@@ -189,9 +189,15 @@ class LedgerAndReportTests(unittest.TestCase):
             tr._sample()
         self.assertNotEqual(s.game.phase, "playing")
         mgr.delete(s.id)
+        # The game's own units are each a few milliseconds, which Windows' thread clock (15.6 ms ticks) mostly reads
+        # as nothing; one more unit of the game's work that surely registers makes the host's CPU event certain.
+        with ledger.cpu_unit(s.cpu_activity):
+            t0 = time.thread_time()
+            while time.thread_time() - t0 < 0.05:
+                pass
         tr.flush()
         self.assertTrue(ledger.get().flush(30))
-        led = U.read()
+        led = U.read(work=True)
         act = f"game:{s.id}"
         self.assertIn(act, led["acts"])
         mine = [sp for sp in led["spans"] if sp["act"] == act]

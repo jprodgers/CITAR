@@ -336,6 +336,25 @@ class BenchmarkTests(unittest.TestCase):
         sch.control_run(run["id"], "cancel")
         self.assertEqual(run["status"], "cancelled")
 
+    def test_a_job_paused_for_its_budget_says_so_and_runs_again_when_its_game_resumes(self):
+        """A seat's game paused for its machine's budget (``pause_for_budget``) resumes by itself when the period
+        turns; its job stayed "paused" then, and its make-way checks were skipped (review of 3-10)."""
+        sch = self.scheduler()
+        run = sch.create_run(dry_suite(models=("q",), turn_limit=200, delay=0.02))
+        job = run["jobs"][0]
+        self.assertEqual(started(sch, run, job, timeout=20), "running", why(sch, run))
+        s = self.manager.get(job["game_id"])
+        s.suspend({"kind": "budget", "player": 1, "message": "The budget is used up.", "since": time.time(),
+                   "until": time.time() + 3600, "budget": "b_x", "period": "2026-10-12"})
+        self.assertTrue(wait_for(lambda: job["status"] == "paused", timeout=10, sch=sch), why(sch, run))
+        self.assertEqual(job["pause_reason"], "budget")
+        self.assertEqual([it["state"] for it in sch.running_items()], ["paused (budget used up)"],
+                         "the queue page says why")
+        s.resume()                                          # the budget's period turned: its watcher resumes it
+        self.assertTrue(wait_for(lambda: job["status"] == "running", timeout=10, sch=sch), why(sch, run))
+        self.assertIsNone(job["pause_reason"])
+        sch.control_run(run["id"], "cancel")
+
     def test_restart_reloads_games_in_progress(self):
         sch = self.scheduler()
         run = sch.create_run(dry_suite(models=("r",), turn_limit=30, delay=0.02))

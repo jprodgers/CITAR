@@ -459,15 +459,22 @@ def cmd_reprice(args) -> int:
 
 
 def cmd_refresh_budgets(args) -> int:
-    """Rebuild the budgets' entries of their current period (or ``--period``) from the compute ledger's events
-    (``pool.budgets.refresh_from_ledger``): the repair for an entry lost when the server stopped between an event and
-    its settling, or for credits repriced. A running server reads its budgets again when one is next used or edited."""
+    """Rebuild the budgets' entries of their current period (or ``--period``: then only the budgets counted in periods
+    of that kind, a day's key for daily budgets, a week's for weekly ones, a month's for monthly ones, ``all`` for
+    totals) from the compute ledger's events (``pool.budgets.refresh_from_ledger``): the repair for an entry lost when
+    the server stopped between an event and its settling, or for credits repriced. A running server reads every
+    budget's spend again from the rebuilt entries at its ledger's next rollup pass, within five minutes."""
     from ..pool import budgets
-    with db.session() as s:
-        n = budgets.refresh_from_ledger(s, key=args.period)
-        audit.record(s, "budgets.refreshed", actor_label="admin_cli", object_type="budget", entries=n,
-                     period=args.period)
-    print(f"{n} budget entr{'y' if n == 1 else 'ies'} rebuilt from the compute ledger.")
+    try:
+        with db.session() as s:
+            n = budgets.refresh_from_ledger(s, key=args.period)
+            audit.record(s, "budgets.refreshed", actor_label="admin_cli", object_type="budget", entries=n,
+                         period=args.period)
+    except ValueError as e:
+        print(f"error: {e}")
+        return 1
+    print(f"{n} budget entr{'y' if n == 1 else 'ies'} rebuilt from the compute ledger; a running server reads them "
+          "within five minutes.")
     return 0
 
 
@@ -611,7 +618,9 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_reprice)
 
     p = subparsers.add_parser("refresh-budgets", help="rebuild the grants' budget entries from the compute ledger")
-    p.add_argument("--period", default=None, help="a period key (2026-10, 2026-W41, 2026-10-12); default the current")
+    p.add_argument("--period", default=None,
+                   help="a period key: 2026-10-12 (daily budgets), 2026-W41 (weekly), 2026-10 (monthly) or all "
+                        "(totals); only the budgets of that kind are rebuilt. Default: each budget's current period")
     p.set_defaults(func=cmd_refresh_budgets)
 
     p = subparsers.add_parser("set-collection", help="mark an owned item as the server's own data collection")

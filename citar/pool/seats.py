@@ -306,19 +306,20 @@ def ticket(server_id: Optional[str], model: str = "", *, cls: str, consumer: Opt
     the ticket's ``refused``, with the admission's reason, its ``code`` and its ``retry_at`` (a helper that is offline
     refuses at once, as temporary); an admitted ticket is capped by the grant's concurrency (the scheduler's per-
     consumer cap, leases and tickets together). No consumer (the server's own work), no machine, or no database: no
-    admission. The admitting grant's budget, when it has one, is the ticket's to reserve against (``budget``,
-    P3.4.6). Reads the database, so never call it with a session's or a machine's lock held."""
+    admission. The ticket is bound to the admitting grant (``access_grant``): each of its requests reserves against
+    the budget that grant has then (P3.4.6). Reads the database, so never call it with a session's or a machine's lock
+    held."""
     from . import scheduler
-    refusal, cap, budget = None, 0, None
+    refusal, cap, access_grant = None, 0, None
     if consumer and server_id:
-        refusal, cap, budget = _ticket_admission(consumer, server_id, purpose, capability)
+        refusal, cap, access_grant = _ticket_admission(consumer, server_id, purpose, capability)
     return scheduler.get().ticket(server_id, model, cls=cls, consumer=consumer, cap=cap, refusal=refusal,
-                                  budget=budget, **kw)
+                                  access_grant=access_grant, **kw)
 
 
 def _ticket_admission(consumer: str, server_id: str, purpose: str, capability: Optional[str]) -> tuple:
     """``ticket``'s admission: (the refusal as a ``SchedulerError``, or None; the grant's concurrency, 0 for none;
-    the grant's budget id, or None)."""
+    the admitting grant's id for the binding, its budget followed by the keeper (``Keeper.bind``), or None)."""
     from .. import db
     from ..auth import access, policy
     from ..db.models import Server, User
@@ -342,7 +343,7 @@ def _ticket_admission(consumer: str, server_id: str, purpose: str, capability: O
             if decision.allowed:
                 grant = decision.grant
                 return (None, max(0, int(grant.concurrency or 0)) if grant is not None else 0,
-                        budgets.keeper().handle(s, grant))
+                        budgets.keeper().bind(s, grant))
             reason = decision.reason
             if access.VIEW not in access.on(s, user, server):
                 reason = "You may not use that machine."
@@ -366,10 +367,11 @@ def consumer_cap(user_id: Optional[str], server_id: Optional[str], purpose: str 
 
 
 def consumer_terms(user_id: Optional[str], server_id: Optional[str], purpose: str = "game") -> tuple:
-    """(``consumer_cap``, the id of that grant's budget or None): what a lease of ``user_id`` on ``server_id`` is held
-    to. The budget is the one the grant admitting the work carries (P3.4.6), loaded into the process's budget keeper,
-    whether or not it has room left now (a lease made with its budget spent pauses at its first request). Reads the
-    database."""
+    """(``consumer_cap``, the id of that grant or None): what a lease of ``user_id`` on ``server_id`` is held to. The
+    lease is bound to the grant admitting the work (``Keeper.bind``, its budget loaded into the process's budget
+    keeper), so each request is held to the budget the grant has when it runs (P3.4.6), whether or not it has room
+    left now (a lease made with its budget spent pauses at its first request), and one added to the grant later holds
+    it from then on. Reads the database."""
     if not user_id or not server_id:
         return 0, None
     from .. import db
@@ -385,7 +387,7 @@ def consumer_terms(user_id: Optional[str], server_id: Optional[str], purpose: st
             grant = admission.check(s, user, server, purpose, in_flight=None).grant
             if grant is None:
                 return 0, None
-            return max(0, int(grant.concurrency or 0)), budgets.keeper().handle(s, grant)
+            return max(0, int(grant.concurrency or 0)), budgets.keeper().bind(s, grant)
     except Exception:
         import logging
         logging.getLogger("citar.pool").warning("could not read the grant for %s on %s", user_id, server_id,

@@ -66,11 +66,14 @@ step, so an attempt that never reached the model meters nothing. A helper whose 
 time by more than 10% plus a second on three requests within an hour gets ``flags.overreports`` on its machine row and
 an audit row.
 
-**Budgets** (P3.4.6): a binding made under a grant with a budget carries its id (``budget``). Each request reserves the
-step's estimate once its slot is granted (``pool.budgets.Keeper.reserve``, in memory); a hard budget that the request
-would take past its amount refuses it (``MachineRefused`` with ``code`` ``budget`` and the period's end as
-``retry_at``), its slot given back; the step's event carries the reservation, which the ledger's writer settles. A soft
-budget's first request past its amount is told to the binding's ``on_budget`` (on the notifier thread).
+**Budgets** (P3.4.6): a binding carries the id of the grant that admitted it (``access_grant``), and each request reserves
+against the budget that grant has when the request runs (``pool.budgets.Keeper.budget_of``), so a budget added or
+changed later holds the work already running. The step's estimate is reserved once its slot is granted
+(``pool.budgets.Keeper.reserve``, in memory); a hard budget that the request would take past its amount refuses it
+(``MachineRefused`` with ``code`` ``budget`` and the period's end as ``retry_at``), its slot given back. The step's event
+carries the reservation, which the ledger's listener settles in memory as it prices the step (its writer then writes
+the event and the budget's entry). A soft budget's first request past its amount is told to the binding's
+``on_budget`` (on the notifier thread).
 
 Replaces: ``LLMAgent._step``'s busy sleep (``citar/agents/llm_agent.py``, before 3-07), ``WorkerConversation.close``'s
 no-op and the hub forgetting a request once it was resolved (``citar/server/workers.py``).
@@ -350,7 +353,7 @@ class Binding:
 
     def __init__(self, sched: "Scheduler", machine: Optional["Machine"], model: str, *, activity: Optional[str],
                  consumer: Optional[str], label: str, cap: int, on_status: Optional[Callable[[dict], None]],
-                 budget: Optional[str] = None, on_budget: Optional[Callable[[dict], None]] = None):
+                 access_grant: Optional[str] = None, on_budget: Optional[Callable[[dict], None]] = None):
         self.sched = sched
         self.machine = machine
         self.model = model or ""
@@ -359,9 +362,10 @@ class Binding:
         self.label = label
         self.cap = max(0, int(cap or 0))
         self.on_status = on_status
-        #: The budget its requests reserve against (``pool.budgets``: the grant's that admitted it), and who hears a
-        #: soft budget's warning (``{"warning", "budget"}``, on the notifier thread).
-        self.budget = budget
+        #: The grant that admitted it (``pool.budgets.Keeper.bind``): each request reserves against that grant's budget
+        #: as it is then (``Keeper.budget_of``). And who hears a soft budget's warning (``{"warning", "budget"}``, on
+        #: the notifier thread).
+        self.access_grant = access_grant
         self.on_budget = on_budget
         self.id = secrets.token_hex(6)
 
@@ -1396,7 +1400,7 @@ class Scheduler:
     def lease(self, server_id: Optional[str], model: str = "", *, kind: str = "game", activity: Optional[str] = None,
               consumer: Optional[str] = None, label: str = "", cap: int = 0,
               on_status: Optional[Callable[[dict], None]] = None, game: Optional[str] = None,
-              ref: Optional[tuple] = None, budget: Optional[str] = None,
+              ref: Optional[tuple] = None, access_grant: Optional[str] = None,
               on_budget: Optional[Callable[[dict], None]] = None) -> Lease:
         """A live lease on ``server_id`` (an unscheduled one when the machine has no id): a game seat's (``game``, the
         session's id), a probe run's or a report's; ``ref`` is the work it serves as the shared queue names it. A
@@ -1404,7 +1408,7 @@ class Scheduler:
         ``contaminated``) when its first request goes ahead."""
         m = self.machine(server_id)
         lease = Lease(self, m, model, kind=kind, activity=activity, consumer=consumer, label=label, cap=cap,
-                      on_status=on_status, game=game, ref=ref, budget=budget, on_budget=on_budget)
+                      on_status=on_status, game=game, ref=ref, access_grant=access_grant, on_budget=on_budget)
         if m is not None:
             for conv in m.add_lease(lease):
                 try:
@@ -1418,7 +1422,7 @@ class Scheduler:
                start_within: Optional[float] = None, steps: int = DEFAULT_STEPS, wait_for_benchmark: bool = False,
                cap: int = 0, on_status: Optional[Callable[[dict], None]] = None,
                one_per_consumer: bool = False, ref: Optional[tuple] = None,
-               refusal: Optional[SchedulerError] = None, budget: Optional[str] = None,
+               refusal: Optional[SchedulerError] = None, access_grant: Optional[str] = None,
                on_budget: Optional[Callable[[dict], None]] = None) -> Ticket:
         """A pooled prompt on ``server_id``. Refused at once (``state == "refused"`` with ``reason`` and ``retry_at``)
         when ``refusal`` is given (admission's, ``pool.seats.ticket``), when the machine cannot take it (rule 3
@@ -1432,7 +1436,7 @@ class Scheduler:
         deadline = self.clock() + float(start_within) if start_within is not None else None
         t = Ticket(self, m, model, cls=cls, priority=priority, deadline=deadline, steps=steps,
                    wait_for_benchmark=wait_for_benchmark, activity=activity, consumer=consumer, label=label,
-                   cap=cap, on_status=on_status, ref=ref, budget=budget, on_budget=on_budget)
+                   cap=cap, on_status=on_status, ref=ref, access_grant=access_grant, on_budget=on_budget)
         if refusal is not None:
             t.state, t.error = _ended_state(refusal), refusal
             if m is not None:
@@ -1702,7 +1706,7 @@ class ScheduledConversation(Conversation):
         while True:
             queued += grant.queue_s
             t0: Optional[float] = None
-            if hold is None and getattr(b, "budget", None):
+            if hold is None and getattr(b, "access_grant", None):
                 hold = self._reserve(grant)
             try:
                 if self._closed:
@@ -1741,12 +1745,17 @@ class ScheduledConversation(Conversation):
             return result
 
     def _reserve(self, grant: Grant):
-        """Hold the step's estimate of its binding's budget, now that its slot is granted (P3.4.6). A hard budget that
-        would pass its amount refuses the request: its slot goes back and ``MachineRefused`` (``budget``, the
-        period's end as ``retry_at``) is raised. A soft budget's warning goes to ``on_budget``. In memory only."""
+        """Hold the step's estimate of the budget its binding's access grant has now, once its slot is granted
+        (P3.4.6); None when that grant has none. A hard budget that would pass its amount refuses the request: its slot goes back
+        and ``MachineRefused`` (``budget``, the period's end as ``retry_at``) is raised. A soft budget's warning goes to
+        ``on_budget``. In memory only."""
         from .. import ledger
         from . import budgets
         b = self.binding
+        keeper = budgets.keeper()
+        budget = keeper.budget_of(b.access_grant)
+        if not budget:
+            return None
         cfg = getattr(self.inner, "cfg", None) or self.cfg or {}
         max_tokens = grant.max_tokens or (cfg.get("max_tokens") if isinstance(cfg, dict) else None)
         try:
@@ -1757,7 +1766,7 @@ class ScheduledConversation(Conversation):
             log.warning("could not estimate a request's cost on %s", b.server_id, exc_info=True)
             estimate, unpriced = 0.0, False
         try:
-            hold = budgets.keeper().reserve(b.budget, b.activity, b.consumer, estimate, unpriced=unpriced)
+            hold = keeper.reserve(budget, b.activity, b.consumer, estimate, unpriced=unpriced)
         except budgets.BudgetExceeded as e:
             b.finish(grant)
             retry = e.retry_at.astimezone().replace(tzinfo=None) if e.retry_at is not None else None
@@ -1765,9 +1774,9 @@ class ScheduledConversation(Conversation):
             err.budget = {"id": e.budget_id, "key": e.key}
             raise err from None
         if hold is not None and hold.warning and b.on_budget is not None:
-            b.sched._notify(b.on_budget, {"warning": hold.warning, "budget": b.budget})
+            b.sched._notify(b.on_budget, {"warning": hold.warning, "budget": budget})
         if hold is not None and hold.warning:
-            b.sched.run_db_job(lambda bid=b.budget, who=b.consumer, text=hold.warning: _soft_passed(bid, who, text))
+            b.sched.run_db_job(lambda bid=budget, who=b.consumer, text=hold.warning: _soft_passed(bid, who, text))
         return hold
 
     def _input_estimate(self) -> int:

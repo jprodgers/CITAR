@@ -124,9 +124,13 @@ function computeCard() {
     el("option", { value: v, selected: v === "30d" }, text)));
   const body = el("div", { class: "col gap" }, el("span", { class: "muted" }, "Loading…"));
   const head = (...cells) => el("thead", {}, el("tr", {}, ...cells.map((c) => el("th", {}, c))));
+  // only the latest range's answer is shown: switching twice quickly must not leave the first range's figures
+  let asked = 0;
   const show = async () => {
+    const mine = ++asked;
     try {
       const d = await api.ledgerMe(range.value);
+      if (mine !== asked) return;
       clear(body);
       body.appendChild(el("div", { class: "kv compute-ratio" }, el("span", { class: "k" }, "Ratio (given ÷ used)"),
         el("span", { class: "v" }, el("b", {}, compute.ratioText(d.ratio)))));
@@ -153,7 +157,10 @@ function computeCard() {
       body.appendChild(el("span", { class: "muted small" }, own.events
         ? `Your own work on your own machines (counted on neither side): ${compute.credits(own.credits)} credits.`
         : "Your own work on your own machines counts on neither side."));
-    } catch (e) { clear(body); body.appendChild(el("span", { class: "bad" }, e.message)); }
+    } catch (e) {
+      if (mine !== asked) return;
+      clear(body); body.appendChild(el("span", { class: "bad" }, e.message));
+    }
   };
   range.onchange = show;
   show();

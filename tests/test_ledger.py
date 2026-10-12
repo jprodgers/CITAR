@@ -272,10 +272,9 @@ class GivenAndUsed(World):
     def test_consumer_provider_and_credits_for_every_activity_on_every_machine(self):
         table = self.the_table()
         self.write(*[row[0] for row in table])
-        with db.session() as s:
-            self.assertEqual(ledger.ingest_lab(s, self.led, self.lab), 1, "the lab's one finished game; the crash none")
-            self.assertEqual(ledger.ingest_lab(s, self.led, self.lab), 0, "and only once")
-            self.assertEqual(ledger.ingest_lab(s, None, self.lab), 0, "even when its file is read again")
+        self.assertEqual(ledger.ingest_lab(self.led, self.lab), 1, "the lab's one finished game; the crash none")
+        self.assertEqual(ledger.ingest_lab(self.led, self.lab), 0, "and only once")
+        self.assertEqual(ledger.ingest_lab(None, self.lab), 0, "even when its file is read again")
         got = self.events()
         self.assertEqual(len(got), len(table) + 1)
         for (src, consumer, provider, kind, akind, credits, self_use), ev in zip(table, got):
@@ -289,8 +288,9 @@ class GivenAndUsed(World):
         self.assertTrue(test.activity.startswith("test:"), "a machine's test is an activity of its own")
         lab = got[-1]
         self.assertEqual((lab.activity, lab.consumer_id, lab.provider_id, lab.kind, lab.cpu_core_s, lab.credits,
-                          lab.machine_id, lab.request_id),
-                         ("lab:exp1:0", self.ids["alice"], None, "cpu", 100.0, 5.0, "sv_host", "lab:exp1:0"))
+                          lab.machine_id, lab.request_id, lab.observed_s),
+                         ("lab:exp1:0", self.ids["alice"], None, "cpu", 100.0, 5.0, "sv_host", "lab:exp1:0", 120.0),
+                         "its observed time the game's wall time, which costing spreads its CPU over")
         api = got[6]
         self.assertEqual((api.tokens_in, api.tokens_out, api.tokens_cache_read), (1_000_000, 100_000, 2_000_000))
 
@@ -482,6 +482,8 @@ class CpuAttribution(World):
         self.assertEqual(set(cpu), {a.cpu_activity, b.cpu_activity})
         for act, seconds in cpu.items():
             self.assertAlmostEqual(seconds, charged[act], places=5)
+        self.assertTrue(all(e.observed_s and e.observed_s > 0 for e in self.events(kind="cpu")),
+                        "each carries the window it was measured over, which costing spreads it across")
 
     def test_a_unit_inside_another_is_the_outer_ones(self):
         """An engine call inside a drive (or a chat answer) on one thread is part of the outer unit: charged once, to
@@ -631,12 +633,15 @@ class Rollups(World):
 
 class Budgets(World):
     def grant_budget(self, amount, *, behavior="hard", period="day", who="alice", group=None) -> str:
+        """Give ``who``'s grant a budget; returns its id (the grant's is ``self.gid``)."""
         with db.session() as s:
             grant = s.scalar(select(AccessGrant).where(AccessGrant.group_id == (group or self.group),
                                                        AccessGrant.subject_user_id == self.ids[who]))
             bid = budgets.set_budget(s, grant, period=period, amount=amount, behavior=behavior).id
+            self.gid = grant.id
         with db.session() as s:
-            self.assertEqual(self.keeper.handle(s, s.get(AccessGrant, grant.id)), bid)
+            self.assertEqual(self.keeper.bind(s, s.get(AccessGrant, grant.id)), grant.id)
+        self.assertEqual(self.keeper.budget_of(self.gid), bid)
         return bid
 
     def scheduler(self):
@@ -647,10 +652,11 @@ class Budgets(World):
 
     def test_a_hard_budget_admits_until_spent_and_reserved_would_pass_it(self):
         bid = self.grant_budget(5.0)
-        cap, budget = pool_seats.consumer_terms(self.ids["alice"], "sv_bob", "game")
-        self.assertEqual(budget, bid, "the lease carries the grant's budget")
+        cap, gid = pool_seats.consumer_terms(self.ids["alice"], "sv_bob", "game")
+        self.assertEqual(gid, self.gid, "the lease is bound to the grant that admits it")
+        self.assertEqual(self.keeper.budget_of(gid), bid)
         sched, clock = self.scheduler()
-        lease = sched.lease("sv_bob", "dry-run", activity="game:g1", consumer=self.ids["alice"], budget=budget)
+        lease = sched.lease("sv_bob", "dry-run", activity="game:g1", consumer=self.ids["alice"], access_grant=gid)
         conv = S.ScheduledConversation(Scripted(clock, 2.0), lease)
         conv.step()                                         # reserves 1 (no mean yet), spends 2
         self.led.drain()
@@ -671,7 +677,8 @@ class Budgets(World):
         self.assertEqual(len(self.events()), 2, "the refused request never ran")
         with db.session() as s:
             entries = [(e.activity_id, e.period_key, e.actual) for e in s.scalars(select(BudgetEntry))]
-            state = budgets.state(s, s.scalar(select(AccessGrant).where(AccessGrant.id == s.get(Budget, bid).grant_id)))
+            # the period the keeper's clock is in (the test's day, whatever the real one)
+            state = budgets.state(s, s.get(AccessGrant, s.get(Budget, bid).grant_id), when=self.now)
         self.assertEqual(entries, [("game:g1", "2026-10-12", 4.0)])
         self.assertEqual((state.spent, state.reserved), (4.0, 0.0))
         # the period turns: the budget admits again
@@ -685,7 +692,7 @@ class Budgets(World):
         bid = self.grant_budget(100.0)
         sched, clock = self.scheduler()
         for act in ("game:g1", "game:g2"):
-            lease = sched.lease("sv_bob", "dry-run", activity=act, consumer=self.ids["alice"], budget=bid)
+            lease = sched.lease("sv_bob", "dry-run", activity=act, consumer=self.ids["alice"], access_grant=self.gid)
             conv = S.ScheduledConversation(Scripted(clock, 1.5 if act == "game:g1" else 2.5), lease)
             for _ in range(3):
                 conv.step()
@@ -724,10 +731,12 @@ class Budgets(World):
                               budget={"period": "day", "amount": 30.0})
             gid = group.id
         servers.invalidate()
-        _cap, bid = pool_seats.consumer_terms(self.ids["alice"], "sv_api", "game")
+        _cap, api_grant = pool_seats.consumer_terms(self.ids["alice"], "sv_api", "game")
+        bid = self.keeper.budget_of(api_grant)
         self.assertIsNotNone(bid)
         sched, clock = self.scheduler()
-        lease = sched.lease("sv_api", "claude-opus-5", activity="game:g1", consumer=self.ids["alice"], budget=bid)
+        lease = sched.lease("sv_api", "claude-opus-5", activity="game:g1", consumer=self.ids["alice"],
+                            access_grant=api_grant)
         # 2,000 in at $5 and 1,000 out at $25 a million: $0.035, 35 credits
         conv = S.ScheduledConversation(Scripted(clock, 1.0, usage={"input_tokens": 2000, "output_tokens": 1000},
                                                 model="claude-opus-5", max_tokens=1000), lease)
@@ -739,7 +748,8 @@ class Budgets(World):
         self.assertEqual(refused.exception.code, "budget")
         lease.release()
         self.now += timedelta(days=1)
-        mystery = sched.lease("sv_api", "mystery", activity="game:g2", consumer=self.ids["alice"], budget=bid)
+        mystery = sched.lease("sv_api", "mystery", activity="game:g2", consumer=self.ids["alice"],
+                              access_grant=api_grant)
         conv = S.ScheduledConversation(Scripted(clock, 1.0, model="mystery", max_tokens=10), mystery)
         with self.assertRaises(S.MachineRefused) as refused:
             conv.step()
@@ -759,7 +769,7 @@ class Budgets(World):
         bid = self.grant_budget(3.0, behavior="soft")
         sched, clock = self.scheduler()
         heard = []
-        lease = sched.lease("sv_bob", "dry-run", activity="game:g1", consumer=self.ids["alice"], budget=bid,
+        lease = sched.lease("sv_bob", "dry-run", activity="game:g1", consumer=self.ids["alice"], access_grant=self.gid,
                             on_budget=heard.append)
         conv = S.ScheduledConversation(Scripted(clock, 2.0), lease)
         for _ in range(4):
@@ -771,9 +781,159 @@ class Budgets(World):
         self.assertIn("soft budget", heard[0]["warning"])
         with db.session() as s:
             grant = s.get(AccessGrant, s.get(Budget, bid).grant_id)
-            client = budgets.state(s, grant).client()
+            client = budgets.state(s, grant, when=self.now).client()
         self.assertIn("soft budget", client["warning"], "the machine owner's Servers page says so")
         lease.release()
+
+    def test_a_budget_added_to_a_grant_holds_the_work_already_running_under_it(self):
+        """A lease is bound to the grant that admitted it, not to the budget that grant had when the lease was made
+        (review of 3-10): bob gives alice's grant a hard budget of 5 a day through the grant route while her lease
+        runs, and its next requests are held to it (two run, the third is refused) and counted on bob's meter; the
+        budget removed lets the work run on, and one set again (a budget of its own, a new id) holds it once more."""
+        from fastapi.testclient import TestClient
+        from citar.server import app as appmod
+        client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(client.close)
+        _cap, gid = pool_seats.consumer_terms(self.ids["alice"], "sv_bob", "game")
+        self.assertIsNotNone(gid, "bound to her grant")
+        self.assertIsNone(self.keeper.budget_of(gid), "which has no budget yet")
+        sched, clock = self.scheduler()
+        lease = sched.lease("sv_bob", "dry-run", activity="game:g1", consumer=self.ids["alice"], access_grant=gid)
+        self.addCleanup(lease.release)
+        conv = S.ScheduledConversation(Scripted(clock, 2.0), lease)
+        conv.step()                                         # no budget: runs, counted against nothing
+        self.led.drain()
+
+        def put(budget):
+            r = client.put(f"/api/pool/grants/{gid}", json={"purposes": ["game", "pooled"], "budget": budget},
+                           headers=self.headers["bob"])
+            self.assertEqual(r.status_code, 200, r.text)
+
+        put({"period": "day", "amount": 5.0, "behavior": "hard"})
+        bid = self.keeper.budget_of(gid)
+        self.assertIsNotNone(bid, "the route's reload follows the grant to its new budget")
+        conv.step()                                         # reserves 2 (the mean), spends 2
+        conv.step()                                         # 2 + 2 <= 5: spends 2 more
+        self.led.drain()
+        with self.assertRaises(S.MachineRefused) as refused:
+            conv.step()                                     # 4 + 2 would pass 5
+        self.assertEqual((refused.exception.code, refused.exception.budget["id"]), ("budget", bid))
+        with db.session() as s:
+            state = budgets.state(s, s.get(AccessGrant, gid), when=self.now)
+        self.assertEqual((state.spent, state.limit), (4.0, 5.0), "the owner's meter counts what ran under it")
+        put(None)                                           # removed: the work runs on
+        self.assertIsNone(self.keeper.budget_of(gid))
+        self.assertIsNone(self.keeper.account(bid), "its account forgotten")
+        conv.step()
+        put({"period": "day", "amount": 3.0, "behavior": "hard"})
+        new = self.keeper.budget_of(gid)
+        self.assertNotIn(new, (None, bid), "set again: a budget of its own")
+        conv.step()                                         # reserves 2, spends 2 of 3
+        self.led.drain()
+        with self.assertRaises(S.MachineRefused) as refused:
+            conv.step()
+        self.assertEqual(refused.exception.budget["id"], new)
+
+    def test_a_budget_read_again_counts_each_settled_step_once(self):
+        """Steps are settled in memory at once and their entries written by the ledger's writer up to two seconds
+        later. An owner's edit of the amount meanwhile changes only the terms, never the spend; an account read from
+        the database (loaded afresh, or after a repair) counts what is settled and not written yet once, and the
+        same once it is written."""
+        bid = self.grant_budget(100.0)
+        sched, clock = self.scheduler()
+        lease = sched.lease("sv_bob", "dry-run", activity="game:g1", consumer=self.ids["alice"],
+                            access_grant=self.gid)
+        self.addCleanup(lease.release)
+        conv = S.ScheduledConversation(Scripted(clock, 2.0), lease)
+        conv.step()
+        conv.step()                                         # 4 settled, nothing written yet (nothing drained)
+        self.assertEqual(self.keeper.account(bid)["spent"], 4.0)
+        with db.session() as s:
+            budgets.set_budget(s, s.get(AccessGrant, self.gid), period="day", amount=50.0, behavior="hard")
+        with db.session() as s:
+            self.keeper.reload_grant(s, self.gid)
+        account = self.keeper.account(bid)
+        self.assertEqual((account["amount"], account["spent"]), (50.0, 4.0), "the edit changed the terms only")
+        for written in (False, True):
+            if written:
+                self.led.drain()
+            self.keeper.forget(bid)
+            with db.session() as s:
+                self.keeper.handle(s, s.get(AccessGrant, self.gid))      # read from the database afresh
+            with self.subTest(written=written):
+                self.assertEqual(self.keeper.account(bid)["spent"], 4.0)
+            with db.session() as s:
+                self.keeper.reload(s, bid, fresh=True)
+            with self.subTest(written=written, fresh=True):
+                self.assertEqual(self.keeper.account(bid)["spent"], 4.0)
+        self.assertEqual(self.keeper._unwritten, {}, "every settled step's entry is the database's now")
+
+    def test_a_repair_reaches_the_running_server_at_its_next_pass(self):
+        """``citar admin refresh-budgets`` runs in a process of its own: its rebuild leaves a mark, and the server's
+        ledger reads every budget's spend again from the rebuilt entries at its next rollup pass."""
+        bid = self.grant_budget(100.0)
+        clock = FakeClock()
+        sched = S.Scheduler(clock=clock, wall=lambda: self.now.timestamp(), background=False)
+        sched.add_listener(ledger.listener)
+        lease = sched.lease("sv_bob", "dry-run", activity="game:g1", consumer=self.ids["alice"],
+                            access_grant=self.gid)
+        self.addCleanup(lease.release)
+        conv = S.ScheduledConversation(Scripted(clock, 2.0), lease)
+        for _ in range(3):
+            conv.step()
+        self.led.drain()
+        self.led.pass_once()                                # the server's pass: nothing to repair
+        self.assertEqual(self.keeper.account(bid)["spent"], 6.0)
+        with db.session() as s:                             # the credits repriced (a rate of 1.5 a second)...
+            for e in s.scalars(select(ComputeEvent)):
+                e.credits = e.credits * 1.5
+        with db.session() as s:                             # ...and the entries rebuilt by the administrator
+            self.assertEqual(budgets.refresh_from_ledger(s, key="2026-10-12"), 1)
+        self.assertEqual(self.keeper.account(bid)["spent"], 6.0, "not before the server's next pass")
+        self.led.pass_once()
+        self.assertEqual(self.keeper.account(bid)["spent"], 9.0, "read again from the rebuilt entries")
+        conv.step()
+        self.led.drain()
+        self.led.pass_once()
+        self.assertEqual(self.keeper.account(bid)["spent"], 11.0, "and kept in memory from then on")
+
+    def test_a_period_key_rebuilds_only_the_budgets_counted_in_that_kind_of_period(self):
+        """``refresh-budgets --period 2026-10`` with a daily budget on the server used to fail on the daily one (and a
+        total budget got entries under a key nothing reads): a key rebuilds the budgets of its kind of period only."""
+        daily = self.grant_budget(100.0, period="day")
+        monthly = self.grant_budget(100.0, period="month", who="carol")
+        clock = FakeClock()
+        sched = S.Scheduler(clock=clock, wall=lambda: self.now.timestamp(), background=False)
+        sched.add_listener(ledger.listener)
+        for who in ("alice", "carol"):
+            _cap, gid = pool_seats.consumer_terms(self.ids[who], "sv_bob", "game")
+            lease = sched.lease("sv_bob", "dry-run", activity=f"game:{who}", consumer=self.ids[who],
+                                access_grant=gid)
+            S.ScheduledConversation(Scripted(clock, 2.0), lease).step()
+            lease.release()
+        self.led.drain()
+
+        def entries():
+            with db.session() as s:
+                return sorted((e.budget_id, e.period_key, e.actual) for e in s.scalars(select(BudgetEntry)))
+        settled = entries()
+        self.assertEqual(settled, sorted([(daily, "2026-10-12", 2.0), (monthly, "2026-10", 2.0)]))
+        with db.session() as s:
+            for e in s.scalars(select(BudgetEntry)):
+                s.delete(e)                                 # both lost
+        with db.session() as s:
+            self.assertEqual(budgets.refresh_from_ledger(s, key="2026-10"), 1)
+        self.assertEqual(entries(), [(monthly, "2026-10", 2.0)], "the monthly budget only")
+        with db.session() as s:
+            self.assertEqual(budgets.refresh_from_ledger(s, key="2026-10-12"), 1)
+            self.assertEqual(budgets.refresh_from_ledger(s, key="all"), 0, "no total budget")
+        self.assertEqual(entries(), settled)
+        with db.session() as s:
+            for bad in ("2026/10", "October", "2026-W4"):
+                with self.subTest(key=bad), self.assertRaises(ValueError):
+                    budgets.refresh_from_ledger(s, key=bad)
+            with self.assertRaises(ValueError):
+                budgets.refresh_from_ledger(s, s.get(Budget, daily), key="2026-10")
 
 
 class BudgetedGame(World):
@@ -855,6 +1015,58 @@ class Costing(World):
         self.assertGreater(x_old["energy_dynamic"], x_new["energy_dynamic"], "queue time is no longer busy energy")
         self.assertGreater(x_old["busy_h"], x_new["busy_h"])
         self.assertAlmostEqual(x_old["depreciation"], x_new["depreciation"], places=9, msg="what was held is unchanged")
+
+    def test_a_past_lab_game_is_priced_once_and_its_cpu_over_its_whole_run(self):
+        """The lab's results are read into the compute ledger (``ingest_lab``), its past games' too, whose usage spans
+        (written before 3-10) carry their own CPU: each is priced once. And a lab game's CPU is spread over its run,
+        not crammed into its last minute: an hour's game of 3,600 core-seconds costs the energy it cost before."""
+        results = _TMP / f"lab-{secrets.token_hex(3)}"
+        results.mkdir()
+        self.addCleanup(shutil.rmtree, results, True)
+        fin = datetime(2025, 11, 3, 12, 0, 0)              # local and naive, as lab.py writes it
+        t1 = fin.timestamp()
+        old = [{"k": "act", "id": "lab:old:0", "kind": "lab", "name": "old #0", "t": t1,
+                "parent": {"kind": "lab_experiment", "id": "old", "name": "old"}, "ref": {"exp": "old", "i": 0}},
+               {"k": "span", "act": "lab:old:0", "srv": "sv_host", "t0": t1 - 600, "t1": t1, "held": 600.0,
+                "cpu": 600.0, "busy": 0.0, "est_cpu": False}]
+        new = usage.lab_game_rows("new", 0, {"seconds": 3600, "cpu_s": 3600.0, "finished": fin.isoformat()}, "sv_host")
+        self.assertNotIn("cpu", new[1], "a lab game's span holds its held time only now")
+        usage.USAGE_DIR.mkdir(parents=True, exist_ok=True)
+        path = usage.USAGE_DIR / "lab-2025-11.jsonl"
+        path.write_text("".join(json.dumps(r) + chr(10) for r in old + new), encoding="utf-8")
+        self.addCleanup(path.unlink, missing_ok=True)
+        for exp, seconds in (("old", 600), ("new", 3600)):
+            (results / f"{exp}.jsonl").write_text(json.dumps(
+                {"exp": exp, "i": 0, "cpu_s": float(seconds), "seconds": seconds,
+                 "finished": fin.isoformat(timespec="seconds")}) + chr(10), encoding="utf-8")
+        since, until = t1 - 7200, t1 + 7200
+        reg = servers.with_pooled()
+        before = costing.compute(since, until, reg, usage.read(since, until, work=True))
+        self.assertEqual(ledger.ingest_lab(self.led, results), 2, "both games read, the past one too")
+        after = costing.compute(since, until, reg, usage.read(since, until, work=True))
+        was, now = before["acts"]["lab:old:0"]["total"], after["acts"]["lab:old:0"]["total"]
+        self.assertGreater(was["cpu_h"], 0)
+        for k in ("cpu_h", "kwh_dynamic", "energy_dynamic"):
+            with self.subTest(past_game=k):
+                self.assertAlmostEqual(now[k], was[k], places=9, msg="priced once")
+        spread = costing.compute(since, until, reg, {"acts": {"lab:new:0": new[0]}, "power": {}, "work": [],
+                                                     "spans": [dict(new[1], cpu=3600.0, busy=0.0)]})
+        fresh, then = after["acts"]["lab:new:0"]["total"], spread["acts"]["lab:new:0"]["total"]
+        self.assertGreater(then["kwh_dynamic"], 0)
+        for k in ("cpu_h", "kwh_dynamic", "energy_dynamic"):
+            with self.subTest(hour_game=k):
+                self.assertAlmostEqual(fresh[k], then[k], places=9, msg="spread over its hour, as before")
+
+    def test_the_report_builders_options_read_no_compute_event(self):
+        """Every visit to the report builder asks for its options; they list activities, and every model step is a
+        compute event: reading them all there grew without bound (review of 3-10). Only costing asks for the work."""
+        from citar import reports
+        self.write(event("sv_gpu", "game:x", None, 1.0))
+        with mock.patch.object(usage, "work_rows", side_effect=AssertionError("the options read the events")) as rows:
+            reports.scope_options()
+            self.assertEqual(usage.read()["work"], [], "the activities only, unless asked")
+        rows.assert_not_called()
+        self.assertEqual(len(usage.read(work=True)["work"]), 1)
 
 
 # ---------------------------------------------------------------------------- gate 6: the routes
@@ -1045,6 +1257,114 @@ class WriteVolume(World):
             self.assertEqual(s.scalar(select(func.count()).select_from(ComputeEvent)
                                       .where(ComputeEvent.activity == "game:kept")), 500)
         self.assertFalse(self.led._writer.is_alive() and self.led.q.qsize(), "nothing left behind")
+
+
+# ---------------------------------------------------------------------------- the database's write lock held briefly
+
+class ShortTransactions(World):
+    """Work over a long backlog never holds the database's write lock for long (review of 3-10: the rollups of 4,000
+    hours took 4.9 s in one transaction, a reprice of 120,000 events 13 s, and the writer lost what it could not insert
+    past the busy timeout)."""
+
+    def backlog(self, n: int, step: timedelta) -> datetime:
+        a = self.ids["alice"]
+        base = datetime(2026, 9, 1, tzinfo=UTC)
+        self.write(*[event("sv_bob", "game:g", a, 1.0, at=(base + step * i).timestamp()) for i in range(n)])
+        return base
+
+    def test_a_long_rollup_backlog_is_committed_in_chunks(self):
+        self.backlog(23, timedelta(hours=1))
+        seen = []
+        real = ledger._rollup_hour
+
+        def spy(session, h):
+            with db.session() as other:                     # another connection: what is committed so far
+                seen.append((other.scalar(select(func.count()).select_from(ComputeRollup)), ledger._watermark(other)))
+            real(session, h)
+        with mock.patch.object(ledger, "ROLLUP_CHUNK", 5), mock.patch.object(ledger, "_rollup_hour", spy):
+            with db.session() as s:
+                self.assertEqual(ledger.rollup(s), 23)
+        committed = [n for n, _ in seen]
+        self.assertEqual(committed[:5], [0] * 5)
+        self.assertEqual(committed[5::5], [10, 20, 30, 40], "each chunk of 5 hours (2 rows an hour) committed")
+        self.assertEqual({m for _, m in seen}, {0}, "the watermark moves only with the last chunk")
+        with db.session() as s:
+            self.assertGreater(ledger._watermark(s), 0)
+            self.assertEqual(s.scalar(select(func.count()).select_from(ComputeRollup)), 46)
+        t = self.totals()
+        self.assertEqual((t[self.ids["alice"]]["used"]["credits"], t[self.ids["bob"]]["given"]["credits"]),
+                         (23.0, 23.0))
+
+    def test_reprice_commits_page_by_page(self):
+        base = self.backlog(30, timedelta(minutes=7))
+        self.rate("hc_gpu", 3.0)
+        progress = []
+        real = ledger.rollup
+
+        def spy(session, hours=None):
+            with db.session() as other:
+                progress.append(other.scalar(select(func.count()).select_from(ComputeEvent)
+                                             .where(ComputeEvent.credits == 3.0)))
+            return real(session, hours)
+        with mock.patch.object(ledger, "REPRICE_PAGE", 7), mock.patch.object(ledger, "rollup", spy):
+            with db.session() as s:
+                out = ledger.reprice(s, base)
+        self.assertEqual((out["events"], out["changed"]), (30, 30))
+        self.assertEqual(progress, [0, 7, 14, 21, 28], "each page committed before the next is read")
+        with db.session() as s:
+            ledger.rollup(s)
+        t = self.totals()
+        self.assertEqual(t[self.ids["alice"]]["used"]["credits"], 90.0)
+
+    def test_a_batch_the_database_is_too_busy_for_is_tried_again(self):
+        from sqlalchemy.exc import OperationalError
+        real = self.led._rows
+        calls = []
+
+        def busy_once(session, batch):
+            calls.append(len(batch))
+            if len(calls) == 1:
+                raise OperationalError("INSERT INTO compute_events", {}, Exception("database is locked"))
+            return real(session, batch)
+        with mock.patch.object(self.led, "_rows", busy_once), mock.patch.object(ledger, "WRITE_BACKOFF", 0.01):
+            self.assertEqual(self.write(event("sv_bob", "game:busy", self.ids["alice"], 1.0)), 1)
+        self.assertEqual((calls, self.led.failures), ([1, 1], 0))
+        self.assertEqual(len(self.events(activity="game:busy")), 1)
+
+
+class LabReaders(World):
+    BACKGROUND = True
+
+    def test_concurrent_readers_write_each_lab_game_once_on_the_writer_thread(self):
+        """The rollup pass and every report read the lab's results; two at once each found the same games missing
+        and wrote them twice (review of 3-10). One reader at a time, its events written by the ledger's writer thread
+        (the one thread that inserts events) before the next reader looks."""
+        results = _TMP / f"lab-{secrets.token_hex(3)}"
+        results.mkdir()
+        self.addCleanup(shutil.rmtree, results, True)
+        (results / "exp1.jsonl").write_text("".join(json.dumps(
+            {"exp": "exp1", "i": i, "cpu_s": 10.0, "seconds": 12, "finished": "2026-10-12T10:00:00+00:00"}) + chr(10)
+            for i in range(30)), encoding="utf-8")
+        writers = set()
+        self.led.listeners.append(lambda rows: writers.add(threading.current_thread().name)
+                                  if any(r["activity_kind"] == "lab" for r in rows) else None)
+        go = threading.Barrier(8)
+        got = []
+
+        def read(with_ledger):
+            go.wait()
+            got.append(ledger.ingest_lab(self.led if with_ledger else None, results))
+        threads = [threading.Thread(target=read, args=(i % 2 == 0,)) for i in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(60)
+        self.assertTrue(self.led.flush(10))
+        lab = self.events(activity_kind="lab")
+        self.assertEqual(len(lab), 30)
+        self.assertEqual(len({e.activity for e in lab}), 30, "each game once")
+        self.assertEqual(sum(got), 30)
+        self.assertLessEqual(writers, {"ledger-writer"}, "what the ledger's readers queued, its writer wrote")
 
 
 if __name__ == "__main__":

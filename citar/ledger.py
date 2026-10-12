@@ -20,17 +20,22 @@ core-seconds, the tokens, and the **credits** they are worth, priced when writte
   administrator may pin one (``class_override``). A new rate applies from then on; ``reprice`` recomputes a period.
 
 **Writers.** The prompt scheduler's listener (``listener``, every model step: ``gpu`` or ``api``), the usage
-tracker's flush (``cpu``: the host's CPU measured per unit of work, ``cpu_unit``, one event per activity a minute),
-and the lab's results (``ingest_lab``: one ``cpu`` event per lab game). Events go through a queue to **one writer
-thread** that inserts them in batches (every ``BATCH_SECONDS`` or ``BATCH_EVENTS``), never on a game's lock, and
-settles each step's budget reservation in the same transaction (``pool.budgets``). It drains on shutdown (``stop``).
+tracker's flush (``cpu``: the host's CPU measured per unit of work, ``cpu_unit``, one event per activity a minute,
+``observed_s`` the window it was measured over), and the lab's results (``ingest_lab``: one ``cpu`` event per lab game,
+``observed_s`` the game's wall time). The listener prices each step and settles its budget hold in memory at once
+(``pool.budgets.Keeper.settle``); events go through a queue to **one writer thread**, the only one in the process that
+inserts them (so their ids commit in order, which the rollups' watermark relies on), in batches (every
+``BATCH_SECONDS`` or ``BATCH_EVENTS``), never on a game's lock, writing each settled step's budget entry in the same
+transaction (``pool.budgets.settle_entries``). A batch the database is too busy for is tried again (``WRITE_TRIES``).
+It drains on shutdown (``stop``).
 
 **Rollups** (P3.4.5): ``compute_rollups`` holds an hour of one member's given or used compute of one kind. A rollup
 thread recomputes, every ``ROLLUP_SECONDS``, each hour an event landed in since its last pass (the events past its
-watermark, ``settings_kv.ledger_rollups``), deleting and inserting the hour's rows in one transaction. Totals
-(``totals``) read the rollups for complete hours and the raw events for the rest (the current hour, the range's
-first partial hour, and any hour not rolled up yet), so a total never waits for the pass and always equals the raw
-sums.
+watermark, ``settings_kv.ledger_rollups``), deleting and inserting the hour's rows in one transaction, at most
+``ROLLUP_CHUNK`` hours a transaction (the watermark moves after the last). Totals (``totals``) read the rollups for
+complete hours and the raw events for the rest (the current hour, the range's first partial hour, and any hour not
+rolled up yet), so a total never waits for the pass and always equals the raw sums. The same pass reads the lab's new
+results and the budgets' grants again (``pool.budgets.Keeper.sync``).
 
 The ratio is given credits over used credits (``ratio``); ``/api/ledger/me``, ``/api/users/{handle}/ratio`` and the
 administrators' pages read it (``citar/server/ledger_api.py``).
@@ -76,6 +81,16 @@ DEFAULT_MAX_TOKENS = 4096
 HOUR = timedelta(hours=1)
 #: Past this many hours not rolled up, a total reads the raw events alone (``totals``).
 MAX_DIRTY_HOURS = 200
+#: The most hours one rollup transaction recomputes, and the most events one ``reprice`` transaction reprices: the
+#: database's write lock is never held for long, so the writer's batches and the requests' writes go on meanwhile.
+ROLLUP_CHUNK = 48
+REPRICE_PAGE = 5000
+#: How many times the writer tries a batch the database is too busy for (another transaction holds its write lock past
+#: its busy timeout), and the wait before the next try (doubling).
+WRITE_TRIES = 4
+WRITE_BACKOFF = 0.5
+#: How long ``ingest_lab`` waits for the writer to write the lab's events it queued.
+LAB_WRITE_SECONDS = 60.0
 
 
 def utcnow() -> datetime:
@@ -353,13 +368,15 @@ class Ledger:
                                                 6), "flags": flags}
 
     def cpu(self, activity: Optional[str], seconds: float, *, at: Optional[float] = None,
-            machine: Optional[str] = None, request_id: Optional[str] = None) -> None:
-        """``seconds`` of the host's CPU spent on ``activity`` (the usage tracker's flush, one a minute per activity;
-        the lab's games)."""
+            machine: Optional[str] = None, request_id: Optional[str] = None, window: Optional[float] = None) -> None:
+        """``seconds`` of the host's CPU spent on ``activity`` (the usage tracker's flush, one a minute per activity),
+        measured over the ``window`` seconds that end ``at`` (its ``observed_s``: costing spreads the seconds over it,
+        a minute when not given)."""
         if not activity or not seconds or seconds <= 0:
             return
         self._put(("cpu", {"activity": activity, "seconds": float(seconds), "at": at if at is not None else self.clock(),
-                           "machine": machine, "request_id": request_id}))
+                           "machine": machine, "request_id": request_id,
+                           "window": float(window) if window and window > 0 else None}))
 
     def _put(self, item) -> None:
         with self._lock:
@@ -475,36 +492,58 @@ class Ledger:
                 log.exception("the ledger's rollup pass failed; it carries on")
 
     def pass_once(self) -> int:
-        """One rollup pass, and the lab's new results: what the rollup thread does every ``ROLLUP_SECONDS``. Returns
-        the hours recomputed."""
+        """One rollup pass, the lab's new results, and the budgets' grants read again (``Keeper.sync``: an
+        administrator's repair from another process lands here): what the rollup thread does every
+        ``ROLLUP_SECONDS``. Returns the hours recomputed."""
         from . import db
+        from .pool import budgets
         if not db.configured():
             return 0
         try:
-            with db.session() as s:
-                ingest_lab(s, self)
+            ingest_lab(self)
         except Exception:
             log.warning("could not read the lab's results into the ledger", exc_info=True)
+        try:
+            with db.session() as s:
+                budgets.keeper().sync(s)
+        except Exception:
+            log.warning("could not read the budgets again", exc_info=True)
         with db.session() as s:
             return rollup(s)
 
     # -------------------------------------------------------------- the writer's work
     def write(self, batch: list) -> int:
-        """Insert a batch, with the budget entries its steps settled, in one transaction. Returns the rows written
-        (0 when there is no database: then nothing is kept)."""
+        """Insert a batch, with the budget entries its steps settled, in one transaction, tried again a few times
+        while the database is too busy (``WRITE_TRIES``). Returns the rows written (0 when there is no database: then
+        nothing is kept). The budget keeper hears when the entries are the database's (``Keeper.written``), and a
+        ``rows`` item's waiter when its rows are written."""
         from . import db
         from .pool import budgets
+        from sqlalchemy.exc import OperationalError
+        keeper = budgets.keeper()
+        holds = [getattr(item[1], "reservation", None) for item in batch if item[0] == "step"]
+        keeper.writing()
         try:
             if not db.configured():
                 return 0
             from sqlalchemy import insert
             from .db.models import ComputeEvent
-            with db.session() as s:
-                rows, settled = self._rows(s, batch)
-                if rows:
-                    s.execute(insert(ComputeEvent.__table__), rows)
-                if settled:
-                    budgets.settle_entries(s, settled)
+            for attempt in range(WRITE_TRIES):
+                try:
+                    with db.session() as s:
+                        rows, settled = self._rows(s, batch)
+                        if rows:
+                            s.execute(insert(ComputeEvent.__table__), rows)
+                        if settled:
+                            budgets.settle_entries(s, settled)
+                    break
+                except OperationalError:
+                    # the database's write lock held past its busy timeout (a long transaction elsewhere): wait and try
+                    # the whole batch again rather than lose it
+                    if attempt == WRITE_TRIES - 1:
+                        raise
+                    log.info("the database is busy; the ledger tries its batch of %d again", len(batch))
+                    time.sleep(WRITE_BACKOFF * (2 ** attempt))
             self.written += len(rows)
             for fn in list(self.listeners):
                 try:
@@ -520,6 +559,10 @@ class Ledger:
                 log.warning("the ledger could not write %d event(s); they are lost", len(batch), exc_info=True)
             return 0
         finally:
+            keeper.written(holds)
+            for item in batch:
+                if item[0] == "rows" and item[2] is not None:
+                    item[2].set()
             with self._idle:
                 self._pending -= len(batch)
                 self._idle.notify_all()
@@ -538,6 +581,8 @@ class Ledger:
                 r = getattr(ev, "reservation", None)
                 if r is not None:
                     settled.append((r, priced["credits"]))
+            elif item[0] == "rows":
+                rows.extend(dict(r) for r in item[1])        # made whole by their writer (``ingest_lab``)
             else:
                 row = self._cpu_row(session, item[1], classes, host)
                 if row is not None:
@@ -596,7 +641,9 @@ class Ledger:
         return {"at": datetime.fromtimestamp(item["at"], timezone.utc), "activity": item["activity"][:160],
                 "activity_kind": activity_kind(item["activity"], None, game_kind), "task_class": "cpu",
                 "consumer_id": consumer, "provider_id": provider, "machine_id": machine[:40], "kind": "cpu",
-                "model": None, "gen_s": 0.0, "cpu_core_s": round(seconds, 6), "reported_s": None, "observed_s": None,
+                "model": None, "gen_s": 0.0, "cpu_core_s": round(seconds, 6), "reported_s": None,
+                # the wall time the seconds were measured over (the tracker's window), which costing spreads them over
+                "observed_s": round(item["window"], 3) if item.get("window") else None,
                 "tokens_in": 0, "tokens_out": 0, "tokens_reasoning": 0, "tokens_cache_read": 0,
                 "tokens_cache_write": 0, "credits": round(credits_for("cpu", cpu_core_s=seconds,
                                                                       rate=cls["rate"] if cls else 0.0), 6),
@@ -695,7 +742,8 @@ def reset(**kw) -> Ledger:
 
 
 def listener(event) -> None:
-    """The prompt scheduler's listener (P3.3.4): one event per model step, its budget hold settled when written."""
+    """The prompt scheduler's listener (P3.3.4): one event per model step, priced and its budget hold settled in memory
+    at once (``Ledger.step``); the writer writes the event and the budget's entry."""
     get().step(event)
 
 
@@ -797,7 +845,10 @@ def _set_watermark(session, mark: int) -> None:
 
 def rollup(session, hours: Optional[Iterable[datetime]] = None) -> int:
     """Recompute the rollups of ``hours`` (by default every hour an event landed in since the last pass, which then
-    moves the watermark), each deleted and inserted again in this transaction. Returns the hours recomputed."""
+    moves the watermark), each hour's rows deleted and inserted again together. ``session`` is committed every
+    ``ROLLUP_CHUNK`` hours, so a long backlog (a first start, a rollup thread down for days) never holds the database's
+    write lock for long; the watermark moves only with the last chunk, so until then ``totals`` reads those hours raw,
+    and a pass cut short is done again whole by the next. Returns the hours recomputed."""
     from sqlalchemy import select
     from .db.models import ComputeEvent
     new_mark = None
@@ -810,8 +861,11 @@ def rollup(session, hours: Optional[Iterable[datetime]] = None) -> int:
             new_mark = max(new_mark, eid)
         hours = found
     hours = sorted({hour_of(h) for h in hours})
-    for h in hours:
-        _rollup_hour(session, h)
+    for i in range(0, len(hours), ROLLUP_CHUNK):
+        for h in hours[i:i + ROLLUP_CHUNK]:
+            _rollup_hour(session, h)
+        if i + ROLLUP_CHUNK < len(hours):
+            session.commit()
     if new_mark is not None and new_mark != _watermark(session):
         _set_watermark(session, new_mark)
     session.flush()
@@ -1001,71 +1055,125 @@ def breakdown(session, user, range_: str = "30d", *, now: Optional[datetime] = N
 
 def reprice(session, since: datetime, until: Optional[datetime] = None, *, ledger: Optional[Ledger] = None) -> dict:
     """Recompute the credits of every event in [since, until) with the classes, rates and token prices in force now
-    (an administrator's ``citar admin reprice``), then the rollups of the hours touched. Returns
-    ``{"events", "changed", "hours"}``."""
+    (an administrator's ``citar admin reprice``), then the rollups of the hours touched. ``session`` is committed
+    every ``REPRICE_PAGE`` events (with that page's hours rolled up again), so a long period never holds the database's
+    write lock for long; a reprice cut short leaves the pages before repriced, and running it again finishes it.
+    Returns ``{"events", "changed", "hours"}``."""
     from sqlalchemy import select
     from . import servers
     from .db.models import ComputeEvent, HardwareClass
     classes = [class_dict(c) for c in session.scalars(select(HardwareClass))]
-    q = select(ComputeEvent).where(ComputeEvent.at >= since)
-    if until is not None:
-        q = q.where(ComputeEvent.at < until)
     n = changed = 0
-    hours: set = set()
-    for ev in session.scalars(q):
-        n += 1
-        facts = servers.machine_facts(ev.machine_id) or {}
-        flags = dict(ev.flags or {})
-        if ev.kind == "api":
-            cls = class_of(facts, "api", classes)
-            cost = token_cost(_api_price(ev.machine_id, ev.model, ev.at),
-                              {"tokens_in": ev.tokens_in, "tokens_out": ev.tokens_out,
-                               "tokens_cache_read": ev.tokens_cache_read, "tokens_cache_write": ev.tokens_cache_write})
-            if cost is None:
-                flags["unpriced"] = True
+    touched: set = set()
+    last = 0
+    while True:
+        q = select(ComputeEvent).where(ComputeEvent.at >= since, ComputeEvent.id > last)
+        if until is not None:
+            q = q.where(ComputeEvent.at < until)
+        page = list(session.scalars(q.order_by(ComputeEvent.id).limit(REPRICE_PAGE)))
+        if not page:
+            break
+        hours: set = set()
+        for ev in page:
+            last = ev.id
+            n += 1
+            facts = servers.machine_facts(ev.machine_id) or {}
+            flags = dict(ev.flags or {})
+            if ev.kind == "api":
+                cls = class_of(facts, "api", classes)
+                cost = token_cost(_api_price(ev.machine_id, ev.model, ev.at),
+                                  {"tokens_in": ev.tokens_in, "tokens_out": ev.tokens_out,
+                                   "tokens_cache_read": ev.tokens_cache_read,
+                                   "tokens_cache_write": ev.tokens_cache_write})
+                if cost is None:
+                    flags["unpriced"] = True
+                else:
+                    flags.pop("unpriced", None)
+                credits = credits_for("api", cost=cost, rate=cls["rate"] if cls else 0.0)
+            elif ev.kind == "cpu":
+                cls = class_of(facts, "cpu", classes)
+                credits = credits_for("cpu", cpu_core_s=ev.cpu_core_s, rate=cls["rate"] if cls else 0.0)
             else:
-                flags.pop("unpriced", None)
-            credits = credits_for("api", cost=cost, rate=cls["rate"] if cls else 0.0)
-        elif ev.kind == "cpu":
-            cls = class_of(facts, "cpu", classes)
-            credits = credits_for("cpu", cpu_core_s=ev.cpu_core_s, rate=cls["rate"] if cls else 0.0)
-        else:
-            cls = class_of(facts, "gpu", classes)
-            credits = credits_for("gpu", gen_s=ev.gen_s, rate=cls["rate"] if cls else 0.0)
-        credits = round(credits, 6)
-        if abs(credits - (ev.credits or 0.0)) > 1e-9 or flags != (ev.flags or {}):
-            ev.credits, ev.flags = credits, flags
-            changed += 1
-            hours.add(hour_of(ev.at))
-    session.flush()
-    rollup(session, hours)
+                cls = class_of(facts, "gpu", classes)
+                credits = credits_for("gpu", gen_s=ev.gen_s, rate=cls["rate"] if cls else 0.0)
+            credits = round(credits, 6)
+            if abs(credits - (ev.credits or 0.0)) > 1e-9 or flags != (ev.flags or {}):
+                ev.credits, ev.flags = credits, flags
+                changed += 1
+                hours.add(hour_of(ev.at))
+        session.flush()
+        rollup(session, hours)
+        session.commit()
+        for ev in page:
+            session.expunge(ev)             # a long period's events are not all kept in the session
+        touched |= hours
     if ledger is not None:
         ledger.invalidate_classes()
-    return {"events": n, "changed": changed, "hours": len(hours)}
+    return {"events": n, "changed": changed, "hours": len(touched)}
 
 
 # ---------------------------------------------------------------------------- the lab's results
 
-def ingest_lab(session, ledger: Optional[Ledger] = None, results_dir=None) -> int:
+_LAB_LOCK = threading.Lock()
+
+
+def ingest_lab(ledger: Optional[Ledger] = None, results_dir=None) -> int:
     """Each finished lab game's ``cpu_s`` (its result line, ``lab.py``) as one ``cpu`` event on the host, its
-    experiment's owner the consumer (P3.4.3). The lab runner is a process of its own, often without the server's
-    database; the server reads its results files here (the rollup thread's pass), each game once (its ``request_id``
-    is ``lab:<experiment>:<game>``). Returns the events written."""
+    experiment's owner the consumer (P3.4.3), its ``observed_s`` the game's wall time (``seconds``: costing spreads the
+    CPU over the game, not over a minute). The lab runner is a process of its own, often without the server's database;
+    the server reads its results files here (the rollup thread's pass, and a report before it gathers), each game once
+    (its activity and ``request_id`` are ``lab:<experiment>:<game>``).
+
+    One reader at a time (``_LAB_LOCK``), in a transaction of its own begun under that lock: the games already in the
+    ledger are read after the last reader's events were written, so none is written twice. With a ``ledger`` its
+    writer thread writes the events, as it writes every other (one inserting thread: the ids commit in order, which the
+    rollups' watermark relies on), and the reader waits for them; without one they are inserted here. Returns the
+    events written."""
     from pathlib import Path
-    from sqlalchemy import insert, select
-    from . import paths, servers
-    from .db.models import ComputeEvent, HardwareClass
+    from sqlalchemy import insert
+    from . import db, paths
+    from .db.models import ComputeEvent
     folder = Path(results_dir) if results_dir is not None else paths.saves_path("lab", "results")
-    if not folder.is_dir():
+    if not db.configured() or not folder.is_dir():
         return 0
     seen = ledger._lab_seen if ledger is not None else {}
+    with _LAB_LOCK:
+        with db.session() as s:
+            rows, stamps = _lab_rows(s, ledger, folder, seen)
+        if rows and ledger is not None and not ledger._stop.is_set():
+            done = []
+            for i in range(0, len(rows), BATCH_EVENTS):
+                ev = threading.Event()
+                done.append(ev)
+                ledger._put(("rows", rows[i:i + BATCH_EVENTS], ev))
+            if not ledger.background:
+                ledger.drain()
+            deadline = time.monotonic() + LAB_WRITE_SECONDS
+            for ev in done:
+                if not ev.wait(max(0.0, deadline - time.monotonic())):
+                    # not written yet (the writer is far behind): the files are read again next time, and whatever the
+                    # writer has written by then is not written twice
+                    log.warning("the ledger's writer has not written the lab's events yet")
+                    return 0
+        elif rows:
+            with db.session() as s:
+                s.execute(insert(ComputeEvent.__table__), rows)
+        seen.update(stamps)
+    return len(rows)
+
+
+def _lab_rows(session, ledger: Optional[Ledger], folder, seen: dict) -> tuple:
+    """``ingest_lab``'s events of the results files changed since they were last read, and those files' stamps."""
+    from sqlalchemy import select
+    from . import servers
+    from .db.models import ComputeEvent, HardwareClass
     classes = (ledger.classes(session) if ledger is not None else
                [class_dict(c) for c in session.scalars(select(HardwareClass))])
     host = servers.load().get("host_server_id") or HOST_UNKNOWN
     facts = servers.machine_facts(host) or {}
     cls = class_of(facts, "cpu", classes)
     rate = cls["rate"] if cls else 0.0
-    written = 0
+    rows, stamps = [], {}
     for path in sorted(folder.glob("*.jsonl")):
         try:
             st = path.stat()
@@ -1083,7 +1191,6 @@ def ingest_lab(session, ledger: Optional[Ledger] = None, results_dir=None) -> in
         have = {act for (act,) in session.execute(select(ComputeEvent.activity).where(
             ComputeEvent.activity_kind == "lab", ComputeEvent.activity.like(pattern, escape="\\")))}
         consumer, _game_kind, _found = owner_of(session, f"lab:{exp}")
-        rows = []
         for line in lines:
             try:
                 res = json.loads(line)
@@ -1101,16 +1208,17 @@ def ingest_lab(session, ledger: Optional[Ledger] = None, results_dir=None) -> in
                 at = datetime.fromisoformat(res["finished"]).astimezone(timezone.utc) if res.get("finished") else utcnow()
             except (TypeError, ValueError):
                 at = utcnow()
+            try:
+                wall = float(res.get("seconds") or 0.0)
+            except (TypeError, ValueError):
+                wall = 0.0
             rows.append({"at": at, "activity": activity[:160], "activity_kind": "lab", "task_class": "cpu",
                          "consumer_id": consumer, "provider_id": None, "machine_id": host[:40], "kind": "cpu",
                          "model": None, "gen_s": 0.0, "cpu_core_s": round(cpu_s, 6), "reported_s": None,
-                         "observed_s": None, "tokens_in": 0, "tokens_out": 0, "tokens_reasoning": 0,
-                         "tokens_cache_read": 0, "tokens_cache_write": 0,
+                         "observed_s": round(wall, 3) if wall > 0 else None, "tokens_in": 0, "tokens_out": 0,
+                         "tokens_reasoning": 0, "tokens_cache_read": 0, "tokens_cache_write": 0,
                          "credits": round(credits_for("cpu", cpu_core_s=cpu_s, rate=rate), 6), "flags": {},
                          "self_use": consumer is None, "verification": "verified", "request_id": rid})
             have.add(activity)
-        if rows:
-            session.execute(insert(ComputeEvent.__table__), rows)
-            written += len(rows)
-        seen[str(path)] = stamp
-    return written
+        stamps[str(path)] = stamp
+    return rows, stamps

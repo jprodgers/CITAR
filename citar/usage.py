@@ -63,10 +63,12 @@ def append(writer: str, rows: list[dict]):
             time.sleep(0.1)
 
 
-def read(since: Optional[float] = None, until: Optional[float] = None, *, work: bool = True) -> dict:
+def read(since: Optional[float] = None, until: Optional[float] = None, *, work: bool = False) -> dict:
     """All ledger rows between two timestamps: {"acts": {id: merged}, "spans": [...], "power": {srv: [...]},
-    "work": [...]}. ``work`` is the compute ledger's events in the range, in a span's shape (``work_rows``): the
-    generation seconds, CPU seconds and tokens costing prices; empty without a database."""
+    "work": [...]}. With ``work`` (what costing asks for: ``costing.compute``, a report's ``gather``), ``"work"`` is the
+    compute ledger's events in the range, in a span's shape (``work_rows``): the generation seconds, CPU seconds and
+    tokens costing prices; empty without a database, and without ``work`` (the activities alone are wanted, and every
+    model step is an event)."""
     acts: dict = {}
     spans: list = []
     power: dict = defaultdict(list)
@@ -108,37 +110,48 @@ def read(since: Optional[float] = None, until: Optional[float] = None, *, work: 
     return {"acts": acts, "spans": spans, "power": dict(power), "work": done}
 
 
-#: The window a CPU event's seconds are spread over by costing: the tracker's flush, one a minute.
+#: The window a CPU event's seconds are spread over by costing when it names none (its ``observed_s``: the tracker's
+#: flush window, about a minute; a lab game's wall time), and the longest window a CPU event is looked for over.
 CPU_WINDOW_SECONDS = 60.0
+MAX_CPU_WINDOW_SECONDS = 7 * 86400.0
 
 
 def work_rows(since: Optional[float] = None, until: Optional[float] = None) -> list:
     """The compute ledger's events between two timestamps as costing reads work (P3.4.7): one row per event,
     ``{"act", "srv", "model", "t0", "t1", "busy", "cpu", "in", "out", "rsn", "cr", "cw", "req"}``, a model step's
-    generation seconds ending when it did, a CPU event's seconds over the minute it was measured in. Empty in a process
-    without the server's database."""
+    generation seconds ending when it did, a CPU event's seconds over the window it was measured in (its
+    ``observed_s``: the tracker's flush window, a lab game's whole run; a minute when it names none). Empty in a
+    process without the server's database."""
     from . import db
     if not db.configured():
         return []
     try:
         from datetime import timezone
-        from sqlalchemy import select
+        from sqlalchemy import and_, or_, select
         from .db.models import ComputeEvent
         q = select(ComputeEvent.activity, ComputeEvent.machine_id, ComputeEvent.model, ComputeEvent.at,
                    ComputeEvent.kind, ComputeEvent.gen_s, ComputeEvent.cpu_core_s, ComputeEvent.tokens_in,
                    ComputeEvent.tokens_out, ComputeEvent.tokens_reasoning, ComputeEvent.tokens_cache_read,
-                   ComputeEvent.tokens_cache_write)
+                   ComputeEvent.tokens_cache_write, ComputeEvent.observed_s)
         if since is not None:
             q = q.where(ComputeEvent.at >= datetime.fromtimestamp(since, timezone.utc))
         if until is not None:
-            q = q.where(ComputeEvent.at <= datetime.fromtimestamp(until + CPU_WINDOW_SECONDS, timezone.utc))
+            # an event ends at ``at``; one ending after ``until`` still counts when its window began before it (a lab
+            # game's CPU over its whole run)
+            q = q.where(or_(ComputeEvent.at <= datetime.fromtimestamp(until + CPU_WINDOW_SECONDS, timezone.utc),
+                            and_(ComputeEvent.kind == "cpu", ComputeEvent.observed_s > CPU_WINDOW_SECONDS,
+                                 ComputeEvent.at <= datetime.fromtimestamp(until + MAX_CPU_WINDOW_SECONDS,
+                                                                           timezone.utc))))
         out = []
         with db.session() as s:
-            for act, srv, model, at, kind, gen, cpu, tin, tout, rsn, cr, cw in s.execute(q):
+            for act, srv, model, at, kind, gen, cpu, tin, tout, rsn, cr, cw, observed in s.execute(q):
                 t1 = at.timestamp()
                 if kind == "cpu":
-                    out.append({"act": act, "srv": srv, "t0": t1 - CPU_WINDOW_SECONDS, "t1": t1, "busy": 0.0,
-                                "cpu": float(cpu or 0.0)})
+                    window = float(observed) if observed and observed > 0 else CPU_WINDOW_SECONDS
+                    t0 = t1 - min(window, MAX_CPU_WINDOW_SECONDS)
+                    if until is not None and t0 > until:
+                        continue
+                    out.append({"act": act, "srv": srv, "t0": t0, "t1": t1, "busy": 0.0, "cpu": float(cpu or 0.0)})
                 else:
                     out.append({"act": act, "srv": srv, "model": model or "?", "t0": t1 - max(float(gen or 0.0), 1e-3),
                                 "t1": t1, "busy": float(gen or 0.0), "cpu": 0.0, "in": int(tin or 0),
@@ -321,7 +334,7 @@ class Tracker:
             from . import ledger
             led = ledger.get()
             for act, seconds in cpu.items():
-                led.cpu(act, seconds, at=now)
+                led.cpu(act, seconds, at=now, window=now - t0)
 
 
 _tracker: Optional[Tracker] = None

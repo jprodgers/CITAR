@@ -181,8 +181,7 @@ def _lab_results() -> None:
         return
     try:
         from .. import ledger as compute
-        with db.session() as s:
-            compute.ingest_lab(s, compute.current())
+        compute.ingest_lab(compute.current())
     except Exception:
         import logging
         logging.getLogger("citar.reports").warning("could not read the lab's results into the ledger", exc_info=True)
@@ -206,7 +205,7 @@ def gather(spec: dict, progress=lambda msg: None, *, reach: Optional[Reach] = No
     pooling = spec.get("pooling") or "own"
     progress("Reading the usage ledger")
     _lab_results()
-    ledger = U.read(since, until)
+    ledger = U.read(since, until, work=True)
     seen = reach.ledger(ledger)
     if since is None:       # "all time": from the first recorded use
         since = min((float(sp["t0"]) for sp in seen["spans"]), default=until - 86400)

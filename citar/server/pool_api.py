@@ -413,7 +413,8 @@ def update_grant(grant_id: str, body: GrantBody, request: Request,
         raise _fail(exc)
     audit.record(s, "grant.updated", actor=me, object_type="server_group", object_id=grant.group_id)
     _saved(s)
-    # the work already running under the grant is held to its budget as it is now (P3.4.6)
+    # the work already running under the grant is held to its budget as it is now, from its next request (P3.4.6:
+    # leases and tickets are bound to the grant, not to the budget it had when they were made)
     budgets.keeper().reload_grant(s, grant.id)
     return pool.grant_to_client(s, grant, me)
 
@@ -619,7 +620,7 @@ def test_server(server_id: str, request: Request, model: str = "",
             server.id, chosen, cls="test", activity=f"test:{secrets.token_hex(6)}", consumer=me.id,
             label=f"test of {server.name}", start_within=wait, steps=1,
             cap=int(grant.concurrency or 0) if grant is not None else 0, one_per_consumer=True,
-            budget=budgets.keeper().handle(s, grant))
+            access_grant=budgets.keeper().bind(s, grant))
         if ticket.state != "queued":
             return {"ok": False, "stage": "queue", "model": chosen, "reason": ticket.reason,
                     "code": ticket.error.code if ticket.error else None,

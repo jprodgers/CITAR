@@ -257,7 +257,8 @@ class BenchmarkScheduler:
         if job["status"] != "paused":
             return job["status"]
         return {"restricted": "paused (quiet hours)", "quiet": "paused (quiet hours)", "user": "paused by a person",
-                "disconnect": "paused (model server unreachable)"}.get(job.get("pause_reason"), "paused")
+                "disconnect": "paused (model server unreachable)",
+                "budget": "paused (budget used up)"}.get(job.get("pause_reason"), "paused")
 
     @staticmethod
     def _set_waiting(job: dict, note) -> bool:
@@ -769,8 +770,9 @@ class BenchmarkScheduler:
                 # paused from the game screen, or by the game itself when a model server went away
                 job["status"], job["pause_reason"] = "paused", (s.pause_reason or {}).get("kind") or "user"
                 self._touch(run)
-            elif job["status"] == "paused" and job["pause_reason"] in ("user", "disconnect") and not s.paused:
-                job["status"], job["pause_reason"] = "running", None     # resumed from the game screen
+            elif job["status"] == "paused" and job["pause_reason"] in ("user", "disconnect", "budget") and not s.paused:
+                # resumed from the game screen, or by the game itself (its budget's period turned)
+                job["status"], job["pause_reason"] = "running", None
                 self._touch(run)
             self._queue_turn(run, job, s)
             if _now() - self._progress_at.get(job["id"], 0) > 5:

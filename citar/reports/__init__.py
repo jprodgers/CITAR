@@ -700,7 +700,7 @@ def scope_options(reach=None) -> dict:
     from .reach import Reach
     reach = reach or Reach()
     reg = servers.with_pooled()
-    ledger = reach.ledger(usage.read())
+    ledger = reach.ledger(usage.read(work=False))       # the activities only: no compute event is read here
     if not reach.everything:
         reg = {**reg, "servers": [sv for sv in reg["servers"] if sv["id"] in reach.names]}
     items: dict = {}
