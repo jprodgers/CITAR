@@ -20,10 +20,6 @@ class BotAgent:
     per-tool rows). A benchmark comparing a model against the bot is then comparing two players of the same game
     rather than two code paths.
     """
-    #: How long a bot's turn waits for a seat it is in a negotiation with (a person, a model, an MCP client) to
-    #: answer before the chat is closed as expired and the turn goes on. Phase 3's lobby timeouts replace it.
-    REPLY_WAIT_SECONDS = 90.0
-
     def __init__(self, aggression: float = 0.4, profile: str = None):
         # the profile decides what plays; the seat's aggression applies when the profile leaves it open
         ref = profile or profiles.DEFAULT_PROFILE
@@ -34,6 +30,10 @@ class BotAgent:
             self.profile = profiles.resolve(ref)
         self.bot = profiles.make_bot(ref, aggression=float(aggression) if aggression is not None else None)
         self.cancelled = False
+        #: The turn's safety cap on its waits for other seats' answers, in seconds of unpaused time: None for the
+        #: game's own (``ChatClock.safety_cap``, twice its longest chat timeout). A probe's turn case, whose other seats
+        #: are scripts that never answer, sets 0: a chat the bot opens there is closed at once.
+        self.wait_cap: float | None = None
 
     def cancel(self):
         """Stop at the next point the turn waits (a seat change, a suspension, the game closing)."""
@@ -45,10 +45,11 @@ class BotAgent:
         The drive passes every bot seat of the game, so a negotiation one bot opens with another is answered inside
         it. A drive that stops because chats wait on seats the session plays (a person, a model, an MCP client) has
         already started those seats' responders (``_after_action``); this waits on the session's condition until any
-        of them answers (the chat is settled, or back with the bot) and drives again at once, so an answer is taken
-        up as it comes rather than when the slowest seat has answered. The turn has one budget for all its waits,
-        :attr:`REPLY_WAIT_SECONDS` of unpaused time: once it is spent, the chats still waiting on others are closed
-        as expired, through the session, and the turn is driven on to its end. A chat left waiting on the bot's own
+        of them moves or closes (the chat clock closes one whose time ran out, design/phase3-features.md P3.5.2) and
+        drives again at once, so an answer is taken up as it comes rather than when the slowest seat has answered. The
+        chat clock is the timer; the turn keeps only a safety cap for all its waits (``wait_cap``, by default twice the
+        game's longest chat timeout, in unpaused time), past which it closes the chats still waiting on others as
+        expired itself, through the session, and drives the turn on to its end. A chat left waiting on the bot's own
         seat (one its model owns, which only a hybrid seat answers) is not waited for: the session's driver closes it
         and ends the turn, as it ends any turn an agent leaves open. A pause holds the turn before its first drive as
         between drives.
@@ -62,7 +63,8 @@ class BotAgent:
             if (g.current != pid or g.phase != "playing" or session.crashed or session.stopped
                     or self.cancelled):
                 return
-            budget = float(self.REPLY_WAIT_SECONDS)
+            cap = float(self.wait_cap) if self.wait_cap is not None else session.chat.safety_cap()
+            spent = 0.0
             stop = session.drive_bots(pid)
             for _ in range(10_000):
                 if session.stopped or session.crashed or self.cancelled:
@@ -76,16 +78,17 @@ class BotAgent:
                 theirs = self._waiting_on_others(session, pid, stop["negotiations"])
                 if not theirs:
                     return
-                if budget > 0:
-                    budget -= session._await(
+                if spent < cap:
+                    spent += session._await(
                         lambda nids=theirs: len(self._waiting_on_others(session, pid, nids)) < len(nids),
-                        budget, halted=lambda: self.cancelled, hold_paused=True)
+                        cap - spent, halted=lambda: self.cancelled, hold_paused=True)
                 # a pause holds the turn where it is: the game does not move on while paused
                 session._await(lambda: not session.paused, float("inf"),
                                halted=lambda: self.cancelled or bool(session.crashed))
                 if session.stopped or session.crashed or self.cancelled:
                     return
-                if budget <= 0:
+                if spent >= cap:
+                    # the chat clock should have closed them by now: the safety net
                     for nid in self._waiting_on_others(session, pid, theirs):
                         session.close_negotiation(nid, "expired", "(no reply in time)")
                 stop = session.drive_bots(pid)

@@ -1213,8 +1213,10 @@ SEAT_OVERRIDES = ("persona", "max_tool_calls_per_turn", "max_turn_seconds", "rea
 #: timeout, unknown keys) decides what the server dials or sends, and only an administrator may set it.
 MEMBER_LLM_KEYS = ("server_id", "model", "model_id", "profile_id") + SEAT_OVERRIDES
 
-#: What an inline dry-run block may keep besides: the dry-run provider dials nothing and reads no key.
-DRYRUN_LLM_KEYS = ("dry_run_delay", "dry_run_negotiation")
+#: What an inline dry-run block, or a seat on a dry-run machine, may keep besides: the dry-run provider dials nothing
+#: and reads no key. ``dry_run_negotiation`` is how it answers chats; ``dry_run_propose_every`` makes it open a trade
+#: with a civilization it has met every that many turns (``citar.agents.providers.dryrun``).
+DRYRUN_LLM_KEYS = ("dry_run_delay", "dry_run_negotiation", "dry_run_propose_every")
 
 
 class SeatBlockError(ValueError):
@@ -1272,7 +1274,10 @@ def member_llm(block: Optional[dict], user, *, required: bool = False) -> dict:
                                   "not an address or a key.")
     if not isinstance(sid, str) or machine(sid) is None:
         raise SeatBlockError(400, "There is no such machine. Pick a machine for this seat.")
-    return {k: block[k] for k in MEMBER_LLM_KEYS if k in block}
+    keys = MEMBER_LLM_KEYS
+    if str(((machine(sid) or {}).get("connection") or {}).get("provider") or "").lower() == "dryrun":
+        keys = MEMBER_LLM_KEYS + DRYRUN_LLM_KEYS        # a dry-run machine's knobs: they dial nothing either
+    return {k: block[k] for k in keys if k in block}
 
 
 def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> dict:
@@ -1334,6 +1339,9 @@ def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> 
         cfg.pop("effort", None)
     if provider == "dryrun":
         cfg["dry_run_delay"] = conn.get("dry_run_delay", 1.0) if llm.get("dry_run_delay") is None else llm["dry_run_delay"]
+        for k in DRYRUN_LLM_KEYS[1:]:
+            if llm.get(k) not in (None, ""):
+                cfg[k] = llm[k]
     prof = profile(m, llm.get("profile_id"))
     if prof:
         cfg["profile_id"] = prof["id"]

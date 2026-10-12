@@ -316,7 +316,7 @@ class _Slot:
 class _Request:
     """One wait for a slot: a lease's call, or a ticket's start."""
     __slots__ = ("binding", "seq", "arrived", "state", "error", "slot", "conv", "position", "eta", "queued_s",
-                 "reported_s", "pass_through")
+                 "reported_s", "pass_through", "behind")
 
     def __init__(self, binding, seq: int, arrived: float, conv=None):
         self.binding = binding
@@ -331,6 +331,7 @@ class _Request:
         self.queued_s = 0.0          # every wait of it, a ``busy`` requeue's included
         self.reported_s = 0.0        # what of it the grants handed out already
         self.pass_through = False
+        self.behind = False          # a ticket's start waiting behind a benchmark, as last published
 
 
 @dataclass
@@ -749,6 +750,7 @@ class Machine:
             self.max_in_flight = max(self.max_in_flight, len(self.slots))
         self.counters["granted"] += 1
         self._status(b, {"state": "thinking" if b.is_lease else "running"})
+        self._conv_status(r, {"state": "thinking"})
         self.cond.notify_all()
 
     def _end(self, r: _Request, error: SchedulerError) -> None:
@@ -766,6 +768,7 @@ class Machine:
         if error.retry_at is not None:
             payload["retry_at"] = error.retry_at.isoformat()
         self._status(b, payload)
+        self._conv_status(r, payload)
         self.cond.notify_all()
 
     def _free(self, s: _Slot, now: float, *, frame: bool) -> None:
@@ -802,14 +805,20 @@ class Machine:
             del self.late[rid]
 
     def _positions(self, now: float, force: bool = False) -> None:
-        """Work out each waiting request's position and ETA and publish them to its status callback, when they changed
-        (``force``: work them out even when no callback wants them, for a caller about to wait). Lock held."""
-        if not force and not any(r.binding.on_status for r in self.waiting):
+        """Work out each waiting request's position and ETA and publish them to its status callbacks (its binding's,
+        and its conversation's: a chat's answer tells the chat), when they changed (``force``: work them out even when
+        no callback wants them, for a caller about to wait). A ticket waiting while a benchmark holds the machine says
+        so (``benchmark``): in a benchmark game the chat clock does not count that wait (P3.5.2). Lock held."""
+        if not force and not any(r.binding.on_status or getattr(r.conv, "on_status", None) for r in self.waiting):
             return
+        bench = self._bench_live()
         for r, i, eta in self._line(now):
-            if (r.position, r.eta) != (i, eta):
-                r.position, r.eta = i, eta
-                self._status(r.binding, {"state": "queued", "position": i, "eta_s": eta})
+            behind = bench and not r.binding.is_lease
+            if (r.position, r.eta, r.behind) != (i, eta, behind):
+                r.position, r.eta, r.behind = i, eta, behind
+                payload = {"state": "queued", "position": i, "eta_s": eta, "benchmark": behind}
+                self._status(r.binding, payload)
+                self._conv_status(r, payload)
 
     def _line(self, now: float) -> list:
         """The waiting requests in the order the rules serve them (lease requests by arrival, then tickets by priority,
@@ -833,6 +842,15 @@ class Machine:
     def _status(self, b: Binding, payload: dict) -> None:
         if b.on_status is not None:
             self.sched._notify(b.on_status, {"binding": b.id, "machine": self.id, **payload})
+
+    def _conv_status(self, r: _Request, payload: dict) -> None:
+        """Tell the conversation a request is of (``ScheduledConversation.on_status``) where it stands, on the notifier
+        thread: a lease's requests serve its turn and its chat answers alike, and a chat's answer tells its chat
+        (``negotiation_status``). Lock held."""
+        fn = getattr(r.conv, "on_status", None) if r.conv is not None else None
+        if fn is not None:
+            self.sched._notify(fn, {"binding": r.binding.id, "machine": self.id,
+                                    "machine_name": self.settings.name or self.id, **payload})
 
     # -------------------------------------------------------------- the non-blocking core (tests drive it directly)
     def submit(self, binding: Binding, conv=None) -> _Request:
@@ -1642,6 +1660,10 @@ class ScheduledConversation(Conversation):
         #: machine (its ``position``, ``eta_s`` and the ``machine``'s name) and when that wait is over (None): the
         #: agent shows its seat as waiting for the machine (``Machine.acquire``).
         self.on_wait: Optional[Callable[[Optional[dict]], None]] = None
+        #: ``on_status(payload)``: told, on the notifier thread, where this conversation's request stands in its
+        #: machine's queue (``queued`` with ``position``, ``eta_s`` and ``benchmark``) and when it is granted
+        #: (``thinking``): a chat's answer passes it on to the chat (``ChatClock.answer_status``).
+        self.on_status: Optional[Callable[[dict], None]] = None
         self.last_queue_s = 0.0
         self.last_gen_s = 0.0
         self.last_event: Optional[StepEvent] = None
@@ -1676,6 +1698,18 @@ class ScheduledConversation(Conversation):
 
     def add_tool_results(self, results):
         self.inner.add_tool_results(results)
+
+    def rebind(self, binding: Binding) -> None:
+        """Run the next steps on another binding (a chat's conversation answering on a fresh ticket each time, as a
+        probe asks it): the conversation and what it has said are kept. Not while a step runs."""
+        old = self.binding
+        if isinstance(old, Ticket):
+            old.convs.discard(self)
+        self.binding = binding
+        if isinstance(binding, Ticket):
+            binding.convs.add(self)
+            if isinstance(getattr(self.inner, "cfg", None), dict):
+                self.inner.cfg = dict(self.inner.cfg)
 
     def close(self):
         """Cancel (non-blocking, allowed under a session lock): a waiting request leaves the queue; a running one is

@@ -1,8 +1,15 @@
 """Dry-run 'model' for testing benchmark setups without a GPU: founds a city, keeps research and production going,
-sends military units exploring, then ends each turn. Makes no network calls."""
+sends military units exploring, then ends each turn. Makes no network calls.
+
+It answers chats too (design/phase3-features.md P3.9.4: taught what the QA needs): each message of a chat's
+conversation is answered once (``dry_run_negotiation``, or by counting what it gives and gets), a message that holds
+``[dry run: wait N s]`` is answered after N seconds rather than the usual delay (a model too slow for the chat clock),
+and with ``dry_run_propose_every`` it opens a trade (maps both ways) with the first civilization it has met on every
+turn that many turns divide."""
 from __future__ import annotations
 
 import json
+import re
 import threading
 
 from .base import Conversation, StepResult, ToolCall
@@ -28,10 +35,14 @@ class DryRunConversation(Conversation):
         self._results: list[str] = []
         self._tools = {t.get("name") for t in tools or []}
         self._text = ""
+        self._last = ""             # the latest message: what a chat's answer reads
+        self._fresh = False         # a message not answered yet
 
     def add_user_text(self, text: str):
-        """Ignore the text; the dry run does not read it."""
+        """Keep the text: a chat's answer and a turn's proposal read it (the turn's number, the chat's offer)."""
         self._text += text
+        self._last = text
+        self._fresh = True
 
     def add_tool_results(self, results):
         """Ignore tool results."""
@@ -41,9 +52,15 @@ class DryRunConversation(Conversation):
         """Nothing to release."""
         self._closed.set()
 
+    def _delay(self) -> float:
+        """How long this step takes: the configured delay, or a chat message's ``[dry run: wait N s]``."""
+        chat = "respond_negotiation" in self._tools and "end_turn" not in self._tools
+        m = re.search(r"\[dry run: wait (\d+(?:\.\d+)?) s\]", self._last) if chat and self._fresh else None
+        return min(600.0, float(m.group(1))) if m else self.delay
+
     def step(self) -> StepResult:
         """Produce a plausible set of orders, after a configurable delay."""
-        if self._closed.wait(self.delay):
+        if self._closed.wait(self._delay()):
             raise RuntimeError("dry run cancelled")
         self._step += 1
         self.usage["input_tokens"] += 1000
@@ -54,9 +71,11 @@ class DryRunConversation(Conversation):
         if "respond_negotiation" in self._tools and "end_turn" not in self._tools:
             return self._negotiate()
         if self._step == 1:
-            return StepResult(text="Checking units, cities and research.",
-                              tool_calls=[ToolCall("d_u", "get_units", {}), ToolCall("d_c", "get_cities", {}),
-                                          ToolCall("d_e", "get_empire", {})])
+            calls = [ToolCall("d_u", "get_units", {}), ToolCall("d_c", "get_cities", {}),
+                     ToolCall("d_e", "get_empire", {})]
+            if self._proposing():
+                calls.append(ToolCall("d_pl", "get_players", {}))
+            return StepResult(text="Checking units, cities and research.", tool_calls=calls)
         if self._step == 2:
             calls = self._orders()
             if calls:
@@ -64,32 +83,57 @@ class DryRunConversation(Conversation):
         return StepResult(text="Nothing else to do.", tool_calls=[ToolCall(f"d_end{self._step}", "end_turn", {})])
 
     def _negotiate(self) -> StepResult:
-        """Diplomatic interrupt: answers with cfg["dry_run_negotiation"] (accept | reject | counter | reply), or
-        accepts deals that give it at least as many items as it gives."""
-        import re
-        m = re.search(r"negotiation #(\d+)", self._text)
-        if not m or self._step > 1:
+        """A chat's answer: each message once, with cfg["dry_run_negotiation"] (accept | reject | counter | reply),
+        else accepting a deal that gives it at least as many items as it gives (a reply when nothing is on the
+        table)."""
+        text = self._last
+        m = re.search(r"negotiation #(\d+)", text)
+        if not m or not self._fresh:
             return StepResult(text="Done.", tool_calls=[])
+        self._fresh = False
         nid = int(m.group(1))
         mode = self.cfg.get("dry_run_negotiation")
-        if '"current_proposal": null' in self._text:
+        if '"current_proposal": null' in text:
             mode = "reply"          # nothing on the table to accept or counter
         if not mode:
-            gives = len(re.findall(r'"type"', self._text.split('"you_receive"')[0])) if '"you_receive"' in self._text else 0
-            gets = self._text.count('"type"') - gives
+            table = text.split('"current_proposal"', 1)[1] if '"current_proposal"' in text else text
+            table = table.split('"proposal_by_you"', 1)[0]
+            gives = len(re.findall(r'"type"', table.split('"you_receive"')[0])) if '"you_receive"' in table else 0
+            gets = table.count('"type"') - gives
             mode = "accept" if gets >= gives else "reject"
         args = {"negotiation_id": nid, "action": mode, "message": f"(dry run) {mode}"}
         if mode == "counter":
             args.update({"give": [], "receive": [{"type": "gold", "amount": 10}]})
         return StepResult(text=f"Dry run: {mode}.", tool_calls=[ToolCall("d_n", "respond_negotiation", args)])
 
+    def _proposing(self) -> bool:
+        """Whether this turn opens a trade (``dry_run_propose_every``: on every turn that many turns divide)."""
+        try:
+            every = int(self.cfg.get("dry_run_propose_every") or 0)
+        except (TypeError, ValueError):
+            every = 0
+        m = re.search(r"It is your turn \(turn (\d+)\)", self._text)
+        return every > 0 and m is not None and int(m.group(1)) % every == 0 and "open_negotiation" in self._tools
+
     def _orders(self) -> list:
-        """Make up orders that are legal but not clever."""
+        """Make up orders that are legal but not clever, and a trade on a proposing turn (``_proposing``)."""
         try:
             units, cities, empire = (json.loads(r) for r in self._results[:3])
         except (ValueError, TypeError):
             return []
         calls = []
+        if self._proposing() and len(self._results) > 3:
+            try:
+                players = json.loads(self._results[3])
+            except (ValueError, TypeError):
+                players = []
+            met = [p for p in players if isinstance(p, dict) and p.get("met") and p.get("alive")
+                   and p.get("kind") == "major" and p.get("id") != empire.get("id")
+                   and p.get("name") != empire.get("name")] if isinstance(players, list) else []
+            if met:
+                calls.append(ToolCall("d_o", "open_negotiation", {
+                    "to": met[0]["id"], "message": "(dry run) Shall we share our maps?",
+                    "give": [{"type": "share_map"}], "receive": [{"type": "share_map"}]}))
         # the engine names unit types as the ruleset does ("Settler")
         settler = next((u for u in units if str(u.get("type") or "").lower() == "settler"), None)
         if settler and not cities:

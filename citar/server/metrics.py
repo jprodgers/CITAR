@@ -245,10 +245,21 @@ class Metrics:
         if rec is not None:
             rec[field] = rec.get(field, 0) + n
 
-    def negotiation(self, pid: int, seconds: float, steps: int, input_tokens: int, output_tokens: int):
-        """Record a negotiation handled during this turn."""
+    #: How a model seat's answer to a chat ended (design/phase3-features.md P3.5.7): its model answered; the chat clock
+    #: declined for it when its time ran out; its fallback answered (a hybrid seat's bot) or, for a full model seat,
+    #: it declined because its model could not answer (``cause``: chat.CAUSES); the chat closed before it answered.
+    NEGOTIATION_OUTCOMES = ("answered", "declined_late", "fallback", "closed")
+
+    def negotiation(self, pid: int, seconds: float, steps: int, input_tokens: int, output_tokens: int, *,
+                    nid: Optional[int] = None, gen_s: float = 0.0, queue_s: float = 0.0,
+                    outcome: Optional[str] = None, cause: Optional[str] = None):
+        """Record a model seat's answer to a chat (one exchange, or the chat clock's decline): the chat (``nid``), the
+        time it took, its steps and tokens, its generation and queue time apart, how it ended (``outcome``) and, for a
+        fallback or a late decline, why (``cause``)."""
         self.data["negotiations"].append({"player": pid, "t": time.time(), "seconds": round(seconds, 3), "steps": steps,
-                                          "input_tokens": input_tokens, "output_tokens": output_tokens})
+                                          "input_tokens": input_tokens, "output_tokens": output_tokens, "nid": nid,
+                                          "gen_s": round(gen_s or 0.0, 3), "queue_s": round(queue_s or 0.0, 3),
+                                          "outcome": outcome, "cause": cause})
 
     # ------------------------------------------------------------------
     def summary(self, players: dict) -> dict:
@@ -335,6 +346,21 @@ class Metrics:
             if negs:
                 out[pid]["negotiation_replies"] = len(negs)
                 out[pid]["avg_negotiation_s"] = round(statistics.mean(x["seconds"] for x in negs), 1)
+                # chat answers by how they ended (P3.5.7); a row from before 0.1.6 has none and counts as answered
+                answers: dict = {}
+                causes: dict = {}
+                for x in negs:
+                    how = x.get("outcome") or "answered"
+                    answers[how] = answers.get(how, 0) + 1
+                    if x.get("cause"):
+                        causes[x["cause"]] = causes.get(x["cause"], 0) + 1
+                out[pid]["chat_answers"] = answers
+                if causes:
+                    out[pid]["chat_fallback_causes"] = causes
+                timed = [x for x in negs if x.get("outcome") in ("answered", "closed", "fallback") and x.get("steps")]
+                if timed:
+                    out[pid]["avg_chat_gen_s"] = round(statistics.mean(x.get("gen_s", 0.0) for x in timed), 2)
+                    out[pid]["avg_chat_queue_s"] = round(statistics.mean(x.get("queue_s", 0.0) for x in timed), 2)
         return out
 
     def turn_rows(self) -> list[dict]:

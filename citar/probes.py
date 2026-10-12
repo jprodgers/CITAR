@@ -393,10 +393,11 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                 g.force_turn(subject)
                 s._track_turn()
                 began = (g.turn, g.current)
-            if is_bot:
-                # Nobody answers a chat in a turn case (the other seats are scripts): a chat the bot opens expires at
-                # once rather than after the bot's wait for a reply, and its turn goes on to its end.
-                agent.REPLY_WAIT_SECONDS = 0.0
+            if hasattr(agent, "wait_cap"):
+                # Nobody answers a chat in a turn case (the other seats are scripts, and the case's session runs no
+                # chat clock): a chat the subject opens is closed at once rather than at its safety cap, and its turn
+                # goes on to its end.
+                agent.wait_cap = 0.0
             agent.play_turn(s, subject)
             with s.lock:
                 if is_bot:

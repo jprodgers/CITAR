@@ -786,6 +786,39 @@ def call_tool(gid: str, body: ToolCallBody, request: Request, token: Optional[st
     return s.call_tool(pid, body.tool, body.args, wait_negotiation=wait)
 
 
+@app.get("/api/games/{gid}/negotiations/{nid}")
+def negotiation_view(gid: str, nid: int, request: Request, token: Optional[str] = None,
+                     as_player: Optional[int] = None, p: Principal = Depends(principal),
+                     sdb: DbSession = Depends(get_db)):
+    """One chat as a side of it sees it, with where its clock stands (``clock``: whose move, the kind of side,
+    ``deadline`` in epoch seconds, ``left_s``, ``paused``): what the chat window opens from the socket's event,
+    without waiting for a view refresh (design/phase3-features.md P3.5.6).
+
+    A seat token reads the chats its seat is in. A spectator of a game whose god view is allowed (no person plays,
+    or it is over) reads any, from ``as_player``'s side when that civilization is in it, else the side that opened
+    it. Anyone else, and a chat the caller may not read, gets 404, so a chat's existence is not told either."""
+    s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
+    if not 0 <= nid <= 2**31:
+        raise HTTPException(404, "No such negotiation.")
+    tok = _token(request, token)
+    with s.lock, _crash_guard(s):
+        seat = s.seat_for_token(tok)
+        if seat is not None:
+            side = seat.player
+        elif (s.is_spectator(tok) or access.VIEW in perms) and s.god_view_allowed():
+            side = as_player
+        else:
+            raise HTTPException(404, "No such negotiation.")
+        try:
+            if side is not None and as_player is not None and seat is None:
+                n = s.game.negotiation_head(nid)
+                if side not in (n["initiator"], n["responder"]):
+                    side = None
+            return s.chat_view(nid, side)
+        except ActionError:
+            raise HTTPException(404, "No such negotiation.") from None
+
+
 @app.get("/api/games/{gid}/path")
 def path_preview(gid: str, request: Request, unit_id: int, x: int, y: int,
                  token: Optional[str] = None, p: Principal = Depends(principal),
@@ -2452,6 +2485,8 @@ async def ws(websocket: WebSocket, gid: str, token: str = "", k: str = ""):
                 msg = {**msg, "event": s.game.event_view(ev, pid)}
         if t == "thought" and not (spectator and s.god_view_allowed()):
             return
+        if t == "negotiation_status" and not _sees_chat_status(s, pid, msg):
+            return
         try:
             loop.call_soon_threadsafe(_safe_put, queue, msg)
         except RuntimeError:
@@ -2476,6 +2511,15 @@ async def ws(websocket: WebSocket, gid: str, token: str = "", k: str = ""):
         send_task.cancel()
         if push in s.subscribers:
             s.subscribers.remove(push)
+
+
+def _sees_chat_status(s: GameSession, pid: Optional[int], msg: dict) -> bool:
+    """Whether a game socket gets a chat's ``negotiation_status`` (design/phase3-features.md P3.5.5): a seat's socket
+    for the chats its seat is in, a spectator's while the game's god view is allowed (no person plays, or it is
+    over), nobody else's: a third seat, or a spectator of a game a person plays, learns nothing of who is talking."""
+    if pid is not None:
+        return pid in (msg.get("players") or [])
+    return s.god_view_allowed()
 
 
 def _safe_put(q: asyncio.Queue, msg: dict):
