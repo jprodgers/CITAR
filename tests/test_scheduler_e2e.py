@@ -111,29 +111,42 @@ class Overreporting:
 
 
 class HelperBase(unittest.TestCase):
-    """A real server on a free port; helpers connect to it in threads of their own."""
+    """A real server on a free port; helpers connect to it in threads of their own.
+
+    The app's start makes process-wide workers that would outlive this module's server: the host's power sampler
+    (which runs ``nvidia-smi`` every few seconds where there is one, and later modules watch for outbound calls) is
+    not started, and the benchmark scheduler, the probe and report runners it made are stopped and put back as they
+    were when the server is gone."""
 
     @classmethod
     def setUpClass(cls):
         import uvicorn
-        from citar.server.app import app
+        from citar import usage
+        from citar.server import app as appmod, reports_api
         _database()
         S.reset()
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             cls.port = probe.getsockname()[1]
-        cls.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=cls.port, log_level="error"))
+        cls.server = uvicorn.Server(uvicorn.Config(appmod.app, host="127.0.0.1", port=cls.port, log_level="error"))
         cls.thread = threading.Thread(target=cls.server.run, daemon=True)
+        cls.saved = (appmod.scheduler, appmod._probe_runner, reports_api._runner)
+        cls.sampler = usage._sampler
         # the server's start brings back the games other test modules left marked as open: not this one's business
         from citar.server.session import SessionManager
-        with mock.patch.object(SessionManager, "restore_live", lambda self: []):
+        with mock.patch.object(SessionManager, "restore_live", lambda self: []), \
+                mock.patch.object(usage, "start_power_sampler", lambda follow_host=False: None):
             cls.thread.start()
             _until(lambda: cls.server.started, 15)
 
     @classmethod
     def tearDownClass(cls):
+        from citar.server import app as appmod, reports_api
         cls.server.should_exit = True
         cls.thread.join(timeout=10)
+        if appmod.scheduler is not None and appmod.scheduler is not cls.saved[0]:
+            appmod.scheduler.stop()
+        appmod.scheduler, appmod._probe_runner, reports_api._runner = cls.saved
         S.reset()
 
     def setUp(self):
@@ -186,6 +199,11 @@ class HelperBase(unittest.TestCase):
 
 class Draining(HelperBase):
     """Gate 3."""
+
+    def test_the_servers_start_left_no_power_sampler_behind(self):
+        from citar import usage
+        self.assertIs(usage._sampler, self.sampler, "the app's start made no process-wide power sampler here")
+        self.assertFalse([t for t in threading.enumerate() if t.name == "power-sampler" and self.sampler is None])
 
     def test_a_cancelled_ticket_drains_until_the_helpers_late_answer(self):
         endpoint = qa.FakeEndpoint(delay=20.0)
