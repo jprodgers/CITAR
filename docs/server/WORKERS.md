@@ -174,12 +174,18 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
 - A game's model seat holds a **lease** on its machine from the moment the game is created, loaded, brought back after
   a restart or launched from a scenario (paused or not, whoever moves first), until the seat is changed or eliminated
   or the game ends or is closed; a game paused to make way for higher-priority work gives its leases up until it
-  resumes, while any other pause (a person's, quiet hours, a lost connection) keeps them. Its requests are served in
-  the order they come, before any pooled prompt. While the seat waits on something else (another side's answer in a
-  chat, a paused game, its next turn) a lobby game's lease lends its slot.
+  resumes (a person who chats with its model seat meanwhile is answered on a lease for that answer alone, given up
+  when the answer ends), while any other pause (a person's, quiet hours, a lost connection) keeps them. Its requests
+  are served in the order they come, before any pooled prompt. While the seat waits on something else (another side's
+  answer in a chat, a paused game, its next turn) a lobby game's lease lends its slot. A seat's lease is held to the
+  concurrency of the grant its game was admitted for: a benchmark game's to the owner's grant for benchmarks.
 - **What the machine is busy with** is its leases: queued benchmark jobs, probe runs and reports wait for them, and the
   Queue page lists them. A probe run holds a lease on its model's machine for the whole run, and a report whose
-  analysis a model writes holds one while it is built; neither lends its slot.
+  analysis a model writes holds one while it is built; neither lends its slot. What a queued job, run or report says
+  it waits for names only the work its reader may see; anyone else's game or run is "someone's game" or "someone's
+  probe run", and a game paused to make way says only what kind of work it makes way for. A report whose analysis a
+  helper machine writes waits in the queue while that helper is offline, and if the helper drops while the report is
+  built, waits up to half an hour for it to come back.
 - A **pooled prompt** (one short job: the Servers page's test today; chat answers, report narratives and probe cases
   as later packages move them on) takes a free slot that no seat in the middle of its turn needs, only on a model the
   helper has loaded (unless the machine allows swaps), and never inside the machine's quiet hours. One that borrows an

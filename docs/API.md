@@ -86,7 +86,10 @@ anyone else it reaches gets neither its traceback nor its owner, and a specifica
 could have chosen (the scope's items and machines they may see; of the narrative only `enabled`).
 A body of the wrong shape (an item named by anything but its id, a report specification whose parts
 are not objects or lists) is a 400. A report's narrative that names a pooled machine the caller is not
-admitted to is a 403, as a run's machine is.
+admitted to is a 403, as a run's machine is. What queued work waits for (a benchmark job's `waiting` in
+`GET /api/benchmarks/runs`, a probe run's in `GET /api/probe-runs/{id}`, a report's `waiting` and
+`progress`, a Queue page entry's `waiting`) names only the games and runs the caller may see; the rest
+are "someone's game", "someone's benchmark run" and so on.
 An item is addressed here by its kind and its id on disk (`ref`), as its own routes name it:
 
 | Method and path | |
