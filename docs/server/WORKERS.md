@@ -51,9 +51,12 @@ the action touches:
 
 | Action | Who |
 |---|---|
-| See a machine and seat it | Its owner and administrators; anyone else through a grant on a server group it is in |
-| Change its configuration (name, models, hardware, power and costs, quiet hours, its key), remove it | Its owner and administrators; another member gets 404 |
+| See a machine and seat it | Its owner and administrators; anyone else through a grant on a server group it is in. No listing names a machine to anyone else (the lobby's availability, the machines in their quiet hours): it is 404 to them |
+| Change its configuration (name, models, hardware, power and costs, quiet hours), remove it | Its owner and administrators; another member gets 404 |
+| Store or delete its API key | Its owner and administrators, on a machine the server dials; a helper machine has no key on the server (404) |
 | Add a machine the server dials itself, or switch one to that | Administrators, unless its provider is the dry run (it dials nothing): a member gets 403 with the reason |
+| Price a machine with an electricity plan | Administrators: the plans are the household's bill. A member gets 403, and on a machine an administrator gave a plan, sees no price per kWh |
+| Choose a new machine's id | Administrators; a member's new machine gets an id from the server |
 | Detect its models, see what is loaded, load and unload models, read a loaded configuration, estimate memory | The owner or an administrator, on a machine the server dials or the host; for a member only the dry run. A helper machine reports its models through its helper: these answer 404 for it, and nothing is dialled or started |
 | Collect the host's hardware, list LM Studio's devices | Administrators, on the host |
 | Point a key at one of the server's environment variables (the `env` backend) | Administrators |
@@ -62,7 +65,10 @@ the action touches:
 
 A member's machine is a helper machine: the server never dials it, never drives an LM Studio for it and never reads
 a key for it. The site's own machines (the host, the APIs an administrator added, the imported registry's) are
-administrators' until one of them shares them in a server group, like any other machine.
+administrators' until one of them shares them in a server group, like any other machine; the administrator named as
+their owner keeps nothing of them once made a member. A machine body of the wrong shape (a list where an object
+belongs, say) is refused with 400 on every route that saves one. Removing a machine removes the key its row stores,
+in the OS credential store or the key file, as well.
 
 ## Revocation
 
@@ -70,8 +76,9 @@ Taking a machine away from its helper takes effect at once: **revoking the token
 **disabling** the machine, **deleting** it, or **suspending its owner's account** closes the helper's connection
 within a second of the change being saved. Whatever it was generating fails (it is not retried), its next request
 is refused, the helper is told why and stops instead of reconnecting, and a helper that tries again with what was
-taken away is refused at its hello. Revoking one token leaves a helper connected with another token alone. A change
-made from the command line or another process is noticed at the next keep-alive (`CITAR_WORKER_PING_SECONDS`).
+taken away is refused at its hello, or, if the change was saved while its hello was being checked, as soon as it
+is connected. Revoking one token leaves a helper connected with another token alone. A change made from the command
+line or another process is noticed at the next keep-alive (`CITAR_WORKER_PING_SECONDS`).
 
 ---
 

@@ -139,9 +139,17 @@ invitation with the admin role; in local mode the owner, at the first start). Ev
 suites, saved games, the usage ledger and stored API keys keep resolving; each becomes the first administrator's,
 in no server group (share one from the Servers page when members should use it), with its `max_parallel` as its
 slots. The file is then **renamed** `servers.json.imported-<date>-<time>` beside itself, never deleted, and never
-read again; a file that reappears later is left alone, with a warning at each start. A fresh server-mode database
-with no administrator imports nothing and says so in its log. With no file at all, the first run makes the default
-machines the file used to start with (this computer as the host, the Anthropic API, the dry run).
+read again; a file that reappears later is left alone, with a warning at each start. A `servers.json` in another
+`config/` folder (a checkout and an installed copy can share one database) is **not** imported once one was: the
+warning says so, and its machines are added on the Servers page by hand if they are wanted. A fresh server-mode
+database with no administrator imports nothing and says so in its log. With no file at all, the first run makes the
+default machines the file used to start with (this computer as the host, the Anthropic API, the dry run), once the
+first administrator is saved. A database where the old Servers page's "import" was used keeps the copies it made
+under new ids, beside the machines imported under their own; the log and the audit row name them for removal.
+
+The host and the site's online APIs are the site's: an administrator manages them, whoever the import named as
+their owner. The power sampler follows whichever machine is the host, so a host that appears with the first
+administrator is sampled without a restart.
 `citar setup --local` writes its machines into the database when there is one, else into `servers.json` for the
 first start to import.
 
