@@ -4,7 +4,8 @@ A seat's ``llm`` block names a machine by id. Every machine is a row of the ``se
 P3.2.8): CITAR dials one whose ``reach`` is ``direct`` itself (``citar.servers.resolve_llm``), and plays one whose
 ``reach`` is ``worker`` through the helper connected from that machine. This module turns a seat naming a helper
 machine into an agent configuration that plays through its helper, and checks that whoever creates the game may use
-the machine, whichever its reach.
+the machine, whichever its reach: each seat by its task class (``seat_class``: a model seat that plays every turn is
+*full*, one asked a prompt at a time *partial*), and each pooled prompt when its ticket is made (``ticket``).
 """
 from __future__ import annotations
 
@@ -14,9 +15,10 @@ from typing import Optional
 # ---------------------------------------------------------------------------- who is using a machine
 # A machine is in use by the leases live on it (design/phase3-features.md P3.3.5): every living model seat of a
 # registered game (made when its session is registered, released when the seat changes, is eliminated or the game ends,
-# stops, crashes or makes way), a probe run's and a report's narrative's. Before package 3-08 this module walked every
+# stops, crashes or makes way) and a probe's turn case's, for the case. Before package 3-08 this module walked every
 # session's seats and kept a table of "claims" for the work that was not a registered game; the scheduler's leases
-# replace both, so what waits for a machine and what the scheduler serves are the same list.
+# replace both, so what waits for a machine and what the scheduler serves are the same list. Pooled prompts (a report's
+# narrative, a probe's offer and message cases, a hybrid seat's diplomacy) are tickets and never occupy a machine.
 
 
 def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list[str]:
@@ -34,8 +36,8 @@ def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list
 
 
 def occupants(server_id: Optional[str], exclude: frozenset = frozenset()) -> list[dict]:
-    """``occupied`` with what each lease serves: {"label", "kind" (the queue's kind: game, benchmark, probe, report;
-    None when the lease names none), "id" (a game's id, a run's or a report's), "game" (the session id of a game
+    """``occupied`` with what each lease serves: {"label", "kind" (the queue's kind: game, benchmark, probe; None when
+    the lease names none), "id" (a game's id, or its run's), "game" (the session id of a game
     seat's lease)}. A benchmark job's game is a game of kind benchmark, named by its run."""
     if not server_id:
         return []
@@ -207,50 +209,147 @@ def describe(llm: dict, pooled: dict) -> dict:
             "missing_server": False, "restricted_until": clock_text(pooled, end), "pooled": True}
 
 
-def authorize(session, user, seats: list[dict], purpose: str = "game", *, queued: bool = False) -> None:
-    """Refuse a game whose LLM seats use pooled machines the creator may not use for games right now.
+# ---------------------------------------------------------------------------- task classes and admission
+# design/phase3-features.md P3.3.7: a model seat that plays every turn is task class *full* (it holds a lease on its
+# machine), one that asks a prompt at a time is *partial* (tickets: 3-14's hybrid seat). Each class needs its
+# capability and a grant for its purpose; every place that asks "what does this seat play" asks ``seat_class``.
 
-    Raises ValueError with the admission system's own explanation (no grant, outside a window, budget
-    spent, machine offline...), except to somebody who may not even see the machine: they are told only
-    that they may not use it, since the explanation names the machine and its group. Every machine is a row
-    (the host and the site's API rows included, since the registry merge), so every seat with a machine is
-    admitted here; a helper machine is online while its helper is connected, a machine CITAR dials has no
-    such state (``liveness``). ``purpose`` is the
-    work the seats do (``admission.PURPOSES``): a benchmark run's machines are admitted for `benchmark`, a
-    probe run's subject for `probe` (design/phase3-features.md P3.2.4: "create" is the capability plus
-    admission where the work runs on a machine). ``queued`` is for work that waits its turn (a run): who may is
-    decided now, when is the runner's, so a refusal that only says "not yet" (outside a window, a spent period,
-    the helper offline, every slot busy) lets it through.
-    """
+#: A seat type's task class.
+SEAT_CLASSES = {"llm": "full", "hybrid": "partial"}
+#: The seat types that play a model, whose seats name a machine (``citar.server.app._member_seat``).
+MODEL_SEAT_TYPES = tuple(SEAT_CLASSES)
+#: What each task class needs: the capability, and the grant purpose it is admitted for (``admission.PURPOSES``).
+CLASS_NEEDS = {"full": ("full_llm", "game"), "partial": ("partial_llm", "pooled")}
+#: The capability work of a purpose needs besides its own (a report's ``run_reports``, a probe's ``run_probes``): a
+#: pooled prompt, whatever it is part of, is the account's use of pooled prompts (``partial_llm``).
+PURPOSE_CAPABILITY = {"pooled": "partial_llm"}
+
+
+def seat_class(seat) -> Optional[str]:
+    """A seat's task class: ``full`` for a model seat that plays every turn (``llm``), ``partial`` for one whose model
+    is asked a prompt at a time (``hybrid``), None for a seat that plays no model (a person, an MCP client, a bot, a
+    script) or for anything that is not a seat. Takes a seat as a dict (a request's, a scenario's) or a session's
+    ``Seat``."""
+    kind = seat.get("type") if isinstance(seat, dict) else getattr(seat, "type", None)
+    return SEAT_CLASSES.get(kind) if isinstance(kind, str) else None
+
+
+def authorize(session, user, seats: list, *, queued: bool = False) -> None:
+    """Refuse a game whose model seats ``user`` may not seat: each by its task class (``seat_class``), which needs its
+    capability (``full_llm`` or ``partial_llm``) and, on the machine its block names, a grant for its purpose
+    (``game`` or ``pooled``) that admits ``user`` now.
+
+    Raises ValueError with the reason: the capability's (``policy.denial``), or the admission system's own (no grant,
+    outside a window, budget spent, the helper offline...), except to somebody who may not even see the machine: they
+    are told only that they may not use it, since the explanation names the machine and its group. Every machine is a
+    row (the host and the site's API rows included), so every seat with a machine is admitted here. Admission decides
+    who may, the scheduler when (P3.3.7): a busy machine is never a refusal. ``queued`` is for work that waits its turn:
+    a refusal that only says "not yet" (outside a window, a spent period, the helper offline) lets it through."""
+    from ..auth import policy
+    for seat in seats:
+        cls = seat_class(seat)
+        if cls is None:
+            continue
+        capability, purpose = CLASS_NEEDS[cls]
+        if not policy.can(user, capability):
+            raise ValueError(policy.denial(user, capability))
+        llm = (seat.get("llm") if isinstance(seat, dict) else getattr(seat, "llm", None)) or {}
+        _admit_one(session, user, llm.get("server_id"), purpose, queued=queued)
+
+
+def admit(session, user, server_ids, purpose: str) -> None:
+    """Admission for work that names machines rather than seats and waits its turn for them (a benchmark run's
+    machines, a probe run's subject, a report's narrative): may ``user`` use each one for ``purpose`` at all, with the
+    capability the purpose needs (``PURPOSE_CAPABILITY``: pooled prompts need ``partial_llm``). The work's own
+    capability (``run_benchmarks``, ``run_probes``, ``run_reports``) is its route's to check. Raises ValueError as
+    ``authorize`` does."""
+    from ..auth import policy
+    wanted = [sid for sid in server_ids if sid]
+    needs = PURPOSE_CAPABILITY.get(purpose)
+    if wanted and needs and not policy.can(user, needs):
+        raise ValueError(policy.denial(user, needs))
+    for sid in wanted:
+        _admit_one(session, user, sid, purpose, queued=True)
+
+
+def _admit_one(session, user, server_id, purpose: str, *, queued: bool) -> None:
+    """``authorize``'s check of one machine for ``purpose``."""
     from ..auth import access
     from ..db.models import Server
     from . import admission
-    for seat in seats:
-        llm = seat.get("llm") or {}
-        if seat.get("type") != "llm" or not llm.get("server_id"):
-            continue
-        server = session.get(Server, llm["server_id"]) if isinstance(llm["server_id"], str) else None
-        if server is None:
-            continue
-        online, in_flight = liveness(server)
-        decision = admission.check(session, user, server, purpose, online=online, in_flight=in_flight)
-        # "busy right now" is fine for a game: its turns take their place in the machine's queue
-        if queued and (decision.temporary or decision.code == "offline"):
-            continue
-        if not decision.allowed and decision.code != "concurrency":
-            if access.VIEW not in access.on(session, user, server):
-                raise ValueError("You may not use that machine. Pick one of the machines you may use.")
-            raise ValueError(f"{server.name}: {decision.reason}")
+    server = session.get(Server, server_id) if isinstance(server_id, str) and server_id else None
+    if server is None:
+        return
+    decision = admission.check(session, user, server, purpose, online=helper_online(server), in_flight=None)
+    if decision.allowed or (queued and (decision.temporary or decision.code == "offline")):
+        return
+    if access.VIEW not in access.on(session, user, server):
+        raise ValueError("You may not use that machine. Pick one of the machines you may use.")
+    raise ValueError(f"{server.name}: {decision.reason}")
 
 
-def liveness(server) -> tuple:
-    """``(online, in_flight)`` for admission: a helper machine is online while its helper is connected, with the
-    requests it has in flight; a machine CITAR dials itself has no connection to be absent, so both are unknown
-    (None), as ``citar.server.pool_api`` reports it, rather than "offline" for ever."""
+def helper_online(server) -> Optional[bool]:
+    """Whether a helper machine's helper is connected, for admission; None for a machine CITAR dials itself, which has
+    no connection to be absent (as ``citar.server.pool_api`` reports it), rather than "offline" for ever."""
     if (getattr(server, "reach", None) or "worker") != "worker":
-        return None, None
+        return None
     from ..server.workers import hub
-    return hub().is_online(server.id), hub().in_flight(server.id)
+    return hub().is_online(server.id)
+
+
+def ticket(server_id: Optional[str], model: str = "", *, cls: str, consumer: Optional[str] = None,
+           purpose: str = "pooled", capability: Optional[str] = None, **kw):
+    """A pooled prompt's ticket (``scheduler.Scheduler.ticket``, which takes ``kw``), admitted when it is made
+    (design/phase3-features.md P3.3.7): may ``consumer`` use ``server_id`` for ``purpose`` now, with ``capability``
+    when the work needs one (a report's narrative ``run_reports``, a probe's case ``run_probes``). Admission decides who
+    may and the scheduler when: the check skips the capacity step, so a busy machine queues the prompt. A refusal is
+    the ticket's ``refused``, with the admission's reason, its ``code`` and its ``retry_at`` (a helper that is offline
+    refuses at once, as temporary); an admitted ticket is capped by the grant's concurrency (the scheduler's per-
+    consumer cap, leases and tickets together). No consumer (the server's own work), no machine, or no database: no
+    admission. Reads the database, so never call it with a session's or a machine's lock held."""
+    from . import scheduler
+    refusal, cap = None, 0
+    if consumer and server_id:
+        refusal, cap = _ticket_admission(consumer, server_id, purpose, capability)
+    return scheduler.get().ticket(server_id, model, cls=cls, consumer=consumer, cap=cap, refusal=refusal, **kw)
+
+
+def _ticket_admission(consumer: str, server_id: str, purpose: str, capability: Optional[str]) -> tuple:
+    """``ticket``'s admission: (the refusal as a ``SchedulerError``, or None; the grant's concurrency, 0 for none)."""
+    from .. import db
+    from ..auth import access, policy
+    from ..db.models import Server, User
+    from . import admission, scheduler
+    if not db.configured():
+        return None, 0
+    try:
+        with db.session() as s:
+            user, server = s.get(User, consumer), s.get(Server, server_id)
+            if server is None:
+                return None, 0          # no row: an unscheduled machine, which the scheduler passes through
+            if user is None:
+                return scheduler.MachineRefused("The account this prompt is for no longer exists.",
+                                                code="account"), 0
+            if capability and not policy.can(user, capability):
+                return scheduler.MachineRefused(policy.denial(user, capability), code="capability"), 0
+            needs = PURPOSE_CAPABILITY.get(purpose)
+            if needs and not policy.can(user, needs):
+                return scheduler.MachineRefused(policy.denial(user, needs), code="capability"), 0
+            decision = admission.check(s, user, server, purpose, online=helper_online(server), in_flight=None)
+            if decision.allowed:
+                grant = decision.grant
+                return None, max(0, int(grant.concurrency or 0)) if grant is not None else 0
+            reason = decision.reason
+            if access.VIEW not in access.on(s, user, server):
+                reason = "You may not use that machine."
+            retry = decision.retry_at.astimezone().replace(tzinfo=None) if decision.retry_at else None
+            return scheduler.MachineRefused(reason, code=decision.code or "admission", retry_at=retry), 0
+    except Exception:
+        import logging
+        logging.getLogger("citar.pool").warning("could not admit a pooled prompt of %s on %s", consumer, server_id,
+                                                exc_info=True)
+        return scheduler.MachineRefused("The prompt could not be admitted: the server could not read its grants.",
+                                        code="admission"), 0
 
 
 def consumer_cap(user_id: Optional[str], server_id: Optional[str], purpose: str = "game") -> int:
@@ -278,11 +377,3 @@ def consumer_cap(user_id: Optional[str], server_id: Optional[str], purpose: str 
         logging.getLogger("citar.pool").warning("could not read the grant for %s on %s", user_id, server_id,
                                                 exc_info=True)
         return 0
-
-
-def admit(session, user, server_ids, purpose: str) -> None:
-    """``authorize`` for work that names machines rather than seats and waits its turn for them (a benchmark run's
-    machines, a probe run's subject, a report's narrative): may ``user`` use each pooled one for ``purpose`` at all.
-    Raises ValueError as ``authorize`` does."""
-    authorize(session, user, [{"type": "llm", "llm": {"server_id": sid}} for sid in server_ids if sid], purpose,
-              queued=True)

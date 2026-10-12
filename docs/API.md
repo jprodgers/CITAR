@@ -86,7 +86,12 @@ anyone else it reaches gets neither its traceback nor its owner, and a specifica
 could have chosen (the scope's items and machines they may see; of the narrative only `enabled`).
 A body of the wrong shape (an item named by anything but its id, a report specification whose parts
 are not objects or lists) is a 400. A report's narrative that names a pooled machine the caller is not
-admitted to is a 403, as a run's machine is. What queued work waits for (a benchmark job's `waiting` in
+admitted to (a grant for `pooled` prompts, P3.3.7) is a 403, as a run's machine is. A probe run's subject
+(`POST /api/probes/{id}/run`) is admitted for what its chosen cases are: `probe` for a turn case,
+`pooled` (and `partial_llm`) for an offer or message case; one it is not admitted for is a 403 naming the
+purpose. A report's record carries `narrative_written` and `narrative_note` (who wrote its analysis, or
+why it was skipped or failed); `DELETE /api/reports/{id}` deletes a report being built too (its
+narrative's prompt leaves the machine's line). What queued work waits for (a benchmark job's `waiting` in
 `GET /api/benchmarks/runs`, a probe run's in `GET /api/probe-runs/{id}`, a report's `waiting` and
 `progress`, a Queue page entry's `waiting`) names only the games and runs the caller may see; the rest
 are "someone's game", "someone's benchmark run" and so on.
@@ -99,7 +104,9 @@ An item is addressed here by its kind and its id on disk (`ref`), as its own rou
 | `POST /api/items/{kind}/{ref}/sharing/users`, `DELETE .../sharing/users/{handle}` | Share with one account (`view`, `play` or `manage`), or stop |
 | `POST /api/items/{kind}/{ref}/sharing/rotate` | A new share link; every copy of the old one stops working |
 | `POST /api/items/{kind}/{ref}/unpublish` | `{"reason"}`: make it private and kill its links, for a moderator on a published item or for whoever manages it |
-| `POST /api/queue/priority` | `{"kind", "id", "priority"}`: move your own work (a benchmark run, a probe run, a report, a lobby game, a lab experiment) up or down the queue |
+| `GET /api/queue` | The Queue page: the machines the caller may see (`others_busy` counts the rest that are in use, naming none), each with `capacity`, `in_flight`, `busy_with`, its `leases` (`kind`, `label`, `member`, `state`: `active`, `lending` or `held`), its jobs (`waiting`, `running`) and its pooled `prompts` (`running` and `waiting`: `class`, `label`, `member`, `model`, `priority`, `position`, `waited_s`, `eta_s`, `starts_within_s`, `can_manage` with the work's `ref`, `can_cancel` with the prompt's `id`); work the caller may not see is "someone's <kind>" with no member |
+| `POST /api/queue/priority` | `{"kind", "id", "priority"}`: move your own work (a benchmark run, a probe run, a report, a lobby game, a lab experiment) up or down the queue; its pooled prompts follow it |
+| `POST /api/queue/tickets/{id}/cancel` | Cancel a pooled prompt: for its work's owner (for a prompt of no work, its member), the machine's owner and administrators; 403 to anyone else who may see it, 404 to the rest. A running prompt's request drains on a helper that keeps generating it |
 
 `kind` is one of `benchmark_suite`, `benchmark_run`, `probe`, `probe_run`, `lab_experiment`,
 `scenario`, `map`, `bot_profile` and `report`. These take a signed-in account.

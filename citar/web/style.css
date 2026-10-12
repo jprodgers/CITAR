@@ -526,6 +526,9 @@ dl.paths dd { margin: 0; }
 .q-table tr.q-next td { background: rgba(79, 140, 255, .08); }
 .q-prio-box { display: inline-flex; gap: 3px; align-items: center; white-space: nowrap; }
 .q-prio { width: 52px; }
+.q-leases { margin: 6px 0; }
+.q-list { margin: 4px 0 6px 18px; padding: 0; font-size: 13px; }
+.q-list li { margin: 2px 0; }
 .q-load { margin: 8px 0; }
 
 /* ---- Bots page -------------------------------------------------------------------------------------------------- */

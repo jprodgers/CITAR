@@ -116,6 +116,12 @@ class WorkerConnection:
         #: with the same error, rather than wait out its deadline for an answer nothing will send.
         self._failure: Optional[tuple] = None
         self._lock = threading.RLock()
+        #: Whether the helper has its welcome. Registering the connection tells the scheduler the machine is online,
+        #: which lets a request waiting for it go at once, before the welcome is sent; a helper takes nothing but the
+        #: welcome first (it reconnected, failing that request), so a frame sent before it waits here and follows it
+        #: (``welcome``). Only the connection's loop touches these.
+        self.welcomed = False
+        self._early: list = []
 
     # -------------------------------------------------------------- state
     @property
@@ -155,8 +161,19 @@ class WorkerConnection:
 
     # -------------------------------------------------------------- sending
     async def send(self, text: str):
-        """Send a frame to the worker."""
+        """Send a frame to the worker; one sent before its welcome waits for it (``welcome``)."""
+        if not self.welcomed:
+            self._early.append(text)
+            return
         await self.ws.send_text(text)
+
+    async def welcome(self, text: str):
+        """Send the welcome frame, then the frames sent before it, in the order they were sent (one sent while these
+        go out joins them), and from then on send frames as they come."""
+        await self.ws.send_text(text)
+        while self._early:
+            await self.ws.send_text(self._early.pop(0))
+        self.welcomed = True
 
     def send_threadsafe(self, text: str):
         """Queue a frame from a non-async thread."""

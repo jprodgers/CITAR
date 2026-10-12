@@ -17,10 +17,13 @@ or reports its models (``helper_changed``). The scheduler's own thread never rea
 **Bindings.** A ``Lease`` (task class *full*) is a model seat that plays every turn; it belongs to the session's seat
 (``GameSession.lease_for``), not to its agent, is made when the session is registered and released when the seat stops
 playing that machine (``GameSession.open_leases``, package 3-08), and is *active* while its seat is mid-turn and *idle*
-(lending its slot, for a ``game`` lease) otherwise. A probe run and a report's narrative hold a lease too, for the
-run, lending nothing; the leases live on a machine are what ``pool.seats.occupied`` lists. A ``Ticket`` (task class *partial*) is one pooled prompt of up to ``steps`` calls: a
-chat answer, a diplomat phase, a probe case, a report's narrative, the Servers page's test. The rules, which
-``tests/test_scheduler.py`` holds as invariants over random schedules:
+(lending its slot, for a ``game`` lease) otherwise. A probe's turn case holds a ``probe_case`` lease for the case,
+lending nothing; the leases live on a machine are what ``pool.seats.occupied`` lists. A ``Ticket`` (task class
+*partial*) is one pooled prompt of up to ``steps`` calls: a chat answer, a diplomat phase, a probe's offer or message
+case, a report's narrative, the Servers page's test. It is admitted when it is made (``pool.seats.ticket``: the
+``pooled`` purpose, capped by the grant's concurrency), follows the queue priority of the work it is part of
+(``set_priority``), and is listed on the Queue page (``views``). The rules, which ``tests/test_scheduler.py`` holds as
+invariants over random schedules:
 
 1. Requests in flight, draining ones included, never exceed capacity (a running ticket holds its slot between its
    calls).
@@ -92,9 +95,9 @@ TICKET_CLASSES = tuple(BASE_PRIORITY)
 BORROW_SECONDS = {"diplomat": 180.0, "chat": 120.0, "probe": 120.0, "report": 300.0, "test": 30.0}
 #: The largest ``max_tokens`` a borrowing ticket's step may ask for, by class (rule 5).
 BORROW_MAX_TOKENS = {"diplomat": 2048, "chat": 1024, "probe": 1024, "report": 4096, "test": 256}
-#: A lease's kind: a lobby game (lends its slot while idle), a benchmark game, a probe's turn case, a report's narrative
-#: (none of the last three lends; package 3-09 moves narratives onto tickets).
-LEASE_KINDS = ("game", "benchmark", "probe_case", "report")
+#: A lease's kind: a lobby game (lends its slot while idle), a benchmark game, a probe's turn case (neither of the last
+#: two lends). A report's narrative and a probe's offer and message cases are tickets (package 3-09).
+LEASE_KINDS = ("game", "benchmark", "probe_case")
 #: Calls a ticket may make once started, unless its maker says otherwise.
 DEFAULT_STEPS = 8
 #: How long a benchmark lease's first request waits for pooled requests to drain (``benchmark_drain_seconds``).
@@ -449,16 +452,23 @@ class Lease(Binding):
 
 
 class Ticket(Binding):
-    """One pooled prompt of up to ``steps`` calls (task class *partial*; P3.3.3)."""
+    """One pooled prompt of up to ``steps`` calls (task class *partial*; P3.3.3). ``ref`` is the work it is part of as
+    the shared queue names it (``(kind, id)``: a report, a probe run, a game), whose queue priority it follows
+    (``Scheduler.set_priority``) and which the Queue page decides its viewers' rights on; None for one that is part of
+    nothing (the Servers page's test)."""
     task_class = "partial"
 
     def __init__(self, sched, machine, model, *, cls: str, priority: int, deadline: Optional[float], steps: int,
-                 wait_for_benchmark: bool, **kw):
+                 wait_for_benchmark: bool, ref: Optional[tuple] = None, **kw):
         if cls not in TICKET_CLASSES:
             raise ValueError(f"Unknown ticket class {cls!r}.")
         super().__init__(sched, machine, model, **kw)
         self.ticket_class = cls
-        self.priority = BASE_PRIORITY[cls] + max(-100, min(100, int(priority or 0)))
+        self.ref = tuple(ref) if ref else None
+        #: the activity's queue priority (-100..100), which its owner or an administrator sets on the Queue page
+        self.queue_priority = max(-100, min(100, int(priority or 0)))
+        self.priority = BASE_PRIORITY[cls] + self.queue_priority
+        self.created = sched.clock()
         self.deadline = deadline                 # the latest start, on the scheduler's clock
         self.steps = max(1, int(steps or DEFAULT_STEPS))
         self.wait_for_benchmark = bool(wait_for_benchmark)
@@ -507,7 +517,8 @@ class Ticket(Binding):
         """The ticket as a status listing shows it."""
         return {"id": self.id, "class": self.ticket_class, "label": self.label, "model": self.model,
                 "state": self.state, "priority": self.priority, "borrowing": self.borrowing,
-                "steps_used": self.steps_used, "reason": self.reason or None}
+                "steps_used": self.steps_used, "reason": self.reason or None,
+                "ref": list(self.ref) if self.ref else None}
 
 
 def _request_id() -> str:
@@ -777,17 +788,26 @@ class Machine:
         (``force``: work them out even when no callback wants them, for a caller about to wait). Lock held."""
         if not force and not any(r.binding.on_status for r in self.waiting):
             return
+        for r, i, eta in self._line(now):
+            if (r.position, r.eta) != (i, eta):
+                r.position, r.eta = i, eta
+                self._status(r.binding, {"state": "queued", "position": i, "eta_s": eta})
+
+    def _line(self, now: float) -> list:
+        """The waiting requests in the order the rules serve them (lease requests by arrival, then tickets by priority,
+        round-robin and arrival), each as ``(request, position, ETA)``: the expected time of the work ahead of it over
+        the slots it may use. Lock held."""
         order = sorted((r for r in self.waiting if r.binding.is_lease), key=lambda r: r.seq) + \
             sorted((r for r in self.waiting if not r.binding.is_lease), key=self._ticket_order)
         ahead = sum(max(0.0, self._expected(s.binding) - (now - s.taken)) for s in self.slots)
         cap = self.capacity() or 1
+        reserved = self._reserved()
+        out = []
         for i, r in enumerate(order, start=1):
-            usable = cap if r.binding.is_lease else max(1, cap - self._reserved())
-            eta = round(ahead / usable, 1)
-            if (r.position, r.eta) != (i, eta):
-                r.position, r.eta = i, eta
-                self._status(r.binding, {"state": "queued", "position": i, "eta_s": eta})
+            usable = cap if r.binding.is_lease else max(1, cap - reserved)
+            out.append((r, i, round(ahead / usable, 1)))
             ahead += self._expected(r.binding)
+        return out
 
     def _expected(self, b: Binding) -> float:
         return self.ewma.get((b.model, b.cls), DEFAULT_GEN_SECONDS)
@@ -1170,6 +1190,79 @@ class Machine:
                     + [r.binding.client() for r in self.waiting if not r.binding.is_lease],
                     "max_in_flight": self.max_in_flight, "counters": dict(self.counters)}
 
+    def view(self) -> dict:
+        """The machine as the Queue page lists it (P3.3.8): its capacity, its leases (active or lending, a request of
+        theirs waiting), the tickets running on it and those waiting, in the order the rules will serve them, with their
+        place in the machine's line (lease requests ahead of them included), how long they have waited, their ETA and
+        how long they may still wait to start. Every entry keeps its consumer and the work it is part of (``ref``): the
+        route decides what each viewer is told of them."""
+        with self.lock:
+            now = self.sched.clock()
+            line = self._line(now)
+            asking = {r.binding.id for r, _, _ in line if r.binding.is_lease}
+            leases = [{"id": lease.id, "kind": lease.kind, "label": lease.label, "model": lease.model,
+                       "consumer": lease.consumer, "ref": list(lease.ref) if lease.ref else None, "game": lease.game,
+                       "active": lease.active, "lending": lease.lends and not lease.active,
+                       "in_flight": lease.inflight, "waiting": lease.id in asking} for lease in self.leases]
+            running, seen = [], set()
+            for s in self.slots:
+                t = s.binding
+                if t.is_lease or t.id in seen:
+                    continue
+                seen.add(t.id)
+                started = t.started if t.started is not None else s.taken
+                running.append({**self._ticket_entry(t), "waited_s": round(max(0.0, started - t.created), 1),
+                                "running_s": round(max(0.0, now - started), 1), "draining": s.draining,
+                                "borrowing": t.borrowing, "steps_used": t.steps_used})
+            waiting = [{**self._ticket_entry(r.binding), "position": position, "eta_s": eta,
+                        "waited_s": round(max(0.0, now - r.binding.created), 1),
+                        "starts_within_s": None if r.binding.deadline is None
+                        else round(max(0.0, r.binding.deadline - now), 1)}
+                       for r, position, eta in line if not r.binding.is_lease]
+            return {"id": self.id, "name": self.settings.name or self.id, "capacity": self.capacity(),
+                    "slots": self.settings.slots, "in_flight": len(self.slots),
+                    "draining": sum(1 for s in self.slots if s.draining), "lease_requests": len(asking),
+                    "leases": leases, "running": running, "waiting": waiting}
+
+    @staticmethod
+    def _ticket_entry(t: "Ticket") -> dict:
+        return {"id": t.id, "class": t.ticket_class, "label": t.label, "model": t.model, "consumer": t.consumer,
+                "ref": list(t.ref) if t.ref else None, "priority": t.queue_priority, "state": t.state}
+
+    def busy_now(self) -> bool:
+        """Whether anything holds, uses or waits for the machine: a lease, a slot, a request."""
+        with self.lock:
+            return bool(self.leases or self.slots or self.waiting)
+
+    def set_priority(self, ref: tuple, value: int) -> int:
+        """The work ``ref``'s queue priority changed (the Queue page): its tickets here follow it (non-blocking).
+        Returns how many did."""
+        with self.lock:
+            value = max(-100, min(100, int(value or 0)))
+            n = 0
+            for t in self._tickets():
+                if t.ref != ref or t.state not in ("queued", "running"):
+                    continue
+                t.queue_priority = value
+                t.priority = BASE_PRIORITY[t.ticket_class] + value
+                n += 1
+            if n:
+                self._dispatch(self.sched.clock())
+            return n
+
+    def find_ticket(self, ticket_id: str) -> Optional["Ticket"]:
+        """A ticket queued or running here (a draining one's included), by its id."""
+        with self.lock:
+            return next((t for t in self._tickets() if t.id == ticket_id), None)
+
+    def _tickets(self) -> list:
+        """Every ticket made here and not over (queued, made but not yet asking, running, draining). Lock held."""
+        out = {id(t): t for t in list(self.open_tickets) if t.state in ("queued", "running")}
+        for b in [r.binding for r in self.waiting] + [s.binding for s in self.slots]:
+            if not b.is_lease:
+                out.setdefault(id(b), b)
+        return list(out.values())
+
 
 # ---------------------------------------------------------------------------- the scheduler
 
@@ -1274,6 +1367,15 @@ class Scheduler:
             m.settings.loaded = loaded
             m.loaded_at = self.clock()
 
+    def models_changed(self, server_id: Optional[str]) -> None:
+        """A direct machine's loaded models changed (CITAR loaded one on it): the next ticket asks it again rather than
+        reading the cached list (non-blocking)."""
+        with self._lock:
+            m = self.machines.get(server_id or "")
+        if m is not None:
+            with m.lock:
+                m.loaded_at = None
+
     # -------------------------------------------------------------- bindings
     def lease(self, server_id: Optional[str], model: str = "", *, kind: str = "game", activity: Optional[str] = None,
               consumer: Optional[str] = None, label: str = "", cap: int = 0,
@@ -1298,19 +1400,27 @@ class Scheduler:
                consumer: Optional[str] = None, label: str = "", priority: int = 0,
                start_within: Optional[float] = None, steps: int = DEFAULT_STEPS, wait_for_benchmark: bool = False,
                cap: int = 0, on_status: Optional[Callable[[dict], None]] = None,
-               one_per_consumer: bool = False) -> Ticket:
+               one_per_consumer: bool = False, ref: Optional[tuple] = None,
+               refusal: Optional[SchedulerError] = None) -> Ticket:
         """A pooled prompt on ``server_id``. Refused at once (``state == "refused"`` with ``reason`` and ``retry_at``)
-        when the machine cannot take it (rule 3 (a)-(c), disabled, offline), or, with ``one_per_consumer``, when its
-        consumer already has a ticket of its class queued or running there (``duplicate``: the Servers page's test,
-        which a caller waits on, one at a time); else queued: its first ``step`` waits for its start, at most
-        ``start_within`` seconds (then it expires)."""
+        when ``refusal`` is given (admission's, ``pool.seats.ticket``), when the machine cannot take it (rule 3
+        (a)-(c), disabled, offline), or, with ``one_per_consumer``, when its consumer already has a ticket of its class
+        queued or running there (``duplicate``: the Servers page's test, which a caller waits on, one at a time); else
+        queued: its first ``step`` waits for its start, at most ``start_within`` seconds (then it expires). ``priority``
+        is the queue priority of the work it is part of (``ref``), which it follows (``set_priority``)."""
         m = self.machine(server_id)
-        if m is not None:
+        if m is not None and refusal is None:
             self._fresh(m)
         deadline = self.clock() + float(start_within) if start_within is not None else None
         t = Ticket(self, m, model, cls=cls, priority=priority, deadline=deadline, steps=steps,
                    wait_for_benchmark=wait_for_benchmark, activity=activity, consumer=consumer, label=label,
-                   cap=cap, on_status=on_status)
+                   cap=cap, on_status=on_status, ref=ref)
+        if refusal is not None:
+            t.state, t.error = _ended_state(refusal), refusal
+            if m is not None:
+                with m.lock:
+                    m.counters[t.state] += 1
+            return t
         if m is None:
             return t
         self.refresh_loaded(m)
@@ -1349,6 +1459,31 @@ class Scheduler:
         with self._lock:
             machines = list(self.machines.values())
         return [m.status() for m in machines]
+
+    def views(self, busy_only: bool = True) -> dict:
+        """Every machine as the Queue page lists it (``Machine.view``), by id; with ``busy_only``, only those something
+        holds, uses or waits for."""
+        with self._lock:
+            machines = list(self.machines.values())
+        return {m.id: m.view() for m in machines if not busy_only or m.busy_now()}
+
+    def find_ticket(self, ticket_id: str) -> Optional[Ticket]:
+        """A ticket queued or running on any machine, by its id (the Queue page's cancel), or None."""
+        with self._lock:
+            machines = list(self.machines.values())
+        for m in machines:
+            t = m.find_ticket(ticket_id)
+            if t is not None:
+                return t
+        return None
+
+    def set_priority(self, ref: tuple, value: int) -> int:
+        """The work ``ref`` (``(kind, id)``, as the shared queue names it) has a new queue priority: its tickets on
+        every machine follow it (P3.3.3: a ticket's priority is its class's base plus its activity's). Non-blocking.
+        Returns how many tickets changed."""
+        with self._lock:
+            machines = list(self.machines.values())
+        return sum(m.set_priority(tuple(ref), value) for m in machines)
 
     # -------------------------------------------------------------- listeners
     def add_listener(self, fn: Callable[[StepEvent], None]) -> None:

@@ -116,6 +116,37 @@ class Hub(unittest.TestCase):
         self.assertTrue(first.closed)
         self.assertTrue(self.hub.is_online("sv1"))
 
+    def test_nothing_reaches_a_helper_before_its_welcome(self):
+        """Registering a helper wakes the requests waiting for its machine, which may be sent before the server has
+        sent its welcome; a helper takes nothing but the welcome first (it reconnected, failing that request). Frames
+        sent before the welcome wait and follow it in order, one sent while they go out joining them; then frames go
+        as they come."""
+        sent: list = []
+
+        class Socket:
+            async def send_text(self, text):
+                sent.append(text)
+                await asyncio.sleep(0)          # the loop runs other sends meanwhile, as a real socket's would
+
+        async def scenario():
+            c = W.WorkerConnection(websocket=Socket(), server_id="sv1", hello={"max_concurrent": 1},
+                                   loop=asyncio.get_running_loop())
+            await c.send("request 1")
+            await c.send("cancel 1")
+            self.assertEqual(sent, [], "nothing goes before the welcome")
+            late = asyncio.ensure_future(c.send("request 2"))       # sent while the welcome's backlog goes out
+            await c.welcome("welcome")
+            await late
+            await c.send("request 3")
+            return c
+        loop = asyncio.new_event_loop()
+        try:
+            c = loop.run_until_complete(scenario())
+        finally:
+            loop.close()
+        self.assertEqual(sent, ["welcome", "request 1", "cancel 1", "request 2", "request 3"])
+        self.assertTrue(c.welcomed)
+
     def test_stale_connection_counts_as_offline(self):
         c = self._connection()
         self.hub.register(c)
@@ -264,7 +295,7 @@ class PooledWork(unittest.TestCase):
         from citar import probes
         runner = probes.ProbeRunner.__new__(probes.ProbeRunner)
         runner.manager, runner.lock, runner._stop_run, runner._thread = self.manager, threading.Lock(), set(), None
-        runner.lives, runner._workers, runner._loaded = {}, {}, {}
+        runner.lives, runner._workers, runner._loaded, runner.asking = {}, {}, {}, {}
         runner.POLL_SECONDS = 0.05
         # the made-up runs it writes go when the test ends: a later module's probe runner would queue them again, and
         # the Probes page's listing reads every run on the disk
@@ -296,9 +327,10 @@ class PooledWork(unittest.TestCase):
                 both.set()
             release.wait(10)
         runner._run = fake_run
-        # a lobby game's seat holding the busy machine (the leases are what occupied() lists)
-        held = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “long one”",
-                                            ref=("game", "long-one"))
+        # a benchmark holding the busy machine: a probe run waits for it (a lobby game's lease would not hold it up,
+        # its prompts run on the slots the game's seat lends; package 3-09)
+        held = prompt_scheduler.get().lease(self.server_id, "m1", kind="benchmark", label="benchmark run “long one”",
+                                            ref=("benchmark", "long-one"))
         loop = threading.Thread(target=runner._loop, daemon=True)
         try:
             loop.start()
@@ -308,7 +340,7 @@ class PooledWork(unittest.TestCase):
             self.assertEqual(waiting["status"], "waiting (machine busy)")
             # the note names the holder to whoever may see it (the run's route); its stored text names nobody
             self.assertIn("long one", seats.note_text(waiting["waiting_note"], lambda h: h["label"]))
-            self.assertEqual(waiting["waiting"], "waiting for someone's game")
+            self.assertEqual(waiting["waiting"], "waiting for someone's benchmark run")
         finally:
             held.release()
             release.set()
@@ -345,22 +377,77 @@ class PooledWork(unittest.TestCase):
             work_queue.set_priority("benchmark", run["id"], 0)
             work_queue.register("probe", lambda: [])
 
-    def test_a_probe_run_holds_its_machine(self):
-        """A probe run's lease on its subject's machine (``ProbeRunner._lease``, held for the run) is what occupied()
-        lists, as the Queue page names it: a probe run, which never lends its slot."""
-        from citar import probes
-        from citar.pool import seats
-        run = {"name": "x", "llm": {"server_id": self.server_id, "model": "m1"}, "owner_id": None}
-        lease = probes.ProbeRunner._lease("pr-x", run, "probe:pr-x")
+    def test_a_lobby_game_does_not_hold_up_offer_and_message_cases_but_a_benchmark_does(self):
+        """A probe run's offer and message cases are tickets (package 3-09): a lobby game's lease on its machine
+        leaves the run free to start and its next such case free to play (its prompts run on the slots the game's seat
+        lends); a benchmark's lease holds both up, the run saying what it waits for."""
+        from citar.pool import scheduler as prompt_scheduler
+        runner = self._bare_runner()
+        rid = f"test-beside-{int(time.time() * 1000) % 100000}"
+        runner._write({"id": rid, "name": "beside", "llm": {"server_id": self.server_id}, "status": "queued",
+                       "jobs": []})
+        game = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “a lobby game”",
+                                            ref=("game", "lobby-1"))
         try:
-            self.assertEqual(seats.occupied(self.server_id), ["probe run “x”"])
-            self.assertEqual([(o["kind"], o["id"]) for o in seats.occupants(self.server_id)], [("probe", "pr-x")])
-            self.assertEqual((lease.kind, lease.lends, lease.activity), ("probe_case", False, "probe:pr-x"))
+            self.assertFalse(runner._machine_busy(rid), "a lobby game holds no probe run up")
+            waited = {}
+            worker = threading.Thread(target=lambda: waited.setdefault("w", runner._wait_machine(
+                rid, self.server_id, full=False)), daemon=True)
+            worker.start()
+            worker.join(5)
+            self.assertEqual(waited.get("w"), False, "nor its next message case")
+            bench = prompt_scheduler.get().lease(self.server_id, "m1", kind="benchmark", label="benchmark run “b”",
+                                                 ref=("benchmark", "b-1"))
+            try:
+                self.assertTrue(runner._machine_busy(rid), "a benchmark does")
+                self.assertEqual(runner.get_run(rid)["waiting"], "waiting for someone's benchmark run")
+            finally:
+                bench.release()
+            self.assertFalse(runner._machine_busy(rid))
         finally:
-            lease.release()
-        self.assertEqual(seats.occupied(self.server_id), [])
-        self.assertIsNone(probes.ProbeRunner._lease("pr-y", {"name": "y", "llm": {"provider": "bot"}}, "probe:pr-y"),
-                          "the bot as the subject holds no machine")
+            game.release()
+
+    def test_a_turn_case_waits_while_leases_fill_the_machines_slots(self):
+        """A turn case plays on a lease of its own that never lends (package 3-09): on the one-slot machine a lobby
+        game's lease fills, the run waits before it, saying so ("waiting for someone's game"), and plays once the game
+        lets the machine go; on two slots one lease leaves room for it."""
+        from citar.pool import scheduler as prompt_scheduler
+        runner = self._bare_runner()
+        runner.BENCHMARK_POLL_SECONDS = 0.05
+        rid = f"test-turn-{int(time.time() * 1000) % 100000}"
+        runner._write({"id": rid, "name": "turns", "llm": {"server_id": self.server_id}, "status": "running",
+                       "jobs": []})
+        game = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “a lobby game”",
+                                            ref=("game", "lobby-1"))
+        waited = {}
+        worker = threading.Thread(target=lambda: waited.setdefault("w", runner._wait_machine(
+            rid, self.server_id, full=True)), daemon=True)
+        try:
+            worker.start()
+            deadline = time.perf_counter() + 10
+            while runner.get_run(rid).get("waiting") is None and time.perf_counter() < deadline:
+                time.sleep(0.02)
+            run = runner.get_run(rid)
+            self.assertEqual((run["status"], run["waiting"]), ("waiting (machine busy)", "waiting for someone's game"))
+            time.sleep(0.2)
+            self.assertTrue(worker.is_alive(), "the turn case waits while the game fills the one slot")
+        finally:
+            game.release()
+        worker.join(5)
+        self.assertEqual(waited.get("w"), True)
+        run = runner.get_run(rid)
+        self.assertEqual((run["status"], run.get("waiting")), ("running", None))
+        with db.session() as s:
+            s.get(Server, self.server_id).max_concurrent = 2
+        from citar import servers
+        servers.invalidate()
+        prompt_scheduler.get().refresh(self.server_id)
+        game = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “a lobby game”",
+                                            ref=("game", "lobby-1"))
+        try:
+            self.assertFalse(runner._wait_machine(rid, self.server_id, full=True), "a second slot is left for it")
+        finally:
+            game.release()
 
 
 class QuietHours(unittest.TestCase):

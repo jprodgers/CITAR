@@ -190,7 +190,9 @@ function renderList(card, reports, ctx, redrawBuilder) {
     const sm = r.summary || {};
     const busy = ["queued", "running"].includes(r.status);
     table.appendChild(el("tr", {},
-      el("td", {}, el("b", {}, r.title), r.narrative ? el("div", { class: "muted small" }, "with written analysis") : null),
+      el("td", {}, el("b", {}, r.title), r.narrative ? el("div", { class: "muted small" },
+        // a narrative that was skipped or failed says why (the report's page says it too)
+        r.status === "done" && r.narrative_written === false ? (r.narrative_note || "without its written analysis") : "with written analysis") : null),
       el("td", {}, el("span", { class: `pill ${busy ? "live" : r.status === "done" ? "good" : r.status === "failed" ? "bad" : ""}` }, r.status),
         busy ? el("div", { class: "muted small" }, r.progress || "") : null,
         r.status === "failed" ? el("div", { class: "bad small", title: r.trace || "" }, r.error) : null,

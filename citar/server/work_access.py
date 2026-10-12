@@ -5,7 +5,8 @@ first on it: somebody's game, run or report, which the viewer may not be allowed
 may do with one piece of queued work; ``namer`` names a holder to a viewer who may see its work and calls it "someone's
 <kind>" otherwise; ``with_waiting`` tells a job's, a run's or a report's waiting note (``pool.seats.note``) to one
 viewer. The runners store their notes' text naming no holder, so a reader that is not given the viewer's rendering
-(a log, a file) is told nothing either.
+(a log, a file) is told nothing either. On the Queue page a machine's leases and pooled prompts are told the same way
+(``binding_rights``, ``told_lease``, ``told_ticket``; package 3-09).
 """
 from __future__ import annotations
 
@@ -56,6 +57,64 @@ def namer(sdb, user, *, admin: bool = False, cache: Optional[dict] = None) -> Ca
             cache[key] = access_to(sdb, user, *key)
         return label if access.VIEW in cache[key] else pool_seats.anonymous(holder)
     return name
+
+
+#: How a pooled prompt the viewer may not see is named on the Queue page, by its class (P3.3.8: "someone's <class>").
+SOMEONES_PROMPT = {"chat": "someone's chat", "diplomat": "someone's diplomat phase", "probe": "someone's probe",
+                   "report": "someone's report", "test": "someone's test"}
+
+
+def binding_rights(sdb, user, entry: dict, server_row, *, admin: bool, cache: dict) -> tuple:
+    """What ``user`` may do with one lease or ticket on a machine (an entry of ``scheduler.Machine.view``), as
+    ``(view, manage, cancel)`` (P3.3.8): ``view``, see its work's name and its member (their own prompt, or work they
+    may see: ``access_to`` on its ``ref``); ``manage``, change its work's queue priority (MANAGE on the work, which a
+    prompt of no work has none of); ``cancel``, cancel a ticket: the work's owner (MANAGE on it, or the prompt's own
+    member for a prompt of no work), the machine's owner (MANAGE on its row) and administrators. ``cache`` keeps the
+    permissions read across one response's entries."""
+    if admin:
+        return True, True, True
+    ref = entry.get("ref") or [None, None]
+    key = (ref[0], ref[1])
+    if key not in cache:
+        cache[key] = access_to(sdb, user, *key)
+    perms = cache[key]
+    own = user is not None and entry.get("consumer") is not None and entry.get("consumer") == user.id
+    machine_key = ("server", getattr(server_row, "id", None))
+    if machine_key not in cache:
+        cache[machine_key] = access.on(sdb, user, server_row) if server_row is not None else access.Access(set())
+    view = own or access.VIEW in perms
+    manage = ref[0] is not None and access.MANAGE in perms
+    cancel = manage or (own and ref[0] is None) or access.MANAGE in cache[machine_key]
+    return view, manage, cancel
+
+
+def told_lease(entry: dict, rights: tuple, member: Optional[str]) -> dict:
+    """A machine's lease as one viewer is told it (``binding_rights``): the work's label and its member when they may
+    see the work, else "someone's <kind>"; whether its seat is mid-turn (``active``), lending its slot between its
+    turns (``lending``) or holding it lending nothing (``held``); a request of it waiting."""
+    view = rights[0]
+    kind = (entry.get("ref") or [None])[0]
+    return {"kind": entry["kind"], "label": entry["label"] if view else pool_seats.SOMEONES.get(kind, "someone's work"),
+            "member": member if view else None, "model": entry.get("model"),
+            "state": "active" if entry["active"] else ("lending" if entry["lending"] else "held"),
+            "in_flight": entry["in_flight"], "waiting": entry["waiting"]}
+
+
+def told_ticket(entry: dict, rights: tuple, member: Optional[str]) -> dict:
+    """A machine's running or waiting ticket as one viewer is told it (``binding_rights``): its class, the work's label
+    and its member when they may see the work, else "someone's <class>"; its model, its work's queue priority, its
+    place in the machine's line, how long it has waited and how long it may still wait to start, its ETA; the work
+    (``ref``) for the priority buttons when they may change it, and its id when they may cancel it."""
+    view, manage, cancel = rights
+    out = {"class": entry["class"],
+           "label": entry["label"] if view else SOMEONES_PROMPT.get(entry["class"], "someone's prompt"),
+           "member": member if view else None, "model": entry.get("model"), "priority": entry.get("priority", 0),
+           "state": entry.get("state"), "ref": entry.get("ref") if manage else None, "can_manage": bool(manage),
+           "can_cancel": bool(cancel), "id": entry["id"] if cancel else None}
+    for k in ("position", "eta_s", "waited_s", "starts_within_s", "running_s", "borrowing", "draining"):
+        if k in entry:
+            out[k] = entry[k]
+    return out
 
 
 def with_waiting(entry: dict, name: Callable[[dict], str]) -> dict:

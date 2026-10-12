@@ -35,6 +35,7 @@ from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
 from .. import items, pool
+from ..pool import seats as pool_seats
 from . import ownership, work_access
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -235,8 +236,9 @@ def _game_limit(sdb: DbSession, user) -> None:
                             "Finish or delete one first, or ask an administrator to raise the limit.")
 
 
-#: The seat types that play a model, and so must name a machine when a game is made or a seat changed.
-MODEL_SEATS = ("llm",)
+#: The seat types that play a model, and so must name a machine when a game is made or a seat changed: those
+#: ``pool.seats.seat_class`` gives a task class (P3.3.7).
+MODEL_SEATS = pool_seats.MODEL_SEAT_TYPES
 
 
 def _member_seat(seat: dict, user, *, playing: bool = True) -> dict:
@@ -268,9 +270,8 @@ def _member_seat(seat: dict, user, *, playing: bool = True) -> dict:
 
 
 def _authorize_seats(sdb: DbSession, user, seats: list) -> None:
-    """Whether ``user`` may seat these models on the pooled machines they name (``pool.seats.authorize``), as HTTP:
-    a 403 with the admission's reason."""
-    from ..pool import seats as pool_seats
+    """Whether ``user`` may seat these models on the machines they name (``pool.seats.authorize``: each model seat by
+    its task class, its capability and a grant for its purpose), as HTTP: a 403 with the reason."""
     try:
         pool_seats.authorize(sdb, user, seats)
     except ValueError as e:
@@ -686,8 +687,7 @@ def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
         # A change that leaves a model seat's block as it is (a new name) checks nothing: that block was checked when
         # it was set, and a machine's window or budget must not stop its seat being renamed.
         checked = _member_seat({"type": new_type, "llm": llm if llm is not None else dict(seat.llm)}, p.user)
-        if new_type in MODEL_SEATS:
-            _authorize_seats(sdb, p.user, [checked])
+        _authorize_seats(sdb, p.user, [checked])          # admitted again by its task class (P3.3.7)
         if llm is not None:
             llm = checked["llm"]
     try:
@@ -1666,10 +1666,11 @@ class ProbeRunBody(BaseModel):
     cases: Optional[list[str]] = None
 
 
-def _probe_subject(sdb: DbSession, user, llm) -> dict:
+def _probe_subject(sdb: DbSession, user, llm, purposes=("probe",)) -> dict:
     """A probe run's subject through the members' gate (P3.2.9), as it will be played: the scripted bot (``provider:
     bot``, a profile the caller may see), or a model on a machine the caller names, never describes, and is admitted
-    to for probes."""
+    to for each of ``purposes`` (``probes.case_purposes``: ``probe`` for its turn cases, ``pooled`` for its offer and
+    message cases, P3.3.7)."""
     from .. import servers
     llm = servers.llm_block(llm) if not isinstance(llm, dict) else dict(llm)
     if str(llm.get("provider") or "").lower() == "bot":
@@ -1684,7 +1685,8 @@ def _probe_subject(sdb: DbSession, user, llm) -> dict:
         checked = servers.member_llm(llm, user, required=True)
     except servers.SeatBlockError as e:
         raise HTTPException(e.status, str(e)) from None
-    _admit(sdb, user, [checked.get("server_id")], "probe")
+    for purpose in purposes:
+        _admit(sdb, user, [checked.get("server_id")], purpose)
     return checked
 
 
@@ -1697,8 +1699,9 @@ def probes_run(pid: str, body: ProbeRunBody, request: Request, me=Depends(requir
     items.require(sdb, "probe", pid, me, access.VIEW, slug=_share_key(request))
     # the cases play on the probe's scenario, and an opened case is its state: a probe shared wider than its
     # scenario runs only for those who may see the scenario too
-    _probe_scenario(sdb, me, _probe_call(P.load_probe, pid))
-    llm = _probe_subject(sdb, me, body.llm)
+    probe = _probe_call(P.load_probe, pid)
+    _probe_scenario(sdb, me, probe)
+    llm = _probe_subject(sdb, me, body.llm, _probe_call(P.case_purposes, probe, body.cases))
     return _probe_call(_probes().start, pid, llm, body.repeats, body.name, body.cases, owner_id=me.id, session=sdb)
 
 
@@ -1831,42 +1834,67 @@ def _queue_entry(sdb: DbSession, user, it: dict, cache: dict, name=None) -> dict
 
 @app.get("/api/queue")
 def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
-    """Everything waiting to run, in the order it will run.
+    """Everything waiting to run, in the order it will run (P3.3.8).
 
-    Per model machine: what is using it now, and the benchmark jobs and probe runs waiting for it, best
-    first (see citar.pool.queue). Then this server's CPU: the lab's experiments, the lab runner, and the
-    load average, since the lab's bot games share the CPU with every game being played here. Work the caller may
-    not see is "someone's <kind>" (P3.2.4); which machines a member is shown is package 3-09's (P3.3.8).
+    Only the machines the caller may view (their own, those their grants reach, every one for an administrator), each
+    with its capacity; the leases live on it (a model seat that plays every turn: active, lending its slot between its
+    turns, or holding it); its pooled prompts, running and waiting, in the order the prompt scheduler will serve them
+    (``scheduler.Machine.view``); what holds it (``busy_with``); and the benchmark jobs and probe runs the shared job
+    queue has for it, best first (``citar.pool.queue``). Work the caller may not see is "someone's <kind>" (or
+    "someone's <class>" for a prompt), with no name and no member (``work_access.binding_rights``); the other machines
+    in use are a count (``others_busy``), with no names or loads. Then this server's CPU: the lab's experiments, the
+    lab runner, and the load average, since the lab's bot games share the CPU with every game being played here.
     """
     import os
     from .. import lab, servers as registry
-    from ..db.models import Server
-    from ..pool import queue as work_queue, seats as pool_seats
+    from ..db.models import Server, User
+    from ..pool import queue as work_queue, scheduler as prompt_scheduler
     from .workers import hub
     _scheduler()
     _probes()
-    from .reports_api import reports_runner
-    reports_runner()                  # registers queued reports with the shared queue
     items_waiting = work_queue.waiting()
     active = work_queue.running()
-    names = {sv["id"]: sv["name"] for sv in registry.list_servers()}
-    for sv in sdb.query(Server):
-        names[sv.id] = sv.name
-    ids = list(dict.fromkeys([i["server_id"] for i in active + items_waiting if i.get("server_id")] +
-                             [sid for sid in names if pool_seats.occupied(sid)]))
+    sched = prompt_scheduler.current()
+    views = sched.views() if sched is not None else {}
+    ids = list(dict.fromkeys([i["server_id"] for i in active + items_waiting if i.get("server_id")] + list(views)))
     admin = _is_admin(me)
     cache: dict = {}
     name = work_access.namer(sdb, me, admin=admin, cache=cache)
-    machines = []
+    handles: dict = {}
+
+    def handle(user_id):
+        if not user_id:
+            return None
+        if user_id not in handles:
+            row = sdb.get(User, user_id)
+            handles[user_id] = row.handle if row is not None else None
+        return handles[user_id]
+
+    names = {sv["id"]: sv["name"] for sv in registry.list_servers()}
+    machines, others = [], 0
     for sid in ids:
+        row = sdb.get(Server, sid)
+        if not admin and (row is None or not pool.visible(sdb, me, row)):
+            others += 1             # in use, but not the caller's to see: counted, never named
+            continue
+        view = views.get(sid) or {}
         waiting = [_queue_entry(sdb, me, dict(it, position=n + 1), cache, name)
                    for n, it in enumerate(i for i in items_waiting if i.get("server_id") == sid)]
         # one line per holder: a game with two model seats on the machine holds two leases
         busy = list(dict.fromkeys(pool_seats.occupied(sid))) if admin else _occupants(sdb, me, sid, cache)
-        machines.append({"server_id": sid, "name": names.get(sid, sid), "online": hub().is_online(sid) or None,
-                         "busy_with": busy, "waiting": waiting,
-                         "running": [_queue_entry(sdb, me, i, cache, name) for i in active
-                                     if i.get("server_id") == sid]})
+
+        def told(entry, fn, row=row):
+            rights = work_access.binding_rights(sdb, me, entry, row, admin=admin, cache=cache)
+            return fn(entry, rights, handle(entry.get("consumer")))
+        machines.append({
+            "server_id": sid, "name": row.name if row is not None else names.get(sid, sid),
+            "online": hub().is_online(sid) or None, "capacity": view.get("capacity"),
+            "slots": view.get("slots"), "in_flight": view.get("in_flight", 0), "draining": view.get("draining", 0),
+            "busy_with": busy, "waiting": waiting,
+            "running": [_queue_entry(sdb, me, i, cache, name) for i in active if i.get("server_id") == sid],
+            "leases": [told(entry, work_access.told_lease) for entry in view.get("leases") or []],
+            "prompts": {"running": [told(entry, work_access.told_ticket) for entry in view.get("running") or []],
+                        "waiting": [told(entry, work_access.told_ticket) for entry in view.get("waiting") or []]}})
     try:
         overview = lab.overview()
     except Exception:
@@ -1888,7 +1916,7 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
            "lab_runner": overview.get("runner"),
            "lab_running": overview.get("running", []) if admin else [],
            "experiments": experiments}
-    return {"machines": machines, "cpu": cpu}
+    return {"machines": machines, "others_busy": others, "cpu": cpu}
 
 
 def _occupants(sdb: DbSession, user, server_id: str, cache: dict) -> list:
@@ -1909,9 +1937,10 @@ class PriorityBody(BaseModel):
 @app.post("/api/queue/priority")
 def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
     """Move work up or down the queue: the caller's own work, or work they manage (P3.2.4). A game is managed
-    through its row in the games index."""
+    through its row in the games index. The work's pooled prompts follow it (P3.3.3: a ticket's priority is its
+    class's base plus its work's)."""
     import json as _json
-    from ..pool import queue as work_queue
+    from ..pool import queue as work_queue, scheduler as prompt_scheduler
     if body.kind not in work_queue.KINDS and body.kind != "lab":
         raise HTTPException(400, "kind is benchmark, probe, report, game or lab.")
     if body.kind == "game":
@@ -1922,7 +1951,11 @@ def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSes
     else:
         items.require(sdb, _QUEUE_ITEMS[body.kind], body.id, me, access.MANAGE)
     if body.kind in work_queue.KINDS:
-        return {"kind": body.kind, "id": body.id, "priority": work_queue.set_priority(body.kind, body.id, body.priority)}
+        value = work_queue.set_priority(body.kind, body.id, body.priority)
+        sched = prompt_scheduler.current()
+        if sched is not None:
+            sched.set_priority((body.kind, body.id), value)
+        return {"kind": body.kind, "id": body.id, "priority": value}
     from .. import lab
     import re as _re
     if not _re.fullmatch(r"[A-Za-z0-9._-]{1,80}", body.id or ""):
@@ -1936,6 +1969,31 @@ def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSes
     tmp.write_text(_json.dumps(spec, indent=1), encoding="utf-8")
     tmp.replace(path)
     return {"kind": "lab", "id": body.id, "priority": spec["priority"]}
+
+
+@app.post("/api/queue/tickets/{tid}/cancel")
+def work_queue_cancel(tid: str, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Cancel a pooled prompt (P3.3.8): its work's owner (MANAGE on it; for a prompt of no work, the member it is
+    for), the machine's owner and administrators. Somebody who may see the prompt but none of those gets 403; anybody
+    else 404, as for a prompt that is not there. A queued prompt leaves the queue; a running one is abandoned, its
+    request draining on a helper that keeps generating it, and its caller falls back."""
+    from ..db.models import Server
+    from ..pool import scheduler as prompt_scheduler
+    sched = prompt_scheduler.current()
+    ticket = sched.find_ticket(tid) if sched is not None else None
+    if ticket is None:
+        raise HTTPException(404, "No such prompt.")
+    row = sdb.get(Server, ticket.server_id) if ticket.server_id else None
+    admin = _is_admin(me)
+    entry = {"ref": list(ticket.ref) if ticket.ref else None, "consumer": ticket.consumer}
+    view, _manage, cancel = work_access.binding_rights(sdb, me, entry, row, admin=admin, cache={})
+    if not cancel:
+        seen = admin or (row is not None and pool.visible(sdb, me, row) and view)
+        raise HTTPException(403 if seen else 404, "You may not cancel that prompt." if seen else "No such prompt.")
+    ticket.cancel("cancelled from the Queue page")
+    audit.record(sdb, "queue.prompt_cancelled", actor=me, object_type="server", object_id=ticket.server_id,
+                 cls=ticket.ticket_class, work=list(ticket.ref) if ticket.ref else None)
+    return {"cancelled": tid, "state": ticket.state}
 
 
 @app.get("/api/lab/report/{name}")
@@ -2275,7 +2333,8 @@ async def worker_socket(websocket: WebSocket):
             await websocket.send_text(P.frame(P.SHUTDOWN, reason=refused))
             await websocket.close(code=4403)
             return
-        await websocket.send_text(P.welcome_frame(P.Welcome(
+        # what was sent to it since it was registered (a request waiting for the machine) follows the welcome
+        await connection.welcome(P.welcome_frame(P.Welcome(
             server_id=server_id, server_name=server_name,
             ping_seconds=citar_settings.get().worker_ping_seconds)))
         await asyncio.to_thread(record_connection, server_id, ip=ip,
@@ -2307,8 +2366,13 @@ async def worker_socket(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception:
-        import traceback
-        traceback.print_exc()
+        from starlette.websockets import WebSocketState
+        if not (connection is not None and connection.closed
+                and websocket.application_state != WebSocketState.CONNECTED):
+            import traceback
+            traceback.print_exc()
+        # else the hub dropped the helper (a revoked token, a disabled machine) and closed its socket before this
+        # loop's next receive: an ordinary end, not an error
     finally:
         if connection is not None:
             hub().unregister(connection)

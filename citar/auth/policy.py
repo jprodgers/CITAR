@@ -228,6 +228,31 @@ def can(user: Optional[User], capability: str) -> bool:
     return bool((ROLE_DEFAULTS.get(user.role) or {}).get(capability, False))
 
 
+def denial(user: Optional[User], capability: str) -> str:
+    """Why ``user`` may not do ``capability``, so the person can act on it rather than guessing: the 403 of a route
+    that needs it (``deps.require_cap``), and of a model seat or a pooled prompt its account may not use
+    (``pool.seats.authorize``)."""
+    if user is not None and user.status == "probation" and capability in PROBATION_DENIES:
+        return ("New accounts cannot do that yet. An administrator can lift the restriction — "
+                "it is there to keep automated signups from registering servers or publishing.")
+    friendly = {
+        "register_servers": "Your account is not allowed to register servers.",
+        "run_reports": "Your account is not allowed to build reports.",
+        "publish_global": "Your account is not allowed to publish to the whole internet.",
+        "create_games": "Your account is not allowed to start games.",
+        "invite": "Your account cannot create invitations.",
+        "run_benchmarks": "Your account is not allowed to run benchmarks.",
+        "run_probes": "Your account is not allowed to run probes.",
+        "run_lab": "Lab experiments run on this server's own CPU; an administrator has to allow your account to "
+                   "queue them.",
+        "edit_bots": "Bot profiles are what every benchmark is measured against; an administrator has to allow your "
+                     "account to edit them.",
+        "full_llm": "Your account is not allowed to seat a model that plays every turn.",
+        "partial_llm": "Your account is not allowed to use pooled prompts.",
+    }
+    return friendly.get(capability, f"Your account lacks the {capability} permission.")
+
+
 def capabilities(user: Optional[User]) -> dict:
     """Every capability resolved, for the browser to enable and disable controls with.
 
