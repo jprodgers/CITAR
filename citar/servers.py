@@ -290,14 +290,56 @@ def _price(p) -> Optional[dict]:
     return out if any(out.values()) or p.get("input") is not None else None
 
 
+def _obj(v, what: str) -> dict:
+    """``v`` as an object (empty when left out), or a ServerError naming ``what``: a body from a browser or a file can
+    carry any JSON where an object belongs, and a wrong shape must be the caller's 400, never a crash."""
+    if not v:
+        return {}
+    if not isinstance(v, dict):
+        raise ServerError(f"{what} must be an object.")
+    return v
+
+
+def _items(v, what: str, *, text_ok: bool = False) -> list:
+    """``v`` as a list of objects (empty when left out; ``text_ok``: an entry may be a string too), or a ServerError
+    naming ``what``."""
+    if not v:
+        return []
+    if not isinstance(v, (list, tuple)):
+        raise ServerError(f"{what} must be a list.")
+    for i, x in enumerate(v):
+        if not isinstance(x, dict) and not (text_ok and isinstance(x, str)):
+            raise ServerError(f"{what}[{i}] must be an object{' or a name' if text_ok else ''}.")
+    return list(v)
+
+
+def _ref(v) -> Optional[str]:
+    """An id a part of a server carries (a model's, a load profile's, a component's): text, or None for none."""
+    if isinstance(v, str):
+        return v or None
+    return str(v) if isinstance(v, int) and not isinstance(v, bool) else None
+
+
 def normalize_server(d: dict) -> dict:
     """Validate and complete a server entry, filling in every field the rest of CITAR expects.
 
     The single place a server is checked. Everything downstream - costing, benchmarks, the seat
-    resolver - assumes a fully-formed entry, which is only true because nothing else writes one.
+    resolver - assumes a fully-formed entry, which is only true because nothing else writes one. A part of the wrong
+    shape (a list where an object belongs, a number where a list does) is a ServerError, which the routes answer 400.
     """
+    if not isinstance(d, dict):
+        raise ServerError("A server must be an object.")
+    try:
+        return _normalize_server(d)
+    except (TypeError, AttributeError) as exc:
+        # a shape the checks below did not foresee: still the sender's mistake, and still never a 500
+        raise ServerError(f"The server's settings do not read: {exc}") from exc
+
+
+def _normalize_server(d: dict) -> dict:
+    """``normalize_server``'s work, on a dict."""
     kind = d.get("kind") if d.get("kind") in KINDS else "owned"
-    conn_in = d.get("connection") or {}
+    conn_in = _obj(d.get("connection"), "connection")
     provider = conn_in.get("provider") if conn_in.get("provider") in PROVIDERS else "none"
     sv = default_server(kind, provider)
     sv["id"] = d.get("id") if re.fullmatch(r"[A-Za-z0-9_\-]{3,40}", str(d.get("id") or "")) else sv["id"]
@@ -314,14 +356,14 @@ def normalize_server(d: dict) -> dict:
     c["lmstudio_device"] = str(conn_in.get("lmstudio_device") or "").strip()
     c["manage_loading"] = bool(conn_in.get("manage_loading", provider == "lmstudio")) and provider == "lmstudio"
     c["max_parallel"] = int(_num(conn_in.get("max_parallel"), 1, 1, 16))
-    key = conn_in.get("key") or {}
+    key = _obj(conn_in.get("key"), "connection.key")
     backend = key.get("backend") if key.get("backend") in ("none", "keyring", "env", "file") else "none"
     c["key"] = {"backend": backend, "env": str(key.get("env") or "").strip()}
     c["dry_run_delay"] = _num(conn_in.get("dry_run_delay"), 1.0, 0, 60)
     c["timeout"] = _num(conn_in.get("timeout"), None, 5, 7200)
     hw = d.get("hardware") if isinstance(d.get("hardware"), dict) else {}
     sv["hardware"] = hw or {"source": "none"}
-    pw_in = d.get("power") or {}
+    pw_in = _obj(d.get("power"), "power")
     pw = default_power()
     for k in ("idle_w", "cpu_max_w", "gpu_max_w"):
         pw[k] = _num(pw_in.get(k), None, 0, 20000)
@@ -330,18 +372,22 @@ def normalize_server(d: dict) -> dict:
     pw["source"] = str(pw_in.get("source") or ("manual" if pw["idle_w"] is not None else "unset"))[:20]
     sv["power"] = pw
     sv["components"] = []
+    if d.get("components") and not isinstance(d.get("components"), (list, tuple)):
+        raise ServerError("components must be a list.")
     for comp in d.get("components") or []:
         if not isinstance(comp, dict):
             continue
-        sv["components"].append({"id": comp.get("id") or new_id("c_"), "name": str(comp.get("name") or "Component")[:80],
+        sv["components"].append({"id": _ref(comp.get("id")) or new_id("c_"), "name": str(comp.get("name") or "Component")[:80],
                                  "price": _num(comp.get("price"), None, 0), "purchased": _date(comp.get("purchased"), ""),
                                  "lifespan_years": _num(comp.get("lifespan_years"), 4, 0.25, 30),
                                  "resale": _num(comp.get("resale"), 0.0, 0),
                                  "retired": _date(comp.get("retired"), "") or None})
     periods = []
-    for p in d.get("costs") or [default_cost_period(kind)]:
+    for p in _items(d.get("costs"), "costs") or [default_cost_period(kind)]:
         q = default_cost_period(kind)
         q["from"] = _date(p.get("from"))
+        if p.get("electricity_plan_id") and not isinstance(p.get("electricity_plan_id"), str):
+            raise ServerError("A cost period's electricity_plan_id is a plan's id.")
         q["electricity_plan_id"] = p.get("electricity_plan_id") or None
         for k in ("fixed_monthly", "hourly_rate", "api_fixed_monthly"):
             q[k] = _num(p.get(k), 0.0, 0)
@@ -351,17 +397,20 @@ def normalize_server(d: dict) -> dict:
         periods.append(q)
     periods.sort(key=lambda p: p["from"])
     sv["costs"] = periods or [default_cost_period(kind)]
-    rh_in = d.get("restricted_hours") or {}
+    rh_in = _obj(d.get("restricted_hours"), "restricted_hours")
     rh = default_restricted()
     rh["enabled"] = bool(rh_in.get("enabled"))
     rh["unload_models"] = bool(rh_in.get("unload_models", True))
     rh["grace_minutes"] = _num(rh_in.get("grace_minutes"), 15, 0, 240)
-    for w in rh_in.get("windows") or []:
-        days = sorted({int(x) for x in (w.get("days") if w.get("days") is not None else range(7)) if str(x).lstrip("-").isdigit() and 0 <= int(x) <= 6})
+    for w in _items(rh_in.get("windows"), "restricted_hours.windows"):
+        days_in = w.get("days") if w.get("days") is not None else range(7)
+        if not isinstance(days_in, (list, tuple, range)):
+            raise ServerError("A quiet-hours window's days are a list of weekdays (0 is Monday).")
+        days = sorted({int(x) for x in days_in if str(x).lstrip("-").isdigit() and 0 <= int(x) <= 6})
         rh["windows"].append({"days": days, "start": _hhmm(w.get("start"), "21:00"), "end": _hhmm(w.get("end"), "06:00")})
     sv["restricted_hours"] = rh
     models, seen = [], set()
-    for m in d.get("models") or []:
+    for m in _items(d.get("models"), "models", text_ok=True):
         if isinstance(m, str):
             m = {"key": m}
         key = str(m.get("key") or m.get("model") or "").strip()
@@ -369,11 +418,11 @@ def normalize_server(d: dict) -> dict:
             continue
         seen.add(key)
         mm = default_model(key, provider)
-        mm["id"] = m.get("id") or mm["id"]
+        mm["id"] = _ref(m.get("id")) or mm["id"]
         mm["label"] = str(m.get("label") or "")[:80]
         mm["enabled"] = bool(m.get("enabled", True))
         mm["info"] = m.get("info") if isinstance(m.get("info"), dict) else {}
-        inf = m.get("inference") or {}
+        inf = _obj(m.get("inference"), f"The inference settings of {key}")
         mm["inference"].update({k: inf[k] for k in mm["inference"] if k in inf})
         if mm["inference"]["tool_mode"] not in ("auto", "native", "json"):
             mm["inference"]["tool_mode"] = "auto"
@@ -381,9 +430,10 @@ def normalize_server(d: dict) -> dict:
         mm["inference"]["max_tokens"] = int(_num(mm["inference"].get("max_tokens"), 0, 0, 200000)) or None
         mm["inference"]["temperature"] = _num(mm["inference"].get("temperature"), None, 0, 2)
         profiles = []
-        for pr in m.get("profiles") or ([default_profile()] if provider == "lmstudio" else []):
+        for pr in (_items(m.get("profiles"), f"The load profiles of {key}")
+                   or ([default_profile()] if provider == "lmstudio" else [])):
             q = default_profile()
-            q["id"] = pr.get("id") or new_id("p_")
+            q["id"] = _ref(pr.get("id")) or new_id("p_")
             q["name"] = str(pr.get("name") or "Profile")[:60]
             q["context"] = int(_num(pr.get("context"), 32768, 0, 4_000_000))
             gpu = str(pr.get("gpu") if pr.get("gpu") is not None else "max").strip().lower()
@@ -417,22 +467,35 @@ def normalize_server(d: dict) -> dict:
 
 
 def normalize_plan(d: dict) -> dict:
-    """Validate and complete an electricity plan."""
+    """Validate and complete an electricity plan. A part of the wrong shape is a ServerError (the routes' 400)."""
+    if not isinstance(d, dict):
+        raise ServerError("An electricity plan must be an object.")
+    try:
+        return _normalize_plan(d)
+    except (TypeError, AttributeError) as exc:
+        raise ServerError(f"The electricity plan does not read: {exc}") from exc
+
+
+def _normalize_plan(d: dict) -> dict:
+    """``normalize_plan``'s work, on a dict."""
     p = default_plan()
     p["id"] = d.get("id") if re.fullmatch(r"[A-Za-z0-9_\-]{3,40}", str(d.get("id") or "")) else p["id"]
     p["name"] = (str(d.get("name") or "").strip() or "Electricity plan")[:80]
     periods = []
-    for q in d.get("periods") or []:
+    for q in _items(d.get("periods"), "periods"):
         r = {"from": _date(q.get("from")), "type": q.get("type") if q.get("type") in ("flat", "tou", "tiered") else "flat",
              "rate_kwh": _num(q.get("rate_kwh"), None, 0, 100), "fixed_monthly": _num(q.get("fixed_monthly"), 0.0, 0),
              "fee_allocation": q.get("fee_allocation") if q.get("fee_allocation") in ("household_kwh", "share", "none") else "household_kwh",
              "household_kwh_month": _num(q.get("household_kwh_month"), None, 1, 1e7),
              "share_pct": _num(q.get("share_pct"), 0.0, 0, 100), "note": str(q.get("note") or "")[:500], "tou": [], "tiers": []}
-        for w in q.get("tou") or []:
-            days = sorted({int(x) for x in (w.get("days") if w.get("days") is not None else range(7)) if 0 <= int(x) <= 6})
+        for w in _items(q.get("tou"), "tou"):
+            days_in = w.get("days") if w.get("days") is not None else range(7)
+            if not isinstance(days_in, (list, tuple, range)):
+                raise ServerError("A time-of-use window's days are a list of weekdays (0 is Monday).")
+            days = sorted({int(x) for x in days_in if str(x).lstrip("-").isdigit() and 0 <= int(x) <= 6})
             r["tou"].append({"days": days, "start": _hhmm(w.get("start")), "end": _hhmm(w.get("end"), "00:00"),
                              "rate_kwh": _num(w.get("rate_kwh"), 0.0, 0, 100), "name": str(w.get("name") or "")[:30]})
-        for t in q.get("tiers") or []:
+        for t in _items(q.get("tiers"), "tiers"):
             r["tiers"].append({"up_to_kwh": _num(t.get("up_to_kwh"), None, 0), "rate_kwh": _num(t.get("rate_kwh"), 0.0, 0, 100)})
         periods.append(r)
     periods.sort(key=lambda q: q["from"])
@@ -1625,7 +1688,8 @@ def apply_hardware(server: dict, hw: dict, source: str = "collected", set_power:
     hw = dict(hw)
     hw["source"] = source
     sv["hardware"] = hw
-    sug = (hw.get("power") or {}).get("suggested") or {}
+    power = hw.get("power") if isinstance(hw.get("power"), dict) else {}
+    sug = power.get("suggested") if isinstance(power.get("suggested"), dict) else {}
     if set_power:
         for k in ("idle_w", "cpu_max_w", "gpu_max_w"):
             if sv["power"].get(k) is None and sug.get(k) is not None:
@@ -1635,21 +1699,31 @@ def apply_hardware(server: dict, hw: dict, source: str = "collected", set_power:
 
 
 def hardware_summary(hw: dict) -> str:
-    """A one-line description of a machine, for lists and reports."""
-    if not hw or hw.get("source") in (None, "none"):
+    """A one-line description of a machine, for lists and reports. Hardware comes from a collector file or a helper's
+    hello, so any part of it may be missing or of another shape: what does not read is left out."""
+    if not isinstance(hw, dict) or hw.get("source") in (None, "none"):
         return "No hardware details yet"
+
+    def part(v) -> dict:
+        return v if isinstance(v, dict) else {}
+
+    def many(v) -> list:
+        return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
     parts = []
-    cpu = hw.get("cpu") or {}
+    cpu = part(hw.get("cpu"))
     if cpu.get("model"):
         parts.append(f"{cpu['model']} ({cpu.get('cores') or '?'}C/{cpu.get('threads') or '?'}T)")
-    for g in hw.get("gpus") or []:
-        if g.get("vendor") in ("Intel",) and len(hw.get("gpus")) > 1:
+    gpus = many(hw.get("gpus"))
+    for g in gpus:
+        if g.get("vendor") in ("Intel",) and len(gpus) > 1:
             continue
-        parts.append(f"{g.get('name')}" + (f" {g['vram_gb']:g} GB" if g.get("vram_gb") and not g.get("unified_memory") else ""))
-    mem = hw.get("memory") or {}
-    if mem.get("ram_gb"):
-        parts.append(f"{mem['ram_gb']:g} GB {'unified memory' if mem.get('unified') else 'RAM'}")
-    disk = sum(d.get("size_gb") or 0 for d in hw.get("physical_disks") or [])
+        vram = _num(g.get("vram_gb"))
+        parts.append(f"{g.get('name')}" + (f" {vram:g} GB" if vram and not g.get("unified_memory") else ""))
+    mem = part(hw.get("memory"))
+    ram = _num(mem.get("ram_gb"))
+    if ram:
+        parts.append(f"{ram:g} GB {'unified memory' if mem.get('unified') else 'RAM'}")
+    disk = sum(_num(d.get("size_gb"), 0) for d in many(hw.get("physical_disks")))
     if disk:
         parts.append(f"{disk / 1024:.1f} TB disk" if disk > 1000 else f"{disk:.0f} GB disk")
     return " · ".join(parts)
