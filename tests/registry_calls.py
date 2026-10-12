@@ -8,7 +8,9 @@ fixture alone; phase B adds a helper machine (a row the file never held, ``sv_he
 through its helper before the merge as after it.
 
 Every call runs with the clock frozen at ``NOW`` (a Wednesday evening, inside the host's quiet hours) and LM Studio's
-model list stubbed out, so nothing here depends on the day or dials anything.
+model list stubbed out, so nothing here depends on the day or dials anything. The code keeps times as naive local times
+of the computer CITAR runs on; the answers were recorded on one in New York, so the frozen clock says so (``LOCAL``)
+and the calls answer the same on a computer in any zone (CI's runners are on UTC).
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 DATA = Path(__file__).resolve().parent / "data" / "registry"
 FIXTURE = DATA / "servers.json"
@@ -28,8 +31,29 @@ CLAUDE_KEY = "sk-ant-fixture-0123456789"
 #: The LAN machine's key variable's value (the ``env`` backend reads it).
 LAN_KEY = "lan-fixture-key"
 
+#: The zone of the computer the answers were recorded on: what a naive local time means in these calls.
+LOCAL = ZoneInfo("America/New_York")
+
+
+class _Frozen(datetime):
+    """``datetime`` with ``now()`` fixed at ``NOW``, and naive times read in ``LOCAL`` rather than in the zone of
+    the computer the tests run on. Arithmetic, ``replace`` and ``astimezone`` keep the class, so every time the
+    code derives from ``NOW`` or from a ``_Frozen`` argument converts the same way."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return NOW if tz is None else NOW.astimezone(tz)
+
+    def astimezone(self, tz=None):
+        aware = self.replace(tzinfo=LOCAL) if self.tzinfo is None else self
+        return datetime.astimezone(aware, LOCAL if tz is None else tz)
+
+    def timestamp(self):
+        return datetime.timestamp(self.replace(tzinfo=LOCAL) if self.tzinfo is None else self)
+
+
 #: Wednesday 2026-09-23 23:30 on this computer's clock: inside the host's weekday window (23:00-06:00).
-NOW = datetime(2026, 9, 23, 23, 30)
+NOW = _Frozen(2026, 9, 23, 23, 30)
 
 HELPER = {"id": "sv_helper", "name": "Bob's GPU box", "kind": "owned", "provider": "lmstudio",
           "max_concurrent": 2, "owner_tz": "America/New_York",
@@ -42,14 +66,6 @@ HELPER = {"id": "sv_helper", "name": "Bob's GPU box", "kind": "owned", "provider
 
 #: Keys of a server dict that change every time it is written (``normalize_server`` stamps ``updated``).
 VOLATILE = ("updated",)
-
-
-class _Frozen(datetime):
-    """``datetime`` with ``now()`` fixed at ``NOW``."""
-
-    @classmethod
-    def now(cls, tz=None):
-        return NOW if tz is None else NOW.astimezone(tz)
 
 
 @contextlib.contextmanager
@@ -130,8 +146,8 @@ def phase_a() -> dict:
             out[f"server_name:{sid}"] = _call(S.server_name, sid)
             out[f"restricted_now:{sid}"] = _call(S.restricted_now, sid)
             out[f"restriction_config:{sid}"] = _call(S.restriction_config, sid)
-        for when in (datetime(2026, 9, 26, 2, 10), datetime(2026, 9, 26, 3, 0), datetime(2026, 9, 24, 5, 59),
-                     datetime(2026, 9, 25, 23, 30), datetime(2026, 9, 27, 0, 30)):
+        for when in (_Frozen(2026, 9, 26, 2, 10), _Frozen(2026, 9, 26, 3, 0), _Frozen(2026, 9, 24, 5, 59),
+                     _Frozen(2026, 9, 25, 23, 30), _Frozen(2026, 9, 27, 0, 30)):
             out[f"restricted_at:sv_host:{when.isoformat()}"] = _call(S.restricted_at, "sv_host", when)
         end = S.restricted_now("sv_host")
         out["restricted_text:sv_host"] = _call(S.restricted_text, "sv_host", end)
@@ -171,6 +187,7 @@ def phase_b() -> dict:
 
 
 #: 2026-03-10 12:00 and 2026-07-01 18:00 on this computer's clock: before and after the host's second cost period.
+#: Plain local times, not ``LOCAL``'s: costing reads a ledger's times back on this computer's clock, unfrozen.
 T_MARCH = datetime(2026, 3, 10, 12, 0).timestamp()
 T_JULY = datetime(2026, 7, 1, 18, 0).timestamp()
 

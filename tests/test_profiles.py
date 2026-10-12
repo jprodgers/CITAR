@@ -18,6 +18,7 @@ import struct
 import tempfile
 import unittest
 import zlib
+from datetime import timedelta
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="citar_profiles_"))
@@ -371,8 +372,13 @@ class Directory(Base_):
 
     def test_newest_first_and_paged_by_fifty(self):
         with db.session() as s:
-            for i in range(55):
-                accounts.create_user(s, handle=f"page{i:02d}", status="active")
+            made = [accounts.create_user(s, handle=f"page{i:02d}", status="active") for i in range(55)]
+            s.flush()
+            # a second apart: Windows' clock can give accounts made in one loop the same moment, which the directory
+            # orders by id (stable paging, but not this test's "newest")
+            base = made[0].created_at
+            for i, u in enumerate(made):
+                u.created_at = base + timedelta(seconds=i)
         first = self.get("/api/users", "max").json()
         self.assertEqual((len(first["users"]), first["next"]), (50, 50))
         self.assertEqual(first["users"][0]["handle"], "page54")
@@ -766,7 +772,9 @@ class Avatars(Base_):
         after = [_tree(r) for r in roots]
         for root, b, a in zip(roots, before, after):
             changed = {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
-            outside = sorted(k for k in changed if not (root == paths.data_dir() and k.startswith("avatars/")))
+            # the usage ledger is written by any game the process still plays (other tests' sessions), not by avatars
+            outside = sorted(k for k in changed if not (root == paths.data_dir() and k.startswith("avatars/"))
+                             and not k.startswith("usage/"))
             self.assertEqual(outside, [], f"written under {root}")
         self.assertEqual(sorted(p.name for p in profiles.avatars_dir().iterdir()), self.mine("max"),
                          "only max's file is left: no temporary file, nothing of pat's")
