@@ -609,7 +609,7 @@ class GameSession:
 
     def chat_view(self, nid: int, pid: Optional[int]) -> dict:
         """Chat ``nid`` as seat ``pid`` sees it (``negotiation_view``; the initiator's side for a spectator, ``pid``
-        None), with where its clock stands (``status``): the chat window's ``GET /api/games/{gid}/negotiations/{nid}``.
+        None), with where its clock stands (``clock``): the chat window's ``GET /api/games/{gid}/negotiations/{nid}``.
         Raises ActionError for a chat the game does not have, or one ``pid`` is not in. Lock held."""
         n = self.game.negotiation_head(nid)
         side = pid if pid is not None else n["initiator"]

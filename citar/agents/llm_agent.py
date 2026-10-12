@@ -830,8 +830,9 @@ class ChatThread:
     it), ``moved`` (it no longer waits on the seat: answered or closed by somebody else), ``unanswered`` (the model
     used its steps without answering), ``failed`` (the model could not be asked: an error, a machine's refusal),
     ``cancelled`` (the seat halted, or the chat clock's deadline came: ``cancel``) or ``paused`` (the game paused for
-    its machine before the model was asked, ``GameSession.answers_held``: it answers when the game resumes). The session declines only ``unanswered`` and
-    ``failed`` ones ("(no response)"); a slow answer is the chat clock's to decline."""
+    its machine before the model was asked, ``GameSession.answers_held``: it answers when the game resumes). The
+    session declines only ``unanswered`` and ``failed`` ones ("(no response)"); a slow answer is the chat clock's to
+    decline."""
 
     def __init__(self, agent: LLMAgent, nid: int):
         self.agent = agent
@@ -845,7 +846,6 @@ class ChatThread:
         self.last_outcome: Optional[str] = None
         self.last_cause: Optional[str] = None
         self._dead = False           # its conversation was closed by a cancel: the next exchange starts a new one
-        self._usage: dict = {}       # the conversation's usage already added to the agent's totals
         self.exchanges = 0
         self.conversations = 0
 
@@ -884,7 +884,7 @@ class ChatThread:
             conv.on_status = lambda payload, nid=self.nid: session.chat.answer_status(nid, pid, payload)
         else:
             conv = inner
-        self.conv, self.binding, self._dead, self._usage = conv, binding, False, {}
+        self.conv, self.binding, self._dead = conv, binding, False
         self.conversations += 1
         return conv
 
