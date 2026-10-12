@@ -42,6 +42,22 @@ score trend, turn time, errors and repeats, clean turn endings, the model's late
 estimated time left. Click a game to watch it live. Pause, resume, skip or retry single games, or
 pause and cancel whole runs.
 
+**A machine in use waits.** A job starts on a machine only while fewer things hold it than its
+**Games at once**: every lobby game with a model seat there counts from the moment it is created,
+loaded or brought back after a restart (paused or not, whoever moves first) until that seat is
+changed or eliminated or the game ends, and so do a probe run and a report whose analysis a model
+writes there, for as long as they run. A game paused to make way for higher-priority work does not
+count until it resumes. The job says what it is waiting for.
+
+**Pooled prompts drain first.** Short pooled prompts (the Servers page's test today; chat answers
+and report narratives later) may run on a machine between games. When a job starts there, those
+waiting are refused and those running are cancelled, and the model's first request waits until
+the ones its machine is still generating have finished, for up to two minutes, so none of them runs
+beside a benchmark step. The run page shows that wait under the job's turn time ("drained 6s",
+`drain_s` in the job's result). A job whose wait reached the two minutes goes ahead anyway and is
+marked **timing contaminated** (`contaminated`): its turn times measured the other work too, so they
+are left out of the model's speed score; its performance and reliability still count.
+
 **Restricted hours** are set per server on the Servers page. When a window starts, games on that
 server finish the model turn in progress (up to the server's grace minutes), then pause, and no new
 ones start there. The server's models can be unloaded so its GPU idles. Everything resumes when the
@@ -60,7 +76,7 @@ benchmark that will take three days is a normal thing to do.
 |---|---|---|
 | **Benchmark performance** | 60% | 100 for a win, 0 if eliminated, otherwise the model's share of the score against the strongest bot — 50 means level. Each game counts in proportion to the turns played, so full games outweigh short tests. |
 | **Reliability** | 25% | Clean turn endings, few rejected orders, little looping. |
-| **Speed** | 15% | Average turn time on a log scale: 20 seconds or less is 100, 30 minutes or more is 0. |
+| **Speed** | 15% | The model's own generation time per turn on a log scale: 20 seconds or less is 100, 30 minutes or more is 0. Time spent waiting for a busy machine never counts, and a job marked *timing contaminated* is left out; a model with no other timed turn has no speed score, and its overall score is made of the other two. |
 
 The weights are adjustable under Benchmarks → ⚙. A model needs at least one benchmark game to get
 an overall score, and dry-run games never count.

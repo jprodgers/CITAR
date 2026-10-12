@@ -625,6 +625,33 @@ class Priority(ItemCase):
         finally:
             self.manager.delete(gid)
 
+    def test_the_queue_says_what_holds_a_machine_as_the_caller_may_see_it(self):
+        """A machine's ``busy_with`` on the Queue page is its live leases (package 3-08: a lobby game holds them from
+        its creation, whoever moves first), each holder once: the owner and an administrator see the owner's game by
+        name, another member "someone's game", a visitor nothing (401)."""
+        from citar.pool import scheduler as prompt_scheduler
+        prompt_scheduler.reset()                # this test's leases only
+        self.addCleanup(prompt_scheduler.reset)
+        seat = {"type": "llm", "llm": {"server_id": "sv_dryrun", "model": "dry-run"}}
+        r = self.call("owner", "POST", "/api/games", {"name": "held", "config": {**CONFIG, "map_size": "small"},
+                                                      "seats": [{"type": "human"}, seat, seat]})
+        self.assertEqual(r.status_code, 200, r.text)
+        gid = r.json()["id"]
+        try:
+            self.assertEqual(len(prompt_scheduler.get().leases("sv_dryrun")), 2, "a lease per model seat")
+
+            def busy(who):
+                q = self.call(who, "GET", "/api/queue")
+                self.assertEqual(q.status_code, 200, q.text[:300])
+                return next((m["busy_with"] for m in q.json()["machines"] if m["server_id"] == "sv_dryrun"), None)
+            self.assertEqual(busy("owner"), ["game “held”"])
+            self.assertEqual(busy("admin"), ["game “held”"])
+            self.assertEqual(busy("stranger"), ["someone's game"])
+            self.assertEqual(self.call("anonymous", "GET", "/api/queue").status_code, 401)
+        finally:
+            self.manager.delete(gid)
+        self.assertEqual(prompt_scheduler.get().leases("sv_dryrun"), [], "a closed game holds nothing")
+
     def test_the_queue_names_only_what_the_caller_may_see(self):
         """Another member's queued run is "someone's benchmark run" on the Queue page, with no name and no priority
         controls; the owner sees it by name with them."""
