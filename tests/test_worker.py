@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -265,6 +266,15 @@ class PooledWork(unittest.TestCase):
         runner.manager, runner.lock, runner._stop_run, runner._thread = self.manager, threading.Lock(), set(), None
         runner.lives, runner._workers, runner._loaded = {}, {}, {}
         runner.POLL_SECONDS = 0.05
+        # the made-up runs it writes go when the test ends: a later module's probe runner would queue them again, and
+        # the Probes page's listing reads every run on the disk
+        written, write = [], runner._write
+
+        def write_and_remember(run):
+            written.append(run["id"])
+            write(run)
+        runner._write = write_and_remember
+        self.addCleanup(lambda: [shutil.rmtree(runner._run_dir(rid), ignore_errors=True) for rid in written])
         return runner
 
     def test_probe_runs_on_different_machines_do_not_wait_for_each_other(self):
