@@ -87,15 +87,16 @@ Roles are coarse. Fine-grained things are per-account capability flags an admin 
 | `run_probes` | save probes and run them | yes |
 | `run_lab` | queue lab experiments, which run on the server's own CPU | no |
 | `edit_bots` | create, fork and edit bot profiles, which benchmarks are measured against | no |
-| `full_llm` | seat a model that plays every turn | yes |
-| `partial_llm` | use pooled prompts (a hybrid seat's diplomacy, a report's written analysis) | yes |
+| `full_llm` | seat a model that plays every turn (an LLM seat) | yes |
+| `partial_llm` | use pooled prompts (a report's written analysis, a probe's offers and messages, the Servers page's test, a hybrid seat's diplomacy) | yes |
 | `publish_global` | make something readable by the whole internet (`publish_public` before 0.1.6) | no |
 | `invite` | mint invitation codes, up to `invite_quota` | no |
 
 Defaults come from a server-settings template so an admin changes the policy once rather than per
 user; a template saved before a capability existed falls back to the built-in default for it.
-`full_llm` and `partial_llm` restrict nothing yet: they are where a future rule (say, on the compute
-ratio) switches an account's model use off.
+`full_llm` and `partial_llm` are the switches for an account's use of models (a future rule, say on the compute ratio,
+turns them off): an LLM seat needs `full_llm` and a grant for ordinary games, every pooled prompt `partial_llm` and a
+grant for pooled prompts ([Workers](WORKERS.md#when-a-machine-is-busy)).
 
 ### Profiles and the directory
 
@@ -378,10 +379,12 @@ list of **grants**.
 
 A **grant** gives a subject (a user, or everyone) permission to use a group, optionally narrowed by:
 
-- **purpose** — normal games, benchmarks, probes, scenarios, lab runs
+- **purpose** — normal games (a model seat that plays every turn), pooled prompts (a report's written analysis, a
+  probe's offers and messages, a machine test, a hybrid seat's diplomacy), benchmarks, probes, scenarios, lab runs
 - **window** — which hours, which weekdays
 - **budget** — a spend cap per period
-- **concurrency** — how many simultaneous games may use the group
+- **concurrency** — how many of the subject's requests may run on one of the group's machines at once, its seats' and
+  its pooled prompts' together (0: no cap below the machine's slots)
 - **expiry**
 
 So the two examples from the brief are both just grants:
@@ -413,11 +416,13 @@ electricity, depreciation, lease costs, hourly rates and per-token API prices. N
 
 ### Admission control
 
-When a game is launched, for each LLM seat the server resolves the chosen server group and checks,
-in order: grant exists → purpose allowed → inside an availability window → budget remaining →
-concurrency slot free → a worker is actually online. Each failure produces a specific, quotable
-reason in the lobby ("Overnight box is available 00:00–06:00 owner time; next window opens in 4h
-12m"), never a generic denial. Failures that are only about timing offer to queue the game instead.
+When a game is launched or a seat changed, each model seat is admitted by its task class (a seat that plays every
+turn needs `full_llm` and a grant for ordinary games; a hybrid seat `partial_llm` and one for pooled prompts), and each
+pooled prompt is admitted when it is made. The server checks, in order: grant exists → purpose allowed → inside an
+availability window → budget remaining → a worker is actually online. Each failure produces a specific, quotable
+reason ("Overnight box is available 00:00–06:00 owner time; next window opens in 4h 12m"), never a generic denial.
+A busy machine is not a refusal: admission decides who may use a machine, the prompt scheduler when, so the work
+waits its turn, and the grant's concurrency is the scheduler's cap on the subject's requests there.
 
 ---
 

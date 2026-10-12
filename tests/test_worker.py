@@ -264,7 +264,7 @@ class PooledWork(unittest.TestCase):
         from citar import probes
         runner = probes.ProbeRunner.__new__(probes.ProbeRunner)
         runner.manager, runner.lock, runner._stop_run, runner._thread = self.manager, threading.Lock(), set(), None
-        runner.lives, runner._workers, runner._loaded = {}, {}, {}
+        runner.lives, runner._workers, runner._loaded, runner.asking = {}, {}, {}, {}
         runner.POLL_SECONDS = 0.05
         # the made-up runs it writes go when the test ends: a later module's probe runner would queue them again, and
         # the Probes page's listing reads every run on the disk

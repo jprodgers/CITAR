@@ -45,13 +45,12 @@ pause and cancel whole runs.
 **A machine in use waits.** A job starts on a machine only while fewer things hold it than its
 **Games at once**: every lobby game with a model seat there counts from the moment it is created,
 loaded or brought back after a restart (paused or not, whoever moves first) until that seat is
-changed or eliminated or the game ends, and so do a probe run and a report whose analysis a model
-writes there, for as long as they run. A game paused to make way for higher-priority work does not
+changed or eliminated or the game ends, and so does a probe's turn case while it plays. A game paused to make way for higher-priority work does not
 count until it resumes, not even while its model answers a chat. The job says what it is waiting for,
 naming only the games and runs you may see (anyone else's is "someone's game").
 
-**Pooled prompts drain first.** Short pooled prompts (the Servers page's test today; chat answers
-and report narratives later) may run on a machine between games. When a job starts there, those
+**Pooled prompts drain first.** Short pooled prompts (reports' written analyses, probes' offers and
+messages, the Servers page's test; chat answers later) may run on a machine between games. When a job starts there, those
 waiting are refused and those running are cancelled, and the model's first request waits until
 the ones its machine is still generating have finished, for up to two minutes, so none of them runs
 beside a benchmark step. The run page shows that wait under the job's turn time ("drained 6s",

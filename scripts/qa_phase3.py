@@ -36,7 +36,10 @@ games sharing a helper machine's one slot through the prompt scheduler, never tw
 refusal; the Servers page's test given up mid-completion, its request draining until the helper's late answer while
 the next request waits; 3-08: a lobby game's lease made when it is registered and again when the server, restarted,
 brings it back, a benchmark job waiting for it, and a one-job benchmark started beside a running test, which it
-cancels and waits to drain, ``drain_s`` in its result), and later ``ledger``, ``chat``, ``hybrid``, ``minimap``,
+cancels and waits to drain, ``drain_s`` in its result; 3-09: two members' report analyses and probe cases waiting as
+pooled prompts behind a lobby game's seat mid-turn, their Queue pages, and the order they are served in, none while the
+seat is mid-turn; ``--hold-line`` keeps them waiting for the browser checklist), and later ``ledger``, ``chat``,
+``hybrid``, ``minimap``,
 ``machines``; ``all`` runs every part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
@@ -230,6 +233,12 @@ class FakeEndpoint:
         self.max_trades = max_trades
         self.trades_opened = 0
         self._lock = threading.Lock()
+        #: Completions ``hold(body)`` picks wait for ``gate`` (set: open) before they are answered; ``held`` counts
+        #: those waiting now. A part holds a game's turn so the work behind it queues on its machine.
+        self.hold: Optional[Callable[[dict], bool]] = None
+        self.gate = threading.Event()
+        self.gate.set()
+        self.held = 0
 
         class Handler(BaseHTTPRequestHandler):
             def _send(self, code: int, body: dict):
@@ -256,12 +265,19 @@ class FakeEndpoint:
                     body = json.loads(raw or b"{}")
                 except ValueError:
                     body = {}
+                if outer.hold is not None and outer.hold(body):
+                    with outer._lock:
+                        outer.held += 1
+                    outer.gate.wait(300)
+                    with outer._lock:
+                        outer.held -= 1
+                t1 = time.time()
                 delay = outer.delay_for(body)
                 if delay:
                     time.sleep(delay)
                 reply, calls = outer.scripted_reply(body)
                 entry.update(tools=len(body.get("tools") or []), calls=[c["function"]["name"] for c in calls],
-                             delay=delay, seconds=round(time.time() - t0, 3))
+                             delay=delay, seconds=round(time.time() - t0, 3), served=t1, **outer.describe(body))
                 outer.requests.append(entry)
                 self._send(200, reply)
 
@@ -285,6 +301,19 @@ class FakeEndpoint:
     def completions(self) -> list:
         """The chat completions it served."""
         return [r for r in self.requests if r.get("method") == "POST"]
+
+    @staticmethod
+    def describe(body: dict) -> dict:
+        """What a completion was, for the log: ``kind`` (``turn``: a game's turn, with ``end_turn`` among its tools;
+        ``chat``: an answer to a negotiation; ``plain``: no tools, a report's narrative), its last user message's first
+        line (``head``) and a ``QA-...`` marker in it (``marker``)."""
+        tools = {(t.get("function") or {}).get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+        last = next((str(m.get("content") or "") for m in reversed(body.get("messages") or [])
+                     if isinstance(m, dict) and m.get("role") == "user"), "")
+        found = re.search(r"QA-[A-Za-z0-9-]+", last)
+        return {"kind": "turn" if "end_turn" in tools else "chat" if "respond_negotiation" in tools
+                else "plain" if not tools else "other",
+                "head": last.splitlines()[0][:120] if last else "", "marker": found.group(0) if found else None}
 
     def delay_for(self, body: dict) -> float:
         """How long a completion takes: ``slow``'s seconds for a prompt whose last user message holds one of its
@@ -512,11 +541,14 @@ class Harness:
     """What a part is given: the report, the server, the signed-in accounts, the fake endpoint, a tag that makes
     this run's names unique, and an anonymous client maker."""
 
-    def __init__(self, report: Report, server: Server, accounts: dict, endpoint: FakeEndpoint, *, keep: bool = False):
+    def __init__(self, report: Report, server: Server, accounts: dict, endpoint: FakeEndpoint, *, keep: bool = False,
+                 hold_line: float = 0.0):
         self.report, self.server, self.accounts, self.endpoint = report, server, accounts, endpoint
         self.tag = secrets.token_hex(3)
         #: ``--keep``: the server stays up for the browser checklist, and so does what a part leaves for it to show
         self.keep = keep
+        #: ``--hold-line``: seconds the ``queue`` part keeps its pooled prompts waiting (the browser checklist's C1)
+        self.hold_line = max(0.0, float(hold_line or 0.0))
 
     def anonymous(self, **headers) -> httpx.Client:
         """A client with no account (and the headers given, a share key's say)."""
@@ -1283,7 +1315,9 @@ def _accounts_servers_page(h: Harness) -> None:
         group = alice.post("/api/pool/groups", json={"name": f"QA page group {h.tag}", "visibility": "link"})
         gid = group.json().get("id") if group.status_code == 200 else ""
         put = alice.put(f"/api/pool/servers/{hid}", json={"group_id": gid})
-        grant = alice.post(f"/api/pool/groups/{gid}/grants", json={"subject_type": "everyone", "purposes": ["game"]})
+        # games and pooled prompts (the test is one, package 3-09)
+        grant = alice.post(f"/api/pool/groups/{gid}/grants", json={"subject_type": "everyone",
+                                                                    "purposes": ["game", "pooled"]})
         mine_groups = {g.get("id"): g for g in alice.get("/api/pool/groups").json().get("groups", [])}
         mine_group = mine_groups.get(gid) or {}
         his = {s.get("id"): s for s in bob.get("/api/pool/servers").json().get("servers", [])}
@@ -1301,10 +1335,10 @@ def _accounts_servers_page(h: Harness) -> None:
                 (group.status_code, put.status_code, grant.status_code) == (200, 200, 200)
                 and shared.get("group_id") == gid and shared.get("can_manage") is False and "config" not in shared
                 and hid not in his_regs and refused == {"rates": 404, "tokens": 403, "quiet hours": 403}
-                and his_test.status_code == 200,
+                and his_test.status_code == 200 and his_test.json().get("ok") is True,
                 json.dumps({"made": [group.status_code, put.status_code, grant.status_code], "his": {
                     f: shared.get(f) for f in ("group_id", "can_manage")}, "refused": refused,
-                    "test": his_test.status_code}))
+                    "test": his_test.text[:200]}))
         r.check("a group's listing hands its manager no share link: its grants share it (bob's above), and no route "
                 "takes a group's key, so a link would open nothing",
                 mine_group.get("visibility") == "link" and "share_url" not in mine_group
@@ -1336,9 +1370,11 @@ def _accounts_servers_page(h: Harness) -> None:
 
 def part_queue(h: Harness) -> None:
     """The ``queue`` part: 3-07's lease and cancel checks (design/phase3-features.md P3.3.3), 3-08's leases at
-    registration, a restart's restored game and a benchmark's drain; 3-09 adds its own."""
+    registration, a restart's restored game and a benchmark's drain, 3-09's pooled prompts (reports' analyses and probe
+    cases beside a lobby game, the Queue page)."""
     _queue_leases_and_drain(h)
     _queue_restored_game_and_benchmark_drain(h)
+    _queue_pooled_prompts(h)
 
 
 def _queue_leases_and_drain(h: Harness) -> None:
@@ -1666,6 +1702,261 @@ def _queue_restored_game_and_benchmark_drain(h: Harness) -> None:
         scripted.close()
 
 
+def _turn_spans(served: list) -> list:
+    """A game's turns at the endpoint (``kind`` ``turn``, in order): from a turn's first request to the end of the
+    one answered with ``end_turn``; its seat is mid-turn across each span."""
+    spans, first = [], None
+    for q in sorted((q for q in served if q.get("kind") == "turn"), key=lambda q: q["t"]):
+        first = q["t"] if first is None else first
+        if "end_turn" in (q.get("calls") or []):
+            spans.append((first, q["t"] + q["seconds"]))
+            first = None
+    return spans
+
+
+def _queue_pooled_prompts(h: Harness) -> None:
+    """3-09's checks (design/phase3-features.md P3.3.3, P3.3.7, P3.3.8), on alice's helper machine with one slot (a real
+    helper behind the scripted endpoint, 0.4 s a completion, no chats opened), shared with bob for pooled prompts and
+    probes: her lobby game's model seat holds the slot mid-turn (the endpoint holds its request), while bob's probe run
+    (two message cases), her probe run (one), her two reports and his two (each with a written analysis) queue as
+    pooled prompts. Their Queue pages show the game's lease and the prompts with their places, each member's work named
+    to its owner and "someone's report" to the other, the machine not named at all to a member it is not shared with;
+    bob lowers his probe run and raises his second report, and may not move hers. Released, the prompts are served by
+    priority, then by turns between the members, then in order, none starting while the game's seat is mid-turn; no
+    report holds a lease, nothing is refused as busy, and every report has its analysis."""
+    r = h.report
+    admin, alice, bob, mod = (h.accounts[k] for k in ("admin", "alice", "bob", "mod"))
+    scripted = FakeEndpoint(delay=0.4, max_trades=0)
+    helper: Optional[Helper] = None
+    gid, runs = "", []
+    data = r.data.setdefault("queue", {}).setdefault("pooled", {})
+
+    def mine(who: "Account", hid: str) -> dict:
+        got = who.get("/api/queue")
+        q = got.json() if got.status_code == 200 else {}
+        box = next((m for m in q.get("machines") or [] if m.get("server_id") == hid), None)
+        return {"q": q, "box": box}
+
+    def waiting(who: "Account", hid: str) -> list:
+        return ((mine(who, hid)["box"] or {}).get("prompts") or {}).get("waiting") or []
+
+    try:
+        made = alice.post("/api/pool/servers", json={"config": {"name": f"QA pooled helper {h.tag}", "kind": "owned",
+                                                                "connection": {"provider": "openai_compatible",
+                                                                               "max_parallel": 1}},
+                                                     "reach": "worker"})
+        hid = made.json().get("id") if made.status_code == 200 else ""
+        t = alice.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa pooled"}) if hid else None
+        if t is not None and t.status_code == 200:
+            helper = Helper(h, t.json().get("token", ""), scripted, "qa-pooled-helper")
+        group = alice.post("/api/pool/groups", json={"name": f"QA pooled group {h.tag}", "visibility": "private"})
+        group_id = group.json().get("id") if group.status_code == 200 else ""
+        put = alice.put(f"/api/pool/servers/{hid}", json={"group_id": group_id})
+        grant = alice.post(f"/api/pool/groups/{group_id}/grants",
+                           json={"subject_type": "user", "handle": bob.handle, "purposes": ["pooled", "probe"]})
+        online = bool(helper and wait_until(lambda: _online(alice, hid), 60, 0.25))
+        r.check("a helper machine of alice's with one slot, its real helper connected, shared with bob for pooled prompts "
+                "and probes only",
+                online and (group.status_code, put.status_code, grant.status_code) == (200, 200, 200)
+                and grant.json().get("purposes") == ["pooled", "probe"],
+                f"online {online}; group {group.status_code}, put {put.status_code}, grant {grant.status_code}")
+        data["machine"] = hid
+
+        # ---- a seat that plays every turn needs a grant for games: bob's covers pooled prompts only
+        refused = bob.post("/api/games", json={"name": f"QA no games {h.tag}", "config": CONFIG, "seats": [
+            {"type": "llm", "llm": {"server_id": hid, "model": scripted.MODEL}}, {"type": "bot"}]})
+        r.check("bob's grant covers pooled prompts, not a model seat that plays every turn: his game is refused (403, "
+                "the purpose named)",
+                refused.status_code == 403 and "pooled prompts" in refused.text, f"HTTP {refused.status_code}: "
+                f"{refused.text[:200]}")
+
+        # ---- alice's lobby game: its first turn's request held at the endpoint, its seat mid-turn on the slot
+        scripted.hold = lambda body: FakeEndpoint.describe(body)["kind"] == "turn"
+        scripted.gate.clear()
+        g = alice.post("/api/games", json={"name": f"QA pooled game {h.tag}", "config": {**CONFIG, "seed": 3317},
+                                           "seats": [{"type": "llm", "llm": {"server_id": hid, "model": scripted.MODEL}},
+                                                     {"type": "bot"}]})
+        gid = g.json().get("id", "") if g.status_code == 200 else ""
+        holding = wait_until(lambda: scripted.held >= 1, 60, 0.2)
+        r.check("alice's lobby game holds the slot mid-turn (its request held at the endpoint)", bool(gid and holding),
+                f"HTTP {g.status_code}; held {scripted.held}")
+
+        # ---- the work that queues behind it, one prompt at a time so the line's order is known
+        def probe_run(who: "Account", name: str, markers: list) -> str:
+            ed = who.post("/api/scenario-editor", json={"source": "generate", "config": {**CONFIG, "seed": 3319},
+                                                         "players": [{"type": "bot"}, {"type": "bot"}]})
+            eid = ed.json().get("editor_id", "") if ed.status_code == 200 else ""
+            saved = who.post(f"/api/scenario-editor/{eid}/save", json={"name": f"QA pooled {name} {h.tag}"})
+            scn = saved.json().get("id", "") if saved.status_code == 200 else ""
+            who.delete(f"/api/scenario-editor/{eid}")
+            pid = f"qa-pooled-{name}-{h.tag}"
+            put_probe = who.put(f"/api/probes/{pid}", json={
+                "name": f"QA pooled {name}", "scenario": scn, "subject": 1, "counterparty": 0,
+                "cases": [{"id": f"m{i + 1}", "kind": "message", "message": f"{m} hello"} for i, m in enumerate(markers)]})
+            run = who.post(f"/api/probes/{pid}/run", json={"llm": {"server_id": hid, "model": scripted.MODEL}})
+            if run.status_code != 200:
+                raise HarnessError(f"{who.handle}'s probe run did not start: scenario {saved.status_code}, probe "
+                                   f"{put_probe.status_code}, run {run.status_code} {run.text[:200]}")
+            return run.json()["id"]
+
+        def report(who: "Account", title: str) -> str:
+            got = who.post("/api/reports", json={"title": title, "sections": ["summary"], "narrative": {
+                "enabled": True, "server_id": hid, "model_id": scripted.MODEL}})
+            if got.status_code != 200:
+                raise HarnessError(f"{who.handle}'s report did not start: {got.status_code} {got.text[:200]}")
+            return got.json()["id"]
+
+        names = {f"QA-PROBE-bob-1-{h.tag}": "bob probe 1", f"QA-PROBE-bob-2-{h.tag}": "bob probe 2",
+                 f"QA-PROBE-alice-1-{h.tag}": "alice probe 1"}
+        reports = {}
+        n = 0
+        bob_run = probe_run(bob, "bob", [f"QA-PROBE-bob-1-{h.tag}", f"QA-PROBE-bob-2-{h.tag}"])
+        runs.append((bob, bob_run))
+        n += 1
+        in_line = wait_until(lambda: len(waiting(admin, hid)) >= n, 60, 0.25)
+        alice_run = probe_run(alice, "alice", [f"QA-PROBE-alice-1-{h.tag}"])
+        runs.append((alice, alice_run))
+        # both runs lowered alike: a run makes way between its cases only for work of a higher priority
+        lowered = bob.post("/api/queue/priority", json={"kind": "probe", "id": bob_run, "priority": -20})
+        alice.post("/api/queue/priority", json={"kind": "probe", "id": alice_run, "priority": -20})
+        for who, title in ((alice, "A1"), (alice, "A2"), (bob, "B1"), (bob, "B2")):
+            reports[title] = (who, report(who, f"QA pooled {title} {h.tag}"))
+            n += 1
+            in_line = in_line and wait_until(lambda n=n: len(waiting(admin, hid)) >= n, 60, 0.25)
+        raised = bob.post("/api/queue/priority", json={"kind": "report", "id": reports["B2"][1], "priority": 20})
+        not_his = bob.post("/api/queue/priority", json={"kind": "report", "id": reports["A1"][1], "priority": 50})
+        line = [(p.get("position"), p.get("label")) for p in waiting(admin, hid)]
+        bob_probe = f"probe run “QA pooled bob · {scripted.MODEL} @ QA pooled helper {h.tag}”"
+        expected_line = [f"report “QA pooled {t} {h.tag}”" for t in ("B2", "A1", "A2", "B1")] + [bob_probe]
+        r.check("five pooled prompts wait in the machine's line behind the game's seat, bob's probe run lowered and his "
+                "second report raised by his own priority buttons (hers is not his to move: 404); alice's probe run "
+                "waits as a job behind his",
+                bool(in_line) and lowered.status_code == 200 and raised.status_code == 200
+                and not_his.status_code == 404 and [label for _, label in line] == expected_line
+                and [pos for pos, _ in line] == [1, 2, 3, 4, 5],
+                json.dumps({"line": line, "lowered": lowered.status_code, "raised": raised.status_code,
+                            "not_his": not_his.status_code})[:600])
+
+        # ---- the Queue page as each sees it
+        his, hers, other = mine(bob, hid), mine(alice, hid), mine(mod, hid)
+        his_box, her_box = his["box"] or {}, hers["box"] or {}
+        his_line = [(p.get("label"), p.get("member"), p.get("can_manage"), p.get("can_cancel"))
+                    for p in (his_box.get("prompts") or {}).get("waiting") or []]
+        her_line = [(p.get("label"), p.get("member"), p.get("can_cancel"))
+                    for p in (her_box.get("prompts") or {}).get("waiting") or []]
+        his_leases = [(x.get("label"), x.get("member"), x.get("state")) for x in his_box.get("leases") or []]
+        her_leases = [(x.get("label"), x.get("member"), x.get("state")) for x in her_box.get("leases") or []]
+        text_other = json.dumps(other["q"], ensure_ascii=False)
+        r.check("bob's Queue page: alice's machine with its slot in use, her game's seat mid-turn as someone's game, his "
+                "prompts named with his priority and cancel buttons, hers as someone's report with neither",
+                his_box.get("capacity") == 1 and his_box.get("in_flight") == 1
+                and his_leases == [("someone's game", None, "active")]
+                and his_line == [(f"report “QA pooled B2 {h.tag}”", bob.handle, True, True),
+                                 ("someone's report", None, False, False), ("someone's report", None, False, False),
+                                 (f"report “QA pooled B1 {h.tag}”", bob.handle, True, True),
+                                 (expected_line[4], bob.handle, True, True)],
+                json.dumps({"leases": his_leases, "line": his_line})[:700])
+        r.check("alice's Queue page: her game and her reports by name; bob's reports and probe as someone's, hers to "
+                "cancel as the machine's owner",
+                her_leases == [(f"game “QA pooled game {h.tag}”", alice.handle, "active")]
+                and her_line == [("someone's report", None, True), (f"report “QA pooled A1 {h.tag}”", alice.handle, True),
+                                 (f"report “QA pooled A2 {h.tag}”", alice.handle, True), ("someone's report", None, True),
+                                 ("someone's probe", None, True)],
+                json.dumps({"leases": her_leases, "line": her_line})[:700])
+        r.check("a member the machine is not shared with is not shown it: it is one of the other machines in use, "
+                "named nowhere",
+                other["box"] is None and (other["q"].get("others_busy") or 0) >= 1
+                and f"QA pooled helper {h.tag}" not in text_other and "QA pooled" not in text_other,
+                f"others_busy {other['q'].get('others_busy')}")
+        data["queue_pages"] = {"bob": {"leases": his_leases, "line": his_line},
+                               "alice": {"leases": her_leases, "line": her_line}, "line": line}
+        if h.hold_line:
+            # the browser checklist's C1: the line stays as it is while the Queue page is looked at
+            hold = h.server.state / "qa-hold.json"
+            hold.write_text(json.dumps({"base": h.server.public, "password": r.data.get("password"),
+                                        "accounts": {k: a.handle for k, a in h.accounts.items()}, "machine": hid,
+                                        "until": time.time() + h.hold_line}, indent=1), encoding="utf-8")
+            r.note(f"holding the line for {h.hold_line:.0f} s (--hold-line); the accounts are in {hold}")
+            time.sleep(h.hold_line)
+
+        # ---- released: the order they are served in, and when
+        released = time.time()
+        scripted.hold = None
+        scripted.gate.set()
+
+        seen_kinds: set = set()
+
+        def finished() -> bool:
+            seen_kinds.update(x.get("kind") for x in _machine_status(admin, hid).get("leases") or [])
+            def body(got) -> dict:
+                return got.json() if got.status_code == 200 else {}
+            done = all((body(who.get(f"/api/reports/{rid}")).get("meta") or {}).get("status") in ("done", "failed")
+                       for who, rid in reports.values())
+            ran = all((body(who.get(f"/api/probe-runs/{rid}")).get("run") or {}).get("status") in
+                      ("finished", "stopped", "failed") for who, rid in runs)
+            return done and ran
+        ended = wait_until(finished, 240, 1.0)
+        alice.post(f"/api/games/{gid}/control", json={"paused": True})
+        time.sleep(1.0)
+        served = [q for q in scripted.completions() if q["t"] >= released - 60]
+        pooled = sorted((q for q in served if q.get("kind") == "plain" or (q.get("kind") == "chat" and q.get("marker"))),
+                        key=lambda q: q["t"])
+
+        def name(q) -> str:
+            if q.get("kind") == "chat":
+                return names.get(q.get("marker") or "", q.get("marker") or "?")
+            found = re.search(r"QA pooled (A1|A2|B1|B2) ", q.get("head") or "")
+            return found.group(1) if found else (q.get("head") or "?")
+        order = [name(q) for q in pooled]
+        expected = ["B2", "A1", "B1", "A2", "bob probe 1", "bob probe 2", "alice probe 1"]
+        r.check("released, the prompts were served by priority (his raised report, then the reports, then his lowered "
+                "probe's answers), then by turns between the members (B1 before A2), then in order; alice's probe run "
+                "after his",
+                bool(ended) and order == expected, f"served {order}; expected {expected}")
+        spans = _turn_spans(served)
+        inside = [(name(q), round(q["t"] - released, 2)) for q in pooled if any(a <= q["t"] < b for a, b in spans)]
+        r.check("no pooled prompt started while the game's seat was mid-turn (each between its turns, on the slot it "
+                "lends)", bool(spans) and not inside,
+                f"{len(spans)} turns, {len(pooled)} prompts; inside a turn: {inside}", turns=len(spans), prompts=len(pooled))
+        texts = {t: who.get(f"/api/reports/{rid}/html").text for t, (who, rid) in reports.items()}
+        status = _machine_status(admin, hid)
+        counters = status.get("counters") or {}
+        lease_kinds = sorted({x.get("kind") for x in status.get("leases") or []})
+        turns_queue = []
+        got = alice.get(f"/api/games/{gid}/metrics")
+        if got.status_code == 200:
+            turns_queue = [row.get("queue_s") or 0.0 for row in got.json().get("turns") or [] if row.get("controller") == "llm"]
+        r.check("every report has its analysis (written by the endpoint), no report or probe held a lease while they "
+                "ran (only the game's), nothing was refused as busy, and a seat's turn waited at most one pooled step",
+                all("(qa endpoint)" in text for text in texts.values()) and lease_kinds in ([], ["game"])
+                and seen_kinds <= {"game"}
+                and counters.get("busy_refusals", 0) == 0 and turns_queue and max(turns_queue) <= 0.4 + 1.0 + 0.5,
+                json.dumps({"lease_kinds": lease_kinds, "seen": sorted(seen_kinds), "counters": counters,
+                            "max_turn_queue_s": max(turns_queue) if turns_queue else None})[:500],
+                max_turn_queue_s=max(turns_queue) if turns_queue else None)
+        data.update({"order": order, "expected": expected, "turns": len(spans),
+                     "prompts": [{"name": name(q), "at_s": round(q["t"] - released, 2), "seconds": q["seconds"]}
+                                 for q in pooled],
+                     "turn_spans_s": [[round(a - released, 2), round(b - released, 2)] for a, b in spans],
+                     "counters": counters})
+    finally:
+        scripted.gate.set()
+        for undo in ((lambda: alice.delete(f"/api/games/{gid}")) if gid else None,):
+            try:
+                if undo is not None:
+                    undo()
+            except httpx.HTTPError:
+                pass
+        for who, rid in runs:
+            try:
+                who.post(f"/api/probe-runs/{rid}/stop")
+            except httpx.HTTPError:
+                pass
+        if helper is not None:
+            helper.stop()
+        scripted.close()
+
+
 #: The parts written so far, in the order ``all`` runs them.
 PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue}
 
@@ -1737,7 +2028,8 @@ def run(args) -> tuple:
         report.note(f"the server is up at {server.public} (dir {state})")
         report.data["server"]["start_s"] = round(time.perf_counter() - t0, 1)
         accounts = make_accounts(server, report, args.part == "all")
-        harness = Harness(report, server, accounts, endpoint, keep=args.keep)
+        harness = Harness(report, server, accounts, endpoint, keep=args.keep,
+                          hold_line=getattr(args, "hold_line", 0.0))
         for name in parts:
             report.note(f"part: {name}")
             try:
@@ -1773,6 +2065,9 @@ def main(argv=None) -> int:
     ap.add_argument("--dir", default=str(Path(os.environ.get("TEMP") or "/tmp") / "citar-qa-phase3"),
                     help="the state directory: new, empty, or an earlier run's (it is emptied first)")
     ap.add_argument("--keep", action="store_true", help="leave the server running afterwards (the browser checklist)")
+    ap.add_argument("--hold-line", type=float, default=0.0, metavar="SECONDS",
+                    help="queue: keep the pooled prompts waiting this long before they are served (the browser "
+                         "checklist's C1; the accounts are written to <dir>/qa-hold.json)")
     args = ap.parse_args(argv)
     try:
         code, report = run(args)

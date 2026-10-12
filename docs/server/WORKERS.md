@@ -179,20 +179,34 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   are served in the order they come, before any pooled prompt. While the seat waits on something else (another side's
   answer in a chat, a paused game, its next turn) a lobby game's lease lends its slot. A seat's lease is held to the
   concurrency of the grant its game was admitted for: a benchmark game's to the owner's grant for benchmarks.
-- **What the machine is busy with** is its leases: queued benchmark jobs, probe runs and reports wait for them, and the
-  Queue page lists them. A probe run holds a lease on its model's machine for the whole run, and a report whose
-  analysis a model writes holds one while it is built; neither lends its slot. What a queued job, run or report says
+- **What the machine is busy with** is its leases: queued benchmark jobs wait for them, and the Queue page lists
+  them. A probe's turn case holds a lease on its model's machine for the case (lending nothing); a probe run waits to
+  start only for a benchmark holding its machine (and for work ranked ahead of it there). What a queued job or run says
   it waits for names only the work its reader may see; anyone else's game or run is "someone's game" or "someone's
-  probe run", and a game paused to make way says only what kind of work it makes way for. A report whose analysis a
-  helper machine writes waits in the queue while that helper is offline, and if the helper drops while the report is
-  built, waits up to half an hour for it to come back.
-- A **pooled prompt** (one short job: the Servers page's test today; chat answers, report narratives and probe cases
-  as later packages move them on) takes a free slot that no seat in the middle of its turn needs, only on a model the
-  helper has loaded (unless the machine allows swaps), and never inside the machine's quiet hours. One that borrows an
-  idle game's slot gives it back after one capped step when that game's turn comes. A benchmark game on the machine
-  holds it: pooled prompts are refused or wait, and the benchmark's first request waits up to two minutes for those
-  already running to finish (`drain_s` in the job's result; a benchmark that had to go ahead anyway is marked
-  `contaminated`, and its timing is left out of the model's speed score).
+  benchmark run", and a game paused to make way says only what kind of work it makes way for.
+- A **pooled prompt** is one short job of a few model calls: a report's written analysis, each answer of a probe's
+  offer or message case, the Servers page's test (and, later, a hybrid seat's diplomacy and chat answers). It holds no
+  lease, so it never makes a machine look busy. It takes a free slot that no seat in the middle of its turn needs, only
+  on a model the helper has loaded (unless the machine allows swaps), and never inside the machine's quiet hours.
+  Waiting prompts go by priority (their class's, plus their work's queue priority, which its owner sets on the Queue
+  page), then take turns between members (the one served longest ago first), then first come first served.
+- **Lending.** A lobby game's seat lends its slot between its turns (and while it waits on a chat or a pause), so a
+  one-slot home GPU serves pooled prompts beside a game. A prompt that borrows an idle seat's slot runs under its
+  class's cap (a report's analysis five minutes and 4,096 tokens a step, a probe's answer and a chat two minutes and
+  1,024, a test 30 seconds and 256), and gives the slot back after its current step as soon as the seat's turn comes:
+  the seat waits for at most that one capped step. A benchmark game on the machine holds it: pooled prompts are refused
+  or, for those that wait for benchmarks (a report's analysis, a probe's answers), wait until it is gone, and the
+  benchmark's first request waits up to two minutes for those already running to finish (`drain_s` in the job's
+  result; a benchmark that had to go ahead anyway is marked `contaminated`, and its timing is left out of the model's
+  speed score).
+- **Who may use a machine for pooled prompts** is a grant's **pooled prompts** purpose (`pooled`), beside **ordinary
+  games** (`game`: a model seat that plays every turn) and the rest. Each prompt is admitted when it is made: the
+  account needs `partial_llm` (and the work's own permission, `run_reports` or `run_probes`) and a grant for `pooled`,
+  inside its window and budget; a grant's **concurrency** is how many of that account's requests may run on the
+  machine at once, seats' and prompts' together. A busy machine is never a refusal: the work waits its turn. A prompt
+  refused says why (no grant for pooled prompts, outside the window, the helper offline...). A report whose analysis
+  waits for an offline helper, the machine's quiet hours or a grant's window waits up to half an hour to start (and
+  rides out a helper that drops while it writes for as long), then the report is built without it, saying why.
 - **Cancelling drains on today's helper.** When the server gives up a request (a game is closed or paused, a seat is
   changed, a prompt is cancelled or runs out of time), it sends the helper `CANCEL`. The helper of this version ignores
   it and finishes the completion, so the scheduler keeps that slot taken (*draining*) until the helper's late answer
@@ -204,8 +218,16 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   most five seconds when nothing else is in flight), and queues the request again.
 - **The game screen shows the wait.** A model seat whose request waits for its machine shows "waiting for <machine>:
   2nd in line, about 40 s" (its status `queued`) until the request runs.
-- **The Servers page's test** waits for a slot like any pooled prompt. Each person has one test of a machine waiting at
-  a time and two in all (another is refused at once), and a few dozen in ten minutes; it is not metered.
+- **The Servers page's test** is a pooled prompt like any other (its grant must cover pooled prompts). Each person has
+  one test of a machine waiting at a time and two in all (another is refused at once), and a few dozen in ten
+  minutes; it is not metered.
+- **The Queue page** lists the machines you may use (your own, those your grants reach; every machine for an
+  administrator), each with its slots, the seats that play every turn there (mid-turn, lending their slot between
+  turns, or holding it), its jobs, and its pooled prompts, running and waiting, with each one's place in the line, how
+  long it has waited, about when it starts and how long it may still wait. Work you may not see is "someone's report",
+  "someone's game" and so on, with no name and no member; other members' machines are only counted ("2 other machines
+  are busy"). Priority buttons are on your own work only, and **Cancel** on a prompt is for its work's owner, the
+  machine's owner and administrators.
 - **Generation time is what the server saw.** A step is credited the smaller of the helper's own `duration` and the
   time from sending the request to receiving its answer; time spent queueing is recorded apart and never counted as the
   model's (nor against its turn's time limit, nor in its speed score). A helper that claims more than the server

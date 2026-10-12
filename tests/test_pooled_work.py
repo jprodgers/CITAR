@@ -617,7 +617,7 @@ class Probes(World):
         self.addCleanup(lambda: [self.manager.delete(sid) for sid in list(self.manager.sessions)])
         runner = P.ProbeRunner.__new__(P.ProbeRunner)
         runner.manager, runner.lock, runner._stop_run, runner._thread = self.manager, threading.Lock(), set(), None
-        runner.lives, runner._workers, runner._loaded, runner.queue = {}, {}, {}, []
+        runner.lives, runner._workers, runner._loaded, runner.queue, runner.asking = {}, {}, {}, [], {}
         written, write = [], runner._write
 
         def write_and_remember(run):
@@ -691,8 +691,10 @@ class Probes(World):
         rid = self.run_probe(cases=("gift", "hello"))
         worker = threading.Thread(target=self.runner._run, args=(rid,), daemon=True)
         worker.start()
-        self.assertTrue(until(lambda: (self.runner.lives.get(rid) or {}).get("ticket") is not None
+        self.assertTrue(until(lambda: self.runner.asking.get(rid) is not None
                               and S.get().machine("sv_gpu").view()["waiting"]), "the answer waits for the machine")
+        self.assertNotIn("ticket", json.dumps(self.runner.status(), default=str).lower(),
+                         "the probe page's status carries no ticket")
         t0 = time.perf_counter()
         self.runner.stop(rid)
         worker.join(15)

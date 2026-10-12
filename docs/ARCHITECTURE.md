@@ -332,17 +332,23 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
   the seat still plays the block the agent was made from and its lease is live (`suspend`, `update_seat` and
   `_crashed` change, cancel and release in one hold of that lock), and makes again one whose lease was released. A
   lease is capped by the owner's grant for the work its game was admitted for (`benchmark`, `probe`, else `game`). `pool.seats.occupied()` lists the leases live on a machine, which is what
-  benchmark jobs, probe runs and reports wait for and `usage.session_servers` counts as held. A probe run holds a
-  non-lending lease for the run (its cases adopt it: `GameSession.adopt_lease`), and a report's narrative goes through
-  `make_conversation` on a non-lending `report` lease. It is *active* while its seat is
+  benchmark jobs wait for and `usage.session_servers` counts as held. A probe's turn case holds a non-lending
+  `probe_case` lease for the case (`GameSession.lease_ref`/`lease_label` name it for its run). It is *active* while its
+  seat is
   mid-turn (the driver calls `activate()` and `idle()` around `play_turn`) and *idle* otherwise; the agent also idles
   it while it waits on a chat reply or a pause, so a seat waiting on its counterpart never keeps the slot the
-  counterpart needs. A lobby game's idle lease lends its slot; a benchmark's, a probe's and a report's never do. A
+  counterpart needs. A lobby game's idle lease lends its slot; a benchmark's and a probe case's never do. A
   benchmark lease's first request waits for the machine's pooled requests to drain; the session adds the wait to the
   job's `drain_s` and a drain cut short to `contaminated` (`benchmark` in its saves), whose timings
   `scoring.compare_models` leaves out of the speed score.
-- A **ticket** is one pooled prompt of a few steps (a chat answer, a diplomat phase, a probe case, a report's
-  narrative, the Servers page's test), with a class, a priority and a deadline to start by.
+- A **ticket** is one pooled prompt of a few steps (a chat answer, a diplomat phase, an answer of a probe's offer or
+  message case, a report's narrative, the Servers page's test), with a class, a priority (its class's base plus the
+  queue priority of the work it is part of, its `ref`, which it follows: `Scheduler.set_priority`) and a deadline to
+  start by. It is admitted when it is made (`pool.seats.ticket`: `partial_llm`, the work's own capability and a grant
+  for `pooled`, with `in_flight=None`, so a busy machine queues it; the grant's concurrency is the consumer's cap), and
+  a refusal is its `refused` with the admission's reason. Model seats are admitted by their task class
+  (`pool.seats.seat_class`: `llm` full, `hybrid` partial). `Machine.view` is what the Queue page lists
+  (`/api/queue`, told per viewer by `server/work_access.py`).
 - **The rules**: in flight (draining included) never above capacity; lease requests first and in arrival order; a
   ticket only on a slot no active or non-lending lease needs, on a loaded model, outside quiet hours, under its
   consumer's cap and never beside a benchmark; tickets by priority, then round-robin across members, then first come.

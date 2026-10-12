@@ -221,13 +221,14 @@ def _items_text(g, items) -> str:
 
 def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_path: Optional[Path] = None,
              live: Optional[dict] = None, should_stop=lambda: False, usage_act: Optional[str] = None,
-             owner_id: Optional[str] = None, run_id: Optional[str] = None, run_name: Optional[str] = None) -> dict:
+             owner_id: Optional[str] = None, run_id: Optional[str] = None, run_name: Optional[str] = None,
+             on_ticket=None) -> dict:
     """Plays one case on a fresh copy of the scenario and returns its record. ``owner_id`` is the probe run's owner,
     the case game's owner (``GameSession.owner_id``) and the consumer of its prompts. A model subject's answers in an
     offer or message case are ``probe`` tickets, one per answer (``_answer``), and its turn in a turn case plays on a
     ``probe_case`` lease the case's seat holds for the case only (released when the case's game stops); both name the
-    run (``run_id``, ``run_name``) on the Queue page. ``live`` (the run's live panel) carries the ticket an answer
-    waits on, which stopping the run cancels."""
+    run (``run_id``, ``run_name``) on the Queue page. ``on_ticket(ticket)`` is told of each answer's ticket while it
+    is asked, and ``on_ticket(None)`` after (the runner cancels it when the run is stopped)."""
     subject, cp = probe["subject"], probe.get("counterparty")
     seats = [None] * len(scn.get("seats") or [])
     seats = [{} for _ in range(max(len(seats), subject + 1, (cp or 0) + 1))]
@@ -312,8 +313,8 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                     rec["outcome"] = "stopped"
                     break
                 if prompts:
-                    refused = _answer(s, agent, subject, nid, live=live, should_stop=should_stop, usage_act=usage_act,
-                                      owner_id=owner_id, run_id=run_id, run_name=run_name)
+                    refused = _answer(s, agent, subject, nid, on_ticket=on_ticket, should_stop=should_stop,
+                                      usage_act=usage_act, owner_id=owner_id, run_id=run_id, run_name=run_name)
                     if refused:
                         rec["error"] = refused
                     answer = None
@@ -424,13 +425,13 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
     return rec
 
 
-def _answer(s, agent, subject: int, nid: int, *, live: Optional[dict], should_stop, usage_act: Optional[str],
+def _answer(s, agent, subject: int, nid: int, *, on_ticket, should_stop, usage_act: Optional[str],
             owner_id: Optional[str], run_id: Optional[str], run_name: Optional[str]) -> Optional[str]:
     """One answer of a model subject to the case's negotiation, as a ``probe`` ticket on its machine (P3.3.3): admitted
     for ``pooled`` when it is made (``pool.seats.ticket``, with ``run_probes``), following the run's queue priority,
     waiting for a benchmark that holds the machine rather than refused by it, at most ``PROBE_START_SECONDS`` to start.
     A refusal that says "not yet" (the helper offline, the machine's quiet hours, a grant's window) is tried again
-    within that time; stopping the run cancels the ticket (``live["ticket"]``). Returns why the answer was not asked
+    within that time; stopping the run cancels the ticket (``on_ticket``). Returns why the answer was not asked
     (a refusal, an expiry, a cancel), else None. A subject with no machine to play on (``NoMachineAgent``) answers
     nothing, as before."""
     cfg = getattr(agent, "cfg", None) or {}
@@ -458,15 +459,15 @@ def _answer(s, agent, subject: int, nid: int, *, live: Optional[dict], should_st
             wake = min(wake, time.perf_counter() + max(1.0, (error.retry_at - datetime.now()).total_seconds()))
         while time.perf_counter() < min(wake, deadline) and not should_stop():
             time.sleep(0.25)
-    if live is not None:
-        live["ticket"] = ticket
+    if on_ticket is not None:
+        on_ticket(ticket)
     agent.binding = ticket
     try:
         agent.respond_negotiation(s, subject, nid)
     finally:
         agent.binding = None
-        if live is not None:
-            live.pop("ticket", None)
+        if on_ticket is not None:
+            on_ticket(None)
         ticket.close()
     if ticket.error is not None and ticket.error.code in ("cancelled", "expired", "benchmark", "disabled"):
         return f"The prompt did not run: {ticket.reason}"
@@ -526,6 +527,7 @@ class ProbeRunner:
         self.lock = threading.Lock()
         self.queue: list[str] = []
         self.lives: dict = {}                       # run id -> what it is doing now (shown on the Probes page)
+        self.asking: dict = {}                      # run id -> the ticket its case's answer is asked on now
         self._workers: dict = {}                    # machine -> the thread running a run on it
         self._loaded: dict = {}                     # server id -> model this runner loaded there
         self._thread: Optional[threading.Thread] = None
@@ -628,7 +630,7 @@ class ProbeRunner:
                 self._write(run)
             else:
                 self._stop_run.add(rid)
-        ticket = (self.lives.get(rid) or {}).get("ticket")
+        ticket = self.asking.get(rid)
         if ticket is not None:
             ticket.cancel("stopped")        # an answer waiting for its machine stops waiting
         return run
@@ -879,7 +881,9 @@ class ProbeRunner:
             rec = run_case(self.manager, scn, probe, cases[job["case"]], run["llm"],
                            save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar", live=self.lives[rid],
                            should_stop=lambda: rid in self._stop_run, usage_act=act, owner_id=run.get("owner_id"),
-                           run_id=rid, run_name=run.get("name"))
+                           run_id=rid, run_name=run.get("name"),
+                           on_ticket=lambda t: self.asking.__setitem__(rid, t) if t is not None
+                           else self.asking.pop(rid, None))
             rec["rep"] = job["rep"]
             with open(self._run_dir(rid) / "results.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, default=str) + "\n")

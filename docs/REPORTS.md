@@ -138,9 +138,14 @@ useful property of the design: you do not have to know your electricity tariff b
 3. Options: count electricity as the full draw or only the extra power the work caused, and the
    lifespan range for the depreciation sensitivity table.
 4. Optionally have a model write an analysis — pick server, model and profile, plus instructions.
-   The computed findings never need a model, and the narrative's own cost is tracked too. A report
-   whose analysis a machine reached through its helper writes waits in the queue while that helper is
-   offline (it says so), and rides out a helper that drops while it is built for up to half an hour.
+   The computed findings never need a model, and the narrative's own cost is tracked too. The analysis
+   is a pooled prompt on that machine ([Workers](server/WORKERS.md#when-a-machine-is-busy)): your grant
+   there must cover pooled prompts; it waits its turn in the machine's line (the report's progress says
+   where: "Waiting for Home GPU: 2nd in line, about 40 s"), runs between a game's turns on the slot the
+   game lends, and waits for a benchmark to finish. It may wait half an hour to start (an offline
+   helper, the machine's quiet hours, a grant's window included) and rides out a helper that drops
+   while it writes for as long; past that, or when the machine will not take it (the model not loaded,
+   no grant), the report is built without it and says why. Reports are built several at a time.
 5. **Run report.**
 
 **View** opens it in place; **Open in new tab** and **Download** give a single self-contained HTML
