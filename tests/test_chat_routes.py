@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -278,6 +277,26 @@ class StatusEvents(Case):
         states = [x["state"] for x in got["spectator"] if x["negotiation"] == nid]
         self.assertIn("waiting", states)
         self.assertEqual(states[-1], "closed")
+
+
+class DryRunKnobs(Case):
+    """The dry run's knobs (how it answers chats, when it proposes) ride on a member's seat only on a dry-run machine:
+    they dial nothing (``servers.member_llm``); anywhere else they go, as everything not a machine's name does."""
+
+    def test_a_dry_run_machines_seat_keeps_them_and_another_machines_does_not(self):
+        from citar.db.models import User
+        with db.session() as s:
+            alice = s.get(User, self.ids["alice"])
+            kept = servers.member_llm({"server_id": "sv_dryrun", "model": "dry-run", "dry_run_propose_every": 3,
+                                       "dry_run_negotiation": "accept", "base_url": "http://127.0.0.1:9/v1"}, alice)
+            gone = servers.member_llm({"server_id": "sv_api", "model": "claude-opus-5", "dry_run_propose_every": 3},
+                                      alice)
+        self.assertEqual(kept, {"server_id": "sv_dryrun", "model": "dry-run", "dry_run_propose_every": 3,
+                                "dry_run_negotiation": "accept"})
+        self.assertEqual(gone, {"server_id": "sv_api", "model": "claude-opus-5"})
+        cfg = servers.resolve_llm(kept)
+        self.assertEqual((cfg["provider"], cfg["dry_run_propose_every"], cfg["dry_run_negotiation"]),
+                         ("dryrun", 3, "accept"))
 
 
 class WaitForTurnDeadlines(Case):

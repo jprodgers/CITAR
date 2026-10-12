@@ -186,7 +186,7 @@ class Responders(Case):
         self.assertTrue(until(lambda: all(
             sum(1 for h in s.game.negotiation(n["id"])["history"] if h["by"] == n["responder"]) >= 2
             for n in people_chats), 30))
-        self.assertEqual({count for count in Recording.made.values()}, {1},
+        self.assertEqual(set(Recording.made.values()), {1},
                          "one conversation per chat for each seat, whatever the exchanges")
         self.assertGreaterEqual(len(Recording.made), 40)
         # the chats close: no responder key is left behind

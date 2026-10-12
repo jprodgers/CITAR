@@ -378,6 +378,17 @@ export function llmForm(L, rerender, { seat = true } = {}) {
   return box;
 }
 
+/** The lobby's chat settings as the game's configuration keys (P3.5.2): minutes to seconds, an empty field left to the
+ *  server's default. */
+function chatConfig(modelMinutes, personMinutes, cap) {
+  const seconds = (v) => (v === "" || !(+v > 0) ? undefined : Math.round(+v * 60));
+  const out = {};
+  if (seconds(modelMinutes) !== undefined) out.chat_model_reply_seconds = seconds(modelMinutes);
+  if (seconds(personMinutes) !== undefined) out.chat_person_reply_seconds = seconds(personMinutes);
+  if (cap !== "" && +cap >= 2) out.diplomacy = { max_chat_messages: Math.round(+cap) };
+  return out;
+}
+
 function renderNewGame(card, rules, meta, refresh) {
   card.appendChild(el("h2", {}, "New game"));
   const f = {};
@@ -420,6 +431,16 @@ function renderNewGame(card, rules, meta, refresh) {
     + "A paused game resumes by itself as soon as the server answers again.";
   f.reconnect = el("input", { type: "number", min: 0, max: 86400, value: 180,
     title: "How long an AI keeps retrying its model server before the disconnect rule applies. Short drops inside this window cost nothing." });
+  // Chat (design/phase3-features.md P3.5.2): how long a chat waits on each side, in minutes, and its message cap.
+  // The server holds the game to them; the defaults are the server's own (10 and 5 minutes, 30 messages).
+  f.chatModel = el("input", { type: "number", min: 0.5, max: 1440, step: 0.5, value: 10,
+    title: "How long a chat waits for an AI model's answer (an LLM, MCP or hybrid seat), its time waiting for its machine "
+      + "included. Then the model is taken to have declined (a hybrid seat's bot answers instead)." });
+  f.chatPerson = el("input", { type: "number", min: 0.5, max: 1440, step: 0.5, value: 5,
+    title: "How long a chat waits for a person's answer, whoever opened it. Then it closes as expired. "
+      + "The clock stands still while the game is paused." });
+  f.chatCap = el("input", { type: "number", min: 2, max: 200, value: 30,
+    title: "The most messages one chat may hold; the message that would pass it closes the chat instead." });
   // custom maps from the map editor
   f.map = sel([["", "Generate a new map"]], "");
   f.map.title = "Play on a map made in the map editor, or generate one from the size and type below.";
@@ -448,6 +469,11 @@ function renderNewGame(card, rules, meta, refresh) {
     field("Turn limit (0 = speed default)", f.turns),
     field("City-states", f.cs), field("Seed", f.seed),
     field("If an AI's model server disconnects", f.onDisconnect), field("Keep reconnecting for (seconds)", f.reconnect),
+    el("div", { class: "field" }, el("label", {}, "Chat"),
+      el("div", { class: "row" },
+        el("label", { title: f.chatModel.title }, "AI answers within ", f.chatModel, " min"),
+        el("label", { title: f.chatPerson.title }, "people within ", f.chatPerson, " min"),
+        el("label", { title: f.chatCap.title }, "at most ", f.chatCap, " messages"))),
     el("div", { class: "field" }, el("label", {}, "Victory conditions"),
       el("div", { class: "row" }, ...Object.entries(f.victories).map(([k, cb]) => el("label", {}, cb, ` ${k}`)))),
     el("div", { class: "field" }, el("label", {}, "Options"),
@@ -549,6 +575,7 @@ function renderNewGame(card, rules, meta, refresh) {
           victories: Object.fromEntries(Object.entries(f.victories).map(([k, cb]) => [k, cb.checked])),
           tech_trading: f.tech.checked, ruins: f.ruins.checked, religion: f.religion.checked, espionage: f.espionage.checked,
           on_disconnect: f.onDisconnect.value, reconnect_seconds: f.reconnect.value === "" ? null : +f.reconnect.value,
+          ...chatConfig(f.chatModel.value, f.chatPerson.value, f.chatCap.value),
           ...(f.map.value ? {} : gen.value()),
         },
         seats: seats.map((s) => ({ type: s.type, civ_name: s.civ_name || null, nation: s.nation === "random" ? null : s.nation,

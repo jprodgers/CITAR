@@ -1275,7 +1275,7 @@ def member_llm(block: Optional[dict], user, *, required: bool = False) -> dict:
     if not isinstance(sid, str) or machine(sid) is None:
         raise SeatBlockError(400, "There is no such machine. Pick a machine for this seat.")
     keys = MEMBER_LLM_KEYS
-    if str(((machine(sid) or {}).get("connection") or {}).get("provider") or "").lower() == "dryrun":
+    if str((machine(sid) or {}).get("provider") or "").lower() == "dryrun":
         keys = MEMBER_LLM_KEYS + DRYRUN_LLM_KEYS        # a dry-run machine's knobs: they dial nothing either
     return {k: block[k] for k in keys if k in block}
 
