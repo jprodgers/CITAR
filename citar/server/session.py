@@ -522,11 +522,17 @@ class GameSession:
         sid = (seat.llm or {}).get("server_id") or None
         model = model or (seat.llm or {}).get("model") or ""
         kind = self._lease_kind()
-        lease = self._live_lease(pid, sid, model, kind)
-        if lease is not None or self._leases_ended():
-            return lease
-        # off every lock: the grant's concurrency and the machine (its row read on first use) are database reads
         from ..pool import scheduler as prompt_scheduler, seats as pool_seats
+        lease, new_owner = self._live_lease(pid, sid, model, kind)
+        if lease is not None:
+            if new_owner:
+                # made when the game was registered, before its owner was known (a save loaded by a member whose game
+                # had no owner yet): the owner's grant caps it from now on (a database read, off every lock)
+                lease.cap = pool_seats.consumer_cap(self.owner_id, sid)
+            return lease
+        if self._leases_ended():
+            return None
+        # off every lock: the grant's concurrency and the machine (its row read on first use) are database reads
         cap = pool_seats.consumer_cap(self.owner_id, sid)
         sched = prompt_scheduler.get()
         sched.machine(sid)
@@ -563,16 +569,18 @@ class GameSession:
         return lease is not None and not lease.released and lease.server_id == sid and \
             (lease.kind == kind or pid in self._adopted)
 
-    def _live_lease(self, pid: int, sid: Optional[str], model: str, kind: str):
-        """The seat's lease when it still plays ``sid``, brought up to date (its activity, consumer and model), else
-        None. Non-blocking."""
+    def _live_lease(self, pid: int, sid: Optional[str], model: str, kind: str) -> tuple:
+        """The seat's lease when it still plays ``sid``, brought up to date (its activity, consumer and model), and
+        whether its consumer changed (the game's owner was set after the lease was made); (None, False) when it has
+        none. Non-blocking."""
         with self._lease_lock:
             if self._leases_ended():
-                return None
+                return None, False
             lease = self.leases.get(pid)
             if not self._still_lease(pid, lease, sid, kind):
-                return None
-            return self._renewed(pid, lease, model)
+                return None, False
+            new_owner = pid not in self._adopted and lease.consumer != self.owner_id
+            return self._renewed(pid, lease, model), new_owner
 
     def _renewed(self, pid: int, lease, model: str):
         """``lease`` with the game's activity and owner (unless another holds it: ``adopt_lease``), and the model its

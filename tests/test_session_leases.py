@@ -214,6 +214,33 @@ class Registration(LeaseCase):
             self.assertEqual(pool_seats.occupied("sv_gpu"), [])
         self.assertTrue(until(lambda: pool_seats.occupied("sv_dryrun") == [label]))
 
+    def test_a_lease_made_before_its_game_had_an_owner_follows_the_owner_given_after(self):
+        """The load route gives a save whose game had no owner to the member loading it after the load registered
+        the game (and made its leases): the seat's lease then carries her as its consumer, capped by her grant."""
+        from citar.auth import accounts
+        from citar.db.models import AccessGrant, Server, ServerGroup
+        with db.session() as s:
+            owner = accounts.create_user(s, handle="lender-l", email="ll@x.cc", password="a long enough phrase",
+                                         status="active", email_verified=True)
+            member = accounts.create_user(s, handle="loader-l", email="lo@x.cc", password="a long enough phrase",
+                                          status="active", email_verified=True)
+            group = ServerGroup(owner_id=owner.id, name="lent for loads", visibility="server")
+            s.add(group)
+            s.flush()
+            row = Server(owner_id=owner.id, name="lent box", kind="test", provider="dryrun", reach="direct",
+                         group_id=group.id, max_concurrent=2,
+                         config={"connection": {"provider": "dryrun"}, "models": [{"key": "dry-run"}]})
+            s.add(row)
+            s.add(AccessGrant(group_id=group.id, subject_type="everyone", concurrency=1))
+            s.flush()
+            sid, member_id = row.id, member.id
+        g = self.game([{"type": "human"}, {"type": "llm", "llm": {"server_id": sid, "model": "dry-run"}}])
+        lease = g.leases[1]
+        self.assertEqual((lease.consumer, lease.cap), (None, 0), "the server's own game: no consumer, no cap")
+        g.owner_id = member_id                      # what the load route does for a game with no owner
+        self.assertIs(g.lease_for(1), lease, "the same lease")
+        self.assertEqual((lease.consumer, lease.cap), (member_id, 1), "hers now, capped by her grant")
+
     def test_a_scenario_launch_and_a_benchmark_reload_make_their_leases_when_registered(self):
         g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}], start=False)
         self.assertEqual(labels("sv_gpu"), [], "not registered yet: no lease")
