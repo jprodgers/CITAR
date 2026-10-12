@@ -156,14 +156,18 @@ def optional_user(p: Principal = Depends(principal)) -> Optional[User]:
     return p.user
 
 
-def require_role(role: str) -> Callable:
-    """`moderator` or `admin`. Ranked, so an admin satisfies a moderator requirement."""
+def require_role(role: str, *, hide: bool = False) -> Callable:
+    """`moderator` or `admin`. Ranked, so an admin satisfies a moderator requirement. With ``hide``, a signed-in
+    account below the role gets 404, as if the route were not there (the admin users page and the audit log,
+    design/phase3-features.md P3.2.7: a member learns nothing of them); a visitor still gets 401."""
 
     def dependency(request: Request, p: Principal = Depends(principal)) -> User:
         """Resolve the caller and refuse anyone below the required role."""
+        if hide and p.user is not None and not p.user.at_least(role):
+            raise HTTPException(404, "Not Found")
         user = require_user(request, p)
         if not user.at_least(role):
-            raise HTTPException(403, f"That needs {role} access.")
+            raise HTTPException(404, "Not Found") if hide else HTTPException(403, f"That needs {role} access.")
         return user
 
     return dependency

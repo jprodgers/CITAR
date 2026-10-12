@@ -79,6 +79,9 @@ BODY_GATES = ("require_user(", "_gate(", ".require(", "access.on(", "ownership.r
               # Owned items (design/phase3-features.md P3.2.4): a route resolves its item through the gate, and a
               # listing shows only what the viewer may see.
               "items.require(", "items.listed(",
+              # Profiles (P3.2.6): a profile and its avatar are open to whoever their fields show to, visitors
+              # included, and the account is resolved through the one gate that decides it.
+              "profiles.require_visible(",
               # Routes that take the Principal and refuse an anonymous caller themselves, because
               # they need the account object rather than just the fact that there is one.
               "p.user is None", "principal.user is None")

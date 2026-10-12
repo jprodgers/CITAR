@@ -6,6 +6,11 @@ Chiefly: creating the first administrator of a fresh server, and getting back in
     python -m citar.server.admin_cli create-user --handle sam --email sam@example.com [--role moderator]
     python -m citar.server.admin_cli list-users
     python -m citar.server.admin_cli set-role jimmie admin
+    python -m citar.server.admin_cli set-status sam suspended --reason "spam"
+    python -m citar.server.admin_cli set-caps sam run_lab=on publish_global=default
+    python -m citar.server.admin_cli set-limits sam --games 4 --seats 8 --invites 2
+    python -m citar.server.admin_cli set-trust sam trusted
+    python -m citar.server.admin_cli audit --actor jimmie --action 'user.*' --limit 20
     python -m citar.server.admin_cli reset-password jimmie
     python -m citar.server.admin_cli invite --role moderator --uses 1
     python -m citar.server.admin_cli policy registration invite
@@ -19,7 +24,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
-from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -127,50 +131,93 @@ def cmd_list_users(args) -> int:
     return 0
 
 
-def cmd_set_role(args) -> int:
-    """Change an account's role."""
-    if args.role not in ("user", "moderator", "admin"):
-        print("error: role must be user, moderator or admin")
-        return 1
+def _admin_change(handle: str, changes: dict, reason=None) -> int:
+    """Change an account as the admin users page does (``user_admin.apply``: everything checked first, one audit row
+    naming the fields, never the last active administrator demoted or suspended), as ``admin_cli``."""
+    from ..auth import user_admin
     with db.session() as s:
-        user = accounts.by_handle(s, args.handle)
+        user = accounts.by_handle(s, handle)
         if user is None:
-            print(f"error: no account '{args.handle}'")
+            print(f"error: no account '{handle}'")
             return 1
-        if user.role == "admin" and args.role != "admin":
-            remaining = s.scalar(select(User).where(User.role == "admin", User.id != user.id,
-                                                    User.status == "active"))
-            if remaining is None:
-                print("error: that is the only administrator. Promote somebody else first.")
-                return 1
-        before, user.role = user.role, args.role
-        audit.record(s, "user.role_changed", actor_label="admin_cli", object_type="user",
-                     object_id=user.id, **{"from": before, "to": args.role})
-        accounts.on_first_admin(s, user)
-        print(f"{user.handle}: {before} -> {args.role}")
+        try:
+            changed = user_admin.apply(s, user, changes, actor_label="admin_cli", reason=reason)
+        except user_admin.UserAdminError as exc:
+            print(f"error: {exc}")
+            return 1
+        if not changed:
+            print(f"{user.handle}: nothing to change")
+            return 0
+        for field in changed:
+            value = getattr(user, field)
+            if field == "caps":
+                value = ", ".join(f"{k}={'on' if v else 'off'}" for k, v in sorted((value or {}).items())) or "(role defaults)"
+            print(f"{user.handle}: {field} -> {value}")
     return 0
 
 
+def cmd_set_role(args) -> int:
+    """Change an account's role."""
+    return _admin_change(args.handle, {"role": args.role})
+
+
 def cmd_set_status(args) -> int:
-    """Activate or suspend an account."""
-    if args.status not in ("active", "probation", "suspended"):
-        print("error: status must be active, probation or suspended")
-        return 1
-    with db.session() as s:
-        user = accounts.by_handle(s, args.handle)
-        if user is None:
-            print(f"error: no account '{args.handle}'")
+    """Activate, put on probation or suspend an account (a suspension needs --reason: its owner is told it)."""
+    return _admin_change(args.handle, {"status": args.status}, reason=args.reason)
+
+
+#: How ``set-caps`` reads a setting: on, off, or back to the role's default.
+_CAP_WORDS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False,
+              "default": None, "null": None, "none": None}
+
+
+def cmd_set_caps(args) -> int:
+    """Override an account's capabilities (``cap=on``, ``cap=off``), or drop an override (``cap=default``)."""
+    caps = {}
+    for item in args.caps:
+        cap, sep, word = item.partition("=")
+        if not sep or word.strip().lower() not in _CAP_WORDS:
+            print(f"error: {item!r}: write capability=on, capability=off or capability=default")
             return 1
-        before, user.status = user.status, args.status
-        if args.status == "suspended":
-            user.suspended_at = datetime.now(timezone.utc)
-            user.suspended_reason = args.reason
-            accounts.revoke_all_sessions(s, user)
-        else:
-            user.suspended_at = user.suspended_reason = None
-        audit.record(s, "user.status_changed", actor_label="admin_cli", object_type="user",
-                     object_id=user.id, **{"from": before, "to": args.status})
-        print(f"{user.handle}: {before} -> {args.status}")
+        caps[cap.strip()] = _CAP_WORDS[word.strip().lower()]
+    return _admin_change(args.handle, {"caps": caps})
+
+
+def cmd_set_limits(args) -> int:
+    """Change an account's limits: invitations, games at once, seats per game (0: the ruleset's maximum)."""
+    changes = {field: value for field, value in (("invite_quota", args.invites), ("max_concurrent_games", args.games),
+                                                 ("max_seats_per_game", args.seats)) if value is not None}
+    if not changes:
+        print("error: name at least one of --invites, --games, --seats")
+        return 1
+    return _admin_change(args.handle, changes)
+
+
+def cmd_set_trust(args) -> int:
+    """Set an account's trust tier."""
+    return _admin_change(args.handle, {"trust_tier": args.tier})
+
+
+def cmd_audit(args) -> int:
+    """Read the audit log, newest first (the admin page's filters)."""
+    import json as _json
+    from ..auth import user_admin
+    with db.session() as s:
+        page = user_admin.audit_page(s, actor=args.actor, action=args.action, object_type=args.object_type,
+                                     object_id=args.object_id, before=args.before, limit=args.limit)
+    if args.json:
+        print(_json.dumps(page, indent=2))
+        return 0
+    if not page["entries"]:
+        print("No entries.")
+        return 0
+    for e in page["entries"]:
+        obj = f"{e['object_type']}/{e['object_id']}" if e["object_type"] else "-"
+        detail = _json.dumps(e["detail"], separators=(",", ":")) if e["detail"] else ""
+        print(f"{e['id']:>7}  {(e['at'] or '')[:19]}  {e['actor']:<28.28}  {e['action']:<26}  {obj}  {detail}")
+    if page["next_before"] is not None:
+        print()
+        print(f"More: --before {page['next_before']}")
     return 0
 
 
@@ -417,11 +464,38 @@ def main(argv=None) -> int:
     p.add_argument("role", choices=["user", "moderator", "admin"])
     p.set_defaults(func=cmd_set_role)
 
-    p = subparsers.add_parser("set-status", help="activate or suspend an account")
+    p = subparsers.add_parser("set-status", help="activate, put on probation or suspend an account")
     p.add_argument("handle")
     p.add_argument("status", choices=["active", "probation", "suspended"])
-    p.add_argument("--reason", default=None)
+    p.add_argument("--reason", default=None, help="why (required for a suspension: its owner is told)")
     p.set_defaults(func=cmd_set_status)
+
+    p = subparsers.add_parser("set-caps", help="override an account's capabilities (cap=on|off|default)")
+    p.add_argument("handle")
+    p.add_argument("caps", nargs="+", metavar="CAP=on|off|default")
+    p.set_defaults(func=cmd_set_caps)
+
+    p = subparsers.add_parser("set-limits", help="change an account's limits")
+    p.add_argument("handle")
+    p.add_argument("--invites", type=int, default=None, help="invitations it may have outstanding")
+    p.add_argument("--games", type=int, default=None, help="lobby games it may run at once")
+    p.add_argument("--seats", type=int, default=None, help="seats per game (0: the ruleset's maximum)")
+    p.set_defaults(func=cmd_set_limits)
+
+    p = subparsers.add_parser("set-trust", help="set an account's trust tier")
+    p.add_argument("handle")
+    p.add_argument("tier", choices=["new", "provisional", "trusted", "quarantined"])
+    p.set_defaults(func=cmd_set_trust)
+
+    p = subparsers.add_parser("audit", help="read the audit log, newest first")
+    p.add_argument("--actor", default=None, help="an account's handle or id")
+    p.add_argument("--action", default=None, help="an action, or a prefix ending in * (user.*)")
+    p.add_argument("--object-type", dest="object_type", default=None)
+    p.add_argument("--object-id", dest="object_id", default=None)
+    p.add_argument("--before", type=int, default=None, help="entries before this id (the next page)")
+    p.add_argument("--limit", type=int, default=50, help="at most 200")
+    p.add_argument("--json", action="store_true", help="print the page as JSON")
+    p.set_defaults(func=cmd_audit)
 
     p = subparsers.add_parser("reset-password", help="set an account's password")
     p.add_argument("handle")

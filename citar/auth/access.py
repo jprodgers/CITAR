@@ -490,8 +490,9 @@ def revoke(session, obj, user: User, *, actor: User, permission: Optional[str] =
     return len(rows)
 
 
-def shared_with(session, obj) -> list:
-    """Who has explicit access, for the sharing dialog."""
+def shared_with(session, obj, viewer: Optional[User]) -> list:
+    """Who has explicit access, for the sharing dialog, each account as ``viewer`` (whoever manages the
+    object) may see it (``User.public``: a hidden display name or avatar stays hidden; the handle shows)."""
     object_type = object_type_of(obj)
     rows = session.scalars(select(AclEntry).where(AclEntry.object_type == object_type,
                                                   AclEntry.object_id == obj.id))
@@ -500,7 +501,7 @@ def shared_with(session, obj) -> list:
         user = session.get(User, row.user_id)
         if user is None:
             continue
-        entry = out.setdefault(user.id, {"user": user.public(), "permissions": []})
+        entry = out.setdefault(user.id, {"user": user.public(viewer), "permissions": []})
         entry["permissions"].append(row.permission)
     return list(out.values())
 
@@ -511,16 +512,24 @@ _PAGES = {"game": "game", "server_group": "servers", "report": "reports", "bench
           "scenario": "scenarios", "map": "editor", "bot_profile": "bots"}
 
 
-def share_url(obj, base: str) -> Optional[str]:
-    """The link to hand out (P3.2.3): for `link` it carries the key; for `server` and `global` it is
-    the object's plain address, which members (or everyone) open without one. None below `link`.
+def page_path(obj) -> Optional[str]:
+    """Where an object opens in the web client (``#/<page>/<id>``), or None for a kind with no page of its own.
     An owned item is addressed by its id on disk (its `ref`), as its page names it."""
-    visibility = getattr(obj, "visibility", PRIVATE)
-    if visibility not in (LINK, SERVER, GLOBAL):
-        return None
     page = _PAGES.get(object_type_of(obj), "")
     if not page:
         return None
     ident = obj.ref if isinstance(obj, OwnedItem) else obj.id
-    url = f"{base.rstrip('/')}/#/{page}/{ident}"
+    return f"#/{page}/{ident}"
+
+
+def share_url(obj, base: str) -> Optional[str]:
+    """The link to hand out (P3.2.3): for `link` it carries the key; for `server` and `global` it is
+    the object's plain address, which members (or everyone) open without one. None below `link`."""
+    visibility = getattr(obj, "visibility", PRIVATE)
+    if visibility not in (LINK, SERVER, GLOBAL):
+        return None
+    path = page_path(obj)
+    if not path:
+        return None
+    url = f"{base.rstrip('/')}/{path}"
     return f"{url}?k={obj.slug}" if visibility == LINK else url

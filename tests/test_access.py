@@ -355,7 +355,7 @@ class AccessModel(unittest.TestCase):
             owner = s.get(User, self.owner_id)
             perms = access.on(s, owner, row)          # snapshot taken while still private
             access.set_visibility(s, row, "link", actor=owner)
-            payload = ownership.to_client(row, perms, base_url="https://citar.test")
+            payload = ownership.to_client(row, perms, owner, base_url="https://citar.test")
         self.assertEqual(payload["visibility"], "link")
         self.assertIn("share_url", payload)
 
@@ -444,9 +444,9 @@ class UserPublic(unittest.TestCase):
     def test_public_has_no_role_or_status_and_account_has_both(self):
         with db.session() as s:
             user = _user(s, "quiet", role="moderator")
-            public = user.public()
+            public = user.public(user)
             account = user.account()
-        self.assertEqual(set(public), {"id", "handle", "display_name", "avatar_url"})
+        self.assertEqual(set(public), {"id", "handle", "display_name", "avatar"})
         self.assertEqual((account["role"], account["status"]), ("moderator", "active"))
         self.assertEqual(public, {k: v for k, v in account.items() if k in public})
 
@@ -471,7 +471,7 @@ class UserPublic(unittest.TestCase):
             s.add(row)
             s.flush()
             access.grant(s, row, mod, access.VIEW, actor=owner)
-            entry = access.shared_with(s, row)[0]
+            entry = access.shared_with(s, row, owner)[0]
         self.assertNotIn("role", entry["user"])
         self.assertNotIn("status", entry["user"])
 

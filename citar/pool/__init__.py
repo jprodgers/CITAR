@@ -174,7 +174,7 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
         "enabled": server.enabled,
         "max_concurrent": server.max_concurrent,
         "group_id": server.group_id,
-        "owner": owner.public() if owner else None,
+        "owner": owner.public(viewer) if owner else None,
         "is_mine": bool(viewer and server.owner_id == viewer.id),
         "can_manage": access.MANAGE in perms,
     }
@@ -336,7 +336,7 @@ def grant_to_client(session, grant: AccessGrant, viewer: Optional[User]) -> dict
         "id": grant.id,
         "group_id": grant.group_id,
         "subject_type": grant.subject_type,
-        "subject": subject.public() if subject else None,
+        "subject": subject.public(viewer) if subject else None,
         "purposes": grant.purposes or [],
         "purpose_label": (", ".join(admission.PURPOSE_LABELS.get(p, p) for p in grant.purposes)
                           if grant.purposes else "any kind of work"),

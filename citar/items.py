@@ -313,13 +313,14 @@ def visibility_of(session, kind: str, ref: str) -> str:
     return row.visibility if row is not None else access.PRIVATE
 
 
-def client(session, row: OwnedItem, perms: access.Access) -> dict:
-    """An item's sharing as the browser shows it: its owner, visibility, the caller's permissions; for whoever
-    manages it, its share link, who it is shared with and its last unpublish."""
+def client(session, row: OwnedItem, perms: access.Access, viewer: Optional[User]) -> dict:
+    """An item's sharing as the browser shows it to ``viewer``: its owner (as the viewer may see the account,
+    ``User.public``), visibility, the caller's permissions; for whoever manages it, its share link, who it is shared
+    with and its last unpublish."""
     from . import settings
     owner = session.get(User, row.owner_id) if row.owner_id else None
     out = {"kind": row.kind, "ref": row.ref, "id": row.id, "name": row.name, "visibility": row.visibility,
-           "owner": owner.public() if owner is not None else None, "system": row.owner_id is None,
+           "owner": owner.public(viewer) if owner is not None else None, "system": row.owner_id is None,
            "created_at": row.created_at.isoformat() if row.created_at else None, **perms.client()}
     if access.MANAGE in perms:
         base = settings.get().public_origin
@@ -329,7 +330,7 @@ def client(session, row: OwnedItem, perms: access.Access) -> dict:
         page = public_url(row, base)
         if page:
             out["public_url"] = page
-        out["shared_with"] = access.shared_with(session, row)
+        out["shared_with"] = access.shared_with(session, row, viewer)
         out["unpublished"] = access.last_unpublished(session, row, perms.viewer_id)
     return out
 
