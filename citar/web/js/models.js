@@ -38,7 +38,15 @@ function drawBoard(card, data, refresh) {
     el("span", { class: "muted" }, `Overall = benchmark performance ${pct(w.benchmark)} + reliability ${pct(w.reliability)} + speed ${pct(w.speed)}. ` +
       "Change the weights under Benchmarks → Quiet hours & scoring."),
     el("span", { class: "grow" }), el("button", { class: "small", onclick: refresh }, "Refresh")));
-  if (!data.models.length) { card.appendChild(el("p", { class: "muted" }, "No AI games recorded yet. Run a benchmark suite to score models.")); return; }
+  // a member's figures: their own games and the ones other members pool (the server says what that held)
+  if (data.scope) card.appendChild(el("p", { class: "muted small" }, `From ${data.scope.description}. Other members' games count ` +
+    `only where at least ${data.scope.min_contributors} accounts are behind a model, and are never named.`));
+  const withheld = (data.withheld || []).map((w) => el("li", {}, el("b", {}, w.model), ": ", w.reason));
+  if (!data.models.length) {
+    card.appendChild(el("p", { class: "muted" }, "No AI games recorded yet. Run a benchmark suite to score models."));
+    if (withheld.length) card.appendChild(el("ul", { class: "muted small" }, ...withheld));
+    return;
+  }
   const help = {
     overall: "Weighted mix of the three scores. Needs at least one benchmark game.",
     benchmark: "Benchmark games against scripted bots: 100 = win, 0 = eliminated, otherwise the model's share of the score against the strongest bot (50 = level). Weighted by turns played, so long games count most.",
@@ -56,7 +64,8 @@ function drawBoard(card, data, refresh) {
       el("td", {}, r.overall != null ? i + 1 : ""),
       el("td", {}, el("b", {}, r.model), r.overall == null ? el("div", { class: "muted small" }, r.benchmark_games ? "needs AI turn metrics" : "no benchmark games yet") : null),
       scoreCell(r.overall, help.overall), scoreCell(r.benchmark, help.benchmark), scoreCell(r.reliability, help.reliability), scoreCell(r.speed, help.speed),
-      el("td", {}, `${r.benchmark_games}`, r.benchmark_finished ? el("span", { class: "muted" }, ` (${r.benchmark_finished} finished${r.wins ? `, ${r.wins} won` : ""})`) : null),
+      el("td", {}, `${r.benchmark_games}`, r.benchmark_finished ? el("span", { class: "muted" }, ` (${r.benchmark_finished} finished${r.wins ? `, ${r.wins} won` : ""})`) : null,
+        r.pooled_games ? el("div", { class: "muted small" }, `${r.pooled_games} pooled`) : null),
       el("td", {}, r.benchmark_turns.toLocaleString(), r.benchmark_turns && r.benchmark_turns < 50 ? el("div", { class: "warn small" }, "provisional — short games") : null),
       el("td", {}, m ? secs(m.avg_turn_s) : "–"),
       el("td", {}, r.games.length ? (expanded ? "▾" : "▸") : "")));
@@ -72,4 +81,6 @@ function drawBoard(card, data, refresh) {
     }
   });
   card.appendChild(el("div", { style: { overflowX: "auto" } }, table));
+  if (withheld.length) card.appendChild(el("details", {}, el("summary", { class: "muted" }, "Not enough pooled data yet"),
+    el("ul", { class: "muted small" }, ...withheld)));
 }
