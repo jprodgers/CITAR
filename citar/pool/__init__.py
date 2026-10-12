@@ -5,11 +5,17 @@
     admission   may this person run this work on that server, right now
     (here)      servers, groups and grants — ownership and the CRUD around it
 
-`config/servers.json` becomes a per-owner table. The file stays supported as an import and export
-format, and the rich per-server configuration — hardware, power draw, component depreciation, cost
-periods, model catalog, load profiles — is kept whole in `Server.config` rather than normalized,
-because `citar/servers.py` already validates, prices and renders exactly that shape. Splitting it
-into columns would mean rewriting 1,200 lines of working code to enable queries nobody needs.
+Every machine is a row (design/phase3-features.md P3.2.8): the host, the site's online APIs and the machines on the
+LAN an administrator registers (``reach = direct``: CITAR dials them), and the members' machines behind the CITAR
+helper (``reach = worker``). ``config/servers.json``, the registry of CITAR before 0.1.6, is imported once under its
+own ids (``import_registry``, run by ``citar.pool.registry_import``), and the rich per-server configuration —
+hardware, power draw, component depreciation, cost periods, model catalog, load profiles — is kept whole in
+`Server.config` rather than normalized, because `citar/servers.py` already validates, prices and renders exactly that
+shape. Splitting it into columns would mean rewriting 1,200 lines of working code to enable queries nobody needs.
+
+Who may make a machine CITAR dials: an administrator, or anyone for the dry-run provider, which dials nothing
+(``check_reach``). A direct machine is a URL the server requests; a member naming one could make the server reach
+addresses on its own network.
 """
 from __future__ import annotations
 
@@ -30,6 +36,23 @@ __all__ = ["admission", "budgets", "windows", "PoolError"]
 
 class PoolError(ValueError):
     """A problem the person can fix. Safe to show."""
+
+
+class ReachRefused(PoolError):
+    """A member asked for a machine CITAR would dial (``reach = direct``) with a provider that dials something: only
+    an administrator may (P3.2.8). The routes answer 403 with the reason."""
+
+
+def check_reach(actor: Optional[User], reach: str, provider: str) -> None:
+    """Refuse a machine CITAR dials unless ``actor`` is an administrator in good standing or its provider is the dry
+    run, which dials nothing. A helper machine (``worker``) is anybody's to register: the helper dials out to us."""
+    if reach != "direct" or (provider or "").lower() == "dryrun":
+        return
+    if actor is not None and actor.role == "admin" and actor.status in ("active", "probation"):
+        return
+    raise ReachRefused("Only an administrator can add a machine the CITAR server connects to itself: it would make "
+                       "the server request an address on its own network. Register it as a helper machine (run the "
+                       "CITAR helper on it), or use the dry-run provider.")
 
 
 # ---------------------------------------------------------------------------- groups
@@ -83,20 +106,17 @@ def create_server(session, owner: User, config: dict, *, group_id: Optional[str]
 
     if reach not in ("worker", "direct"):
         raise PoolError("reach is 'worker' or 'direct'.")
+    check_reach(owner, reach, (normalized.get("connection") or {}).get("provider") or "none")
     if group_id:
         group = session.get(ServerGroup, group_id)
         if group is None or group.owner_id != owner.id:
             raise PoolError("That server group is not yours.")
 
-    server = Server(
-        owner_id=owner.id, group_id=group_id,
-        name=(normalized.get("name") or "Unnamed server")[:120],
-        kind=normalized.get("kind") or "owned",
-        provider=(normalized.get("connection") or {}).get("provider") or "none",
-        config=normalized, reach=reach,
-        max_concurrent=max(1, int((normalized.get("connection") or {}).get("max_parallel") or 1)))
+    server = Server(owner_id=owner.id, group_id=group_id, reach=reach)
+    registry.apply_row(server, normalized)
     session.add(server)
     session.flush()
+    server.config = {**(server.config or {}), "id": server.id}
     audit.record(session, "server.created", actor=owner, object_type="server", object_id=server.id,
                  name=server.name, kind=server.kind, provider=server.provider, reach=reach)
     return server
@@ -115,13 +135,10 @@ def update_server(session, actor: User, server: Server, config: dict, *,
 
     # The config dict carries an id of its own; the row's primary key is authoritative.
     normalized["id"] = server.id
-    server.config = normalized
-    server.name = (normalized.get("name") or server.name)[:120]
-    server.kind = normalized.get("kind") or server.kind
-    server.provider = (normalized.get("connection") or {}).get("provider") or server.provider
-    server.max_concurrent = max(1, int((normalized.get("connection") or {}).get("max_parallel") or 1))
-    if reach in ("worker", "direct"):
-        server.reach = reach
+    new_reach = reach if reach in ("worker", "direct") else (server.reach or "worker")
+    check_reach(actor, new_reach, (normalized.get("connection") or {}).get("provider") or "none")
+    registry.apply_row(server, normalized)
+    server.reach = new_reach
     if group_id != "__keep__":
         if group_id:
             group = session.get(ServerGroup, group_id)
@@ -196,7 +213,9 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
     base["restricted_until"] = seats.clock_text(view, seats.restricted(view))
     if access.MANAGE in perms:
         try:
-            base["config"] = registry.public(config)
+            base["config"] = registry.public(registry.find(server.id)
+                                             or registry.normalize_server({**config, "id": server.id,
+                                                                           "name": server.name, "kind": server.kind}))
             base["config"]["restricted_until"] = base["restricted_until"]
         except Exception:
             # Stored configs can predate a registry change; showing the raw dict to its owner beats
@@ -352,45 +371,61 @@ def grant_to_client(session, grant: AccessGrant, viewer: Optional[User]) -> dict
     }
 
 
-# ---------------------------------------------------------------------------- migration
+# ---------------------------------------------------------------------------- the registry's import
 
-def import_registry(session, owner: User, *, registry_data: Optional[dict] = None) -> dict:
-    """Bring `config/servers.json` into the database as `owner`'s servers.
-
-    Idempotent: a server already imported (matched on its registry id) is left alone, so running
-    this twice does not duplicate anybody's hardware.
+def import_registry(session, owner: Optional[User], *, registry_data: dict) -> dict:
+    """Bring a registry (``config/servers.json``'s dict, or ``servers.bootstrap()``'s on a first run) into the
+    database: every server a row **under its own id** (so seats, suites, saved games, the usage ledger and the keystore
+    entries keep resolving), in no group (sharing one is its owner's later choice), owned by ``owner`` (the first
+    administrator; None leaves them to administrators), dialled by CITAR (``reach = direct``), the registry's host
+    the row with ``is_host``, and the host and online APIs ``server_resource`` (the site provides them). Each row's
+    slots are the entry's ``connection.max_parallel``. The electricity plans join ``settings_kv`` (by id: a plan
+    already there is kept), and the currency is set when none is. Idempotent: an id that is already a row is left
+    alone. Writes in ``session``; the caller commits. ``citar.pool.registry_import`` runs it once, behind its marker.
     """
+    from datetime import timedelta
+
     from .. import servers as registry
+    from ..db.models import Setting, now as _now
 
-    data = registry_data or registry.load()
-    existing = {s.config.get("id") for s in session.scalars(select(Server)) if s.config}
-    group = session.scalar(select(ServerGroup).where(
-        ServerGroup.owner_id == owner.id, ServerGroup.name == "Imported"))
+    existing = set(session.scalars(select(Server.id)))
+    host_taken = session.scalar(select(Server.id).where(Server.is_host.is_(True))) is not None
+    host_id = registry_data.get("host_server_id")
     created, skipped = [], []
-
-    for entry in data.get("servers") or []:
-        if entry.get("id") in existing:
-            skipped.append(entry.get("name"))
+    stamp = _now()
+    for i, entry in enumerate(registry_data.get("servers") or []):
+        if not isinstance(entry, dict):
             continue
-        if group is None:
-            group = create_group(session, owner, name="Imported",
-                                 description="Servers migrated from config/servers.json.")
-        server = Server(
-            owner_id=owner.id, group_id=group.id,
-            name=(entry.get("name") or "Unnamed")[:120],
-            kind=entry.get("kind") or "owned",
-            provider=(entry.get("connection") or {}).get("provider") or "none",
-            config=entry,
-            # Everything in the old single-user registry was reached directly over the LAN. That is
-            # still right for the CITAR host itself; anything else should move to a worker.
-            reach="direct",
-            max_concurrent=max(1, int((entry.get("connection") or {}).get("max_parallel") or 1)))
-        session.add(server)
-        created.append(entry.get("name"))
-
+        try:
+            sv = registry.normalize_server(entry)
+        except (registry.ServerError, ValueError, TypeError) as exc:
+            raise PoolError(f"Server {entry.get('id')!r} in the registry does not read: {exc}") from exc
+        sv["updated"] = entry.get("updated") or sv["updated"]
+        if sv["id"] in existing:
+            skipped.append(sv["id"])
+            continue
+        is_host = sv["id"] == host_id and not host_taken
+        row = Server(id=sv["id"], owner_id=owner.id if owner else None, group_id=None, reach="direct",
+                     is_host=is_host, server_resource=is_host or sv["kind"] == "api",
+                     created_at=stamp + timedelta(microseconds=i))
+        registry.apply_row(row, sv)
+        session.add(row)
+        existing.add(sv["id"])
+        host_taken = host_taken or is_host
+        created.append(sv["id"])
     session.flush()
-    if created:
-        audit.record(session, "pool.imported_registry", actor=owner, count=len(created),
-                     servers=created)
-    return {"imported": created, "already_present": skipped,
-            "group_id": group.id if group else None}
+
+    plans_row = session.get(Setting, registry.PLANS_KEY)
+    plans = list(((plans_row.value or {}).get("v") if plans_row else None) or [])
+    known = {p.get("id") for p in plans if isinstance(p, dict)}
+    added_plans = [registry.normalize_plan(p) for p in registry_data.get("electricity_plans") or []
+                   if isinstance(p, dict) and p.get("id") not in known]
+    if added_plans:
+        registry.save_plans(plans + added_plans, session=session)
+    currency_row = session.get(Setting, registry.CURRENCY_KEY)
+    if currency_row is None or not (currency_row.value or {}).get("v"):
+        registry.save_currency(registry_data.get("currency") or "USD", registry_data.get("currency_symbol") or "$",
+                               session=session)
+    session.flush()
+    return {"imported": created, "already_present": skipped, "electricity_plans": [p["id"] for p in added_plans],
+            "host_server_id": next((sid for sid in created if sid == host_id), None)}

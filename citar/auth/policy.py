@@ -88,6 +88,10 @@ DEFAULTS: dict = {
     "closed_message": "CITAR is currently invite-only.",
 }
 
+#: Rows of the same table that are no policy: the server registry's electricity plans and currency
+#: (``citar.servers.REGISTRY_KEYS``), which ``citar.servers`` reads and writes itself.
+NOT_POLICY = ("electricity_plans", "registry_currency")
+
 _lock = threading.RLock()
 _cache: dict = {}
 _loaded = False
@@ -103,6 +107,8 @@ def _load() -> dict:
         try:
             with db.session() as s:
                 for row in s.query(Setting).all():
+                    if row.key in NOT_POLICY:
+                        continue
                     values[row.key] = row.value.get("v") if isinstance(row.value, dict) else row.value
         except Exception:
             # First boot, before migrations have run. Defaults are correct until the table exists.

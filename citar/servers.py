@@ -1,5 +1,14 @@
-"""The server registry (config/servers.json): every machine or online service that can run a model for CITAR, with
-everything needed to use it and to cost it.
+"""The server registry: every machine or online service that can run a model for CITAR, with everything needed to use
+it and to cost it.
+
+Every machine is a row of the ``servers`` table (design/phase3-features.md P3.2.8). A row's ``config`` holds the
+``normalize_server()`` dict below, and ``reach`` says who dials it: ``direct``, CITAR itself (the host's LM Studio, an
+online API, a machine on the LAN an administrator registered); ``worker``, the CITAR helper running on that machine,
+which dialled in (``citar.server.workers``). ``Server.max_concurrent`` is the machine's one number of LLM slots. The
+electricity plans and the currency live in ``settings_kv``; the host is the row with ``is_host``. ``config/servers.json``
+is read once, by the import (``citar.pool.registry_import``), and renamed. The functions here keep the shapes they had
+when the registry was that file: ``load()`` is the registry dict, built from the rows and cached (re-read after this
+process commits a change to a machine, and at most every ``CACHE_SECONDS`` otherwise).
 
 A server has
     connection        how to reach it: provider (lmstudio | ollama | openai_compatible | anthropic | dryrun | none),
@@ -16,21 +25,37 @@ A server has
 
 Electricity plans are shared (both home PCs are on the same bill). One server is the CITAR host: the machine running
 this program, whose CPU runs the game engine and the scripted bots.
+
+Quiet hours are read on this computer's clock for a machine CITAR dials, and on its owner's for a helper machine
+(``citar.pool.seats.restricted``), as they were when the two lived in different lists.
 """
 from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
+import itertools
 import json
+import logging
 import re
 import secrets
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
+
+from sqlalchemy import event
+from sqlalchemy.orm import Session as _OrmSession
+
 from . import paths
+from .db.models import Server as _ServerRow, Setting as _Setting, User as _User
+
+log = logging.getLogger("citar.servers")
 
 CONFIG_DIR = paths.config_path()
+#: The registry file of CITAR before 0.1.6: imported once into the servers table, then renamed
+#: (``citar.pool.registry_import``). Nothing else reads it.
 PATH = CONFIG_DIR / "servers.json"
 PROVIDERS = ("lmstudio", "ollama", "openai_compatible", "anthropic", "dryrun", "none")
 KINDS = ("owned", "leased", "api", "test")
@@ -50,8 +75,24 @@ ANTHROPIC_PRICES = {
     "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1},
 }
 
+#: ``settings_kv`` keys the registry keeps beside its machines: the electricity plans, and the currency.
+PLANS_KEY = "electricity_plans"
+CURRENCY_KEY = "registry_currency"
+REGISTRY_KEYS = (PLANS_KEY, CURRENCY_KEY)
+#: Who dials a machine (``Server.reach``): CITAR, or the helper running on it.
+REACHES = ("direct", "worker")
+#: How long a read of the machines serves when this process changed none: another process's change (a command-line
+#: tool, the server seen from one) shows within this.
+CACHE_SECONDS = 5.0
+
 _lock = threading.RLock()
-_cache: dict = {"mtime": None, "data": None}
+#: Held across a read-modify-write of the registry's settings (the plans), never while reading the cache.
+_write_lock = threading.RLock()
+#: The registry as last read: {"key": (database epoch, generation), "at": monotonic time, "data": registry dict,
+#: "meta": {server id: what the row says beyond its config}}.
+_cache: dict = {"key": None, "at": 0.0, "data": None, "meta": {}}
+#: Bumped after a commit in this process that changed a machine, the registry's settings or an owner's time zone.
+_generation = 0
 
 
 class ServerError(ValueError):
@@ -399,98 +440,266 @@ def normalize_plan(d: dict) -> dict:
     return p
 
 
-# ----------------------------------------------------------------------------- storage
-def _read() -> dict:
-    """Read the registry from disk, returning an empty one if there is no file yet."""
-    if not PATH.exists():
-        return {}
-    for _ in range(20):
-        try:
-            return json.loads(PATH.read_text(encoding="utf-8"))
-        except PermissionError:
-            time.sleep(0.1)
-        except ValueError:
-            break
-    return {}
+# ----------------------------------------------------------------------------- storage: the servers table
+def _stable_ids(cfg: dict) -> dict:
+    """``cfg`` with an id on every model, load profile and component that has none, made from what it is rather than
+    drawn at random: a helper's hello stores its models as bare keys, and ``normalize_server`` would give them new ids
+    at every read, so a seat or a suite naming one by id would lose it."""
+    def digest(prefix: str, *parts) -> str:
+        return prefix + hashlib.sha1("/".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:8]
+    out = dict(cfg)
+    models = []
+    for m in cfg.get("models") or []:
+        if isinstance(m, str):
+            m = {"key": m}
+        if not isinstance(m, dict):
+            continue
+        m = dict(m)
+        key = str(m.get("key") or m.get("model") or "")
+        m["id"] = m.get("id") or digest("m_", key)
+        if isinstance(m.get("profiles"), list):
+            m["profiles"] = [dict(p, id=p.get("id") or digest("p_", key, i)) if isinstance(p, dict) else p
+                             for i, p in enumerate(m["profiles"])]
+        models.append(m)
+    out["models"] = models
+    if isinstance(cfg.get("components"), list):
+        out["components"] = [dict(c, id=c.get("id") or digest("c_", c.get("name"), i)) if isinstance(c, dict) else c
+                             for i, c in enumerate(cfg["components"])]
+    return out
+
+
+def stored_config(sv: dict) -> dict:
+    """What a row's ``config`` keeps of a normalized server: everything but its LLM slots, which are the row's own
+    ``max_concurrent`` (the one number, P3.2.8; ``normalize_server`` still reads ``connection.max_parallel`` as its
+    alias, and ``load()`` puts the row's number there)."""
+    out = copy.deepcopy(sv)
+    (out.get("connection") or {}).pop("max_parallel", None)
+    return out
+
+
+def _row_registry(row, cfg: dict) -> dict:
+    """A row as a registry server: its config through ``normalize_server``, under the row's id, name and kind, with
+    the row's slots as ``connection.max_parallel``. A helper machine's connection is the helper's to make: it carries
+    no address or key here, so nothing that dials what a server dict names (detection, model loading) can reach the
+    host's LM Studio for it."""
+    cfg = _stable_ids(cfg)
+    conn = dict(cfg.get("connection") or {})
+    conn["max_parallel"] = row.max_concurrent or 1
+    sv = normalize_server({**cfg, "id": row.id, "name": row.name, "kind": row.kind, "connection": conn})
+    sv["updated"] = cfg.get("updated") or (row.updated_at.timestamp() if row.updated_at else sv["updated"])
+    if (row.reach or "worker") == "worker":
+        sv["connection"].update(base_url="", manage_loading=False, key={"backend": "none", "env": ""})
+    return sv
+
+
+def _offline_engine():
+    """An engine on the server's database for a process that has not opened one (a command-line tool reading the
+    machines, ``citar lab`` say), or None: only when that database already exists with this version's tables. It is
+    only read: a tool never creates, migrates or switches a database to WAL (that is the server's start's business),
+    and the process's own ``db`` stays unopened, so nothing else in it starts writing there."""
+    from sqlalchemy import create_engine, inspect
+    from . import settings
+    url = settings.get().db_url
+    with _lock:
+        cached = _offline.get(url)
+    if cached is not None:
+        return cached
+    try:
+        if url.startswith("sqlite"):
+            file = url.split("///", 1)[-1]
+            if not file or file == ":memory:" or not Path(file).exists():
+                return None
+            engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 10})
+        else:
+            engine = create_engine(url, pool_pre_ping=True)
+        insp = inspect(engine)
+        if not insp.has_table("servers") or "is_host" not in {c["name"] for c in insp.get_columns("servers")}:
+            engine.dispose()
+            return None
+    except Exception:
+        log.warning("could not open the server's database to read its machines", exc_info=True)
+        return None
+    with _lock:
+        _offline[url] = engine
+    return engine
+
+
+_offline: dict = {}
+
+
+@contextlib.contextmanager
+def _reading():
+    """A database session to read the machines in: the process's own, or the offline reader's (``_offline_engine``);
+    None where there is no database to read (a tool on a computer with no server)."""
+    from . import db
+    if db.configured():
+        with db.session() as s:
+            yield s
+        return
+    engine = _offline_engine()
+    if engine is None:
+        yield None
+        return
+    with _OrmSession(engine) as s:
+        yield s
+
+
+def _read() -> tuple:
+    """The registry dict and each row's facts beyond its config, read from the database."""
+    from sqlalchemy import select
+    reg = empty_registry()
+    reg["aliases"] = {}
+    meta: dict = {}
+    with _reading() as s:
+        if s is None:
+            return reg, meta
+        plans = s.get(_Setting, PLANS_KEY)
+        currency = s.get(_Setting, CURRENCY_KEY)
+        rows = list(s.scalars(select(_ServerRow).order_by(_ServerRow.created_at, _ServerRow.id)))
+        owners = {r.owner_id for r in rows if r.owner_id}
+        zones = {u.id: u.tz for u in s.scalars(select(_User).where(_User.id.in_(owners)))} if owners else {}
+        for p in _setting_value(plans) or []:
+            if isinstance(p, dict):
+                reg["electricity_plans"].append(normalize_plan(p))
+        cur = _setting_value(currency) or {}
+        if isinstance(cur, dict):
+            reg["currency"] = str(cur.get("currency") or reg["currency"])
+            reg["currency_symbol"] = str(cur.get("currency_symbol") or reg["currency_symbol"])
+        for row in rows:
+            cfg = dict(row.config or {})
+            try:
+                sv = _row_registry(row, cfg)
+            except Exception:
+                log.warning("machine %s has a configuration that does not read; it is left out", row.id, exc_info=True)
+                continue
+            reg["servers"].append(sv)
+            if row.is_host and not reg["host_server_id"]:
+                reg["host_server_id"] = row.id
+            for old in cfg.get("former_ids") or []:
+                if isinstance(old, str) and old != row.id:
+                    reg["aliases"].setdefault(old, row.id)
+            meta[row.id] = {"id": row.id, "name": row.name, "kind": row.kind, "provider": row.provider,
+                            "reach": row.reach or "worker", "enabled": bool(row.enabled),
+                            "owner_id": row.owner_id, "owner_tz": zones.get(row.owner_id) or "UTC",
+                            "group_id": row.group_id, "is_host": bool(row.is_host),
+                            "server_resource": bool(row.server_resource), "max_concurrent": row.max_concurrent or 1,
+                            "config": cfg}
+    known = {sv["id"] for sv in reg["servers"]}
+    reg["aliases"] = {old: new for old, new in reg["aliases"].items() if old not in known}
+    return reg, meta
+
+
+def _setting_value(row):
+    """A ``settings_kv`` row's value (stored as ``{"v": value}``, as the policy's are), or None."""
+    if row is None:
+        return None
+    return row.value.get("v") if isinstance(row.value, dict) else row.value
+
+
+def _state() -> tuple:
+    """The cached registry and row facts, read again when this process committed a change since, when the database
+    is another one, or after ``CACHE_SECONDS``."""
+    from . import db
+    with _lock:
+        key = (db.epoch(), _generation)
+        if _cache["data"] is not None and _cache["key"] == key and time.monotonic() - _cache["at"] < CACHE_SECONDS:
+            return _cache["data"], _cache["meta"]
+    try:
+        data, meta = _read()
+    except Exception:
+        # a database without the tables yet (a test's, before create_all) or one that does not answer: no machine is
+        # usable, which every caller already handles; the next read tries again
+        log.debug("could not read the machines", exc_info=True)
+        return {**empty_registry(), "aliases": {}}, {}
+    with _lock:
+        _cache.update(key=key, at=time.monotonic(), data=data, meta=meta)
+    return data, meta
+
+
+def invalidate():
+    """Read the machines again at the next call (a change this process made outside an ORM session, or a test)."""
+    global _generation
+    with _lock:
+        _generation += 1
+
+
+def _touches_registry(session) -> bool:
+    """Whether a flush wrote a machine, the registry's settings, or an account the machines' quiet hours read."""
+    from sqlalchemy import inspect as _inspect
+    for obj in itertools.chain(session.new, session.dirty, session.deleted):
+        if isinstance(obj, _ServerRow):
+            return True
+        if isinstance(obj, _Setting) and obj.key in REGISTRY_KEYS:
+            return True
+        if isinstance(obj, _User) and (obj in session.deleted or _inspect(obj).attrs.tz.history.has_changes()):
+            return True
+    return False
+
+
+@event.listens_for(_OrmSession, "after_flush")
+def _flushed(session, _context):
+    """Remember that this transaction changed what the registry reads."""
+    if not session.info.get("citar_registry") and _touches_registry(session):
+        session.info["citar_registry"] = True
+
+
+@event.listens_for(_OrmSession, "after_commit")
+def _committed(session):
+    """A committed change to the machines: the next read sees it."""
+    if session.info.pop("citar_registry", False):
+        invalidate()
+
+
+@event.listens_for(_OrmSession, "after_rollback")
+def _rolled_back(session):
+    """Nothing changed after all."""
+    session.info.pop("citar_registry", None)
 
 
 def load() -> dict:
-    """The registry (cached until the file changes). Creates the default registry the first time."""
-    with _lock:
-        mtime = PATH.stat().st_mtime if PATH.exists() else None
-        if _cache["data"] is not None and _cache["mtime"] == mtime:
-            return _cache["data"]
-        raw = _read()
-        if not raw:
-            data = bootstrap()
-            save(data)
-            return data
-        data = empty_registry()
-        data.update({k: raw[k] for k in ("currency", "currency_symbol", "host_server_id") if k in raw})
-        data["electricity_plans"] = [normalize_plan(p) for p in raw.get("electricity_plans") or []]
-        data["servers"] = []
-        for s in raw.get("servers") or []:
-            sv = normalize_server(s)
-            sv["updated"] = s.get("updated") or sv["updated"]
-            data["servers"].append(sv)
-        _cache.update(mtime=mtime, data=data)
-        return data
-
-
-def save(data: dict):
-    """Write the registry atomically.
-
-    Atomic because the web page reads it while the lab writes it; a partial file would be read as a
-    registry with no servers in it.
-    """
-    from .fsutil import write_text
-    with _lock:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        write_text(PATH, json.dumps(data, indent=1))
-        _cache.update(mtime=PATH.stat().st_mtime, data=data)
+    """The registry: every machine (``servers``), the electricity plans, the currency and the host's id, as one dict
+    in the shape ``config/servers.json`` had. Shared and cached: copy it (``snapshot``) before changing anything."""
+    return _state()[0]
 
 
 def snapshot() -> dict:
-    """A deep copy of the registry, safe to modify before saving."""
+    """A deep copy of the registry, safe to modify."""
     return copy.deepcopy(load())
 
 
-def with_pooled(reg: Optional[dict] = None) -> dict:
-    """The registry plus every machine on the Servers page, for pricing and reports.
+def machine(server_id: Optional[str]) -> Optional[dict]:
+    """What a machine's row says beyond its configuration: ``reach``, ``enabled``, ``owner_id``, ``owner_tz``,
+    ``group_id``, ``is_host``, ``server_resource``, ``max_concurrent``, ``provider``, ``name``, ``kind`` and the stored
+    ``config`` as it is (a copy). None for no such machine."""
+    if not server_id:
+        return None
+    m = _state()[1].get(server_id)
+    return {**m, "config": copy.deepcopy(m["config"])} if m else None
 
-    Pooled machines keep their power figures, components and cost periods in the same shape as registry servers
-    (their stored config went through normalize_server), and refer to the registry's electricity plans. A machine
-    that was removed and registered again lists its old ids in ``former_ids``; ``aliases`` maps each to the
-    current id, so usage recorded under the old one is priced with the machine's current settings.
-    """
+
+def is_helper(server_id: Optional[str]) -> bool:
+    """Whether a machine is reached through the CITAR helper running on it (``reach = worker``): CITAR never dials
+    it, never drives an LM Studio for it and never reads a key for it."""
+    m = _state()[1].get(server_id or "")
+    return bool(m) and m["reach"] == "worker"
+
+
+def with_pooled(reg: Optional[dict] = None) -> dict:
+    """The registry for pricing and reports: since every machine is a row it is ``load()`` itself (a copy), whose
+    ``aliases`` map the old ids of a machine that was removed and registered again (its ``former_ids``) to its
+    current id, so usage recorded under the old one is priced with the machine's current settings."""
     reg = copy.deepcopy(reg or load())
     reg.setdefault("aliases", {})
-    known = {s["id"] for s in reg["servers"]}
-    from .pool import seats as pool_seats
-    for row in pool_seats.all_machines():
-        if row["id"] in known:
-            continue
-        try:
-            sv = normalize_server({**(row["config"] or {}), "id": row["id"], "name": row["name"],
-                                   "kind": row.get("kind") or "owned"})
-        except (ServerError, ValueError, TypeError):
-            continue
-        sv["pooled"] = True
-        reg["servers"].append(sv)
-        known.add(sv["id"])
-        for old in (row["config"] or {}).get("former_ids") or []:
-            if isinstance(old, str) and old not in known:
-                reg["aliases"][old] = sv["id"]
     return reg
 
 
 def list_servers() -> list[dict]:
-    """Every server in the registry."""
+    """Every machine."""
     return load()["servers"]
 
 
 def get(server_id: str) -> dict:
-    """One server by id, raising if it does not exist."""
+    """One machine by id, raising if it does not exist."""
     for sv in load()["servers"]:
         if sv["id"] == server_id:
             return sv
@@ -498,7 +707,7 @@ def get(server_id: str) -> dict:
 
 
 def find(server_id: Optional[str]) -> Optional[dict]:
-    """One server by id, or None."""
+    """One machine by id, or None."""
     try:
         return get(server_id) if server_id else None
     except ServerError:
@@ -506,7 +715,7 @@ def find(server_id: Optional[str]) -> Optional[dict]:
 
 
 def host() -> Optional[dict]:
-    """The server representing the machine CITAR itself runs on.
+    """The machine CITAR itself runs on (the row with ``is_host``).
 
     It matters for costing: that machine's CPU runs the engine, the bots and the lab, so a share of
     every game's cost is attributed to it rather than to whatever served the model.
@@ -514,77 +723,154 @@ def host() -> Optional[dict]:
     return find(load().get("host_server_id"))
 
 
-def upsert(data: dict) -> dict:
-    """Create or replace a server, validating it and its references first."""
-    with _lock:
-        reg = snapshot()
-        sv = normalize_server(data)
-        for plan_id in {p.get("electricity_plan_id") for p in sv["costs"]} - {None}:
-            if not any(pl["id"] == plan_id for pl in reg["electricity_plans"]):
-                raise ServerError(f"Unknown electricity plan '{plan_id}'.")
-        idx = next((i for i, s in enumerate(reg["servers"]) if s["id"] == sv["id"]), None)
-        if idx is None:
-            reg["servers"].append(sv)
+@contextlib.contextmanager
+def _writing(session=None):
+    """The session a change is made in: the caller's (committed with its own work), or one of its own."""
+    if session is not None:
+        yield session
+        return
+    from . import db
+    with db.session() as s:
+        yield s
+
+
+def _check_plans(sv: dict) -> None:
+    """Refuse cost periods that name an electricity plan the registry does not have."""
+    plans = {p["id"] for p in load()["electricity_plans"]}
+    for plan_id in {p.get("electricity_plan_id") for p in sv["costs"]} - {None}:
+        if plan_id not in plans:
+            raise ServerError(f"Unknown electricity plan '{plan_id}'.")
+
+
+def _set_host(s, server_id: Optional[str]) -> None:
+    """Make ``server_id`` the host (None: no host), the one row with ``is_host``."""
+    from sqlalchemy import select
+    for row in s.scalars(select(_ServerRow).where(_ServerRow.is_host.is_(True))):
+        if row.id != server_id:
+            row.is_host = False
+    if server_id:
+        row = s.get(_ServerRow, server_id)
+        if row is None:
+            raise ServerError("Unknown server.")
+        row.is_host = True
+
+
+def apply_row(row, sv: dict) -> None:
+    """Write a normalized server into its row: the configuration, and the columns that mirror it (name, kind,
+    provider) or replace a part of it (``max_concurrent``)."""
+    row.config = stored_config(sv)
+    row.name = (sv.get("name") or "Unnamed server")[:120]
+    row.kind = sv.get("kind") or "owned"
+    row.provider = (sv.get("connection") or {}).get("provider") or "none"
+    row.max_concurrent = max(1, int((sv.get("connection") or {}).get("max_parallel") or 1))
+
+
+def upsert(data: dict, *, actor=None, reach: Optional[str] = None, session=None) -> dict:
+    """Create or replace a machine, validating it and its references first. A new one is ``actor``'s (nobody's when
+    None: then administrators manage it), dialled by CITAR unless ``reach`` says otherwise; an existing one keeps its
+    owner, group and reach unless ``reach`` is given. ``data["is_host"]`` true makes it the host, false takes that
+    away from it. Whether ``actor`` may do this is the caller's to check (``citar.server.admin_api``). Written in
+    ``session`` when one is given (the caller commits), else committed here. Returns the normalized server."""
+    if reach is not None and reach not in REACHES:
+        raise ServerError("reach is 'direct' or 'worker'.")
+    sv = normalize_server(data)
+    _check_plans(sv)
+    with _writing(session) as s:
+        row = s.get(_ServerRow, sv["id"])
+        if row is None:
+            admin = actor is not None and getattr(actor, "role", None) == "admin"
+            row = _ServerRow(id=sv["id"], owner_id=getattr(actor, "id", None), reach=reach or "direct",
+                             server_resource=(actor is None or admin) and sv["kind"] == "api")
+            s.add(row)
         else:
-            sv["created"] = reg["servers"][idx].get("created") or sv["created"]
-            reg["servers"][idx] = sv
+            sv["created"] = (row.config or {}).get("created") or sv["created"]
+            if reach is not None:
+                row.reach = reach
+        apply_row(row, sv)
+        s.flush()
         if data.get("is_host"):
-            reg["host_server_id"] = sv["id"]
-        elif reg.get("host_server_id") == sv["id"] and data.get("is_host") is False:
-            reg["host_server_id"] = None
-        save(reg)
-        return sv
+            _set_host(s, row.id)
+            row.server_resource = True
+        elif data.get("is_host") is False and row.is_host:
+            row.is_host = False
+        s.flush()
+    return sv
 
 
-def delete(server_id: str):
-    """Remove a server."""
-    with _lock:
-        reg = snapshot()
-        reg["servers"] = [s for s in reg["servers"] if s["id"] != server_id]
-        if reg.get("host_server_id") == server_id:
-            reg["host_server_id"] = None
-        save(reg)
+def delete(server_id: str, *, session=None):
+    """Remove a machine (its worker tokens go with it). Dropping its helper's connection is the caller's, once this
+    is committed (``citar.server.workers.WorkerHub.drop``)."""
+    with _writing(session) as s:
+        row = s.get(_ServerRow, server_id)
+        if row is not None:
+            s.delete(row)
+            s.flush()
+
+
+def _settings_row(s, key: str):
+    """A registry ``settings_kv`` row, made when missing."""
+    row = s.get(_Setting, key)
+    if row is None:
+        row = _Setting(key=key, value={"v": None})
+        s.add(row)
+    return row
+
+
+def save_plans(plans: list, *, session=None) -> list:
+    """Replace the electricity plans (normalized)."""
+    plans = [normalize_plan(p) for p in plans]
+    with _writing(session) as s:
+        _settings_row(s, PLANS_KEY).value = {"v": plans}
+        s.flush()
+    return plans
+
+
+def save_currency(currency: str, symbol: str, *, session=None) -> dict:
+    """Set the registry's currency and its symbol."""
+    value = {"currency": str(currency or "USD")[:8].upper(), "currency_symbol": str(symbol or "$")[:4]}
+    with _writing(session) as s:
+        _settings_row(s, CURRENCY_KEY).value = {"v": value}
+        s.flush()
+    return value
 
 
 def upsert_plan(data: dict) -> dict:
     """Create or replace an electricity plan."""
-    with _lock:
-        reg = snapshot()
+    with _write_lock:
+        plans = copy.deepcopy(load()["electricity_plans"])
         p = normalize_plan(data)
-        idx = next((i for i, x in enumerate(reg["electricity_plans"]) if x["id"] == p["id"]), None)
+        idx = next((i for i, x in enumerate(plans) if x["id"] == p["id"]), None)
         if idx is None:
-            reg["electricity_plans"].append(p)
+            plans.append(p)
         else:
-            reg["electricity_plans"][idx] = p
-        save(reg)
+            plans[idx] = p
+        save_plans(plans)
         return p
 
 
 def delete_plan(plan_id: str):
-    """Remove an electricity plan."""
-    with _lock:
-        reg = snapshot()
+    """Remove an electricity plan that no machine's costs name."""
+    with _write_lock:
+        reg = load()
         users = [s["name"] for s in reg["servers"] if any(c.get("electricity_plan_id") == plan_id for c in s["costs"])]
         if users:
             raise ServerError(f"The plan is used by {', '.join(users)}.")
-        reg["electricity_plans"] = [p for p in reg["electricity_plans"] if p["id"] != plan_id]
-        save(reg)
+        save_plans([p for p in reg["electricity_plans"] if p["id"] != plan_id])
 
 
 def set_settings(patch: dict) -> dict:
     """Change registry-wide settings: currency, and which server is the host."""
-    with _lock:
-        reg = snapshot()
-        if "currency" in patch:
-            reg["currency"] = str(patch["currency"] or "USD")[:8].upper()
-        if "currency_symbol" in patch:
-            reg["currency_symbol"] = str(patch["currency_symbol"] or "$")[:4]
+    with _write_lock:
+        reg = load()
+        if "currency" in patch or "currency_symbol" in patch:
+            save_currency(patch.get("currency", reg["currency"]) if "currency" in patch else reg["currency"],
+                          patch.get("currency_symbol", reg["currency_symbol"]) if "currency_symbol" in patch
+                          else reg["currency_symbol"])
         if "host_server_id" in patch:
-            if patch["host_server_id"] and not any(s["id"] == patch["host_server_id"] for s in reg["servers"]):
-                raise ServerError("Unknown server.")
-            reg["host_server_id"] = patch["host_server_id"] or None
-        save(reg)
-        return reg
+            from . import db
+            with db.session() as s:
+                _set_host(s, patch["host_server_id"] or None)
+        return load()
 
 
 def plan(plan_id: Optional[str]) -> Optional[dict]:
@@ -636,14 +922,21 @@ def restricted(server: Optional[dict], when: Optional[datetime] = None) -> Optio
     return hit[1] if hit else None
 
 
-def restricted_at(server_id: Optional[str], when: Optional[datetime] = None) -> Optional[datetime]:
-    """The same, by server id: a server in this registry, or a machine on the Servers page (whose quiet hours
-    are its owner's wall clock - see citar.pool.seats.restricted)."""
-    sv = find(server_id)
-    if sv is not None or not server_id:
-        return restricted(sv, when)
+def _helper_view(server_id: Optional[str]) -> Optional[dict]:
+    """A helper machine as ``citar.pool.seats`` reads it (``lookup``), or None for any other id."""
     from .pool import seats as pool_seats
-    return pool_seats.restricted(pool_seats.lookup(server_id), when)
+    pooled = pool_seats.lookup(server_id)
+    return pooled if pooled is not None and pooled.get("reach") == "worker" else None
+
+
+def restricted_at(server_id: Optional[str], when: Optional[datetime] = None) -> Optional[datetime]:
+    """The same, by server id: on this computer's clock for a machine CITAR dials, on its owner's for a helper
+    machine (see citar.pool.seats.restricted)."""
+    pooled = _helper_view(server_id)
+    if pooled is not None:
+        from .pool import seats as pool_seats
+        return pool_seats.restricted(pooled, when)
+    return restricted(find(server_id), when)
 
 
 def restricted_now(server_id: Optional[str]) -> Optional[datetime]:
@@ -652,46 +945,51 @@ def restricted_now(server_id: Optional[str]) -> Optional[datetime]:
 
 
 def server_name(server_id: Optional[str]) -> str:
-    """A server's name, whichever list it is in (or its id)."""
+    """A machine's name (or its id)."""
     sv = find(server_id)
-    if sv is None and server_id:
-        from .pool import seats as pool_seats
-        sv = pool_seats.lookup(server_id)
     return sv["name"] if sv else (server_id or "server")
 
 
 def restricted_text(server_id: Optional[str], end: Optional[datetime]) -> str:
-    """A restriction's end as the server's owner reads it: this computer's clock for a registry server, the
-    owner's zone for a Servers-page machine."""
+    """A restriction's end as the machine's owner reads it: this computer's clock for a machine CITAR dials, the
+    owner's zone for a helper machine."""
     if end is None:
         return ""
-    if find(server_id) is None and server_id:
+    pooled = _helper_view(server_id)
+    if pooled is not None:
         from .pool import seats as pool_seats
-        pooled = pool_seats.lookup(server_id)
-        if pooled is not None:
-            return pool_seats.clock_text(pooled, end)
+        return pool_seats.clock_text(pooled, end)
     return end.strftime("%H:%M")
 
 
 def restriction_config(server_id: Optional[str]) -> dict:
-    """A server's restricted-hours settings, whichever list it is in."""
-    sv = find(server_id)
-    if sv is None and server_id:
-        from .pool import seats as pool_seats
-        pooled = pool_seats.lookup(server_id)
-        return ((pooled or {}).get("config") or {}).get("restricted_hours") or {}
-    return (sv or {}).get("restricted_hours") or {}
+    """A machine's restricted-hours settings (a helper machine's as its owner saved them)."""
+    pooled = _helper_view(server_id)
+    if pooled is not None:
+        return (pooled.get("config") or {}).get("restricted_hours") or {}
+    return (find(server_id) or {}).get("restricted_hours") or {}
 
 
 def restriction_status() -> list[dict]:
-    """Servers currently in restricted hours (for the page header), including Servers-page machines."""
-    out = []
+    """Machines in their restricted hours right now (for the page header): those CITAR dials, then helper machines."""
+    from .pool import seats as pool_seats
+    out, helpers = [], []
     for sv in list_servers():
+        if is_helper(sv["id"]):
+            helpers.append(sv["id"])
+            continue
         end = restricted(sv)
         if end:
             out.append({"id": sv["id"], "name": sv["name"], "until": end.strftime("%H:%M"), "until_ts": end.timestamp()})
-    from .pool import seats as pool_seats
-    return out + pool_seats.restriction_status()
+    for sid in helpers:
+        pooled = _helper_view(sid)
+        if not (((pooled or {}).get("config") or {}).get("restricted_hours") or {}).get("enabled"):
+            continue
+        end = pool_seats.restricted(pooled)
+        if end:
+            out.append({"id": sid, "name": pooled["name"], "until": pool_seats.clock_text(pooled, end),
+                        "until_ts": end.timestamp()})
+    return out
 
 
 # ----------------------------------------------------------------------------- models & seats
@@ -721,15 +1019,13 @@ def display_name(server: Optional[dict], model: Optional[dict], key: str = "") -
 
 def seat_ref(server_id: str, model_ref: str, profile_id: Optional[str] = None, **extra) -> dict:
     """The small, saveable description of an LLM seat: which server, model and load profile, plus seat overrides."""
-    if find(server_id) is None:
-        from .pool import seats as pool_seats
-        pooled = pool_seats.lookup(server_id)
-        if pooled is not None:
-            # a machine from the Servers page: the model is named by its key, and there are no load profiles
-            d = {"server_id": pooled["id"], "model_id": model_ref, "model": model_ref, "profile_id": None,
-                 "server": pooled["name"], "provider": "worker"}
-            d.update({k: v for k, v in extra.items() if v is not None})
-            return d
+    pooled = _helper_view(server_id)
+    if pooled is not None:
+        # a helper machine: the model is named by its key, and there are no load profiles
+        d = {"server_id": pooled["id"], "model_id": model_ref, "model": model_ref, "profile_id": None,
+             "server": pooled["name"], "provider": "worker"}
+        d.update({k: v for k, v in extra.items() if v is not None})
+        return d
     sv = get(server_id)
     m = model_entry(sv, model_ref)
     if m is None:
@@ -786,11 +1082,10 @@ def member_llm(block: Optional[dict], user, *, required: bool = False) -> dict:
 
     * a block without a ``server_id`` is refused (400, "Pick a machine for this seat") unless its provider is
       ``dryrun``, which dials nothing (it keeps ``DRYRUN_LLM_KEYS`` too);
-    * a machine of ``config/servers.json`` is not a row until the registry merge (package 3-05), and nothing
-      admits a member to it, so it is refused (403) unless its provider is ``dryrun``: without this a member could
-      spend the host's GPU or the site's API key with no grant;
     * a ``server_id`` that names no machine is refused (400);
-    * a pooled machine (a row) is kept, and ``pool.seats.authorize`` decides whether this member may use it.
+    * a machine is kept, and admission decides whether this member may use it (``pool.seats.authorize``): every
+      machine is a row since the registry merge (package 3-05), the host and the site's API included, so a member
+      reaches one only through a grant of its owner's.
 
     An empty block is returned empty, unless ``required`` (the block of a model seat in a game being made or
     changed: such a seat must name a machine). Raises ``SeatBlockError`` with the status to answer, for anything
@@ -807,16 +1102,9 @@ def member_llm(block: Optional[dict], user, *, required: bool = False) -> dict:
             return out
         raise SeatBlockError(400, "Pick a machine for this seat: a seat names one of the machines you may use, "
                                   "not an address or a key.")
-    out = {k: block[k] for k in MEMBER_LLM_KEYS if k in block}
-    registry = find(sid)
-    if registry is not None:
-        if (registry.get("connection") or {}).get("provider") != "dryrun":
-            raise SeatBlockError(403, "Only an administrator can seat this machine until it is shared.")
-        return out
-    from .pool import seats as pool_seats
-    if pool_seats.lookup(sid) is None:
+    if not isinstance(sid, str) or machine(sid) is None:
         raise SeatBlockError(400, "There is no such machine. Pick a machine for this seat.")
-    return out
+    return {k: block[k] for k in MEMBER_LLM_KEYS if k in block}
 
 
 def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> dict:
@@ -837,12 +1125,11 @@ def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> 
             raise ServerError("This seat has no machine: only an administrator can give a seat a model "
                               "configuration of its own. Pick a machine for this seat.")
         return dict(llm or {})
-    if find(llm["server_id"]) is None:
-        # not in the registry: a machine from the Servers page, played through its helper
+    pooled = _helper_view(llm["server_id"])
+    if pooled is not None:
+        # a helper machine: every request goes down the connection its helper opened
         from .pool import seats as pool_seats
-        pooled = pool_seats.lookup(llm["server_id"])
-        if pooled is not None:
-            return pool_seats.resolve(llm, pooled)
+        return pool_seats.resolve(llm, pooled)
     sv = get(llm["server_id"])
     m = model_entry(sv, llm.get("model_id") or llm.get("model"))
     if m is None:
@@ -895,12 +1182,11 @@ def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> 
 
 def describe_seat(llm: dict) -> dict:
     """Display info for a seat's llm block (server name, model label, profile) without resolving keys."""
-    sv = find(llm.get("server_id"))
-    if sv is None and llm.get("server_id"):
+    pooled = _helper_view(llm.get("server_id"))
+    if pooled is not None:
         from .pool import seats as pool_seats
-        pooled = pool_seats.lookup(llm["server_id"])
-        if pooled is not None:
-            return pool_seats.describe(llm, pooled)
+        return pool_seats.describe(llm, pooled)
+    sv = find(llm.get("server_id"))
     m = model_entry(sv, llm.get("model_id") or llm.get("model")) if sv else None
     return {"server_id": llm.get("server_id"), "server": sv["name"] if sv else llm.get("server"),
             "model": (m or {}).get("key") or llm.get("model"), "label": (m or {}).get("label") or (m or {}).get("key") or llm.get("model"),
@@ -984,9 +1270,21 @@ def _device_matches(server: dict, device_id: Optional[str], devices: dict) -> bo
     return bool(peer and (peer.get("name") or "").lower() == want)
 
 
+def _helper_refusal(server: dict) -> Optional[str]:
+    """Why CITAR must not dial or drive anything for ``server`` (a helper machine's models, loading and keys are its
+    helper's: P3.2.8), or None. Every function below that reaches an address, the ``lms`` command or LM Studio's SDK
+    asks it first, whatever route called it."""
+    if is_helper((server or {}).get("id")):
+        return f"{server.get('name') or 'This machine'} is reached through its CITAR helper, which reports its models."
+    return None
+
+
 def detect_models(server: dict) -> dict:
     """Ask the server which models it offers. Returns {"ok", "models": [{key, info, loaded}], "error"}."""
     import httpx
+    refusal = _helper_refusal(server)
+    if refusal:
+        return {"ok": False, "error": refusal}
     conn = server["connection"]
     provider = conn["provider"]
     try:
@@ -1095,6 +1393,9 @@ def load_args(model_key: str, prof: Optional[dict]) -> list[str]:
 
 def estimate(server: dict, model_key: str, prof: Optional[dict]) -> dict:
     """`lms load --estimate-only`: the memory a profile would need (LM Studio servers)."""
+    refusal = _helper_refusal(server)
+    if refusal:
+        return {"ok": False, "error": refusal}
     from .server import lmstudio
     lms = lmstudio.lms_path()
     if not lms or server["connection"]["provider"] != "lmstudio":
@@ -1113,6 +1414,8 @@ def estimate(server: dict, model_key: str, prof: Optional[dict]) -> dict:
 def loaded_state(server: dict, model_key: str, _ctx: Optional[dict] = None) -> dict:
     """Is the model loaded on this server, and with what context? (`_ctx` caches the LM Studio lookups when several
     models of one server are checked in a row.)"""
+    if _helper_refusal(server):
+        return {"loaded": False, "context": None, "others": []}
     from .server import lmstudio
     conn = server["connection"]
     ctx = _ctx if _ctx is not None else {}
@@ -1176,8 +1479,10 @@ def sdk():
 
 def loaded_config(server: dict, model_key: str) -> Optional[dict]:
     """The load configuration a model is running with right now (LM Studio), as a plain dict."""
+    if _helper_refusal(server) or server["connection"]["provider"] != "lmstudio":
+        return None
     client = sdk()
-    if client is None or server["connection"]["provider"] != "lmstudio":
+    if client is None:
         return None
     try:
         for m in client.llm.list_loaded():
@@ -1193,7 +1498,7 @@ def ensure_model(server: dict, model_key: str, prof: Optional[dict]) -> float:
     """Load a model on a server that CITAR manages (LM Studio, this PC or an LM Link device) with its load profile.
     Returns the seconds spent loading (0 when it was already loaded suitably or the server isn't managed)."""
     conn = server["connection"]
-    if conn["provider"] != "lmstudio" or not conn.get("manage_loading"):
+    if conn["provider"] != "lmstudio" or not conn.get("manage_loading") or _helper_refusal(server):
         return 0.0
     from .server import lmstudio
     lms = lmstudio.lms_path()
@@ -1246,7 +1551,7 @@ def ensure_model(server: dict, model_key: str, prof: Optional[dict]) -> float:
 def unload_models(server: dict, keys: Optional[list] = None):
     """Unload models from a managed LM Studio server (all of its catalog models when keys is None)."""
     conn = server["connection"]
-    if conn["provider"] != "lmstudio":
+    if conn["provider"] != "lmstudio" or _helper_refusal(server):
         return
     from .server import lmstudio
     lms = lmstudio.lms_path()
@@ -1438,14 +1743,19 @@ def _keyring_ok() -> bool:
 
 
 def public(server: dict, reg: Optional[dict] = None) -> dict:
-    """A server as the web UI sees it: config plus key status, restriction state and open issues."""
+    """A server as the web UI sees it: config plus key status, restriction state and open issues, and what its row
+    says of it (who dials it, whether it is on, whose it is)."""
     from . import keystore
     reg = reg or load()
     d = copy.deepcopy(server)
-    d["is_host"] = reg.get("host_server_id") == server["id"]
+    row = machine(server.get("id"))
+    d["is_host"] = bool(row["is_host"]) if row else reg.get("host_server_id") == server.get("id")
+    if row:
+        d.update(reach=row["reach"], enabled=row["enabled"], server_resource=row["server_resource"],
+                 owner_id=row["owner_id"], group_id=row["group_id"], max_concurrent=row["max_concurrent"])
     d["key_status"] = keystore.status(server)
-    end = restricted(server)
-    d["restricted_until"] = end.strftime("%H:%M") if end else None
+    end = restricted_at(server["id"]) if row else restricted(server)
+    d["restricted_until"] = (restricted_text(server["id"], end) or None) if row else (end.strftime("%H:%M") if end else None)
     d["issues"] = issues(server, reg)
     d["hardware_summary"] = hardware_summary(server.get("hardware") or {})
     return d

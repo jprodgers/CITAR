@@ -84,6 +84,8 @@ async def _startup():
     _loop = asyncio.get_running_loop()
     from .boot import startup as boot_startup
     boot_startup()                                # database, migrations, configuration checks
+    from ..pool import registry_import
+    registry_import.on_boot()                     # config/servers.json into rows, once, before any seat needs one
     from .workers import hub
     hub().attach_loop(_loop)                      # lets game threads reach connected workers
     asyncio.create_task(hub().ping_loop(citar_settings.get().worker_ping_seconds))
