@@ -415,15 +415,23 @@ per day, week, month or in total, in the machine owner's time zone (a "month" en
   online API the price of the request's `max_tokens` of output plus its input, times the API class's rate. If a hard
   budget's spent plus reserved would pass its amount, the request is **refused** with the period's end as when to try
   again: a lobby game **pauses** with the budget's reason (as for quiet hours) and resumes by itself when the period
-  turns; a pooled prompt is refused and its caller falls back (a report is written without its analysis, a probe case
-  records the refusal). A hard budget on an online API whose model has no price refuses every request ("this model
-  has no price, so its budget cannot be kept") rather than letting unpriced work through at 0.
-- **Settle.** Each step's credits, priced from its event, are counted against the budget at once, and written to the
-  budget's entry for that activity and period; the reservation goes.
+  turns (a game paused for its budget when the server restarts comes back running, and pauses again at its seat's
+  next request while the budget is still spent); a pooled prompt is refused and its caller falls back (a report is
+  written without its analysis, a probe's offer or message case records the refusal as its error); a probe's turn case
+  ends with `budget` as its end reason. A hard budget on an online API whose model has no price refuses every request
+  ("this model has no price, so its budget cannot be kept") rather than letting unpriced work through at 0.
+- **The grant, not the budget it had.** A game's seats and a pooled prompt are bound to the grant that admitted them,
+  and each request is held to the budget that grant has when the request runs: a budget added to a grant, changed,
+  replaced or removed holds the work already running under it from its next request.
+- **Settle.** Each step's credits, priced as the step ends, are counted against the budget at once, and written to the
+  budget's entry for that activity and period (with the step's event); the reservation goes.
 - **Soft** budgets only warn: the request that takes one past its amount is let through, the game's log says so (once
   a period), an audit row records it, and the machine owner's Servers page shows the meter over its amount.
-- `refresh_from_ledger` (in `citar/pool/budgets.py`) rebuilds a period's entries from the ledger's events: an
-  administrator's repair, when an entry was lost or the credits repriced.
+- `refresh_from_ledger` (in `citar/pool/budgets.py`; `citar admin refresh-budgets [--period KEY]`) rebuilds a
+  period's entries from the ledger's events: an administrator's repair, when an entry was lost or the credits
+  repriced. A period key names one kind of period (`2026-10-12` a day, `2026-W41` a week, `2026-10` a month, `all` a
+  total), and only the budgets counted in that kind are rebuilt. A running server reads the rebuilt entries at its
+  ledger's next rollup pass, within five minutes.
 
 The machine's owner and administrators are not held to grants, so their own work on the machine has no budget.
 
@@ -443,6 +451,9 @@ when the event is written from the machine's hardware class ([Configuration](Con
   games on the server's CPU, or on somebody else's GPU, are **used**.
 - Generation time is the smaller of what a helper reports and what the server observed (a modified helper cannot
   raise its owner's credits past the time the server waited for it).
+- The host's CPU is one event per activity for each window it was measured over (about a minute; the event's
+  `observed_s`), and a lab game's one event for the whole game (`observed_s` its wall time), which costing spreads
+  the CPU seconds over.
 - The **ratio** is given credits over used credits ("only given" when nothing was used).
 
 Who sees it: your own, by machine and by kind of work, on the **Account** page's Compute card

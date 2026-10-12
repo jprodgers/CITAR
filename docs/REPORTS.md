@@ -124,12 +124,14 @@ The **work** each activity did is the compute ledger's (`compute_events` in the 
   a helper's answer, never the time the request waited for its machine in the prompt scheduler's line;
 - tokens: input, output, reasoning, cache reads and cache writes;
 - the host's CPU time, measured per unit of work (a game's drives and engine calls, a chat answer, a report's build, a
-  probe case), so a thread that serves several games charges each its own time; a lab game's CPU from its result.
+  probe case), so a thread that serves several games charges each its own time, and spread over the minute or so it
+  was measured in; a lab game's CPU from its result, spread over the whole game.
 
 So a minute in which a game's seat waited ten seconds for a machine busy with somebody else's work is charged ten
 seconds less busy energy than before 0.1.6, when the ledger counted the whole call. The held time, which fixed costs
 and idle power are split by, is unchanged. Spans written before 0.1.6 carry their own work, and are priced as they
-were.
+were: an activity's compute events up to the end of its last such span are left out, so the lab's past games, whose
+results the compute ledger reads too, and a game played across the upgrade are counted once.
 
 **The ledgers hold no prices.** Reports price them with the settings in force at the time, so
 correcting a rate later corrects every report that touches that period. This is the single most

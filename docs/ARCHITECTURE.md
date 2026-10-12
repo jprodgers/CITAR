@@ -368,7 +368,8 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
 - **Draining and metering.** A request abandoned on a helper keeps its slot until the hub hands the scheduler the
   helper's late frame (`late_frame`), or the connection it went out on goes (`helper_changed`: each connection has its
   own `serial`). After each step the listeners get a `StepEvent` with the generation time (bounded by what the server
-  observed), the queue time and the tokens; the usage ledger's tracker is the first listener. The agent adds queue
+  observed), the queue time and the tokens; the compute ledger (`citar.ledger.listener`) is the listener, which
+  prices each step, settles its budget hold and queues its event for the ledger's writer. The agent adds queue
   and chat waits to the turn's waited time, so they never count against `max_turn_seconds`, and shows its seat as
   `queued` (with its place) while a step waits (`ScheduledConversation.on_wait`).
 

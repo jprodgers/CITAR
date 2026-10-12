@@ -214,7 +214,8 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   A grant limited to **ordinary games** does not cover pooled prompts: a member who should be able to test the
   machine, have reports written on it or run a probe's offers and messages there needs **pooled prompts** ticked
   too (a grant with nothing ticked covers every kind of work).
-- **A grant's budget is kept per request.** Each request of work admitted under a grant with a budget reserves its
+- **A grant's budget is kept per request.** Each request of work admitted under a grant is held to the budget the
+  grant has when the request runs (one set or changed later holds the work already running); it reserves its
   estimate when it is given its slot and is counted at what it cost when it ends; a hard budget that a request would
   pass refuses it (a lobby game pauses until the budget's period turns, a pooled prompt is refused and its caller
   falls back), a soft one only warns ([Accounts](Design-accounts-and-sharing#budgets)). Every request a machine serves is in the

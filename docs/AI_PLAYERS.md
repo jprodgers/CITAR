@@ -186,7 +186,10 @@ turn ends straight away and the error appears beside the seat in the lobby.
 A seat on a member's machine whose grant has a **hard budget** stops when its next request would pass
 the budget: the turn ends (`budget`) and the whole game pauses with the budget's reason, resuming by
 itself when the budget's period begins again, or when you press Resume after its owner raised it
-([Accounts](server/ACCOUNTS.md#budgets)).
+([Accounts](server/ACCOUNTS.md#budgets)). The seat is held to the budget its grant has at each
+request, so a budget the owner sets while the game runs applies from the seat's next request; a game
+paused for its budget when the server restarts comes back running and pauses again at once if the
+budget is still spent.
 
 ---
 
