@@ -116,6 +116,37 @@ class Hub(unittest.TestCase):
         self.assertTrue(first.closed)
         self.assertTrue(self.hub.is_online("sv1"))
 
+    def test_nothing_reaches_a_helper_before_its_welcome(self):
+        """Registering a helper wakes the requests waiting for its machine, which may be sent before the server has
+        sent its welcome; a helper takes nothing but the welcome first (it reconnected, failing that request). Frames
+        sent before the welcome wait and follow it in order, one sent while they go out joining them; then frames go
+        as they come."""
+        sent: list = []
+
+        class Socket:
+            async def send_text(self, text):
+                sent.append(text)
+                await asyncio.sleep(0)          # the loop runs other sends meanwhile, as a real socket's would
+
+        async def scenario():
+            c = W.WorkerConnection(websocket=Socket(), server_id="sv1", hello={"max_concurrent": 1},
+                                   loop=asyncio.get_running_loop())
+            await c.send("request 1")
+            await c.send("cancel 1")
+            self.assertEqual(sent, [], "nothing goes before the welcome")
+            late = asyncio.ensure_future(c.send("request 2"))       # sent while the welcome's backlog goes out
+            await c.welcome("welcome")
+            await late
+            await c.send("request 3")
+            return c
+        loop = asyncio.new_event_loop()
+        try:
+            c = loop.run_until_complete(scenario())
+        finally:
+            loop.close()
+        self.assertEqual(sent, ["welcome", "request 1", "cancel 1", "request 2", "request 3"])
+        self.assertTrue(c.welcomed)
+
     def test_stale_connection_counts_as_offline(self):
         c = self._connection()
         self.hub.register(c)

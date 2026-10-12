@@ -2333,7 +2333,8 @@ async def worker_socket(websocket: WebSocket):
             await websocket.send_text(P.frame(P.SHUTDOWN, reason=refused))
             await websocket.close(code=4403)
             return
-        await websocket.send_text(P.welcome_frame(P.Welcome(
+        # what was sent to it since it was registered (a request waiting for the machine) follows the welcome
+        await connection.welcome(P.welcome_frame(P.Welcome(
             server_id=server_id, server_name=server_name,
             ping_seconds=citar_settings.get().worker_ping_seconds)))
         await asyncio.to_thread(record_connection, server_id, ip=ip,
