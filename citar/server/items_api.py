@@ -114,4 +114,7 @@ def unpublish(kind: str, ref: str, body: UnpublishBody, request: Request, me=Dep
         perms.require(access.MODERATE)
     access.unpublish(s, row, actor=me, reason=body.reason)
     items.visibility_changed(s, row)
+    # committed before the answer (the request's session would commit only after it is sent): the item's owner, told
+    # at once, reads it taken down with the reason, never the moment before
+    s.commit()
     return items.client(s, row, access.on(s, me, row), me)
