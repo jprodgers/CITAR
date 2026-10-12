@@ -74,6 +74,8 @@ EWMA_ALPHA = 0.3
 #: An online API request with no ``max_tokens`` is estimated at this much output.
 DEFAULT_MAX_TOKENS = 4096
 HOUR = timedelta(hours=1)
+#: Past this many hours not rolled up, a total reads the raw events alone (``totals``).
+MAX_DIRTY_HOURS = 200
 
 
 def utcnow() -> datetime:
@@ -540,7 +542,28 @@ class Ledger:
                 row = self._cpu_row(session, item[1], classes, host)
                 if row is not None:
                     rows.append(row)
+        self._known_accounts(session, rows)
         return rows, settled
+
+    @staticmethod
+    def _known_accounts(session, rows: list) -> None:
+        """An account the batch names that the database does not hold (the binding's consumer of work whose row is
+        gone) is nobody: the event is kept, on the server's side, rather than the whole batch refused by the foreign
+        key."""
+        from sqlalchemy import select
+        from .db.models import User
+        named = {r[k] for r in rows for k in ("consumer_id", "provider_id") if r[k]}
+        if not named:
+            return
+        known = {uid for (uid,) in session.execute(select(User.id).where(User.id.in_(sorted(named))))}
+        if named <= known:
+            return
+        for r in rows:
+            for k in ("consumer_id", "provider_id"):
+                if r[k] and r[k] not in known:
+                    log.info("compute event of %s names no account %s: counted as the server's", r["activity"], r[k])
+                    r[k] = None
+            r["self_use"] = r["consumer_id"] == r["provider_id"]
 
     def _step_row(self, session, ev, priced: dict) -> dict:
         from . import servers
@@ -859,16 +882,22 @@ def totals(session, user_ids: Iterable[str], since: Optional[datetime] = None, *
     first_full = None
     if since is not None:
         first_full = hour_of(since) if hour_of(since) == since else hour_of(since) + HOUR
-    rq = select(ComputeRollup).where(ComputeRollup.user_id.in_(ids), ComputeRollup.hour < current)
-    if first_full is not None:
-        rq = rq.where(ComputeRollup.hour >= first_full)
-    if dirty:
-        rq = rq.where(ComputeRollup.hour.notin_(sorted(dirty)))
-    for r in session.scalars(rq):
-        _add(out[r.user_id][r.side], r.kind, r.gen_s, r.cpu_core_s, r.credits, r.tokens_in, r.tokens_out, r.events)
-    raw = [ComputeEvent.at >= current] + [and_(ComputeEvent.at >= h, ComputeEvent.at < h + HOUR) for h in dirty]
-    if first_full is not None:
-        raw.append(ComputeEvent.at < first_full)
+    if len(dirty) > MAX_DIRTY_HOURS:
+        # the rollups are far behind (their thread has not run for days): the raw events alone, whose query stays
+        # small, rather than a condition with an hour for each
+        raw = [ComputeEvent.at.isnot(None)]
+    else:
+        rq = select(ComputeRollup).where(ComputeRollup.user_id.in_(ids), ComputeRollup.hour < current)
+        if first_full is not None:
+            rq = rq.where(ComputeRollup.hour >= first_full)
+        if dirty:
+            rq = rq.where(ComputeRollup.hour.notin_(sorted(dirty)))
+        for r in session.scalars(rq):
+            _add(out[r.user_id][r.side], r.kind, r.gen_s, r.cpu_core_s, r.credits, r.tokens_in, r.tokens_out,
+                 r.events)
+        raw = [ComputeEvent.at >= current] + [and_(ComputeEvent.at >= h, ComputeEvent.at < h + HOUR) for h in dirty]
+        if first_full is not None:
+            raw.append(ComputeEvent.at < first_full)
     for side, col in (("given", ComputeEvent.provider_id), ("used", ComputeEvent.consumer_id)):
         q = select(col, ComputeEvent.kind, func.sum(ComputeEvent.gen_s), func.sum(ComputeEvent.cpu_core_s),
                    func.sum(ComputeEvent.credits), func.sum(ComputeEvent.tokens_in),

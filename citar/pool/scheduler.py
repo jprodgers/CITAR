@@ -1749,8 +1749,13 @@ class ScheduledConversation(Conversation):
         b = self.binding
         cfg = getattr(self.inner, "cfg", None) or self.cfg or {}
         max_tokens = grant.max_tokens or (cfg.get("max_tokens") if isinstance(cfg, dict) else None)
-        estimate, unpriced = ledger.get().estimate(b.server_id, b.model or (cfg or {}).get("model"),
-                                                   max_tokens=max_tokens, input_tokens=self._input_estimate())
+        try:
+            estimate, unpriced = ledger.get().estimate(b.server_id, b.model or (cfg or {}).get("model"),
+                                                       max_tokens=max_tokens, input_tokens=self._input_estimate())
+        except Exception:
+            # an estimate that cannot be made must not keep the slot it was granted: the least one is held instead
+            log.warning("could not estimate a request's cost on %s", b.server_id, exc_info=True)
+            estimate, unpriced = 0.0, False
         try:
             hold = budgets.keeper().reserve(b.budget, b.activity, b.consumer, estimate, unpriced=unpriced)
         except budgets.BudgetExceeded as e:

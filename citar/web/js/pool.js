@@ -609,6 +609,8 @@ function grantRow(group, grant, reload) {
       budget.limited
         ? el("span", { class: budget.exhausted ? "bad" : "muted" }, `💳 ${budget.label}`)
         : null,
+      // a soft budget past its amount lets the work go on, and says so here (design/phase3-features.md P3.4.6)
+      budget.warning ? el("span", { class: "warn" }, budget.warning) : null,
       grant.concurrency ? el("span", { class: "muted" }, `${grant.concurrency} at once`) : null),
     budget.limited
       ? el("div", { class: "meter" },

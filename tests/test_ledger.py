@@ -336,6 +336,17 @@ class GivenAndUsed(World):
         with db.session() as s:
             self.assertEqual(ledger.reprice(s, start)["changed"], 0, "a second reprice changes nothing")
 
+    def test_an_account_the_database_does_not_hold_never_costs_the_batch(self):
+        """A binding's consumer whose account is gone (work with no row of its own: a machine's test) is nobody: its
+        event is kept on the server's side, and the batch's other events with it."""
+        a = self.ids["alice"]
+        self.assertEqual(self.write(event("sv_bob", None, "u_gone", 1.0, cls="test", task="partial"),
+                                    event("sv_bob", "game:g_lobby", a, 2.0)), 2)
+        ghost, kept = self.events()
+        self.assertEqual((ghost.consumer_id, ghost.provider_id, ghost.self_use), (None, self.ids["bob"], False))
+        self.assertEqual((kept.consumer_id, kept.credits), (a, 2.0))
+        self.assertEqual(self.led.failures, 0)
+
     def test_an_api_model_with_no_price_is_credited_nothing_and_flagged(self):
         self.write(event("sv_api", "game:g_lobby", self.ids["alice"], 2.0, usage={"output_tokens": 500},
                          model="mystery-model"))
@@ -543,6 +554,8 @@ class Rollups(World):
                             self.assertAlmostEqual(t["credits"], w[2], places=6)
                             self.assertEqual((t["tokens_in"], t["tokens_out"], t["events"]), (w[3], w[4], w[5]))
         check("before any pass")
+        with mock.patch.object(ledger, "MAX_DIRTY_HOURS", 5):
+            check("before any pass, the hours not rolled up too many to name")
         with db.session() as s:
             hours = ledger.rollup(s)
         self.assertGreater(hours, 50, "three days of hours")
