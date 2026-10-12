@@ -232,6 +232,12 @@ class GivenAndUsed(World):
             items.register(s, "probe_run", "pr_1", alice, "probe run", audit_row=False)
             items.register(s, "report", "rp_1", bob, "report", audit_row=False)
             items.register(s, "lab_experiment", "exp1", alice, "experiment", audit_row=False)
+            # the site's machines belong to its first administrator after an import: still the server's in the ledger
+            for sid in ("sv_api", "sv_host"):
+                s.get(Server, sid).owner_id = z
+        servers.invalidate()
+        with db.session() as s:
+            self.assertTrue(all(s.get(Server, sid).server_resource for sid in ("sv_api", "sv_host")))
         (self.lab / "exp1.jsonl").write_text(json.dumps(
             {"exp": "exp1", "i": 0, "cpu_s": 100.0, "seconds": 120, "finished": "2026-10-12T10:00:00+00:00"}) + "\n"
             + json.dumps({"exp": "exp1", "i": 1, "crash": "boom"}) + "\n", encoding="utf-8")
@@ -332,7 +338,11 @@ class GivenAndUsed(World):
         self.assertEqual(result, {"events": 3, "changed": 2, "hours": 1})
         self.assertEqual([e.credits for e in self.events()], [20.0, 12.5, 20.0])
         self.assertEqual(before, 55.0)
-        self.assertEqual(self.totals()[a]["used"]["credits"], 52.5, "the rollups follow the repriced events")
+        self.assertEqual(self.totals()[a]["used"]["credits"], 52.5)
+        with db.session() as s:
+            rolled = s.scalar(select(func.sum(ComputeRollup.credits)).where(ComputeRollup.user_id == a,
+                                                                            ComputeRollup.side == "used"))
+        self.assertEqual(rolled, 52.5, "the hour's rollups follow the repriced events")
         with db.session() as s:
             self.assertEqual(ledger.reprice(s, start)["changed"], 0, "a second reprice changes nothing")
 
@@ -472,6 +482,24 @@ class CpuAttribution(World):
         self.assertEqual(set(cpu), {a.cpu_activity, b.cpu_activity})
         for act, seconds in cpu.items():
             self.assertAlmostEqual(seconds, charged[act], places=5)
+
+    def test_a_unit_inside_another_is_the_outer_ones(self):
+        """An engine call inside a drive (or a chat answer) on one thread is part of the outer unit: charged once, to
+        the outer unit's activity."""
+        tracker = usage.Tracker("test")
+        with mock.patch.object(usage, "_tracker", tracker):
+            t0 = time.thread_time()
+            with ledger.cpu_unit("game:outer"):
+                self.burn(0.05)
+                with ledger.cpu_unit("game:inner"):
+                    self.burn(0.1)
+            used = time.thread_time() - t0
+        self.assertNotIn("game:inner", tracker.cpu_acc)
+        tick = max(time.get_clock_info("thread_time").resolution, 0.001)
+        self.assertAlmostEqual(tracker.cpu_acc["game:outer"], used, delta=2 * tick + 0.01)
+        with mock.patch.object(usage, "_tracker", tracker), ledger.cpu_unit(None):
+            self.burn(0.01)                                 # no activity: nothing charged
+        self.assertEqual(set(tracker.cpu_acc), {"game:outer"})
 
     def test_a_units_time_is_never_sampled_again_on_its_driver_thread(self):
         """The five-second sampling of a game's driver thread charges only its time outside its units: a unit open at
