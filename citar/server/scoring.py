@@ -5,7 +5,9 @@ Overall score (0-100) = weighted mix of
     eliminated, otherwise its share of the score against the strongest bot (50 = level). Each game is weighted by the
     turns it has been played, so long games count far more than short tests.
   * Reliability - clean turn endings, few rejected orders, little looping (all games).
-  * Speed - average turn time on a log scale: 20s or less = 100, 30 minutes or more = 0 (all games).
+  * Speed - average turn time on a log scale: 20s or less = 100, 30 minutes or more = 0 (all games). A benchmark job
+    whose start had to go ahead beside pooled prompts still running on its machine (``contaminated``,
+    design/phase3-features.md P3.3.3) leaves its model seat's timings out: they measure the other work as well.
 Models without benchmark games get no overall score (the benchmark is the big part).
 
 Pooling (design/phase3-features.md P3.2.4): a member's figures are made from their own games and the games
@@ -90,7 +92,8 @@ def _benchmark_from_state(sess: dict, seats: list, state: dict) -> Optional[dict
     alive = {p["id"]: p["alive"] for p in state["majors"]}
     model = (bench or {}).get("model") or (seats[llm].get("llm") or {}).get("model")
     limit = state["turn_limit"] or 0
-    return {"llm_player": llm, "model": model, "server": (bench or {}).get("server") or (seats[llm].get("llm") or {}).get("base_url"),
+    return {"llm_player": llm, "contaminated": bool((bench or {}).get("contaminated")),
+            "model": model, "server": (bench or {}).get("server") or (seats[llm].get("llm") or {}).get("base_url"),
             "scenario": (bench or {}).get("scenario") or f"{state['map_size']} / {state['map_type']} (legacy bench)",
             "run_id": (bench or {}).get("run_id"), "job_id": (bench or {}).get("job_id"),
             "turns": max(0, state["turn"] - 1), "turn_limit": limit, "phase": state["phase"],
@@ -112,7 +115,9 @@ def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
             bench = None
             if s.benchmark and s.benchmark.get("llm_player", 0) not in dry:
                 p = game_progress(s)
-                bench = {"model": s.benchmark.get("model"), "server": s.benchmark.get("server"), "scenario": s.benchmark.get("scenario"),
+                bench = {"llm_player": s.benchmark.get("llm_player", 0),
+                         "contaminated": bool(s.benchmark.get("contaminated")),
+                         "model": s.benchmark.get("model"), "server": s.benchmark.get("server"), "scenario": s.benchmark.get("scenario"),
                          "run_id": s.benchmark.get("run_id"), "job_id": s.benchmark.get("job_id"),
                          "turns": max(0, s.game.turn - 1), "turn_limit": p["turn_limit"], "phase": p["phase"],
                          "performance": p["performance"], "score": p["score"], "best_bot_score": p["best_bot_score"]}
@@ -169,37 +174,45 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None,
     allowed, withheld = _published(reports, scope)
     by_model: dict = {}
     for gid, rep in reports.items():
+        bench = rep.get("benchmark") or {}
         for pid, row in rep["summary"].items():
             if not row.get("turns"):
                 continue
             key = _label(row)
             if allowed is not None and gid not in allowed.get(key, ()):
                 continue
+            # a contaminated benchmark job's model seat: its timings measured the pooled prompts beside it too
+            timed = not (bench.get("contaminated") and pid == bench.get("llm_player"))
             agg = by_model.setdefault(key, {"model": key, "controller": row.get("controller"), "games": 0, "turns": 0,
                                             "_wall": 0.0, "_steps": 0.0, "_calls": 0.0, "_errors": 0.0, "_repeats": 0.0,
                                             "_out": 0.0, "_model_s_tok": [], "malformed_calls": 0, "blocked_repeats": 0,
                                             "stall_nudges": 0, "end_reasons": {}, "max_turn_s": 0.0, "game_list": [],
-                                            "pooled_games": 0, "_gen": 0.0, "_queue": 0.0, "_gen_turns": 0})
+                                            "pooled_games": 0, "_gen": 0.0, "_queue": 0.0, "_gen_turns": 0,
+                                            "_timed": 0, "contaminated_games": 0})
             n = row["turns"]
             agg["games"] += 1
             agg["turns"] += n
-            agg["_wall"] += row["avg_turn_s"] * n
-            if row.get("avg_model_s") is not None:
-                # generation time and the wait for the machine, apart (P3.3.4)
-                agg["_gen"] += row["avg_model_s"] * n
-                agg["_queue"] += (row.get("avg_queue_s") or 0.0) * n
-                agg["_gen_turns"] += n
+            if timed:
+                agg["_timed"] += n
+                agg["_wall"] += row["avg_turn_s"] * n
+                agg["max_turn_s"] = max(agg["max_turn_s"], row["max_turn_s"])
+                if row.get("output_tokens_per_s"):
+                    agg["_model_s_tok"].append(row["output_tokens_per_s"])
+                if row.get("avg_model_s") is not None:
+                    # generation time and the wait for the machine, apart (P3.3.4)
+                    agg["_gen"] += row["avg_model_s"] * n
+                    agg["_queue"] += (row.get("avg_queue_s") or 0.0) * n
+                    agg["_gen_turns"] += n
+            else:
+                agg["contaminated_games"] += 1
             agg["_steps"] += row["avg_model_steps"] * n
             agg["_calls"] += row["avg_tool_calls"] * n
             agg["_errors"] += row["avg_errors"] * n
             agg["_repeats"] += row["avg_repeats"] * n
             agg["_out"] += row["avg_output_tokens"] * n
-            if row.get("output_tokens_per_s"):
-                agg["_model_s_tok"].append(row["output_tokens_per_s"])
             agg["malformed_calls"] += row["malformed_calls"]
             agg["blocked_repeats"] += row["blocked_repeats"]
             agg["stall_nudges"] += row["stall_nudges"]
-            agg["max_turn_s"] = max(agg["max_turn_s"], row["max_turn_s"])
             for k, v in row["end_reasons"].items():
                 agg["end_reasons"][k] = agg["end_reasons"].get(k, 0) + v
             if scope is None or gid in scope.own_ids:
@@ -211,9 +224,13 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None,
         t = max(1, agg["turns"])
         clean_ends = agg["end_reasons"].get("end_turn", 0)
         g = agg["_gen_turns"]
+        timed = agg["_timed"]
         out.append({
             "model": agg["model"], "controller": agg["controller"], "games": agg["games"], "turns": agg["turns"],
-            "avg_turn_s": round(agg["_wall"] / t, 1), "max_turn_s": round(agg["max_turn_s"], 1),
+            # timings come from the turns that were timed cleanly (``timed_turns``): None when there were none
+            "avg_turn_s": round(agg["_wall"] / timed, 1) if timed else None,
+            "max_turn_s": round(agg["max_turn_s"], 1) if timed else None,
+            "timed_turns": timed, "contaminated_games": agg["contaminated_games"],
             "avg_model_s": round(agg["_gen"] / g, 2) if g else None,
             "avg_queue_s": round(agg["_queue"] / g, 2) if g else None,
             "avg_model_steps": round(agg["_steps"] / t, 2), "avg_tool_calls": round(agg["_calls"] / t, 2),
@@ -225,7 +242,7 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None,
             "end_reasons": agg["end_reasons"], "games_list": agg["game_list"], "pooled_games": agg["pooled_games"],
             "pooled_withheld": withheld.get(agg["model"]),
         })
-    out.sort(key=lambda r: (r["controller"] != "llm", r["avg_turn_s"]))
+    out.sort(key=lambda r: (r["controller"] != "llm", r["avg_turn_s"] if r["avg_turn_s"] is not None else math.inf))
     shown = {r["model"] for r in out}
     controllers = _controllers(reports) if withheld else {}
     for key, contributors in sorted(withheld.items(), key=lambda kv: str(kv[0])):
@@ -259,12 +276,15 @@ def speed_score(seconds_per_turn: float) -> float:
     return round(100 * max(0.0, min(1.0, (hi - t) / (hi - lo))), 1)
 
 
-def model_speed(m: dict) -> float:
+def model_speed(m: dict) -> Optional[float]:
     """A model's speed score from its generation time per turn only (P3.3.4): time it waited for a busy machine, and
     the game's own time, are never the model's. A row with no generation figure (metrics older than the scheduler)
-    falls back to its turn time."""
+    falls back to its turn time; one with no cleanly timed turn at all (every game of it a contaminated benchmark job)
+    has no speed score."""
     gen = m.get("avg_model_s")
-    return speed_score(gen if gen is not None else m["avg_turn_s"])
+    if gen is not None:
+        return speed_score(gen)
+    return speed_score(m["avg_turn_s"]) if m.get("avg_turn_s") is not None else None
 
 
 def model_scores(manager: SessionManager, weights: dict, scope: Optional[aggregate.Scope] = None) -> dict:
@@ -298,8 +318,11 @@ def model_scores(manager: SessionManager, weights: dict, scope: Optional[aggrega
         rel = reliability_score(m) if m else None
         spd = model_speed(m) if m else None
         overall = None
-        if perf is not None and rel is not None and (wb + wr + ws) > 0:
-            overall = round((wb * perf + wr * rel + ws * spd) / (wb + wr + ws), 1)
+        # with no speed score (no cleanly timed turn), the overall score is made of the other two
+        parts = [(wb, perf), (wr, rel)] + ([(ws, spd)] if spd is not None else [])
+        weight = sum(w for w, _ in parts)
+        if perf is not None and rel is not None and weight > 0:
+            overall = round(sum(w * v for w, v in parts) / weight, 1)
         rows.append({
             "model": model, "overall": overall, "benchmark": perf, "reliability": rel, "speed": spd,
             "benchmark_games": len(games), "benchmark_turns": turns,

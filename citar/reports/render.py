@@ -359,7 +359,8 @@ def _pooled_html(x: Ctx) -> str:
         if r.get("withheld"):
             table.append([r["model"], "–", "–", "–", "–", "–", r.get("reason") or ""])
             continue
-        table.append([r["model"], r["games"], f"{r['turns']:,}", f"{r['avg_turn_s']:.0f}s",
+        turn = f"{r['avg_turn_s']:.0f}s" if r.get("avg_turn_s") is not None else "–"     # no cleanly timed turn
+        table.append([r["model"], r["games"], f"{r['turns']:,}", turn,
                       f"{r['avg_errors']:.2f}", f"{100 * r['clean_turn_end_rate']:.0f}%", ""])
     return lead + C.table(["Model", "Games", "Turns", "Avg turn", "Errors / turn", "Clean turn ends", ""], table)
 

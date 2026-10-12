@@ -34,8 +34,10 @@ lists to a member, another member and an administrator, the reads and saves of i
 with ``--keep`` its helper machine's helper stays connected for the browser checklist), ``queue`` (3-07: two lobby
 games sharing a helper machine's one slot through the prompt scheduler, never two requests at once and no busy
 refusal; the Servers page's test given up mid-completion, its request draining until the helper's late answer while
-the next request waits), and later ``ledger``, ``chat``, ``hybrid``, ``minimap``, ``machines``; ``all`` runs every
-part written so far. It needs the
+the next request waits; 3-08: a lobby game's lease made when it is registered and again when the server, restarted,
+brings it back, a benchmark job waiting for it, and a one-job benchmark started beside a running test, which it
+cancels and waits to drain, ``drain_s`` in its result), and later ``ledger``, ``chat``, ``hybrid``, ``minimap``,
+``machines``; ``all`` runs every part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
 from __future__ import annotations
@@ -449,9 +451,35 @@ class Server:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
 
+    def restart(self, timeout: float = 120.0) -> None:
+        """Stop the server as a crash or a power cut would (on Windows ``terminate`` is a kill: no shutdown runs, so
+        its open games keep their live marks) and start it again on the same directory and port, as its owner would.
+        The log so far is kept as ``server-<n>.log``."""
+        self.stop()
+        kept = self.state / f"server-{len(list(self.state.glob('server-*.log'))) + 1}.log"
+        # A venv's python.exe on Windows is a launcher: the server it started goes a moment after it (its job object),
+        # and with it the log's handle and the port. Wait for both.
+        deadline = time.perf_counter() + 30.0
+        while True:
+            try:
+                if self.log.exists():
+                    self.log.replace(kept)
+                with socket.socket() as probe:
+                    probe.settimeout(1.0)
+                    listening = probe.connect_ex(("127.0.0.1", self.port)) == 0
+                if not listening:
+                    break
+            except PermissionError:
+                pass
+            if time.perf_counter() > deadline:
+                raise HarnessError(f"the stopped server still holds {self.log} or port {self.port}")
+            time.sleep(0.1)
+        self.start(timeout)
+
     def tracebacks(self) -> int:
-        """Tracebacks in the server's log."""
-        return self.log.read_text(encoding="utf-8", errors="replace").count("Traceback") if self.log.exists() else 0
+        """Tracebacks in the server's logs: this run's, and those before a restart (``restart``)."""
+        logs = [self.log, *sorted(self.state.glob("server-*.log"))]
+        return sum(p.read_text(encoding="utf-8", errors="replace").count("Traceback") for p in logs if p.exists())
 
 
 class Account:
@@ -467,6 +495,13 @@ class Account:
         if r.status_code == 200:
             self.http.headers["x-citar-csrf"] = r.json().get("csrf_token", "")
         return r
+
+    def reconnect(self) -> None:
+        """A fresh client with the same cookie and CSRF token (the server was restarted: the session is still good,
+        the old client's pooled connections are not)."""
+        old = self.http
+        self.http = httpx.Client(base_url=old.base_url, timeout=old.timeout, cookies=old.cookies, headers=old.headers)
+        old.close()
 
     def __getattr__(self, name):
         # get / post / put / delete go straight to the client
@@ -1300,9 +1335,10 @@ def _accounts_servers_page(h: Harness) -> None:
 
 
 def part_queue(h: Harness) -> None:
-    """The ``queue`` part: 3-07's lease and cancel checks (design/phase3-features.md P3.3.3); 3-08 and 3-09 add
-    theirs."""
+    """The ``queue`` part: 3-07's lease and cancel checks (design/phase3-features.md P3.3.3), 3-08's leases at
+    registration, a restart's restored game and a benchmark's drain; 3-09 adds its own."""
     _queue_leases_and_drain(h)
+    _queue_restored_game_and_benchmark_drain(h)
 
 
 def _queue_leases_and_drain(h: Harness) -> None:
@@ -1456,6 +1492,175 @@ def _queue_leases_and_drain(h: Harness) -> None:
     finally:
         for g in games:
             alice.delete(f"/api/games/{g}")
+        if helper is not None:
+            helper.stop()
+        scripted.close()
+
+
+def _machine_status(admin: "Account", hid: str) -> dict:
+    """A machine as an administrator's ``/api/status`` lists the prompt scheduler's (its leases, tickets, counters)."""
+    got = admin.get("/api/status")
+    rows = (got.json().get("machines") or []) if got.status_code == 200 else []
+    return next((m for m in rows if m.get("id") == hid), {})
+
+
+def _runs_job(who: "Account", run_id: str) -> dict:
+    """A one-job run's job as its owner's Benchmarks page lists it."""
+    got = who.get("/api/benchmarks/runs")
+    runs = got.json() if got.status_code == 200 else []
+    run = next((r for r in runs if isinstance(r, dict) and r.get("id") == run_id), {})
+    return (run.get("jobs") or [{}])[0]
+
+
+def _queue_restored_game_and_benchmark_drain(h: Harness) -> None:
+    """3-08's checks (design/phase3-features.md P3.3.3, P3.3.5), on a member's helper machine with one slot (a real
+    helper behind the scripted endpoint): a lobby game whose person moves first holds a lease on the machine from its
+    creation, before its model seat is asked anything; the server is stopped as a crash would stop it and started
+    again, and the game it brings back (``restore_live``) holds its lease again, before anything is asked of the model;
+    a one-job benchmark on the machine waits for it. The member then tests the machine from the Servers page (the
+    endpoint taking 10 s over it) and closes the game: the benchmark job starts at once, its lease cancels the running
+    test (the helper keeps generating it), and the job's first request waits for that request to drain, so no pooled
+    request overlaps a benchmark step; the wait is the job's ``drain_s`` in its result, not ``contaminated``."""
+    r = h.report
+    admin, alice = h.accounts["admin"], h.accounts["alice"]
+    scripted = FakeEndpoint(delay=0.3)
+    scripted.slow = {"Reply with exactly: CITAR OK": 10.0}
+    helper: Optional[Helper] = None
+    gid, run_id = "", ""
+    try:
+        made = alice.post("/api/pool/servers", json={"config": {"name": f"QA bench helper {h.tag}", "kind": "owned",
+                                                                "connection": {"provider": "openai_compatible",
+                                                                               "max_parallel": 1}},
+                                                     "reach": "worker"})
+        hid = made.json().get("id") if made.status_code == 200 else ""
+        t = alice.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa bench"}) if hid else None
+        if t is not None and t.status_code == 200:
+            helper = Helper(h, t.json().get("token", ""), scripted, "qa-bench-helper")
+        online = bool(helper and wait_until(lambda: _online(alice, hid), 60, 0.25))
+        r.check("a second helper machine of the member's with one slot, its real helper connected",
+                online, f"HTTP {made.status_code}; online {online}")
+        data = r.data.setdefault("queue", {})
+        data["restore"] = {"machine": hid}
+
+        # ---- a lobby game holds its machine from its registration
+        name = f"QA restored game {h.tag}"
+        label = f"game “{name}”"
+        g = alice.post("/api/games", json={"name": name, "config": {**CONFIG, "seed": 3311},
+                                           "seats": [{"type": "human"},
+                                                     {"type": "llm", "llm": {"server_id": hid,
+                                                                             "model": scripted.MODEL}}]})
+        gid = g.json().get("id", "") if g.status_code == 200 else ""
+
+        def game_leases() -> list:
+            return [x for x in _machine_status(admin, hid).get("leases") or [] if x.get("label") == label]
+        made_leases = game_leases()
+        r.check("a lobby game whose person moves first holds a lease on its model seat's machine from its creation, "
+                "before the model is asked anything",
+                bool(gid) and [x.get("kind") for x in made_leases] == ["game"] and not scripted.completions(),
+                json.dumps({"game": gid, "leases": made_leases, "completions": len(scripted.completions())})[:400])
+
+        # ---- the server stops as a crash would, and brings the game back
+        t_restart = time.perf_counter()
+        h.server.restart()
+        for who in h.accounts.values():
+            who.reconnect()
+        back = alice.get(f"/api/games/{gid}") if gid else None
+        restored_leases = game_leases()
+        busy = next((m.get("busy_with") for m in (alice.get("/api/queue").json().get("machines") or [])
+                     if m.get("server_id") == hid), None)
+        r.check("the server, stopped as a crash would stop it and started again, brought the game back "
+                "(restore_live) holding its lease again before the model was asked anything, and the member's Queue "
+                "page shows the machine in use by it",
+                back is not None and back.status_code == 200 and [x.get("kind") for x in restored_leases] == ["game"]
+                and not scripted.completions() and busy == [label],
+                json.dumps({"game": getattr(back, "status_code", None), "leases": restored_leases, "busy_with": busy,
+                            "restart_s": round(time.perf_counter() - t_restart, 1)})[:400])
+        online = wait_until(lambda: _online(alice, hid), 60, 0.25)
+        r.check("the helper reconnected after the restart", bool(online), f"online {online}")
+
+        # ---- a one-job benchmark on the machine waits for the restored game
+        suite = {"name": f"QA drain {h.tag}", "mode": "sequential", "repeats": 1,
+                 "servers": [{"server_id": hid, "models": [{"model": scripted.MODEL}]}],
+                 "scenarios": [{"name": "QA duel", "map_size": "duel", "map_type": "pangaea", "seed": 3313,
+                                "opponents": 1, "turn_limit": 2, "barbarians": "off", "max_turn_minutes": 5}]}
+        started = alice.post("/api/benchmarks/runs", json={"suite": suite, "name": f"QA drain {h.tag}"})
+        run_id = started.json().get("id", "") if started.status_code == 200 else ""
+        waiting = wait_until(lambda: label in (_runs_job(alice, run_id).get("waiting") or ""), 30, 0.5)
+        job = _runs_job(alice, run_id)
+        r.check("a one-job benchmark on the machine waits for the restored game's lease",
+                bool(waiting) and job.get("status") == "queued",
+                f"HTTP {started.status_code}; job {job.get('status')}: {job.get('waiting')}")
+
+        # ---- a test runs on the machine; the game closes; the benchmark starts and drains the test
+        result: dict = {}
+        before = len(scripted.completions())
+
+        def test():
+            result["t0"] = time.time()
+            result["got"] = alice.post(f"/api/pool/servers/{hid}/test", params={"wait": 60})
+            result["t1"] = time.time()
+        tester = threading.Thread(target=test, daemon=True)
+        tester.start()
+        running = wait_until(lambda: any(x.get("class") == "test" and x.get("state") == "running"
+                                         for x in _machine_status(admin, hid).get("tickets") or []), 20, 0.1)
+        t_close = time.time()
+        closed = alice.delete(f"/api/games/{gid}")
+        gid = "" if closed.status_code == 200 else gid
+        tester.join(90)
+        tested = result.get("got")
+        body = tested.json() if tested is not None and tested.status_code == 200 else {}
+        r.check("the member's test of the machine ran on the slot the idle game lent, and was cancelled when the "
+                "benchmark took the machine (its request left draining)",
+                bool(running) and closed.status_code == 200 and body.get("cancelled") is True
+                and body.get("code") == "benchmark",
+                f"running {bool(running)}; close HTTP {closed.status_code}; test HTTP "
+                f"{getattr(tested, 'status_code', None)} after {round(result.get('t1', 0) - result.get('t0', 0), 2)} s: "
+                f"{json.dumps(body)[:240]}")
+        done = wait_until(lambda: _runs_job(alice, run_id).get("status") in ("done", "failed", "cancelled"), 180, 1.0)
+        job = _runs_job(alice, run_id)
+        res = job.get("result") or {}
+        r.check("the benchmark job ran to its end with drain_s in its result: its first request waited for the "
+                "cancelled test to drain, and its timing is not contaminated",
+                bool(done) and job.get("status") == "done" and (res.get("drain_s") or 0) > 1.0
+                and res.get("contaminated") is False,
+                json.dumps({"status": job.get("status"), "error": job.get("error"), "drain_s": res.get("drain_s"),
+                            "contaminated": res.get("contaminated"),
+                            "started_after_close_s": round((job.get("started") or 0) - t_close, 2)})[:400],
+                drain_s=res.get("drain_s"))
+        after = scripted.completions()[before:]
+        late = next((q for q in after if q.get("delay") == 10.0), None)
+        bench = [q for q in after if q is not late]
+        ended = late["t"] + late["seconds"] if late else None
+        first = min((q["t"] for q in bench), default=None)
+        r.check("no pooled request overlapped a benchmark step: the benchmark's first completion reached the endpoint "
+                "only after the helper finished the cancelled test",
+                late is not None and first is not None and first >= ended - 0.05 and len(bench) >= 2,
+                f"test ended {round(ended - result['t0'], 2) if ended else None} s after it began; the benchmark's "
+                f"first completion at {round(first - result['t0'], 2) if first else None} s; {len(bench)} benchmark "
+                f"completions")
+        final = _machine_status(admin, hid)
+        counters = final.get("counters") or {}
+        text = helper.text() if helper else ""
+        busy_lines = [line for line in text.splitlines() if "(busy)" in line]
+        r.check("the helper was sent CANCEL, its late answer freed the slot (a late frame, no drain timed out), "
+                "nothing was refused as busy, and no lease is left on the machine",
+                "server cancelled" in text and counters.get("late_frames", 0) >= 1
+                and counters.get("drain_timeouts", 0) == 0 and counters.get("busy_refusals", 0) == 0
+                and not busy_lines and not final.get("leases"),
+                json.dumps({"counters": counters, "leases": final.get("leases")})[:400])
+        data["restore"].update({"restart_leases": restored_leases, "test": body, "job": {
+            "status": job.get("status"), "drain_s": res.get("drain_s"), "contaminated": res.get("contaminated")},
+            "benchmark_completions": len(bench), "counters": counters})
+    finally:
+        # each step on its own: a server that did not come back must not leave the helper running
+        for undo in ((lambda: alice.delete(f"/api/games/{gid}")) if gid else None,
+                     (lambda: alice.post(f"/api/benchmarks/runs/{run_id}/control", json={"action": "cancel"}))
+                     if run_id else None):
+            try:
+                if undo is not None:
+                    undo()
+            except httpx.HTTPError:
+                pass
         if helper is not None:
             helper.stop()
         scripted.close()

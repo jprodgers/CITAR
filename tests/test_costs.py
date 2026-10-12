@@ -219,7 +219,9 @@ class ReportQueueTests(unittest.TestCase):
         busy = {"on": True}
         runner = reports.ReportRunner(Path(tempfile.mkdtemp(prefix="citar-reports-")))
         runner.POLL_SECONDS = 0.2
-        with mock.patch("citar.pool.seats.occupied", lambda sid, exclude=frozenset(): ["game “x”"] if busy["on"] and sid == "sv_dryrun" else []):
+        holder = {"label": "game “x”", "kind": "game", "id": "x", "game": "x"}
+        with mock.patch("citar.pool.seats.occupants",
+                        lambda sid, exclude=frozenset(): [holder] if busy["on"] and sid == "sv_dryrun" else []):
             plain = runner.start({"title": "No model", "sections": ["summary"]})
             m = runner.start({"title": "Written", "sections": ["summary"],
                               "narrative": {"enabled": True, "server_id": "sv_dryrun", "model_id": "m_dry"}})

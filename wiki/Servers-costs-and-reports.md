@@ -138,7 +138,9 @@ useful property of the design: you do not have to know your electricity tariff b
 3. Options: count electricity as the full draw or only the extra power the work caused, and the
    lifespan range for the depreciation sensitivity table.
 4. Optionally have a model write an analysis — pick server, model and profile, plus instructions.
-   The computed findings never need a model, and the narrative's own cost is tracked too.
+   The computed findings never need a model, and the narrative's own cost is tracked too. A report
+   whose analysis a machine reached through its helper writes waits in the queue while that helper is
+   offline (it says so), and rides out a helper that drops while it is built for up to half an hour.
 5. **Run report.**
 
 **View** opens it in place; **Open in new tab** and **Download** give a single self-contained HTML

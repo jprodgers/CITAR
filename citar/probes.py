@@ -198,9 +198,11 @@ def _items_text(g, items) -> str:
 
 def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_path: Optional[Path] = None,
              live: Optional[dict] = None, should_stop=lambda: False, usage_act: Optional[str] = None,
-             owner_id: Optional[str] = None) -> dict:
+             owner_id: Optional[str] = None, lease=None) -> dict:
     """Plays one case on a fresh copy of the scenario and returns its record. ``owner_id`` is the probe run's owner,
-    the case game's owner (``GameSession.owner_id``)."""
+    the case game's owner (``GameSession.owner_id``). ``lease`` is the probe run's lease on the subject's machine
+    (``ProbeRunner._run``): the subject's model calls are its, and the case leaves it to the run, which releases it;
+    without one the case's own seat makes a ``probe_case`` lease for the case."""
     subject, cp = probe["subject"], probe.get("counterparty")
     seats = [None] * len(scn.get("seats") or [])
     seats = [{} for _ in range(max(len(seats), subject + 1, (cp or 0) + 1))]
@@ -213,6 +215,8 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
     s = manager.create_from_scenario(scn, seats, name=f"probe {probe['id']}/{case['id']}", register=False, start=False)
     s.owner_id = owner_id
     s.lease_kind = "probe_case"         # the subject's model calls hold the machine for the case only, lending nothing
+    if lease is not None and not is_bot:
+        s.adopt_lease(subject, lease)   # the run's, held from its first case to its last (P3.3.3)
     g = s.game
     if usage_act:
         # the case's model calls and the time it holds the servers go to the probe run's usage record
@@ -413,6 +417,13 @@ def _check(case: dict, rec: dict) -> Optional[bool]:
     if case.get("forbid_tools"):
         ok = (ok is not False) and not any(t in tools_used for t in case["forbid_tools"])
     return ok
+
+
+def _set_waiting(run: dict, note: Optional[dict]) -> None:
+    """What a queued run waits for (a ``pool.seats.note``, or None): the note, which the run's route tells each viewer
+    with the names they may see (``work_access.with_waiting``), and its text naming no holder."""
+    from .pool import seats as pool_seats
+    run["waiting_note"], run["waiting"] = note, pool_seats.note_text(note)
 
 
 # ----------------------------------------------------------------------------
@@ -634,17 +645,34 @@ class ProbeRunner:
         cases = {c["id"]: c for c in probe["cases"]}
         act = f"probe:{rid}"
         from . import usage
-        from .pool import seats as pool_seats
         usage.tracker().activity(act, "probe", run["name"], parent={"kind": "probe", "id": probe["id"], "name": probe["name"]},
                                  ref={"probe_run": rid, "scenario": probe.get("scenario")},
                                  server_id=run["llm"].get("server_id"), model=run["llm"].get("model"))
         server_id = run["llm"].get("server_id")
         self._wait_free(rid, server_id)
-        pool_seats.claim(server_id, f"probe run “{run['name']}”", ("probe", rid))
+        lease = self._lease(rid, run, act)
         try:
-            self._run_cases(rid, run, probe, scn, done, cases, act)
+            self._run_cases(rid, run, probe, scn, done, cases, act, lease)
         finally:
-            pool_seats.release(server_id, f"probe run “{run['name']}”")
+            if lease is not None:
+                lease.release()
+
+    @staticmethod
+    def _lease(rid: str, run: dict, act: str):
+        """The run's lease on its subject's machine, held for the whole run as a lobby game's seat holds its own
+        (design/phase3-features.md P3.3.3): non-lending (``probe_case``), so ``occupied()`` lists the run and queued
+        benchmarks wait for it, and every case's model calls are its. None for the bot as the subject. Package 3-09
+        moves the offer and message cases onto tickets and gives each turn case a lease of its own."""
+        llm = run.get("llm") or {}
+        if llm.get("provider") == "bot":
+            return None
+        from .pool import scheduler as prompt_scheduler, seats as pool_seats
+        server_id = llm.get("server_id") or None
+        owner = run.get("owner_id")
+        return prompt_scheduler.get().lease(
+            server_id, llm.get("model") or "", kind="probe_case", activity=act, consumer=owner,
+            label=f"probe run “{run['name']}”", cap=pool_seats.consumer_cap(owner, server_id, "probe"),
+            ref=("probe", rid))
 
     def queue_items(self) -> list[dict]:
         """Queued runs, for the shared work queue (see citar.pool.queue)."""
@@ -658,7 +686,8 @@ class ProbeRunner:
                 continue
             out.append({"kind": "probe", "id": rid, "group": rid, "run": run["name"], "label": run["name"],
                         "server_id": run["llm"].get("server_id"), "server": run["llm"].get("server"),
-                        "created": run.get("created") or 0, "waiting": run.get("waiting")})
+                        "created": run.get("created") or 0, "waiting": run.get("waiting"),
+                        "waiting_note": run.get("waiting_note")})
         return out
 
     def running_items(self) -> list[dict]:
@@ -679,13 +708,14 @@ class ProbeRunner:
     def _make_way(self, rid: str, run: dict) -> bool:
         """Between cases: if higher-priority work is waiting for this run's machine, put the run back in the queue
         (it keeps its rank and carries on from the next case). Returns True if it did."""
-        from .pool import queue as work_queue
+        from .pool import queue as work_queue, seats as pool_seats
         first = work_queue.preempting(run["llm"].get("server_id"), "probe", rid, work_queue.priority("probe", rid))
         if first is None:
             return False
         run = self.get_run(rid)
         run["status"] = "queued"
-        run["waiting"] = f"paused for {first['label']} (priority {first['priority']})"
+        _set_waiting(run, pool_seats.note("paused for ", [pool_seats.queue_holder(first)],
+                                          f" (priority {first['priority']})"))
         self._write(run)
         with self.lock:
             if rid not in self.queue:
@@ -711,16 +741,18 @@ class ProbeRunner:
         except ProbeError:
             return False
         server_id = run["llm"].get("server_id")
-        held = pool_seats.occupied(server_id)
-        note = f"waiting for {', '.join(held)}" if held else None
+        held = pool_seats.holders(server_id)
+        note = pool_seats.note("waiting for ", held) if held else None
         if not held and server_id:
             first = work_queue.ahead_of(server_id, "probe", (-work_queue.priority("probe", rid), run.get("created") or 0))
             if first is not None:
-                held = [first["label"]]
-                note = f"waiting: {first['label']} goes first (priority {first['priority']})"
+                held = [pool_seats.queue_holder(first)]
+                note = pool_seats.note("waiting: ", held, f" goes first (priority {first['priority']})")
         status = "waiting (machine busy)" if held else "queued"
-        if run.get("waiting") != note or run["status"] != status:
-            run["waiting"], run["status"] = note, status
+        if run.get("waiting_note") != note or run.get("waiting") != pool_seats.note_text(note) \
+                or run["status"] != status:
+            _set_waiting(run, note)
+            run["status"] = status
             self._write(run)
         return bool(held)
 
@@ -729,25 +761,27 @@ class ProbeRunner:
         from .pool import seats as pool_seats
         waited = False
         while server_id and rid not in self._stop_run:
-            held = pool_seats.occupied(server_id)
+            held = pool_seats.holders(server_id)
             if not held:
                 break
             if not waited:
                 waited = True
                 run = self.get_run(rid)
                 run["status"] = "waiting (machine busy)"
-                run["waiting"] = f"waiting for {', '.join(held)}"
+                _set_waiting(run, pool_seats.note("waiting for ", held))
                 self._write(run)
-                self._set_live(rid, {"run": rid, "case": f"(waiting: the machine is in use by {', '.join(held)})",
-                                     "since": time.time()})
+                # the live panel is shown to whoever may see the run: what holds the machine is the run's waiting
+                # note, which its route tells each viewer as they may see it
+                self._set_live(rid, {"run": rid, "case": "(waiting: the machine is in use)", "since": time.time()})
             time.sleep(15)
         if waited:
             run = self.get_run(rid)
-            run["status"], run["waiting"] = "running", None
+            run["status"] = "running"
+            _set_waiting(run, None)
             self._write(run)
 
-    def _run_cases(self, rid, run, probe, scn, done, cases, act):
-        """Every case of a run, in order, with the configured repeats."""
+    def _run_cases(self, rid, run, probe, scn, done, cases, act, lease=None):
+        """Every case of a run, in order, with the configured repeats, each under the run's ``lease``."""
         from . import usage
         self._prepare_model(run)
         for job in run["jobs"]:
@@ -763,7 +797,8 @@ class ProbeRunner:
             self._set_live(rid, {"run": rid, "case": job["case"], "rep": job["rep"], "since": time.time()})
             rec = run_case(self.manager, scn, probe, cases[job["case"]], run["llm"],
                            save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar", live=self.lives[rid],
-                           should_stop=lambda: rid in self._stop_run, usage_act=act, owner_id=run.get("owner_id"))
+                           should_stop=lambda: rid in self._stop_run, usage_act=act, owner_id=run.get("owner_id"),
+                           lease=lease)
             rec["rep"] = job["rep"]
             with open(self._run_dir(rid) / "results.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, default=str) + "\n")

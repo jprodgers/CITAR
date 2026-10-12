@@ -90,7 +90,8 @@ class OpenAIConversation(Conversation):
         if self.cfg.get("reasoning_effort"):
             # honoured by LM Studio and OpenAI reasoning models; ignored by servers that don't support it
             params["extra_body"] = {"reasoning_effort": self.cfg["reasoning_effort"]}
-        if self.mode != "json":
+        if self.mode != "json" and self.tools:
+            # a plain completion (a report's narrative) sends none: the API refuses an empty list
             params["tools"] = self.tools
         if self.request_timeout:
             cap = float(self.cfg["timeout"]) if self.cfg.get("timeout") else None

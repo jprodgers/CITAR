@@ -52,6 +52,11 @@ PRESETS = {
 #: only the averages other accounts pool, each withheld until enough accounts are behind it; ``both``.
 POOLING = ("own", "pooled", "both")
 
+#: The kind of work a report's narrative is for admission (``admission.PURPOSES``): one prompt on a machine, as a
+#: game's turn is. The route admits it for this purpose and the runner's lease is capped by the grant for it.
+#: Package 3-09 gives pooled prompts a purpose of their own.
+NARRATIVE_PURPOSE = "game"
+
 
 def _now() -> float:
     """The current time."""
@@ -237,7 +242,7 @@ class ReportRunner:
             title = m.get("title") or "report"
             out.append({"kind": "report", "id": rid, "group": rid, "run": title, "label": f"report “{title}”",
                         "server_id": sid, "server": servers.server_name(sid), "created": m.get("created") or 0,
-                        "waiting": m.get("waiting")})
+                        "waiting": m.get("waiting"), "waiting_note": m.get("waiting_note")})
         return out
 
     def running_items(self) -> list[dict]:
@@ -251,9 +256,11 @@ class ReportRunner:
         return [{"kind": "report", "id": rid, "group": rid, "run": title, "label": f"report “{title}”",
                  "server_id": sid, "server": servers.server_name(sid), "created": self.meta(rid).get("created") or 0}]
 
-    def _blocked(self, rid: str) -> Optional[str]:
-        """Why a queued report cannot start yet (None when it can): its machine is in its quiet hours, in use, or
-        higher-priority work is waiting for it. Reports without a written analysis never wait."""
+    def _blocked(self, rid: str) -> Optional[dict]:
+        """Why a queued report cannot start yet, as a ``pool.seats.note`` (None when it can): its machine is in its
+        quiet hours, its helper is offline, it is in use, or higher-priority work is waiting for it. Reports without a
+        written analysis never wait. A note naming other work is told to each viewer as they may see it
+        (``work_access.with_waiting``)."""
         sid = self._machine(rid)
         if not sid:
             return None
@@ -262,14 +269,19 @@ class ReportRunner:
         name = servers.server_name(sid)
         end = servers.restricted_now(sid)
         if end:
-            return f"{name} is in its quiet hours until {servers.restricted_text(sid, end)}"
-        held = pool_seats.occupied(sid)
+            return pool_seats.note(f"{name} is in its quiet hours until {servers.restricted_text(sid, end)}", [])
+        if servers.is_helper(sid) and not _helper_online(sid):
+            # its narrative would fail at once (a lease's request on a machine of unknown capacity passes through to a
+            # hub with no helper): the report waits for the helper, as for quiet hours, holding nothing
+            return pool_seats.note(f"{name}'s helper is offline", [])
+        held = pool_seats.holders(sid)
         if held:
-            return f"{name} is in use by {', '.join(held)}"
+            return pool_seats.note(f"{name} is in use by ", held)
         m = self.meta(rid)
         first = work_queue.ahead_of(sid, "report", (-work_queue.priority("report", rid), float(m.get("created") or 0)))
         if first is not None:
-            return f"{first['label']} goes first on {name} (priority {first['priority']})"
+            return pool_seats.note("", [pool_seats.queue_holder(first)],
+                                   f" goes first on {name} (priority {first['priority']})")
         return None
 
     def _next(self) -> Optional[str]:
@@ -287,12 +299,15 @@ class ReportRunner:
                         self.queue.remove(rid)
                 continue
             ranked.append(((-work_queue.priority("report", rid), created), rid))
+        from ..pool import seats as pool_seats
         for _, rid in sorted(ranked):
-            why = self._blocked(rid)
-            if why is None:
+            note = self._blocked(rid)
+            if note is None:
                 return rid
-            if self.meta(rid).get("waiting") != why:
-                self._set(rid, waiting=why, progress=f"Waiting: {why}")
+            why = pool_seats.note_text(note)
+            m = self.meta(rid)
+            if m.get("waiting_note") != note or m.get("waiting") != why:
+                self._set(rid, waiting=why, waiting_note=note, progress=f"Waiting: {why}")
         return None
 
     # ------------------------------------------------------------------ running
@@ -354,23 +369,38 @@ class ReportRunner:
             with self.lock:
                 if rid in self.queue:
                     self.queue.remove(rid)
-            self._set(rid, waiting=None)
-            sid = self._machine(rid)
-            from ..pool import seats as pool_seats
-            holder = f"report “{self.meta(rid).get('title') or rid}”"
-            pool_seats.claim(sid, holder, ("report", rid))     # benchmarks and probes wait while the model writes
+            self._set(rid, waiting=None, waiting_note=None)
+            lease = None
             self._current = rid
             try:
-                self.run(rid)
+                lease = self._lease(rid)
+                self.run(rid, lease=lease)
             except Exception as e:
                 self._set(rid, status="failed", error=f"{type(e).__name__}: {e}", trace=traceback.format_exc(limit=8),
                           finished=_now())
             finally:
                 self._current = None
-                pool_seats.release(sid, holder)
+                if lease is not None:
+                    lease.release()
 
-    def run(self, rid: str):
-        """Build one report: gather (what its owner may see: ``reach.Reach``), cost, render, write."""
+    def _lease(self, rid: str):
+        """The lease a report whose analysis a model writes holds on that machine while it is built
+        (design/phase3-features.md P3.3.3): non-lending (``report``), so ``occupied()`` lists the report and queued
+        benchmarks and probe runs wait for it, and the narrative's request is its. None for a report without a
+        narrative. Package 3-09 makes the narrative a ``report`` ticket instead."""
+        sid = self._machine(rid)
+        if not sid:
+            return None
+        from ..pool import scheduler as prompt_scheduler, seats as pool_seats
+        meta = self.meta(rid)
+        owner = meta.get("owner_id")
+        return prompt_scheduler.get().lease(
+            sid, kind="report", activity=f"report:{rid}", consumer=owner, label=f"report “{meta.get('title') or rid}”",
+            cap=pool_seats.consumer_cap(owner, sid, NARRATIVE_PURPOSE), ref=("report", rid))
+
+    def run(self, rid: str, lease=None):
+        """Build one report: gather (what its owner may see: ``reach.Reach``), cost, render, write. ``lease`` is the
+        report's on its narrative's machine (``_lease``), which the narrative's request is made under."""
         from .data import gather
         from .reach import Reach
         from .render import render, narrative_brief
@@ -382,7 +412,7 @@ class ReportRunner:
         narrative, note = "", ""
         if spec["narrative"]["enabled"]:
             self._set(rid, progress="Writing the analysis with a model")
-            narrative, note = self._narrative(rid, spec, narrative_brief(data))
+            narrative, note = self._narrative(rid, spec, narrative_brief(data), lease)
         self._set(rid, progress="Rendering")
         page, summary = render(data, narrative, note)
         from ..fsutil import write_text
@@ -390,8 +420,37 @@ class ReportRunner:
         self._set(rid, status="done", finished=_now(), progress="Done", summary=summary, seconds=round(_now() - t0, 1),
                   size=len(page.encode("utf-8")))
 
-    def _narrative(self, rid: str, spec: dict, brief: str) -> tuple[str, str]:
-        """Ask the chosen model for the written analysis; its usage is recorded as a 'report' activity."""
+    #: How long a narrative waits for a helper that dropped while the report was built (its request failed with a
+    #: connection error worth waiting out), as the narrative's own polling of a helper waited before the scheduler
+    RECONNECT_SECONDS = 1800.0
+    #: The longest pause between two tries while it waits; a helper that comes back is tried at once, after at least
+    #: ``RETRY_MIN_SECONDS`` (an error from a helper the hub still lists is never retried in a tight loop)
+    RECONNECT_POLL_SECONDS = 15.0
+    RETRY_MIN_SECONDS = 1.0
+
+    def _complete_waiting(self, rid: str, sv: dict, cfg: dict, prompt: str, lease) -> tuple[str, float]:
+        """``complete`` under ``lease``, riding out a helper that drops or reconnects while the report is built: a
+        connection error worth waiting out (``WorkerConnectionError``: the helper not connected, gone mid-request) is
+        tried again once the helper is back, for up to ``RECONNECT_SECONDS``; anything else fails at once. The
+        runner's thread holds no lock while it waits."""
+        from ..agents.providers.worker_provider import WorkerConnectionError
+        deadline = time.perf_counter() + self.RECONNECT_SECONDS
+        while True:
+            try:
+                return complete(cfg, NARRATIVE_SYSTEM, prompt, lease)
+            except WorkerConnectionError as e:
+                if time.perf_counter() >= deadline:
+                    raise
+                self._set(rid, progress=f"Waiting for {sv['name']}'s helper: {e}")
+            now = time.perf_counter()
+            soonest, latest = now + self.RETRY_MIN_SECONDS, min(deadline, now + self.RECONNECT_POLL_SECONDS)
+            while time.perf_counter() < latest and not (time.perf_counter() >= soonest and _helper_online(sv["id"])):
+                time.sleep(0.25)
+            self._set(rid, progress="Writing the analysis with a model")
+
+    def _narrative(self, rid: str, spec: dict, brief: str, lease=None) -> tuple[str, str]:
+        """Ask the chosen model for the written analysis, under the report's ``lease`` (a scheduled request like every
+        model call, P3.3.4: the usage ledger's listener meters it to the report's activity)."""
         from .. import servers, usage
         n = spec["narrative"]
         sv = servers.find(n["server_id"])
@@ -420,10 +479,17 @@ class ReportRunner:
                     servers.ensure_model(sv, cfg["model"], cfg.get("load"))
                 except Exception:
                     pass
-            t0 = time.perf_counter()
-            text, tokens, served = complete(cfg, NARRATIVE_SYSTEM, prompt)
-            secs = time.perf_counter() - t0
-            tr.llm(act, sv["id"], served or cfg["model"], secs, **tokens)
+            own = None
+            if lease is None:           # built outside the runner's loop (a script): a lease for the narrative alone
+                from ..pool import scheduler as prompt_scheduler
+                lease = own = prompt_scheduler.get().lease(sv["id"], kind="report", activity=act,
+                                                           label=f"report “{spec['title']}”", ref=("report", rid))
+            try:
+                lease.set_model(cfg["model"])
+                text, secs = self._complete_waiting(rid, sv, cfg, prompt, lease)
+            finally:
+                if own is not None:
+                    own.release()
             return text, f"Written by {cfg['model']} on {sv['name']} in {secs:.0f}s from the computed figures above."
         except Exception as e:
             return "", f"The narrative failed: {type(e).__name__}: {e}"
@@ -434,64 +500,29 @@ class ReportRunner:
             tr.flush()
 
 
-def complete(cfg: dict, system: str, prompt: str) -> tuple[str, dict, Optional[str]]:
-    """One plain completion (no tools). Returns (text, token counts for the ledger, model that served it)."""
-    provider = cfg.get("provider")
-    if provider == "worker":
-        return _complete_on_worker(cfg, system, prompt)
-    if provider == "dryrun":
-        time.sleep(float(cfg.get("dry_run_delay") or 0))
-        text = ("(Dry run narrative.) This is where a model's written analysis of the figures would appear. The computed "
-                "findings and charts below are produced without a model.")
-        return text, {"input_tokens": len(prompt) // 4, "output_tokens": len(text) // 4}, cfg.get("model")
-    if provider == "anthropic":
-        import anthropic
-        client = anthropic.Anthropic(api_key=cfg.get("api_key"), base_url=cfg.get("base_url") or None, max_retries=3)
-        params = {"model": cfg["model"], "max_tokens": int(cfg.get("max_tokens") or 8000), "system": system,
-                      "messages": [{"role": "user", "content": prompt}]}
-        if cfg.get("effort"):
-            params["output_config"] = {"effort": cfg["effort"]}
-        r = client.messages.create(**params)
-        if r.stop_reason == "refusal":
-            raise RuntimeError("the model declined to write the analysis")
-        text = "\n".join(b.text for b in r.content if b.type == "text")
-        u = r.usage
-        return text, {"input_tokens": u.input_tokens or 0, "output_tokens": u.output_tokens or 0,
-                      "cache_read": getattr(u, "cache_read_input_tokens", 0) or 0,
-                      "cache_write": getattr(u, "cache_creation_input_tokens", 0) or 0}, getattr(r, "model", None)
-    from openai import OpenAI
-    client = OpenAI(base_url=cfg.get("base_url") or None, api_key=cfg.get("api_key") or "not-needed",
-                    timeout=float(cfg.get("timeout") or 1800), max_retries=1)
-    params = {"model": cfg["model"], "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
-    if cfg.get("reasoning_effort"):
-        params["extra_body"] = {"reasoning_effort": cfg["reasoning_effort"]}
-    if cfg.get("max_tokens"):
-        params["max_tokens"] = int(cfg["max_tokens"])
-    r = client.chat.completions.create(**params)
-    text = r.choices[0].message.content or ""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
-    toks = {}
-    if r.usage:
-        toks = {"input_tokens": r.usage.prompt_tokens or 0, "output_tokens": r.usage.completion_tokens or 0}
-    return text, toks, cfg.get("model")
+def _helper_online(server_id: str) -> bool:
+    """Whether a helper machine's helper is connected now (the hub's view; no database read)."""
+    from ..server.workers import hub
+    return hub().is_online(server_id)
 
 
-def _complete_on_worker(cfg: dict, system: str, prompt: str, busy_wait: float = 1800) -> tuple[str, dict, Optional[str]]:
-    """The same, on a machine reached through its helper. A busy machine (another game's turn) is waited for."""
-    from ..agents.providers.worker_provider import WorkerConversation, WorkerConnectionError
-    conv = WorkerConversation(dict(cfg, tool_mode="native"), system, [])
-    conv.add_user_text(prompt)
-    deadline = time.time() + busy_wait
-    while True:
-        try:
-            step = conv.step()
-            break
-        except WorkerConnectionError as e:
-            if time.time() > deadline:
-                raise
-            time.sleep(5 if getattr(e, "refusal", "") == "busy" else 15)
+def complete(cfg: dict, system: str, prompt: str, binding) -> tuple[str, float]:
+    """One plain completion (no tools) under ``binding`` (a lease or a ticket of ``citar.pool.scheduler``): the one path
+    every model call takes (``make_conversation``, P3.3.4), whatever the provider, so the request waits for its
+    machine's slot rather than polling a busy helper, and the usage ledger's listener meters it. Returns the text,
+    without a model's ``<think>`` block, and the generation seconds the scheduler measured."""
+    from ..agents.providers import make_conversation
+    conv = make_conversation(dict(cfg, tool_mode="native"), system, [], binding=binding)
+    conv.request_timeout = float(cfg.get("timeout") or 1800)
+    try:
+        conv.add_user_text(prompt)
+        step = conv.step()
+    finally:
+        conv.close()
+    if step.stop_reason == "refusal":
+        raise RuntimeError("the model declined to write the analysis")
     text = re.sub(r"<think>.*?</think>", "", step.text or "", flags=re.S).strip()
-    return text, {"input_tokens": conv.usage.get("input_tokens", 0), "output_tokens": conv.usage.get("output_tokens", 0)}, cfg.get("model")
+    return text, float(getattr(conv, "last_gen_s", 0.0) or 0.0)
 
 
 def scope_options(reach=None) -> dict:

@@ -625,6 +625,33 @@ class Priority(ItemCase):
         finally:
             self.manager.delete(gid)
 
+    def test_the_queue_says_what_holds_a_machine_as_the_caller_may_see_it(self):
+        """A machine's ``busy_with`` on the Queue page is its live leases (package 3-08: a lobby game holds them from
+        its creation, whoever moves first), each holder once: the owner and an administrator see the owner's game by
+        name, another member "someone's game", a visitor nothing (401)."""
+        from citar.pool import scheduler as prompt_scheduler
+        prompt_scheduler.reset()                # this test's leases only
+        self.addCleanup(prompt_scheduler.reset)
+        seat = {"type": "llm", "llm": {"server_id": "sv_dryrun", "model": "dry-run"}}
+        r = self.call("owner", "POST", "/api/games", {"name": "held", "config": {**CONFIG, "map_size": "small"},
+                                                      "seats": [{"type": "human"}, seat, seat]})
+        self.assertEqual(r.status_code, 200, r.text)
+        gid = r.json()["id"]
+        try:
+            self.assertEqual(len(prompt_scheduler.get().leases("sv_dryrun")), 2, "a lease per model seat")
+
+            def busy(who):
+                q = self.call(who, "GET", "/api/queue")
+                self.assertEqual(q.status_code, 200, q.text[:300])
+                return next((m["busy_with"] for m in q.json()["machines"] if m["server_id"] == "sv_dryrun"), None)
+            self.assertEqual(busy("owner"), ["game “held”"])
+            self.assertEqual(busy("admin"), ["game “held”"])
+            self.assertEqual(busy("stranger"), ["someone's game"])
+            self.assertEqual(self.call("anonymous", "GET", "/api/queue").status_code, 401)
+        finally:
+            self.manager.delete(gid)
+        self.assertEqual(prompt_scheduler.get().leases("sv_dryrun"), [], "a closed game holds nothing")
+
     def test_the_queue_names_only_what_the_caller_may_see(self):
         """Another member's queued run is "someone's benchmark run" on the Queue page, with no name and no priority
         controls; the owner sees it by name with them."""
@@ -640,6 +667,70 @@ class Priority(ItemCase):
         entry = next(m for m in theirs["machines"] if m["server_id"] == "sv_dryrun")["waiting"][0]
         self.assertEqual((entry["label"], entry["can_manage"], entry["group"]), ("someone's benchmark run", False, None))
         self.assertNotIn(ref, json.dumps(theirs))
+
+    def test_what_queued_work_waits_for_names_only_what_the_caller_may_see(self):
+        """The owner's private game holds the dry run; the stranger's queued benchmark job, probe run and report wait
+        for it. Their routes and the Queue page tell the stranger "someone's game", never the game's name; an
+        administrator is told its name (P3.9.1). The stored notes name nobody."""
+        from citar.pool import scheduler as prompt_scheduler
+        from citar.server import reports_api
+        prompt_scheduler.reset()                # this test's leases only
+        self.addCleanup(prompt_scheduler.reset)
+        seat = {"type": "llm", "llm": {"server_id": "sv_dryrun", "model": "dry-run"}}
+        r = self.call("owner", "POST", "/api/games", {"name": "secret plans", "config": CONFIG,
+                                                      "seats": [{"type": "human"}, seat]})
+        self.assertEqual(r.status_code, 200, r.text)
+        gid = r.json()["id"]
+        self.addCleanup(self.manager.delete, gid)
+        secret = "secret plans"
+        # the stranger's benchmark run (its suite's machine takes one game at a time), probe run and report
+        run_ref = self.make("benchmark_run", owner="stranger", share_with=None)
+        sch = self.app._scheduler()
+        sch.runs[run_ref]["status"] = "running"
+        sch._start_jobs()
+        job = sch.runs[run_ref]["jobs"][0]
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["waiting"], "waiting: Dry run is in use by someone's game", "its stored text names nobody")
+        probe_ref = self.make("probe_run", owner="stranger", share_with=None)
+        runner = self.app._probes()
+        run = runner.get_run(probe_ref)
+        run.update(status="queued", llm={"provider": "dryrun", "server_id": "sv_dryrun", "model": "dry-run"},
+                   finished=None)
+        runner._write(run)
+        self.assertTrue(runner._machine_busy(probe_ref))
+        report_ref = self.make("report", owner="stranger", share_with=None)
+        reports = reports_api.reports_runner()
+        (reports.dir / report_ref / "spec.json").write_text(json.dumps({
+            "title": f"report {report_ref}", "sections": ["summary"],
+            "narrative": {"enabled": True, "server_id": "sv_dryrun", "model_id": "m_dry"}}), encoding="utf-8")
+        reports._set(report_ref, status="queued")
+        reports.queue.append(report_ref)
+        self.addCleanup(lambda: report_ref in reports.queue and reports.queue.remove(report_ref))
+        self.assertIsNone(reports._next())
+
+        def told(who):
+            runs = self.call(who, "GET", "/api/benchmarks/runs").json()
+            job_note = next(j for rr in runs if rr["id"] == run_ref for j in rr["jobs"] if j["id"] == "job1")
+            probe = self.call(who, "GET", f"/api/probe-runs/{probe_ref}").json()["run"]
+            meta = self.call(who, "GET", f"/api/reports/{report_ref}").json()["meta"]
+            listed = next(m for m in self.call(who, "GET", "/api/reports").json() if m["id"] == report_ref)
+            for entry in (job_note, probe, meta, listed):
+                self.assertNotIn("waiting_note", entry)
+            return job_note["waiting"], probe["waiting"], meta["waiting"], meta["progress"], listed["waiting"]
+        for text in told("stranger"):
+            self.assertIn("someone's game", text)
+            self.assertNotIn(secret, text)
+        for text in told("admin"):
+            self.assertIn(f"game “{secret}”", text)
+        queue = self.call("stranger", "GET", "/api/queue").json()
+        self.assertNotIn(secret, json.dumps(queue))
+        mine = [it for m in queue["machines"] for it in m["waiting"] if it.get("group") in (run_ref, probe_ref,
+                                                                                               report_ref)]
+        self.assertTrue(mine, queue)
+        for it in mine:
+            self.assertNotIn("waiting_note", it)
+            self.assertIn("someone's game", it["waiting"])
+        self.assertIn(f"game “{secret}”", json.dumps(self.call("admin", "GET", "/api/queue").json(), ensure_ascii=False))
 
 
 class Producers(ItemCase):

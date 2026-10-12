@@ -260,6 +260,17 @@ class BenchmarkScheduler:
                 "disconnect": "paused (model server unreachable)"}.get(job.get("pause_reason"), "paused")
 
     @staticmethod
+    def _set_waiting(job: dict, note) -> bool:
+        """Set what a queued job waits for (a ``pool.seats.note``, or None): the note, which the runs' route tells each
+        viewer with the names they may see (``work_access.with_waiting``), and its text naming no holder. Returns
+        whether it changed."""
+        if job.get("waiting_note") == note and (note is not None or job.get("waiting") is None):
+            return False
+        from ..pool import seats as pool_seats
+        job["waiting_note"], job["waiting"] = note, pool_seats.note_text(note)
+        return True
+
+    @staticmethod
     def _preempted(job: dict) -> bool:
         """Whether a job paused to make way for higher-priority work on its machine."""
         return job["status"] == "paused" and job.get("pause_reason") == "preempted"
@@ -270,7 +281,8 @@ class BenchmarkScheduler:
                 "label": f"{job['label']} · {job['scenario_name']} #{job['repeat']}",
                 "server_id": self._machine(job) if job.get("game_id") else job["server_key"],
                 "server": job.get("server_name"), "created": job["created"],
-                "waiting": job.get("waiting") or ("paused for higher-priority work" if self._preempted(job) else None)}
+                "waiting": job.get("waiting") or ("paused for higher-priority work" if self._preempted(job) else None),
+                "waiting_note": job.get("waiting_note")}
 
     # ------------------------------------------------------------------ persistence
     def _load(self):
@@ -556,7 +568,10 @@ class BenchmarkScheduler:
         if job["status"] in ("running", "resuming"):
             s = self.manager.get(job["game_id"]) if job["game_id"] else None
             if s is not None:
-                s.suspend({"kind": "queue", "message": f"making way for {first['label']} (priority {first['priority']})"}
+                # the game's pause is shown to whoever may watch it: the work it makes way for is named by its kind
+                from ..pool import seats as pool_seats
+                what = pool_seats.kind_text(pool_seats.queue_holder(first)) if first else ""
+                s.suspend({"kind": "queue", "message": f"making way for {what} (priority {first['priority']})"}
                           if reason == "preempted" and first else None)
             job["status"], job["pause_reason"] = "paused", reason
         elif job["status"] == "paused" and reason == "user":
@@ -592,7 +607,9 @@ class BenchmarkScheduler:
             crashes = sorted(p.name for p in folder.glob("crash-*.citar"))
             for name in ("benchmark.citar", *crashes[-1:], "autosave.citar"):
                 if (folder / name).exists():
-                    s = self.manager.load(folder / name)
+                    # a job that is over is only looked at: its game holds no machine (P3.3.3), so a cancelled job's
+                    # benchmark lease never holds pooled prompts off the machine while somebody watches its recap
+                    s = self.manager.load(folder / name, leases=job["status"] not in ("done", "failed", "cancelled"))
                     s.owner_id = run.get("owner_id") or s.owner_id
                     ownership.claim_quietly(s, run.get("owner_id"), item=("benchmark_run", run["id"]))
                     if job["status"] in ("done", "failed", "cancelled"):
@@ -795,8 +812,10 @@ class BenchmarkScheduler:
             job.pop("pause_pending", None)
             job.pop("preempt_since", None)
             self._pause_job(job, "preempted", first)
+            # the run's log is read by whoever may see the run: the work it made way for is named by its kind only
             self._log(f"{job['label']} · {job['scenario_name']} #{job['repeat']} paused on {job['server_name']} "
-                      f"for {first['label']} (priority {first['priority']}).", run["id"])
+                      f"for {pool_seats.kind_text(pool_seats.queue_holder(first))} (priority {first['priority']}).",
+                      run["id"])
             self._touch(run)
         elif self._preempted(job) and run["status"] == "running" and machine not in self._restricted:
             ours = frozenset(j["game_id"] for r in self.runs.values() for j in r["jobs"] if j.get("game_id"))
@@ -830,11 +849,12 @@ class BenchmarkScheduler:
                     busy[job["server_key"]] = busy.get(job["server_key"], 0) + 1
                 if job.get("game_id"):
                     ours.add(job["game_id"])
-        # Games that are not ours - somebody's lobby game, a probe - hold their machine too. A queued job
+        # Games that are not ours - somebody's lobby game, a probe run, a report's narrative - hold their machine too:
+        # each lease live on it counts against the machine's limit (design/phase3-features.md P3.3.5). A queued job
         # waits for them rather than fighting a running game for the machine's slot.
         others: dict[str, list] = {}
         for sid in {j["server_key"] for r in self.runs.values() for j in r["jobs"] if j["status"] == "queued"}:
-            others[sid] = pool_seats.occupied(sid, exclude=frozenset(ours))
+            others[sid] = pool_seats.occupants(sid, exclude=frozenset(ours))
         from ..pool import queue as work_queue
         for run in sorted(self.runs.values(), key=lambda r: (-work_queue.priority("benchmark", r["id"]), r["created"])):
             if run["status"] != "running":
@@ -851,19 +871,19 @@ class BenchmarkScheduler:
                 limit = self._server(run, job).get("max_parallel", 1)
                 held = others.get(job["server_key"]) or []
                 if busy.get(job["server_key"], 0) + len(held) >= limit:
-                    note = f"waiting: {job['server_name']} is in use by {', '.join(held)}" if held else None
-                    if job.get("waiting") != note:
-                        job["waiting"] = note
+                    note = pool_seats.note(f"waiting: {job['server_name']} is in use by ",
+                                           pool_seats.distinct(held)) if held else None
+                    if self._set_waiting(job, note):
                         self._touch(run)
                     continue
                 first = work_queue.ahead_of(job["server_key"], "benchmark", (-prio, job["created"]))
                 if first is not None:
-                    note = f"waiting: {first['label']} goes first on {job['server_name']} (priority {first['priority']})"
-                    if job.get("waiting") != note:
-                        job["waiting"] = note
+                    note = pool_seats.note("waiting: ", [pool_seats.queue_holder(first)],
+                                           f" goes first on {job['server_name']} (priority {first['priority']})")
+                    if self._set_waiting(job, note):
                         self._touch(run)
                     continue
-                job["waiting"] = None
+                self._set_waiting(job, None)
                 busy[job["server_key"]] = busy.get(job["server_key"], 0) + 1
                 run_busy += 1
                 job["status"] = "loading"
@@ -1155,6 +1175,10 @@ def game_progress(s: GameSession, llm_player: Optional[int] = None, model: Optio
         "malformed_calls": rep.get("malformed_calls"), "end_reasons": rep.get("end_reasons", {}),
         "output_tokens_per_s": rep.get("output_tokens_per_s"), "series": series,
         "last_thought": (last_thought["text"][:300] if last_thought else None),
+        # how long the job's model waited for pooled prompts to drain off its machine before its first request (each
+        # time its lease was made: a start, a reload, a resume after making way), and whether a drain was cut short by
+        # its bound, which leaves the job's timing out of the speed score (design/phase3-features.md P3.3.3)
+        "drain_s": bench.get("drain_s"), "contaminated": bool(bench.get("contaminated")),
         "updated": _now(),
     }
 
