@@ -52,6 +52,11 @@ PRESETS = {
 #: only the averages other accounts pool, each withheld until enough accounts are behind it; ``both``.
 POOLING = ("own", "pooled", "both")
 
+#: The kind of work a report's narrative is for admission (``admission.PURPOSES``): one prompt on a machine, as a
+#: game's turn is. The route admits it for this purpose and the runner's lease is capped by the grant for it.
+#: Package 3-09 gives pooled prompts a purpose of their own.
+NARRATIVE_PURPOSE = "game"
+
 
 def _now() -> float:
     """The current time."""
@@ -237,7 +242,7 @@ class ReportRunner:
             title = m.get("title") or "report"
             out.append({"kind": "report", "id": rid, "group": rid, "run": title, "label": f"report “{title}”",
                         "server_id": sid, "server": servers.server_name(sid), "created": m.get("created") or 0,
-                        "waiting": m.get("waiting")})
+                        "waiting": m.get("waiting"), "waiting_note": m.get("waiting_note")})
         return out
 
     def running_items(self) -> list[dict]:
@@ -251,9 +256,11 @@ class ReportRunner:
         return [{"kind": "report", "id": rid, "group": rid, "run": title, "label": f"report “{title}”",
                  "server_id": sid, "server": servers.server_name(sid), "created": self.meta(rid).get("created") or 0}]
 
-    def _blocked(self, rid: str) -> Optional[str]:
-        """Why a queued report cannot start yet (None when it can): its machine is in its quiet hours, in use, or
-        higher-priority work is waiting for it. Reports without a written analysis never wait."""
+    def _blocked(self, rid: str) -> Optional[dict]:
+        """Why a queued report cannot start yet, as a ``pool.seats.note`` (None when it can): its machine is in its
+        quiet hours, its helper is offline, it is in use, or higher-priority work is waiting for it. Reports without a
+        written analysis never wait. A note naming other work is told to each viewer as they may see it
+        (``work_access.with_waiting``)."""
         sid = self._machine(rid)
         if not sid:
             return None
@@ -262,14 +269,19 @@ class ReportRunner:
         name = servers.server_name(sid)
         end = servers.restricted_now(sid)
         if end:
-            return f"{name} is in its quiet hours until {servers.restricted_text(sid, end)}"
-        held = pool_seats.occupied(sid)
+            return pool_seats.note(f"{name} is in its quiet hours until {servers.restricted_text(sid, end)}", [])
+        if servers.is_helper(sid) and not _helper_online(sid):
+            # its narrative would fail at once (a lease's request on a machine of unknown capacity passes through to a
+            # hub with no helper): the report waits for the helper, as for quiet hours, holding nothing
+            return pool_seats.note(f"{name}'s helper is offline", [])
+        held = pool_seats.holders(sid)
         if held:
-            return f"{name} is in use by {pool_seats.held_text(held)}"
+            return pool_seats.note(f"{name} is in use by ", held)
         m = self.meta(rid)
         first = work_queue.ahead_of(sid, "report", (-work_queue.priority("report", rid), float(m.get("created") or 0)))
         if first is not None:
-            return f"{first['label']} goes first on {name} (priority {first['priority']})"
+            return pool_seats.note("", [pool_seats.queue_holder(first)],
+                                   f" goes first on {name} (priority {first['priority']})")
         return None
 
     def _next(self) -> Optional[str]:
@@ -287,12 +299,15 @@ class ReportRunner:
                         self.queue.remove(rid)
                 continue
             ranked.append(((-work_queue.priority("report", rid), created), rid))
+        from ..pool import seats as pool_seats
         for _, rid in sorted(ranked):
-            why = self._blocked(rid)
-            if why is None:
+            note = self._blocked(rid)
+            if note is None:
                 return rid
-            if self.meta(rid).get("waiting") != why:
-                self._set(rid, waiting=why, progress=f"Waiting: {why}")
+            why = pool_seats.note_text(note)
+            m = self.meta(rid)
+            if m.get("waiting_note") != note or m.get("waiting") != why:
+                self._set(rid, waiting=why, waiting_note=note, progress=f"Waiting: {why}")
         return None
 
     # ------------------------------------------------------------------ running
@@ -354,7 +369,7 @@ class ReportRunner:
             with self.lock:
                 if rid in self.queue:
                     self.queue.remove(rid)
-            self._set(rid, waiting=None)
+            self._set(rid, waiting=None, waiting_note=None)
             lease = None
             self._current = rid
             try:
@@ -381,7 +396,7 @@ class ReportRunner:
         owner = meta.get("owner_id")
         return prompt_scheduler.get().lease(
             sid, kind="report", activity=f"report:{rid}", consumer=owner, label=f"report “{meta.get('title') or rid}”",
-            cap=pool_seats.consumer_cap(owner, sid), ref=("report", rid))
+            cap=pool_seats.consumer_cap(owner, sid, NARRATIVE_PURPOSE), ref=("report", rid))
 
     def run(self, rid: str, lease=None):
         """Build one report: gather (what its owner may see: ``reach.Reach``), cost, render, write. ``lease`` is the
@@ -404,6 +419,34 @@ class ReportRunner:
         write_text(self._path(rid) / "report.html", page)
         self._set(rid, status="done", finished=_now(), progress="Done", summary=summary, seconds=round(_now() - t0, 1),
                   size=len(page.encode("utf-8")))
+
+    #: How long a narrative waits for a helper that dropped while the report was built (its request failed with a
+    #: connection error worth waiting out), as the narrative's own polling of a helper waited before the scheduler
+    RECONNECT_SECONDS = 1800.0
+    #: The longest pause between two tries while it waits; a helper that comes back is tried at once, after at least
+    #: ``RETRY_MIN_SECONDS`` (an error from a helper the hub still lists is never retried in a tight loop)
+    RECONNECT_POLL_SECONDS = 15.0
+    RETRY_MIN_SECONDS = 1.0
+
+    def _complete_waiting(self, rid: str, sv: dict, cfg: dict, prompt: str, lease) -> tuple[str, float]:
+        """``complete`` under ``lease``, riding out a helper that drops or reconnects while the report is built: a
+        connection error worth waiting out (``WorkerConnectionError``: the helper not connected, gone mid-request) is
+        tried again once the helper is back, for up to ``RECONNECT_SECONDS``; anything else fails at once. The
+        runner's thread holds no lock while it waits."""
+        from ..agents.providers.worker_provider import WorkerConnectionError
+        deadline = time.perf_counter() + self.RECONNECT_SECONDS
+        while True:
+            try:
+                return complete(cfg, NARRATIVE_SYSTEM, prompt, lease)
+            except WorkerConnectionError as e:
+                if time.perf_counter() >= deadline:
+                    raise
+                self._set(rid, progress=f"Waiting for {sv['name']}'s helper: {e}")
+            now = time.perf_counter()
+            soonest, latest = now + self.RETRY_MIN_SECONDS, min(deadline, now + self.RECONNECT_POLL_SECONDS)
+            while time.perf_counter() < latest and not (time.perf_counter() >= soonest and _helper_online(sv["id"])):
+                time.sleep(0.25)
+            self._set(rid, progress="Writing the analysis with a model")
 
     def _narrative(self, rid: str, spec: dict, brief: str, lease=None) -> tuple[str, str]:
         """Ask the chosen model for the written analysis, under the report's ``lease`` (a scheduled request like every
@@ -443,7 +486,7 @@ class ReportRunner:
                                                            label=f"report “{spec['title']}”", ref=("report", rid))
             try:
                 lease.set_model(cfg["model"])
-                text, secs = complete(cfg, NARRATIVE_SYSTEM, prompt, lease)
+                text, secs = self._complete_waiting(rid, sv, cfg, prompt, lease)
             finally:
                 if own is not None:
                     own.release()
@@ -455,6 +498,12 @@ class ReportRunner:
             tr.update(act, ended=_now())
             tr.unregister(act)
             tr.flush()
+
+
+def _helper_online(server_id: str) -> bool:
+    """Whether a helper machine's helper is connected now (the hub's view; no database read)."""
+    from ..server.workers import hub
+    return hub().is_online(server_id)
 
 
 def complete(cfg: dict, system: str, prompt: str, binding) -> tuple[str, float]:

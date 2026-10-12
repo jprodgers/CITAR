@@ -25,6 +25,8 @@ from sqlalchemy.orm import Session
 from .. import items
 from ..auth import access
 from ..auth.deps import Principal, get_db, principal, require_cap, require_user
+from ..reports import NARRATIVE_PURPOSE  # the kind of work a narrative is admitted for
+from . import work_access
 
 router = APIRouter()
 _runner = None
@@ -60,11 +62,6 @@ def _is_admin(user) -> bool:
     return user is not None and user.role == "admin" and user.status == "active"
 
 
-#: The kind of work a report's narrative is for admission (``admission.PURPOSES``): one prompt on a machine, as a
-#: game's turn is. Package 3-09 gives pooled prompts a purpose of their own.
-NARRATIVE_PURPOSE = "game"
-
-
 def _narrative_gate(s: Session, spec: dict, user) -> None:
     """A report's written analysis runs on the machine its (normalized) spec names: a member's names one
     (P3.2.9, ``servers.member_llm``) and is admitted to it (``pool.seats.admit``: their own machine, or a group's they
@@ -93,7 +90,8 @@ def reports_list(request: Request, p: Principal = Depends(principal), s: Session
     seen = items.listed(s, "report", p.user, slug=key)
     out = [m for m in reports_runner().list() if seen is None or m.get("id") in seen]
     perms = items.permissions_by_ref(s, "report", p.user, [m["id"] for m in out], slug=key)
-    return [_meta_for(dict(m, **perms.get(m["id"], {}))) for m in out]
+    name = work_access.namer(s, p.user, admin=_is_admin(p.user))
+    return [_meta_for(work_access.with_waiting(dict(m, **perms.get(m["id"], {})), name)) for m in out]
 
 
 #: What a report's metadata keeps for its managers only: a failed build's traceback (the server's code and paths)
@@ -194,7 +192,9 @@ def reports_get(rid: str, request: Request, p: Principal = Depends(principal), s
     _row, perms = items.require(s, "report", rid, p.user, access.VIEW, slug=_key(request))
     r = reports_runner()
     manages = access.MANAGE in perms
-    return {"meta": _meta_for(_call(r.meta, rid), manages), "spec": _spec_for(s, _call(r.spec, rid), p.user, manages),
+    # what a queued report waits for names only the work the caller may see (P3.9.1)
+    meta = work_access.with_waiting(_call(r.meta, rid), work_access.namer(s, p.user, admin=_is_admin(p.user)))
+    return {"meta": _meta_for(meta, manages), "spec": _spec_for(s, _call(r.spec, rid), p.user, manages),
             **perms.client()}
 
 

@@ -419,6 +419,13 @@ def _check(case: dict, rec: dict) -> Optional[bool]:
     return ok
 
 
+def _set_waiting(run: dict, note: Optional[dict]) -> None:
+    """What a queued run waits for (a ``pool.seats.note``, or None): the note, which the run's route tells each viewer
+    with the names they may see (``work_access.with_waiting``), and its text naming no holder."""
+    from .pool import seats as pool_seats
+    run["waiting_note"], run["waiting"] = note, pool_seats.note_text(note)
+
+
 # ----------------------------------------------------------------------------
 # the runner (one run at a time: runs usually share a single GPU)
 # ----------------------------------------------------------------------------
@@ -679,7 +686,8 @@ class ProbeRunner:
                 continue
             out.append({"kind": "probe", "id": rid, "group": rid, "run": run["name"], "label": run["name"],
                         "server_id": run["llm"].get("server_id"), "server": run["llm"].get("server"),
-                        "created": run.get("created") or 0, "waiting": run.get("waiting")})
+                        "created": run.get("created") or 0, "waiting": run.get("waiting"),
+                        "waiting_note": run.get("waiting_note")})
         return out
 
     def running_items(self) -> list[dict]:
@@ -700,13 +708,14 @@ class ProbeRunner:
     def _make_way(self, rid: str, run: dict) -> bool:
         """Between cases: if higher-priority work is waiting for this run's machine, put the run back in the queue
         (it keeps its rank and carries on from the next case). Returns True if it did."""
-        from .pool import queue as work_queue
+        from .pool import queue as work_queue, seats as pool_seats
         first = work_queue.preempting(run["llm"].get("server_id"), "probe", rid, work_queue.priority("probe", rid))
         if first is None:
             return False
         run = self.get_run(rid)
         run["status"] = "queued"
-        run["waiting"] = f"paused for {first['label']} (priority {first['priority']})"
+        _set_waiting(run, pool_seats.note("paused for ", [pool_seats.queue_holder(first)],
+                                          f" (priority {first['priority']})"))
         self._write(run)
         with self.lock:
             if rid not in self.queue:
@@ -732,16 +741,18 @@ class ProbeRunner:
         except ProbeError:
             return False
         server_id = run["llm"].get("server_id")
-        held = pool_seats.occupied(server_id)
-        note = f"waiting for {pool_seats.held_text(held)}" if held else None
+        held = pool_seats.holders(server_id)
+        note = pool_seats.note("waiting for ", held) if held else None
         if not held and server_id:
             first = work_queue.ahead_of(server_id, "probe", (-work_queue.priority("probe", rid), run.get("created") or 0))
             if first is not None:
-                held = [first["label"]]
-                note = f"waiting: {first['label']} goes first (priority {first['priority']})"
+                held = [pool_seats.queue_holder(first)]
+                note = pool_seats.note("waiting: ", held, f" goes first (priority {first['priority']})")
         status = "waiting (machine busy)" if held else "queued"
-        if run.get("waiting") != note or run["status"] != status:
-            run["waiting"], run["status"] = note, status
+        if run.get("waiting_note") != note or run.get("waiting") != pool_seats.note_text(note) \
+                or run["status"] != status:
+            _set_waiting(run, note)
+            run["status"] = status
             self._write(run)
         return bool(held)
 
@@ -750,21 +761,23 @@ class ProbeRunner:
         from .pool import seats as pool_seats
         waited = False
         while server_id and rid not in self._stop_run:
-            held = pool_seats.occupied(server_id)
+            held = pool_seats.holders(server_id)
             if not held:
                 break
             if not waited:
                 waited = True
                 run = self.get_run(rid)
                 run["status"] = "waiting (machine busy)"
-                run["waiting"] = f"waiting for {pool_seats.held_text(held)}"
+                _set_waiting(run, pool_seats.note("waiting for ", held))
                 self._write(run)
-                self._set_live(rid, {"run": rid, "case": f"(waiting: the machine is in use by "
-                                                         f"{pool_seats.held_text(held)})", "since": time.time()})
+                # the live panel is shown to whoever may see the run: what holds the machine is the run's waiting
+                # note, which its route tells each viewer as they may see it
+                self._set_live(rid, {"run": rid, "case": "(waiting: the machine is in use)", "since": time.time()})
             time.sleep(15)
         if waited:
             run = self.get_run(rid)
-            run["status"], run["waiting"] = "running", None
+            run["status"] = "running"
+            _set_waiting(run, None)
             self._write(run)
 
     def _run_cases(self, rid, run, probe, scn, done, cases, act, lease=None):

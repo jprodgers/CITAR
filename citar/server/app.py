@@ -35,7 +35,7 @@ from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
 from .. import items, pool
-from . import ownership
+from . import ownership, work_access
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -1120,9 +1120,13 @@ def bench_runs(request: Request, me=Depends(require_user), sdb: DbSession = Depe
     each."""
     key = _share_key(request)
     out = _scheduler().list_runs(items.listed(sdb, "benchmark_run", me, slug=key))
-    if not _is_admin(me):
-        # a machine's address is its owner's and the administrators' (the registry's routes are theirs)
-        for r in out:
+    admin = _is_admin(me)
+    # what a queued job waits for names only the work the caller may see (P3.9.1)
+    name = work_access.namer(sdb, me, admin=admin)
+    for r in out:
+        r["jobs"] = [work_access.with_waiting(j, name) for j in r.get("jobs", [])]
+        if not admin:
+            # a machine's address is its owner's and the administrators' (the registry's routes are theirs)
             r["servers"] = [{k: v for k, v in sv.items() if k != "base_url"} for sv in r.get("servers", [])]
     return _with_perms(sdb, "benchmark_run", me, out, slug=key)
 
@@ -1734,7 +1738,10 @@ def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb
     runner = _probes()
     _row, perms = items.require(sdb, "probe_run", rid, p.user, access.VIEW, slug=_share_key(request))
     run = _probe_call(runner.get_run, rid)
-    if not _is_admin(p.user):
+    admin = _is_admin(p.user)
+    # what a queued run waits for names only the work the caller may see (P3.9.1)
+    run = work_access.with_waiting(run, work_access.namer(sdb, p.user, admin=admin))
+    if not admin:
         # an administrator's subject may describe its machine (P3.2.9); its address and key variable stay theirs
         run["llm"] = {k: v for k, v in (run.get("llm") or {}).items() if k not in DESCRIBING_KEYS}
     return {"run": run, "results": runner.results(rid), "status": _probe_status(sdb, p.user, runner),
@@ -1800,31 +1807,22 @@ def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = De
 
 
 #: The queue's kinds and the item each one's ``id`` (its run) names; a game is its row in the games index.
-_QUEUE_ITEMS = {"benchmark": "benchmark_run", "probe": "probe_run", "report": "report", "lab": "lab_experiment"}
+_QUEUE_ITEMS = work_access.QUEUE_ITEMS
 #: How work the caller may not see is named on the Queue page (P3.2.4).
-_SOMEONES = {"benchmark": "someone's benchmark run", "probe": "someone's probe run", "report": "someone's report",
-             "game": "someone's game", "lab": "someone's lab experiment"}
+_SOMEONES = work_access.SOMEONES
+_queue_access = work_access.access_to
 
 
-def _queue_access(sdb: DbSession, user, kind: str, ident: str) -> access.Access:
-    """What ``user`` may do with one piece of queued work: its item's permissions, a game's through its row."""
-    if kind == "game":
-        row = ownership.row_for(sdb, ident)
-        return access.on(sdb, user, row) if row is not None else access.Access(set())
-    item = _QUEUE_ITEMS.get(kind)
-    if item is None:
-        return access.Access(set())
-    return items.resolve(sdb, item, ident, user)[1]
-
-
-def _queue_entry(sdb: DbSession, user, it: dict, cache: dict) -> dict:
+def _queue_entry(sdb: DbSession, user, it: dict, cache: dict, name=None) -> dict:
     """One queued or running item as ``user`` may see it: work they cannot see is "someone's <kind>", with no name,
-    no run and no reason that would name other work; ``can_manage`` says whether its priority is theirs to change."""
+    no run and no reason that would name other work; ``can_manage`` says whether its priority is theirs to change.
+    The reason of one they may see names only the work they may see too (``name``, ``work_access.namer``)."""
     key = (it.get("kind"), it.get("group"))
     if key not in cache:
         cache[key] = _queue_access(sdb, user, *key)
     perms = cache[key]
-    out = dict(it, can_manage=access.MANAGE in perms)
+    out = work_access.with_waiting(dict(it, can_manage=access.MANAGE in perms),
+                                   name or work_access.namer(sdb, user, cache=cache))
     if access.VIEW not in perms:
         out.update(label=_SOMEONES.get(it.get("kind"), "someone's work"), run=None, waiting=None, server=None,
                    id=None, group=None)
@@ -1858,15 +1856,17 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
                              [sid for sid in names if pool_seats.occupied(sid)]))
     admin = _is_admin(me)
     cache: dict = {}
+    name = work_access.namer(sdb, me, admin=admin, cache=cache)
     machines = []
     for sid in ids:
-        waiting = [_queue_entry(sdb, me, dict(it, position=n + 1), cache)
+        waiting = [_queue_entry(sdb, me, dict(it, position=n + 1), cache, name)
                    for n, it in enumerate(i for i in items_waiting if i.get("server_id") == sid)]
         # one line per holder: a game with two model seats on the machine holds two leases
         busy = list(dict.fromkeys(pool_seats.occupied(sid))) if admin else _occupants(sdb, me, sid, cache)
         machines.append({"server_id": sid, "name": names.get(sid, sid), "online": hub().is_online(sid) or None,
                          "busy_with": busy, "waiting": waiting,
-                         "running": [_queue_entry(sdb, me, i, cache) for i in active if i.get("server_id") == sid]})
+                         "running": [_queue_entry(sdb, me, i, cache, name) for i in active
+                                     if i.get("server_id") == sid]})
     try:
         overview = lab.overview()
     except Exception:
@@ -1893,19 +1893,9 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
 
 def _occupants(sdb: DbSession, user, server_id: str, cache: dict) -> list:
     """What is using a machine, as a member may be told: the names of the games and runs they may see, and
-    "someone's <kind>" for the rest (``pool.seats.occupants``: the leases live on it), each holder once."""
-    from ..pool import seats as pool_seats
-    out, seen = [], set()
-    for occ in pool_seats.occupants(server_id):
-        kind, ident = occ.get("kind"), occ.get("id")
-        key = (kind, ident)
-        if (key, occ["label"]) in seen:
-            continue                     # another model seat of the same game
-        seen.add((key, occ["label"]))
-        if key not in cache:
-            cache[key] = _queue_access(sdb, user, kind, ident) if kind and ident else access.Access(set())
-        out.append(occ["label"] if access.VIEW in cache[key] else _SOMEONES.get(kind, "someone's work"))
-    return out
+    "someone's <kind>" for the rest (``pool.seats.holders``: the leases live on it, each holder once)."""
+    name = work_access.namer(sdb, user, cache=cache)
+    return [name(h) for h in work_access.holders(server_id)]
 
 
 class PriorityBody(BaseModel):

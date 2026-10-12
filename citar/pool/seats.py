@@ -57,6 +57,66 @@ def held_text(held: list) -> str:
     return ", ".join(dict.fromkeys(held))
 
 
+# ---------------------------------------------------------------------------- notes that name other work
+# A queued job, run or report says what it waits for: the work holding its machine, or the work ahead of it. That work
+# may be another member's private game or run (P3.2.4, P3.9.1), so a note is kept as its words and its holders
+# (``note``), its stored text names no holder (``note_text`` with no namer: "someone's game"), and whoever serves it
+# tells each viewer the names they may see (``citar.server.app._namer``).
+
+#: How work a viewer may not see is named, by the shared queue's kind.
+SOMEONES = {"benchmark": "someone's benchmark run", "probe": "someone's probe run", "report": "someone's report",
+            "game": "someone's game", "lab": "someone's lab experiment"}
+#: How work is named where no viewer is known (a game's pause, a run's log), by the shared queue's kind.
+KINDS = {"benchmark": "a benchmark run", "probe": "a probe run", "report": "a report", "game": "a game",
+         "lab": "a lab experiment"}
+
+
+def anonymous(holder: dict) -> str:
+    """A holder as somebody who may not see its work is told of it ("someone's game")."""
+    return SOMEONES.get(holder.get("kind"), "someone's work")
+
+
+def kind_text(holder: dict) -> str:
+    """A holder by its kind alone ("a benchmark run"), for words every viewer of a game or run reads."""
+    return KINDS.get(holder.get("kind"), "other work")
+
+
+def holders(server_id: Optional[str], exclude: frozenset = frozenset()) -> list[dict]:
+    """The work holding a machine (``occupants``), each holder once: {"kind", "id", "label"}, ``id`` being what the
+    work's access is decided on (a game's id, a run's or a report's)."""
+    return distinct(occupants(server_id, exclude))
+
+
+def distinct(occs: list) -> list[dict]:
+    """``occupants`` (one per lease) as holders, each once: {"kind", "id", "label"}."""
+    out, seen = [], set()
+    for occ in occs:
+        key = (occ.get("kind"), occ.get("id"), occ["label"])
+        if key not in seen:
+            seen.add(key)
+            out.append({"kind": occ.get("kind"), "id": occ.get("id"), "label": occ["label"]})
+    return out
+
+
+def queue_holder(item: dict) -> dict:
+    """The work a shared queue item is (``pool.queue``: its kind, its ``group`` and its label), as a holder."""
+    return {"kind": item.get("kind"), "id": item.get("group") or item.get("id"), "label": item.get("label") or ""}
+
+
+def note(prefix: str, held: list, suffix: str = "") -> dict:
+    """A note naming other work: its words before and after the names of the holders ``held``, and the holders."""
+    return {"prefix": prefix, "holders": [dict(h) for h in held], "suffix": suffix}
+
+
+def note_text(note: Optional[dict], name=None) -> Optional[str]:
+    """A note in words, each holder named once by ``name(holder)`` (a viewer's namer), or by ``anonymous`` when no
+    namer is given (what is stored, and what a reader no route renders for is told)."""
+    if not note:
+        return None
+    name = name or anonymous
+    return note["prefix"] + ", ".join(dict.fromkeys(name(h) for h in note.get("holders") or [])) + note.get("suffix", "")
+
+
 def max_parallel(pooled: dict) -> int:
     """How many requests a machine takes at once: its row's slots (``Server.max_concurrent``, the one number of
     P3.2.8), or 1."""
