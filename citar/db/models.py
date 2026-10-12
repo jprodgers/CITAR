@@ -752,6 +752,10 @@ class ComputeEvent(Base):
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     tokens_reasoning: Mapped[int] = mapped_column(Integer, default=0)
+    #: Input tokens the provider read from its prompt cache, and wrote to it (revision 0016b): an online API prices
+    #: them apart from the rest of the input, so costing needs them.
+    tokens_cache_read: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    tokens_cache_write: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     #: Priced when written, from the machine's hardware class of this kind.
     credits: Mapped[float] = mapped_column(Float, default=0.0)
     #: {"overreported", "capped_tokens", "unpriced"}.

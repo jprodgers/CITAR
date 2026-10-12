@@ -14,6 +14,11 @@ Method, per server and per minute:
     plan's fixed fee spread over the household's monthly kWh.
   * API servers: tokens x the model's per-million prices (input, output, cache reads, cache writes).
 Everything is computed with the configuration in force at the time of use (effective-dated cost periods).
+
+What was held, and when, is the usage ledger's (``citar/usage.py``: activities, held time, power samples); the work
+done (generation seconds, tokens, the host's CPU seconds) is the compute ledger's (``compute_events``, read through
+``usage.read``'s ``work``; design/phase3-features.md P3.4.7). Generation seconds are bounded by what the server saw
+(P3.3.4), so a request's wait for its machine is never priced as busy energy.
 """
 from __future__ import annotations
 
@@ -27,6 +32,9 @@ from . import usage as U
 
 HOURS_PER_YEAR = 8766.0
 BUCKET = 60
+#: A compute event ending this close after an activity's last span with its own work is that span's work (a lab game's
+#: span ends when the game finished, rounded to a tenth of a second; its event at that moment).
+LEGACY_SLACK = 1.0
 
 
 def _dt(ts: float) -> datetime:
@@ -144,7 +152,7 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
     ``notes_by_server`` keys each note by the machine it is about (``"unassigned"`` for usage with no machine), so
     that a report that may show only some machines keeps only their notes (``reports.reach.Reach.cost``)."""
     reg = reg or S.with_pooled()
-    ledger = ledger or U.read(since, until)
+    ledger = ledger or U.read(since, until, work=True)
     servers = {s["id"]: s for s in reg["servers"]}
     aliases = reg.get("aliases") or {}           # a re-registered machine's old ids -> its current one
     acts_out: dict = {}
@@ -163,11 +171,26 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
                                 "servers": defaultdict(_new_cost), "models": defaultdict(_new_cost)}
         return acts_out[act_id]
 
-    # ---- per server, per minute: who held it and what work they did
+    # ---- per server, per minute: who held it and what work they did. The time held comes from the usage ledger's
+    # spans; the work (generation seconds, tokens, the host's CPU seconds) from the compute ledger's events (``work``,
+    # design/phase3-features.md P3.4.7), so time a request waited for its machine is never charged as work. A span
+    # written before package 3-10 carries its own work, which counts as it did. Work of an activity the usage ledger
+    # does not know (a machine's test, a game with no model seat) is the compute ledger's alone: it has nothing held
+    # to price against.
     days: dict = defaultdict(lambda: defaultdict(float))     # date -> srv -> cost (full basis)
     hours: dict = defaultdict(lambda: defaultdict(float))    # "YYYY-MM-DD HH:00" -> srv -> cost
     buckets: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0])))   # srv -> m -> act -> [held, busy, cpu]
+    known = ledger["acts"]
+    # an activity whose spans carry their own work (written before 3-10: ``busy``, ``cpu``, tokens) is priced from them
+    # up to the last such span's end, and from the compute ledger only after it: the lab's past games, read into the
+    # compute ledger from their results (``ledger.ingest_lab``), and a game played across the upgrade are counted once
+    legacy: dict = {}
     for sp in ledger["spans"]:
+        if "busy" in sp or "cpu" in sp or any(f in sp for f in U.TOKEN_FIELDS):
+            legacy[sp["act"]] = max(legacy.get(sp["act"], float("-inf")), float(sp["t1"]))
+    work = [w for w in ledger.get("work") or []
+            if w.get("act") in known and float(w["t1"]) > legacy.get(w["act"], float("-inf")) + LEGACY_SLACK]
+    for sp in list(ledger["spans"]) + work:
         srv = aliases.get(sp.get("srv"), sp.get("srv")) or "unassigned"
         t0, t1 = float(sp["t0"]), float(sp["t1"])
         if since:

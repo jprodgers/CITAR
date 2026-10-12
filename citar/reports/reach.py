@@ -116,12 +116,13 @@ class Reach:
 
     # ------------------------------------------------------------------ applying it
     def ledger(self, ledger: dict) -> dict:
-        """The usage ledger cut to the activities the owner may see (the spans and the activity rows; power samples
-        only for their own machines)."""
+        """The usage ledger cut to the activities the owner may see (the spans, the compute ledger's work and the
+        activity rows; power samples only for their own machines)."""
         if self.everything:
             return ledger
         acts = {k: a for k, a in ledger["acts"].items() if self.sees(a)}
         return {"acts": acts, "spans": [sp for sp in ledger["spans"] if sp.get("act") in acts],
+                "work": [w for w in ledger.get("work") or [] if w.get("act") in acts],
                 "power": {srv: rows for srv, rows in (ledger.get("power") or {}).items() if srv in self.machines}}
 
     def registry(self, reg: dict) -> dict:

@@ -60,10 +60,20 @@ scheduler's one notifier thread, which also does the periodic housekeeping and s
 **Metering** (``ScheduledConversation``, P3.3.4): after every step, listeners (``add_listener``) receive a ``StepEvent``
 with the generation time (on a helper the smaller of its reported ``Done.duration`` and the time the server observed
 from sending the request to its ``Done``; on a machine CITAR dials, the call's wall time after the slot was granted),
-the queue time, the token counts capped at the request's ``max_tokens`` and the model's context, and flags. The usage
-ledger's tracker is the first listener (it replaces ``LLMAgent._meter``), so an attempt that never reached the model
-meters nothing. A helper whose reported duration exceeds the observed time by more than 10% plus a second on three
-requests within an hour gets ``flags.overreports`` on its machine row and an audit row.
+the queue time, the token counts capped at the request's ``max_tokens`` and the model's context, and flags. The compute
+ledger (``citar.ledger.listener``, package 3-10) is the process scheduler's listener: one ``compute_events`` row per
+step, so an attempt that never reached the model meters nothing. A helper whose reported duration exceeds the observed
+time by more than 10% plus a second on three requests within an hour gets ``flags.overreports`` on its machine row and
+an audit row.
+
+**Budgets** (P3.4.6): a binding carries the id of the grant that admitted it (``access_grant``), and each request reserves
+against the budget that grant has when the request runs (``pool.budgets.Keeper.budget_of``), so a budget added or
+changed later holds the work already running. The step's estimate is reserved once its slot is granted
+(``pool.budgets.Keeper.reserve``, in memory); a hard budget that the request would take past its amount refuses it
+(``MachineRefused`` with ``code`` ``budget`` and the period's end as ``retry_at``), its slot given back. The step's event
+carries the reservation, which the ledger's listener settles in memory as it prices the step (its writer then writes
+the event and the budget's entry). A soft budget's first request past its amount is told to the binding's
+``on_budget`` (on the notifier thread).
 
 Replaces: ``LLMAgent._step``'s busy sleep (``citar/agents/llm_agent.py``, before 3-07), ``WorkerConversation.close``'s
 no-op and the hub forgetting a request once it was resolved (``citar/server/workers.py``).
@@ -281,6 +291,8 @@ class StepEvent:
     at: float
     provider: str = ""
     flags: dict = field(default_factory=dict)
+    #: The step's hold on its budget (``pool.budgets.Reservation``), which the compute ledger settles; None for none.
+    reservation: Any = None
 
 
 # ---------------------------------------------------------------------------- slots and requests
@@ -340,7 +352,8 @@ class Binding:
     task_class = ""
 
     def __init__(self, sched: "Scheduler", machine: Optional["Machine"], model: str, *, activity: Optional[str],
-                 consumer: Optional[str], label: str, cap: int, on_status: Optional[Callable[[dict], None]]):
+                 consumer: Optional[str], label: str, cap: int, on_status: Optional[Callable[[dict], None]],
+                 access_grant: Optional[str] = None, on_budget: Optional[Callable[[dict], None]] = None):
         self.sched = sched
         self.machine = machine
         self.model = model or ""
@@ -349,6 +362,11 @@ class Binding:
         self.label = label
         self.cap = max(0, int(cap or 0))
         self.on_status = on_status
+        #: The grant that admitted it (``pool.budgets.Keeper.bind``): each request reserves against that grant's budget
+        #: as it is then (``Keeper.budget_of``). And who hears a soft budget's warning (``{"warning", "budget"}``, on
+        #: the notifier thread).
+        self.access_grant = access_grant
+        self.on_budget = on_budget
         self.id = secrets.token_hex(6)
 
     @property
@@ -1271,6 +1289,8 @@ class Scheduler:
 
     #: The class of its machines (a test's audited one checks the rules at every grant).
     machine_class = Machine
+    #: Whether a listener settles the steps' budget holds (``add_listener``).
+    _ledger_listens = False
 
     def __init__(self, *, clock: Callable[[], float] = time.perf_counter, wall: Callable[[], float] = time.time,
                  settings: Optional[Callable[[str], MachineSettings]] = None,
@@ -1380,14 +1400,15 @@ class Scheduler:
     def lease(self, server_id: Optional[str], model: str = "", *, kind: str = "game", activity: Optional[str] = None,
               consumer: Optional[str] = None, label: str = "", cap: int = 0,
               on_status: Optional[Callable[[dict], None]] = None, game: Optional[str] = None,
-              ref: Optional[tuple] = None) -> Lease:
+              ref: Optional[tuple] = None, access_grant: Optional[str] = None,
+              on_budget: Optional[Callable[[dict], None]] = None) -> Lease:
         """A live lease on ``server_id`` (an unscheduled one when the machine has no id): a game seat's (``game``, the
         session's id), a probe run's or a report's; ``ref`` is the work it serves as the shared queue names it. A
         benchmark lease starts the machine's drain, and its ``on_status`` hears ``drained`` (with ``drain_s`` and
         ``contaminated``) when its first request goes ahead."""
         m = self.machine(server_id)
         lease = Lease(self, m, model, kind=kind, activity=activity, consumer=consumer, label=label, cap=cap,
-                      on_status=on_status, game=game, ref=ref)
+                      on_status=on_status, game=game, ref=ref, access_grant=access_grant, on_budget=on_budget)
         if m is not None:
             for conv in m.add_lease(lease):
                 try:
@@ -1401,7 +1422,8 @@ class Scheduler:
                start_within: Optional[float] = None, steps: int = DEFAULT_STEPS, wait_for_benchmark: bool = False,
                cap: int = 0, on_status: Optional[Callable[[dict], None]] = None,
                one_per_consumer: bool = False, ref: Optional[tuple] = None,
-               refusal: Optional[SchedulerError] = None) -> Ticket:
+               refusal: Optional[SchedulerError] = None, access_grant: Optional[str] = None,
+               on_budget: Optional[Callable[[dict], None]] = None) -> Ticket:
         """A pooled prompt on ``server_id``. Refused at once (``state == "refused"`` with ``reason`` and ``retry_at``)
         when ``refusal`` is given (admission's, ``pool.seats.ticket``), when the machine cannot take it (rule 3
         (a)-(c), disabled, offline), or, with ``one_per_consumer``, when its consumer already has a ticket of its class
@@ -1414,7 +1436,7 @@ class Scheduler:
         deadline = self.clock() + float(start_within) if start_within is not None else None
         t = Ticket(self, m, model, cls=cls, priority=priority, deadline=deadline, steps=steps,
                    wait_for_benchmark=wait_for_benchmark, activity=activity, consumer=consumer, label=label,
-                   cap=cap, on_status=on_status, ref=ref)
+                   cap=cap, on_status=on_status, ref=ref, access_grant=access_grant, on_budget=on_budget)
         if refusal is not None:
             t.state, t.error = _ended_state(refusal), refusal
             if m is not None:
@@ -1487,10 +1509,14 @@ class Scheduler:
 
     # -------------------------------------------------------------- listeners
     def add_listener(self, fn: Callable[[StepEvent], None]) -> None:
-        """Receive a ``StepEvent`` after every step of a scheduled conversation (P3.3.4)."""
+        """Receive a ``StepEvent`` after every step of a scheduled conversation (P3.3.4). A listener that settles the
+        steps' budget holds says so (``settles_budgets``: the compute ledger's); without one, a step's hold is given
+        back as soon as the step is metered."""
         with self._lock:
             if fn not in self._listeners:
                 self._listeners.append(fn)
+            if getattr(fn, "settles_budgets", False):
+                self._ledger_listens = True
 
     def remove_listener(self, fn) -> None:
         with self._lock:
@@ -1620,6 +1646,7 @@ class ScheduledConversation(Conversation):
         self.last_gen_s = 0.0
         self.last_event: Optional[StepEvent] = None
         self._closed = False
+        self._last_input = 0                # the last step's input tokens: the next one's budget estimate
         if isinstance(binding, Ticket):
             binding.convs.add(self)
             if isinstance(getattr(inner, "cfg", None), dict):
@@ -1675,9 +1702,12 @@ class ScheduledConversation(Conversation):
         queued = 0.0
         self.last_queue_s = self.last_gen_s = 0.0
         grant = b.acquire(self, self.halted, self.on_wait)
+        hold = None
         while True:
             queued += grant.queue_s
             t0: Optional[float] = None
+            if hold is None and getattr(b, "access_grant", None):
+                hold = self._reserve(grant)
             try:
                 if self._closed:
                     raise Cancelled("The conversation was closed.", code="cancelled")
@@ -1706,12 +1736,59 @@ class ScheduledConversation(Conversation):
                 # a request the provider abandoned (cancelled, timed out) may still be generating on its helper
                 b.finish(grant, unfinished=getattr(inner, "unfinished", None) if t0 is not None else None)
                 self.last_queue_s = queued
+                _release(hold)
                 raise
             gen_s, reported, observed = self._gen(inner, wall)
             b.finish(grant, gen_s=gen_s)
             self.last_queue_s, self.last_gen_s = queued, gen_s
-            self._meter(grant, before, gen_s, reported, observed, queued)
+            self._meter(grant, before, gen_s, reported, observed, queued, hold)
             return result
+
+    def _reserve(self, grant: Grant):
+        """Hold the step's estimate of the budget its binding's access grant has now, once its slot is granted
+        (P3.4.6); None when that grant has none. A hard budget that would pass its amount refuses the request: its slot goes back
+        and ``MachineRefused`` (``budget``, the period's end as ``retry_at``) is raised. A soft budget's warning goes to
+        ``on_budget``. In memory only."""
+        from .. import ledger
+        from . import budgets
+        b = self.binding
+        keeper = budgets.keeper()
+        budget = keeper.budget_of(b.access_grant)
+        if not budget:
+            return None
+        cfg = getattr(self.inner, "cfg", None) or self.cfg or {}
+        max_tokens = grant.max_tokens or (cfg.get("max_tokens") if isinstance(cfg, dict) else None)
+        try:
+            estimate, unpriced = ledger.get().estimate(b.server_id, b.model or (cfg or {}).get("model"),
+                                                       max_tokens=max_tokens, input_tokens=self._input_estimate())
+        except Exception:
+            # an estimate that cannot be made must not keep the slot it was granted: the least one is held instead
+            log.warning("could not estimate a request's cost on %s", b.server_id, exc_info=True)
+            estimate, unpriced = 0.0, False
+        try:
+            hold = keeper.reserve(budget, b.activity, b.consumer, estimate, unpriced=unpriced)
+        except budgets.BudgetExceeded as e:
+            b.finish(grant)
+            retry = e.retry_at.astimezone().replace(tzinfo=None) if e.retry_at is not None else None
+            err = MachineRefused(str(e), code="budget", retry_at=retry)
+            err.budget = {"id": e.budget_id, "key": e.key}
+            raise err from None
+        if hold is not None and hold.warning and b.on_budget is not None:
+            b.sched._notify(b.on_budget, {"warning": hold.warning, "budget": budget})
+        if hold is not None and hold.warning:
+            b.sched.run_db_job(lambda bid=budget, who=b.consumer, text=hold.warning: _soft_passed(bid, who, text))
+        return hold
+
+    def _input_estimate(self) -> int:
+        """The next request's input tokens, for an online API's estimate: the last step's, else the conversation's
+        text at about four characters a token."""
+        if self._last_input:
+            return self._last_input
+        try:
+            import json as _json
+            return len(_json.dumps(getattr(self.inner, "messages", []) or [], default=str)) // 4
+        except Exception:
+            return 0
 
     def _cap_tokens(self, cap: Optional[int]):
         """A borrowing ticket's step asks for at most its class's ``max_tokens``; returns how to undo it."""
@@ -1741,7 +1818,8 @@ class ScheduledConversation(Conversation):
             return observed, reported, observed
         return min(reported, observed), reported, observed
 
-    def _meter(self, grant: Grant, before: dict, gen_s: float, reported, observed, queued: float) -> None:
+    def _meter(self, grant: Grant, before: dict, gen_s: float, reported, observed, queued: float,
+               hold=None) -> None:
         b = self.binding
         sched = b.sched
         after = dict(getattr(self.inner, "usage", {}) or {})
@@ -1768,14 +1846,39 @@ class ScheduledConversation(Conversation):
                 count = m.note_overreport(sched.wall())
                 if count is not None:
                     sched.run_db_job(lambda sid=m.id, n=count: flag_overreports(sid, n))
+        self._last_input = int(usage.get("input_tokens", 0) or 0) + int(usage.get("cache_read_input_tokens", 0) or 0)
         event = StepEvent(machine=b.server_id, model=model, activity=b.activity, consumer=b.consumer,
                           task_class=b.task_class, cls=b.cls, gen_s=round(gen_s, 3),
                           reported_s=None if reported is None else round(reported, 3),
                           observed_s=None if observed is None else round(observed, 3), queue_s=round(queued, 3),
                           usage=usage, request_id=grant.request_id, at=sched.wall(),
-                          provider=str((cfg or {}).get("provider") or ""), flags=flags)
+                          provider=str((cfg or {}).get("provider") or ""), flags=flags, reservation=hold)
         self.last_event = event
         sched.emit(event)
+        if hold is not None and not getattr(sched, "_ledger_listens", False):
+            _release(hold)                 # a scheduler with no ledger listening (a test's): nothing will settle it
+
+
+def _release(hold) -> None:
+    """Give a step's budget hold back (it never ran, or nothing will settle it)."""
+    if hold is not None:
+        from . import budgets
+        budgets.keeper().release(hold)
+
+
+def _soft_passed(budget_id: Optional[str], consumer: Optional[str], text: str) -> None:
+    """One audit row when a request takes a soft budget past its amount (P3.4.6; once a period): the machine owner's
+    Servers page shows the meter over it. Runs on the notifier thread."""
+    try:
+        from .. import db
+        from ..auth import audit
+        if not db.configured() or not budget_id:
+            return
+        with db.session() as s:
+            audit.record(s, "budget.soft_passed", object_type="budget", object_id=budget_id, consumer=consumer,
+                         text=text[:300])
+    except Exception:
+        log.exception("could not record a soft budget passed")
 
 
 def flag_overreports(server_id: str, count: int) -> None:
@@ -1809,12 +1912,14 @@ _SCHED_LOCK = threading.Lock()
 
 
 def get() -> Scheduler:
-    """The process's scheduler, made on first use with the usage tracker as its first listener."""
+    """The process's scheduler, made on first use with the compute ledger as its listener (``citar.ledger``), which
+    settles each step's budget hold."""
     global _SCHED
     with _SCHED_LOCK:
         if _SCHED is None:
+            from .. import ledger
             _SCHED = Scheduler()
-            _SCHED.add_listener(usage_listener)
+            _SCHED.add_listener(ledger.listener)
         return _SCHED
 
 
@@ -1831,16 +1936,3 @@ def reset() -> None:
             _SCHED.stop()
         _SCHED = None
 
-
-def usage_listener(event: StepEvent) -> None:
-    """The usage ledger's tracker as a listener (P3.3.4): one model call, its generation time and its tokens, on its
-    activity and machine. It replaces ``LLMAgent._meter``: an attempt that never reached the model meters nothing."""
-    if not event.activity:
-        return
-    from .. import usage
-    u = event.usage
-    usage.tracker().llm(event.activity, event.machine, event.model, event.gen_s,
-                        input_tokens=u.get("input_tokens", 0), output_tokens=u.get("output_tokens", 0),
-                        reasoning_tokens=u.get("reasoning_tokens", 0),
-                        cache_read=u.get("cache_read_input_tokens", 0),
-                        cache_write=u.get("cache_creation_input_tokens", 0))

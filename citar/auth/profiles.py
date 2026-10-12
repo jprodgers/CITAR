@@ -1,7 +1,7 @@
 """Profiles, the members' directory and avatars (design/phase3-features.md P3.2.6).
 
 An account shows other people a handle (always), and a display name, an avatar, a bio, up to three links, the things
-it owns and, from package 3-10, its compute ratio, each field `private`, `server` (members) or `global` (anyone) as
+it owns and its compute ratio (given over used, ``citar.ledger``), each field `private`, `server` (members) or `global` (anyone) as
 the account chooses (`users.field_visibility`, defaults in `models.USER_FIELD_DEFAULTS`). The `profile` field is the
 page's own gate: a field shows when the viewer reaches both its level and the profile's. The rule itself lives on
 the account (`User.visible_fields`, and `User.public` for a viewer), so everywhere an account appears applies the same one;
@@ -265,7 +265,7 @@ _SEEN_AS = {0: "visitor", 1: "member"}
 
 def to_client(session, user: User, viewer: Optional[User], rank: int) -> dict:
     """The profile as ``viewer`` (at ``rank``) sees it: the fields that show and nothing of the rest, the items it
-    may see when `items` shows. Package 3-10 adds the ratio here when `ratio` shows."""
+    may see when `items` shows, and its compute ratio over 30 days when `ratio` shows (``ledger.summary``, P3.4.4)."""
     shown = user.visible_fields(viewer, rank=rank)
     you = viewer is not None and viewer.id == user.id
     out = {**user.public(viewer, rank=rank), "fields": sorted(shown), "is_you": you,
@@ -276,6 +276,9 @@ def to_client(session, user: User, viewer: Optional[User], rank: int) -> dict:
         out["links"] = list(user.links or [])
     if "items" in shown:
         out["items"] = items_of(session, user, viewer, rank)
+    if "ratio" in shown:
+        from .. import ledger
+        out["ratio"] = ledger.summary(session, user.id, "30d")
     if you or (viewer is not None and viewer.role == "admin" and rank == 2):
         out["levels"] = user.chosen_levels()
         out["listed"] = bool(user.listed)

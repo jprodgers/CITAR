@@ -172,8 +172,13 @@ class KeystoreTests(unittest.TestCase):
 
 class LedgerAndReportTests(unittest.TestCase):
     def test_game_is_metered_and_reported(self):
+        """A game's held time is the usage ledger's, its work (each model step's generation seconds and tokens, the
+        host's CPU) the compute ledger's (design/phase3-features.md P3.4.7); a report prices both."""
         from citar.server.session import SessionManager
-        from citar import reports
+        from citar import db, ledger, reports
+        from citar.db.models import ComputeEvent
+        if not db.configured():
+            db.configure()
         mgr = SessionManager()
         seats = [{"type": "llm", "llm": S.seat_ref("sv_gpu", "m_gpu", dry_run_delay=0.05)}, {"type": "bot"}]
         s = mgr.create({"map_size": "duel", "map_type": "pangaea", "seed": 3, "turn_limit": 3, "barbarians": "off"}, seats, "metered")
@@ -184,13 +189,30 @@ class LedgerAndReportTests(unittest.TestCase):
             tr._sample()
         self.assertNotEqual(s.game.phase, "playing")
         mgr.delete(s.id)
+        # The game's own units are each a few milliseconds, which Windows' thread clock (15.6 ms ticks) mostly reads
+        # as nothing; one more unit of the game's work that surely registers makes the host's CPU event certain.
+        with ledger.cpu_unit(s.cpu_activity):
+            t0 = time.thread_time()
+            while time.thread_time() - t0 < 0.05:
+                pass
         tr.flush()
-        led = U.read()
+        self.assertTrue(ledger.get().flush(30))
+        led = U.read(work=True)
         act = f"game:{s.id}"
         self.assertIn(act, led["acts"])
         mine = [sp for sp in led["spans"] if sp["act"] == act]
-        self.assertTrue(any(sp["srv"] == "sv_gpu" and sp.get("busy", 0) > 0 and sp.get("in", 0) > 0 for sp in mine), mine)
+        self.assertTrue(any(sp["srv"] == "sv_gpu" and sp.get("held", 0) > 0 for sp in mine), mine)
         self.assertTrue(any(sp["srv"] == "sv_host" for sp in mine))
+        self.assertFalse(any("busy" in sp or "in" in sp or "cpu" in sp for sp in mine),
+                         "the work is the compute ledger's now")
+        with db.session() as d:
+            steps = list(d.query(ComputeEvent).filter(ComputeEvent.activity == act, ComputeEvent.kind == "gpu"))
+            cpu = list(d.query(ComputeEvent).filter(ComputeEvent.activity == act, ComputeEvent.kind == "cpu"))
+        self.assertTrue(steps and all(e.machine_id == "sv_gpu" and e.task_class == "full" for e in steps))
+        self.assertTrue(any(e.gen_s > 0 and e.tokens_in > 0 for e in steps), [(e.gen_s, e.tokens_in) for e in steps])
+        self.assertTrue(cpu and all(e.provider_id is None and e.cpu_core_s > 0 for e in cpu), "the host's CPU, measured")
+        work = [w for w in led["work"] if w["act"] == act]
+        self.assertEqual(len(work), len(steps) + len(cpu))
         runner = reports.ReportRunner(Path(tempfile.mkdtemp(prefix="citar-reports-")))
         m = runner.start({"title": "Test", "preset": "everything", "sections": reports.ALL_SECTIONS,
                           "scope": {"items": [{"kind": "game", "id": s.id}]},

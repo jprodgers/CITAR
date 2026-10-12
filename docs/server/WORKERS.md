@@ -214,6 +214,13 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   A grant limited to **ordinary games** does not cover pooled prompts: a member who should be able to test the
   machine, have reports written on it or run a probe's offers and messages there needs **pooled prompts** ticked
   too (a grant with nothing ticked covers every kind of work).
+- **A grant's budget is kept per request.** Each request of work admitted under a grant is held to the budget the
+  grant has when the request runs (one set or changed later holds the work already running); it reserves its
+  estimate when it is given its slot and is counted at what it cost when it ends; a hard budget that a request would
+  pass refuses it (a lobby game pauses until the budget's period turns, a pooled prompt is refused and its caller
+  falls back), a soft one only warns ([Accounts](ACCOUNTS.md#budgets)). Every request a machine serves is in the
+  compute ledger, given by the machine's owner and used by whoever's work it was
+  ([Accounts](ACCOUNTS.md#the-compute-ledger-and-the-ratio)).
 - **Cancelling drains on today's helper.** When the server gives up a request (a game is closed or paused, a seat is
   changed, a prompt is cancelled or runs out of time), it sends the helper `CANCEL`. The helper of this version ignores
   it and finishes the completion, so the scheduler keeps that slot taken (*draining*) until the helper's late answer

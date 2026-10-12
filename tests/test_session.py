@@ -1,6 +1,7 @@
 """Session-level tests: AI seats, negotiation interrupts between agents, saves. Uses a scripted mock model."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 from tests import has_test_ops
+import json
 import time
 import unittest
 from unittest import mock
@@ -396,6 +397,35 @@ class SessionTests(unittest.TestCase):
             self.assertFalse(after.get(running.id).paused)
             self.assertTrue(after.get(held.id).paused)
             self.assertIsNone(after.get(closed.id))
+        finally:
+            for sid in list(after.sessions):
+                after.delete(sid)
+
+    def test_a_game_paused_for_its_budget_comes_back_running_after_a_restart(self):
+        """A game paused because its machine's budget was spent resumes by itself when the budget's period turns, but
+        its watcher goes with the process: brought back paused, it waited for a person (review of 3-10). It comes back
+        running, as a disconnect's pause does; its seat's next request is refused again (and pauses it, watched) while
+        the budget is still spent. A person's pause stays."""
+        from citar.server.session import SAVE_DIR
+        budgeted = self.manager.create({"map_size": "duel", "seed": 12}, [{"type": "human"}, {"type": "bot"}],
+                                       name="budgeted")
+        held = self.manager.create({"map_size": "duel", "seed": 13}, [{"type": "human"}, {"type": "bot"}],
+                                   name="held by a person")
+        budgeted.suspend({"kind": "budget", "player": 1, "message": "The budget for “Bob's” is used up.",
+                          "since": time.time(), "until": time.time() + 3600, "budget": "b_x", "period": "2026-10-12"})
+        held.suspend({"kind": "user", "message": "Paused by alice."})
+        for s in (budgeted, held):
+            s.autosave(force=True)
+        marks = {s.id: json.loads((SAVE_DIR / s.id / "live.json").read_text(encoding="utf-8")) for s in (budgeted, held)}
+        self.assertEqual((marks[budgeted.id]["paused"], marks[held.id]["paused"]), (False, True))
+        for s in (budgeted, held):
+            s.stop()
+        after = SessionManager()
+        try:
+            after.restore_live()
+            self.assertEqual({budgeted.id, held.id} & set(after.sessions), {budgeted.id, held.id})
+            self.assertFalse(after.get(budgeted.id).paused, "the check that paused it runs again")
+            self.assertTrue(after.get(held.id).paused)
         finally:
             for sid in list(after.sessions):
                 after.delete(sid)

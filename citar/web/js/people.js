@@ -8,6 +8,7 @@ import { api } from "./api.js";
 import { el, clear, toast } from "./util.js";
 import { pageHeader } from "./nav.js";
 import * as auth from "./auth.js";
+import * as compute from "./compute.js";
 
 // What each kind of thing is called on a profile.
 const KIND_LABEL = { game: "Games", report: "Reports", benchmark_run: "Benchmark runs", benchmark_suite: "Benchmark suites",
@@ -124,6 +125,10 @@ export async function renderProfile(root, handle) {
       el("ul", { class: "profile-links" }, ...profile.links.map((link) => el("li", {},
         el("a", { href: link.url, target: "_blank", rel: "nofollow noopener noreferrer ugc" }, link.label || hostOf(link.url)),
         link.label ? el("span", { class: "muted small" }, ` ${hostOf(link.url)}`) : null)))));
+  }
+  if (profile.ratio) {
+    page.appendChild(el("section", { class: "card" }, el("h3", {}, "Compute"),
+      el("p", { class: "profile-ratio" }, compute.ratioLine(profile.ratio))));
   }
   if (profile.items) {
     const card = el("section", { class: "card" }, el("h3", {}, "Shared here"));

@@ -6,7 +6,7 @@
   no socket, which answers at once); ``wait`` out of its bounds 422; a model the helper has not loaded refused by the
   queue with its code. Each caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all, refused at
   once past them (each holds a request until its reply); the request's database connection is back in the pool while
-  it waits; the test is metered under no activity.
+  it waits; the test is an activity of its own in the compute ledger (`test:<id>`).
 - ``GET /api/status``: an administrator's lists the scheduler's machines (with its leases' game labels); a member's and
   a moderator's do not; a visitor gets 401.
 """
@@ -155,7 +155,9 @@ class TestRoute(unittest.TestCase):
                     self.assertGreaterEqual(body["queue_s"], 0.0)
                     self.assertLessEqual(body["gen_s"], 0.01)
         self.assertEqual(len(events), 3, "each answered test went through the scheduler")
-        self.assertEqual({e.activity for e in events}, {None}, "and is metered under no activity")
+        acts = [e.activity for e in events]
+        self.assertTrue(all(a and a.startswith("test:") for a in acts) and len(set(acts)) == 3,
+                        f"each an activity of its own in the compute ledger: {acts}")
         self.assertEqual({e.cls for e in events}, {"test"})
         self.assertEqual(sorted(e.consumer for e in events),
                          sorted(self.ids[h] for h in ("alice", "bob", "zara")))

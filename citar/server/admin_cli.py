@@ -14,6 +14,9 @@ Chiefly: creating the first administrator of a fresh server, and getting back in
     python -m citar.server.admin_cli reset-password jimmie
     python -m citar.server.admin_cli invite --role moderator --uses 1
     python -m citar.server.admin_cli policy registration invite
+    python -m citar.server.admin_cli reprice --since 2026-10-01 [--until 2026-10-08]
+    python -m citar.server.admin_cli set-collection benchmark_run br_1234 on
+    python -m citar.server.admin_cli refresh-budgets [--period 2026-10]
 
 Passwords are always prompted for, never taken as an argument: a password on the command line ends
 up in the shell history and in the process list where every other user on the box can read it. A
@@ -427,6 +430,74 @@ def cmd_policy(args) -> int:
     return 0
 
 
+def _date(text: str, what: str):
+    """A ``YYYY-MM-DD`` date (or an ISO time) as an aware UTC instant; a naive one is UTC."""
+    from datetime import datetime, timezone
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        raise SystemExit(f"error: {what} is a date (YYYY-MM-DD) or a time (YYYY-MM-DDTHH:MM).")
+    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when.astimezone(timezone.utc)
+
+
+def cmd_reprice(args) -> int:
+    """Recompute the credits of the compute ledger's events in a period with the hardware classes, their rates and
+    the models' token prices in force now (design/phase3-features.md P3.4.3), then the rollups of the hours touched;
+    one audit row. A new rate otherwise applies only to events written after it."""
+    from .. import ledger
+    since = _date(args.since, "--since")
+    until = _date(args.until, "--until") if args.until else None
+    if until is not None and until <= since:
+        print("error: --until comes after --since.")
+        return 1
+    with db.session() as s:
+        result = ledger.reprice(s, since, until)
+        audit.record(s, "ledger.repriced", actor_label="admin_cli", object_type="ledger",
+                     since=since.isoformat(), until=until.isoformat() if until else None, **result)
+    print(f"{result['events']} event(s) read, {result['changed']} repriced, {result['hours']} hour(s) rolled up again.")
+    return 0
+
+
+def cmd_refresh_budgets(args) -> int:
+    """Rebuild the budgets' entries of their current period (or ``--period``: then only the budgets counted in periods
+    of that kind, a day's key for daily budgets, a week's for weekly ones, a month's for monthly ones, ``all`` for
+    totals) from the compute ledger's events (``pool.budgets.refresh_from_ledger``): the repair for an entry lost when
+    the server stopped between an event and its settling, or for credits repriced. A running server reads every
+    budget's spend again from the rebuilt entries at its ledger's next rollup pass, within five minutes."""
+    from ..pool import budgets
+    try:
+        with db.session() as s:
+            n = budgets.refresh_from_ledger(s, key=args.period)
+            audit.record(s, "budgets.refreshed", actor_label="admin_cli", object_type="budget", entries=n,
+                         period=args.period)
+    except ValueError as e:
+        print(f"error: {e}")
+        return 1
+    print(f"{n} budget entr{'y' if n == 1 else 'ies'} rebuilt from the compute ledger; a running server reads them "
+          "within five minutes.")
+    return 0
+
+
+def cmd_set_collection(args) -> int:
+    """Mark an owned item (a benchmark run, a probe run, a report, a lab experiment) as the server's own data
+    collection, or not: its compute is then used by nobody, and given by whoever's machine served it (P3.4.2)."""
+    from .. import items
+    on = {"on": True, "off": False}.get(args.state)
+    with db.session() as s:
+        row = items.get(s, args.kind, args.ref)
+        if row is None:
+            print(f"error: no {args.kind} {args.ref!r}.")
+            return 1
+        if bool(row.collection) == on:
+            print(f"{args.kind} {args.ref} is already {'' if on else 'not '}the server's data collection.")
+            return 0
+        row.collection = on
+        audit.record(s, "item.collection", actor_label="admin_cli", object_type=args.kind, object_id=args.ref,
+                     collection=on)
+    print(f"{args.kind} {args.ref} is {'now' if on else 'no longer'} the server's own data collection.")
+    return 0
+
+
 def cmd_config(args) -> int:
     """Print the effective configuration, with no secrets in it."""
     for key, value in settings.get().describe().items():
@@ -540,6 +611,23 @@ def main(argv=None) -> int:
 
     p = subparsers.add_parser("config", help="show the effective configuration")
     p.set_defaults(func=cmd_config)
+
+    p = subparsers.add_parser("reprice", help="recompute the compute ledger's credits of a period at today's rates")
+    p.add_argument("--since", required=True, help="YYYY-MM-DD (UTC)")
+    p.add_argument("--until", default=None, help="YYYY-MM-DD (UTC); default now")
+    p.set_defaults(func=cmd_reprice)
+
+    p = subparsers.add_parser("refresh-budgets", help="rebuild the grants' budget entries from the compute ledger")
+    p.add_argument("--period", default=None,
+                   help="a period key: 2026-10-12 (daily budgets), 2026-W41 (weekly), 2026-10 (monthly) or all "
+                        "(totals); only the budgets of that kind are rebuilt. Default: each budget's current period")
+    p.set_defaults(func=cmd_refresh_budgets)
+
+    p = subparsers.add_parser("set-collection", help="mark an owned item as the server's own data collection")
+    p.add_argument("kind", choices=("benchmark_run", "probe_run", "report", "lab_experiment"))
+    p.add_argument("ref")
+    p.add_argument("state", choices=("on", "off"))
+    p.set_defaults(func=cmd_set_collection)
 
     args = parser.parse_args(argv)
     _setup()

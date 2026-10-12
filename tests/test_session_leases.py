@@ -575,12 +575,12 @@ class MadeWay(LeaseCase):
         releases the leases) leaves no lease made after it."""
         g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}])
         g.release_leases([1], for_good=False)           # the seat's lease is made again on first use
-        real = pool_seats.consumer_cap
+        real = pool_seats.consumer_terms
 
-        def cap_while_suspended(*a, **kw):
+        def terms_while_suspended(*a, **kw):
             g.suspend({"kind": "queue", "message": "making way"})
             return real(*a, **kw)
-        with mock.patch.object(pool_seats, "consumer_cap", cap_while_suspended):
+        with mock.patch.object(pool_seats, "consumer_terms", terms_while_suspended):
             self.assertIsNone(g.lease_for(1))
         self.assertEqual(labels("sv_gpu"), [])
         self.assertNotIn(1, g.leases)

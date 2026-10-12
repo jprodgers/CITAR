@@ -163,7 +163,8 @@ function renderJob(run, job, ctx) {
     try { await api.jobControl(run.id, job.id, action); ctx.refresh(); } catch (err) { toast(err.message, "error"); }
   } }, label);
   let statusText = job.status;
-  if (job.status === "paused" && job.pause_reason) statusText = `paused (${job.pause_reason === "restricted" ? "restricted hours" : job.pause_reason})`;
+  const PAUSES = { restricted: "restricted hours", budget: "budget used up" };
+  if (job.status === "paused" && job.pause_reason) statusText = `paused (${PAUSES[job.pause_reason] || job.pause_reason})`;
   if (job.status === "queued" && job.waiting) statusText = `queued — ${job.waiting.replace(/^waiting: /, "")}`;
   if (job.status === "loading") statusText = "loading model…";
   if (job.status === "running" && p.llm_to_move) {

@@ -199,6 +199,13 @@ export const api = {
   adminUsers: (params = {}) => request("GET", "/api/admin/users?" + new URLSearchParams(params)),
   adminUser: (id) => request("GET", `/api/admin/users/${encodeURIComponent(id)}`),
   patchAdminUser: (id, body) => request("PATCH", `/api/admin/users/${encodeURIComponent(id)}`, body),
+  // ---------------------------------------------------------------- the compute ledger (P3.4.4)
+  ledgerMe: (range = "30d") => request("GET", `/api/ledger/me?range=${encodeURIComponent(range)}`),
+  userRatio: (handle, range = "30d") => request("GET", `/api/users/${encodeURIComponent(handle)}/ratio?range=${encodeURIComponent(range)}`),
+  hardwareClasses: () => request("GET", "/api/admin/hardware-classes"),
+  createHardwareClass: (body) => request("POST", "/api/admin/hardware-classes", body),
+  updateHardwareClass: (id, body) => request("PUT", `/api/admin/hardware-classes/${encodeURIComponent(id)}`, body),
+  deleteHardwareClass: (id) => request("DELETE", `/api/admin/hardware-classes/${encodeURIComponent(id)}`),
   adminAudit: (params = {}) => request("GET", "/api/admin/audit?" + new URLSearchParams(params)),
 
   // ---------------------------------------------------------------- server pool

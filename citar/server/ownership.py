@@ -54,8 +54,10 @@ def status_for(phase: Optional[str], stopped: bool = False) -> str:
 
 def register(session, gs, owner: Optional[User], *, kind: str = "game",
              visibility: str = access.PRIVATE, data_sharing: Optional[str] = None,
-             save_path: Optional[str] = None) -> GameRow:
-    """Create (or refresh) the index row for a live session, and give the session its owner."""
+             save_path: Optional[str] = None, item: Optional[Tuple[str, str]] = None) -> GameRow:
+    """Create (or refresh) the index row for a live session, and give the session its owner. ``item`` = (kind, ref) is
+    the owned item a run's game is part of (a benchmark job's run), kept in the row's ``meta``: the compute ledger asks
+    it whether the game's work is the server's own data collection (P3.4.2)."""
     access.check_visibility(visibility)
     row = session.get(GameRow, gs.id)
     if row is None:
@@ -73,6 +75,8 @@ def register(session, gs, owner: Optional[User], *, kind: str = "game",
     if save_path:
         row.save_path = save_path
     row.meta = {"seats": [{"player": s.player, "type": s.type, "name": s.name} for s in gs.seats]}
+    if item:
+        row.meta["item"] = [str(item[0]), str(item[1])]
     session.flush()
     gs.owner_id = row.owner_id
     return row
@@ -153,7 +157,7 @@ def register_quietly(gs, owner_id: Optional[str], *, kind: str, item: Optional[T
             owner = s.get(User, owner_id) if owner_id else None
             visibility = items.visibility_of(s, *item) if item else access.PRIVATE
             register(s, gs, owner, kind=kind, visibility=visibility,
-                     data_sharing=None if owner is not None else "private")
+                     data_sharing=None if owner is not None else "private", item=item)
     except Exception:
         log.warning("could not index game %s of %s", getattr(gs, "id", "?"), item, exc_info=True)
 
@@ -176,6 +180,7 @@ def claim_quietly(gs, owner_id: Optional[str], *, item: Optional[Tuple[str, str]
             row.data_sharing = owner.data_sharing or "pool"
             if item:
                 row.visibility = items.visibility_of(s, *item)
+                row.meta = {**(row.meta or {}), "item": [str(item[0]), str(item[1])]}
             gs.owner_id = owner.id
     except Exception:
         log.warning("could not give game %s its run's owner", getattr(gs, "id", "?"), exc_info=True)

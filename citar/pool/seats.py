@@ -306,50 +306,55 @@ def ticket(server_id: Optional[str], model: str = "", *, cls: str, consumer: Opt
     the ticket's ``refused``, with the admission's reason, its ``code`` and its ``retry_at`` (a helper that is offline
     refuses at once, as temporary); an admitted ticket is capped by the grant's concurrency (the scheduler's per-
     consumer cap, leases and tickets together). No consumer (the server's own work), no machine, or no database: no
-    admission. Reads the database, so never call it with a session's or a machine's lock held."""
+    admission. The ticket is bound to the admitting grant (``access_grant``): each of its requests reserves against
+    the budget that grant has then (P3.4.6). Reads the database, so never call it with a session's or a machine's lock
+    held."""
     from . import scheduler
-    refusal, cap = None, 0
+    refusal, cap, access_grant = None, 0, None
     if consumer and server_id:
-        refusal, cap = _ticket_admission(consumer, server_id, purpose, capability)
-    return scheduler.get().ticket(server_id, model, cls=cls, consumer=consumer, cap=cap, refusal=refusal, **kw)
+        refusal, cap, access_grant = _ticket_admission(consumer, server_id, purpose, capability)
+    return scheduler.get().ticket(server_id, model, cls=cls, consumer=consumer, cap=cap, refusal=refusal,
+                                  access_grant=access_grant, **kw)
 
 
 def _ticket_admission(consumer: str, server_id: str, purpose: str, capability: Optional[str]) -> tuple:
-    """``ticket``'s admission: (the refusal as a ``SchedulerError``, or None; the grant's concurrency, 0 for none)."""
+    """``ticket``'s admission: (the refusal as a ``SchedulerError``, or None; the grant's concurrency, 0 for none;
+    the admitting grant's id for the binding, its budget followed by the keeper (``Keeper.bind``), or None)."""
     from .. import db
     from ..auth import access, policy
     from ..db.models import Server, User
-    from . import admission, scheduler
+    from . import admission, budgets, scheduler
     if not db.configured():
-        return None, 0
+        return None, 0, None
     try:
         with db.session() as s:
             user, server = s.get(User, consumer), s.get(Server, server_id)
             if server is None:
-                return None, 0          # no row: an unscheduled machine, which the scheduler passes through
+                return None, 0, None    # no row: an unscheduled machine, which the scheduler passes through
             if user is None:
                 return scheduler.MachineRefused("The account this prompt is for no longer exists.",
-                                                code="account"), 0
+                                                code="account"), 0, None
             if capability and not policy.can(user, capability):
-                return scheduler.MachineRefused(policy.denial(user, capability), code="capability"), 0
+                return scheduler.MachineRefused(policy.denial(user, capability), code="capability"), 0, None
             needs = PURPOSE_CAPABILITY.get(purpose)
             if needs and not policy.can(user, needs):
-                return scheduler.MachineRefused(policy.denial(user, needs), code="capability"), 0
+                return scheduler.MachineRefused(policy.denial(user, needs), code="capability"), 0, None
             decision = admission.check(s, user, server, purpose, online=helper_online(server), in_flight=None)
             if decision.allowed:
                 grant = decision.grant
-                return None, max(0, int(grant.concurrency or 0)) if grant is not None else 0
+                return (None, max(0, int(grant.concurrency or 0)) if grant is not None else 0,
+                        budgets.keeper().bind(s, grant))
             reason = decision.reason
             if access.VIEW not in access.on(s, user, server):
                 reason = "You may not use that machine."
             retry = decision.retry_at.astimezone().replace(tzinfo=None) if decision.retry_at else None
-            return scheduler.MachineRefused(reason, code=decision.code or "admission", retry_at=retry), 0
+            return scheduler.MachineRefused(reason, code=decision.code or "admission", retry_at=retry), 0, None
     except Exception:
         import logging
         logging.getLogger("citar.pool").warning("could not admit a pooled prompt of %s on %s", consumer, server_id,
                                                 exc_info=True)
         return scheduler.MachineRefused("The prompt could not be admitted: the server could not read its grants.",
-                                        code="admission"), 0
+                                        code="admission"), 0, None
 
 
 def consumer_cap(user_id: Optional[str], server_id: Optional[str], purpose: str = "game") -> int:
@@ -358,22 +363,33 @@ def consumer_cap(user_id: Optional[str], server_id: Optional[str], purpose: str 
     leases and tickets together. 0 for no cap: the machine's owner, an administrator, no account (the server's own
     work), no machine, a grant with none, or no grant at all (admission has refused that already). Reads the
     database."""
+    return consumer_terms(user_id, server_id, purpose)[0]
+
+
+def consumer_terms(user_id: Optional[str], server_id: Optional[str], purpose: str = "game") -> tuple:
+    """(``consumer_cap``, the id of that grant or None): what a lease of ``user_id`` on ``server_id`` is held to. The
+    lease is bound to the grant admitting the work (``Keeper.bind``, its budget loaded into the process's budget
+    keeper), so each request is held to the budget the grant has when it runs (P3.4.6), whether or not it has room
+    left now (a lease made with its budget spent pauses at its first request), and one added to the grant later holds
+    it from then on. Reads the database."""
     if not user_id or not server_id:
-        return 0
+        return 0, None
     from .. import db
     from ..db.models import Server, User
-    from . import admission
+    from . import admission, budgets
     if not db.configured():
-        return 0
+        return 0, None
     try:
         with db.session() as s:
             user, server = s.get(User, user_id), s.get(Server, server_id)
             if user is None or server is None:
-                return 0
+                return 0, None
             grant = admission.check(s, user, server, purpose, in_flight=None).grant
-            return max(0, int(grant.concurrency or 0)) if grant is not None else 0
+            if grant is None:
+                return 0, None
+            return max(0, int(grant.concurrency or 0)), budgets.keeper().bind(s, grant)
     except Exception:
         import logging
         logging.getLogger("citar.pool").warning("could not read the grant for %s on %s", user_id, server_id,
                                                 exc_info=True)
-        return 0
+        return 0, None

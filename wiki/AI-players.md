@@ -183,6 +183,14 @@ If the server is still unreachable when the wait runs out, the game's **disconne
 A model that answers with an error — a bad request, a context overflow — is not a disconnect: the
 turn ends straight away and the error appears beside the seat in the lobby.
 
+A seat on a member's machine whose grant has a **hard budget** stops when its next request would pass
+the budget: the turn ends (`budget`) and the whole game pauses with the budget's reason, resuming by
+itself when the budget's period begins again, or when you press Resume after its owner raised it
+([Accounts](Design-accounts-and-sharing#budgets)). The seat is held to the budget its grant has at each
+request, so a budget the owner sets while the game runs applies from the seat's next request; a game
+paused for its budget when the server restarts comes back running and pauses again at once if the
+budget is still spent.
+
 ---
 
 ## What gets recorded
@@ -196,7 +204,8 @@ output tokens per second; and how the turn ended.
 common errors and recent turns. **Download per-turn CSV** gets you the raw numbers.
 
 Every game with an AI seat is also written to the usage ledger, so it can be costed later:
-[REPORTS.md](Servers-costs-and-reports).
+[REPORTS.md](Servers-costs-and-reports); each model step and the host's CPU it used is in the compute ledger, as given by the
+machine's owner and used by the game's ([Accounts](Design-accounts-and-sharing#the-compute-ledger-and-the-ratio)).
 
 
 ---
