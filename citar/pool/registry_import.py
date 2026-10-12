@@ -115,12 +115,26 @@ def rename_file(path: Optional[Path]) -> Optional[Path]:
 
 
 def rename_after_commit(session, result: Optional[dict]) -> None:
-    """Rename ``result``'s file once ``session``'s transaction commits (never when it rolls back, so the next start
-    or administrator still finds the file to import)."""
+    """Rename ``result``'s file once ``session``'s outermost transaction commits (a savepoint's release, which fires
+    the same event, is not that; and never when it rolls back, so the next start or administrator still finds the
+    file to import)."""
     if not result or not result.get("file"):
         return
     path = result["file"]
-    event.listen(session, "after_commit", lambda _s: rename_file(path), once=True)
+    # the listeners stay on the session (a request's or a command's, closed soon after) and do nothing once the
+    # outermost transaction ended: one cannot be removed while the event that calls it is being dispatched
+    state = {"open": True}
+
+    def committed(s):
+        if state["open"] and not s.in_nested_transaction():
+            state["open"] = False
+            rename_file(path)
+
+    def rolled_back(s):
+        if not s.in_nested_transaction():
+            state["open"] = False
+    event.listen(session, "after_commit", committed)
+    event.listen(session, "after_rollback", rolled_back)
 
 
 def on_boot() -> Optional[dict]:

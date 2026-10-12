@@ -743,6 +743,248 @@ class EndToEnd(unittest.TestCase):
             self._stop_worker(worker, loop, thread)
 
 
+class Revocation(unittest.TestCase):
+    """Package 3-05's gate 4 (design/phase3-features.md P3.2.8), on a real server and a real helper over a real
+    websocket: revoking the helper's token, disabling its machine, deleting it or suspending its owner closes its
+    socket within a second, through the routes that do it; its next request is refused, a request it was serving
+    fails as not retryable, and a hello with what was taken away is refused."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+
+        import httpx
+        import uvicorn
+        from citar.auth import sessions
+        from citar.server.app import app
+
+        _reset()
+        cls.headers = {}
+        with db.session() as s:
+            for handle, role in (("lena", "user"), ("moe", "user"), ("ada", "admin")):
+                user = accounts.create_user(s, handle=handle, email=f"{handle}@x.cc", password="a long enough phrase",
+                                            role=role, status="active", email_verified=True)
+                row, raw = sessions.start(s, user)
+                cls.headers[handle] = {"cookie": f"{sessions.COOKIE_NAME}={raw}", sessions.CSRF_HEADER: row.csrf_token,
+                                       "origin": "https://citar.test"}
+                setattr(cls, f"{handle}_id", user.id)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            cls.port = probe.getsockname()[1]
+        cls.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=cls.port, log_level="error"))
+        cls.thread = threading.Thread(target=cls.server.run, daemon=True)
+        cls.thread.start()
+        for _ in range(100):
+            if cls.server.started:
+                break
+            time.sleep(0.1)
+        cls.http = httpx.Client(base_url=f"http://127.0.0.1:{cls.port}", timeout=20)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.http.close()
+        cls.server.should_exit = True
+        cls.thread.join(timeout=10)
+
+    def call(self, who, method, path, body=None):
+        return self.http.request(method, path, json=body, headers=self.headers[who])
+
+    def machine(self, owner_id: str, name: str) -> tuple:
+        """A helper machine of ``owner_id``'s and a worker token for it: (server id, token, token id)."""
+        with db.session() as s:
+            server = Server(owner_id=owner_id, name=name, kind="owned", provider="lmstudio", reach="worker",
+                            config={"models": [{"key": "test-model"}]})
+            s.add(server)
+            s.flush()
+            raw, hashed = tokens.new_pair()
+            token = WorkerToken(server_id=server.id, token_hash=hashed, prefix=tokens.prefix(raw), label="t")
+            s.add(token)
+            s.flush()
+            return server.id, raw, token.id
+
+    def helper(self, server_id: str, token: str, *, completion=None, wait: bool = True) -> tuple:
+        """A real helper (the worker agent, its local model call stubbed) connected in a thread of its own."""
+        from citar.worker.agent import Worker, WorkerConfig
+        worker = Worker(WorkerConfig(server_url=f"http://127.0.0.1:{self.port}", token=token, name="revocable",
+                                     collect_hardware=False))
+        worker.discover_models = lambda: _async_value([{"key": "test-model", "label": "Test"}])
+        worker._complete = completion or (lambda data: {"text": "ok", "thinking": "", "stop_reason": "stop",
+                                                        "malformed": 0, "tool_calls": [], "usage": {}})
+        loop = asyncio.new_event_loop()
+
+        def run():
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(worker.run())
+            except asyncio.CancelledError:
+                pass
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        if wait:
+            for _ in range(100):
+                if W.hub().is_online(server_id):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(W.hub().is_online(server_id), "the helper did not connect")
+        self.addCleanup(self.stop, worker, loop, thread)
+        return worker, loop, thread
+
+    @staticmethod
+    def stop(worker, loop, thread):
+        worker.stop()
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(lambda: [task.cancel() for task in asyncio.all_tasks(loop)])
+        thread.join(timeout=5)
+
+    def offline_within(self, server_id: str, t0: float, limit: float = 1.0) -> float:
+        """Seconds from ``t0`` until the hub has no connection for ``server_id``; fails past ``limit``."""
+        while W.hub().is_online(server_id) and time.perf_counter() - t0 < limit + 2:
+            time.sleep(0.01)
+        took = time.perf_counter() - t0
+        self.assertFalse(W.hub().is_online(server_id), "the helper is still connected")
+        self.assertLessEqual(took, limit, f"dropped after {took:.2f} s")
+        return took
+
+    def refused_now(self, server_id: str) -> None:
+        """The machine's next request is refused at once: no helper is connected."""
+        with self.assertRaises(W.WorkerError) as caught:
+            W.hub().submit(server_id, P.Request(id="after", model="test-model", messages=[], timeout=5), timeout=5)
+        self.assertEqual(caught.exception.refusal, "closed")
+
+    def test_revoking_the_token_drops_its_helper(self):
+        sid, token, tid = self.machine(self.lena_id, "revoked box")
+        worker, loop, thread = self.helper(sid, token)
+        t0 = time.perf_counter()
+        r = self.call("lena", "DELETE", f"/api/pool/servers/{sid}/workers/tokens/{tid}")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.offline_within(sid, t0)
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive(), "told why (shutdown), the helper stops rather than reconnect")
+        self.refused_now(sid)
+        _again, _loop, again = self.helper(sid, token, wait=False)
+        again.join(timeout=15)
+        self.assertFalse(again.is_alive(), "a hello with the revoked token is refused, and the helper gives up")
+        self.assertFalse(W.hub().is_online(sid))
+
+    def test_a_request_in_flight_fails_and_is_not_retried(self):
+        sid, token, tid = self.machine(self.lena_id, "busy box")
+        started = threading.Event()
+
+        def slow(data):
+            started.set()
+            time.sleep(5)
+            return {"text": "late", "thinking": "", "stop_reason": "stop", "malformed": 0, "tool_calls": [], "usage": {}}
+        self.helper(sid, token, completion=slow)
+        outcome = {}
+
+        def caller():
+            try:
+                W.hub().submit(sid, P.Request(id="slow-1", model="test-model", messages=[], timeout=20), timeout=20)
+            except W.WorkerError as exc:
+                outcome["error"] = exc
+        t = threading.Thread(target=caller)
+        t.start()
+        self.assertTrue(started.wait(10))
+        t0 = time.perf_counter()
+        self.assertEqual(self.call("lena", "DELETE", f"/api/pool/servers/{sid}/workers/tokens/{tid}").status_code, 200)
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive(), "the waiting request is released, not left to its timeout")
+        self.assertLess(time.perf_counter() - t0, 2.0)
+        self.assertFalse(outcome["error"].retryable)
+        self.assertEqual(outcome["error"].refusal, "dropped")
+
+    def test_disabling_the_machine_drops_its_helper(self):
+        sid, token, _tid = self.machine(self.lena_id, "disabled box")
+        _worker, _loop, thread = self.helper(sid, token)
+        t0 = time.perf_counter()
+        r = self.call("lena", "PUT", f"/api/pool/servers/{sid}", {"enabled": False})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.offline_within(sid, t0)
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.refused_now(sid)
+        self.assertIsNone(W.authenticate(token), "a disabled machine's helper is refused at hello")
+        self.assertEqual(self.call("lena", "PUT", f"/api/pool/servers/{sid}", {"enabled": True}).status_code, 200)
+        # the request's session commits as the response goes out (FastAPI ends a dependency after it): poll briefly
+        self.assertTrue(_soon(lambda: W.authenticate(token) is not None), "and let in again once it is enabled")
+
+    def test_deleting_the_machine_drops_its_helper_and_leaves_no_connection(self):
+        sid, token, _tid = self.machine(self.lena_id, "deleted box")
+        _worker, _loop, thread = self.helper(sid, token)
+        t0 = time.perf_counter()
+        r = self.call("lena", "DELETE", f"/api/pool/servers/{sid}")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.offline_within(sid, t0)
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn(sid, W.hub()._workers, "no connection is left")
+        self.refused_now(sid)
+        with db.session() as s:
+            self.assertIsNone(s.get(Server, sid))
+            self.assertEqual(s.query(WorkerToken).filter(WorkerToken.server_id == sid).count(), 0)
+
+    def test_deleting_it_through_the_registry_routes_drops_it_too(self):
+        sid, token, _tid = self.machine(self.lena_id, "deleted through the registry")
+        self.helper(sid, token)
+        t0 = time.perf_counter()
+        self.assertEqual(self.call("lena", "DELETE", f"/api/servers/{sid}").status_code, 200)
+        self.offline_within(sid, t0)
+
+    def test_suspending_the_owner_drops_their_helpers(self):
+        sid, token, _tid = self.machine(self.moe_id, "moe's box")
+        self.helper(sid, token)
+        t0 = time.perf_counter()
+        r = self.call("ada", "PATCH", f"/api/admin/users/{self.moe_id}", {"status": "suspended", "reason": "tests"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.offline_within(sid, t0)
+        self.assertIsNone(W.authenticate(token), "a suspended account's machine is refused at hello")
+        self.assertEqual(self.call("ada", "PATCH", f"/api/admin/users/{self.moe_id}", {"status": "active"}).status_code,
+                         200)
+        self.assertTrue(_soon(lambda: W.authenticate(token) is not None))
+
+    def test_a_change_made_elsewhere_drops_it_within_a_ping(self):
+        """``admin_cli`` or another process revokes a token in the database: the keep-alive's check finds it."""
+        from datetime import datetime, timezone
+        sid, token, tid = self.machine(self.lena_id, "revoked elsewhere")
+        self.helper(sid, token)
+        with db.session() as s:
+            s.get(WorkerToken, tid).revoked_at = datetime.now(timezone.utc)
+        self.assertEqual(W.still_allowed([(sid, tid)]), {(sid, tid): "its worker token was revoked"})
+        connection = W.hub().get(sid)
+        self.assertEqual(connection.token_id, tid)
+        for (server_id, token_id), reason in W.still_allowed([(sid, tid)]).items():
+            W.hub().drop(server_id, reason, token_id=token_id)
+        self.assertFalse(W.hub().is_online(sid))
+
+    def test_a_drop_names_its_token(self):
+        """Revoking one of a machine's tokens drops a helper connected with it, never one connected with another."""
+        sid, token, tid = self.machine(self.lena_id, "two tokens")
+        raw, hashed = tokens.new_pair()
+        with db.session() as s:
+            other = WorkerToken(server_id=sid, token_hash=hashed, prefix=tokens.prefix(raw), label="other")
+            s.add(other)
+            s.flush()
+            other_id = other.id
+        self.helper(sid, token)
+        self.assertEqual(self.call("lena", "DELETE", f"/api/pool/servers/{sid}/workers/tokens/{other_id}").status_code,
+                         200)
+        time.sleep(0.3)
+        self.assertTrue(W.hub().is_online(sid), "its own token still stands")
+        self.assertEqual(self.call("lena", "DELETE", f"/api/pool/servers/{sid}/workers/tokens/{tid}").status_code, 200)
+        self.offline_within(sid, time.perf_counter())
+
+
+def _soon(check, limit: float = 3.0) -> bool:
+    """Whether ``check()`` holds within ``limit`` seconds."""
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < limit:
+        if check():
+            return True
+        time.sleep(0.02)
+    return bool(check())
+
+
 def _async_value(value):
     async def _inner():
         return value

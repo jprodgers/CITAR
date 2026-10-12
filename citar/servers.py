@@ -645,15 +645,19 @@ def _flushed(session, _context):
 
 @event.listens_for(_OrmSession, "after_commit")
 def _committed(session):
-    """A committed change to the machines: the next read sees it."""
+    """A committed change to the machines: the next read sees it. A savepoint's release fires this too, while the
+    change is not committed yet: only the outermost commit counts."""
+    if session.in_nested_transaction():
+        return
     if session.info.pop("citar_registry", False):
         invalidate()
 
 
 @event.listens_for(_OrmSession, "after_rollback")
 def _rolled_back(session):
-    """Nothing changed after all."""
-    session.info.pop("citar_registry", None)
+    """Nothing changed after all (a savepoint rolled back may leave changes made before it: those still count)."""
+    if not session.in_nested_transaction():
+        session.info.pop("citar_registry", None)
 
 
 def load() -> dict:
