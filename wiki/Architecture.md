@@ -286,7 +286,8 @@ returns the whole registry with schemas (`engine_api.tool_list`).
 | Module | |
 |---|---|
 | `app.py` | The FastAPI app: routes, WebSockets, static files |
-| `session.py` | `SessionManager` and `GameSession`: seats, the turn driver, negotiation interrupts, saving |
+| `session.py` | `SessionManager` and `GameSession`: seats, the turn driver, the chats' responders, saving |
+| `chat.py` | The chat clock: how long a chat waits on each side, and its status events (below) |
 | `benchmarks.py` | The benchmark scheduler: suites, runs, restricted hours, resuming after a restart |
 | `scoring.py` | Model scores |
 | `metrics.py` | Per-seat, per-turn measurement |
@@ -313,6 +314,41 @@ loadable (crates/citar-engine/DESIGN.md P2.5.3).
 
 Negotiations interrupt: an AI that proposes a deal blocks until the other side answers, which is
 why `wait_for_turn` returns for a negotiation as well as for a turn.
+
+### Chats: the clock and the responders
+
+A negotiation is a chat (`design/phase3-features.md` P3.5). Three pieces of the session play it:
+
+- **The chat clock** (`citar/server/chat.py`, `GameSession.chat`) times every open chat by the side it waits on,
+  from the game's `chat_model_reply_seconds` and `chat_person_reply_seconds`: past its time a model seat (LLM, MCP)
+  declines, "(no reply in time)" (`decline_late`), and a chat waiting on a person closes as expired (`expire_chat`); a
+  bot is never timed. It first cancels the answer still in progress for that chat (`cancel_chat_answer`). Each action
+  is an engine call that a chat which moved meanwhile refuses, so a late answer and the deadline leave one outcome. It
+  stands still while the game is paused (`settle` before a pause or a resume changes it), restarts a chat's time when
+  its entries or awaited seat change (the session's event hook, `note`), starts afresh in a loaded session, and, in a
+  benchmark game, holds a chat whose answer is a prompt queued behind a benchmark (`answer_status`: the ticket's or the
+  conversation's status says so) until that prompt starts. Its thread wakes on the session's condition and at least
+  once a second, records and survives every exception, and the driver starts it again if it dies (`ensure`). Its time
+  is the session's `clock`, which tests replace with a fake one (`tests/chatfake.py`).
+- **The responders** (`citar/agents/responders.py`): a chat that comes to wait on a bot or a model seat is handed to that
+  seat's line, which answers one chat at a time in order, on a pool of `CITAR_RESPONDERS` (16) threads for model answers
+  and one of `CITAR_BOT_RESPONDERS` (2) for bot answers, so a bot is never behind models waiting for a busy GPU. A halt
+  (`cancel_agent`: a suspension, a seat change, a crash, a stop) never declines: the chat waits for the seat's next
+  responder, dispatched again on resume, load, `restore_live` and a seat change (`dispatch_waiting`). Only an answer
+  that ran and failed outright is declined, "(no response)".
+- **The model seat's conversations.** `LLMAgent` keeps one `ChatThread` per open chat: a slim fixed system prompt
+  (`prompts.chat_system_prompt`), the chat's history once, then only what changed, on the seat's lease, stopping when
+  the chat moves. On its own turn the agent's waits for the other side (`_await_answer`, the tool's own minute;
+  `_end_turn`, until every chat it opened is settled) end when the clock settles the chat, with a safety cap of twice
+  the game's longest timeout; an answer that comes later is put in front of the model before its next step
+  (`_chat_news`). `BotAgent.play_turn` waits the same way.
+
+**Status events.** `{"type": "negotiation_status", "negotiation", "players", "waiting_on", "kind", "state", "position",
+"eta_s", "deadline", "left_s", "paused"}` goes out on the game's socket: `waiting` (with the deadline) from the clock,
+`queued` (with the place and ETA) and `thinking` from the answering conversation's requests in the prompt scheduler
+(`ScheduledConversation.on_status`, delivered by the notifier thread), `closed` (with the chat's `status`) from the
+session. The socket gives it to the seats in `players` and to spectators while the god view is allowed, and to
+nobody else.
 
 ### The prompt scheduler
 

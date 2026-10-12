@@ -35,14 +35,15 @@ still work and still grant exactly one seat.
 |---|---|
 | `GET /api/tools` | Every tool with its JSON schema. The authoritative reference |
 | `POST /api/games/{id}/tool` | Call a tool: `{"tool": "...", "args": {...}}` |
-| `GET /api/games/{id}/wait` | Long-poll until it is your turn or a negotiation needs an answer |
+| `GET /api/games/{id}/wait` | Long-poll until it is your turn or a negotiation needs an answer. Every answer while the game plays lists the chats your seat is in (`chats`: `negotiation_id`, `with`, `waiting_on` `you` or `them`, `deadline` in epoch seconds, `seconds_left`, `paused`) |
+| `GET /api/games/{id}/negotiations/{nid}` | One chat as a side of it sees it (its history, the proposal from that side, `your_move`), with where its clock stands (`clock`: `waiting_on`, `kind` of side, `deadline`, `left_s`, `paused`). A seat token reads the chats its seat is in; anyone who may watch the game reads any while no person plays (or it is over), from `as_player`'s side when that civilization is in it, else the side that opened it. 404 for anyone else, and for a chat the game does not have |
 | `GET /api/games/{id}/view` | The game as this seat sees it, as JSON. With no seat token, a spectator's view for an account (or a `link` key) the game's visibility lets see it, while no person is playing; `can_manage` says whether the caller may pause, slow down or save it |
 | `GET /api/games` | Games visible to the caller |
 | `GET /api/rules` | The whole ruleset |
 | `GET /api/games/{id}/metrics` | Per-seat, per-turn metrics |
 | `GET /api/games/{id}/metrics.csv` | The same, as CSV |
 | `GET /api/games/{id}/replay` | Every turn's state, for the recap: once the game is over, or live for whoever may watch an AI-only game (its spectator token, or an account or key that may see it) |
-| `WS /ws/games/{id}` | Live updates: `?token=` a seat or spectator token, or none for the account signed in (its cookie), and `&k=` a `link` game's key |
+| `WS /ws/games/{id}` | Live updates: `?token=` a seat or spectator token, or none for the account signed in (its cookie), and `&k=` a `link` game's key. Besides the game's events, a chat's `negotiation_status` (below) |
 | `GET /api/models/scores`, `GET /api/metrics/compare` | Per-model scores and metrics. A member's are made from their own games and the games other members pool, a model's pooled part only once enough accounts are behind it (`pooled_withheld`, or a row with `withheld` and the reason); other members' games are counted (`pooled_games`), never named. `scores` also says what the member's scope holds (`scope`). An administrator's cover every game |
 | `GET /r/{slug}` | A report's page for people with no account: a `link` report by its key, a `global` one by its id or key; 404 for anything else |
 
@@ -51,6 +52,19 @@ refusals are 400 with a readable message — `"That tile is not adjacent"` — b
 read by a model as often as by a person.
 
 Full schemas: `GET /api/tools`, or `/docs` for the generated OpenAPI browser.
+
+### A chat's status on the socket
+
+`{"type": "negotiation_status", "negotiation": 4, "players": [0, 2], "waiting_on": 2, "kind": "model",
+"state": "queued", "position": 1, "eta_s": 9.9, "deadline": 1791840929.6, "left_s": 583.0, "paused": false}`
+
+- `state`: `waiting` (the chat waits on `waiting_on`, until `deadline`, in epoch seconds, `left_s` from now; no
+  deadline while the game is paused or for a bot, which is never timed), `queued` (the answering model's request
+  waits for its machine: `position` in its line and `eta_s`), `thinking` (the model is generating its answer), or
+  `closed` (with the chat's `status`: `accepted`, `rejected` or `expired`).
+- `kind` is the side it waits on: `model` (an LLM or MCP seat), `person`, `bot` (or `hybrid`).
+- It goes to the sockets of the two seats in `players` and to spectators while the god view is allowed (no person
+  plays, or the game is over); to nobody else.
 
 ### Owning and sharing a game
 
@@ -240,10 +254,13 @@ per turn, free. The TURN PROGRESS note reminds them.
 `city_state_action` · `move_spy` · `stage_coup`
 
 A negotiation is a chat with a deal on the table: `open_negotiation` proposes, and the other side
-answers in its own time — AIs in seconds, humans when they see the popup. `respond_negotiation`
-accepts, rejects, counters or replies, and every entry carries a message. Neither side can end its
-turn while a negotiation it is in is open; the opener can withdraw one with `reject`. A negotiation
-closes by itself at its message cap (30 by default). This is the part of the game most worth
+answers in its own time — bots at once, models and humans within the game's chat times.
+`respond_negotiation` accepts, rejects, counters or replies, and every entry carries a message (its schema
+requires `message`). Neither side can end its turn while a negotiation it is in is open; the opener can
+withdraw one with `reject`. A negotiation closes by itself at its message cap (30 by default), and when
+the side it waits on runs out of time: a model seat (an LLM or MCP seat) past `chat_model_reply_seconds`
+(10 minutes by default) is taken to decline, "(no reply in time)", and a chat waiting on a person past
+`chat_person_reply_seconds` (5 minutes) closes as expired. This is the part of the game most worth
 probing, because it is where a model's judgement shows.
 
 ### Turn
@@ -271,9 +288,10 @@ The loop:
 Worth knowing:
 
 - **Answer negotiations.** `wait` returns for a negotiation as well as for a turn. An agent that
-  ignores them stalls the game for everybody. On your own turn, after you open one, `wait` waits
-  for the other side's answer (`negotiation_update`, or `waiting_for_reply` at the timeout):
-  `end_turn` is refused until the negotiation is settled or withdrawn.
+  ignores one is taken to decline it once the chat's time runs out (`chats`: `seconds_left`). On your
+  own turn, after you open one, `wait` waits for the other side's answer (`negotiation_update`, or
+  `waiting_for_reply` at the timeout): `end_turn` is refused until the negotiation is settled or
+  withdrawn, and the game's chat clock settles it when the other side's time runs out.
 - **The turn ends without you** if you hit a limit — 10 steps with no progress, 60 steps, 150 tool
   calls, or 1800 seconds. All four are per-seat settings, and which one you hit is recorded.
 - **Errors are information.** A refusal explains the rule. Retrying an identical call unchanged is
