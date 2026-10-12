@@ -486,7 +486,8 @@ def on_first_admin(session, user: Optional[User]) -> None:
     setup wizard, ``bootstrap_admin``, an invitation with the admin role, the local owner): the work that waits for
     an administrator on a fresh server-mode database runs now, in ``session``'s transaction, rather than at the next
     boot. That is importing the server registry (``citar.pool.registry_import``, design/phase3-features.md P3.2.8),
-    once, its file renamed when this transaction commits, and adopting the item files nobody owns
+    once, its file renamed when this transaction commits (with no file, the first run's registry, a scan of this
+    computer, is made once this transaction commits, in a transaction of its own), and adopting the item files nobody owns
     (``items.adopt_orphans``, P3.2.4), which is idempotent, so a later administrator only adopts what has appeared
     since. Nothing for an account that is not an active administrator."""
     if user is None or user.role != "admin" or user.status != "active":
@@ -497,12 +498,17 @@ def on_first_admin(session, user: Optional[User]) -> None:
     session.flush()
     owner = items.first_admin(session) or user
     try:
-        # each in a savepoint of its own: whatever the import or the adoption meets (a registry that does not read,
-        # a file a producer is writing this moment, a row it cannot make) must not take the new administrator, or
-        # the other, with it; the next start tries again what this did not do
-        with session.begin_nested():
-            imported = registry_import.run_once(session, owner)
-        registry_import.rename_after_commit(session, imported)
+        if registry_import.from_first_run(session):
+            # no file to import: the first run's registry is a scan of this computer (hardware, LM Studio's lms),
+            # which waits for this transaction's commit rather than hold the write lock it took
+            registry_import.import_after_commit(session)
+        else:
+            # each in a savepoint of its own: whatever the import or the adoption meets (a registry that does not
+            # read, a file a producer is writing this moment, a row it cannot make) must not take the new
+            # administrator, or the other, with it; the next start tries again what this did not do
+            with session.begin_nested():
+                imported = registry_import.run_once(session, owner)
+            registry_import.rename_after_commit(session, imported)
     except Exception:
         policy.invalidate()                      # the marker it may have cached was rolled back
         log.warning("importing the server registry failed; the next start tries again", exc_info=True)

@@ -398,13 +398,25 @@ def import_registry(session, owner: Optional[User], *, registry_data: dict) -> d
     slots are the entry's ``connection.max_parallel``. The electricity plans join ``settings_kv`` (by id: a plan
     already there is kept), and the currency is set when none is. Idempotent: an id that is already a row is left
     alone. Writes in ``session``; the caller commits. ``citar.pool.registry_import`` runs it once, behind its marker.
+
+    A database where the pool's old import route was used (retired in 0.1.6) holds copies of the registry's machines
+    under new ids, each with the registry's id as its config's ``id``. The machines still come in under their own
+    ids, which is what seats, suites, the usage ledger and the keystore name (and which the copies never answered
+    to); the copies are listed in ``earlier_copies`` ({registry id: [row ids]}) for an administrator to remove, and
+    left alone, since whatever names them still needs them.
     """
     from datetime import timedelta
 
     from .. import servers as registry
     from ..db.models import Setting, now as _now
 
-    existing = set(session.scalars(select(Server.id)))
+    rows = list(session.scalars(select(Server)))
+    existing = {r.id for r in rows}
+    copies: dict = {}
+    for r in rows:
+        cid = (r.config or {}).get("id") if isinstance(r.config, dict) else None
+        if isinstance(cid, str) and cid != r.id:
+            copies.setdefault(cid, []).append(r.id)
     host_taken = session.scalar(select(Server.id).where(Server.is_host.is_(True))) is not None
     host_id = registry_data.get("host_server_id")
     created, skipped = [], []
@@ -444,4 +456,5 @@ def import_registry(session, owner: Optional[User], *, registry_data: dict) -> d
                                session=session)
     session.flush()
     return {"imported": created, "already_present": skipped, "electricity_plans": [p["id"] for p in added_plans],
-            "host_server_id": next((sid for sid in created if sid == host_id), None)}
+            "host_server_id": next((sid for sid in created if sid == host_id), None),
+            "earlier_copies": {sid: sorted(copies[sid]) for sid in created if sid in copies}}

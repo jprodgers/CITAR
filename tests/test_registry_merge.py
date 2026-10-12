@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -43,7 +44,7 @@ from sqlalchemy import select
 
 from citar import db, keystore, pool, servers, settings
 from citar.auth import accounts, policy, sessions
-from citar.db.models import AuditLog, Base, Server, User, WorkerToken
+from citar.db.models import AuditLog, Base, Server, Setting, User, WorkerToken
 from citar.pool import registry_import
 
 settings.reset()
@@ -227,6 +228,67 @@ class Import(RegistryFile):
                 raise RuntimeError("the transaction that made the administrator failed")
         self.assertTrue(self.file.exists(), "renamed only once the import commits")
         self.assertEqual(servers.list_servers(), [])
+
+    def test_another_instances_registry_file_is_never_called_imported(self):
+        """A checkout and an installed CITAR can share one database with two configuration folders: once one's file
+        is imported, the other's is not, and the boot says so rather than advise removing it."""
+        with db.session() as s:
+            _admin(s)
+        other = self.dir / "other-config"
+        other.mkdir()
+        shutil.copy(RC.FIXTURE, other / "servers.json")
+        with mock.patch.object(servers, "PATH", other / "servers.json"):
+            with self.assertLogs("citar.registry_import", logging.WARNING) as logged:
+                self.assertIsNone(registry_import.on_boot())
+        said = "\n".join(logged.output)
+        self.assertIn("was NOT imported", said)
+        self.assertIn(str(self.file), said, "it names the file the machines came from")
+        self.assertNotIn("Remove or rename", said)
+        self.assertTrue((other / "servers.json").exists())
+
+    def test_the_old_pool_imports_copies_are_named_and_kept(self):
+        """A database where the pool's old import route (retired) copied the registry's machines under new ids: the
+        machines still come in under their own ids (what seats, suites, the ledger and the keystore name), and the
+        copies are named in the log and the audit row for an administrator to remove, not removed."""
+        with db.session() as s:
+            ada = accounts.create_user(s, handle="ada", email="ada@example.com", password="a long enough phrase",
+                                       role="admin", status="active", email_verified=True)
+            s.add(Server(id="sv_old_copy", owner_id=ada.id, name="Desktop on the LAN", kind="owned",
+                         provider="openai_compatible", reach="direct", config=copy.deepcopy(self.entries["sv_lan"])))
+        with self.assertLogs("citar.registry_import", logging.WARNING) as logged:
+            result = registry_import.on_boot()
+        self.assertEqual(result["earlier_copies"], {"sv_lan": ["sv_old_copy"]})
+        self.assertIn("sv_old_copy", "\n".join(logged.output))
+        self.assertEqual({sv["id"] for sv in servers.list_servers()}, set(self.entries) | {"sv_old_copy"})
+        with db.session() as s:
+            row = s.scalar(select(AuditLog).where(AuditLog.action == "migration.registry_imported"))
+            self.assertEqual(row.detail["earlier_copies"], {"sv_lan": ["sv_old_copy"]})
+
+    def test_the_first_runs_registry_is_made_once_the_administrator_is_committed(self):
+        """With no file, the import makes the first run's registry, a scan of this computer: it waits for the
+        transaction that made the administrator to commit, so nothing holds the database's write lock meanwhile."""
+        self.file.unlink()
+        real = servers.bootstrap
+        seen = {}
+
+        def bootstrap():
+            t0 = time.perf_counter()
+            with db.session() as s:
+                seen["admin committed"] = accounts.by_handle(s, "ada") is not None
+                s.add(Setting(key="a_write_from_another_connection", value={"v": True}))
+            seen["write took"] = time.perf_counter() - t0
+            return real()
+        with mock.patch("citar.hwinfo.collect", side_effect=RuntimeError("no scan in tests")), \
+                mock.patch("citar.server.lmstudio.lms_path", lambda: None), \
+                mock.patch.object(servers, "bootstrap", bootstrap):
+            with db.session() as s:
+                _admin(s)
+                self.assertEqual(seen, {}, "not inside the administrator's transaction")
+        self.assertTrue(seen["admin committed"])
+        self.assertLess(seen["write took"], 2.0, "another writer is not kept waiting")
+        self.assertEqual({sv["id"] for sv in servers.list_servers()}, {"sv_host", "sv_anthropic", "sv_dryrun"})
+        with db.session() as s:
+            self.assertEqual(policy.marker(s, "registry_imported")["source"], "first run")
 
 
 # ---------------------------------------------------------------------------------------------------------- gate 2
@@ -620,6 +682,31 @@ class Benchmarks(unittest.TestCase):
                 manager.delete(sid)
                 if session is not None and session._driver is not None:
                     session._driver.join(10)          # its last write to the index lands before the next test
+
+
+# ---------------------------------------------------------------------------------------------------------- power
+
+class HostSampler(unittest.TestCase):
+    """The server samples the host's power from its start, whether or not a host exists yet: on a fresh server-mode
+    database the host appears with its first administrator, after the boot."""
+
+    def test_the_servers_sampler_follows_the_host(self):
+        from citar import usage
+        _fresh()
+        with mock.patch.object(usage, "_sampler", None), mock.patch.object(usage.PowerSampler, "start") as started:
+            sampler = usage.start_power_sampler(follow_host=True)
+            self.assertIsNotNone(sampler, "started with no host yet")
+            started.assert_called_once()
+            self.assertIsNone(sampler.target())
+            tests.seed_registry()                       # the import, as the first administrator's makes it
+            self.assertEqual(sampler.target(), "sv_host")
+            with db.session() as s:
+                s.get(Server, "sv_host").is_host = False
+                s.get(Server, "sv_gpu").is_host = True
+            self.assertEqual(sampler.target(), "sv_gpu", "a host chosen later is the one sampled")
+        with mock.patch.object(usage, "_sampler", None), mock.patch.object(usage.PowerSampler, "start"):
+            _fresh()
+            self.assertIsNone(usage.start_power_sampler(), "the lab samples only a host there is when it starts")
 
 
 # ---------------------------------------------------------------------------------------------------------- the CLI

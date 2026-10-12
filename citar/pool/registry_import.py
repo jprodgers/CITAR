@@ -9,7 +9,8 @@ every machine is a row. The import runs once, behind the ``registry_imported`` m
 * and from ``accounts.on_first_admin``, which every path that makes an administrator calls (``admin_cli create-admin``,
   ``create-user --role admin`` and ``set-role``, the setup wizard, an invitation with the admin role, the local
   owner's creation): ``run_once`` in a savepoint of that transaction, the file renamed once it commits
-  (``rename_after_commit``).
+  (``rename_after_commit``). With no file to read, the first run's registry is made once that transaction commits,
+  in one of its own (``import_after_commit``): it scans this computer, which must not hold the write lock.
 
 The machines come in under the file's own ids, owned by the first administrator (in local mode the local owner)
 (``citar.pool.import_registry``), and the file is renamed ``servers.json.imported-<date>`` beside it: never deleted,
@@ -81,7 +82,13 @@ def run_once(session, owner, *, data: Optional[dict] = None, source: Optional[st
     if audit_row:
         audit.record(session, "migration.registry_imported", actor=owner, actor_label=None if owner else "system",
                      object_type="server", count=len(result["imported"]), servers=result["imported"],
-                     already_present=result["already_present"], source=source)
+                     already_present=result["already_present"], earlier_copies=result["earlier_copies"],
+                     source=source)
+    if result["earlier_copies"]:
+        log.warning("The server registry's machines were imported under their own ids; the pool's old import had "
+                    "already copied some of them under new ids (%s). The copies are kept, since games or grants may "
+                    "name them: remove them on the Servers page once nothing uses them.",
+                    "; ".join(f"{sid}: {', '.join(rows)}" for sid, rows in result["earlier_copies"].items()))
     session.flush()
     return {**result, **record, "file": file}
 
@@ -137,6 +144,59 @@ def rename_after_commit(session, result: Optional[dict]) -> None:
     event.listen(session, "after_rollback", rolled_back)
 
 
+def from_first_run(session) -> bool:
+    """Whether the import still to be done would make the first run's registry (no marker yet, and no file to read):
+    ``servers.bootstrap`` scans this computer and asks LM Studio's ``lms`` (up to a minute and a half), which must not
+    happen while a transaction holds the database's write lock (``import_after_commit``)."""
+    from ..auth import policy
+    return not policy.marker(session, MARKER) and not registry_file().exists()
+
+
+def import_after_commit(session) -> None:
+    """Import the registry once ``session``'s outermost transaction commits, in a transaction of its own (as at
+    boot, ``on_boot``), never while ``session`` holds the write lock it took making an administrator: the first run's
+    registry is a slow scan of this computer, and every other writer would wait out its busy timeout meanwhile.
+    Nothing when the transaction rolls back (the next start or administrator tries again)."""
+    state = {"open": True}
+
+    def committed(s):
+        if state["open"] and not s.in_nested_transaction():
+            state["open"] = False
+            on_boot()
+
+    def rolled_back(s):
+        if not s.in_nested_transaction():
+            state["open"] = False
+    event.listen(session, "after_commit", committed)
+    event.listen(session, "after_rollback", rolled_back)
+
+
+def _same_file(a, b) -> bool:
+    """Whether two paths name the same file (the marker records the imported file's path as text)."""
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except (OSError, TypeError, ValueError):
+        return str(a) == str(b)
+
+
+def _warn_left_over(path: Path, done: dict) -> None:
+    """Say what a registry file found once the import is done means: the imported file itself, left behind by a
+    rename that failed (or restored from a backup), or another one, which was never imported. Two instances (a
+    checkout and an installed CITAR, say) can share a database with different configuration folders: that other
+    file's machines are not in the database, and only a person can merge them, so it is never called safe to remove."""
+    source = (done or {}).get("source")
+    at = (done or {}).get("at") or "an earlier start"
+    if source and _same_file(source, path):
+        log.warning("%s is not read any more: the server registry was imported into the database from it on %s. "
+                    "Remove or rename the file.", path, at)
+        return
+    origin = {"first run": "this computer's first run (there was no registry file then)",
+              "given": "the registry given to the import"}.get(source or "", source or "another registry")
+    log.warning("%s was NOT imported: the database's machines came from %s on %s, and only the database is read now. "
+                "This file may belong to another CITAR using the same database; add its machines on the Servers page "
+                "by hand if they are wanted here.", path, origin, at)
+
+
 def on_boot() -> Optional[dict]:
     """At the server's start, before any game comes back: import the registry when it has not been and an
     administrator exists (in local mode the owner, made just before). Never raises: a registry that will not import
@@ -149,8 +209,7 @@ def on_boot() -> Optional[dict]:
             done = policy.marker(s, MARKER)
             if done:
                 if registry_file().exists():
-                    log.warning("%s is not read any more: the server registry was imported into the database on %s. "
-                                "Remove or rename the file.", registry_file(), (done or {}).get("at") or "an earlier start")
+                    _warn_left_over(registry_file(), done)
                 return None
             owner = items.first_admin(s)
             if owner is None:

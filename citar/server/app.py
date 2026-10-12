@@ -104,7 +104,8 @@ async def _startup():
     items.on_boot()                               # shipped items' rows; strays adopted when there is an admin
     asyncio.create_task(_close_finished_loop())   # finished lobby games leave the list after a while
     from .. import usage
-    usage.start_power_sampler()                   # live power samples of this machine for cost reports
+    usage.start_power_sampler(follow_host=True)   # live power samples of the host for cost reports (a host made
+                                                  # later, by the first administrator, from then on)
     usage.tracker().start()
 
 
