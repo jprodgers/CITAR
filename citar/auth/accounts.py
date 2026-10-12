@@ -220,6 +220,7 @@ def create_user(session, *, handle: str, email: Optional[str] = None, password: 
             raise AccountError("That looks like a disposable email address. "
                                "Please use an address you will still have later.")
 
+    from .profiles import clean_text
     password_hash = None
     if password:
         passwords.check(password, handle=normalized_handle, email=normalized_email or "")
@@ -239,7 +240,8 @@ def create_user(session, *, handle: str, email: Optional[str] = None, password: 
     user = User(
         handle=handle.strip() if normalize_handle(handle) == normalized_handle else normalized_handle,
         handle_lower=normalized_handle,
-        display_name=(display_name or "").strip()[:80],
+        # control characters and bidirectional overrides out, as a profile edit takes them out (P3.2.6)
+        display_name=clean_text(display_name or "")[:80],
         email=normalized_email,
         email_lower=normalized_email,
         email_verified=bool(email_verified),

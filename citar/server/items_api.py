@@ -40,7 +40,7 @@ def _key(request: Request) -> Optional[str]:
 def get_sharing(kind: str, ref: str, request: Request, me=Depends(require_user), s: Session = Depends(get_db)):
     """An item's sharing, for whoever manages it."""
     row, perms = items.require(s, kind, ref, me, access.MANAGE, slug=_key(request))
-    return items.client(s, row, perms)
+    return items.client(s, row, perms, me)
 
 
 class VisibilityBody(BaseModel):
@@ -57,7 +57,7 @@ def set_sharing(kind: str, ref: str, body: VisibilityBody, request: Request, me=
     access.set_visibility(s, row, body.visibility, actor=me)
     if row.visibility != before:
         items.visibility_changed(s, row)
-    return items.client(s, row, perms)
+    return items.client(s, row, perms, me)
 
 
 class ShareWithBody(BaseModel):
@@ -75,7 +75,7 @@ def share_with(kind: str, ref: str, body: ShareWithBody, request: Request, me=De
     if target is None or target.status in ("deleted", "suspended"):
         raise HTTPException(404, f"No account called '{body.handle}'.")
     access.grant(s, row, target, body.permission, actor=me)
-    return {"shared_with": access.shared_with(s, row)}
+    return {"shared_with": access.shared_with(s, row, me)}
 
 
 @router.delete("/api/items/{kind}/{ref}/sharing/users/{handle}")
@@ -87,7 +87,7 @@ def unshare_with(kind: str, ref: str, handle: str, request: Request, me=Depends(
     if target is None:
         raise HTTPException(404, f"No account called '{handle}'.")
     access.revoke(s, row, target, actor=me)
-    return {"shared_with": access.shared_with(s, row)}
+    return {"shared_with": access.shared_with(s, row, me)}
 
 
 @router.post("/api/items/{kind}/{ref}/sharing/rotate")
@@ -95,7 +95,7 @@ def rotate(kind: str, ref: str, request: Request, me=Depends(require_user), s: S
     """Give an item a new share link; every copy of the old one stops working."""
     row, perms = items.require(s, kind, ref, me, access.MANAGE, slug=_key(request))
     access.rotate_slug(s, row, actor=me)
-    return items.client(s, row, perms)
+    return items.client(s, row, perms, me)
 
 
 class UnpublishBody(BaseModel):
@@ -114,4 +114,4 @@ def unpublish(kind: str, ref: str, body: UnpublishBody, request: Request, me=Dep
         perms.require(access.MODERATE)
     access.unpublish(s, row, actor=me, reason=body.reason)
     items.visibility_changed(s, row)
-    return items.client(s, row, access.on(s, me, row))
+    return items.client(s, row, access.on(s, me, row), me)

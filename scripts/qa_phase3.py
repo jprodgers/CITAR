@@ -24,7 +24,8 @@ The harness:
   check failed, 0 when every one passed.
 
 Parts: ``accounts`` (3-03: sharing of games and reports, ``/r/{slug}``, a moderator's unpublish, members' model
-blocks, a member's report gathering only what they may see; 3-04 to 3-06 add theirs), and later ``queue``,
+blocks, a member's report gathering only what they may see; 3-04: profiles, avatars, the directory, the admin users
+routes, ``admin_cli``'s commands, probation and a suspension; 3-05 and 3-06 add theirs), and later ``queue``,
 ``ledger``, ``chat``, ``hybrid``, ``minimap``, ``machines``; ``all`` runs every part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
@@ -37,11 +38,13 @@ import os
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
@@ -377,6 +380,13 @@ def _ids(listing) -> set:
 
 
 def part_accounts(h: Harness) -> None:
+    """The ``accounts`` part: 3-03's sharing checks, then 3-04's profiles and administration. Each half runs whatever
+    the other found."""
+    _accounts_sharing(h)
+    _accounts_profiles(h)
+
+
+def _accounts_sharing(h: Harness) -> None:
     """3-03's checks: the sharing of a game and of a report (the visibility ladder, links and their keys, sharing by
     handle, ``/r/{slug}``, a moderator's unpublish), members' model blocks (nothing dialled), and a member's report
     gathering only what they may see."""
@@ -555,6 +565,158 @@ def part_accounts(h: Harness) -> None:
     # the games stop, so a kept server does not play on
     for who, g in ((alice, gid), (bob, bob_gid)):
         who.post(f"/api/games/{g}/control", json={"paused": True})
+
+
+def _chunk(kind: bytes, data: bytes) -> bytes:
+    """A PNG chunk with its checksum."""
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+def _png(width: int, height: int, *, author: str = "") -> bytes:
+    """A small, whole PNG (one colour), made here: the harness adds no image library. ``author`` goes in a tEXt
+    chunk, as the program that saved a picture often puts its owner's name there."""
+    rows = b"".join(b"\x00" + b"\x3c\x78\xd8" * width for _ in range(height))
+    text = _chunk(b"tEXt", b"Author\0" + author.encode("latin-1")) if author else b""
+    return (b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) + text
+            + _chunk(b"IDAT", zlib.compress(rows)) + _chunk(b"IEND", b""))
+
+
+def _accounts_profiles(h: Harness) -> None:
+    """3-04's checks (design/phase3-features.md P3.2.6, P3.2.7): a member's profile (bio, links, an avatar checked by
+    its header, each field's visibility), the directory and its search, a public profile for a visitor with a private
+    name kept back; the admin users routes (404 for anyone but an administrator, a change of capabilities, limits and
+    trust with its one audit row, the last administrator kept), ``admin_cli``'s new commands on the server's database,
+    probation and a suspension."""
+    r = h.report
+    admin, alice, bob, mod = (h.accounts[k] for k in ("admin", "alice", "bob", "mod"))
+    anon = h.anonymous()
+    name = f"Alice QA {h.tag}"
+
+    # ---- a member's profile
+    put = alice.put("/api/auth/me", json={"display_name": name, "bio": f"QA bio {h.tag}\nsecond line",
+                                          "links": [{"label": "QA", "url": "https://example.com/qa"}]})
+    r.check("a member writes a profile: a display name, a bio and a link",
+            put.status_code == 200 and put.json()["user"]["bio"].startswith("QA bio"), put.text[:200])
+    js = alice.put("/api/auth/me", json={"links": [{"label": "x", "url": "javascript:alert(1)"}]})
+    long = alice.put("/api/auth/me", json={"bio": "x" * 1001})
+    kept = alice.get("/api/auth/me").json()["user"]
+    r.check("a javascript: link and a bio over 1,000 characters are refused (400) and change nothing",
+            js.status_code == 400 and long.status_code == 400 and kept["bio"].startswith("QA bio")
+            and kept["links"][0]["url"] == "https://example.com/qa", f"HTTP {js.status_code} / {long.status_code}")
+    author = f"Alice Author QA {h.tag}"
+    up = alice.post("/api/auth/me/avatar", files={"file": ("me.png", _png(48, 48, author=author), "image/png")})
+    avatar = up.json()["user"]["avatar"] if up.status_code == 200 else ""
+    got = bob.get(avatar) if avatar else None
+    r.check("an avatar (a PNG checked by its header) is served to a member as image/png, nosniff and sandboxed",
+            got is not None and got.status_code == 200 and got.headers.get("content-type") == "image/png"
+            and got.headers.get("x-content-type-options") == "nosniff"
+            and got.headers.get("content-security-policy") == "default-src 'none'; sandbox",
+            f"upload HTTP {up.status_code} {up.text[:120]}")
+    r.check("the picture's metadata (a tEXt chunk naming its author) is left out of what is served",
+            got is not None and got.content == _png(48, 48) and author.encode() not in got.content,
+            f"{len(got.content) if got is not None else 0} bytes served")
+    garbled = alice.post("/api/auth/me/avatar", content=b"--x\r\n" + bytes(range(256)) + b"\r\n--x--\r\n",
+                         headers={"content-type": "multipart/form-data; boundary=zz"})
+    r.check("an upload that is not a well-formed form is a 400, and the picture stays",
+            garbled.status_code == 400 and alice.get("/api/auth/me").json()["user"]["avatar"] == avatar,
+            f"HTTP {garbled.status_code} {garbled.text[:120]}")
+    r.check("a visitor gets 404 for the picture while it is members-only", bool(avatar) and anon.get(avatar).status_code == 404)
+    svg = alice.post("/api/auth/me/avatar", files={"file": ("x.png", b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+                                                           "image/png")})
+    r.check("an SVG named .png is refused (400) and the picture stays", svg.status_code == 400
+            and alice.get("/api/auth/me").json()["user"]["avatar"] == avatar, f"HTTP {svg.status_code}")
+
+    # ---- the directory and the profile's visibility
+    listed = bob.get("/api/users", params={"q": alice.handle})
+    r.check("the directory lists her for a member, with her name; a visitor gets 401",
+            listed.status_code == 200 and [u["display_name"] for u in listed.json()["users"]] == [name]
+            and anon.get("/api/users").status_code == 401, listed.text[:200])
+    r.check("her profile is members-only by default: a member opens it, a visitor gets 404",
+            bob.get(f"/api/users/{alice.handle}").status_code == 200
+            and anon.get(f"/api/users/{alice.handle}").status_code == 404)
+    put = alice.put("/api/auth/me", json={"field_visibility": {"profile": "global", "avatar": "global", "bio": "global",
+                                                                "display_name": "private"}})
+    page = anon.get(f"/api/users/{alice.handle}")
+    r.check("made public with her name kept private: a visitor opens it and sees her handle, her bio, not her name",
+            put.status_code == 200 and page.status_code == 200 and name not in page.text
+            and page.json().get("display_name") == alice.handle and "QA bio" in page.text, page.text[:200])
+    r.check("and a visitor sees her picture", anon.get(avatar).status_code == 200)
+    r.check("a member's directory search for her private name finds nothing",
+            bob.get("/api/users", params={"q": name}).json().get("users") == [])
+    huge = str(2 ** 63)
+    pages = (bob.get("/api/users", params={"offset": huge}), admin.get("/api/admin/users", params={"offset": huge}),
+             admin.get("/api/admin/audit", params={"before": huge}))
+    r.check("a page number past SQLite's integer is a 422 on the directory, the users list and the audit log",
+            [x.status_code for x in pages] == [422, 422, 422], str([x.status_code for x in pages]))
+    alice.put("/api/auth/me", json={"listed": False})
+    r.check("hidden from the directory, her page still opens",
+            alice.handle not in [u["handle"] for u in bob.get("/api/users").json()["users"]]
+            and anon.get(f"/api/users/{alice.handle}").status_code == 200)
+    alice.put("/api/auth/me", json={"listed": True, "field_visibility": {"display_name": "server"}})
+
+    # ---- the admin users page's routes
+    bob_id = bob.get("/api/auth/me").json()["user"]["id"]
+    admin_id = admin.get("/api/auth/me").json()["user"]["id"]
+    routes = ["/api/admin/users", f"/api/admin/users/{bob_id}", "/api/admin/audit"]
+    r.check("a member and a moderator get 404 on every admin route, a visitor 401",
+            all(bob.get(u).status_code == 404 and mod.get(u).status_code == 404 and anon.get(u).status_code == 401
+                for u in routes) and bob.patch(f"/api/admin/users/{bob_id}", json={"trust_tier": "trusted"}).status_code == 404)
+    patch = admin.patch(f"/api/admin/users/{bob_id}", json={"caps": {"run_lab": True}, "max_concurrent_games": 3,
+                                                            "trust_tier": "provisional"})
+    r.check("an administrator changes a member's capabilities, limits and trust",
+            patch.status_code == 200 and patch.json().get("changed") == ["caps", "max_concurrent_games", "trust_tier"],
+            patch.text[:200])
+    r.check("the member's own capabilities follow", bob.get("/api/auth/me").json()["capabilities"].get("run_lab") is True)
+    rows = admin.get("/api/admin/audit", params={"object_id": bob_id, "action": "user.updated"}).json().get("entries", [])
+    r.check("one audit row names the fields, by the administrator",
+            len(rows) == 1 and rows[0]["detail"].get("fields") == ["caps", "max_concurrent_games", "trust_tier"]
+            and rows[0]["actor_id"] == admin_id, str(rows)[:300])
+    unset = admin.patch(f"/api/admin/users/{bob_id}", json={"caps": {"run_lab": None}})
+    r.check("null removes the capability override",
+            unset.status_code == 200 and unset.json()["user"]["caps"] == {}
+            and bob.get("/api/auth/me").json()["capabilities"].get("run_lab") is False)
+    last = admin.patch(f"/api/admin/users/{admin_id}", json={"role": "user"})
+    r.check("the last administrator cannot demote themselves (409)", last.status_code == 409, last.text[:200])
+    zero = admin.patch(f"/api/admin/users/{bob_id}", json={"max_concurrent_games": 0})
+    r.check("a game limit of 0, which the server would read as its default, is refused (400)",
+            zero.status_code == 400 and admin.get(f"/api/admin/users/{bob_id}").json()["user"]["max_concurrent_games"] == 3,
+            zero.text[:200])
+
+    # ---- the command line, on the server's own database
+    runs = [h.server.cli(*args) for args in (("set-trust", bob.handle, "trusted"),
+                                              ("set-limits", bob.handle, "--seats", "6"),
+                                              ("set-caps", bob.handle, "run_probes=off"))]
+    view = admin.get(f"/api/admin/users/{bob_id}").json().get("user", {})
+    r.check("admin_cli set-trust, set-limits and set-caps change the account, seen through the API",
+            all(x.returncode == 0 for x in runs) and view.get("trust_tier") == "trusted"
+            and view.get("max_seats_per_game") == 6 and view.get("caps") == {"run_probes": False},
+            " | ".join((x.stdout + x.stderr).strip()[-150:] for x in runs))
+    listing = h.server.cli("audit", "--object-id", bob_id, "--action", "user.updated", "--json")
+    try:
+        entries = json.loads(listing.stdout).get("entries", [])
+    except ValueError:
+        entries = []
+    r.check("admin_cli audit lists the command line's three changes and the administrator's two",
+            [e["actor"] for e in entries[:3]] == ["admin_cli"] * 3 and len(entries) == 5, listing.stdout[-300:])
+    by_cli = admin.get("/api/admin/audit", params={"actor": "admin_cli", "object_id": bob_id,
+                                                   "action": "user.updated"}).json().get("entries", [])
+    r.check("the audit log's actor filter finds the command line's changes by its name",
+            [e["id"] for e in by_cli] == [e["id"] for e in entries[:3]],
+            f"{[e['id'] for e in by_cli]} against {[e['id'] for e in entries[:3]]}")
+
+    # ---- probation and a suspension
+    admin.patch(f"/api/admin/users/{bob_id}", json={"status": "probation"})
+    pub = bob.put("/api/auth/me", json={"field_visibility": {"bio": "global"}})
+    r.check("on probation, a member cannot make a field public (403)", pub.status_code == 403, pub.text[:200])
+    no_reason = admin.patch(f"/api/admin/users/{bob_id}", json={"status": "suspended"})
+    sus = admin.patch(f"/api/admin/users/{bob_id}", json={"status": "suspended", "reason": f"QA {h.tag}"})
+    r.check("a suspension needs its reason (400), and signs the member out",
+            no_reason.status_code == 400 and sus.status_code == 200
+            and bob.get("/api/auth/me").json().get("authenticated") is False, f"HTTP {no_reason.status_code} / {sus.status_code}")
+    back = admin.patch(f"/api/admin/users/{bob_id}", json={"status": "active", "caps": {"run_probes": None},
+                                                           "max_seats_per_game": 0})
+    r.check("reinstated, the member signs in again", back.status_code == 200 and bob.login().status_code == 200)
+    r.data["profiles"] = {"alice_display_name": name, "alice_avatar": avatar, "bob_id": bob_id}
 
 
 #: The parts written so far, in the order ``all`` runs them.

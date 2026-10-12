@@ -21,7 +21,9 @@ export class Forbidden extends Error {
 
 async function request(method, url, body) {
   const opts = { method, headers: {}, credentials: "same-origin" };
-  if (body !== undefined) {
+  if (body instanceof FormData) {
+    opts.body = body;                      // the browser writes the multipart type with its boundary
+  } else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
@@ -180,6 +182,8 @@ export const api = {
   changePassword: (current_password, new_password) =>
     request("POST", "/api/auth/password/change", { current_password, new_password }),
   updateProfile: (body) => request("PUT", "/api/auth/me", body),
+  uploadAvatar: (file) => { const form = new FormData(); form.append("file", file); return request("POST", "/api/auth/me/avatar", form); },
+  deleteAvatar: () => request("DELETE", "/api/auth/me/avatar"),
   sessions: () => request("GET", "/api/auth/sessions"),
   revokeSession: (id) => request("DELETE", `/api/auth/sessions/${id}`),
   revokeOtherSessions: () => request("POST", "/api/auth/sessions/revoke-others"),
@@ -188,6 +192,14 @@ export const api = {
   invites: (includeSpent = false) => request("GET", `/api/invites?include_spent=${includeSpent}`),
   createInvite: (body) => request("POST", "/api/invites", body),
   revokeInvite: (id) => request("DELETE", `/api/invites/${id}`),
+
+  // ---------------------------------------------------------------- people and the admin users page (P3.2.6, P3.2.7)
+  users: (q = "", offset = 0) => request("GET", `/api/users?q=${encodeURIComponent(q)}&offset=${offset}`),
+  user: (handle, as) => request("GET", `/api/users/${encodeURIComponent(handle)}` + (as ? `?as=${encodeURIComponent(as)}` : "")),
+  adminUsers: (params = {}) => request("GET", "/api/admin/users?" + new URLSearchParams(params)),
+  adminUser: (id) => request("GET", `/api/admin/users/${encodeURIComponent(id)}`),
+  patchAdminUser: (id, body) => request("PATCH", `/api/admin/users/${encodeURIComponent(id)}`, body),
+  adminAudit: (params = {}) => request("GET", "/api/admin/audit?" + new URLSearchParams(params)),
 
   // ---------------------------------------------------------------- server pool
   poolServers: (purpose = "game") => request("GET", `/api/pool/servers?purpose=${purpose}`),

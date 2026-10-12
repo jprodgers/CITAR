@@ -8,7 +8,7 @@ browser hands on to a third party through the Referer header.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from .. import settings
 from ..auth import (accounts, audit, captcha, invites, mailer, oauth, passwords, policy,
-                    ratelimit, sessions)
+                    profiles, ratelimit, sessions)
 from ..auth.deps import Principal, get_db, principal, require_user
 from ..db.models import Invite, User
 
@@ -510,20 +510,31 @@ def oauth_unlink(provider: str, request: Request, p: Principal = Depends(princip
 # ============================================================================ the account itself
 
 class ProfileBody(BaseModel):
-    """The editable parts of a profile."""
+    """The editable parts of an account: its settings, and its profile (design/phase3-features.md P3.2.6): the bio, up
+    to three links, each field's visibility (`private`, `server`, `global`) and whether it is in the directory. The
+    profile's parts are checked by ``citar.auth.profiles`` (a wrong shape is a 400 with the rule, not a 422)."""
     display_name: Optional[str] = None
     tz: Optional[str] = None
     data_sharing: Optional[str] = None
     locale: Optional[str] = None
+    bio: Optional[Any] = None
+    links: Optional[Any] = None
+    field_visibility: Optional[Any] = None
+    listed: Optional[Any] = None
 
 
 @router.put("/api/auth/me")
 def update_profile(body: ProfileBody, request: Request, p: Principal = Depends(principal),
                    s: Session = Depends(get_db)):
-    """Change the caller's own profile."""
+    """Change the caller's own account and profile. Every part of the profile is checked before any is changed: a
+    bio over 1,000 characters, a fourth link, a link that is not http or https, an unknown field or level is a 400,
+    and a `global` field on probation a 403."""
     user = require_user(request, p)
-    if body.display_name is not None:
-        user.display_name = body.display_name.strip()[:80]
+    try:
+        profiles.update(s, user, display_name=body.display_name, bio=body.bio, links=body.links,
+                        field_visibility=body.field_visibility, listed=body.listed, ip=p.ip)
+    except profiles.ProfileError as exc:
+        raise HTTPException(exc.status, str(exc))
     if body.tz is not None:
         user.tz = _clean_tz(body.tz)
     if body.locale is not None:
@@ -574,14 +585,16 @@ def revoke_other_sessions(request: Request, p: Principal = Depends(principal),
 
 @router.get("/api/invites/check")
 def check_invite(code: str, s: Session = Depends(get_db)):
-    """Lets the signup form say 'you have been invited as a moderator' before anything is created."""
+    """Lets the signup form say 'you have been invited as a moderator' before anything is created. The inviter is
+    named as a visitor may see the account (the handle, the display name only when it is `global`): whoever holds a
+    code has no account yet."""
     try:
         invite = invites.check(s, code)
     except invites.InviteError as exc:
         raise _fail(exc)
     creator = accounts.by_id(s, invite.created_by)
     return {"ok": True, "role": invite.role, "email": invite.email, "note": invite.note,
-            "invited_by": creator.name if creator else None}
+            "invited_by": creator.public(None)["display_name"] if creator else None}
 
 
 @router.get("/api/invites")

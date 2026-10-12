@@ -101,6 +101,30 @@ An item is addressed here by its kind and its id on disk (`ref`), as its own rou
 `kind` is one of `benchmark_suite`, `benchmark_run`, `probe`, `probe_run`, `lab_experiment`,
 `scenario`, `map`, `bot_profile` and `report`. These take a signed-in account.
 
+### Profiles, the directory and the admin users page
+
+An account's profile fields each show to the account and administrators (`private`), members (`server`) or
+anyone (`global`), and the profile page's own field gates the rest
+([the rules](server/ACCOUNTS.md#profiles-and-the-directory)). Wherever an account appears in any answer
+(`owner`, `shared_with`, a grant's `subject`), it is `{"id", "handle", "display_name", "avatar"}` as the caller
+may see it: a hidden display name is the handle, a hidden picture `null`.
+
+| Method and path | |
+|---|---|
+| `GET /api/auth/me` | The caller's own account, its profile included (`bio`, `links`, `field_visibility`, `listed`, `avatar`, `avatar_uploaded`, and `avatar_url`, the sign-in provider's picture) |
+| `PUT /api/auth/me` | Also `{"bio", "links": [{"label", "url"}], "field_visibility": {field: level}, "listed"}`: every part checked before any changes; a bio over 1,000 characters, a fourth link, a link that is not `http` or `https`, an unknown field or level is 400, a `global` field on probation 403 |
+| `POST /api/auth/me/avatar` | A multipart form with one file: PNG, JPEG or WebP, at most 256 KB and 1024x1024, checked by its header (400 with the rule otherwise, or for a body that is not a well-formed form; 413 when larger). Stored without its metadata: Exif, XMP, text chunks and comments are left out, the pixels untouched |
+| `DELETE /api/auth/me/avatar` | Remove the uploaded picture |
+| `GET /api/users` | Members only: the directory, listed accounts in good standing, newest first; `?q=` (a handle, or a display name the caller may see), `?offset=` (pages of 50, `next`; 0 to 1,000,000, 422 otherwise) |
+| `GET /api/users/{handle}` | A profile as the caller may see it (`fields` lists what shows; `bio`, `links` and `items` when they do); `?as=member` or `?as=visitor` narrows the view, never widens it. 404 when the page does not show to the caller, alike for an account that does not exist. Open to visitors |
+| `GET /api/users/{handle}/avatar` | The uploaded picture, to whoever its field shows to; 404 otherwise. Its address in `avatar` carries the file's hash |
+| `GET /api/admin/users` | Administrators: every account, newest first; `?q=` (handle, name or email), `?role=`, `?status=`, `?offset=` (pages of 50; 0 to 1,000,000, 422 otherwise) |
+| `GET /api/admin/users/{id}` | One account (its capabilities resolved, `capabilities`, beside its overrides, `caps`), the role's defaults and its audit rows |
+| `PATCH /api/admin/users/{id}` | Any of `role`, `status` (with `reason` for a suspension), `caps` (each capability `true`, `false` or `null`, null removing the override), `invite_quota` (0 to 1,000; 0 is none), `max_concurrent_games` (1 to 100), `max_seats_per_game` (0 to 64; 0 is the ruleset's most), `trust_tier`, `listed`: all checked before any changes, one audit row naming the fields; 409 for the last active administrator demoting or suspending themselves |
+| `GET /api/admin/audit` | The audit log, newest first: `?actor=` (handle or id, or `admin_cli` for the command line's changes), `?action=` (or a prefix ending in `*`), `?object_type=`, `?object_id=`, `?before=` (an entry's id, from `next_before`; 422 past a 64-bit integer), `?limit=` (at most 200) |
+
+The admin routes answer 404 to any account that is not an administrator, and 401 to a visitor.
+
 ---
 
 ## The tools

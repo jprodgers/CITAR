@@ -270,13 +270,20 @@ def delete(session, gid: str, *, actor: Optional[User]) -> None:
         audit.record(session, "game.deleted", actor=actor, object_type="game", object_id=gid)
 
 
-def to_client(row: Optional[GameRow], perms: access.Access, *, base_url: str = "") -> dict:
-    """The sharing block the browser shows next to a game. The share URL (``access.share_url``) goes
+def to_client(row: Optional[GameRow], perms: access.Access, viewer: Optional[User], *, base_url: str = "") -> dict:
+    """The sharing block the browser shows next to a game, for ``viewer`` (None: a visitor). Its owner appears as the
+    viewer may see the account (``User.public`` for the viewer: the handle, and the display name and avatar only where they
+    show to the viewer; a `global` game's list is read by visitors). The share URL (``access.share_url``) goes
     to whoever manages the game: for `link` it carries the key, for `server` and `global` it does not."""
     if row is None:
-        return {"owner_id": None, "visibility": access.PRIVATE, "data_sharing": "pool", **perms.client()}
+        return {"owner_id": None, "owner": None, "visibility": access.PRIVATE, "data_sharing": "pool",
+                **perms.client()}
+    from sqlalchemy.orm import object_session
+    session = object_session(row)
+    owner = session.get(User, row.owner_id) if row.owner_id and session is not None else None
     out = {
         "owner_id": row.owner_id,
+        "owner": owner.public(viewer) if owner is not None else None,
         "visibility": row.visibility,
         "data_sharing": row.data_sharing,
         "kind": row.kind,

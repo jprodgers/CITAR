@@ -244,7 +244,7 @@ def list_groups(request: Request, p: Principal = Depends(principal), s: Session 
         owner = s.get(User, group.owner_id) if group.owner_id else None
         entry = {
             "id": group.id, "name": group.name, "description": group.description,
-            "visibility": group.visibility, "owner": owner.public() if owner else None,
+            "visibility": group.visibility, "owner": owner.public(me) if owner else None,
             "is_mine": group.owner_id == me.id, "can_manage": access.MANAGE in perms,
             "servers": [pool.public_server(s, sv, me)
                         for sv in s.query(Server).filter(Server.group_id == group.id)],

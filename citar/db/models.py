@@ -102,6 +102,14 @@ TRUST_TIERS = ("new", "provisional", "trusted", "quarantined")
 USER_FIELD_DEFAULTS = {"profile": "server", "display_name": "server", "avatar": "server", "bio": "server",
                        "links": "server", "items": "server", "ratio": "private"}
 
+#: A profile field's levels, narrowest first: `private` the account and administrators, `server` every signed-in
+#: member in good standing too, `global` anyone. Only these three: an account is no item, so it has no allowlist or
+#: link of its own.
+FIELD_LEVELS = ("private", "server", "global")
+#: Who a viewer is to an account, as a field asks it: how wide a field may be and still show to them.
+_FIELD_RANK = {"global": 0, "server": 1, "private": 2}
+_VISITOR, _MEMBER, _SELF = 0, 1, 2
+
 #: Per-account permission switches, on top of the coarse role. The defaults for each role live in
 #: the runtime settings table so an admin sets policy once rather than per user; a value here is an
 #: explicit override for one account.
@@ -198,22 +206,90 @@ class User(Base):
         """Whether this account's role is at least the one named."""
         return ROLE_RANK.get(self.role, 0) >= ROLE_RANK[role]
 
-    def public(self) -> dict:
-        """How the account appears to other people, wherever it appears: seats, sharing, grants, owners.
+    # ------------------------------------------------------------------ the profile's visibility (P3.2.6)
+
+    def chosen_levels(self) -> dict:
+        """Each profile field's level as the account chose it: its choice over the defaults, a value that is not a
+        level read as `private` (a null as no choice, as the directory's search reads it in SQL). What its own
+        settings show; ``field_levels`` is what applies."""
+        chosen = self.field_visibility if isinstance(self.field_visibility, dict) else {}
+        out = {}
+        for field, default in USER_FIELD_DEFAULTS.items():
+            value = chosen.get(field)
+            out[field] = default if value is None else value if value in FIELD_LEVELS else "private"
+        return out
+
+    def field_levels(self) -> dict:
+        """Each profile field's level as it applies now (``chosen_levels``), narrowed by the account's standing
+        whatever was chosen: an account on probation shows nothing wider than `server` (making a field `global` is
+        refused on probation, and an account put back on probation is held to the same), and an account not in good
+        standing (pending, suspended, deleted) shows nothing to anyone but itself and administrators."""
+        levels = self.chosen_levels()
+        if self.status not in ("probation", "active"):
+            return dict.fromkeys(levels, "private")
+        if self.status == "probation":
+            return {f: "server" if level == "global" else level for f, level in levels.items()}
+        return levels
+
+    def viewer_rank(self, viewer: Optional["User"]) -> int:
+        """Who ``viewer`` is to this account: the account itself or an administrator (everything), a member in good
+        standing (`server` and `global` fields), or a visitor (`global` only). A suspended, deleted or pending
+        account sees what a visitor does."""
+        if viewer is None or viewer.status not in ("probation", "active"):
+            return _VISITOR
+        if viewer.id == self.id or viewer.role == "admin":
+            return _SELF
+        return _MEMBER
+
+    def visible_fields(self, viewer: Optional["User"], *, rank: Optional[int] = None) -> frozenset:
+        """The profile fields of this account that show to ``viewer``: those whose level the viewer reaches, and
+        none unless the viewer reaches the profile's own (the page's gate, so a hidden profile hides every field).
+        ``rank`` is the viewer's rank when the caller already has it, or a narrower one ("view as a visitor")."""
+        if rank is None:
+            rank = self.viewer_rank(viewer)
+        levels = self.field_levels()
+        if rank < _FIELD_RANK[levels["profile"]]:
+            return frozenset()
+        return frozenset(f for f, level in levels.items() if rank >= _FIELD_RANK[level])
+
+    def shows(self, field: str, viewer: Optional["User"], *, rank: Optional[int] = None) -> bool:
+        """Whether ``field`` of this account shows to ``viewer`` (``visible_fields``)."""
+        return field in self.visible_fields(viewer, rank=rank)
+
+    @property
+    def avatar_route(self) -> Optional[str]:
+        """Where an uploaded avatar is served (with its content's hash, so a new one is fetched at once), or None."""
+        if not self.avatar_path:
+            return None
+        from urllib.parse import quote
+        stem = self.avatar_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        return f"/api/users/{quote(self.handle, safe='')}/avatar?v={quote(stem.rsplit('-', 1)[-1], safe='')}"
+
+    def public(self, viewer: Optional["User"], *, rank: Optional[int] = None) -> dict:
+        """How the account appears to ``viewer`` (None: a visitor with no account), wherever it appears: seats,
+        sharing lists, grants, owners, the directory (P3.2.6). The handle always; the display name and the avatar
+        (the uploaded one's route, else the sign-in provider's picture) only when those fields show to ``viewer``,
+        else the handle and null. Every caller names its viewer: there is no default, so a new caller cannot leak a
+        hidden name by forgetting it (tests/test_profiles.py also lists the callers).
 
         No role and no status: whether somebody is a moderator, on probation or suspended is the account's own
         business and the administrators', not every viewer's (`account` carries both).
         """
-        return {"id": self.id, "handle": self.handle, "display_name": self.name, "avatar_url": self.avatar_url}
+        shown = self.visible_fields(viewer, rank=rank)
+        return {"id": self.id, "handle": self.handle,
+                "display_name": self.name if "display_name" in shown else self.handle,
+                "avatar": (self.avatar_route or self.avatar_url) if "avatar" in shown else None}
 
     def account(self) -> dict:
-        """The account as its owner and administrators see it: `public` plus its role, status, settings and
+        """The account as its owner and administrators see it: `public` plus its role, status, profile, settings and
         limits. Never for anyone else."""
-        d = self.public()
+        d = self.public(self, rank=_SELF)
         d.update(role=self.role, status=self.status, email=self.email, email_verified=self.email_verified,
                  tz=self.tz, data_sharing=self.data_sharing, caps=dict(self.caps or {}),
                  invite_quota=self.invite_quota, max_concurrent_games=self.max_concurrent_games,
                  max_seats_per_game=self.max_seats_per_game, trust_tier=self.trust_tier, listed=self.listed,
+                 bio=self.bio or "", links=list(self.links or []), field_visibility=self.chosen_levels(),
+                 avatar_url=self.avatar_url, avatar_uploaded=bool(self.avatar_path),
                  has_password=bool(self.password_hash),
                  created_at=self.created_at.isoformat() if self.created_at else None,
                  providers=[i.provider for i in self.identities])
@@ -710,7 +786,7 @@ class ComputeRollup(Base):
 
 class AuditLog(Base):
     """Append-only record of anything consequential: logins, role changes, grants, suspensions,
-    publishes, deletions. Moderators can read it; nobody can edit it through the application."""
+    publishes, deletions. Administrators read it; nobody can edit it through the application."""
     __tablename__ = "audit_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

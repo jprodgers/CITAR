@@ -29,6 +29,8 @@ from .auth_api import router as auth_router
 from .pool_api import router as pool_router
 from .share_api import router as share_router
 from .bots_api import router as bots_router
+from .users_api import router as users_router
+from .admin_users_api import router as admin_users_router
 from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
@@ -46,6 +48,8 @@ app.include_router(admin_router)
 app.include_router(reports_router)
 app.include_router(items_router)
 app.include_router(setup_router)
+app.include_router(users_router)
+app.include_router(admin_users_router)
 manager = SessionManager()
 scheduler: Optional[BenchmarkScheduler] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -468,7 +472,7 @@ def list_games(request: Request, p: Principal = Depends(principal), sdb: DbSessi
         if access.VIEW not in perms:
             continue
         info = s.info()
-        info["sharing"] = ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
+        info["sharing"] = ownership.to_client(row, perms, p.user, base_url=citar_settings.get().public_origin)
         out.append(info)
     return out
 
@@ -606,7 +610,7 @@ def create_game(body: CreateGame, request: Request,
     audit.record(sdb, "game.created", actor=me, object_type="game", object_id=s.id,
                  seats=len(body.seats), visibility=row.visibility)
     info = s.info(include_tokens=True)
-    info["sharing"] = ownership.to_client(row, access.Access({access.VIEW, access.PLAY, access.MANAGE}),
+    info["sharing"] = ownership.to_client(row, access.Access({access.VIEW, access.PLAY, access.MANAGE}), me,
                                           base_url=citar_settings.get().public_origin)
     return info
 
@@ -621,7 +625,7 @@ def game_info(gid: str, request: Request, p: Principal = Depends(principal),
     """
     s, row, perms = _gate(sdb, gid, p, access.VIEW, request)
     info = s.info(include_tokens=access.MANAGE in perms)
-    info["sharing"] = ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
+    info["sharing"] = ownership.to_client(row, perms, p.user, base_url=citar_settings.get().public_origin)
     return info
 
 
@@ -2082,9 +2086,9 @@ def get_sharing(gid: str, request: Request, p: Principal = Depends(principal),
     """Who can see this game, and by what link; for whoever manages it, also who it is shared with and the last
     unpublish (who took it down, when and why)."""
     s, row, perms = _gate(sdb, gid, p, access.VIEW, request)
-    out = ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
+    out = ownership.to_client(row, perms, p.user, base_url=citar_settings.get().public_origin)
     if row is not None and access.MANAGE in perms:
-        out["shared_with"] = access.shared_with(sdb, row)
+        out["shared_with"] = access.shared_with(sdb, row, p.user)
         out["unpublished"] = access.last_unpublished(sdb, row, p.user.id if p.user else None)
     return out
 
@@ -2107,7 +2111,7 @@ def unpublish_game(gid: str, body: UnpublishBody, request: Request, p: Principal
     if access.MODERATE not in perms and access.MANAGE not in perms:
         perms.require(access.MODERATE)
     access.unpublish(sdb, row, actor=me, reason=body.reason)
-    return ownership.to_client(row, access.on(sdb, me, row), base_url=citar_settings.get().public_origin)
+    return ownership.to_client(row, access.on(sdb, me, row), me, base_url=citar_settings.get().public_origin)
 
 
 @app.put("/api/games/{gid}/sharing")
@@ -2127,7 +2131,7 @@ def set_sharing(gid: str, body: ShareBody, request: Request, p: Principal = Depe
                      to=body.data_sharing)
     if body.rotate_slug:
         access.rotate_slug(sdb, row, actor=p.user)
-    return ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
+    return ownership.to_client(row, perms, p.user, base_url=citar_settings.get().public_origin)
 
 
 class ShareWithBody(BaseModel):
@@ -2148,7 +2152,7 @@ def share_with_user(gid: str, body: ShareWithBody, request: Request,
     if target is None or target.status in ("deleted", "suspended"):
         raise HTTPException(404, f"No account called '{body.handle}'.")
     access.grant(sdb, row, target, body.permission, actor=p.user)
-    return {"shared_with": access.shared_with(sdb, row)}
+    return {"shared_with": access.shared_with(sdb, row, p.user)}
 
 
 @app.delete("/api/games/{gid}/sharing/users/{handle}")
@@ -2163,7 +2167,7 @@ def unshare_with_user(gid: str, handle: str, request: Request,
     if target is None:
         raise HTTPException(404, f"No account called '{handle}'.")
     access.revoke(sdb, row, target, actor=p.user)
-    return {"shared_with": access.shared_with(sdb, row)}
+    return {"shared_with": access.shared_with(sdb, row, p.user)}
 
 
 # ----------------------------------------------------------------------------
