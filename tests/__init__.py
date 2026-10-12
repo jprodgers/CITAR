@@ -12,6 +12,10 @@ import tempfile
 # change what the tests read. The tests of the variable itself set it in children of their own.
 os.environ.pop("CITAR_RULESET_DIR", None)
 
+# Test mode for the prompt scheduler (citar/pool/scheduler.py, design/phase3-features.md P3.3.9): a model call that
+# would wait for its machine with a game session's lock held raises instead, wherever in the suite it happens.
+os.environ.setdefault("CITAR_TEST_LOCKS", "1")
+
 # The API test modules each point CITAR_DATA_DIR and CITAR_DB_URL at their own temporary database. This default is
 # for a module run on its own that builds the app without doing so: without it, the app opens the per-user database.
 if not os.environ.get("CITAR_DATA_DIR"):

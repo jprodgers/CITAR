@@ -3,10 +3,17 @@
 Includes guard rails for weaker models: identical actions are not re-executed within a turn, unchanged queries are
 flagged, a short "turn progress" note follows every batch of actions, and stalled or runaway turns are ended.
 Every model step and tool call is recorded in the session metrics.
+
+Every request the seat makes is one of its lease's (``GameSession.lease_for``; design/phase3-features.md P3.3.3): the
+scheduler gives it a slot on its machine, so a busy machine queues it rather than refusing it, and the agent tells the
+lease when its seat is blocked on something other than the machine (a chat reply, a pause), so the slot is lent
+meanwhile. Time spent queueing for the machine and waiting on chats is the agent's ``_waited``: it never counts against
+the turn's ``max_turn_seconds`` (P3.3.4), and the request's timeout is set only once the slot is granted.
 """
 from __future__ import annotations
 
 import json
+import threading
 import time
 import traceback
 
@@ -113,8 +120,13 @@ class LLMAgent:
     action, re-asking an unchanged question, emitting a tool call as prose. Each is handled rather than
     punished, so that a score reflects how well the model played and not how well it formatted.
     """
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, binding=None):
         self.cfg = dict(cfg)
+        #: The seat's lease (``citar.pool.scheduler.Lease``): every request of the seat is one of its, in its turn or
+        #: answering a chat out of turn. None: the calls go to the provider unscheduled (a caller with no session).
+        self.binding = binding
+        #: The clock the turn's time budget is kept on (a test's fake clock replaces it).
+        self._clock = time.time
         self.max_calls = int(self.cfg.get("max_tool_calls_per_turn") or 150)
         self.max_steps = int(self.cfg.get("max_steps_per_turn") or 60)
         self.max_turn_seconds = float(self.cfg.get("max_turn_seconds") if self.cfg.get("max_turn_seconds") is not None else 1800)
@@ -127,6 +139,9 @@ class LLMAgent:
         self._active: set = set()
         self._waited = 0.0          # seconds this turn spent waiting for the server to come back (not counted against it)
         self._chat_left: dict = {}  # (negotiation id, entries) -> seconds still allowed for the answer (see _wait_left)
+        # this seat's model calls waiting for their machine now (its turn's and its chat answers'), for its status
+        self._machine_waits = 0
+        self._waits_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     def cancel(self):
@@ -164,8 +179,34 @@ class LLMAgent:
         session.agent_status[pid] = status
         session._broadcast({"type": "agent", "player": pid, "status": status})
 
+    def _waiting_for_machine(self, session, pid: int, place):
+        """A model call of the seat waits for its machine (``place``: its ``position``, ``eta_s`` and the ``machine``'s
+        name; ``ScheduledConversation.on_wait``, on the waiting thread), or no longer does (None). A seat mid-turn shows
+        "queued" (with its place) on the game screen while any of its calls waits, and "thinking" again once none
+        does, as it showed a helper's busy answers before the scheduler. A chat answered out of turn leaves the seat's
+        status as it is."""
+        with self._waits_lock:
+            self._machine_waits = max(0, self._machine_waits + (1 if place is not None else -1))
+            first, last = place is not None and self._machine_waits == 1, place is None and self._machine_waits == 0
+            status = session.agent_status.get(pid)
+            if first and status == "thinking":
+                session.agent_status[pid] = "queued"
+                note = {"type": "agent", "player": pid, "status": "queued", "machine": place.get("machine"),
+                        "position": place.get("position"), "eta_s": place.get("eta_s")}
+            elif last and status == "queued":
+                session.agent_status[pid] = "thinking"
+                note = {"type": "agent", "player": pid, "status": "thinking"}
+            else:
+                return
+        session._broadcast(note)
+
     def _step(self, session, pid: int, conv, deadline: float | None = None):
         """One model call (timed and metered), riding out connection problems.
+
+        On a scheduled machine the call first waits for its lease's slot (``ScheduledConversation``): a machine busy
+        with someone else's work is a queue, not a failure, and its ``busy`` refusals are the scheduler's to absorb
+        (no sleep, nothing metered). The time queued is added to ``_waited``, so it never counts against the turn, and
+        the request's timeout is set only once the slot is granted, from the turn's time left then (``budget``).
 
         A transient failure is retried with backoff for up to the reconnect window, so a server that drops for
         a few seconds - a worker reconnecting, LM Studio restarting, Wi-Fi blinking - costs nothing but the wait.
@@ -173,56 +214,55 @@ class LLMAgent:
         closes, _Disconnected is raised and the game's disconnect policy decides what happens next.
 
         With a deadline (end of the turn's time budget) the request may only use the time left, and running out
-        of time raises _TimeUp instead of an error."""
+        of time raises _TimeUp instead of an error. The step's metrics carry its generation time and, apart, the time
+        it waited for the machine; the usage ledger is metered by the scheduler's listener."""
         delays = [2, 3, 5, 10, 15, 20, 30]
         first_failure = None
         attempt = 0
-        busy_noted = False
+        scheduled = hasattr(conv, "budget")
+        if scheduled:
+            conv.halted = lambda: self._halted(session)
+            conv.on_wait = lambda place: self._waiting_for_machine(session, pid, place)
         while True:
             if self._halted(session):
                 raise _Halted()
             if deadline is not None:
-                remaining = deadline + self._waited - time.time()
+                remaining = deadline + self._waited - self._clock()
                 if remaining <= 5:
                     raise _TimeUp()
-                conv.request_timeout = remaining
+                if scheduled:
+                    conv.budget = lambda queued, end=deadline: self._time_left(end, queued)
+                else:
+                    conv.request_timeout = remaining
             before = dict(getattr(conv, "usage", {}))
             t0 = time.perf_counter()
             try:
                 step = conv.step()
                 usage = getattr(conv, "usage", {})
                 d = {k: usage.get(k, 0) - before.get(k, 0) for k in usage}
-                seconds = time.perf_counter() - t0
+                queue_s = float(getattr(conv, "last_queue_s", 0.0) or 0.0) if scheduled else 0.0
+                gen_s = float(conv.last_gen_s) if scheduled else time.perf_counter() - t0
+                self._waited += queue_s
                 session.metrics.model_step(
-                    pid, seconds, input_tokens=d.get("input_tokens", 0), output_tokens=d.get("output_tokens", 0),
-                    reasoning_tokens=d.get("reasoning_tokens", 0), malformed=step.malformed)
-                self._meter(session, conv, seconds, d)
+                    pid, gen_s, queue_s=queue_s, input_tokens=d.get("input_tokens", 0),
+                    output_tokens=d.get("output_tokens", 0), reasoning_tokens=d.get("reasoning_tokens", 0),
+                    malformed=step.malformed)
                 if first_failure is not None:
                     self._thought(session, pid, f"(reconnected after {time.time() - first_failure:.0f}s)", "system")
                     self._status(session, pid, "thinking")
                 return step
+            except _TimeUp:
+                self._waited += float(getattr(conv, "last_queue_s", 0.0) or 0.0) if scheduled else 0.0
+                raise
             except Exception as e:
+                queued = float(getattr(conv, "last_queue_s", 0.0) or 0.0) if scheduled else 0.0
+                self._waited += queued
                 if self._halted(session):
                     raise _Halted()
                 name = type(e).__name__
-                self._meter(session, conv, time.perf_counter() - t0, {})
-                if getattr(e, "refusal", "") == "busy":
-                    # The machine is answering someone else (another game sharing it). That is a queue, not a
-                    # failure: wait for the slot, without counting it against the reconnect window or the turn.
-                    if not busy_noted:
-                        busy_noted = True
-                        self._thought(session, pid, f"(waiting for a free slot: {e})", "system")
-                    first_failure = None
-                    now = time.time()
-                    for _ in range(4):
-                        if self._halted(session):
-                            raise _Halted()
-                        time.sleep(0.5)
-                    self._waited += time.time() - now
-                    continue
                 unreachable = _is_unreachable(e)
-                if not unreachable and deadline is not None and time.time() >= deadline + self._waited - 5:
-                    session.metrics.model_step(pid, time.perf_counter() - t0)
+                if not unreachable and deadline is not None and self._clock() >= deadline + self._waited - 5:
+                    session.metrics.model_step(pid, max(0.0, time.perf_counter() - t0 - queued))
                     raise _TimeUp()
                 if not any(k in name for k in _TRANSIENT):
                     raise
@@ -256,14 +296,23 @@ class LLMAgent:
                         # screen should not say "reconnecting" all that time
                         self._status(session, pid, "thinking")
 
-    def _meter(self, session, conv, seconds: float, d: dict):
-        """Record a model call (time and tokens) in the usage ledger, which reports turn into costs."""
-        from .. import usage
-        usage.tracker().llm(getattr(session, "usage_act", None), self.cfg.get("server_id"),
-                            getattr(conv, "served_model", None) or self.cfg.get("model"), seconds,
-                            input_tokens=d.get("input_tokens", 0), output_tokens=d.get("output_tokens", 0),
-                            reasoning_tokens=d.get("reasoning_tokens", 0), cache_read=d.get("cache_read_input_tokens", 0),
-                            cache_write=d.get("cache_creation_input_tokens", 0))
+    def _time_left(self, deadline: float, queued: float) -> float:
+        """The request's timeout once its slot is granted (``ScheduledConversation.budget``): what is left of the turn,
+        the time just queued for the machine not counted against it. Raises _TimeUp when nothing worth a request is."""
+        remaining = deadline + self._waited + queued - self._clock()
+        if remaining <= 5:
+            raise _TimeUp()
+        return remaining
+
+    def _idle(self):
+        """The seat is blocked on something other than the machine (a chat reply, a pause): its lease lends its slot."""
+        if self.binding is not None and hasattr(self.binding, "idle"):
+            self.binding.idle()
+
+    def _activate(self):
+        """The seat goes on with its turn: its lease's slot is reserved from pooled prompts again."""
+        if self.binding is not None and hasattr(self.binding, "activate"):
+            self.binding.activate()
 
     def _ensure_loaded(self, session, pid: int):
         """Once per agent: load the seat's model with its load profile on a server CITAR manages (lobby games; the
@@ -296,8 +345,13 @@ class LLMAgent:
                                   f"{self.last_error[:300]}. Its turn was skipped — check the seat settings.", None, player=pid)
 
     def _conversation(self, names=None):
-        """Start a conversation with the provider, with the tools this turn may use."""
-        return make_conversation(self.cfg, system_prompt(self.cfg.get("persona")), _tool_defs(names))
+        """Start a conversation with the provider, with the tools this turn may use, on the seat's lease (the provider's
+        conversation wrapped as ``make_conversation(..., binding=)`` wraps it: every step takes the lease's slot)."""
+        conv = make_conversation(self.cfg, system_prompt(self.cfg.get("persona")), _tool_defs(names))
+        if self.binding is None:
+            return conv
+        from ..pool.scheduler import ScheduledConversation
+        return ScheduledConversation(conv, self.binding, self.cfg)
 
     def _record_usage(self, conv):
         """Write this turn's token and timing usage to the ledger."""
@@ -409,8 +463,17 @@ class LLMAgent:
             n = session.game.negotiation_head(nid)
             key, left = (nid, n["entries"]), self._wait_left(n)
             if n["status"] == "open" and n["awaiting"] != pid:
-                self._chat_left[key] = left - session._await_reply(pid, nid, left, halted=lambda: self._halted(session),
-                                                                   hold_paused=True)
+                # waiting on the other side: the seat's slot is lent meanwhile (the counterpart may need it to answer),
+                # and the wait is not the model's time (P3.3.4)
+                self._idle()
+                t = self._clock()
+                try:
+                    self._chat_left[key] = left - session._await_reply(pid, nid, left,
+                                                                       halted=lambda: self._halted(session),
+                                                                       hold_paused=True)
+                finally:
+                    self._waited += max(0.0, self._clock() - t)
+                    self._activate()
             result = session._reply_result(pid, nid, result)
         if self._halted(session):
             raise _Halted()
@@ -453,9 +516,15 @@ class LLMAgent:
                 if not mine:
                     continue
                 before = {n["id"]: (mark(n["id"]), self._wait_left(n)) for n in mine}
-                spent = session._await(lambda was=before: any(mark(nid) != then for nid, (then, _) in was.items()),
-                                       min(left for _, left in before.values()), lambda: self._halted(session),
-                                       hold_paused=True)
+                self._idle()
+                t = self._clock()
+                try:
+                    spent = session._await(lambda was=before: any(mark(nid) != then for nid, (then, _) in was.items()),
+                                           min(left for _, left in before.values()), lambda: self._halted(session),
+                                           hold_paused=True)
+                finally:
+                    self._waited += max(0.0, self._clock() - t)
+                    self._activate()
                 for nid, (was, left) in before.items():
                     self._chat_left[(nid, was[2])] = left - spent
                     if mark(nid) != was:
@@ -492,9 +561,10 @@ class LLMAgent:
         self._check_context(session, pid, conv)
         state = _TurnState()
         calls_made = steps = nudges = 0
-        started = time.time()
+        started = self._clock()
         self._waited = 0.0
         self._chat_left = {}
+        self._activate()                        # the driver did already; a probe's turn case calls this directly
         try:
             while True:
                 if self._halted(session):
@@ -505,12 +575,14 @@ class LLMAgent:
                         return
                 if session.paused:
                     # paused from the game screen mid-turn: hold before the next model call, and do not count the
-                    # pause against the turn's time
-                    held = time.time()
+                    # pause against the turn's time; the seat's slot is lent meanwhile
+                    held = self._clock()
                     self._status(session, pid, "paused")
+                    self._idle()
                     while session.paused and not self._halted(session):
                         time.sleep(0.5)
-                    self._waited += time.time() - held
+                    self._activate()
+                    self._waited += self._clock() - held
                     if self._halted(session):
                         continue
                     self._status(session, pid, "thinking")
@@ -520,7 +592,7 @@ class LLMAgent:
                 if calls_made >= self.max_calls:
                     self._limit(session, pid, "tool_limit", f"reached {self.max_calls} tool calls")
                     return
-                if self.max_turn_seconds and time.time() - started - self._waited > self.max_turn_seconds:
+                if self.max_turn_seconds and self._clock() - started - self._waited > self.max_turn_seconds:
                     self._limit(session, pid, "time_limit", f"exceeded {int(self.max_turn_seconds)}s")
                     return
                 step = self._step(session, pid, conv,
@@ -581,6 +653,7 @@ class LLMAgent:
         finally:
             self._active.discard(conv)
             self._record_usage(conv)
+            self._idle()
 
     def _disconnected(self, session, pid: int, detail: str):
         """The server stayed unreachable for the whole reconnect window: apply the game's disconnect policy.

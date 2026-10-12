@@ -166,7 +166,10 @@ function renderJob(run, job, ctx) {
   if (job.status === "paused" && job.pause_reason) statusText = `paused (${job.pause_reason === "restricted" ? "restricted hours" : job.pause_reason})`;
   if (job.status === "queued" && job.waiting) statusText = `queued — ${job.waiting.replace(/^waiting: /, "")}`;
   if (job.status === "loading") statusText = "loading model…";
-  if (job.status === "running" && p.llm_to_move) statusText = p.agent_status === "thinking" ? "model thinking" : "model's turn";
+  if (job.status === "running" && p.llm_to_move) {
+    statusText = p.agent_status === "thinking" ? "model thinking"
+      : p.agent_status === "queued" ? "model waiting for its machine" : "model's turn";
+  }
   else if (job.status === "running") statusText = "bots moving";
   const outcome = job.status === "done" && p.outcome ? el("div", { class: p.outcome === "won" ? "good" : "muted small" }, p.outcome) : null;
   const perf = p.performance;

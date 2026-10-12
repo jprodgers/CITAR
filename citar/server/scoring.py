@@ -179,11 +179,16 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None,
                                             "_wall": 0.0, "_steps": 0.0, "_calls": 0.0, "_errors": 0.0, "_repeats": 0.0,
                                             "_out": 0.0, "_model_s_tok": [], "malformed_calls": 0, "blocked_repeats": 0,
                                             "stall_nudges": 0, "end_reasons": {}, "max_turn_s": 0.0, "game_list": [],
-                                            "pooled_games": 0})
+                                            "pooled_games": 0, "_gen": 0.0, "_queue": 0.0, "_gen_turns": 0})
             n = row["turns"]
             agg["games"] += 1
             agg["turns"] += n
             agg["_wall"] += row["avg_turn_s"] * n
+            if row.get("avg_model_s") is not None:
+                # generation time and the wait for the machine, apart (P3.3.4)
+                agg["_gen"] += row["avg_model_s"] * n
+                agg["_queue"] += (row.get("avg_queue_s") or 0.0) * n
+                agg["_gen_turns"] += n
             agg["_steps"] += row["avg_model_steps"] * n
             agg["_calls"] += row["avg_tool_calls"] * n
             agg["_errors"] += row["avg_errors"] * n
@@ -205,9 +210,12 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None,
     for agg in by_model.values():
         t = max(1, agg["turns"])
         clean_ends = agg["end_reasons"].get("end_turn", 0)
+        g = agg["_gen_turns"]
         out.append({
             "model": agg["model"], "controller": agg["controller"], "games": agg["games"], "turns": agg["turns"],
             "avg_turn_s": round(agg["_wall"] / t, 1), "max_turn_s": round(agg["max_turn_s"], 1),
+            "avg_model_s": round(agg["_gen"] / g, 2) if g else None,
+            "avg_queue_s": round(agg["_queue"] / g, 2) if g else None,
             "avg_model_steps": round(agg["_steps"] / t, 2), "avg_tool_calls": round(agg["_calls"] / t, 2),
             "avg_errors": round(agg["_errors"] / t, 2), "avg_repeats": round(agg["_repeats"] / t, 2),
             "avg_output_tokens": round(agg["_out"] / t),
@@ -244,11 +252,19 @@ def reliability_score(m: dict) -> float:
     return round(100 * clean * (1 - min(0.5, error_rate)) * (1 - min(0.5, m["avg_repeats"] / 10)), 1)
 
 
-def speed_score(avg_turn_s: float) -> float:
+def speed_score(seconds_per_turn: float) -> float:
     """How fast a model played, on a log scale from 20 seconds to 30 minutes a turn."""
     lo, hi = math.log(20), math.log(1800)
-    t = math.log(max(1.0, avg_turn_s))
+    t = math.log(max(1.0, seconds_per_turn))
     return round(100 * max(0.0, min(1.0, (hi - t) / (hi - lo))), 1)
+
+
+def model_speed(m: dict) -> float:
+    """A model's speed score from its generation time per turn only (P3.3.4): time it waited for a busy machine, and
+    the game's own time, are never the model's. A row with no generation figure (metrics older than the scheduler)
+    falls back to its turn time."""
+    gen = m.get("avg_model_s")
+    return speed_score(gen if gen is not None else m["avg_turn_s"])
 
 
 def model_scores(manager: SessionManager, weights: dict, scope: Optional[aggregate.Scope] = None) -> dict:
@@ -280,7 +296,7 @@ def model_scores(manager: SessionManager, weights: dict, scope: Optional[aggrega
         turns = sum(g["turns"] for g in games)
         perf = round(sum(g["performance"] * g["turns"] for g in games) / turns, 1) if turns else None
         rel = reliability_score(m) if m else None
-        spd = speed_score(m["avg_turn_s"]) if m else None
+        spd = model_speed(m) if m else None
         overall = None
         if perf is not None and rel is not None and (wb + wr + ws) > 0:
             overall = round((wb * perf + wr * rel + ws * spd) / (wb + wr + ws), 1)

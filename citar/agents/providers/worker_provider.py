@@ -24,6 +24,10 @@ from .base import Conversation, StepResult, ToolCall
 
 log = logging.getLogger("citar.worker_provider")
 
+#: The hub's grace beyond a request's timeout (``WorkerHub.submit``): an abandoned request drains at most this long
+#: past its own timeout.
+DRAIN_GRACE_SECONDS = 15.0
+
 
 class WorkerConnectionError(ConnectionError):
     """The machine serving this seat cannot be reached right now - its worker is disconnected, reconnecting or
@@ -53,6 +57,20 @@ class WorkerConversation(Conversation):
         self.usage = {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
         self.request_timeout: Optional[float] = None
         self._P = P
+        #: The id the next request goes out under: the scheduler's (``ScheduledConversation``), so a late frame for it
+        #: frees the slot it drains; a fresh one otherwise.
+        self.next_request_id: Optional[str] = None
+        #: The last step's generation time as the helper reported it (``Done.duration``) and as the server observed it
+        #: (from sending the request frame to its ``Done``): the scheduler meters the smaller (P3.3.4).
+        self.last_reported_s: Optional[float] = None
+        self.last_observed_s: Optional[float] = None
+        self.last_request_id: Optional[str] = None
+        #: (request id, seconds left, the connection's serial) when the last step ended without the helper's answer
+        #: (cancelled, or the hub's wait ran out): the helper may still be generating it, so its slot drains until that
+        #: answer comes, the bound passes or that connection goes (P3.3.3).
+        self.unfinished: Optional[tuple] = None
+        self._inflight: Optional[str] = None
+        self._closed = False
 
     # ------------------------------------------------------------------ message building
     def add_user_text(self, text: str):
@@ -81,23 +99,43 @@ class WorkerConversation(Conversation):
                 params[key] = self.cfg[key]
 
         timeout = float(self.request_timeout or self.cfg.get("timeout") or 900)
+        rid, self.next_request_id = self.next_request_id or secrets.token_hex(8), None
         request = self._P.Request(
-            id=secrets.token_hex(8), model=self.model, messages=self.messages,
+            id=rid, model=self.model, messages=self.messages,
             tools=self.tools, tool_mode=self.tool_mode, params=params,
             timeout=timeout, activity=self.activity)
+        self.unfinished = None
+        self.last_reported_s = self.last_observed_s = None
+        self.last_request_id = rid
+        if self._closed:
+            raise RuntimeError("The request was cancelled.")
 
         started = time.time()
+        self._inflight = rid
         try:
             answer = hub().submit(self.server_id, request, timeout=timeout)
         except WorkerError as exc:
-            # A dropped or busy worker is worth waiting for: the agent retries it for the game's
-            # reconnect window and then applies the disconnect policy. Anything else - a refusal, a
-            # machine closed for the night - is not a model failure, and retrying it would only make
-            # the agent hammer a machine that has said no.
+            if getattr(exc, "unfinished", False):
+                # sent, then given up (cancelled, or the hub's wait ran out): the helper may still be generating it,
+                # and its answer can come only over the connection it went out on
+                self.unfinished = (rid, max(0.0, started + timeout - time.time()) + DRAIN_GRACE_SECONDS,
+                                   getattr(exc, "connection", None))
+            # A dropped worker is worth waiting for: the agent retries it for the game's reconnect window and then
+            # applies the disconnect policy. A "busy" refusal is the scheduler's to handle (it lowers the machine's
+            # capacity and queues the request again; P3.3.3). Anything else - a refusal, a machine closed for the
+            # night - is not a model failure, and retrying it would only make the agent hammer a machine that has
+            # said no.
             if exc.retryable:
                 raise WorkerConnectionError(str(exc), exc.refusal) from exc
             raise RuntimeError(str(exc)) from exc
+        finally:
+            self._inflight = None
 
+        self.last_observed_s = answer.get("observed_s")
+        try:
+            self.last_reported_s = float(answer.get("duration")) if answer.get("duration") is not None else None
+        except (TypeError, ValueError):
+            self.last_reported_s = None
         usage = answer.get("usage") or {}
         for field in ("input_tokens", "output_tokens", "reasoning_tokens"):
             self.usage[field] = self.usage.get(field, 0) + int(usage.get(field) or 0)
@@ -136,7 +174,11 @@ class WorkerConversation(Conversation):
         return None
 
     def close(self):
-        # Nothing local to close: the HTTP client lives on the worker. An in-flight request is
-        # cancelled by the hub when the caller gives up.
-        """Release the request slot on the worker."""
-        pass
+        """Cancel the request in flight, if any (non-blocking): the hub sends the helper ``CANCEL`` and ends the wait
+        with an error. Today's helper ignores ``CANCEL`` and finishes the completion, so the scheduler keeps its slot
+        draining until the helper's late answer (``unfinished``; design/phase3-features.md P3.3.3)."""
+        self._closed = True
+        rid = self._inflight
+        if rid:
+            from ...server.workers import hub
+            hub().cancel(self.server_id, rid)

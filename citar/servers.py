@@ -646,7 +646,7 @@ def _read() -> tuple:
                             "owner_id": row.owner_id, "owner_tz": zones.get(row.owner_id) or "UTC",
                             "group_id": row.group_id, "is_host": bool(row.is_host),
                             "server_resource": bool(row.server_resource), "max_concurrent": row.max_concurrent or 1,
-                            "config": cfg}
+                            "capabilities": dict(row.capabilities or {}), "config": cfg}
     known = {sv["id"] for sv in reg["servers"]}
     reg["aliases"] = {old: new for old, new in reg["aliases"].items() if old not in known}
     return reg, meta
@@ -742,6 +742,26 @@ def machine(server_id: Optional[str]) -> Optional[dict]:
         return None
     m = _state()[1].get(server_id)
     return {**m, "config": copy.deepcopy(m["config"])} if m else None
+
+
+def machine_settings(server_id: Optional[str]) -> Optional[dict]:
+    """What the prompt scheduler reads of a machine, from the registry's cache (design/phase3-features.md P3.3.10): its
+    LLM ``slots`` (``max_concurrent``, the one site number of P3.2.8), whether it takes model work at all (``llm``,
+    ``capabilities.llm.enabled``, default on) and whether pooled prompts may make it swap models (``allow_swaps``,
+    ``capabilities.llm.allow_swaps``, default off), with the row's ``enabled``, ``reach``, ``provider``, ``kind`` and
+    ``name``. None for no such machine. Phase 4's settings frame will carry the same; package 3-18 adds the CPU
+    limits."""
+    m = _state()[1].get(server_id or "")
+    if not m:
+        return None
+    llm = (m.get("capabilities") or {}).get("llm") or {}
+    try:
+        slots = max(1, int(m.get("max_concurrent") or 1))
+    except (TypeError, ValueError):
+        slots = 1
+    return {"id": m["id"], "name": m["name"], "kind": m["kind"], "provider": m["provider"], "reach": m["reach"],
+            "enabled": m["enabled"], "slots": slots, "llm": bool(llm.get("enabled", True)),
+            "allow_swaps": bool(llm.get("allow_swaps", False))}
 
 
 def is_helper(server_id: Optional[str]) -> bool:

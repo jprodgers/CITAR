@@ -18,7 +18,9 @@ function reasonsText(r) {
 const HELP = {
   "Avg turn": "Wall-clock time from the start of the seat's turn to its end (includes tool execution and waiting on negotiations).",
   "Steps/turn": "Model requests per turn. Fewer is better for the same quality of play.",
-  "Step time": "Average seconds per model request.",
+  "Step time": "Average generation seconds per model request (time spent waiting for the machine is not included).",
+  "Model/turn": "Generation seconds per turn: the model's own time, which the speed score reads.",
+  "Waited/turn": "Seconds per turn the seat's requests waited for their machine (a slot busy with other work). Never counted as the model's time.",
   "Calls/turn": "Tool calls per turn (queries + actions).",
   "OK actions": "Successful game actions per turn.",
   "Errors/turn": "Tool calls rejected by the game (invalid orders).",
@@ -63,7 +65,7 @@ export async function openMetrics(gid) {
 
     const table = el("table", { class: "list" }, el("tr", {},
       th("Civ"), th("Controller"), th("Turns"), th("Avg turn"), th("Median"), th("Max"), th("Steps/turn"), th("Step time"),
-      th("Calls/turn"), th("OK actions"), th("Errors/turn"), th("Repeats/turn"), th("Blocked"), th("Malformed"),
+      th("Model/turn"), th("Waited/turn"), th("Calls/turn"), th("OK actions"), th("Errors/turn"), th("Repeats/turn"), th("Blocked"), th("Malformed"),
       th("Stall nudges"), th("Out tok/turn"), th("Tok/s"), th("Peak prompt"), th("Context"), th("Slowest call"),
       th("Cold starts"), th("Bot actions/turn"), th("Turn ends")));
     for (const s of seats) {
@@ -74,6 +76,8 @@ export async function openMetrics(gid) {
       if (s.turns) {
         tr.append(el("td", {}, secs(s.avg_turn_s)), el("td", {}, secs(s.median_turn_s)), el("td", {}, secs(s.max_turn_s)),
           el("td", {}, fmt(s.avg_model_steps, 1)), el("td", {}, s.avg_model_steps ? secs(s.avg_step_s) : "–"),
+          el("td", {}, s.avg_model_steps ? secs(s.avg_model_s) : "–"),
+          el("td", { class: s.avg_queue_s > 60 ? "warn" : "" }, s.avg_model_steps ? secs(s.avg_queue_s) : "–"),
           el("td", {}, fmt(s.avg_tool_calls, 1)), el("td", {}, fmt(s.avg_actions_ok, 1)),
           el("td", { class: s.avg_errors > 2 ? "warn" : "" }, fmt(s.avg_errors, 1)),
           el("td", { class: s.avg_repeats > 2 ? "bad" : "" }, fmt(s.avg_repeats, 1)),

@@ -31,8 +31,11 @@ blocks, a member's report gathering only what they may see; 3-04: profiles, avat
 routes, ``admin_cli``'s commands, probation and a suspension; 3-05: the registry's import, members' machines, a
 helper machine with a real helper, the machine routes' gates and dropped helpers; 3-06: the one Servers page, what it
 lists to a member, another member and an administrator, the reads and saves of its dialogs, sharing a machine from it;
-with ``--keep`` its helper machine's helper stays connected for the browser checklist), and later ``queue``,
-``ledger``, ``chat``, ``hybrid``, ``minimap``, ``machines``; ``all`` runs every part written so far. It needs the
+with ``--keep`` its helper machine's helper stays connected for the browser checklist), ``queue`` (3-07: two lobby
+games sharing a helper machine's one slot through the prompt scheduler, never two requests at once and no busy
+refusal; the Servers page's test given up mid-completion, its request draining until the helper's late answer while
+the next request waits), and later ``ledger``, ``chat``, ``hybrid``, ``minimap``, ``machines``; ``all`` runs every
+part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
 from __future__ import annotations
@@ -68,8 +71,7 @@ DEV_SERVER_PORT = 8799
 #: The owner's dev server's directory: never a harness's, whatever is in it.
 OWNER_PLAY_DIR = Path("C:/dev/citar-play")
 #: Parts a later package writes (P3.9.4): asked for now, the harness says so and refuses.
-LATER = {"queue": "3-07 to 3-09", "ledger": "3-10", "chat": "3-11 to 3-13", "hybrid": "3-14 to 3-16",
-         "minimap": "3-17", "machines": "3-18"}
+LATER = {"ledger": "3-10", "chat": "3-11 to 3-13", "hybrid": "3-14 to 3-16", "minimap": "3-17", "machines": "3-18"}
 
 
 def _dev_server():
@@ -221,6 +223,8 @@ class FakeEndpoint:
         self.connections: list[tuple[float, str]] = []
         self.requests: list[dict] = []
         self.delay = delay
+        #: Slower completions for some prompts: {text in the last user message: seconds} (``delay_for``).
+        self.slow: dict = {}
         self.max_trades = max_trades
         self.trades_opened = 0
         self._lock = threading.Lock()
@@ -250,11 +254,12 @@ class FakeEndpoint:
                     body = json.loads(raw or b"{}")
                 except ValueError:
                     body = {}
-                if outer.delay:
-                    time.sleep(outer.delay)
+                delay = outer.delay_for(body)
+                if delay:
+                    time.sleep(delay)
                 reply, calls = outer.scripted_reply(body)
                 entry.update(tools=len(body.get("tools") or []), calls=[c["function"]["name"] for c in calls],
-                             seconds=round(time.time() - t0, 3))
+                             delay=delay, seconds=round(time.time() - t0, 3))
                 outer.requests.append(entry)
                 self._send(200, reply)
 
@@ -278,6 +283,13 @@ class FakeEndpoint:
     def completions(self) -> list:
         """The chat completions it served."""
         return [r for r in self.requests if r.get("method") == "POST"]
+
+    def delay_for(self, body: dict) -> float:
+        """How long a completion takes: ``slow``'s seconds for a prompt whose last user message holds one of its
+        texts, else ``delay``."""
+        last = next((str(m.get("content") or "") for m in reversed(body.get("messages") or [])
+                     if isinstance(m, dict) and m.get("role") == "user"), "")
+        return next((seconds for text, seconds in self.slow.items() if text in last), self.delay)
 
     def scripted_reply(self, body: dict) -> tuple:
         """A chat completion for ``body`` (an OpenAI request) and the tool calls in it."""
@@ -1287,8 +1299,170 @@ def _accounts_servers_page(h: Harness) -> None:
             scripted.close()
 
 
+def part_queue(h: Harness) -> None:
+    """The ``queue`` part: 3-07's lease and cancel checks (design/phase3-features.md P3.3.3); 3-08 and 3-09 add
+    theirs."""
+    _queue_leases_and_drain(h)
+
+
+def _queue_leases_and_drain(h: Harness) -> None:
+    """3-07's checks, on a member's helper machine with one slot (a real helper behind the scripted endpoint, 0.4 s a
+    completion): two lobby games with a model seat each play through the prompt scheduler, their requests never two at
+    once and nothing refused as busy, both games' leases on the machine; then the Servers page's test, given up after
+    2 s while the helper takes 8 s over it, is cancelled: the helper is sent ``CANCEL`` and finishes it anyway, the
+    slot drains until its late answer, and a game's model seat resumed meanwhile waits for it (its queue time in its
+    turn's metrics), with the late frame counted by the scheduler and no drain timed out. While that test waits, a
+    second of the same machine from her other tab is refused at once (one test of a machine per person)."""
+    r = h.report
+    admin, alice = h.accounts["admin"], h.accounts["alice"]
+    scripted = FakeEndpoint(delay=0.4)
+    scripted.slow = {"Reply with exactly: CITAR OK": 8.0}
+    helper: Optional[Helper] = None
+    games: list = []
+
+    def machine_status(hid: str) -> dict:
+        got = admin.get("/api/status")
+        rows = (got.json().get("machines") or []) if got.status_code == 200 else []
+        return next((m for m in rows if m.get("id") == hid), {})
+
+    def turn(gid: str) -> int:
+        got = alice.get(f"/api/games/{gid}")
+        return (got.json().get("turn") or 0) if got.status_code == 200 else 0
+
+    def queued(gid: str) -> float:
+        got = alice.get(f"/api/games/{gid}/metrics")
+        rows = (got.json().get("turns") or []) if got.status_code == 200 else []
+        return sum(row.get("queue_s") or 0.0 for row in rows if row.get("controller") == "llm")
+
+    try:
+        made = alice.post("/api/pool/servers", json={"config": {"name": f"QA queue helper {h.tag}", "kind": "owned",
+                                                                "connection": {"provider": "openai_compatible",
+                                                                               "max_parallel": 1}},
+                                                     "reach": "worker"})
+        hid = made.json().get("id") if made.status_code == 200 else ""
+        t = alice.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa queue"}) if hid else None
+        if t is not None and t.status_code == 200:
+            helper = Helper(h, t.json().get("token", ""), scripted, "qa-queue-helper")
+        online = bool(helper and wait_until(lambda: _online(alice, hid), 60, 0.25))
+        r.check("a member's helper machine with one slot, its real helper connected behind the scripted endpoint",
+                online and made.json().get("max_concurrent") == 1, f"HTTP {made.status_code}; online {online}")
+        r.data["queue"] = {"machine": hid}
+
+        # ---- two lobby games, a model seat each, on its one slot
+        for i in range(2):
+            g = alice.post("/api/games", json={"name": f"QA queue game {i + 1} {h.tag}",
+                                               "config": {**CONFIG, "seed": 3307 + i},
+                                               "seats": [{"type": "llm", "llm": {"server_id": hid,
+                                                                                  "model": scripted.MODEL}},
+                                                         {"type": "bot"}]})
+            if g.status_code == 200:
+                games.append(g.json()["id"])
+                alice.post(f"/api/games/{games[-1]}/debug/meet_all")
+        played = len(games) == 2 and wait_until(lambda: all(turn(g) >= 4 for g in games), 240, 1.0)
+        for g in games:
+            alice.post(f"/api/games/{g}/control", json={"paused": True})
+        time.sleep(1.5)                                     # a request in flight at the pause finishes
+        served = scripted.completions()
+        spans = sorted((q["t"], q["t"] + q["seconds"]) for q in served)
+        overlaps = sum(1 for a, b in zip(spans, spans[1:]) if b[0] < a[1] - 0.05)
+        status = machine_status(hid)
+        counters = status.get("counters") or {}
+        r.check("two lobby games on the helper machine each played three rounds through its one slot: never two "
+                "completions at once at the endpoint",
+                bool(played) and len(served) >= 12 and overlaps == 0,
+                f"{len(served)} completions, {overlaps} overlapping; turns {[turn(g) for g in games]}",
+                completions=len(served), overlaps=overlaps)
+        busy_lines = [line for line in (helper.text() if helper else "").splitlines() if "(busy)" in line]
+        leases = [lease for lease in status.get("leases") or [] if lease.get("kind") == "game"]
+        r.check("the helper refused nothing as busy, the scheduler saw no busy refusal and at most one request in "
+                "flight, and it lists both games' leases on the machine",
+                not busy_lines and counters.get("busy_refusals", 0) == 0 and status.get("max_in_flight") == 1
+                and len(leases) == 2,
+                json.dumps({"busy_lines": busy_lines[:3], "counters": counters,
+                            "max_in_flight": status.get("max_in_flight"), "leases": len(leases)})[:500])
+
+        # ---- the Servers page's test, given up while the helper generates it: its slot drains
+        before = len(scripted.completions())
+        queued_before = queued(games[0]) if games else 0.0
+        result: dict = {}
+
+        def first_test():
+            result["got"] = alice.post(f"/api/pool/servers/{hid}/test", params={"wait": 2})
+            result["t1"] = time.time()
+        t0 = time.time()
+        runner = threading.Thread(target=first_test, daemon=True)
+        runner.start()
+        # her second tab tries the same machine while the first test waits for its reply: refused at once
+        second_tab = Account(h.server, alice.handle, alice.role, alice.password)
+        try:
+            second_tab.login()
+            running = wait_until(lambda: any(t.get("class") == "test" for t in machine_status(hid).get("tickets") or []),
+                                 10, 0.1)
+            t_dup = time.time()
+            dup = second_tab.post(f"/api/pool/servers/{hid}/test", params={"wait": 2})
+            dup_s = round(time.time() - t_dup, 2)
+        finally:
+            second_tab.http.close()
+        dup_body = dup.json() if dup.status_code == 200 else {}
+        r.check("a second test of the machine by the same member (another tab) while the first waits is refused at "
+                "once, not queued behind it",
+                bool(running) and dup_body.get("code") == "duplicate" and dup_s < 1.5,
+                f"HTTP {dup.status_code} after {dup_s} s: {json.dumps(dup_body)[:200]}", seconds=dup_s)
+        runner.join(30)
+        tested = result.get("got")
+        gave_up = round(result.get("t1", time.time()) - t0, 2)
+        body = tested.json() if tested is not None and tested.status_code == 200 else {}
+        r.check("the Servers page's test given up after 2 s is cancelled while the helper generates it",
+                tested is not None and tested.status_code == 200 and body.get("cancelled") is True and gave_up < 6,
+                f"HTTP {getattr(tested, 'status_code', None)} after {gave_up} s: {json.dumps(body)[:200]}",
+                seconds=gave_up)
+        draining = machine_status(hid)
+        r.check("its slot drains: the scheduler still counts the request the helper is finishing",
+                draining.get("draining") == 1 and draining.get("in_flight") == 1,
+                json.dumps({k: draining.get(k) for k in ("in_flight", "draining", "waiting")}))
+        if games:
+            alice.post(f"/api/games/{games[0]}/control", json={"paused": False})    # its model seat wants the slot
+        finished = wait_until(lambda: any(q.get("delay") == 8.0 for q in scripted.completions()[before:])
+                              and len(scripted.completions()) > before + 1, 60, 0.25)
+        for g in games:
+            alice.post(f"/api/games/{g}/control", json={"paused": True})
+        time.sleep(1.5)
+        after = scripted.completions()[before:]
+        late = next((q for q in after if q.get("delay") == 8.0), None)
+        others = [q for q in after if q is not late]
+        ended = late["t"] + late["seconds"] if late else None
+        first_other = min((q["t"] for q in others), default=None)
+        waited = round((queued(games[0]) if games else 0.0) - queued_before, 2)
+        r.check("the resumed game's model seat waited for the drain: its next completion reached the endpoint only "
+                "after the helper finished the cancelled test, and the wait is in its turn's queue time",
+                bool(finished) and late is not None and first_other is not None and first_other >= ended - 0.05
+                and waited > 2.0,
+                f"test finished {round(ended - t0, 2) if ended else None} s after it began; the game's next "
+                f"completion at {round(first_other - t0, 2) if first_other else None} s; its queue time +{waited} s",
+                queue_s=waited)
+        final = machine_status(hid)
+        counters = final.get("counters") or {}
+        text = helper.text() if helper else ""
+        cancel_seen = "server cancelled" in text
+        busy_lines = [line for line in text.splitlines() if "(busy)" in line]
+        r.check("the helper was sent CANCEL, its late answer reached the scheduler (a late frame, no drain timed out) "
+                "and nothing was refused as busy",
+                cancel_seen and counters.get("late_frames", 0) >= 1 and counters.get("drain_timeouts", 0) == 0
+                and counters.get("busy_refusals", 0) == 0 and not busy_lines,
+                json.dumps({"cancel_seen": cancel_seen, "counters": counters}))
+        r.data["queue"].update({"completions": len(scripted.completions()), "overlaps": overlaps,
+                                "test": body, "test_gave_up_s": gave_up, "duplicate_s": dup_s, "drain_wait_s": waited,
+                                "counters": counters})
+    finally:
+        for g in games:
+            alice.delete(f"/api/games/{g}")
+        if helper is not None:
+            helper.stop()
+        scripted.close()
+
+
 #: The parts written so far, in the order ``all`` runs them.
-PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts}
+PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue}
 
 
 # ---------------------------------------------------------------------------- the run

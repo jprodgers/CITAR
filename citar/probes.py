@@ -212,6 +212,7 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
         seats[cp] = {"type": "script"}
     s = manager.create_from_scenario(scn, seats, name=f"probe {probe['id']}/{case['id']}", register=False, start=False)
     s.owner_id = owner_id
+    s.lease_kind = "probe_case"         # the subject's model calls hold the machine for the case only, lending nothing
     g = s.game
     if usage_act:
         # the case's model calls and the time it holds the servers go to the probe run's usage record

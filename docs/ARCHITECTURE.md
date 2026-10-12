@@ -291,6 +291,7 @@ returns the whole registry with schemas (`engine_api.tool_list`).
 | `auth_api.py`, `admin_api.py`, `pool_api.py`, `share_api.py`, `setup_api.py` | HTTP surfaces |
 | `boot.py` | Migrations at startup, and the configuration checks that refuse to start a broken server |
 | `workers.py` | The WebSocket endpoint worker agents connect to |
+| `citar/pool/scheduler.py` | The prompt scheduler: one queue per machine for every model call (below) |
 | `admin_cli.py` | `citar admin` |
 
 ### The turn driver
@@ -310,6 +311,37 @@ loadable (crates/citar-engine/DESIGN.md P2.5.3).
 
 Negotiations interrupt: an AI that proposes a deal blocks until the other side answers, which is
 why `wait_for_turn` returns for a negotiation as well as for a turn.
+
+### The prompt scheduler
+
+Every model call of a machine (a row of `servers`, whoever dials it) goes through `citar/pool/scheduler.py`
+(`design/phase3-features.md` P3.3), so that no machine is sent more than it has slots for and nobody waits by
+sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's conversation in a
+`ScheduledConversation`, whose every step takes a slot of its binding's machine first:
+
+- A **lease** is a model seat that plays every turn. It belongs to the session's seat (`GameSession.lease_for`), not to
+  its agent, so it outlives agents made again after a seat change or a resume; a game that has stopped or crashed
+  makes none (its leases are released for good). It is *active* while its seat is
+  mid-turn (the driver calls `activate()` and `idle()` around `play_turn`) and *idle* otherwise; the agent also idles
+  it while it waits on a chat reply or a pause, so a seat waiting on its counterpart never keeps the slot the
+  counterpart needs. A lobby game's idle lease lends its slot; a benchmark's and a probe case's never do.
+- A **ticket** is one pooled prompt of a few steps (a chat answer, a diplomat phase, a probe case, a report's
+  narrative, the Servers page's test), with a class, a priority and a deadline to start by.
+- **The rules**: in flight (draining included) never above capacity; lease requests first and in arrival order; a
+  ticket only on a slot no active or non-lending lease needs, on a loaded model, outside quiet hours, under its
+  consumer's cap and never beside a benchmark; tickets by priority, then round-robin across members, then first come.
+  `tests/test_scheduler.py` checks them as invariants at every grant over 500 random schedules.
+- **Threads.** One lock and one condition per machine. Only `acquire` blocks (in ticks of a second, noticing
+  cancellation and deadlines), never with a game's lock held: in test mode it asserts so. Cancelling, releasing,
+  `idle` and `activate` only change counters, so `suspend`, `update_seat` and a crash can cancel a waiting or running
+  call under the game's lock. Status callbacks run on the scheduler's notifier thread, after the machine's lock is let
+  go.
+- **Draining and metering.** A request abandoned on a helper keeps its slot until the hub hands the scheduler the
+  helper's late frame (`late_frame`), or the connection it went out on goes (`helper_changed`: each connection has its
+  own `serial`). After each step the listeners get a `StepEvent` with the generation time (bounded by what the server
+  observed), the queue time and the tokens; the usage ledger's tracker is the first listener. The agent adds queue
+  and chat waits to the turn's waited time, so they never count against `max_turn_seconds`, and shows its seat as
+  `queued` (with its place) while a step waits (`ScheduledConversation.on_wait`).
 
 ### Authorisation
 

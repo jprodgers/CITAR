@@ -49,6 +49,7 @@ function gameState(g) {
   if (st.includes("reconnecting")) return ["warn", "reconnecting"];
   if (Object.keys(g.agent_errors || {}).length) return ["bad", "AI error"];
   if (st.includes("thinking")) return ["live", "AI thinking"];
+  if (st.includes("queued")) return ["live", "AI waiting for its machine"];
   return ["live", "playing"];
 }
 
@@ -150,7 +151,8 @@ async function gamePage(gid) {
           [p.seat === "llm" ? (p.model || "AI model") : p.seat, p.era,
            p.cities != null ? `${p.cities} cities · pop ${p.pop} · ${p.techs} techs` : null].filter(Boolean).join(" · ")),
         p.status === "reconnecting" ? el("div", { class: "warn small" }, "reconnecting to its model server…")
-          : p.status === "thinking" ? el("div", { class: "live small" }, "thinking…") : null,
+          : p.status === "thinking" ? el("div", { class: "live small" }, "thinking…")
+          : p.status === "queued" ? el("div", { class: "live small" }, "waiting for its machine…") : null,
         p.error ? el("div", { class: "bad small" }, p.error) : null),
       p.score != null ? el("span", { class: "m-score" }, p.score) : null)))));
   out.push(section("Recent news", ...(d.events.length
