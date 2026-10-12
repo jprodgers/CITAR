@@ -925,7 +925,10 @@ pub static TOOLS: [ToolSpec; 61] = [
                 items("give"),
                 items("receive"),
             ],
-            required: &["negotiation_id", "action"],
+            // Every entry of a chat carries a message, which the engine refuses an answer
+            // without, so the schema a model reads says so.
+            // refcheck: respond-negotiation-message-required
+            required: &["negotiation_id", "action", "message"],
         },
         description: "Respond in a negotiation, with a message every time. action: accept (the \
             other side's current proposal), counter (a new proposal via give/receive from your \

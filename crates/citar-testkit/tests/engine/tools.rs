@@ -75,8 +75,10 @@ fn arguments_are_coerced_as_python_coerced_them() {
 
 /// Where the registry says what Python's tool list did not, on purpose: the tool, the field of
 /// its entry, and the id of `tests/rules/intended.toml` that explains it.
-const FIXES: &[(&str, &str, &str)] =
-    &[("city_state_action", "description", "gift-unit-described-as-ruled")];
+const FIXES: &[(&str, &str, &str)] = &[
+    ("city_state_action", "description", "gift-unit-described-as-ruled"),
+    ("respond_negotiation", "input_schema", "respond-negotiation-message-required"),
+];
 
 /// A value as JSON text, with its objects' keys in their order (`preserve_order`).
 fn json_text(v: &Value) -> String {
