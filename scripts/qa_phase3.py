@@ -1311,7 +1311,8 @@ def _queue_leases_and_drain(h: Harness) -> None:
     once and nothing refused as busy, both games' leases on the machine; then the Servers page's test, given up after
     2 s while the helper takes 8 s over it, is cancelled: the helper is sent ``CANCEL`` and finishes it anyway, the
     slot drains until its late answer, and a game's model seat resumed meanwhile waits for it (its queue time in its
-    turn's metrics), with the late frame counted by the scheduler and no drain timed out."""
+    turn's metrics), with the late frame counted by the scheduler and no drain timed out. While that test waits, a
+    second of the same machine from her other tab is refused at once (one test of a machine per person)."""
     r = h.report
     admin, alice = h.accounts["admin"], h.accounts["alice"]
     scripted = FakeEndpoint(delay=0.4)
@@ -1383,13 +1384,38 @@ def _queue_leases_and_drain(h: Harness) -> None:
         # ---- the Servers page's test, given up while the helper generates it: its slot drains
         before = len(scripted.completions())
         queued_before = queued(games[0]) if games else 0.0
+        result: dict = {}
+
+        def first_test():
+            result["got"] = alice.post(f"/api/pool/servers/{hid}/test", params={"wait": 2})
+            result["t1"] = time.time()
         t0 = time.time()
-        tested = alice.post(f"/api/pool/servers/{hid}/test", params={"wait": 2})
-        gave_up = round(time.time() - t0, 2)
-        body = tested.json() if tested.status_code == 200 else {}
+        runner = threading.Thread(target=first_test, daemon=True)
+        runner.start()
+        # her second tab tries the same machine while the first test waits for its reply: refused at once
+        second_tab = Account(h.server, alice.handle, alice.role, alice.password)
+        try:
+            second_tab.login()
+            running = wait_until(lambda: any(t.get("class") == "test" for t in machine_status(hid).get("tickets") or []),
+                                 10, 0.1)
+            t_dup = time.time()
+            dup = second_tab.post(f"/api/pool/servers/{hid}/test", params={"wait": 2})
+            dup_s = round(time.time() - t_dup, 2)
+        finally:
+            second_tab.http.close()
+        dup_body = dup.json() if dup.status_code == 200 else {}
+        r.check("a second test of the machine by the same member (another tab) while the first waits is refused at "
+                "once, not queued behind it",
+                bool(running) and dup_body.get("code") == "duplicate" and dup_s < 1.5,
+                f"HTTP {dup.status_code} after {dup_s} s: {json.dumps(dup_body)[:200]}", seconds=dup_s)
+        runner.join(30)
+        tested = result.get("got")
+        gave_up = round(result.get("t1", time.time()) - t0, 2)
+        body = tested.json() if tested is not None and tested.status_code == 200 else {}
         r.check("the Servers page's test given up after 2 s is cancelled while the helper generates it",
-                tested.status_code == 200 and body.get("cancelled") is True and gave_up < 6,
-                f"HTTP {tested.status_code} after {gave_up} s: {json.dumps(body)[:200]}", seconds=gave_up)
+                tested is not None and tested.status_code == 200 and body.get("cancelled") is True and gave_up < 6,
+                f"HTTP {getattr(tested, 'status_code', None)} after {gave_up} s: {json.dumps(body)[:200]}",
+                seconds=gave_up)
         draining = machine_status(hid)
         r.check("its slot drains: the scheduler still counts the request the helper is finishing",
                 draining.get("draining") == 1 and draining.get("in_flight") == 1,
@@ -1425,7 +1451,7 @@ def _queue_leases_and_drain(h: Harness) -> None:
                 and counters.get("busy_refusals", 0) == 0 and not busy_lines,
                 json.dumps({"cancel_seen": cancel_seen, "counters": counters}))
         r.data["queue"].update({"completions": len(scripted.completions()), "overlaps": overlaps,
-                                "test": body, "test_gave_up_s": gave_up, "drain_wait_s": waited,
+                                "test": body, "test_gave_up_s": gave_up, "duplicate_s": dup_s, "drain_wait_s": waited,
                                 "counters": counters})
     finally:
         for g in games:
