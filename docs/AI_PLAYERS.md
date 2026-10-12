@@ -73,9 +73,9 @@ machine: on a server with accounts, a member's seat that carries a base URL, an 
 an environment variable to read one from is refused ("Pick a machine for this seat"), when a game is
 created, when a seat is changed, when a scenario is saved and when one is launched. Otherwise
 anybody could make the server dial any address with any of its keys. A machine the member may not
-use is refused too, and until the registry merge the machines of `config/servers.json` are an
-administrator's to seat (unless they are dry runs). The dry-run provider is the exception: it dials
-nothing, so anyone may use it.
+use is refused too: every machine is a row on the Servers page, the site's own included (the host, the
+online APIs), and a member seats one only if it is theirs or its owner shared it with them in a server
+group. An inline dry run is the exception: it dials nothing, so anyone may use it.
 
 Only the seats that play a model are held to this. A bot, human or MCP seat may carry model settings
 left over from when it was an LLM seat; nothing plays them, so they are never a reason to refuse the

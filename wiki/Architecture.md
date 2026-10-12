@@ -375,7 +375,7 @@ right way.
 | A modded ruleset | the folder `CITAR_RULESET_DIR` names | The same layout |
 | Saved games | `saves/<id>/*.citar`, beside the game's journals `saves/<id>/journal*.cjnl` | A small JSON header and the state, zstd; the journal holds the history, one record per save |
 | Maps, scenarios, probes | `saves/maps`, `saves/scenarios`, `saves/probes` | JSON |
-| Server registry | `config/servers.json` | JSON |
+| Machines (the server registry) | the database's `servers` table; a pre-0.1.6 `config/servers.json` is imported once and renamed | rows, each machine's configuration as JSON |
 | Usage ledger | `saves/usage/*.jsonl` | One line per activity, no prices |
 | Accounts | the database | SQLite or PostgreSQL |
 

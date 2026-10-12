@@ -139,6 +139,13 @@ adds another administrator. The CLI changes accounts under the web page's rules 
 the last active administrator) and each change is an audit row of `admin_cli`'s; the same changes are on the
 **Users** page (`#/admin/users`).
 
+**The first administrator imports the old server registry.** A server upgraded from before 0.1.6 still has
+`config/servers.json`; it is imported into the database once, the moment the first administrator exists (at a start
+that has one, or when `create-admin` makes one), under its own ids and owned by that administrator, then renamed
+`servers.json.imported-<date>-<time>` (never deleted). Until then the start's log says that no machine is usable yet.
+Suspending an account disconnects the helpers of its machines at once; so do revoking a worker token and disabling
+or removing a machine ([Workers](WORKERS.md#revocation)).
+
 ---
 
 ## Servers and workers

@@ -43,6 +43,38 @@ way.
 
 ---
 
+## Who may do what to a machine
+
+Every machine is a row of the server's database: the host, the online APIs and LAN machines the server dials
+itself (**direct**), and the machines behind a CITAR helper (**helper machines**). Who may touch one depends on what
+the action touches:
+
+| Action | Who |
+|---|---|
+| See a machine and seat it | Its owner and administrators; anyone else through a grant on a server group it is in |
+| Change its configuration (name, models, hardware, power and costs, quiet hours, its key), remove it | Its owner and administrators; another member gets 404 |
+| Add a machine the server dials itself, or switch one to that | Administrators, unless its provider is the dry run (it dials nothing): a member gets 403 with the reason |
+| Detect its models, see what is loaded, load and unload models, read a loaded configuration, estimate memory | The owner or an administrator, on a machine the server dials or the host; for a member only the dry run. A helper machine reports its models through its helper: these answer 404 for it, and nothing is dialled or started |
+| Collect the host's hardware, list LM Studio's devices | Administrators, on the host |
+| Point a key at one of the server's environment variables (the `env` backend) | Administrators |
+| The host-wide settings (currency, which machine is the host), the encrypted key file, electricity plans | Administrators; a member gets 404 |
+| "Detect models" from an address (the lobby's) | Administrators, the dry run excepted |
+
+A member's machine is a helper machine: the server never dials it, never drives an LM Studio for it and never reads
+a key for it. The site's own machines (the host, the APIs an administrator added, the imported registry's) are
+administrators' until one of them shares them in a server group, like any other machine.
+
+## Revocation
+
+Taking a machine away from its helper takes effect at once: **revoking the token** it connected with,
+**disabling** the machine, **deleting** it, or **suspending its owner's account** closes the helper's connection
+within a second of the change being saved. Whatever it was generating fails (it is not retried), its next request
+is refused, the helper is told why and stops instead of reconnecting, and a helper that tries again with what was
+taken away is refused at its hello. Revoking one token leaves a helper connected with another token alone. A change
+made from the command line or another process is noticed at the next keep-alive (`CITAR_WORKER_PING_SECONDS`).
+
+---
+
 ## For the person lending the machine
 
 The simplest way is the **CITAR helper**: the worker as one file, with nothing else to install.
@@ -104,15 +136,16 @@ It cannot read your files, run commands, see other things on your network, or us
 not list. The worker only speaks to the base URL you configured, and only forwards completion
 requests to it.
 
-Stop lending at any time: stop the worker, or ask the operator to revoke the token. Neither needs
-the other's cooperation.
+Stop lending at any time: stop the worker, or revoke its token (or remove the machine) on the
+Servers page; the server drops the connection at once. Neither needs the other's cooperation.
 
 ---
 
 ## Troubleshooting
 
-**Connects, then disconnects.** The token is wrong or has been revoked. Reissuing a token
-invalidates the old one.
+**Connects, then disconnects.** The token is wrong or has been revoked, the machine is disabled
+or removed, or its owner's account is suspended. The helper's log says which ("The server rejected
+this worker", or the server's reason). Issue a new token on the Servers page.
 
 **`wss://` fails immediately.** The server's reverse proxy is not passing the WebSocket upgrade.
 The nginx site and Caddyfile in `deploy/` do; a hand-written one often does not.

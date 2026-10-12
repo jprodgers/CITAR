@@ -5,8 +5,8 @@ CITAR is configured in three places, and which one you need depends on what you 
 | Where | What | Changes take effect |
 |---|---|---|
 | **Environment variables** | What the process needs to start: mode, port, keys, database, e-mail | On restart |
-| **The web client** | Servers, models, suites, scenarios, and on a server, policy | Immediately |
-| **Files** | The server registry, saved games, benchmark runs | Immediately, or on restart for the registry |
+| **The web client** | Machines, models, suites, scenarios, and on a server, policy | Immediately |
+| **Files** | Saved games, benchmark runs | Immediately |
 
 Running CITAR on your own machine needs none of it. With no environment at all, it starts in local
 mode, generates its own key, and signs you in.
@@ -22,7 +22,7 @@ citar where
 | | A git checkout | An installed copy |
 |---|---|---|
 | Saved games | `<checkout>/saves` | `<user data>/saves` |
-| Server registry | `<checkout>/config` | `<user data>/config` |
+| `config/` (the helper's `worker.json`; once, the old registry) | `<checkout>/config` | `<user data>/config` |
 | Benchmarks | `<checkout>/benchmarks` | `<user data>/benchmarks` |
 | Database, secret key | `<user data>` | `<user data>` |
 
@@ -43,7 +43,7 @@ mid-write corrupts it. Password hashes do not belong in a synced folder either.
 |---|---|
 | `CITAR_STATE_DIR` | Everything below, in one go |
 | `CITAR_SAVE_DIR` | Saved games, and maps, scenarios, probes, lab, reports and the usage ledger with them |
-| `CITAR_CONFIG_DIR` | The server registry |
+| `CITAR_CONFIG_DIR` | The `config/` folder: the helper's `worker.json`, and a pre-0.1.6 `servers.json` until it is imported |
 | `CITAR_BENCH_DIR` | Benchmark suites and runs |
 | `CITAR_DATA_DIR` | Database and secret key |
 
@@ -126,16 +126,37 @@ https://<your domain>/api/auth/oauth/<provider>/callback
 
 `CITAR_HCAPTCHA_SITE_KEY` and `CITAR_HCAPTCHA_SECRET`. Only needed with open registration.
 
+### The machines: in the database, not a file
+
+Since 0.1.6 every machine that can run a model is a row of the database's `servers` table: the computer CITAR
+runs on (the **host**), the online APIs and LAN machines the server dials itself, and the members' machines behind
+the CITAR helper ([Workers](server/WORKERS.md)). The electricity plans and the currency are kept there too. They are
+edited on the Servers page; there is no registry file to edit any more.
+
+**`config/servers.json`** was the registry before 0.1.6. It is imported **once**: at the first start that has an
+administrator, or else the moment the first administrator is made (`admin_cli create-admin`, the setup wizard, an
+invitation with the admin role; in local mode the owner, at the first start). Every machine keeps its id, so seats,
+suites, saved games, the usage ledger and stored API keys keep resolving; each becomes the first administrator's,
+in no server group (share one from the Servers page when members should use it), with its `max_parallel` as its
+slots. The file is then **renamed** `servers.json.imported-<date>-<time>` beside itself, never deleted, and never
+read again; a file that reappears later is left alone, with a warning at each start. A fresh server-mode database
+with no administrator imports nothing and says so in its log. With no file at all, the first run makes the default
+machines the file used to start with (this computer as the host, the Anthropic API, the dry run).
+`citar setup --local` writes its machines into the database when there is one, else into `servers.json` for the
+first start to import.
+
 ### API keys for models
 
 Not environment variables by default — they go to the OS credential store through the Servers page.
-The alternatives, chosen per server:
+The alternatives, chosen per machine:
 
 | Backend | How |
 |---|---|
 | `keyring` | The OS credential store. The default |
-| `env` | You name a variable; CITAR reads it. For containers and CI |
+| `env` | You name a variable; CITAR reads it. For containers and CI. An administrator's to choose: it names one of the server's own variables |
 | `file` | scrypt + Fernet, outside the project. `CITAR_KEYS_FILE` sets the path, `CITAR_KEYS_PASSPHRASE` unlocks it without a prompt |
+
+Keys are stored under the machine's id, which the import keeps.
 
 ### Workers
 

@@ -125,6 +125,33 @@ may see it: a hidden display name is the handle, a hidden picture `null`.
 
 The admin routes answer 404 to any account that is not an administrator, and 401 to a visitor.
 
+### Machines
+
+Every machine is a row (the host, online APIs and LAN machines the server dials itself, `reach: "direct"`, and
+machines behind a CITAR helper, `reach: "worker"`); who may do what is in
+[Workers](Workers#who-may-do-what-to-a-machine). Another member's machine is a 404, a visitor gets 401.
+
+| Method and path | |
+|---|---|
+| `GET /api/servers` | The machines the caller manages (every one for an administrator), each with `reach`, `enabled`, `is_host`, `max_concurrent` (its slots) and its configuration; the electricity plans (a member sees their names only) and the key backends the caller may choose |
+| `GET /api/servers/new` | A blank machine to start from: `reach` is `worker` for a member unless the provider is `dryrun`. Needs `register_servers` |
+| `POST /api/servers` | Create a machine, or save one the caller manages (by its `id`). A machine the server dials (`reach: "direct"`, the default for a new one) is an administrator's unless its provider is `dryrun`, and so is the `env` key backend and `is_host`: 403 with the reason |
+| `DELETE /api/servers/{id}` | Remove it (its stored key, its tokens) and disconnect its helper |
+| `POST /api/servers/{id}/hardware`, `GET .../rates` | Import a hardware file; what an hour on it costs |
+| `POST .../detect`, `GET .../state`, `POST .../load`, `.../unload`, `GET .../loading`, `POST .../loaded-config`, `.../estimate` | Model detection and LM Studio control: on a machine the server dials, or the host; for a member only a dry run. 404 for a helper machine, with nothing dialled or started |
+| `POST /api/servers/{id}/collect`, `GET /api/lmstudio/devices` | Administrators, on the host: they read the computer CITAR runs on |
+| `POST`, `DELETE /api/servers/{id}/key` | Store or remove its API key; the `env` backend is an administrator's (403) |
+| `PUT /api/servers-settings`, `POST /api/keys/unlock`, `POST /api/keys/lock`, `POST /api/electricity-plans`, `DELETE /api/electricity-plans/{id}` | Administrators (404 to anyone else signed in) |
+| `GET /api/servers/restricted` | The machines in their quiet hours that the caller may see |
+| `POST /api/llm/models` | List the models at a base URL ("Detect models"): an administrator's, the `dryrun` provider excepted (403 before anything is dialled) |
+| `PUT /api/pool/servers/{id}` | `{"enabled": false}` disconnects its helper at once; switching to `reach: "direct"` follows the rule above |
+| `DELETE /api/pool/servers/{id}/workers/tokens/{token}` | Revoke a worker token: a helper connected with it is disconnected at once, and refused if it says hello again |
+
+`POST /api/pool/import-registry` is gone: a pre-0.1.6 `config/servers.json` is imported once by the server itself
+([Configuration](Configuration#the-machines-in-the-database-not-a-file)). The first-run setup wizard's
+`POST /api/setup/scan` and `POST /api/setup/apply` (they read this computer and register machines the server dials)
+are an administrator's.
+
 ---
 
 ## The tools

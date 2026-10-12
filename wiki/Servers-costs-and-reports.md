@@ -82,7 +82,8 @@ refusing. The page header lists servers that are restricted right now.
 Currency, and which server is the machine running CITAR — its CPU runs the engine, the bots and the
 lab, so it gets a share of every game's cost.
 
-The registry lives in `config/servers.json` (`citar where` prints the path).
+The machines are rows of the server's database since 0.1.6, edited on the Servers page (a pre-0.1.6
+`config/servers.json` is imported once; see [Configuration](Configuration#the-machines-in-the-database-not-a-file)).
 
 ---
 

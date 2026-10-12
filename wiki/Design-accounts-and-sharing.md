@@ -363,8 +363,12 @@ subtracted. An administrator's figures cover every game.
 
 ## 4. Servers, grants and budgets
 
-This is the heart of the feature and the biggest change to existing code. `config/servers.json`
-becomes a per-owner table; the file stays supported as an import/export format.
+This is the heart of the feature and the biggest change to existing code. Every machine is a row of the
+`servers` table: the host, the online APIs and LAN machines an administrator registers (the server dials them), and
+the members' machines behind the CITAR helper. A pre-0.1.6 `config/servers.json` is imported once, under its own ids,
+owned by the first administrator, then renamed ([Configuration](Configuration#the-machines-in-the-database-not-a-file)).
+Who may do what to a machine, and how a revoked token or a disabled machine drops its helper, is in
+[Workers](Workers#who-may-do-what-to-a-machine).
 
 ### Ownership and groups
 
