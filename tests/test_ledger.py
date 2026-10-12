@@ -950,7 +950,12 @@ class BudgetedGame(World):
             grant = s.scalar(select(AccessGrant).where(AccessGrant.subject_user_id == self.ids["alice"]))
             bid = budgets.set_budget(s, grant, period="day", amount=12.0).id
         mgr = SessionManager()
-        with mock.patch.object(GameSession, "BUDGET_POLL_SECONDS", 0.05):
+        # Every step costs 5 credits, however loaded the process is: a step's cost is its wall time, which load
+        # stretches (the merge's S1 saw a first step, admitted on the least estimate, cost 32.4 credits; a step's mean
+        # past the budget would refuse the new day's every request too). How a step's time is measured is gate 1's.
+        five = staticmethod(lambda inner, wall: (0.05, None, None))
+        with mock.patch.object(GameSession, "BUDGET_POLL_SECONDS", 0.05), \
+                mock.patch.object(S.ScheduledConversation, "_gen", five):
             g = mgr.create({"map_size": "duel", "seed": 21, "barbarians": "off"},
                            [{"type": "llm", "llm": {"server_id": "sv_bob", "model": "dry-run", "dry_run_delay": 0.05}},
                             {"type": "bot"}], "budgeted", owner_id=self.ids["alice"])
@@ -962,8 +967,7 @@ class BudgetedGame(World):
             self.assertIn("used up", reason["message"])
             self.assertIsNotNone(reason["until"])
             first_day = self.keeper.account(bid)["spent"]
-            self.assertGreater(first_day, 0)
-            self.assertLessEqual(first_day, 12.0 + 7.0, "at most one step past it")
+            self.assertAlmostEqual(first_day, 10.0, places=6, msg="two steps of 5: a third would pass 12")
             time.sleep(0.3)
             self.assertTrue(g.paused, "it stays paused while the day lasts")
             self.now += timedelta(days=1)
