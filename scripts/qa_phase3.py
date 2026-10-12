@@ -456,8 +456,24 @@ class Server:
         its open games keep their live marks) and start it again on the same directory and port, as its owner would.
         The log so far is kept as ``server-<n>.log``."""
         self.stop()
-        if self.log.exists():
-            self.log.replace(self.state / f"server-{len(list(self.state.glob('server-*.log'))) + 1}.log")
+        kept = self.state / f"server-{len(list(self.state.glob('server-*.log'))) + 1}.log"
+        # A venv's python.exe on Windows is a launcher: the server it started goes a moment after it (its job object),
+        # and with it the log's handle and the port. Wait for both.
+        deadline = time.perf_counter() + 30.0
+        while True:
+            try:
+                if self.log.exists():
+                    self.log.replace(kept)
+                with socket.socket() as probe:
+                    probe.settimeout(1.0)
+                    listening = probe.connect_ex(("127.0.0.1", self.port)) == 0
+                if not listening:
+                    break
+            except PermissionError:
+                pass
+            if time.perf_counter() > deadline:
+                raise HarnessError(f"the stopped server still holds {self.log} or port {self.port}")
+            time.sleep(0.1)
         self.start(timeout)
 
     def tracebacks(self) -> int:
@@ -1636,10 +1652,15 @@ def _queue_restored_game_and_benchmark_drain(h: Harness) -> None:
             "status": job.get("status"), "drain_s": res.get("drain_s"), "contaminated": res.get("contaminated")},
             "benchmark_completions": len(bench), "counters": counters})
     finally:
-        if gid:
-            alice.delete(f"/api/games/{gid}")
-        if run_id:
-            alice.post(f"/api/benchmarks/runs/{run_id}/control", json={"action": "cancel"})
+        # each step on its own: a server that did not come back must not leave the helper running
+        for undo in ((lambda: alice.delete(f"/api/games/{gid}")) if gid else None,
+                     (lambda: alice.post(f"/api/benchmarks/runs/{run_id}/control", json={"action": "cancel"}))
+                     if run_id else None):
+            try:
+                if undo is not None:
+                    undo()
+            except httpx.HTTPError:
+                pass
         if helper is not None:
             helper.stop()
         scripted.close()
