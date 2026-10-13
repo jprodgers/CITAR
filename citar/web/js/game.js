@@ -7,6 +7,7 @@ import { renderUnitPanel, renderCityPanel, openTechTree, openDiplomacy, openEmpi
          openReligion, openGreatPeople, openCityStates, openVictory, chooseBeliefs } from "./panels.js";
 import { openMetrics } from "./metrics.js";
 import { ChatDock } from "./chat.js";
+import { agentState, isModelSeat, seatLabel } from "./seats.js";
 
 export class GameScreen {
   constructor(root, rules, gid, token, asPlayer) {
@@ -203,6 +204,10 @@ export class GameScreen {
       if (!same) {
         this._viewTag = r.etag || null;
         this.view = v;
+        // what each AI seat is doing as the view saw it, for a seat the socket has not spoken of since the page opened
+        for (const [pid, st] of Object.entries((v.session && v.session.agent_status) || {})) {
+          if (!(pid in this.agentStatus)) this.agentStatus[pid] = st;
+        }
       }
       if (!this.feed.length) this.feed = (v.events || []).slice(-150);
       if (v.thoughts && !this.thoughts.length) this.thoughts = v.thoughts.slice(-80);
@@ -287,6 +292,7 @@ export class GameScreen {
       if (m.status === "queued") this.agentWait[m.player] = m;
       else delete this.agentWait[m.player];
       this.renderTopbar();
+      if (this.sideTab === "scores") this.renderSide();      // the Civs list says what each AI seat is doing
     } else if (m.type === "negotiation_status") {
       this.chat.onStatus(m);
     } else if (m.type === "control") {
@@ -769,10 +775,16 @@ export class GameScreen {
         el("span", { class: "pill live", title: `Run: ${bench.run_name} · server: ${bench.server}` }, `Benchmark: ${bench.model} · ${bench.scenario}`));
     }
     if (!bench && v.session) {
-      // a game pauses itself before its AI's next turn in a server's restricted hours; until then, say so
-      const late = (v.session.seats || []).filter((st) => st.type === "llm" && st.llm_info && st.llm_info.restricted_until);
-      for (const st of late) tb.append(el("span", { class: "pill quiet", title: "This server is in its restricted hours (Servers page): the game pauses before its AI's next turn and resumes when they end." },
+      // a game pauses itself before its AI's next turn in a server's restricted hours; until then, say so. A hybrid
+      // seat's prompts are refused there instead (its bot answers), and its game plays on.
+      const late = (v.session.seats || []).filter((st) => isModelSeat(st) && st.llm_info && st.llm_info.restricted_until);
+      for (const st of late) {
+        const hybrid = st.type === "hybrid";
+        tb.append(el("span", { class: "pill quiet", title: hybrid
+          ? "This server is in its restricted hours (Servers page): the hybrid seat's bot decides its diplomacy until they end."
+          : "This server is in its restricted hours (Servers page): the game pauses before its AI's next turn and resumes when they end." },
         `🌙 ${st.llm_info.server} restricted until ${st.llm_info.restricted_until}`));
+      }
     }
     const cur = v.players.find((p) => p.id === v.current_player);
     if (v.empire) {
@@ -893,9 +905,9 @@ export class GameScreen {
             onclick: (e) => this.onEndTurn(e.ctrlKey || e.metaKey) }, "End Turn");
         })());
     } else {
-      const st = this.agentStatus[v.current_player];
-      const note = st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)"
-        : st === "paused" ? " (paused mid-turn)" : st === "queued" ? ` (${queuedText(this.agentWait[v.current_player])})` : "";
+      const seat = v.session ? (v.session.seats || [])[v.current_player] : null;
+      const state = agentState(seat, this.agentStatus[v.current_player], this.agentWait[v.current_player]);
+      const note = state ? ` (${state})` : "";
       box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${note}`));
     }
     this.chat.layout();          // the End Turn box changed size: the docked windows stay clear of it
@@ -1019,8 +1031,13 @@ export class GameScreen {
             v.current_player === p.id ? el("span", { class: "pill", style: { marginLeft: "4px" } }, "to move") : null),
           el("div", { class: "muted" }, [
             p.score != null ? `score ${p.score}` : null, p.cities != null ? `${p.cities} cities` : null, p.era || null,
-            seat ? (seat.type === "llm" ? `LLM ${seat.llm.model || ""}` : seat.type) : null,
+            seat ? seatLabel(seat) : null,
           ].filter(Boolean).join(" · ")),
+          // what an AI seat is doing now (P3.6.8: a hybrid seat's "bot playing", "diplomat thinking", "queued #n")
+          (() => {
+            const state = seat && seat.type !== "human" ? agentState(seat, this.agentStatus[p.id], this.agentWait[p.id]) : null;
+            return state ? el("div", { class: "seat-state", "data-state": this.agentStatus[p.id] }, state) : null;
+          })(),
           emp ? el("div", { class: "muted" }, `● ${emp.gold} (${signed((emp.per_turn || {}).gold || 0)}) · ⚗ ${fmt((emp.per_turn || {}).science || 0)} · ✦ ${fmt((emp.per_turn || {}).culture || 0)} · ☺ ${emp.happiness.total} · techs ${emp.techs_known}`) : null));
       }
     }
@@ -1086,20 +1103,3 @@ function happyTitle(h) {
   return Object.entries(h.breakdown || {}).map(([k, v]) => `${k} ${signed(v)}`).join(", ") + ` (luxuries: ${h.luxury_types.join(", ") || "none"}) — ${h.status}`;
 }
 
-/** A model seat's wait for its machine, as the scheduler placed its call (its `agent` message: `machine`, `position`,
- * `eta_s`; design/phase3-features.md P3.3.3): "waiting for Test GPU box: 2nd in line, about 40 s". Without a place (a
- * page opened mid-wait), "waiting for its machine…". */
-export function queuedText(w) {
-  if (!w) return "waiting for its machine…";
-  const where = w.machine ? `waiting for ${w.machine}` : "waiting for its machine";
-  const parts = [];
-  if (w.position) parts.push(`${ordinal(w.position)} in line`);
-  if (w.eta_s != null) parts.push(`about ${Math.max(1, Math.round(w.eta_s))} s`);
-  return parts.length ? `${where}: ${parts.join(", ")}` : `${where}…`;
-}
-
-function ordinal(n) {
-  const tens = n % 100;
-  const suffix = tens >= 11 && tens <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" })[n % 10] || "th";
-  return `${n}${suffix}`;
-}

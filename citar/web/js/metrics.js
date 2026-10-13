@@ -1,6 +1,7 @@
 // AI performance metrics: per-game stats modal and cross-game model comparison.
 import { api } from "./api.js";
 import { el, clear, modal, fmt } from "./util.js";
+import { CATEGORIES, controllerLabel, diplomatText, modelCategories, outcomeText } from "./seats.js";
 
 const COLORS = ["#e04040", "#3c78d8", "#e8c547", "#8e44ad", "#27ae60", "#e67e22", "#17becf", "#f06292"];
 
@@ -69,7 +70,7 @@ export async function openMetrics(gid) {
     clear(content);
     const seats = Object.entries(rep.summary).map(([pid, s]) => ({ pid: +pid, ...s }));
     if (selected == null) {
-      const firstAI = seats.find((s) => s.controller === "llm" && s.turns) || seats.find((s) => s.turns);
+      const firstAI = seats.find((s) => ["llm", "hybrid"].includes(s.controller) && s.turns) || seats.find((s) => s.turns);
       selected = firstAI ? firstAI.pid : 0;
     }
     content.appendChild(el("div", { class: "row" },
@@ -86,7 +87,7 @@ export async function openMetrics(gid) {
     for (const s of seats) {
       const tr = el("tr", { style: { cursor: "pointer", background: s.pid === selected ? "#1d2c47" : "" }, onclick: () => { selected = s.pid; draw(); } },
         el("td", {}, el("span", { class: "swatch", style: { background: COLORS[s.pid % COLORS.length] } }), s.name),
-        el("td", {}, s.controller === "llm" ? s.model || "llm" : s.controller),
+        el("td", {}, controllerLabel(s)),
         el("td", {}, s.turns));
       if (s.turns) {
         tr.append(el("td", {}, secs(s.avg_turn_s)), el("td", {}, secs(s.median_turn_s)), el("td", {}, secs(s.max_turn_s)),
@@ -138,7 +139,7 @@ export async function openMetrics(gid) {
           el("td", { class: r.repeats > 2 ? "bad" : "" }, r.repeats), el("td", {}, r.malformed), el("td", {}, r.output_tokens),
           el("td", { class: r.end_reason && r.end_reason !== "end_turn" ? "warn" : "" }, r.end_reason || "…"), el("td", {}, r.top_tools))));
       content.append(
-        el("h3", { class: "section" }, `Details — ${s.name}${s.model ? " (" + s.model + ")" : ""}`),
+        el("h3", { class: "section" }, `Details — ${s.name}${s.controller === "hybrid" ? ` (${controllerLabel(s)})` : s.model ? " (" + s.model + ")" : ""}`),
         s.settings ? el("div", { class: "muted" }, Object.entries(s.settings).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(" · ")) : null,
         el("div", { class: "grid2" },
           el("div", {}, el("h4", {}, "Tool usage"), tools),
@@ -146,10 +147,35 @@ export async function openMetrics(gid) {
         el("h4", { class: "section" }, "Recent turns"), el("div", { style: { overflowX: "auto" } }, turnsTable));
       if (s.negotiation_replies) content.appendChild(el("div", { class: "muted" }, chatAnswersText(s)));
     }
+    if (s && s.controller === "hybrid") content.appendChild(diplomatSection(s, (rep.diplomat || []).filter((r) => r.player === s.pid)));
     if (content.parentElement) content.parentElement.scrollTop = scroll;
   }
   await draw();
   timer = setInterval(() => { if (!document.body.contains(content)) clearInterval(timer); else draw(); }, 5000);
+}
+
+// A hybrid seat's diplomat (design/phase3-features.md P3.6.11): who decides what, its calls summed up, and its recent
+// calls, each with what called it, how it ended (codes only: a refusal's words are never in the metrics), its steps,
+// its model and queue time and the tools it used (refused ones struck).
+function diplomatSection(s, rows) {
+  const name = (k) => (CATEGORIES.find(([c]) => c === k) || [k, k])[1];
+  const mine = modelCategories(s.owners || {});
+  const theirs = CATEGORIES.map(([k]) => k).filter((k) => !mine.includes(k));
+  const recent = rows.slice(-15).reverse();
+  const table = el("table", { class: "list diplomat-rows" }, el("tr", {}, ...["Turn", "Ended", "Called because", "Steps", "Model", "Waited", "Tools"].map((h) => el("th", {}, h))),
+    ...recent.map((r) => el("tr", {},
+      el("td", {}, r.turn), el("td", { class: r.outcome && r.outcome !== "done" ? "warn" : "" }, outcomeText(r)),
+      el("td", { class: "small" }, (r.triggers || []).join("; ") || "–"),
+      el("td", {}, r.steps ?? "–"), el("td", {}, secs(r.gen_s)), el("td", {}, secs(r.queue_s)),
+      el("td", { class: "small" }, ...(r.tools || []).map((t, i) => el("span", { title: t.ok ? "" : "refused",
+        style: t.ok ? {} : { textDecoration: "line-through" } }, `${i ? ", " : ""}${t.tool}`))))));
+  const tools = Object.entries(s.diplomat_tools || {}).map(([k, v]) => `${k} ${v}`).join(", ");
+  return el("div", { class: "col diplomat-section" },
+    el("h4", { class: "section" }, "Diplomat"),
+    el("div", { class: "muted" }, `The model decides: ${mine.map(name).join(", ") || "nothing"}. The bot decides: ${theirs.map(name).join(", ") || "nothing"}.`),
+    el("div", {}, diplomatText(s) || "Not called yet."),
+    tools ? el("div", { class: "muted small" }, `Tools: ${tools}`) : null,
+    recent.length ? el("div", { style: { overflowX: "auto" } }, table) : null);
 }
 
 function drawTurnChart(canvas, turns, seats) {

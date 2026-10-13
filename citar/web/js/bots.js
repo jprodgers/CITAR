@@ -556,7 +556,8 @@ export async function profileFor(value) {
 
 // A select of bot profiles bound to obj[key], listed in ranking order. With `best`, the first option is "Best bot",
 // which the server resolves to the best-ranked profile when the game is created (and records in the seat).
-// A null value means `fallback`. onChange gets the chosen profile.
+// A null value means `fallback`. onChange gets the chosen profile. Picking one drops a seat bot's "(best)" mark
+// (`chosen_as`, which the server set when it pinned "Best bot"): the bot picked is no longer the one chosen as best.
 export function profileSelect(obj, key = "profile", onChange = null, { best = false, fallback = "standard" } = {}) {
   const s = el("select", { title: "Which bot plays this seat. Listed best first by their rating on this server (Bots page)." });
   if (obj[key] == null) obj[key] = fallback;
@@ -574,6 +575,7 @@ export function profileSelect(obj, key = "profile", onChange = null, { best = fa
   });
   s.onchange = async () => {
     obj[key] = s.value;
+    if (key === "profile") delete obj.chosen_as;
     if (onChange) onChange(await profileFor(s.value));
   };
   return s;

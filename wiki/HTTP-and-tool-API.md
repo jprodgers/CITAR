@@ -78,8 +78,8 @@ These take a signed-in account (a seat token is not one); see
 
 | Method and path | |
 |---|---|
-| `POST /api/games` | Create a game: `{"name", "config", "seats", "visibility", "data_sharing"}`. Counts against your game limit. A model seat (an LLM or a hybrid seat) names a machine (`{"llm": {"server_id", "model", ...}}`); a member's seat that describes one (a base URL, a key, a key variable) is refused with 400. A hybrid seat ([the seat](#a-hybrid-seat)) is admitted for pooled prompts on its machine, an LLM seat for games; hybrid settings that are not allowed are 400, with the reason |
-| `POST /api/games/{id}/seats/{player}` | Change a seat's type, model or name. A new model block, or a seat made an LLM seat, passes the same rule; a machine you may not use is 403, and the seat stays as it was. A new name alone checks nothing |
+| `POST /api/games` | Create a game: `{"name", "config", "seats", "visibility", "data_sharing"}`. Counts against your game limit. A model seat (an LLM or a hybrid seat) names a machine (`{"llm": {"server_id", "model", ...}}`); a member's seat that describes one (a base URL, a key, a key variable) is refused with 400. A hybrid seat ([the seat](#a-hybrid-seat)) is admitted for pooled prompts on its machine, an LLM seat for games; hybrid settings that are not allowed are 400, with the reason. A seat's `bot` is `{"profile", "aggression"}` ([seat bots](#seat-bots)) |
+| `POST /api/games/{id}/seats/{player}` | Change a seat: `{"type", "llm", "bot", "name", "hybrid", "handicap"}`, each optional. A new model block, or a seat made an LLM or a hybrid seat, passes the same rule, and is admitted again by its kind (games for an LLM seat, pooled prompts for a hybrid one) at every such change; a machine you may not use is 403, and the seat stays as it was. A hybrid seat takes its settings and handicap as in [a hybrid seat](#a-hybrid-seat); a seat changed from hybrid to another type keeps none of them. Settings, a handicap, a bot or a type that are not allowed are 400, with the reason. A new name alone checks nothing |
 | `DELETE /api/games/{id}` | Close the game (the lobby's End game): it stops, its saves stay yours, and it no longer counts against your limit |
 | `GET /api/games/{id}/sharing` | Its visibility (`private`, `allowlist`, `link`, `server`, `global`), its share link, who it is shared with, and its last unpublish (`at`, `reason`, and `by`: "you", "its owner", "an administrator", "a moderator" or "someone who manages it", never a handle) |
 | `PUT /api/games/{id}/sharing` | `{"visibility", "data_sharing", "rotate_slug"}`; `global` needs the `publish_global` permission |
@@ -89,8 +89,8 @@ These take a signed-in account (a seat token is not one); see
 
 ### A hybrid seat
 
-A seat of `POST /api/games`, of a scenario's seats, or (`type` aside) as `GET /api/games/{id}` lists it
-([AI players](AI-players#hybrid-seats)):
+A seat of `POST /api/games`, of `POST /api/games/{id}/seats/{player}`, of a scenario's seats, or (`type` aside)
+as `GET /api/games/{id}` lists it ([AI players](AI-players#hybrid-seats); [setting one up](Playing-in-the-browser#hybrid-seats)):
 
 ```json
 {"type": "hybrid", "name": "", "handicap": "ai", "difficulty": "Prince",
@@ -106,13 +106,31 @@ A seat of `POST /api/games`, of a scenario's seats, or (`type` aside) as `GET /a
 - `prompt_every`: 1 to 50 (10); `advisor`: true or false (true; always off in a benchmark game);
   `phase_seconds`: 10 to 600 (180).
 - `handicap`: `ai` (the default) or `human`, whose numbers the seat plays with; `difficulty`, its level,
-  as for any seat.
+  as for any seat. `GET /api/games/{id}` gives each major's `difficulty` and `handicap` in `players`.
+- A scenario's hybrid seat (`/api/scenario-editor/{id}/meta` and `/save`) is checked as a game's when it
+  is set (400, naming the seat as the engine does: `Seat 1` is P1), and keeps its bot, settings and
+  handicap but no machine: its launch (`POST /api/scenarios/{id}/launch`, whose `seats` are laid over
+  the scenario's) names the model. A seat's `llm`, `bot` or a hybrid seat's `hybrid` that is not an
+  object is refused there as in a game, never saved as the defaults. A scenario made from a running game
+  (`"source": "game"`) keeps its hybrid seats' settings, a bot chosen as the best one as `"best"` again
+  (pinned when the scenario is launched).
 
 A game's summary (`GET /api/games/{id}/summary`) gives each seat a model plays its `model`, its task
 `class` (`full` for an LLM seat, `partial` for a hybrid seat) and a `label` ("Hybrid: standard +
-<model>"); its metrics (`GET /api/games/{id}/metrics`) give the diplomat's phases (`diplomat`: turn,
-triggers, steps, `gen_s`, `queue_s`, tokens, outcome, cause, tools) and, per seat, their totals
-(`diplomat_phases`, `diplomat_outcomes`, `diplomat_tools`, `diplomat_refused`).
+dry-run", the bot marked "(best)" while it is the one "Best bot" was pinned to, [seat bots](#seat-bots));
+its metrics (`GET /api/games/{id}/metrics`) give the diplomat's phases (`diplomat`: turn, triggers, steps, `gen_s`,
+`queue_s`, tokens, outcome, cause, tools) and, per seat, their totals (`diplomat_phases`,
+`diplomat_outcomes`, `diplomat_tools`, `diplomat_refused`), with a hybrid seat's `bot`, `bot_best` and
+`owners`.
+
+### Seat bots
+
+`{"profile": "standard", "aggression": 0.4}`: the profile that plays (`"best"` for the best-ranked one,
+[Bots](Scripted-bots)) and the seat's aggression, a number from 0 to 1 (held to that range) or empty for the
+default; anything else, or a `bot` that is not an object, is a 400. `"best"` is pinned when the seat is
+made or changed: the seat records the profile it stood for then, with `"chosen_as": "best"`. That mark
+is the server's: one sent is ignored, and a seat keeps it only while its bot stays on the profile it was
+pinned to (the Join/Seats dialog sends it back as it was); pick another and the seat is that profile.
 
 ### Owned items
 
@@ -135,7 +153,7 @@ are not objects or lists) is a 400. A report's narrative that names a pooled mac
 admitted to (a grant for `pooled` prompts, P3.3.7) is a 403, as a run's machine is. A probe run's subject
 (`POST /api/probes/{id}/run`) is admitted for what its chosen cases are: `probe` for a turn case,
 `pooled` (and `partial_llm`) for an offer or message case; one it is not admitted for is a 403 naming the
-purpose. A report's record carries `narrative_written` and `narrative_note` (who wrote its analysis, or
+purpose. `GET /api/probes` gives each probe's `purposes`, what a run of all its cases is admitted for. A report's record carries `narrative_written` and `narrative_note` (who wrote its analysis, or
 why it was skipped or failed); `DELETE /api/reports/{id}` deletes a report being built too (its
 narrative's prompt leaves the machine's line). What queued work waits for (a benchmark job's `waiting` in
 `GET /api/benchmarks/runs`, a probe run's in `GET /api/probe-runs/{id}`, a report's `waiting` and

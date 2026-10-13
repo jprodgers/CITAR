@@ -4,6 +4,7 @@
 import { api, NotSignedIn, setCsrfToken } from "./api.js";
 import * as auth from "./auth.js";
 import { el, clear, toast } from "./util.js";
+import { agentState } from "./seats.js";
 
 const root = document.getElementById("app");
 const titleEl = document.getElementById("m-title");
@@ -48,7 +49,7 @@ function gameState(g) {
   const st = Object.values(g.agent_status || {});
   if (st.includes("reconnecting")) return ["warn", "reconnecting"];
   if (Object.keys(g.agent_errors || {}).length) return ["bad", "AI error"];
-  if (st.includes("thinking")) return ["live", "AI thinking"];
+  if (st.includes("thinking") || st.includes("diplomat")) return ["live", "AI thinking"];
   if (st.includes("queued")) return ["live", "AI waiting for its machine"];
   return ["live", "playing"];
 }
@@ -99,7 +100,8 @@ async function overview() {
 function gameRow(x) {
   const [cls, label] = gameState(x);
   const n = (type) => (x.seats || []).filter((s) => s.type === type).length;
-  const seats = [[n("llm"), "AI model"], [n("human"), "human"], [n("bot"), "bot"], [n("mcp"), "MCP client"]]
+  const seats = [[n("llm"), "AI model"], [n("hybrid"), "hybrid seat"], [n("human"), "human"], [n("bot"), "bot"],
+    [n("mcp"), "MCP client"]]
     .filter(([k]) => k).map(([k, what]) => `${k} ${what}${k === 1 ? "" : "s"}`).join(", ");
   const cur = (x.players || []).find((p) => p.id === x.current_player);
   return el("a", { class: "m-row", href: `#/game/${x.id}` },
@@ -148,11 +150,10 @@ async function gamePage(gid) {
       el("div", { class: "m-row-main" },
         el("div", {}, d.full ? `${i + 1}. ` : "", el("b", {}, p.name), p.alive ? "" : " (eliminated)"),
         el("div", { class: "muted small" },
-          [p.seat === "llm" ? (p.model || "AI model") : p.seat, p.era,
+          [p.seat === "hybrid" ? (p.label || "hybrid") : p.seat === "llm" ? (p.model || "AI model") : p.seat, p.era,
            p.cities != null ? `${p.cities} cities · pop ${p.pop} · ${p.techs} techs` : null].filter(Boolean).join(" · ")),
         p.status === "reconnecting" ? el("div", { class: "warn small" }, "reconnecting to its model server…")
-          : p.status === "thinking" ? el("div", { class: "live small" }, "thinking…")
-          : p.status === "queued" ? el("div", { class: "live small" }, "waiting for its machine…") : null,
+          : agentState({ type: p.seat }, p.status) ? el("div", { class: "live small" }, agentState({ type: p.seat }, p.status)) : null,
         p.error ? el("div", { class: "bad small" }, p.error) : null),
       p.score != null ? el("span", { class: "m-score" }, p.score) : null)))));
   out.push(section("Recent news", ...(d.events.length

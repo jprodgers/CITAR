@@ -1163,6 +1163,19 @@ class ProbeRunRoute(_ProbeScenario):
         self.assertEqual(self.started, [(self.ids["gina"], ["turn"]), (self.ids["dave"], ["gift", "hello"]),
                                         (self.ids["bob"], ["gift"])])
 
+    def test_the_list_says_what_a_run_is_admitted_for(self):
+        """``GET /api/probes`` gives each probe's ``purposes`` (``case_purposes`` of all its cases), which the run
+        dialog lists the machines by, so a refusal shows before the run is asked."""
+        got = self.client.get("/api/probes", headers=self.headers["gina"])
+        self.assertEqual(got.status_code, 200, got.text[:300])
+        row = next(x for x in got.json() if x["id"] == "pooled-probe")
+        self.assertEqual(row["purposes"], ["probe", "pooled"])
+        from citar import probes as P
+        P.save_probe({**self.probe, "cases": [c for c in self.probe["cases"] if c["kind"] == "turn"]})
+        row = next(x for x in self.client.get("/api/probes", headers=self.headers["gina"]).json()
+                   if x["id"] == "pooled-probe")
+        self.assertEqual(row["purposes"], ["probe"])
+
     def test_pooled_cases_need_partial_llm(self):
         with db.session() as s:
             s.get(User, self.ids["dave"]).caps = {"partial_llm": False}

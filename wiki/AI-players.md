@@ -186,7 +186,8 @@ and the time it waited for its machine apart.
 ## Hybrid seats
 
 A hybrid seat is a scripted bot that plays the turns (cities, research, units, every war's fighting)
-with a language model that decides the kinds of diplomacy the seat hands it. Its seat has the bot's
+with a language model that decides the kinds of diplomacy the seat hands it. The lobby, the Join/Seats
+dialog and a scenario's seats set one up ([Playing](Playing-in-the-browser#hybrid-seats)). Its seat has the bot's
 settings, the model's machine (as an LLM seat names one), and `hybrid`:
 
 ```json
@@ -263,7 +264,9 @@ never pause its game: its prompt is refused instead, and its bot answers. Its tu
 it stays out of the model ranking. The game's metrics (`GET /api/games/{id}/metrics`, see
 [the API](HTTP-and-tool-API)) carry its diplomat's calls: each call's row (`diplomat`), and in the seat's
 summary their count by outcome (done, timeout, skipped, refused, failed, cancelled, with the cause's
-code), their generation and queue time, the tools they called and the calls the session refused.
+code), their generation and queue time, the tools they called and the calls the session refused. The
+stats screen (**📊 Stats**) shows them for the seat, and the game screen's player list says what the seat
+is doing: "bot playing", "diplomat thinking", "queued #n" or "diplomat paused".
 
 ---
 

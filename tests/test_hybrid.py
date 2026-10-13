@@ -214,7 +214,7 @@ class Creation(Case):
         self.assertEqual(s.info()["seats"][0]["hybrid"]["prompt_every"], 5)
         with self.assertRaises(ValueError) as e:
             self.game([{"type": "bot"}, {"type": "hybrid", "llm": dict(DRY), "hybrid": {"owners": {}}}])
-        self.assertIn("Seat 2", str(e.exception))
+        self.assertTrue(str(e.exception).startswith("Seat 1: "), "P1, named as the engine's normalize_seats names it")
         with self.assertRaises(ValueError):
             self.game([{"type": "hybrid", "llm": dict(DRY), "handicap": "god"}])
 

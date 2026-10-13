@@ -219,8 +219,10 @@ class GameSession:
                 "resources", "on_disconnect", "reconnect_seconds")}
             # the lobby's chat settings as the game plays them: the defaults when it gave none (P3.5.2)
             | self.chat.settings,
+            # a major's difficulty level and whose numbers it plays with at it (the Join/Seats dialog shows both)
             "players": [{"id": p["id"], "name": p["name"], "color": p["color"], "alive": p["alive"], "kind": p["kind"],
-                         **({"difficulty": p["difficulty"]} if p["kind"] == "major" else {})}
+                         **({"difficulty": p["difficulty"], "handicap": p.get("handicap")} if p["kind"] == "major"
+                            else {})}
                         for p in summ["players"]],
             "seats": [s.public(include_tokens) for s in self.seats],
             "agent_status": {str(k): v for k, v in self.agent_status.items()},
@@ -296,8 +298,10 @@ class GameSession:
                                  "settings": {k: s.llm.get(k) for k in ("provider", "base_url", "tool_mode", "reasoning_effort", "effort")}
                                  if s.model_seat else None}
             if s.type == "hybrid":
-                # marked (P3.6.7): its turns are its bot's, its model's work the diplomat rows and chat answers
+                # marked (P3.6.7): its turns are its bot's, its model's work the diplomat rows and chat answers;
+                # `bot_best` when its bot was "Best bot" (the stats screen labels it as the lobby does)
                 players[s.player].update({"hybrid": True, "bot": (s.bot or {}).get("profile") or "standard",
+                                          "bot_best": (s.bot or {}).get("chosen_as") == "best",
                                           "owners": (s.hybrid or {}).get("owners")})
         return {"summary": self.metrics.summary(players), "turns": self.metrics.turn_rows(),
                 "negotiations": self.metrics.data["negotiations"],
@@ -1153,12 +1157,19 @@ class GameSession:
         set explicitly, and a hybrid seat's are, so a seat that was ever hybrid would otherwise carry them through
         every later change. A hybrid seat (design/phase3-features.md P3.6.2) is the engine's ``hybrid`` controller with
         its seat's handicap (``ai`` unless ``handicap`` says otherwise) and the automatic decisions its owners leave to
-        the bot (``hybrid.engine_auto``). ``hybrid`` is checked (``normalize_hybrid``) before anything changes. Raises
-        ValueError for an unknown seat type, a handicap that is none, or hybrid settings that are not allowed, and
-        EngineCrash on a game whose engine has stopped (the session is then crashed, as everywhere).
+        the bot (``hybrid.engine_auto``). ``hybrid`` is checked (``normalize_hybrid``) before anything changes. ``bot``
+        is the server's (``_seat_bot``): "Best bot" is pinned, as at creation, and the seat keeps its mark of a bot
+        chosen as best only while the bot sent names the profile it was pinned to (the Join/Seats dialog sends the
+        seat's bot back as it was); a ``chosen_as`` sent is never taken. Raises ValueError for an unknown seat type, a
+        handicap that is none, a bot or hybrid settings that are not allowed, and EngineCrash on a game whose engine
+        has stopped (the session is then crashed, as everywhere).
         """
         from ..agents import hybrid as hybrid_mod
         moved = False
+        if bot is not None:
+            # the bot as the server keeps it, "Best bot" pinned to the profile it stands for now (it reads the
+            # ratings: off the lock)
+            bot = _seat_bot(bot)
         with self.lock:
             seat = self.seats[pid]
             before = (seat.type, (seat.llm or {}).get("server_id"), (seat.llm or {}).get("model"))
@@ -1194,6 +1205,10 @@ class GameSession:
             if llm is not None:
                 seat.llm = llm
             if bot is not None:
+                old = seat.bot or {}
+                if old.get("chosen_as") == "best" and bot.get("chosen_as") != "best" \
+                        and bot.get("profile") == old.get("profile"):
+                    bot = {**bot, "chosen_as": "best"}      # still the bot that was chosen as the best one
                 seat.bot = bot
             if name is not None:
                 seat.name = name
@@ -2290,29 +2305,52 @@ def _own_engine(sc: dict, stype: str) -> dict:
     return {k: sc[k] for k in ("handicap", "auto") if sc.get(k) is not None}
 
 
-def _engine_seat(sc: dict, stype: str, pid: int) -> tuple:
-    """A new seat's engine settings from its lobby or scenario entry: (handicap, automatic decisions, its ``hybrid``
-    block). A hybrid seat's block is checked (``normalize_hybrid``), its handicap is ``ai`` unless it says ``human``,
+def _seat_settings(sc: dict, stype: str, pid: int) -> tuple:
+    """A new seat's settings from its lobby or scenario entry: (handicap, automatic decisions, its ``hybrid`` block,
+    its bot). A hybrid seat's block is checked (``normalize_hybrid``), its handicap is ``ai`` unless it says ``human``,
     and its automatic decisions are those its owners leave to the bot (P3.6.2); any other seat's are its entry's own.
-    Raises ValueError, naming the seat, for hybrid settings that are not allowed."""
-    if stype != "hybrid":
-        return sc.get("handicap"), sc.get("auto"), {}
-    from ..agents import hybrid
+    The bot is the server's (``_seat_bot``: "Best bot" pinned). Raises ValueError, naming the seat as the engine's
+    ``normalize_seats`` names it ("Seat 1" for P1), for a bot or hybrid settings that are not allowed. Reads the
+    ratings, so never under a session's lock."""
     try:
+        bot = _seat_bot(sc.get("bot"))
+        if stype != "hybrid":
+            return sc.get("handicap"), sc.get("auto"), {}, bot
+        from ..agents import hybrid
         block = hybrid.normalize_hybrid(sc.get("hybrid"))
         handicap = hybrid.check_handicap(sc.get("handicap"))
     except ValueError as e:
-        raise ValueError(f"Seat {pid + 1}: {e}") from None
-    return handicap, hybrid.engine_auto(block["owners"]), block
+        raise ValueError(f"Seat {pid}: {e}") from None
+    return handicap, hybrid.engine_auto(block["owners"]), block, bot
 
 
-def _pin_best(bot: dict) -> dict:
-    """A bot seat asking for "best" gets the profile that is best-ranked right now, recorded in the seat, so the
-    game keeps playing (and reporting) that bot even after the rankings change."""
-    if bot.get("profile") != "best":
-        return bot
+def _clean_bot(bot) -> dict:
+    """A seat's bot as a person sends it (a lobby or scenario entry, the seat route), as the server keeps it: an object
+    (ValueError for anything else, as for a model block), its aggression a number held to 0..1 or none
+    (``profiles.clean_aggression``: a ProfileError, a ValueError, for one that is no number, which the bot would
+    only have refused when it came to play), and without ``chosen_as``, which is the server's mark alone (``_seat_bot``
+    sets it): a client that sent it with any profile would have a bot labelled "(best)" that was never chosen as
+    best."""
+    if bot is None:
+        return {}
+    if not isinstance(bot, dict):
+        raise ValueError('A seat\'s bot is an object: {"profile": ..., "aggression": ...}.')
+    out = {k: v for k, v in bot.items() if k != "chosen_as"}
+    if "aggression" in out:
+        from ..bots.profiles import clean_aggression
+        out["aggression"] = clean_aggression(out["aggression"])
+    return out
+
+
+def _seat_bot(bot) -> dict:
+    """A seat's bot (``_clean_bot``), with "Best bot" pinned: a seat asking for "best" gets the profile that is
+    best-ranked right now, recorded in the seat with ``chosen_as: "best"``, so the game keeps playing (and reporting)
+    that bot even after the rankings change. Reads the ratings, so never under a session's lock."""
+    out = _clean_bot(bot)
+    if out.get("profile") != "best":
+        return out
     from ..bots.ratings import best_profile
-    return {**bot, "profile": best_profile(), "chosen_as": "best"}
+    return {**out, "profile": best_profile(), "chosen_as": "best"}
 
 class SessionManager:
     """Every live game, and the operations that create or load one."""
@@ -2340,12 +2378,12 @@ class SessionManager:
             stype = sc.get("type", "bot")
             if stype not in SEAT_TYPES:
                 raise ValueError(f"Unknown seat type '{stype}'")
-            handicap, auto, block = _engine_seat(sc, stype, i)
+            handicap, auto, block, bot = _seat_settings(sc, stype, i)
             players.append({"name": sc.get("civ_name") or None, "color": sc.get("color"),
                             "leader": sc.get("leader"), "nation": sc.get("nation"), "controller": stype,
                             "handicap": handicap, "auto": auto, "difficulty": sc.get("difficulty") or None})
             seats.append(Seat(player=i, type=stype, name=sc.get("name") or "", llm=sc.get("llm") or {},
-                              bot=_pin_best(sc.get("bot") or {}), hybrid=block, engine=_own_engine(sc, stype)))
+                              bot=bot, hybrid=block, engine=_own_engine(sc, stype)))
         cfg = dict(config)
         cfg["players"] = players
         game = EngineGame.new(cfg)
@@ -2393,7 +2431,13 @@ class SessionManager:
             pid = p["id"]
             sc = dict(defaults[pid]) if pid < len(defaults) else {}
             if seats_cfg and pid < len(seats_cfg) and seats_cfg[pid]:
-                sc.update({k: v for k, v in seats_cfg[pid].items() if v is not None})
+                given = seats_cfg[pid]
+                if sc.get("type") == "hybrid" and given.get("type") not in (None, "hybrid"):
+                    # a hybrid seat's handicap is one of its hybrid settings, not a choice for whatever the launch seats
+                    # there instead (a bot with a person's numbers): it goes with the settings, unless the launch names one
+                    sc.pop("hybrid", None)
+                    sc.pop("handicap", None)
+                sc.update({k: v for k, v in given.items() if v is not None})
             if check_seat is not None:
                 sc = check_seat(sc)
             stype = sc.get("type") or "bot"
@@ -2401,13 +2445,12 @@ class SessionManager:
                 stype = "human"
             if stype not in SEAT_TYPES:
                 raise ValueError(f"Unknown seat type '{stype}'")
-            handicap, auto, block = _engine_seat(sc, stype, pid)
+            handicap, auto, block, bot = _seat_settings(sc, stype, pid)
             g.set_controller(pid, stype, handicap, auto)
             if sc.get("difficulty"):
                 g.set_difficulty(pid, sc["difficulty"])
             seats.append(Seat(player=pid, type=stype, name=sc.get("name") or sc.get("label") or "",
-                              llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {}), hybrid=block,
-                              engine=_own_engine(sc, stype)))
+                              llm=sc.get("llm") or {}, bot=bot, hybrid=block, engine=_own_engine(sc, stype)))
         s = GameSession(g, seats, name or scn.get("name") or "Scenario")
         if register:
             self.register_new(s)

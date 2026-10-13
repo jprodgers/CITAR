@@ -8,6 +8,8 @@ import { setupState, welcomeBanner } from "./setup.js";
 import { pageHeader } from "./nav.js";
 import { registry } from "./servers.js";
 import { shareButton } from "./share.js";
+import { CATEGORIES, HANDICAPS, PRESETS, PROMPT_EVERY, firstRefusal, hybridProblem, hybridState, isModelSeat, newHybrid,
+  ownersMap, presetOf, seatLabel, seatPayload, seatUpdate } from "./seats.js";
 
 // Civilization colours (the server sends the same palette as rules.player_colors), most distinct first.
 const COLORS = ["#aa0000", "#0000aa", "#00aa00", "#aaaa00", "#50006e", "#c85a00", "#ff00e6", "#299bcc",
@@ -97,15 +99,9 @@ export async function renderLobby(root, rules) {
   return { destroy() { clearInterval(timer); } };
 }
 
-function seatLabel(s) {
-  if (s.type === "llm") return `LLM: ${(s.llm_info && s.llm_info.label) || s.llm.model || s.llm.provider || "?"}${s.llm_info && s.llm_info.server ? " @ " + s.llm_info.server : ""}`;
-  if (s.type === "bot") {
-    const b = s.bot || {};
-    return `Bot: ${b.profile || "standard"}${b.chosen_as === "best" ? " (best)" : ""}`;
-  }
-  if (s.type === "mcp") return `MCP${s.connected ? " (connected)" : ""}`;
-  return "Human";
-}
+/** Who may play a seat, as the lobby, the Join/Seats dialog and the scenario seats offer it (P3.6.8). */
+export const SEAT_KINDS = [["human", "Human"], ["bot", "Scripted bot"], ["llm", "LLM (server-run)"],
+  ["hybrid", "Hybrid (bot plays, model negotiates)"], ["mcp", "MCP client"]];
 
 function renderGames(card, games, refresh, meta) {
   clear(card);
@@ -164,11 +160,12 @@ function renderGames(card, games, refresh, meta) {
 }
 
 // Jump straight into a game as its first human seat. Games with only humans and bots resume automatically;
-// ones with LLM seats stay paused so loading a save never starts GPU work by surprise.
+// ones with a seat a model plays (an LLM or a hybrid seat) stay paused so loading a save never starts GPU work by
+// surprise.
 async function playHuman(info) {
   const human = info.seats.find((s) => s.type === "human");
   if (!human) return;
-  if (info.paused && !info.seats.some((s) => s.type === "llm")) {
+  if (info.paused && !info.seats.some(isModelSeat)) {
     try { await api.control(info.id, { paused: false }); } catch (e) { /* the game screen shows the paused state */ }
   }
   location.hash = gameLink(info.id, human.token);
@@ -181,28 +178,46 @@ const VISIBILITY_LABEL = { allowlist: "shared with people", link: "shared by lin
 export function showConnectInfo(info, meta) {
   const body = el("div", { class: "col" });
   const serverUrl = (meta && meta.server_url) || location.origin;
-  body.appendChild(el("p", { class: "muted" }, "Each seat has its own secret token. Humans play in the browser; MCP seats are driven by an external AI client; LLM and Bot seats are run by the server."));
+  body.appendChild(el("p", { class: "muted" }, "Each seat has its own secret token. Humans play in the browser; MCP seats are driven by an external AI client; LLM, hybrid and bot seats are run by the server."));
+  const copy = (x) => JSON.parse(JSON.stringify(x));
   for (const s of info.seats) {
     const p = info.players[s.player];
-    const row = el("div", { class: "card" });
+    const row = el("div", { class: "card", "data-seat": s.player });
+    const label = el("span", { class: "pill seat-label" }, seatLabel(s));
     row.appendChild(el("div", { class: "row" }, el("span", { class: "swatch", style: { background: p.color } }), el("b", {}, p.name),
-      el("span", { class: "pill" }, seatLabel(s)), el("span", { class: "grow" }),
+      label, el("span", { class: "grow" }),
       el("button", { class: "primary", onclick: () => { location.hash = `#/game/${info.id}/${encodeURIComponent(s.token)}`; closeFn(); } },
         s.type === "human" ? "Play this seat" : "Open this seat's view")));
-    const typeSel = el("select", {}, ...["human", "bot", "llm", "mcp"].map((t) => el("option", { value: t, selected: s.type === t }, t)));
-    const llmCfg = s.llm && s.llm.server_id ? JSON.parse(JSON.stringify(s.llm)) : defaultLLM();
-    const llmBox = el("div", { style: { display: typeSel.value === "llm" ? "block" : "none" } });
-    const drawLLM = () => { clear(llmBox).appendChild(llmForm(llmCfg, drawLLM)); };
-    drawLLM();
-    typeSel.onchange = () => { llmBox.style.display = typeSel.value === "llm" ? "block" : "none"; };
+    // The seat as the dialog changes it: a model block naming a machine (the seat's, or a new one), its bot, a hybrid
+    // seat's settings and its handicap (the engine's now for a hybrid seat; the hybrid seat's default for one becoming
+    // hybrid). Apply sends what the chosen type plays (seatUpdate), and the server admits a model seat again.
+    const st = { type: s.type, llm: s.llm && s.llm.server_id ? copy(s.llm) : defaultLLM(),
+                 bot: copy(s.bot && Object.keys(s.bot).length ? s.bot : { aggression: 0.4 }),
+                 hybrid: hybridState(s.type === "hybrid" ? s.hybrid : null),
+                 handicap: s.type === "hybrid" && p.handicap === "human" ? "human" : "ai" };
+    const typeSel = el("select", {}, ...SEAT_KINDS.map(([t, text]) => el("option", { value: t, selected: s.type === t }, text)));
+    const extra = el("div", { class: "seat-dialog-extra" });
+    const drawExtra = () => {
+      clear(extra);
+      if (st.type === "llm") extra.appendChild(llmForm(st.llm, drawExtra));
+      else if (st.type === "hybrid") extra.appendChild(hybridForm(st, drawExtra, { level: p.difficulty || "" }));
+    };
+    drawExtra();
+    typeSel.onchange = () => { st.type = typeSel.value; drawExtra(); };
     const agentErr = info.agent_errors && info.agent_errors[String(s.player)];
     row.appendChild(el("div", { class: "row", style: { marginTop: "6px" } }, el("span", { class: "muted" }, "Controller:"), typeSel,
       el("button", { class: "small primary", onclick: async () => {
-        await api.updateSeat(info.id, s.player, { type: typeSel.value, llm: typeSel.value === "llm" ? llmCfg : undefined });
-        toast("Seat updated — takes effect on its next turn");
+        const problem = st.type === "hybrid" ? hybridProblem(st.hybrid) : null;
+        if (problem) { toast(problem, "error"); return; }
+        try {
+          const out = await api.updateSeat(info.id, s.player, seatUpdate(st));
+          const now = (out.seats || []).find((x) => x.player === s.player);
+          if (now) label.textContent = seatLabel(now);
+          toast("Seat updated — takes effect on its next turn");
+        } catch (e) { toast(e.message, "error"); }
       } }, "Apply")));
     if (agentErr) row.appendChild(el("div", { class: "bad", style: { marginTop: "4px" } }, `Last AI error: ${agentErr}`));
-    row.appendChild(llmBox);
+    row.appendChild(extra);
     {
       const script = (meta && meta.mcp_script) || "citar_mcp.py";
       const py = (meta && meta.python) || "python";
@@ -311,21 +326,32 @@ function pooledEntries(pool) {
 }
 
 // Every machine a seat may name: the caller's own (every one for an administrator) as the registry lists them, a
-// helper machine as its helper reports it, and the machines shared with the caller (P3.2.8: every machine is a row).
-export async function seatServers(force = false) {
-  const [reg, pool] = await Promise.all([
+// helper machine as its helper reports it, and the machines shared with the caller (P3.2.8: every machine is a row),
+// each with whether the caller is admitted there for `purpose`: `game` for a seat that plays every turn, `pooled` for
+// a hybrid seat's model, a report's narrative or a probe's offer and message cases, whose prompts are pooled prompts,
+// `probe` for a probe's turn cases (P3.3.7). Several purposes (a probe run of both kinds of case): each machine's
+// admission is the first refusal among them (firstRefusal).
+export async function seatServers(force = false, purpose = "game") {
+  const purposes = [].concat(purpose);
+  const [reg, ...pools] = await Promise.all([
     registry(force).catch(() => ({ servers: [] })),
-    api.poolServers("game").catch(() => ({ servers: [] }))]);
+    ...purposes.map((p) => api.poolServers(p).catch(() => ({ servers: [] })))]);
+  const answer = (q, id) => ((q.servers || []).find((x) => x.id === id) || {}).admission;
+  const pool = { ...pools[0], servers: (pools[0].servers || []).map((s) => (
+    { ...s, admission: firstRefusal(pools.map((q) => answer(q, s.id))) })) };
   const own = (reg.servers || []).filter((s) => s.reach !== "worker");
   const ids = new Set(own.map((s) => s.id));
   return { ...reg, servers: [...own, ...pooledEntries(pool).filter((s) => !ids.has(s.id))] };
 }
 
 // Editable LLM seat configuration: server -> model -> load profile, plus overrides. `rerender` redraws the parent.
-export function llmForm(L, rerender, { seat = true } = {}) {
+// `purpose` is what the caller must be admitted for on the machine (`game` for an LLM seat, `pooled` for a hybrid seat's
+// model or a report's narrative, a probe's purposes for its run: seatServers), whose refusal the form shows; without
+// `turns` (a hybrid seat's model, which plays no turns) the per-turn settings are left out.
+export function llmForm(L, rerender, { seat = true, purpose = "game", turns = true } = {}) {
   const field = (label, input, extra = {}) => el("div", { class: "field", ...extra }, el("label", {}, label), input);
   const box = el("div", { class: "seat-extra" }, el("span", { class: "muted small" }, "Loading servers…"));
-  seatServers().then((reg) => {
+  seatServers(false, purpose).then((reg) => {
     clear(box);
     if (!reg.servers.length) { box.appendChild(el("span", { class: "warn" }, "No servers yet: add one on the Servers page.")); return; }
     let sv = reg.servers.find((s) => s.id === L.server_id);
@@ -353,17 +379,19 @@ export function llmForm(L, rerender, { seat = true } = {}) {
     if (sv.kind === "api" && !(sv.key_status || {}).present) notes.push(el("div", { class: "bad small" }, `${sv.name} has no API key yet (Servers page).`));
     if (!m) notes.push(el("div", { class: "warn small" }, `${sv.name} has no models in its catalog yet (Servers page).`));
     if (sv.pooled && !sv.online) notes.push(el("div", { class: "warn small" }, `${sv.name}'s helper is not connected: start it on that machine.`));
-    else if (sv.pooled && sv.admission && !sv.admission.allowed) notes.push(el("div", { class: "warn small" }, sv.admission.reason));
+    // a machine shared with the caller says why it would refuse this seat's kind of work (a grant for games is not one
+    // for a hybrid seat's pooled prompts, and the other way round)
+    else if (sv.admission && !sv.admission.allowed) notes.push(el("div", { class: "warn small admission" }, sv.admission.reason));
     if (sv.pooled && m && !m.loaded && sv.models.some((x) => x.loaded)) notes.push(el("div", { class: "muted small" }, `${m.key} is not the loaded model on ${sv.name}; LM Studio will load it on the first turn if it can.`));
     const provider = sv.connection.provider;
     box.append(...[
       field("Server", serverSel),
       field("Model", modelSel, { style: { gridColumn: "span 2", minWidth: "0" } }),
       profSel ? field("Load profile", profSel) : null,
-      !seat ? null : field("Reconnect wait (s)", el("input", { type: "number", min: 0, max: 86400, value: L.reconnect_seconds ?? "",
+      !seat || !turns ? null : field("Reconnect wait (s)", el("input", { type: "number", min: 0, max: 86400, value: L.reconnect_seconds ?? "",
         placeholder: "game default", title: "How long this seat keeps retrying its model server before the game's disconnect rule applies",
         oninput: (e) => { L.reconnect_seconds = e.target.value === "" ? null : +e.target.value; } })),
-      !seat ? null : field("Max tool calls / turn", el("input", { type: "number", value: L.max_tool_calls_per_turn || (m && m.inference.max_tool_calls_per_turn) || 150,
+      !seat || !turns ? null : field("Max tool calls / turn", el("input", { type: "number", value: L.max_tool_calls_per_turn || (m && m.inference.max_tool_calls_per_turn) || 150,
         oninput: (e) => { L.max_tool_calls_per_turn = +e.target.value; } })),
       provider === "anthropic" ? field("Effort", el("select", { onchange: (e) => { L.effort = e.target.value; } },
         ...["", "low", "medium", "high", "xhigh", "max"].map((v) => el("option", { value: v, selected: (L.effort || "") === v }, v || `server default (${(m && m.inference.effort) || "high"})`)))) : null,
@@ -375,6 +403,95 @@ export function llmForm(L, rerender, { seat = true } = {}) {
       !seat ? null : el("div", { class: "field", style: { gridColumn: "1 / -1" } }, el("label", {}, "Persona / playstyle (optional)"),
         el("textarea", { rows: 2, value: L.persona || "", placeholder: "e.g. A cunning seafaring merchant republic that prefers trade to war.", oninput: (e) => { L.persona = e.target.value; } }))].filter(Boolean));
   }).catch((e) => { clear(box).appendChild(el("span", { class: "bad" }, e.message)); });
+  return box;
+}
+
+const fieldOf = (label, input, extra = {}) => el("div", { class: "field", ...extra }, el("label", {}, label), input);
+
+// The bot a bot seat or a hybrid seat plays: its profile ("Best bot" stands for the best-ranked one, pinned when the seat
+// is made) and its aggression, unless the profile fixes it.
+function botFields(bot) {
+  const aggBox = el("div");
+  const drawAgg = (prof) => {
+    clear(aggBox);
+    aggBox.appendChild(prof && prof.aggression != null
+      ? fieldOf("Aggression", el("span", { class: "muted small" }, `${prof.aggression} (fixed by the profile)`))
+      : fieldOf("Aggression", el("input", { type: "range", min: 0, max: 1, step: 0.1, value: bot.aggression, oninput: (e) => { bot.aggression = +e.target.value; } })));
+    // a seat's bot pinned as "Best bot" (the server's mark, chosen_as) keeps it until another profile is picked
+    if (bot.chosen_as === "best") aggBox.appendChild(el("div", { class: "muted small best-mark" }, "Chosen as the best bot when the seat was set up."));
+  };
+  if (bot.profile == null) bot.profile = "best";
+  profileFor(bot.profile).then(drawAgg);
+  return [fieldOf("Bot", profileSelect(bot, "profile", drawAgg, { best: true, fallback: "best" })), aggBox];
+}
+
+/** A hybrid seat's handicap, whose numbers it plays with at its difficulty level (P3.6.2): "AI bonuses, like the bot"
+ *  (the default) or "a person's values, like a model". Bound to `s.handicap`. */
+function handicapSelect(s) {
+  if (!s.handicap) s.handicap = "ai";
+  return el("select", { class: "handicap",
+    title: "Whose numbers this seat plays with at its difficulty level: the AI's bonuses, as a bot seat does, or a person's values, as an LLM seat does.",
+    onchange: (e) => { s.handicap = e.target.value; } },
+  ...HANDICAPS.map(([v, text]) => el("option", { value: v, selected: s.handicap === v }, text)));
+}
+
+/** Who decides each of the ten kinds of a hybrid seat's diplomacy, its bot or its model, with the three presets
+ *  (P3.6.8); it redraws itself, and says so when the model would decide nothing. Bound to `H.owners`. */
+function ownersGrid(H) {
+  const box = el("div", { class: "hybrid-owners" });
+  const draw = () => {
+    clear(box);
+    const preset = presetOf(H.owners);
+    const label = (k) => (CATEGORIES.find(([c]) => c === k) || [k, k])[1];
+    const presets = el("div", { class: "row" }, el("span", { class: "muted small" }, "The model decides:"),
+      ...PRESETS.map(([name, text, cats]) => el("button", { type: "button", class: `small preset ${preset === name ? "active" : ""}`,
+        "data-preset": name, title: cats.map(label).join(", "), onclick: () => { H.owners = ownersMap(name); draw(); } }, text)),
+      el("span", { class: "muted small" }, preset ? "" : "a choice of its own"));
+    const grid = el("div", { class: "hybrid-grid" }, ...CATEGORIES.map(([k, text, help]) => {
+      const mine = H.owners[k] === "llm";
+      const pick = (owner) => () => { H.owners = { ...H.owners, [k]: owner }; draw(); };
+      return el("div", { class: "hybrid-cat", title: help, "data-cat": k },
+        el("span", {}, text),
+        el("span", { class: "owner-toggle" },
+          el("button", { type: "button", class: `small ${mine ? "" : "active"}`, "aria-pressed": String(!mine), onclick: pick("bot") }, "Bot"),
+          el("button", { type: "button", class: `small ${mine ? "active" : ""}`, "aria-pressed": String(mine), onclick: pick("llm") }, "Model")));
+    }));
+    const problem = hybridProblem(H);
+    box.append(presets, grid, problem ? el("div", { class: "warn small" }, problem) : null);
+  };
+  draw();
+  return box;
+}
+
+/** A hybrid seat's form (P3.6.8): the bot that plays its turns and the seat's handicap at its difficulty level (`level`,
+ *  when the form knows it), the model that negotiates (its machine, where the caller needs a grant for pooled
+ *  prompts), who decides each kind of diplomacy, the advisor and how often the diplomat is called when nothing else
+ *  calls it. Without `model` (a scenario's default seat) the model is picked when the game starts. Works on `s` in
+ *  place; `rerender` redraws the parent (the model's form asks it when its machine changes). */
+export function hybridForm(s, rerender, { model = true, level = "" } = {}) {
+  s.hybrid = hybridState(s.hybrid);
+  s.bot = s.bot && Object.keys(s.bot).length ? s.bot : { aggression: 0.4 };
+  if (!s.handicap) s.handicap = "ai";
+  const H = s.hybrid;
+  const every = el("input", { type: "number", min: PROMPT_EVERY.min, max: PROMPT_EVERY.max, step: 1, value: H.prompt_every,
+    class: "prompt-every", style: { width: "64px" },
+    oninput: (e) => { H.prompt_every = e.target.value === "" ? PROMPT_EVERY.default : +e.target.value; } });
+  const box = el("div", { class: "seat-extra hybrid-form" },
+    el("div", { class: "hybrid-bot" }, ...botFields(s.bot),
+      fieldOf(`Handicap at ${level || "its difficulty level"}`, handicapSelect(s))));
+  if (model) {
+    if (!s.llm || !Object.keys(s.llm).length) s.llm = defaultLLM();
+    box.appendChild(el("div", { class: "hybrid-model" }, el("div", { class: "muted small" }, "Its model (for the diplomacy below):"),
+      llmForm(s.llm, rerender, { purpose: "pooled", turns: false })));
+  } else {
+    box.appendChild(el("div", { class: "muted small" }, "Its model is picked when a game starts from the scenario (Play…)."));
+  }
+  box.append(ownersGrid(H),
+    el("div", { class: "row" },
+      el("label", { title: "With the advisor on, each call of the diplomat shows it the bot's view: what each deal is worth in gold, its war readiness, its spare luxuries and what it would ask for." },
+        el("input", { type: "checkbox", class: "advisor", checked: H.advisor, onchange: (e) => { H.advisor = e.target.checked; } }), " Advisor (the bot's view)"),
+      el("label", { title: "The diplomat is called when something happens (first contact, a war declared on the seat, a deal running out, a vote, a large change in strength), when another civilization talks to it, and at least this often." },
+        "Call the diplomat at least every ", every, " turns")));
   return box;
 }
 
@@ -511,11 +628,12 @@ function renderNewGame(card, rules, meta, refresh) {
   function renderSeats() {
     clear(seatsBox);
     seats.forEach((s, i) => {
-      const type = sel([["human", "Human"], ["bot", "Scripted bot"], ["llm", "LLM (server-run)"], ["mcp", "MCP client"]], s.type);
+      const type = sel(SEAT_KINDS, s.type);
       type.onchange = () => {
         s.type = type.value;
         if (s.type === "llm" && !s.llm) s.llm = defaultLLM();
-        if (s.type === "bot" && !s.bot) s.bot = { aggression: 0.4 };
+        if ((s.type === "bot" || s.type === "hybrid") && !s.bot) s.bot = { aggression: 0.4 };
+        if (s.type === "hybrid" && !s.hybrid) s.hybrid = newHybrid();
         renderSeats();
       };
       const nation = sel(nationOptions, s.nation || "random");
@@ -526,24 +644,20 @@ function renderNewGame(card, rules, meta, refresh) {
       const color = colorPicker(palette, s, others, (c) => { s.color = c; renderSeats(); });
       const remove = el("button", { class: "small", disabled: seats.length <= 1, onclick: () => { seats.splice(i, 1); renderSeats(); } }, "✕");
       const diff = sel([["", "Game difficulty"], ...rules.difficulty_list.map((k) => [k, k])], s.difficulty || "");
-      diff.onchange = () => { s.difficulty = diff.value; };
-      diff.title = "This seat's difficulty. Bots get the level's AI bonuses; humans and AI models get its player values.";
-      const row = el("div", { class: "seat-row" }, el("b", {}, `P${i}`), type, nation, diff, name, color, remove);
+      // a hybrid seat's form names the level its handicap applies at: redrawn when the level changes
+      diff.onchange = () => { s.difficulty = diff.value; if (s.type === "hybrid") renderSeats(); };
+      diff.title = s.type === "hybrid"
+        ? "This seat's difficulty level. Its handicap (below, beside its bot) says whose numbers it plays with at that level."
+        : "This seat's difficulty. Bots get the level's AI bonuses; humans and AI models get its player values.";
+      const row = el("div", { class: "seat-row", "data-seat": i }, el("b", {}, `P${i}`), type, nation, diff, name, color, remove);
       if (s.type === "llm") {
         s.llm = s.llm || defaultLLM();
         row.appendChild(llmForm(s.llm, renderSeats));
       } else if (s.type === "bot") {
         s.bot = s.bot || { aggression: 0.4 };
-        const aggBox = el("div");
-        const drawAgg = (prof) => {
-          clear(aggBox);
-          aggBox.appendChild(prof && prof.aggression != null
-            ? field("Aggression", el("span", { class: "muted small" }, `${prof.aggression} (fixed by the profile)`))
-            : field("Aggression", el("input", { type: "range", min: 0, max: 1, step: 0.1, value: s.bot.aggression, oninput: (e) => { s.bot.aggression = +e.target.value; } })));
-        };
-        if (s.bot.profile == null) s.bot.profile = "best";
-        profileFor(s.bot.profile).then(drawAgg);
-        row.appendChild(el("div", { class: "seat-extra" }, field("Bot", profileSelect(s.bot, "profile", drawAgg, { best: true, fallback: "best" })), aggBox));
+        row.appendChild(el("div", { class: "seat-extra" }, ...botFields(s.bot)));
+      } else if (s.type === "hybrid") {
+        row.appendChild(hybridForm(s, renderSeats, { level: s.difficulty || "the game's difficulty" }));
       } else if (s.type === "mcp") {
         row.appendChild(el("div", { class: "seat-extra muted" }, "After creating the game, open Join / Seats for the MCP command to connect Claude Code or another MCP client."));
       }
@@ -563,6 +677,8 @@ function renderNewGame(card, rules, meta, refresh) {
   renderSeats();
 
   const create = el("button", { class: "primary", style: { marginTop: "12px" }, onclick: async () => {
+    const wrong = seats.map((s, i) => [i, s.type === "hybrid" ? hybridProblem(s.hybrid) : null]).find(([, why]) => why);
+    if (wrong) { toast(`P${wrong[0]}: ${wrong[1]}`, "error"); return; }
     create.disabled = true;
     try {
       const body = {
@@ -580,8 +696,7 @@ function renderNewGame(card, rules, meta, refresh) {
           ...chatConfig(f.chatModel.value, f.chatPerson.value, f.chatCap.value),
           ...(f.map.value ? {} : gen.value()),
         },
-        seats: seats.map((s) => ({ type: s.type, civ_name: s.civ_name || null, nation: s.nation === "random" ? null : s.nation,
-                                   difficulty: s.difficulty || null, color: s.color, llm: s.llm, bot: s.bot })),
+        seats: seats.map(seatPayload),
       };
       const info = await api.createGame(body);
       toast(`Created ${info.name}`);

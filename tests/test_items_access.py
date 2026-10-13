@@ -1367,7 +1367,7 @@ class BestBot(ItemCase):
                  for pid, rating in ((private, 1700), (shared, 1600), ("standard", 1500))]
         with mock.patch.object(ratings, "ranked_profiles", lambda board_=None: [dict(p) for p in board]):
             self.assertEqual(ratings.best_profile(), shared)
-            self.assertEqual(sess._pin_best({"profile": "best"}), {"profile": shared, "chosen_as": "best"})
+            self.assertEqual(sess._seat_bot({"profile": "best"}), {"profile": shared, "chosen_as": "best"})
             self.assertEqual(profiles.resolve("best")["profile"], shared)
             for who in ("owner", "stranger", "admin", "anonymous"):
                 with self.subTest(caller=who):

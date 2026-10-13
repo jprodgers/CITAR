@@ -53,6 +53,19 @@ table.list th, table.list td { text-align: left; padding: 6px 8px; border-bottom
 table.list th { font-size: 12px; color: var(--muted); font-weight: 500; }
 .seat-row { display: grid; grid-template-columns: 30px 110px minmax(120px, 1fr) 120px minmax(110px, 1fr) 46px auto; gap: 8px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .seat-extra { grid-column: 3 / 8; display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px; }
+/* a hybrid seat's form (lobby.js hybridForm): the bot, its model, who decides each kind of diplomacy, the advisor */
+.seat-extra.hybrid-form { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.hybrid-form .hybrid-bot { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px; }
+.hybrid-form .hybrid-model > .seat-extra { margin-top: 4px; }
+.hybrid-owners { display: flex; flex-direction: column; gap: 6px; }
+.hybrid-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 12px; }
+.hybrid-cat { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 2px 0; border-bottom: 1px dotted var(--border); }
+.owner-toggle { display: inline-flex; }
+.owner-toggle button { border-radius: 0; }
+.owner-toggle button:first-child { border-radius: 6px 0 0 6px; }
+.owner-toggle button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.seat-dialog-extra .hybrid-form, .seat-dialog-extra > .seat-extra { margin-top: 6px; }
+.seat-state { font-size: 12px; color: #cfe2ff; }
 code, pre { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 pre { background: #0b0e13; padding: 8px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
 

@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from .. import engine_api
 from ..engine_api import ActionError, EngineCrash, EngineGame
-from .session import CRASHED, SessionManager, GameSession, SAVE_DIR
+from .session import CRASHED, SessionManager, GameSession, SAVE_DIR, _clean_bot
 from .benchmarks import BenchmarkScheduler
 from .admin_api import router as admin_router
 from .items_api import router as items_router
@@ -606,9 +606,12 @@ def game_summary(gid: str, request: Request, p: Principal = Depends(principal), 
 
 def _seat_label(seat, model: Optional[str]) -> str:
     """How a seat a model plays is named where its game is summed up: its model, or, for a hybrid seat, "Hybrid: <the
-    bot's profile> + <the model>" (P3.6.7)."""
+    bot's profile> + <the model>" (P3.6.7), the profile marked "(best)" when the seat asked for the best-ranked bot, as
+    the web client's ``seatLabel`` (``citar/web/js/seats.js``) names it."""
     if seat.type == "hybrid":
-        return f"Hybrid: {(seat.bot or {}).get('profile') or 'standard'} + {model or 'its model'}"
+        bot = seat.bot or {}
+        best = " (best)" if bot.get("chosen_as") == "best" else ""
+        return f"Hybrid: {bot.get('profile') or 'standard'}{best} + {model or 'its model'}"
     return model or "a model"
 
 
@@ -682,21 +685,27 @@ def delete_game(gid: str, request: Request, p: Principal = Depends(principal),
 
 
 class SeatUpdate(BaseModel):
-    """A change to one seat: its type, and the model configuration if it is an LLM seat."""
+    """A change to one seat: its type; the model configuration of a seat a model plays; the bot of a bot or hybrid seat;
+    a hybrid seat's settings (``hybrid``: owners, advisor, prompt_every, design/phase3-features.md P3.6.2); and its
+    ``handicap`` (``ai`` or ``human``: a hybrid seat's, or any other seat's own)."""
     type: Optional[str] = None
     llm: Optional[dict] = None
     bot: Optional[dict] = None
     name: Optional[str] = None
+    hybrid: Optional[dict] = None
+    handicap: Optional[str] = None
 
 
 @app.post("/api/games/{gid}/seats/{pid}")
 def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
                 p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """Change who controls a seat (e.g. hand a bot seat to an MCP client, or take over as human).
+    """Change who controls a seat (e.g. hand a bot seat to an MCP client, make it a hybrid seat, or take over as human).
 
-    A new model block, or a seat made a model seat, goes through the same gates as a new game's (P3.2.9): a member's
-    block names a machine, and the caller must be admitted to a pooled machine it names. A refusal leaves the seat as
-    it was."""
+    A new model block, or a seat made a model seat (an LLM or a hybrid seat), goes through the same gates as a new
+    game's (P3.2.9): a member's block names a machine, and the caller must be admitted to it by the seat's task class
+    (P3.3.7: games for an LLM seat, pooled prompts for a hybrid one), at every such change. Hybrid settings, a
+    handicap or a bot that are not allowed are a 400 with the reason; a bot's "(best)" mark is the server's
+    (``GameSession.update_seat``). A refusal leaves the seat as it was."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     if not 0 <= pid < len(s.seats):
         raise HTTPException(404, "No such seat.")
@@ -715,9 +724,10 @@ def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
             llm = checked["llm"]
     try:
         # the session keeps the civilization's engine controller in step with the seat type
-        s.update_seat(pid, type=body.type, llm=llm, bot=body.bot, name=body.name)
-    except ValueError:
-        raise HTTPException(400, "Invalid seat type.")
+        s.update_seat(pid, type=body.type, llm=llm, bot=body.bot, name=body.name, hybrid=body.hybrid,
+                      handicap=body.handicap)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
     s.autosave(force=True)
     return s.info(include_tokens=True)
 
@@ -1433,6 +1443,22 @@ def _editor_payload(eid: str, ed: dict, results=None) -> dict:
             "can_undo": bool(ed["undo"]), "results": results}
 
 
+def _game_seat_default(g: EngineGame, seat) -> dict:
+    """A running game's seat as a scenario's default seat (``g`` the copy of its game the scenario starts from): its
+    type and name, and a hybrid seat's settings, its bot and its handicap, so a scenario made from a game with a hybrid
+    seat launches with it. A model block stays behind: the launch names the machine. A bot chosen as the best one is
+    "Best bot" again, pinned when the scenario is launched (the mark is the server's, never taken from a seat)."""
+    out = {"type": seat.type, "label": seat.name}
+    if seat.type == "hybrid":
+        out["hybrid"] = dict(seat.hybrid or {})
+        bot = dict(seat.bot or {})
+        if bot.pop("chosen_as", None) == "best":
+            bot["profile"] = "best"
+        out["bot"] = bot
+        out["handicap"] = g.player(seat.player).get("handicap") or "ai"
+    return out
+
+
 class EditorOpen(BaseModel):
     """What to open a scenario editor on: a map, a game, a save, or nothing."""
     source: str = "map"               # map | generate | scenario | save | game
@@ -1468,7 +1494,8 @@ def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(princ
             if len(players) > engine_api.max_players():
                 raise HTTPException(400, "Too many players.")
             cfg["players"] = [{"nation": pl.get("nation") or None, "difficulty": pl.get("difficulty") or None,
-                               "controller": (pl.get("type") if pl.get("type") in ("human", "llm", "mcp", "bot") else "human"),
+                               "controller": (pl.get("type") if pl.get("type") in ("human", "llm", "mcp", "bot", "hybrid")
+                                              else "human"),
                                "name": pl.get("civ_name") or None} for pl in players]
             g = EngineGame.new(cfg)
             meta["seats"] = [{"type": pl.get("type") or "bot"} for pl in players]
@@ -1491,7 +1518,7 @@ def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(princ
             with s.lock:
                 g = EngineGame.from_state(s.game.state_dict())
             meta["name"] = f"Scenario from {s.name} turn {g.turn}"
-            meta["seats"] = [{"type": seat.type if seat.type != "human" else "human", "label": seat.name} for seat in s.seats]
+            meta["seats"] = [_game_seat_default(g, seat) for seat in s.seats]
         else:
             raise HTTPException(400, f"Unknown source '{body.source}'.")
     except (ValueError, ActionError) as e:
@@ -1560,14 +1587,52 @@ def editor_meta(eid: str, body: EditorMeta, me=Depends(require_user)):
     ed = _editor(eid, me)
     seats = None
     if body.seats is not None:
-        seats = [_member_seat(seat, me, playing=False) if isinstance(seat, dict) else seat
-                 for seat in ed["game"].normalize_seats(body.seats)]
+        try:
+            normal = ed["game"].normalize_seats(body.seats)
+        except ActionError as e:            # a seat's handicap or automatic decisions the engine does not read
+            raise HTTPException(400, str(e)) from None
+        sent = body.seats
+        seats = [_scenario_seat(_member_seat(seat, me, playing=False), i, sent[i] if i < len(sent) else None)
+                 if isinstance(seat, dict) else seat for i, seat in enumerate(normal)]
     for k in ("id", "name", "description"):
         if getattr(body, k) is not None:
             ed["meta"][k] = getattr(body, k)
     if seats is not None:
         ed["meta"]["seats"] = seats
     return {"meta": ed["meta"]}
+
+
+def _scenario_seat(seat: dict, i: int, sent=None) -> dict:
+    """A scenario's seat (``seat``, as ``normalize_seats`` made it of ``sent``, the entry the caller sent for it, if
+    any) checked as a game's seat is, so a scenario is never saved with a seat its launch would refuse: a 400 with the
+    reason, naming the seat as ``normalize_seats`` does ("Seat 1" for P1), when it is not allowed.
+
+    - A model block or a bot sent as anything but an object is refused, as a game's seat refuses it
+      (``servers.llm_block``, ``session._clean_bot``), and so are a hybrid seat's settings (``normalize_hybrid``):
+      ``normalize_seats`` keeps only objects, so the seat would otherwise be saved with defaults the caller never
+      sent. A non-hybrid seat's ``hybrid``, which nothing reads, is left to ``normalize_seats``, as a game's seat
+      ignores it.
+    - The bot is kept as the server keeps a seat's (``_clean_bot``: its aggression a number, no ``chosen_as``); "Best
+      bot" stays ``best``, pinned when the scenario is launched.
+    - A hybrid seat's settings are checked as a game's are (``normalize_hybrid``, P3.6.2) and kept as they read, the
+      owners as the whole map, and its handicap one there is."""
+    from .. import servers
+    from ..agents import hybrid
+    given = sent if isinstance(sent, dict) else {}
+    try:
+        servers.llm_block(given.get("llm"))
+        bot = given.get("bot") if given.get("bot") is not None else seat.get("bot")
+        if bot is not None:
+            seat = {**seat, "bot": _clean_bot(bot)}
+        if seat.get("type") != "hybrid":
+            return seat
+        settings = given.get("hybrid")
+        block = hybrid.normalize_hybrid(settings if settings is not None and not isinstance(settings, dict)
+                                        else seat.get("hybrid"))
+        handicap = hybrid.check_handicap(seat.get("handicap"))
+    except ValueError as e:
+        raise HTTPException(400, f"Seat {i}: {e}") from None
+    return {**seat, "hybrid": block, "handicap": handicap}
 
 
 @app.post("/api/scenario-editor/{eid}/save")
@@ -1580,8 +1645,8 @@ def editor_save(eid: str, body: EditorMeta, me=Depends(require_user), sdb: DbSes
     ed = _editor(eid, me)
     editor_meta(eid, body, me)
     m = ed["meta"]
-    m["seats"] = [_member_seat(seat, me, playing=False) if isinstance(seat, dict) else seat
-                  for seat in (m.get("seats") or [])]
+    m["seats"] = [_scenario_seat(_member_seat(seat, me, playing=False), i) if isinstance(seat, dict) else seat
+                  for i, seat in enumerate(m.get("seats") or [])]
     if not (m.get("id") or m.get("name")):
         raise HTTPException(400, "Give the scenario a name.")
     _seat_profiles(sdb, me, m["seats"])
