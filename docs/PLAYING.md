@@ -8,7 +8,9 @@ the server is on your own machine or somewhere else.
 The lobby lists running games and saved ones.
 
 - **Create game** — map, speed, difficulty, victory conditions and seats. Each seat picks a
-  civilization or takes a random one; you can rename your civ and your cities afterwards.
+  civilization or takes a random one; you can rename your civ and your cities afterwards. A seat is a
+  person, a scripted bot, an LLM, a [hybrid seat](#hybrid-seats) (a bot that plays the turns with a
+  model that negotiates) or an MCP client.
   **BenchmarkCiv** has no unique abilities, units or buildings, which is what benchmark seats use
   so that a comparison is about the player and not the civ.
 - **Map generation** (the fold-out panel above the seats) changes the world itself:
@@ -28,8 +30,12 @@ The lobby lists running games and saved ones.
   default), so a short drop costs nothing — see [AI_PLAYERS.md](AI_PLAYERS.md#when-the-model-server-goes-away).
 - **Chat**: how long a chat waits for an answer, and how long it may grow (see
   [Chat settings](#chat-settings)).
-- **Load** on a saved game with a human seat takes you straight in. Games with no LLM seats resume
-  automatically; games with them start paused so you can check the model settings first.
+- **Load** on a saved game with a human seat takes you straight in. Games with no seat a model plays
+  (an LLM or a hybrid seat) resume automatically; games with one start paused so you can check the
+  model settings first.
+- **Join / Seats** on a running game lists its seats with their tokens and lets whoever manages the
+  game change who plays each one, a hybrid seat's settings included; the change takes effect on the
+  seat's next turn.
 - **▶ Play** resumes a running game. **Watch** opens a game with no human seat with full vision.
 - **Delete** removes every save of a game.
 
@@ -41,6 +47,43 @@ copied without its journal does not load. Saves are written while the game plays
 of bots alone is saved every turn. Loading an older save and playing on from it starts a new
 timeline in a new journal (`journal-2.cjnl`, ...), and every other save of the game still loads.
 Saves made by version 0.1.5 or earlier (the Python engine) do not load in this version.
+
+### Hybrid seats
+
+A hybrid seat is a scripted bot that plays the turns (cities, research, units, every war's fighting)
+with a language model that decides the kinds of diplomacy you hand it ([AI players](AI_PLAYERS.md#hybrid-seats)
+explains what it does in play). To set one up, pick **Hybrid (bot plays, model negotiates)** as a
+seat's kind in the lobby. The seat then asks for:
+
+- **Bot** and **Aggression**: the bot that plays its turns, as for a bot seat.
+- **Handicap at its difficulty level**: whose numbers the seat plays with at the level beside it,
+  **AI bonuses, like the bot** (the default) or **A person's values, like a model**.
+- **Its model**: a machine and one of its models, with an optional persona. A hybrid seat's prompts
+  are pooled prompts, so on another member's machine you need a grant for pooled prompts, not for
+  games; the form says when a machine would refuse you.
+- **The model decides**: the ten kinds of diplomacy (trades, agreements, peace, war, denouncing, the
+  United Nations, city-states, espionage, captured cities and talk), each **Bot** or **Model**, and three
+  presets: **Trade only** (trades and talk, the default), **All but war** and **Everything**. A grid of
+  your own shows no preset. The model must decide at least one kind: a seat that hands it none is a bot
+  seat.
+- **Advisor (the bot's view)**: on, each call shows the model what the bot thinks of the deals on the
+  table, its war readiness and its spare luxuries.
+- **Call the diplomat at least every N turns** (1 to 50, 10 by default): it is called sooner when
+  something happens, and whenever another civilization talks to it.
+
+**Join / Seats** offers the same form for a running game: make a seat hybrid, change its kinds, its
+handicap or its model, or make it a bot again (which keeps none of the hybrid seat's numbers). Each
+change that seats a model is checked again against the machines you may use. A **scenario**'s default
+seats can be hybrid too (Scenarios, Edit, the Scenario tab): the scenario keeps the bot, the kinds, the
+handicap and the advisor, and its **Play…** dialog asks for the model's machine when a game starts.
+
+In the game, the **Civs** tab and the "waiting for" note say what the seat is doing: **bot playing**
+while its bot plays, **diplomat thinking** while its model decides, **queued #2** while the model's
+prompt waits for its machine, and **diplomat paused** while you have paused the game. Its chat window
+shows "thinking…" while its model answers a chat; a chat its bot decides is answered at once. The game
+lists it as its bot and its model everywhere ("Hybrid: standard + gemma"). **📊 Stats** shows, for a hybrid seat, who decides
+what, its diplomat's calls (how each ended, what called it, its steps, the model's time and its wait for
+the machine, the tools it used) and the calls the bot refused.
 
 ### Watching AI games
 
@@ -174,7 +217,7 @@ sets how long a chat waits for the side whose move it is, and how long it may gr
 
 | Setting | Default | When it runs out |
 |---|---|---|
-| **AI answers within** (minutes) | 10 | An AI model (an LLM or MCP seat) that has not answered is taken to have declined, "(no reply in time)". The time it spends waiting for its machine counts. |
+| **AI answers within** (minutes) | 10 | An AI model (an LLM or MCP seat) that has not answered is taken to have declined, "(no reply in time)"; a hybrid seat's bot answers in its model's place. The time it spends waiting for its machine counts. |
 | **People within** (minutes) | 5 | The chat closes as expired, "(no reply in time)", whoever opened it: an AI waiting on you, or another person. |
 | **At most ... messages** | the rules' own (30) | The message that would pass it closes the chat instead. Left empty, the game keeps its ruleset's cap. |
 

@@ -56,7 +56,8 @@ cp citar/web/js/thing.js /tmp/thing.mjs && node --check /tmp/thing.mjs
 ```
 
 The client's pure parts (no network: `citar/web/js/machines.js`, the Servers page's rules; `chatmodel.js`, the chat
-window's state; `util.js`'s dialogs and `chat.js`'s windows, over a few stand-ins for the DOM) have Node tests in
+window's state; `seats.js`, the seat labels and the hybrid seat's payload; `util.js`'s dialogs and `chat.js`'s windows,
+over a few stand-ins for the DOM) have Node tests in
 `citar/web/tests/`. Node 22 or later takes the files as a pattern, not a folder:
 
 ```bash
