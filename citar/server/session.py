@@ -219,8 +219,10 @@ class GameSession:
                 "resources", "on_disconnect", "reconnect_seconds")}
             # the lobby's chat settings as the game plays them: the defaults when it gave none (P3.5.2)
             | self.chat.settings,
+            # a major's difficulty level and whose numbers it plays with at it (the Join/Seats dialog shows both)
             "players": [{"id": p["id"], "name": p["name"], "color": p["color"], "alive": p["alive"], "kind": p["kind"],
-                         **({"difficulty": p["difficulty"]} if p["kind"] == "major" else {})}
+                         **({"difficulty": p["difficulty"], "handicap": p.get("handicap")} if p["kind"] == "major"
+                            else {})}
                         for p in summ["players"]],
             "seats": [s.public(include_tokens) for s in self.seats],
             "agent_status": {str(k): v for k, v in self.agent_status.items()},
@@ -1159,6 +1161,9 @@ class GameSession:
         """
         from ..agents import hybrid as hybrid_mod
         moved = False
+        if isinstance(bot, dict):
+            # "Best bot" is pinned to the profile it stands for now, as at creation (it reads the ratings: off the lock)
+            bot = _pin_best(bot)
         with self.lock:
             seat = self.seats[pid]
             before = (seat.type, (seat.llm or {}).get("server_id"), (seat.llm or {}).get("model"))
@@ -2393,7 +2398,13 @@ class SessionManager:
             pid = p["id"]
             sc = dict(defaults[pid]) if pid < len(defaults) else {}
             if seats_cfg and pid < len(seats_cfg) and seats_cfg[pid]:
-                sc.update({k: v for k, v in seats_cfg[pid].items() if v is not None})
+                given = seats_cfg[pid]
+                if sc.get("type") == "hybrid" and given.get("type") not in (None, "hybrid"):
+                    # a hybrid seat's handicap is one of its hybrid settings, not a choice for whatever the launch seats
+                    # there instead (a bot with a person's numbers): it goes with the settings, unless the launch names one
+                    sc.pop("hybrid", None)
+                    sc.pop("handicap", None)
+                sc.update({k: v for k, v in given.items() if v is not None})
             if check_seat is not None:
                 sc = check_seat(sc)
             stype = sc.get("type") or "bot"
