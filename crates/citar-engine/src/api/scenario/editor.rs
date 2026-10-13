@@ -172,9 +172,10 @@ pub fn default_seats(g: &Game) -> Vec<Value> {
 
 /// A scenario's seat list checked against its civilizations (`scenario.normalize_seats`,
 /// `scenario.py:565-581`): the default seats, each changed by the entry given for it: a seat
-/// type the list knows, a label (at most 60 characters), the settings of its model or bot (an
-/// API key never kept), and its handicap and automatic decisions, checked as the lobby checks
-/// them. Entries past the civilizations, and entries that are not objects, are ignored.
+/// type the list knows, a label (at most 60 characters), the settings of its model, its bot and,
+/// for a hybrid seat, who decides each kind of its diplomacy (`hybrid`; an API key never kept),
+/// and its handicap and automatic decisions, checked as the lobby checks them. Entries past the
+/// civilizations, and entries that are not objects, are ignored.
 ///
 /// # Errors
 /// [`ErrCode::BadParam`], naming the seat, for a handicap or automatic decisions that are not
@@ -200,7 +201,10 @@ pub fn normalize_seats(g: &Game, seats: Option<&Value>) -> Result<Vec<Value>, Ac
             let cut = text.char_indices().nth(LABEL_CHARS).map_or(&*text, |(k, _)| &text[..k]);
             seat.insert("label".into(), json!(cut));
         }
-        for k in ["llm", "bot"] {
+        // Python kept only a seat's `llm` and `bot`, so a hybrid seat saved in a scenario lost
+        // the categories its model decides and launched as the bot it plays with.
+        // refcheck: scenario-seats-keep-hybrid
+        for k in ["llm", "bot", "hybrid"] {
             if let Some(Value::Object(m)) = s.get(k) {
                 let kept: Map<String, Value> = m
                     .iter()

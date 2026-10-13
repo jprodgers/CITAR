@@ -1142,6 +1142,34 @@ impl Game {
         })?)
     }
 
+    /// What `bot`, playing `pid`, makes of a deal with `other` in which `pid` gives `give` and
+    /// receives `receive`, written as a caller writes deal items (`EngineGame.bot_evaluate`): its
+    /// worth in gold from `pid`'s side, positive for a deal the bot would accept as a whole
+    /// (`citar_bot::evaluate`, on the proposal `open_negotiation` would make of them). It reads
+    /// the seat's memory and changes nothing. A hybrid seat's veto on its model's mixed deals and
+    /// the diplomacy leaderboard's valuation of every proposal (design/phase3-features.md P3.6.6,
+    /// P3.6.10). 0 for no items at all; `ActionError` for items that do not read, `ValueError`
+    /// for a player that is no major civilization of the game.
+    #[pyo3(signature = (pid, bot, other, give_json = None, receive_json = None))]
+    fn bot_evaluate(
+        &self,
+        py: Python<'_>,
+        pid: i64,
+        bot: &Bound<'_, Bot>,
+        other: i64,
+        give_json: Option<&[u8]>,
+        receive_json: Option<&[u8]>,
+    ) -> PyResult<f64> {
+        let spec = bot.get().snapshot();
+        Ok(self.read(py, |g| {
+            let (p, o) = (major_of(g, pid)?, major_of(g, other)?);
+            let give = parse_opt(give_json, "The items given")?;
+            let receive = parse_opt(receive_json, "The items received")?;
+            let terms = deals::make_proposal(g, p, o, Some(&give), Some(&receive))?;
+            Ok(terms.map_or(0.0, |t| citar_bot::evaluate(g, &spec, p, o, t.gives(p), t.gives(o))))
+        })?)
+    }
+
     // ---- Tests -----------------------------------------------------------------------------
 
     /// What a rule script reads of the game (`api::inspect`): `query_json` is `{"what": ...}`.

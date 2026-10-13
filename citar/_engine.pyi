@@ -349,6 +349,11 @@ class Game:
         pid."""
     def bot_advice(self, pid: int, bot: Bot, nid: Optional[int] = None) -> bytes:
         """{deal_value, war_readiness, spare_luxuries, wants}."""
+    def bot_evaluate(self, pid: int, bot: Bot, other: int, give_json: Optional[bytes] = None,
+                     receive_json: Optional[bytes] = None) -> float:
+        """citar_bot::evaluate of the proposal open_negotiation would make of give and receive: its worth in gold from
+        pid's side, 0 for no items. ActionError for items that do not read, ValueError for a player that is no
+        major."""
 
     # tests (HAS_TEST_OPS)
     def inspect(self, query_json: bytes) -> bytes: ...
