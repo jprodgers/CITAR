@@ -3,8 +3,8 @@
 // (game.js) draws with it, and citar/web/tests/minimap.test.mjs tests it.
 //
 // A person's minimap shows what their civilization has explored, a little more, and no more: early on a window
-// around the capital, from the Renaissance the explored tiles near the home continent, from the Information era the
-// whole map. The window only grows, so the minimap zooms out over the game and never back in; the last one is kept
+// around the capital, from the Renaissance the explored tiles near the home continent (those the civilization has
+// seen joined to its home), from the Information era the whole map. The window only grows, so the minimap zooms out over the game and never back in; the last one is kept
 // per game and seat in localStorage. Spectators, model seats and the recap show the whole map.
 //
 // A box is {x0, y0, x1, y1}, its corners inclusive (as the engine's `minimap.home` is). On an axis that wraps it may
@@ -158,7 +158,8 @@ export function exploredBox(tiles, width, height, wrapX, wrapY) {
  *  2. capped by the stage (the engine's `minimap.stage`): `early`, on an axis longer than EARLY's, to EARLY's size
  *     centred on the capital (or the explored box's middle; inside the map near an edge that does not wrap), within
  *     the explored box; `renaissance`, to the home box
- *     (`home`, the engine's: the explored tiles of the home continent) padded by PAD, within the explored box;
+ *     (`home`, the engine's: the explored tiles of the home continent joined to the capital through explored
+ *     tiles) padded by PAD, within the explored box;
  *     `information`, the whole map;
  *  3. united with `prev`, the window shown before (the smallest box covering both), so that it never shrinks.
  * Returns the box with its size in tiles (`cols`, `rows`). With nothing explored, `prev` or the whole map.

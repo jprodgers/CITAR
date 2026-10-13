@@ -127,7 +127,8 @@ The minimap in the top-left corner shows the world as your civilization knows it
 - **Early on** it shows what you have explored around your capital, a few tiles past it, and at most
   44 tiles across by 28 down on a larger map.
 - **From the Renaissance era** it shows what you have explored of your home continent (your capital's),
-  with a few tiles of sea around it.
+  with a few tiles of sea around it. Land your scouts found far away counts once the land you explored
+  joins it to home: the minimap does not tell you whether far land is your continent before you know.
 - **From the Information era** it shows the whole map.
 
 It only ever grows: the minimap zooms out over the game and never back in, and remembers how far it
