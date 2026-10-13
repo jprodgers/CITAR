@@ -129,7 +129,7 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .alert-btn { background: #4a1616; border-color: #a33; }
 .alert-item { display: flex; gap: 6px; }
 .alert-icon { width: 18px; text-align: center; flex: none; }
-.minimap { position: absolute; left: 10px; top: 10px; border: 1px solid var(--border); border-radius: 4px; background: #000; cursor: pointer; }
+.minimap { position: absolute; left: 10px; top: 10px; border: 1px solid var(--border); border-radius: 4px; background: #000; cursor: pointer; touch-action: none; }
 .banner { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: rgba(20,24,32,.92); border: 1px solid var(--border); font-weight: 600; z-index: 5; }
 /* End Turn while a chat holds the turn (chat.js): waiting with its countdown, armed to end when they answer */
 .end-turn.answer { background: #4a3b10; border-color: var(--warn); color: #ffe08a; }

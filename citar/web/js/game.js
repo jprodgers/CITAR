@@ -8,6 +8,9 @@ import { renderUnitPanel, renderCityPanel, openTechTree, openDiplomacy, openEmpi
 import { openMetrics } from "./metrics.js";
 import { ChatDock } from "./chat.js";
 import { agentState, isModelSeat, seatLabel } from "./seats.js";
+import { computeWindow, exploredBox, fit, inWindow, loadWindow, sameBox, saveWindow, tileCentre, toScreen, toTile,
+         wholeMap, windowKey } from "./minimap.js";
+import { SQRT3 } from "./hex.js";
 
 export class GameScreen {
   constructor(root, rules, gid, token, asPlayer) {
@@ -34,6 +37,8 @@ export class GameScreen {
     this._pending = false;
     this._lastTurnKey = null;
     this._centered = false;
+    this.mini = null;       // the minimap's window, its fit and the map it is of (updateMinimap)
+    this._miniLayer = null; // its tiles, drawn offscreen when the view's tiles or the window change
     this.build();
     // the docked chat windows, left of End Turn (design/phase3-features.md P3.5.6), clear of the panels when there is room
     this.chat = new ChatDock(this, { host: this.main, turnBox: this.turnBox,
@@ -74,13 +79,30 @@ export class GameScreen {
     this.renderer.onViewChange = () => this.drawMinimap();
     this.bindMouse();
     for (const node of [this.topbar, this.turnBox, this.sidePanel, this.unitPanel, this.cityPanel]) this.holdWhileHovered(node);
-    this.minimap.addEventListener("click", (e) => {
-      if (!this.view) return;
-      const r = this.minimap.getBoundingClientRect();
-      const x = Math.floor((e.clientX - r.left) / r.width * this.view.width);
-      const y = Math.floor((e.clientY - r.top) / r.height * this.view.height);
-      this.renderer.centerOn(x, y);
+    // the minimap: a click centres the main map on the tile under it, a drag pans it (P3.7.4)
+    this.minimap.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { this.minimap.setPointerCapture(e.pointerId); } catch { /* the drag still follows inside the widget */ }
+      this._miniDrag = true;
+      this.minimapCentre(e);
     });
+    this.minimap.addEventListener("pointermove", (e) => { if (this._miniDrag) this.minimapCentre(e); });
+    for (const end of ["pointerup", "pointercancel", "lostpointercapture"]) {
+      this.minimap.addEventListener(end, () => { this._miniDrag = false; });
+    }
+  }
+
+  // centre the main map on the minimap's tile under the pointer
+  minimapCentre(e) {
+    const m = this.mini;
+    if (!m) return;
+    const r = this.minimap.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const px = (e.clientX - r.left) * this.minimap.width / r.width, py = (e.clientY - r.top) * this.minimap.height / r.height;
+    const [x, y] = toTile(m.fit, m.win, m.map, px, py);
+    this.renderer.centerOn(x, y);
+    this.drawMinimap();
   }
 
   // Redrawing a bar or panel replaces its buttons and closes its dropdowns. In a fast AI game that happens several
@@ -214,6 +236,7 @@ export class GameScreen {
       if (!same) {
         this.model = modelFromView(v);
         this.renderer.setModel(this.model);
+        this.updateMinimap();
       }
       if (!this._centered) { this.centerHome(); this._centered = true; }
       if (this.selectedUnit != null && !v.units.some((u) => u.id === this.selectedUnit && u.owner === this.you)) this.deselect();
@@ -1049,37 +1072,84 @@ export class GameScreen {
     setTimeout(() => this.updateOverlay(), 900);
   }
 
-  drawMinimap() {
-    const v = this.view, m = this.model;
-    if (!v || !m) return;
+  // The minimap's window for this view (P3.7.3, minimap.js): a person's seat sees what it has explored, bounded by its
+  // era's stage and never shrinking (kept per game and seat in localStorage); spectators and AI seats the whole map.
+  updateMinimap() {
+    const v = this.view;
+    const map = { width: v.width, height: v.height, wrapX: !!v.wrap_x, wrapY: !!v.wrap_y };
+    let win, key = null;
+    if (!this.isSpectator && v.seat && v.seat.type === "human" && v.minimap && v.you != null) {
+      key = windowKey(this.gid, v.you);
+      const store = localStore();
+      const prev = this.mini && this.mini.key === key ? this.mini.win : loadWindow(store, key, map);
+      win = computeWindow({ explored: exploredBox(v.tiles, v.width, v.height, map.wrapX, map.wrapY),
+                            home: v.minimap.home, stage: v.minimap.stage, capital: v.minimap.capital, ...map, prev });
+      if (!sameBox(win, prev)) saveWindow(store, key, win, map);
+    } else {
+      win = wholeMap(map);
+    }
     const c = this.minimap;
-    const ctx = c.getContext("2d");
-    const sx = c.width / v.width, sy = c.height / v.height;
-    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, c.width, c.height);
+    this.mini = { win, map, key, fit: fit(win, c.width, c.height) };
+    this._miniLayer = null;
+  }
+
+  // the minimap's tiles and cities, drawn once per view or window onto an offscreen canvas
+  minimapLayer() {
+    const v = this.view, m = this.model, { win, map, fit: f } = this.mini;
+    const c = this.minimap;
+    const layer = document.createElement("canvas");
+    layer.width = c.width; layer.height = c.height;
+    const ctx = layer.getContext("2d");
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, layer.width, layer.height);
+    // each tile a box as wide as a hex and as tall as its row, so they tile the window with the map's proportions
+    const hw = f.scale * SQRT3, hh = f.scale * 1.5;
     for (let i = 0; i < m.tiles.length; i++) {
       const t = m.tiles[i];
       if (!t) continue;
       const x = i % v.width, y = Math.floor(i / v.width);
+      if (!inWindow(win, map, x, y)) continue;
+      const [cx, cy] = tileCentre(f, win, map, x, y);
       ctx.fillStyle = t.owner != null && m.players[t.owner] ? m.players[t.owner].color : (TERRAIN_COLORS[t.terrain] || "#444");
       ctx.globalAlpha = t.visible ? 1 : 0.55;
-      ctx.fillRect((x + (y & 1) * 0.5) * sx, y * sy, sx + 0.5, sy + 0.5);
+      ctx.fillRect(cx - hw / 2, cy - hh / 2, hw + 0.5, hh + 0.5);
     }
     ctx.globalAlpha = 1;
+    ctx.fillStyle = "#fff";
+    const dot = Math.max(2.5, Math.min(5, f.scale * 1.2));
     for (const city of v.cities) {
-      ctx.fillStyle = "#fff";
-      ctx.fillRect((city.x + (city.y & 1) * 0.5) * sx - 1.5, city.y * sy - 1.5, 3.5, 3.5);
+      if (!inWindow(win, map, city.x, city.y)) continue;
+      const [cx, cy] = tileCentre(f, win, map, city.x, city.y);
+      ctx.fillRect(cx - dot / 2, cy - dot / 2, dot, dot);
     }
-    // viewport rectangle
+    return layer;
+  }
+
+  drawMinimap() {
+    const v = this.view, m = this.model;
+    if (!v || !m || !this.mini) return;
+    const c = this.minimap;
+    const ctx = c.getContext("2d");
+    if (!this._miniLayer) this._miniLayer = this.minimapLayer();
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.drawImage(this._miniLayer, 0, 0);
+    // the main map's view: its corners in tiles (u a column with an odd row's half in, v a row), as the camera has them
+    const { win, map, fit: f } = this.mini;
     const r = this.canvas.getBoundingClientRect();
     const size = this.renderer.size;
-    const vx = this.renderer.cam.x / (size * Math.sqrt(3)), vy = this.renderer.cam.y / (size * 1.5);
-    const vw = r.width / (size * Math.sqrt(3)), vh = r.height / (size * 1.5);
+    const u = this.renderer.cam.x / (size * SQRT3), vv = this.renderer.cam.y / (size * 1.5);
+    const [x0, y0] = toScreen(f, win, map, u, vv);
+    const w = r.width / (size * SQRT3) * f.scale * SQRT3, h = r.height / (size * 1.5) * f.scale * 1.5;
+    // ... one map over too where the map wraps, so a view across the seam shows both halves
+    const ox = map.wrapX ? [0, -map.width * f.scale * SQRT3] : [0];
+    const oy = map.wrapY ? [0, -map.height * f.scale * 1.5] : [0];
     ctx.strokeStyle = "#ffe066"; ctx.lineWidth = 1;
-    // on a wrapping map the view can straddle the seam: draw the box again one map over, so both halves show
-    for (const ox of m.wrapX ? [0, -v.width] : [0]) {
-      for (const oy of m.wrapY ? [0, -v.height] : [0]) ctx.strokeRect((vx + ox) * sx, (vy + oy) * sy, vw * sx, vh * sy);
-    }
+    for (const dx of ox) for (const dy of oy) ctx.strokeRect(x0 + dx, y0 + dy, w, h);
   }
+}
+
+// the browser's localStorage, or null where reading it throws (a sandboxed frame, blocked site data)
+function localStore() {
+  try { return window.localStorage; } catch { return null; }
 }
 
 export function summarizeCombat(r) {
