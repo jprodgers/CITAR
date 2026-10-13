@@ -98,6 +98,8 @@ class GameSession:
         self._responding: dict = {}
         self._lines: dict = {}          # seat -> its line of chats to answer (citar.agents.responders.SeatLine)
         self._answering: dict = {}      # seat -> its chat answers running now (_run_responder; under the lock)
+        # a loaded game's model seats answer no chat until it is first resumed (answers_held; _register_loaded)
+        self.held_from_load = False
         self._stop = False
         self._mark_lock = threading.Lock()   # a live mark is never written after the game is closed
         self._driver: Optional[threading.Thread] = None
@@ -421,7 +423,8 @@ class GameSession:
         This is why an agent should wait on ``wait_for_turn`` rather than polling for its own turn: a negotiation
         opened on somebody else's turn blocks that turn until it is answered. The current player's own agent handles
         the replies to the chats it opened during its turn (its loop's notes and end_turn's wait), so those are not
-        handed out. A model seat whose machine the game paused for (``answers_held``) answers when it resumes.
+        handed out. A model seat whose machine the game paused for, or of a loaded game not yet resumed
+        (``answers_held``), answers when it resumes.
         ``again`` hands out once more a chat whose key is still held but which no line of its seat holds now (an answer
         that stopped for such a pause).
         """
@@ -451,8 +454,12 @@ class GameSession:
     HOLD_ANSWERS = ("disconnect", "restricted", "budget")
 
     def answers_held(self) -> bool:
-        """Whether the game's model seats' chat answers wait for its resume (``HOLD_ANSWERS``)."""
-        return self.paused and (self.pause_reason or {}).get("kind") in self.HOLD_ANSWERS
+        """Whether the game's model seats' chat answers wait for its resume: a pause of ``HOLD_ANSWERS``, or the pause a
+        load leaves until the game is first resumed (``held_from_load``: a loaded game comes back paused so that its
+        model configuration can be checked before anything spends tokens, whatever acts in it meanwhile)."""
+        if not self.paused:
+            return False
+        return self.held_from_load or (self.pause_reason or {}).get("kind") in self.HOLD_ANSWERS
 
     def dispatch_waiting(self, pids=None) -> None:
         """Hand out again every open chat that waits on a bot or model seat (of ``pids``, when given) and no responder
@@ -498,11 +505,13 @@ class GameSession:
             self._answered(pid)
 
     def _answered(self, pid: int) -> None:
-        """A chat answer of seat ``pid`` ended. When it was the seat's last one running and the game has made way
-        (P3.3.3: a make-way pause holds no lease until the resume), the lease the answer was made on goes, with the
-        agent bound to it: otherwise ``occupied()`` would list the game again, and the work it made way for would wait
-        for the game while the game waits for that work. The resume makes the seat's lease again (``_want_leases``).
-        Non-blocking (the lock is held only to look and release)."""
+        """A chat answer of seat ``pid`` ended. When it was the seat's last one, running or queued on its line, and the
+        game has made way (P3.3.3: a make-way pause holds no lease until the resume), the lease the answer was made on
+        goes, with the agent bound to it: otherwise ``occupied()`` would list the game again, and the work it made way
+        for would wait for the game while the game waits for that work. The resume makes the seat's lease again
+        (``_want_leases``). The seat's line answers one chat at a time, so a chat still queued on it keeps the lease
+        for its own answer, and the agent goes without a halt: a chat handed to the line meanwhile is answered on a
+        lease made for it, not dropped. Non-blocking (the lock is held only to look and release)."""
         with self.lock:
             left = self._answering.get(pid, 0) - 1
             if left > 0:
@@ -510,8 +519,11 @@ class GameSession:
                 return
             self._answering.pop(pid, None)
             if self._made_way() and self.leases.get(pid) is not None:
+                ln = self._lines.get(pid)
+                if ln is not None and ln.pending():
+                    return                  # the line's next answer runs on it; the last one lets it go
                 # a model seat's (a bot's answer holds no lease, and its agent keeps the bot's memory)
-                self.cancel_agent(pid)
+                self.cancel_agent(pid, halt=False)
                 self.release_leases([pid], for_good=False)
 
     def _reject_if_unanswered(self, pid: int, nid: int, key, record: bool = False):
@@ -1082,6 +1094,8 @@ class GameSession:
             self.chat.settle()              # the chats' clocks stand still from here, or go on from here
             self.paused = paused
             self.pause_reason = None
+            if not paused:
+                self.held_from_load = False
             if paused:
                 self.metrics.pause()
             else:
@@ -1129,6 +1143,7 @@ class GameSession:
             self.chat.settle()
             self.paused = False
             self.pause_reason = None
+            self.held_from_load = False
             self.metrics.unpause()
             self._track_turn()
             self.cond.notify_all()
@@ -2305,12 +2320,17 @@ class SessionManager:
         with self.lock:
             self.sessions[s.id] = s
         s.paused = True
-        s.start()
+        # its models answer no chat until it is resumed (P3.5.3: resume, set_paused(False)), whatever acts in it first
+        # (a bot's answer, a person's move), since a loaded game is paused so that its model configuration can be
+        # checked before anything spends tokens
+        s.held_from_load = True
+        s.start()               # its chat clock is new: every open chat is timed afresh from here (ChatClock.start)
         self.track(s)
         s.mark_live()
-        # its bots answer the chats waiting on them now, its models when it resumes (P3.5.3); every chat's clock
-        # starts afresh from the load, as the session's chat clock is new
-        s.dispatch_waiting()
+        # its bots answer the chats waiting on them now; a game opened only to be looked at answers nothing (its end
+        # state is what is looked at)
+        if leases:
+            s.dispatch_waiting([p for p, seat in enumerate(s.seats) if seat.type == "bot"])
 
     def _reopen(self, live: GameSession, paused: bool):
         """Bring back a game ``load`` stopped for a save that then did not load (its history, in the journal the game

@@ -514,6 +514,78 @@ class HaltsNeverDecline(Case):
             self.assertLess(time.perf_counter() - t0, 10, "answered, not timed out (the model's timeout is 600 s)")
             self.assertEqual(s.game.negotiation(nid)["history"][-1]["message"], "seat 1 answers")
 
+    def test_every_chat_waiting_on_a_seat_of_a_game_that_made_way_is_answered(self):
+        """A game that made way answers its model seat's chats on a lease of its own (3-08), one at a time on the
+        seat's line: the lease, and the line's next chat, outlive the first answer."""
+        seats = [{"type": "human"}, {"type": "human"},
+                 {"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}]
+        s = self.game(seats, start=True)
+        s.suspend({"kind": "queue", "message": "making way", "since": time.time()})
+        self.assertTrue(s._made_way())
+        released = []
+        real_release = s.release_leases
+
+        def release_leases(pids=None, *, for_good=None):
+            released.append((pids, for_good))
+            return real_release(pids, for_good=for_good)
+        s.release_leases = release_leases
+        a = self.open(s, 0, 2, "First?")
+        b = self.open(s, 1, 2, "Second?")
+        s.dispatch_waiting()
+        self.assertTrue(until(lambda: s.game.negotiation_head(a)["awaiting"] == 0, 10))
+        self.assertTrue(until(lambda: s.game.negotiation_head(b)["awaiting"] == 1, 10),
+                        (s._responding, s.game.negotiation(b)))
+        self.assertTrue(until(lambda: s.leases.get(2) is None, 10), "the last answer let the seat's lease go")
+        self.assertNotIn(2, s.agents)
+        self.assertEqual(released, [([2], False)], "one lease for the line's answers, let go after the last")
+
+    def _saved_with_chats_waiting(self) -> tuple:
+        """A save with a chat waiting on a model seat and one waiting on a bot (opened on the engine, so nobody was
+        asked), its game closed: (its path, the model's chat, the bot's)."""
+        Recording.reset()
+        g = self.game([{"type": "human"}, self.model(1), {"type": "bot"}])
+        model_chat, bot_chat = self.open(g, 0, 1, "Peace?"), self.open(g, 0, 2, "Trade?")
+        path = g.save("waiting")
+        g.stop()
+        self.manager.sessions.pop(g.id)
+        return path, model_chat, bot_chat
+
+    def test_a_loaded_game_asks_its_models_nothing_until_it_resumes(self):
+        """The Load route's game comes back paused, so its model configuration can be checked before anything spends
+        tokens: its bot answers at once, its model seat on the resume, its first message telling the chat's real
+        deadline; a game opened only to be looked at (``probe_run_open``'s load: a probe case's end state) answers
+        nothing."""
+        folder = Path(tempfile.mkdtemp(prefix="citar-chat-load-"))
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        with mock.patch.object(session_mod, "SAVE_DIR", folder):
+            for leases in (True, False):
+                with self.subTest(leases=leases):
+                    self._loaded(folder, leases)
+
+    def _loaded(self, folder: Path, leases: bool):
+        path, nid, bot_chat = self._saved_with_chats_waiting()
+        manager2 = SessionManager()
+        s = manager2.load(path, **({} if leases else {"kind": "probe", "leases": False}))
+        self.addCleanup(lambda: [manager2.delete(sid) for sid in list(manager2.sessions)])
+        self.assertTrue(s.paused)
+        if leases:
+            self.assertTrue(until(lambda: s.game.negotiation_head(bot_chat)["awaiting"] != 2, 10),
+                            "the bot answers the chat waiting on it at once")
+        time.sleep(1.0)
+        self.assertEqual([t for seat, t in Recording.texts if seat == 1], [],
+                         "the model was asked while the loaded game is paused")
+        self.assertEqual(s.game.negotiation_head(nid)["awaiting"], 1)
+        if not leases:
+            self.assertEqual(s.game.negotiation_head(bot_chat)["awaiting"], 2, "a look-only game answers nothing")
+        self.assertEqual(s.chat.deadline_of(nid)["left_s"], 600.0, "timed from the load")
+        if leases:
+            s.resume()
+            self.assertTrue(until(lambda: s.game.negotiation_head(nid)["awaiting"] == 0, 10))
+            first = [t for seat, t in Recording.texts if seat == 1][0]
+            self.assertIn("minutes left to answer", first)
+            self.assertNotIn("no time limit", first)
+        manager2.delete(s.id)
+
 
 class Scripted(Conversation):
     """A model's turn played from a list of steps (each returns the calls to make), recording each message it is

@@ -182,8 +182,10 @@ class ChatClock:
 
     # ------------------------------------------------------------------ the thread
     def start(self) -> None:
-        """Start the clock's thread (``GameSession.start``)."""
+        """Time the chats open now, from here (a loaded game's included), and start the clock's thread
+        (``GameSession.start``)."""
         self._stopped = False
+        self.note()
         self.ensure(quiet=True)
 
     def ensure(self, quiet: bool = False) -> bool:
@@ -383,13 +385,18 @@ class ChatClock:
     def deadline_of(self, nid: int) -> dict:
         """Where chat ``nid``'s clock stands: ``waiting_on``, ``kind``, ``deadline`` (epoch seconds, None when it is
         not timed or the game is paused), ``left_s`` and ``paused`` (the clock stands still). Empty for a chat the
-        clock does not time (closed, unknown)."""
-        with self._lock:
-            self._settle(self.clock.now())
-            c = self.chats.get(nid)
-            if c is None:
+        clock does not time (closed, unknown). A chat it has not looked at yet is looked at first (``note``), so an
+        answer's first message never says its time is unlimited for want of a look."""
+        for first in (True, False):
+            with self._lock:
+                self._settle(self.clock.now())
+                c = self.chats.get(nid)
+                if c is not None:
+                    return self._timing(c)
+            if not first:
                 return {}
-            return self._timing(c)
+            self.note()
+        return {}
 
     def _timing(self, c: _Chat) -> dict:
         left = self.left(c)

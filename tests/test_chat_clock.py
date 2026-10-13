@@ -254,6 +254,17 @@ class Timeouts(Base):
                           bounded["max_chat_messages"]), (chat_mod.MIN_REPLY_SECONDS, chat_mod.MAX_REPLY_SECONDS, 2))
         self.assertEqual(st({"chat_model_reply_seconds": float("nan")})["chat_model_reply_seconds"], 600.0)
 
+    def test_a_chat_the_clock_has_not_looked_at_yet_is_timed_when_asked(self):
+        """Where a chat's clock stands is never "not timed" for want of a look: asked about a chat it has not seen, the
+        clock looks first (an answer's first message tells its real deadline)."""
+        s = self.game(["human", "mcp"])
+        use(s)
+        nid = self.open(s, 0, 1)
+        s.chat.chats.clear()                            # as before the clock's first look at a loaded game
+        timing = s.chat.deadline_of(nid)
+        self.assertEqual((timing["waiting_on"], timing["kind"], timing["left_s"]), (1, "model", 600.0))
+        self.assertEqual(s.chat.deadline_of(nid + 99), {}, "a chat the game does not have")
+
     def test_a_bot_is_never_timed(self):
         s = self.game(["human", "bot"])
         clock = use(s)
