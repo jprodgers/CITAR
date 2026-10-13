@@ -415,11 +415,12 @@ export class ChatModel {
 /** Where the docked windows go (P3.5.6): along the bottom edge, to the left of the End Turn box, never over it.
  *
  * `width`/`height` are the game area's; `turnBox` is the End Turn box's rectangle in it ({left, top, width,
- * height}); `windows` are the model's, oldest first ({civ, minimised}); `active` the window shown when narrow.
+ * height}); `windows` are the model's, oldest first ({civ, minimised}); `active` the window shown when narrow, and
+ * the one kept open when wide.
  *
  * Wide: windows side by side from right to left in the order they opened, the first next to the End Turn box;
- * minimised ones are tabs at the left end of the row; when the open ones do not fit, the oldest are made tabs
- * (`overflow`) until they do. Narrow (`width` at most NARROW_WIDTH, or no room beside the box for one window, or
+ * minimised ones are tabs at the left end of the row; when the open ones do not fit, the oldest but `active` are
+ * made tabs (`overflow`) until they do. Narrow (`width` at most NARROW_WIDTH, or no room beside the box for one window, or
  * for every window as a tab): one window at a time, full width above the End Turn box, under a strip with a tab
  * per window.
  *
@@ -448,9 +449,12 @@ export function dockLayout({ width, height, turnBox, windows, active = null, mar
     };
     let f = fits();
     while (!f.ok) {
-      const oldest = order.find((w) => !w.minimised);
-      oldest.minimised = true;
-      overflow.push(oldest.civ);
+      // the oldest fold first, but never the active one (the one last opened or brought up): a tab clicked to bring
+      // its window up must come up, and another fold in its place
+      const open = order.filter((w) => !w.minimised);
+      const fold = open.find((w) => w.civ !== active) || open[0];
+      fold.minimised = true;
+      overflow.push(fold.civ);
       f = fits();
     }
     const open = order.filter((w) => !w.minimised);

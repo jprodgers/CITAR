@@ -471,6 +471,25 @@ test("minimised, a window is a tab that lights up when the other side speaks", a
   assert.doesNotMatch(win.root.className, /\btab\b|unread/);
 });
 
+test("a window folded for want of room comes up when its tab is clicked, and the other folds instead", async () => {
+  // room beside End Turn for one window and a tab
+  const { game, dock, server } = makeGame({ width: 1366, boxWidth: 900 });
+  dock.onView(game.view);
+  server.chat(4, 1, "Rome");
+  server.say(4, true, "open", "Hi");
+  server.chat(5, 2, "Persia");
+  server.say(5, true, "open", "Hello");
+  game.view.diplomacy.open_negotiations = [server.view(4), server.view(5)];
+  dock.onView(game.view);
+  const rome = dock.windows.get(1), persia = dock.windows.get(2);
+  assert.deepEqual([rome.tab, persia.tab], [true, false], "the older folds");
+  rome.head.click();
+  assert.deepEqual([rome.tab, persia.tab], [false, true], "brought up; the other folds in its place");
+  assert.ok(dock.plan.items.every((it) => it.left + it.width <= 1366 - 10 - 900 - 8), "still left of End Turn");
+  persia.head.click();
+  assert.deepEqual([rome.tab, persia.tab], [true, false]);
+});
+
 test("at 700 px one window shows, full width above End Turn, with a tab for each", async () => {
   const { game, dock, server } = makeGame({ width: 700, height: 800, boxWidth: 330 });
   dock.onView(game.view);

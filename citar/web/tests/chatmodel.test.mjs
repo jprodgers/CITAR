@@ -450,6 +450,14 @@ test("wide: from right to left in the order they opened; the oldest become tabs 
   const two2 = dockLayout({ width, height, turnBox: narrowBox, windows });
   assert.deepEqual(two2.items.filter((it) => it.kind === "window").map((it) => it.civ), [3, 4]);
   assert.deepEqual(two2.overflow, [1, 2]);
+  // a folded tab brought up (it is the active window) comes up, and the next oldest folds in its place
+  const up = dockLayout({ width, height, turnBox, windows, active: 1 });
+  assert.deepEqual(up.items.filter((it) => it.kind === "window").map((it) => it.civ), [1, 3, 4]);
+  assert.deepEqual(up.overflow, [2]);
+  assert.ok(up.items.every((it) => it.left + it.width <= turnBox.left - 8));
+  const up2 = dockLayout({ width, height, turnBox: narrowBox, windows, active: 2 });
+  assert.deepEqual(up2.items.filter((it) => it.kind === "window").map((it) => it.civ), [2, 4]);
+  assert.deepEqual(up2.overflow, [1, 3]);
   // a minimised window is a tab whatever room there is
   const two = dockLayout({ width, height, turnBox, windows: [{ civ: 1, minimised: true }, { civ: 2, minimised: false }] });
   assert.deepEqual(two.items.map((it) => [it.civ, it.kind]), [[2, "window"], [1, "tab"]]);
