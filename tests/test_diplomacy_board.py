@@ -105,6 +105,19 @@ class Lines(unittest.TestCase):
         self.assertEqual(D.leaderboard(pairs)[0]["model"], "m2", "best mean score difference first")
         self.assertEqual(D.leaderboard(pairs), D.leaderboard(list(reversed(pairs))), "the same with every read")
 
+    def test_the_bootstrap_interval_is_its_definition_with_its_fixed_seed(self):
+        diffs = [3.0, -7.0, 12.0, 0.0, 5.0, -2.0, 9.0, 1.0, -5.0, 4.0]
+        ci = D.bootstrap_interval(diffs)
+        self.assertEqual(ci, bootstrap(diffs))
+        self.assertEqual(ci, D.bootstrap_interval(list(diffs)), "the same every time it is read")
+        self.assertNotEqual(ci, D.bootstrap_interval(diffs, coverage=0.8), "a 90% interval, not an 80% one")
+        self.assertNotEqual(ci, D.bootstrap_interval(diffs, seed=D.BOOTSTRAP_SEED + 1), "its seed is fixed")
+        lo, hi = ci
+        self.assertTrue(min(diffs) < lo < statistics.fmean(diffs) < hi < max(diffs), ci)
+        line = D.leaderboard([pair("m", "trade_only", d, arm(), arm()) for d in diffs])[0]
+        self.assertEqual((line["mean_score_diff"], line["ci90"]), (2.0, ci))
+        self.assertIsNone(D.bootstrap_interval([]))
+
     def test_fallbacks_the_model_did_not_cause_are_not_counted_against_it(self):
         data = {"negotiations": [
             {"player": 1, "outcome": "fallback", "cause": "timeout"},

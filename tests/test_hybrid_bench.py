@@ -315,6 +315,29 @@ class Recorder(Case):
                          [(2, "us", "eliminated them", 1, 0), (1, "them", "peace", 0, 0)])
         self.assertEqual((summary["final"]["alive"], summary["final"]["won"]), (True, False))
 
+    def test_a_controls_seat_keeps_the_hybrid_seats_handicap_and_level_and_a_bot_seats_decisions(self):
+        """P3.6.9: the control copies the hybrid seat's handicap and difficulty level; its automatic decisions are a bot
+        seat's (the engine votes and annexes for it), since those are what the model takes over in the other arm."""
+        seats = [{"type": "hybrid", "llm": {"provider": "dryrun"}, "handicap": "human", "difficulty": "King",
+                  "bot": {"profile": "standard", "aggression": 0.7}, "hybrid": {"owners": "everything"}},
+                 {"type": "bot", "bot": {"aggression": 0.2}}]
+        s = self.manager.create({"map_size": "duel", "seed": 4, "difficulty": "Emperor"}, seats, track=False,
+                                start=False)
+        spec = controls.control_spec(s.engine_config, s.seats, 0)
+        me, other = spec["config"]["players"]
+        hybrid_auto = s.engine_config["players"][0]["auto"]
+        self.assertEqual(hybrid_auto, {"un_vote": False, "conquest": False, "free_picks": True}, "the hybrid arm's")
+        self.assertEqual((me["controller"], me["handicap"], me["difficulty"], me["auto"]),
+                         ("hybrid", "human", "King", {"un_vote": True, "conquest": True, "free_picks": True}))
+        self.assertEqual(other, s.engine_config["players"][1], "every other seat as the hybrid game's")
+        self.assertEqual(spec["config"]["difficulty"], "Emperor")
+        self.assertEqual(spec["bots"], {"0": {"profile": "standard", "aggression": 0.7},
+                                        "1": {"profile": None, "aggression": 0.2}})
+        g = engine_api.EngineGame.new(spec["config"])
+        p0 = g.player(0)
+        self.assertEqual((p0["handicap"], p0["difficulty"], p0["auto"]),
+                         ("human", "King", {"un_vote": True, "conquest": True, "free_picks": True}))
+
     def test_a_control_values_the_deals_bots_make_and_settle_inside_one_drive(self):
         spec = self._spec_of(self._bots_game(turn_limit=40), ops=self.OPS)
         made_in: dict = {}
@@ -347,7 +370,7 @@ class Recorder(Case):
                   "hybrid": {"owners": "trade_only", "prompt_every": 5}},
                  {"type": "bot"}, {"type": "bot"}, {"type": "bot"}]
         s = self.manager.create({"map_size": "small", "seed": 11, "barbarians": "off", "city_states": 2,
-                                 "turn_limit": turn_limit}, seats, track=False, start=False)
+                                 "difficulty": "Emperor", "turn_limit": turn_limit}, seats, track=False, start=False)
         # the test-only configuration (normalize_hybrid refuses it to anyone else): nothing for the model
         s.seats[0].hybrid = {**s.seats[0].hybrid, "owners": hybrid.owners_map({})}
         s.game.set_controller(0, "hybrid", "ai", {"un_vote": True, "conquest": True, "free_picks": True})
