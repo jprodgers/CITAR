@@ -55,7 +55,9 @@ with a language model that decides the kinds of diplomacy you hand it ([AI playe
 explains what it does in play). To set one up, pick **Hybrid (bot plays, model negotiates)** as a
 seat's kind in the lobby. The seat then asks for:
 
-- **Bot** and **Aggression**: the bot that plays its turns, as for a bot seat.
+- **Bot** and **Aggression**: the bot that plays its turns, as for a bot seat. **Best bot** is the
+  best-ranked profile when the seat is set up: the seat keeps playing that profile, labelled "(best)",
+  until you pick another.
 - **Handicap at its difficulty level**: whose numbers the seat plays with at the level beside it,
   **AI bonuses, like the bot** (the default) or **A person's values, like a model**.
 - **Its model**: a machine and one of its models, with an optional persona. A hybrid seat's prompts
