@@ -283,7 +283,10 @@ class Metering(HelperBase):
         steps = [e for e in self.events if e.machine == sid]
         self.assertEqual(len(steps), 3)
         for e in steps:
-            self.assertGreater(e.reported_s, 9 * e.observed_s)
+            # past the rule that flags it, which is the claim's point; not "nine times what the server saw": the
+            # server's window holds the transport too (0.995 s round a 0.307 s completion on CI's windows / Python
+            # 3.12 runner, test.yml run 38434256123, where the claim of 8.07 s was 8.1 times it)
+            self.assertGreater(e.reported_s, e.observed_s * S.OVERREPORT_RATIO + S.OVERREPORT_SLACK)
             self.assertEqual(e.gen_s, e.observed_s, "credited what the server saw, not what it claimed")
             self.assertTrue(e.flags["overreported"])
 
