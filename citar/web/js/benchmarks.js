@@ -9,7 +9,7 @@ import { openMetrics } from "./metrics.js";
 import { seatServers } from "./lobby.js";
 import { mapOptionsForm } from "./mapoptions.js";
 import { CATEGORIES, HANDICAPS, PRESETS, PROMPT_EVERY, modelCategories, ownersMap, presetOf } from "./seats.js";
-import { controlText, ownersText, pairText } from "./diplomacy.js";
+import { controlText, ownersText, pairText, recordText } from "./diplomacy.js";
 
 const STATUS_CLASS = { running: "live", loading: "live", resuming: "live", paused: "warn", queued: "", done: "good", failed: "bad", cancelled: "muted" };
 const COLORS = { llm: "#4f8cff", bot: "#e8c547" };
@@ -186,6 +186,7 @@ function renderJob(run, job, ctx) {
         hybrid ? el("div", { class: "small" }, el("span", { class: "pill", title: "A bot plays the turns; the model decides this diplomacy" },
           `hybrid: ${ownersText(job.owners)}`)) : null,
         hybrid && job.control ? el("div", { class: `small ${job.control.status === "failed" ? "bad" : "muted"}` }, controlText(job.control)) : null,
+        hybrid && recordText(job) ? el("div", { class: "warn small" }, recordText(job)) : null,
         job.pause_pending ? el("div", { class: "warn small" }, "pausing after this turn (restricted hours)") : null),
     el("td", {}, sc.name || job.scenario_name, run.jobs.some((j) => j.repeat > 1) ? el("span", { class: "muted" }, ` #${job.repeat}`) : null,
       el("div", { class: "muted small" }, `${sc.map_size || ""} ${sc.map_type || ""} · ${sc.opponents || "?"} bot${sc.opponents > 1 ? "s" : ""}`)),

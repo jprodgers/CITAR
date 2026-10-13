@@ -88,7 +88,15 @@ export function controlText(control) {
   return control.error ? `${text}: ${control.error}` : text;
 }
 
-/** Who answered a hybrid probe case (its result's `answered_by`, and `answers` round by round). */
+/** Why a finished hybrid job has no pair line when its own record says so (its result's `diplomacy.incomplete`: the
+ *  record stopped on an error, and a pair would not compare like with like); null otherwise. */
+export function recordText(job) {
+  const d = ((job && job.result) || {}).diplomacy;
+  return d && d.incomplete ? `no pair line: its diplomacy record stopped (${d.incomplete})` : null;
+}
+
+/** Who answered a hybrid probe case (its result's `answered_by`, and `answers` round by round): "nobody" when the
+ *  model's prompt did not run, or it left the chat waiting. */
 export function answeredText(rec) {
   if (!rec || !rec.answered_by) return null;
   const words = { bot: "its bot", model: "its model", none: "nobody" };

@@ -4,8 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { answeredText, boardRows, controlText, diffText, fallbackText, num, ownersText, pairText, pct, signed }
-  from "../js/diplomacy.js";
+import { answeredText, boardRows, controlText, diffText, fallbackText, num, ownersText, pairText, pct, recordText,
+  signed } from "../js/diplomacy.js";
 
 test("numbers keep their sign and their rounding", () => {
   assert.equal(signed(4), "+4");
@@ -79,5 +79,14 @@ test("a control game's status and a probe case's answering side", () => {
   assert.equal(answeredText({ answered_by: "bot", answers: ["bot"] }), "answered by its bot");
   assert.equal(answeredText({ answered_by: "model", answers: ["model", "bot"] }), "answered by its model (then its bot)");
   assert.equal(answeredText({ answered_by: "model" }), "answered by its model");
+  assert.equal(answeredText({ answered_by: "none", answers: ["none"] }), "answered by nobody");
   assert.equal(answeredText({}), null);
+});
+
+test("a hybrid job whose record stopped says why it has no pair line", () => {
+  assert.equal(recordText({ result: { diplomacy: { summary: {}, incomplete: "KeyError" } } }),
+    "no pair line: its diplomacy record stopped (KeyError)");
+  assert.equal(recordText({ result: { diplomacy: { summary: {} }, pair: {} } }), null);
+  assert.equal(recordText({ result: null }), null);
+  assert.equal(recordText(null), null);
 });
