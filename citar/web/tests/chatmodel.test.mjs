@@ -483,6 +483,11 @@ test("wide, the windows keep clear of the panels: the unit panel's and the city 
   const b = dockLayout({ width, height, turnBox, windows, active: 2, obstacles: [city, minimap] });
   assert.ok(b.items.every((it) => it.left + it.width <= 1280 - 10 - 380 - 8), JSON.stringify(b.items));
   assert.deepEqual(b.items.map((it) => it.kind), ["window", "window"]);
+  // a panel down to the bottom edge in the row's middle: the windows take the free stretch nearest End Turn
+  const mid = { left: 300, top: 740 - 10 - 300, width: 60, height: 300 };
+  const d = dockLayout({ width, height, turnBox, windows, active: 2, obstacles: [mid] });
+  assert.equal(d.mode, "wide");
+  assert.ok(d.items.every((it) => it.left >= 300 + 60 + 8), JSON.stringify(d.items));
   // the unit panel too, on a narrower screen: no room left for a window beside the tabs, so narrow (one window above
   // End Turn, the panel the person opened lying over it)
   const c = dockLayout({ width: 1000, height, turnBox: { ...turnBox, left: 1000 - 10 - 290 }, windows, active: 2, obstacles: [unit] });

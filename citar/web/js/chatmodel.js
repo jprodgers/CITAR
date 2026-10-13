@@ -268,11 +268,11 @@ export class ChatModel {
 
   /** How many messages an open chat has had against the game's cap (`{messages, max, left, text, tone}`, or null when
    * the cap is not known yet): the message that would pass the cap closes the chat instead, so the window says so
-   * (`warn` with two or fewer left). The game's close notes are not messages. */
+   * (`warn` with two or fewer left). Counted from the entries when they are ahead of the view's count: a close note
+   * is not a message, but it only ever ends a chat, so an open chat's entries are all messages. */
   messageCount(chat) {
     if (!chat || chat.status !== "open" || !(chat.maxMessages > 0)) return null;
-    const said = chat.entries.filter((e) => e.action !== "close").length;
-    const messages = Math.max(chat.messages || 0, said);
+    const messages = Math.max(chat.messages || 0, chat.entries.length);
     const left = Math.max(0, chat.maxMessages - messages);
     return { messages, max: chat.maxMessages, left, text: `${messages}/${chat.maxMessages} messages`,
              tone: left <= 2 ? "warn" : "muted" };
