@@ -215,22 +215,23 @@ def summarize(rows: Iterable[dict], pid: int, final: Optional[dict] = None) -> d
         if r["kind"] == "war":
             wars.append({"turn": r.get("turn"), "with": r.get("with"), "by": r.get("by"), "ended": None,
                          "outcome": "ongoing", "captured": 0, "lost": 0})
-            continue
-        war = next((w for w in reversed(wars) if w["with"] == r.get("with") and w["ended"] is None), None)
-        if r["kind"] == "eliminated" and r.get("with") == pid:
+        elif r["kind"] == "eliminated" and r.get("with") == pid:
             for w in wars:
                 if w["ended"] is None:
                     w.update(ended=r.get("turn"), outcome="eliminated")
-        elif war is None:
-            continue
-        elif r["kind"] == "peace":
-            war.update(ended=r.get("turn"), outcome="peace")
-        elif r["kind"] == "eliminated":
-            war.update(ended=r.get("turn"), outcome="eliminated them")
-        elif r["kind"] == "capture":
-            war["captured"] += 1
-        elif r["kind"] == "loss":
-            war["lost"] += 1
+        elif r["kind"] in ("peace", "eliminated"):
+            war = next((w for w in reversed(wars) if w["with"] == r.get("with") and w["ended"] is None), None)
+            if war is not None:
+                war.update(ended=r.get("turn"), outcome="peace" if r["kind"] == "peace" else "eliminated them")
+    for r in events:
+        if r["kind"] in ("capture", "loss"):
+            # the war with that civilization the city changed hands in (an elimination comes the same turn as the
+            # capture of the last city, before it among the events)
+            t = r.get("turn") or 0
+            war = next((w for w in reversed(wars) if w["with"] == r.get("with") and (w["turn"] or 0) <= t
+                        and (w["ended"] is None or w["ended"] >= t)), None)
+            if war is not None:
+                war["captured" if r["kind"] == "capture" else "lost"] += 1
     out = {"proposals_made": len(made), "proposals_received": len(received), "accepted_own": accepted_own,
            "acceptance_rate": round(accepted_own / len(made), 4) if made else None,
            "deals": len(deals), "deals_valued": len(values),

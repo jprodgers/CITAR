@@ -1131,9 +1131,10 @@ class ProbeRunRoute(_ProbeScenario):
         P.save_probe(dict(self.probe))
         self.addCleanup(lambda: P.delete_probe("pooled-probe"))
         self.started: list = []
+        self.started_kw: list = []
         stub = mock.Mock()
         stub.start.side_effect = lambda pid, llm, repeats, name, cases, **kw: self.started.append(
-            (kw.get("owner_id"), cases)) or {"id": "stub-run", "llm": llm}
+            (kw.get("owner_id"), cases)) or self.started_kw.append(kw) or {"id": "stub-run", "llm": llm}
         patcher = mock.patch.object(appmod, "_probes", return_value=stub)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -1176,6 +1177,35 @@ class ProbeRunRoute(_ProbeScenario):
                    if x["id"] == "pooled-probe")
         self.assertEqual(row["purposes"], ["probe"])
 
+    def test_a_hybrid_run_is_admitted_for_pooled_prompts_only(self):
+        """A hybrid run (3-16, P3.6.9) holds no lease: its offer and message answers and its turn cases' diplomat
+        phases are all pooled prompts, so a grant for probes alone does not cover it, and one for pooled prompts
+        does; its settings are checked first (400 with the reason), and its subject is a model, never the bot."""
+        from citar import probes as P
+        self.assertEqual(P.case_purposes(self.probe, None, "hybrid"), ("pooled",))
+        for who, body, want, says in (
+                ("gina", {"cases": ["turn"], "mode": "hybrid"}, 403, "pooled prompts"),
+                ("dave", {"cases": ["turn"], "mode": "hybrid"}, 200, None),      # pooled-only: a hybrid turn case
+                ("dave", {"mode": "hybrid", "owners": {"trades": "llm"}}, 200, None),
+                ("dave", {"mode": "hybrid", "owners": "most"}, 400, "Unknown preset"),
+                ("dave", {"mode": "hybrid", "owners": {}}, 400, "nothing for its model"),
+                ("dave", {"mode": "sideways"}, 400, "mode"),
+                ("dave", {"mode": "hybrid", "llm": {"provider": "bot"}}, 400, "not the scripted bot")):
+            with self.subTest(who=who, body=body):
+                got = self.client.post("/api/probes/pooled-probe/run", headers=self.headers[who], json={
+                    "llm": {"server_id": self.box, "model": "dry-run"}, **body})
+                self.assertEqual(got.status_code, want, got.text[:300])
+                if says:
+                    self.assertIn(says, got.json()["detail"])
+        self.assertEqual(self.started, [(self.ids["dave"], ["turn"]), (self.ids["dave"], None)])
+        self.assertEqual(self.client.post("/api/probes/pooled-probe/run", headers=self.headers["anon"], json={
+            "llm": {"server_id": self.box, "model": "dry-run"}, "mode": "hybrid"}).status_code, 401)
+        with db.session() as s:
+            items.get(s, "probe", "pooled-probe").visibility = "private"
+        stranger = self.client.post("/api/probes/pooled-probe/run", headers=self.headers["dave"], json={
+            "llm": {"server_id": self.box, "model": "dry-run"}, "mode": "hybrid"})
+        self.assertEqual(stranger.status_code, 404, "another member's private probe")
+
     def test_pooled_cases_need_partial_llm(self):
         with db.session() as s:
             s.get(User, self.ids["dave"]).caps = {"partial_llm": False}
@@ -1184,6 +1214,71 @@ class ProbeRunRoute(_ProbeScenario):
         self.assertEqual(got.status_code, 403, got.text[:300])
         self.assertEqual(got.json()["detail"], policy.denial(self.user("dave"), "partial_llm"))
         self.assertEqual(self.started, [])
+
+
+class HybridProbes(_ProbeScenario):
+    """Package 3-16's gate 5 (P3.6.9): a hybrid probe run seats its subject as a hybrid seat, trades and talk its
+    model's (``trade_only``); each offer or message goes to the seat's bot first and to its model when the model owns
+    it, and the run records which side answered each case; a turn case plays the bot's turn, then a diplomat phase
+    with every trigger forced."""
+
+    def setUp(self):
+        super().setUp()
+        from citar import probes as P
+        from citar.server.session import SessionManager
+        self.P = P
+        self.manager = SessionManager()
+        self.addCleanup(lambda: [self.manager.delete(sid) for sid in list(self.manager.sessions)])
+        runner = P.ProbeRunner.__new__(P.ProbeRunner)
+        runner.manager, runner.lock, runner._stop_run, runner._thread = self.manager, threading.Lock(), set(), None
+        runner.lives, runner._workers, runner._loaded, runner.queue, runner.asking = {}, {}, {}, [], {}
+        written, write = [], runner._write
+
+        def write_and_remember(run):
+            written.append(run["id"])
+            write(run)
+        runner._write = write_and_remember
+        self.addCleanup(lambda: [shutil.rmtree(runner._run_dir(rid), ignore_errors=True) for rid in written])
+        self.runner = runner
+
+    def test_a_hybrid_run_records_which_side_answered_each_case(self):
+        dof = [{"type": "declaration_of_friendship"}]
+        probe = dict(self.probe, cases=self.probe["cases"] + [
+            {"id": "friends", "kind": "offer", "message": "Friends?", "give": dof, "receive": dof}])
+        rid = "pooled-hybrid-run"
+        self.runner._write({"id": rid, "name": "hybrid run", "probe": probe,
+                            "llm": {"server_id": self.box, "model": "dry-run"}, "repeats": 1,
+                            "jobs": [{"case": c["id"], "rep": 0} for c in probe["cases"]], "status": "queued",
+                            "done": 0, "created": time.time(), "started": None, "finished": None, "summary": {},
+                            "owner_id": self.ids["bob"], "mode": "hybrid",
+                            "hybrid": self.P.hybrid_settings("hybrid", {}, "trade_only")})
+        events: list = []
+        S.get().add_listener(events.append)
+        seen: list = []
+        worker = threading.Thread(target=self.runner._run, args=(rid,), daemon=True)
+        worker.start()
+        while worker.is_alive():
+            seen.append(tuple(labels(self.box)))
+            time.sleep(0.01)
+        worker.join()
+        run = self.runner.get_run(rid)
+        self.assertEqual(run["status"], "finished", run)
+        res = {r["case"]: r for r in self.runner.results(rid)}
+        self.assertEqual({c: r.get("answered_by") for c, r in res.items()},
+                         {"gift": "model", "hello": "model", "friends": "bot", "turn": "model"}, res)
+        self.assertEqual(res["gift"]["answers"], ["model"])
+        self.assertEqual(res["gift"]["outcome"], "accept", "the dry-run model takes a gift")
+        self.assertNotEqual(res["friends"]["outcome"], "no_response")
+        self.assertIsNone(res["friends"].get("error"))
+        phases = res["turn"]["diplomat"]
+        self.assertEqual([x["outcome"] for x in phases], ["done"])
+        self.assertTrue(any("probe of your diplomacy" in t for t in phases[0]["triggers"]), phases)
+        self.assertEqual(res["turn"]["end_reason"], "end_turn")
+        self.assertEqual(set(seen), {()}, "a hybrid run holds no lease, not even for its turn case")
+        classes = {e.task_class for e in events if e.machine == self.box}
+        self.assertEqual(classes, {"partial"}, "every model call a pooled prompt")
+        self.assertEqual(run["summary"]["cases"]["friends"]["answered_by"], {"bot": 1})
+        self.assertEqual(run["summary"]["cases"]["gift"]["answered_by"], {"model": 1})
 
 
 # ---------------------------------------------------------------------------- gate 4: the Queue page
