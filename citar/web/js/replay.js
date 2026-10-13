@@ -6,6 +6,7 @@ import { el, clear, toast } from "./util.js";
 import { MapRenderer } from "./render.js";
 import { ReplayFrames, chatThreads, describeTerms, named, plainMessages } from "./replaydecode.js";
 import { CLOSED_TEXT, describeItem } from "./chatmodel.js";
+import { seatLabel } from "./seats.js";
 
 const METRICS = [["score", "Score"], ["military", "Military strength"], ["techs", "Technologies"], ["cities", "Cities"],
   ["population", "Population"], ["land", "Land"], ["science", "Science / turn"], ["gold", "Gold"]];
@@ -46,7 +47,7 @@ export class ReplayScreen {
       el("span", { class: "muted" }, d.phase === "over" ? `Winner: ${winner ? winner.name : "none"} (${d.victory})` : `In progress, turn ${d.turn}`),
       el("span", { class: "spacer" }),
       ...d.players.filter((p) => p.kind === "major").map((p) => el("span", { class: "stat" }, el("span", { class: "swatch", style: { background: p.color } }),
-        p.name, p.seat ? el("span", { class: "muted" }, ` (${p.seat.type === "llm" ? p.seat.llm.model || "LLM" : p.seat.type})`) : null)));
+        p.name, p.seat ? el("span", { class: "muted" }, ` (${seatLabel(p.seat)})`) : null)));
     this.canvas = el("canvas", { class: "map" });
     this.side = el("div", { class: "overlay-panel", style: { right: "10px", top: "10px", bottom: "10px", width: "400px", overflowY: "auto", padding: "10px" } });
     this.turnLabel = el("b", { style: { minWidth: "90px" } });

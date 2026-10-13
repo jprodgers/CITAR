@@ -165,10 +165,12 @@ export function seatLabel(s) {
 }
 
 /** A row of a game's metrics summary (`GET /api/games/{gid}/metrics`), named as its seat: a hybrid row "Hybrid: <bot> +
- *  <model>", an LLM row its model, any other its controller. */
+ *  <model>" (as seatLabel names it: `bot_best` marks a "Best bot"), an LLM row its model, any other its controller. */
 export function controllerLabel(row) {
   if (!row) return "";
-  if (row.controller === "hybrid") return `Hybrid: ${row.bot || "standard"} + ${row.model || "no model"}`;
+  if (row.controller === "hybrid") {
+    return `Hybrid: ${botName({ profile: row.bot, chosen_as: row.bot_best ? "best" : undefined })} + ${row.model || "no model"}`;
+  }
   if (row.controller === "llm") return row.model || "llm";
   return row.controller || "";
 }

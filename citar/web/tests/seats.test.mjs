@@ -171,6 +171,8 @@ test("what an LLM seat (and a bot) is doing reads as before", () => {
 test("the stats screen names a hybrid row and sums up its diplomat", () => {
   assert.equal(controllerLabel({ controller: "hybrid", bot: "standard", model: "dry-run" }), "Hybrid: standard + dry-run");
   assert.equal(controllerLabel({ controller: "hybrid", bot: "standard", model: null }), "Hybrid: standard + no model");
+  assert.equal(controllerLabel({ controller: "hybrid", bot: "rival", bot_best: true, model: "gemma" }),
+    "Hybrid: rival (best) + gemma", "as seatLabel names the seat");
   assert.equal(controllerLabel({ controller: "llm", model: "gemma" }), "gemma");
   assert.equal(controllerLabel({ controller: "llm" }), "llm");
   assert.equal(controllerLabel({ controller: "bot" }), "bot");

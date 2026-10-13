@@ -298,8 +298,10 @@ class GameSession:
                                  "settings": {k: s.llm.get(k) for k in ("provider", "base_url", "tool_mode", "reasoning_effort", "effort")}
                                  if s.model_seat else None}
             if s.type == "hybrid":
-                # marked (P3.6.7): its turns are its bot's, its model's work the diplomat rows and chat answers
+                # marked (P3.6.7): its turns are its bot's, its model's work the diplomat rows and chat answers;
+                # `bot_best` when its bot was "Best bot" (the stats screen labels it as the lobby does)
                 players[s.player].update({"hybrid": True, "bot": (s.bot or {}).get("profile") or "standard",
+                                          "bot_best": (s.bot or {}).get("chosen_as") == "best",
                                           "owners": (s.hybrid or {}).get("owners")})
         return {"summary": self.metrics.summary(players), "turns": self.metrics.turn_rows(),
                 "negotiations": self.metrics.data["negotiations"],
