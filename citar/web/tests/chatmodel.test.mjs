@@ -84,6 +84,19 @@ test("out-of-order answers: a stale view adds entries but never takes the chat b
   assert.deepEqual(c.entries.map((e) => e.seq), [1, 2, 3, 4]);
 });
 
+test("a chat closed by its status stays closed when a view of the same length still says open", () => {
+  const m = new ChatModel(YOU);
+  const h = [entry(1, true, "open"), entry(2, false), entry(3, true)];
+  m.applyNegotiation(view(5, h), 0);
+  m.applyStatus(status(5, "closed", { closed: "rejected" }), 10);
+  // a refresh fetched just before the close: as many entries, still open
+  m.applyNegotiation(view(5, h), 20);
+  const c = m.chats.get(5);
+  assert.equal(c.status, "rejected");
+  assert.equal(c.waitingOn, null);
+  assert.equal(m.endTurnState(30).state, "clear");
+});
+
 test("statuses: a late one is dropped, one ahead of the entries asks for the chat, closed closes", () => {
   const m = new ChatModel(YOU);
   m.applyNegotiation(view(4, [entry(1, true, "open"), entry(2, false), entry(3, true)]), 0);

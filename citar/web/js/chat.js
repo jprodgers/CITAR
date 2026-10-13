@@ -44,7 +44,6 @@ export class ChatDock {
     this.enabled = false;
     this._endKey = null;          // the End Turn state the turn box was last drawn with
     this._endClock = null;        // its countdown
-    this._firing = false;
     this.root = el("div", { class: "chat-dock wide" });
     this.strip = el("div", { class: "chat-strip" });
     this.root.appendChild(this.strip);
@@ -221,10 +220,9 @@ export class ChatDock {
 
   /** Armed End Turn with nothing left open: end the turn (once). */
   fire(st) {
-    if (!st.fire || this._firing || !this.game.myTurn) return;
-    this._firing = true;
-    this.model.disarm();
-    Promise.resolve().then(() => this.game.endTurn(true)).finally(() => { this._firing = false; });
+    if (!st.fire || !this.game.myTurn) return;
+    this.model.disarm();          // at once: whatever comes before the end of turn's answer finds it disarmed
+    Promise.resolve().then(() => this.game.endTurn(true));
   }
 
   /** Every second: the countdowns. */
