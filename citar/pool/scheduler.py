@@ -1212,6 +1212,14 @@ class Machine:
                 return self.counters["overreports"]
             return None
 
+    def line_info(self) -> dict:
+        """What waits on the machine now, for work lined up outside it (the chat responders' parked answers,
+        ``citar.agents.responders``): ``waiting`` (its requests waiting for a slot), ``benchmark`` (a benchmark holds
+        it) and its ``name``."""
+        with self.lock:
+            return {"waiting": len(self.waiting), "benchmark": self._bench_live(),
+                    "name": self.settings.name or self.id}
+
     def status(self) -> dict:
         """The machine as an administrator's status listing shows it."""
         with self.lock:

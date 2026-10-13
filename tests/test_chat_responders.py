@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -55,8 +56,9 @@ def until(fn, timeout: float = 15.0, step: float = 0.01):
 class Recording(Conversation):
     """A model that replies to each message of a chat (``respond_negotiation`` reply), recording what it was told,
     on which threads it ran, how many of its seat's answers ran at once, and how many conversations each (seat,
-    chat) had. ``gate`` (an Event), when set on the class, holds every step until it is set; ``hang`` holds the
-    steps of the seats it names until their conversation is closed."""
+    chat) had. ``gate`` (an Event), when set on the class, holds every step until it is set (only the steps of the
+    machines ``gated`` names, when it names some); ``hang`` holds the steps of the seats it names until their
+    conversation is closed."""
     lock = threading.Lock()
     made: dict = {}             # (seat, chat) -> conversations made for it
     threads: set = set()
@@ -64,12 +66,19 @@ class Recording(Conversation):
     most: dict = {}             # seat -> the most that ran at once
     texts: list = []
     gate: threading.Event | None = None
+    gated: set | None = None
     hang: set = set()
 
     @classmethod
     def reset(cls):
         cls.made, cls.threads, cls.running, cls.most, cls.texts = {}, set(), {}, {}, []
-        cls.gate, cls.hang = None, set()
+        cls.gate, cls.gated, cls.hang = None, None, set()
+
+    @classmethod
+    def in_step(cls) -> int:
+        """How many steps run now, across seats."""
+        with cls.lock:
+            return sum(cls.running.values())
 
     def __init__(self, cfg, system, tools):
         self.cfg = cfg
@@ -106,7 +115,7 @@ class Recording(Conversation):
             if self.seat in Recording.hang:
                 self.closed.wait(30)
                 raise RuntimeError("cancelled")
-            if Recording.gate is not None:
+            if Recording.gate is not None and (Recording.gated is None or self.cfg.get("server_id") in Recording.gated):
                 while not Recording.gate.wait(0.05):
                     if self.closed.is_set():
                         raise RuntimeError("cancelled")
@@ -223,17 +232,131 @@ class Responders(Case):
         for m in range(1, 17):
             self.open(s, 0, m)
         s.dispatch_waiting()
-        machine = S.get().machine("sv_gpu")
-        self.assertTrue(until(lambda: machine.status()["in_flight"] == 1 and machine.status()["waiting"] == 15, 30),
-                        machine.status())
+        self._sixteen_blocked_on_the_gpu()
         t0 = time.perf_counter()
         r = s.call_tool(0, "open_negotiation", {"to": 17, "message": "Friends?"})
         nid = r["result"]["negotiation_id"]
         self.assertTrue(until(lambda: s.game.negotiation_head(nid)["awaiting"] != 17, 5))
         took = time.perf_counter() - t0
         self.assertLess(took, 1.0, "the bot's answer did not wait behind the models")
+        self.assertEqual(responders.pool("bot").threads, 1, "the bot answered on its own pool")
         Recording.gate.set()
         self.assertTrue(until(lambda: all(s.game.negotiation_head(n)["awaiting"] == 0 for n in range(1, 17)), 60))
+
+    @staticmethod
+    def _sixteen_blocked_on_the_gpu():
+        """Sixteen model answers blocked on ``sv_gpu`` (one slot): one holds the slot, fifteen seats' lines wait for
+        it, parked, holding no thread."""
+        machine = S.get().machine("sv_gpu")
+        model_pool = responders.pool("model")
+        held = until(lambda: machine.status()["in_flight"] == 1 and responders.machines().status("sv_gpu")
+                     == {"in_flight": 1, "parked": 15} and model_pool._idle == model_pool.threads - 1, 30)
+        assert held, (machine.status(), responders.machines().status("sv_gpu"), model_pool._idle, model_pool.threads)
+        assert machine.status()["waiting"] == 0, "no responder thread waits on the machine for its slot"
+
+    def test_a_model_seat_on_another_machine_answers_while_sixteen_wait_for_a_one_slot_machine(self):
+        """A machine's answers take no more of the model pool than it has slots: sixteen answers queued on a busy
+        one-slot machine leave the other threads free for every other machine's seats."""
+        responders.reset()
+        self.addCleanup(responders.reset)
+        Recording.gate, Recording.gated = threading.Event(), {"sv_gpu"}     # the GPU's one answer holds its slot
+        seats = [{"type": "human"}] + [{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}
+                                       for _ in range(16)]
+        seats += [{"type": "llm", "llm": {"server_id": "sv_dryrun", "model": "dry-run"}}]
+        s = self.game(seats)
+        for m in range(1, 17):
+            self.open(s, 0, m)
+        s.dispatch_waiting()
+        self._sixteen_blocked_on_the_gpu()
+        t0 = time.perf_counter()
+        r = s.call_tool(0, "open_negotiation", {"to": 17, "message": "Friends?"})
+        nid = r["result"]["negotiation_id"]
+        self.assertTrue(until(lambda: s.game.negotiation_head(nid)["awaiting"] == 0, 5), s.game.negotiation(nid))
+        self.assertLess(time.perf_counter() - t0, 1.0, "the idle machine's answer waited behind the busy one's")
+        self.assertEqual(s.game.negotiation(nid)["history"][-1]["by"], 17)
+        Recording.gate.set()
+        self.assertTrue(until(lambda: all(s.game.negotiation_head(n)["awaiting"] == 0 for n in range(1, 17)), 60))
+        self.assertTrue(until(lambda: responders.machines().status("sv_gpu") == {"in_flight": 0, "parked": 0}, 5))
+
+    def test_a_machines_answers_run_up_to_its_slots_and_half_the_pool(self):
+        """Eight seats on a four-slot machine: four answers at once with the default pool; with a pool of four, two
+        (half the pool), the others parked and each handed the place of one that ended, in order."""
+        for size, most in (("16", 4), ("4", 2)):
+            with self.subTest(responders=size), mock.patch.dict("os.environ", {"CITAR_RESPONDERS": size}):
+                self._eight_on_four_slots(most)
+
+    def _eight_on_four_slots(self, most: int):
+        responders.reset()
+        self.addCleanup(responders.reset)
+        Recording.reset()
+        Recording.gate = threading.Event()
+        s = self.game([{"type": "human"}] + [{"type": "llm", "llm": {"server_id": "sv_dryrun", "model": "dry-run"}}
+                                             for _ in range(8)])
+        chats = [self.open(s, 0, m) for m in range(1, 9)]
+        s.dispatch_waiting()
+        self.assertTrue(until(lambda: responders.machines().status("sv_dryrun")
+                              == {"in_flight": most, "parked": 8 - most} and Recording.in_step() == most, 30),
+                        (responders.machines().status("sv_dryrun"), Recording.in_step()))
+        time.sleep(0.2)
+        self.assertEqual(Recording.in_step(), most, "no more answers run than the machine's places")
+        Recording.gate.set()
+        self.assertTrue(until(lambda: all(s.game.negotiation_head(n)["awaiting"] == 0 for n in chats), 30))
+        self.assertTrue(until(lambda: responders.machines().status("sv_dryrun") == {"in_flight": 0, "parked": 0}, 5))
+        for sid in list(self.manager.sessions):
+            self.manager.delete(sid)
+
+    def test_a_parked_chat_is_told_its_place_and_moves_up(self):
+        """A chat whose answer is parked hears ``queued`` with its place, as a request in the machine's own line does,
+        and again as the answers before it end; then ``thinking`` when its answer starts."""
+        responders.reset()
+        self.addCleanup(responders.reset)
+        Recording.gate, Recording.gated = threading.Event(), {"sv_gpu"}
+        gpu = {"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}
+        s = self.game([{"type": "human"}, gpu, gpu, gpu])
+        heard = []
+        s.subscribers.append(lambda msg: heard.append(msg) if msg.get("type") == "negotiation_status" else None)
+        first = self.open(s, 0, 1)
+        s.dispatch_waiting()
+        self.assertTrue(until(lambda: Recording.in_step() == 1, 30))
+        second = self.open(s, 0, 2)
+        s.dispatch_waiting()
+        self.assertTrue(until(lambda: responders.machines().status("sv_gpu")["parked"] == 1, 10))
+        third = self.open(s, 0, 3)
+        s.dispatch_waiting()
+        self.assertTrue(until(lambda: responders.machines().status("sv_gpu")["parked"] == 2, 10))
+
+        def states(nid):
+            return [(m["state"], m.get("position")) for m in list(heard) if m["negotiation"] == nid
+                    and m["state"] in ("queued", "thinking")]
+        self.assertEqual(states(second), [("queued", 1)])
+        self.assertEqual(states(third), [("queued", 2)])
+        queued = next(m for m in heard if m["negotiation"] == third and m["state"] == "queued")
+        self.assertEqual((queued["machine"], queued["waiting_on"]), ("Test GPU box", 3))
+        Recording.gate.set()
+        self.assertTrue(until(lambda: all(s.game.negotiation_head(n)["awaiting"] == 0
+                                          for n in (first, second, third)), 30))
+        self.assertEqual(states(third)[:3], [("queued", 2), ("queued", 1), ("thinking", None)])
+
+    def test_a_parked_seat_moved_to_another_machine_answers_there_at_once(self):
+        responders.reset()
+        self.addCleanup(responders.reset)
+        Recording.gate, Recording.gated = threading.Event(), {"sv_gpu"}
+        gpu = {"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}
+        s = self.game([{"type": "human"}, gpu, gpu])
+        first = self.open(s, 0, 1)
+        s.dispatch_waiting()
+        self.assertTrue(until(lambda: responders.machines().status("sv_gpu") == {"in_flight": 1, "parked": 0}
+                              and Recording.in_step() == 1, 30))
+        second = self.open(s, 0, 2)
+        s.dispatch_waiting()
+        self.assertTrue(until(lambda: responders.machines().status("sv_gpu") == {"in_flight": 1, "parked": 1}, 10))
+        s.update_seat(2, llm={"server_id": "sv_dryrun", "model": "dry-run"})
+        self.assertEqual(responders.machines().status("sv_gpu")["parked"], 0, "the halted line left the GPU's queue")
+        self.assertTrue(until(lambda: s.game.negotiation_head(second)["awaiting"] == 0, 5),
+                        "answered on its new machine, without waiting for the old one's slot")
+        self.assertEqual(s.game.negotiation_head(first)["awaiting"], 1, "the GPU's answer is still held")
+        Recording.gate.set()
+        self.assertTrue(until(lambda: s.game.negotiation_head(first)["awaiting"] == 0, 10))
 
 
 class Pools(unittest.TestCase):
@@ -254,6 +377,68 @@ class Pools(unittest.TestCase):
         release.set()
         self.assertTrue(until(lambda: len(started) == 9, 5))
         self.assertEqual(pool.threads, 8)
+
+    class _Session:
+        """What a seat's line needs of a session: its lines, its keys, its seats and a responder that records the
+        thread each answer ran on (the first one held until ``go`` is set)."""
+
+        def __init__(self):
+            self._lines, self._responding, self.stopped = {}, {}, False
+            self.seats = [types.SimpleNamespace(type="hybrid", llm={})]
+            self.ran, self.go = [], threading.Event()
+
+        def _run_responder(self, pid, nid, key, epoch=None):
+            if not self.ran:
+                self.go.wait(5)
+            self.ran.append((nid, threading.current_thread().name.rsplit("-", 1)[0]))
+
+    def test_each_answer_of_a_line_runs_on_its_own_kinds_pool(self):
+        """A hybrid seat's bot-first pass and its model's answer share the seat's line, each on its own pool: a model's
+        answer never runs on the bot pool's two threads, whichever kind started the line."""
+        responders.reset()
+        self.addCleanup(responders.reset)
+        for kinds in (("bot", "model", "bot"), ("model", "bot", "model")):
+            with self.subTest(kinds=kinds):
+                self._line_of(kinds)
+
+    def _line_of(self, kinds: tuple):
+        s = self._Session()
+        for nid, kind in enumerate(kinds, 1):
+            responders.submit(s, 0, nid, 1, kind)
+        s.go.set()
+        self.assertTrue(until(lambda: len(s.ran) == 3 and not s._lines[0].running, 5), s.ran)
+        self.assertEqual(s.ran, [(nid, f"{kind}-responder") for nid, kind in enumerate(kinds, 1)])
+
+    def test_a_machines_place_goes_to_its_parked_lines_in_order(self):
+        gate = responders._Machines()
+        handed, told = [], []
+
+        class Recorder:
+            def submit(self, fn, *args):
+                handed.append(args)
+        with mock.patch.object(responders, "pool", lambda kind: Recorder()), \
+                mock.patch.object(responders, "_tell_places",
+                                  lambda sid, places: told.append([(n, w[2]) for n, w in places])):
+            self.assertTrue(gate.enter("m", 1, ("s", 1, "line1")))
+            self.assertFalse(gate.enter("m", 1, ("s", 2, "line2")))
+            self.assertFalse(gate.enter("m", 1, ("s", 3, "line3")))
+            self.assertEqual(told, [[(1, "line2")], [(2, "line3")]], "each parked chat told its place")
+            self.assertEqual(gate.status("m"), {"in_flight": 1, "parked": 2})
+            gate.leave("m")
+            self.assertEqual(handed[-1][:5], ("s", 2, "line2", "model", "m"), "the first parked, holding the place")
+            self.assertEqual(told[-1], [(1, "line3")], "the one behind it moved up")
+            self.assertEqual(gate.status("m"), {"in_flight": 1, "parked": 1})
+            self.assertFalse(gate.enter("m", 1, ("s", 4, "line4")), "a newcomer queues behind the parked")
+            gate.leave("m")
+            gate.leave("m")
+            self.assertEqual([h[2] for h in handed], ["line2", "line3", "line4"])
+            gate.leave("m")
+            self.assertEqual(gate.status("m"), {"in_flight": 0, "parked": 0})
+            self.assertTrue(gate.enter("m", 2, ("s", 5, "line5")) and gate.enter("m", 2, ("s", 6, "line6")))
+            self.assertFalse(gate.enter("m", 2, ("s", 7, "line7")))
+            self.assertTrue(gate.unpark("line7"))
+            self.assertFalse(gate.unpark("line7"))
+            self.assertEqual(gate.status("m"), {"in_flight": 2, "parked": 0})
 
 
 class HaltsNeverDecline(Case):
