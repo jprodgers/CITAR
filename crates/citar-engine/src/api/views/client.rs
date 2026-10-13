@@ -376,6 +376,7 @@ impl Game {
             turn_limit: g.total_turns(),
             config: config_json(g),
             events: events_json(g, viewer, event_limit),
+            // refcheck: minimap-view-block
             minimap: viewer.and_then(|p| g.minimap(p)),
             rest,
         }
