@@ -259,7 +259,8 @@ class Game:
     def revision(self) -> int: ...
     @property
     def writes(self) -> int:
-        """How many commands the game has taken, refused or not: moves on every call that may change it."""
+        """How many commands the game has taken, refused or not: moves on every call that may change it, never on a
+        read (a query tool through execute included)."""
     @property
     def poisoned(self) -> Optional[str]: ...
     def is_alive(self, pid: int) -> bool: ...
@@ -290,7 +291,7 @@ class Game:
 
     # tools and views
     def execute(self, pid: int, tool: str, args_json: Optional[bytes] = None) -> tuple[bytes, bytes]:
-        """(the tool's result, the events). ActionError."""
+        """(the tool's result, the events: none for a query, which is a read and never counts in writes). ActionError."""
     def view_json(self, pid: Optional[int] = None, event_limit: int = 150,
                   extra_json: Optional[bytes] = None) -> bytes:
         """The client view, with extra_json's keys added (a key of the view's own is a ValueError)."""
