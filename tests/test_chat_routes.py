@@ -299,6 +299,33 @@ class DryRunKnobs(Case):
         self.assertEqual((cfg["provider"], cfg["dry_run_propose_every"], cfg["dry_run_negotiation"]),
                          ("dryrun", 3, "accept"))
 
+    def test_a_members_knobs_are_held_to_what_they_may_be(self):
+        """A member's dry run cannot hold a responder for long: its delay is held to the longest a machine's may be
+        (60 s), whether the seat is inline or on a dry-run machine; an answer it does not know and a period that is not
+        a number go."""
+        from citar.agents.providers.dryrun import DryRunConversation
+        from citar.db.models import User
+        wild = {"model": "dry-run", "dry_run_delay": 86400, "dry_run_negotiation": "shout",
+                "dry_run_propose_every": "often"}
+        with db.session() as s:
+            alice = s.get(User, self.ids["alice"])
+            inline = servers.member_llm({"provider": "dryrun", **wild}, alice)
+            machine = servers.member_llm({"server_id": "sv_dryrun", **wild}, alice)
+            fine = servers.member_llm({"server_id": "sv_dryrun", "model": "dry-run", "dry_run_delay": "0.5",
+                                       "dry_run_propose_every": 4.0}, alice)
+        self.assertEqual(inline, {"provider": "dryrun", "model": "dry-run", "dry_run_delay": 60.0})
+        self.assertEqual(machine, {"server_id": "sv_dryrun", "model": "dry-run", "dry_run_delay": 60.0})
+        self.assertEqual(fine, {"server_id": "sv_dryrun", "model": "dry-run", "dry_run_delay": 0.5,
+                                "dry_run_propose_every": 4})
+        self.assertEqual(servers.resolve_llm({"server_id": "sv_dryrun", "model": "dry-run",
+                                              "dry_run_delay": 9999})["dry_run_delay"], 60.0,
+                         "a seat saved before the bound is held to it too")
+        # the provider holds what reaches it, an administrator's inline block's and a chat's "[dry run: wait N s]"
+        conv = DryRunConversation({"dry_run_delay": 3600}, "", [{"name": "respond_negotiation"}])
+        self.assertEqual(conv.delay, 60.0)
+        conv.add_user_text("negotiation #4: [dry run: wait 600 s] hello")
+        self.assertEqual(conv._delay(), 60.0)
+
 
 class WaitForTurnDeadlines(Case):
     """Gate 8: MCP's wait_for_turn gives each chat its deadline."""

@@ -14,6 +14,8 @@ import threading
 
 from .base import Conversation, StepResult, ToolCall
 
+#: The longest one step waits, whatever asks for more (``servers.DRY_RUN_MAX_DELAY``, which a machine's field holds to).
+MAX_DELAY = 60.0
 #: What the dry run writes when it is asked for text with no tools (a report's narrative).
 DRY_NARRATIVE = ("(Dry run narrative.) This is where a model's written analysis of the figures would appear. The "
                  "computed findings and charts below are produced without a model.")
@@ -28,7 +30,13 @@ class DryRunConversation(Conversation):
     """
     def __init__(self, cfg: dict, system: str, tools: list[dict]):
         self.cfg = cfg
-        self.delay = float(cfg.get("dry_run_delay") if cfg.get("dry_run_delay") is not None else 1.0)
+        try:
+            delay = float(cfg.get("dry_run_delay") if cfg.get("dry_run_delay") is not None else 1.0)
+        except (TypeError, ValueError):
+            delay = 1.0
+        # held to the longest a machine's own delay may be (``servers.DRY_RUN_MAX_DELAY``): a seat's block, an
+        # administrator's inline one or a saved game's, never a step of minutes that holds a responder
+        self.delay = max(0.0, min(MAX_DELAY, delay)) if delay == delay else 1.0
         self.usage = {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
         self._closed = threading.Event()
         self._step = 0
@@ -58,7 +66,7 @@ class DryRunConversation(Conversation):
         """How long this step takes: the configured delay, or a chat message's ``[dry run: wait N s]``."""
         chat = "respond_negotiation" in self._tools and "end_turn" not in self._tools
         m = re.search(r"\[dry run: wait (\d+(?:\.\d+)?) s\]", self._chat) if chat and self._pending else None
-        return min(600.0, float(m.group(1))) if m else self.delay
+        return min(MAX_DELAY, float(m.group(1))) if m else self.delay
 
     def step(self) -> StepResult:
         """Produce a plausible set of orders, after a configurable delay."""

@@ -360,7 +360,7 @@ def _normalize_server(d: dict) -> dict:
     key = _obj(conn_in.get("key"), "connection.key")
     backend = key.get("backend") if key.get("backend") in ("none", "keyring", "env", "file") else "none"
     c["key"] = {"backend": backend, "env": str(key.get("env") or "").strip()}
-    c["dry_run_delay"] = _num(conn_in.get("dry_run_delay"), 1.0, 0, 60)
+    c["dry_run_delay"] = _num(conn_in.get("dry_run_delay"), 1.0, 0, DRY_RUN_MAX_DELAY)
     c["timeout"] = _num(conn_in.get("timeout"), None, 5, 7200)
     hw = d.get("hardware") if isinstance(d.get("hardware"), dict) else {}
     sv["hardware"] = hw or {"source": "none"}
@@ -1217,6 +1217,27 @@ MEMBER_LLM_KEYS = ("server_id", "model", "model_id", "profile_id") + SEAT_OVERRI
 #: and reads no key. ``dry_run_negotiation`` is how it answers chats; ``dry_run_propose_every`` makes it open a trade
 #: with a civilization it has met every that many turns (``citar.agents.providers.dryrun``).
 DRYRUN_LLM_KEYS = ("dry_run_delay", "dry_run_negotiation", "dry_run_propose_every")
+#: The longest a dry run's step may take: a machine's ``dry_run_delay`` (``_normalize``), a seat's, and a chat
+#: message's ``[dry run: wait N s]`` are all held to it, so a member's dry run cannot hold a responder for long.
+DRY_RUN_MAX_DELAY = 60.0
+#: How a dry run may answer chats (``dry_run_negotiation``).
+DRY_RUN_ANSWERS = ("accept", "reject", "counter", "reply")
+
+
+def dry_run_knobs(block: dict) -> dict:
+    """The dry-run knobs (``DRYRUN_LLM_KEYS``) of a member's seat block, each kept only as what it may be: the delay a
+    number of seconds within ``DRY_RUN_MAX_DELAY``, the answer one of ``DRY_RUN_ANSWERS``, the proposals' period a
+    whole number of turns."""
+    out: dict = {}
+    delay = _num(block.get("dry_run_delay"), None, 0, DRY_RUN_MAX_DELAY)
+    if delay is not None:
+        out["dry_run_delay"] = delay
+    if block.get("dry_run_negotiation") in DRY_RUN_ANSWERS:
+        out["dry_run_negotiation"] = block["dry_run_negotiation"]
+    every = _num(block.get("dry_run_propose_every"), None, 0, 10_000)
+    if every is not None:
+        out["dry_run_propose_every"] = int(every)
+    return out
 
 
 class SeatBlockError(ValueError):
@@ -1267,17 +1288,18 @@ def member_llm(block: Optional[dict], user, *, required: bool = False) -> dict:
     sid = block.get("server_id")
     if not sid:
         if str(block.get("provider") or "").lower() == "dryrun":
-            out = {k: block[k] for k in MEMBER_LLM_KEYS + DRYRUN_LLM_KEYS if k in block}
+            out = {k: block[k] for k in MEMBER_LLM_KEYS if k in block}
+            out.update(dry_run_knobs(block))
             out["provider"] = "dryrun"
             return out
         raise SeatBlockError(400, "Pick a machine for this seat: a seat names one of the machines you may use, "
                                   "not an address or a key.")
     if not isinstance(sid, str) or machine(sid) is None:
         raise SeatBlockError(400, "There is no such machine. Pick a machine for this seat.")
-    keys = MEMBER_LLM_KEYS
+    out = {k: block[k] for k in MEMBER_LLM_KEYS if k in block}
     if str((machine(sid) or {}).get("provider") or "").lower() == "dryrun":
-        keys = MEMBER_LLM_KEYS + DRYRUN_LLM_KEYS        # a dry-run machine's knobs: they dial nothing either
-    return {k: block[k] for k in keys if k in block}
+        out.update(dry_run_knobs(block))        # a dry-run machine's knobs: they dial nothing either
+    return out
 
 
 def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> dict:
@@ -1292,7 +1314,8 @@ def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> 
     if not llm or not llm.get("server_id"):
         if not inline_ok:
             if str((llm or {}).get("provider") or "").lower() == "dryrun":
-                out = {k: llm[k] for k in MEMBER_LLM_KEYS + DRYRUN_LLM_KEYS if k in llm}
+                out = {k: llm[k] for k in MEMBER_LLM_KEYS if k in llm}
+                out.update(dry_run_knobs(llm))
                 out["provider"] = "dryrun"
                 return out
             raise ServerError("This seat has no machine: only an administrator can give a seat a model "
@@ -1338,10 +1361,9 @@ def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> 
     if cfg["provider"] != "anthropic":
         cfg.pop("effort", None)
     if provider == "dryrun":
-        cfg["dry_run_delay"] = conn.get("dry_run_delay", 1.0) if llm.get("dry_run_delay") is None else llm["dry_run_delay"]
-        for k in DRYRUN_LLM_KEYS[1:]:
-            if llm.get(k) not in (None, ""):
-                cfg[k] = llm[k]
+        knobs = dry_run_knobs(llm)
+        cfg["dry_run_delay"] = knobs.pop("dry_run_delay", conn.get("dry_run_delay", 1.0))
+        cfg.update(knobs)
     prof = profile(m, llm.get("profile_id"))
     if prof:
         cfg["profile_id"] = prof["id"]
