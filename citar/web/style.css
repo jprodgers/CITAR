@@ -147,9 +147,9 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .chat-dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--gold); flex: none; }
 .chat-win.unread .chat-dot { display: inline-block; }
 .chat-body { display: flex; flex-direction: column; gap: 6px; padding: 8px; overflow-y: auto; min-height: 0; }
-/* only the log gives up height when the window is short; the rest keeps its size and the body scrolls */
+/* the log gives up a little height when the window is short (down to 120 px); then the body scrolls */
 .chat-body > * { flex: none; }
-.chat-body > .chat-log { flex: 1 1 auto; min-height: 90px; max-height: 240px; }
+.chat-body > .chat-log { flex: 0 1 auto; min-height: 120px; max-height: 240px; }
 .chat-log { overflow-y: auto; background: #0d1016; border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
 .chat-log .msg { max-width: 92%; }
 .chat-divider { text-align: center; color: var(--muted); font-size: 11px; margin: 4px 0; }

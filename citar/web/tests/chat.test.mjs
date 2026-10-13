@@ -301,6 +301,35 @@ test("entries that arrive out of order are put in their places", async () => {
   assert.equal(win.log.children[0].textContent, "Chat #9 · turn 4");
 });
 
+test("the log follows its newest entry, unless the reader scrolled up to read back", async () => {
+  const { game, dock, server } = makeGame();
+  dock.onView(game.view);
+  server.chat(2, 1, "Rome");
+  server.say(2, false, "open", "Hello");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 2 } });
+  await flush();
+  const log = dock.windows.get(1).log;
+  log.scrollHeight = 400; log.clientHeight = 100;
+  server.say(2, true, "reply", "Hi");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 2 } });
+  await flush();
+  assert.equal(log.scrollTop, 400, "at the newest");
+  // the reader scrolls up: new entries leave the place they are reading
+  log.scrollTop = 50;
+  log.dispatch("scroll");
+  log.scrollHeight = 500;
+  server.say(2, false, "reply", "And?");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 2 } });
+  await flush();
+  assert.equal(log.scrollTop, 50);
+  // back at the bottom, it follows again (and after the window changes size: the builder opened)
+  log.scrollTop = 400;
+  log.dispatch("scroll");
+  log.scrollHeight = 650;
+  dock.windows.get(1).dealToggle.click();
+  assert.equal(log.scrollTop, 650);
+});
+
 test("your move: Enter sends a reply, Counter sends the builder's deal, and what was sent leaves the draft", async () => {
   const { game, dock, server, state } = makeGame();
   dock.onView(game.view);

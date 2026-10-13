@@ -273,6 +273,7 @@ export class ChatDock {
       } else {
         Object.assign(s, { left: "", width: "", bottom: "", maxHeight: `${it.maxHeight}px` });
       }
+      if (it.kind === "window") win.pin();
     }
     this.drawStrip(plan);
     this.plan = plan;
@@ -324,7 +325,11 @@ class ChatWindow {
       el("button", { class: "small chat-min", title: "Minimise", onclick: (e) => { e.preventDefault(); e.stopPropagation(); if (this.tab) dock.restore(civ); else dock.minimise(civ); } }, "–"),
       el("button", { class: "small chat-close", title: "Close (the chat goes on; End Turn or Diplomacy opens it again)",
         onclick: (e) => { e.preventDefault(); e.stopPropagation(); dock.close(civ); } }, "✕"));
-    this.log = el("div", { class: "chat-log" });
+    // the log follows its newest entry unless the reader scrolled up to read back
+    this.follow = true;
+    this.log = el("div", { class: "chat-log", onscroll: () => {
+      this.follow = this.log.scrollTop + this.log.clientHeight >= this.log.scrollHeight - 8;
+    } });
     this.proposal = el("div", { class: "chat-proposal" });
     this.status = el("div", { class: "chat-status" });
     this.text = el("textarea", { class: "chat-text", rows: 2, placeholder: "Write a message…", value: this.draft.text,
@@ -397,7 +402,6 @@ class ChatWindow {
    * divider before each chat's first. Nothing already drawn is drawn again. */
   appendEntries() {
     const chats = this.dock.model.chatsWith(this.civ);
-    const follow = this.log.scrollTop + this.log.clientHeight >= this.log.scrollHeight - 8;
     let added = false;
     for (const chat of chats) {
       if (!chat.entries.length) continue;
@@ -411,7 +415,12 @@ class ChatWindow {
         added = true;
       });
     }
-    if (added && follow) this.log.scrollTop = this.log.scrollHeight;
+    if (added) this.pin();
+  }
+
+  /** Keep the newest entry in sight (when following): after entries arrive, and after the window's size changed. */
+  pin() {
+    if (this.follow) this.log.scrollTop = this.log.scrollHeight;
   }
 
   insert(nid, seq, node) {
@@ -549,6 +558,7 @@ class ChatWindow {
     const n = d.give.length + d.receive.length;
     this.dealToggle.textContent = `${d.builderOpen ? "▾" : "▸"} Deal builder${n ? ` (${n} item${n === 1 ? "" : "s"})` : ""}`;
     this.dealBody.style.display = d.builderOpen ? "" : "none";
+    this.pin();
     const name = this.dock.player(this.civ).name;
     const nameOf = (pid) => this.dock.player(pid).name;
     const side = (node, title, key) => {
