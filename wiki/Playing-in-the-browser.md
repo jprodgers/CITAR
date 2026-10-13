@@ -184,12 +184,25 @@ restarts. A game loaded from a save comes back paused: its bots answer what wait
 models once you resume it, so you can check their settings before they spend anything. Nobody can end their turn while a chat they opened is open: an AI's turn waits for your
 answer, as long as the setting allows.
 
+The deal builder's one-click suggestions (what each side could give, their gold, the agreements you
+could both sign now) are fetched when you open the builder, and again after each message in that
+chat and at each new turn while it stays open.
+
 ## After the game
 
 **Recap** — available when a game ends, and at any time for AI-only games — scrubs through every
 turn: territory, cities and units on the map, score, military and tech graphs, per-turn events,
 diplomatic messages, and every AI's recorded reasoning. You can show the map as a particular player
 saw it, which is the only honest way to judge a decision made under fog of war.
+
+Its **Diplomacy** tab shows the turn's messages and its chats as threads: each chat that had a word
+that turn, with everything said in it up to then (earlier turns' entries dimmed), the deals proposed
+in words ("Rome gives 50 gold; Greece gives Iron × 30t"), the game's own notes in grey ("(no reply in
+time)"), and how it stood at the end of the turn: open, accepted, declined or expired.
+
+The recap downloads the game's turns as the save keeps them, a full map now and then and only what
+changed in between, and your browser rebuilds each turn as you scrub, so even a long game on a large
+map opens quickly.
 
 **📊 AI stats** (top bar, or **Stats** in the lobby) shows live per-seat metrics for any game with
 an AI player: turn times, model steps, tool calls, errors, loops, tokens, and how each turn ended.
