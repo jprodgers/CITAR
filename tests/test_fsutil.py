@@ -121,7 +121,7 @@ class ProbeFiles(unittest.TestCase):
 class LabFiles(Refused):
     """The runner replaces ``status.json`` every pass while the Lab page (``overview``) and ``lab status`` read it; the
     server replaces a queued experiment's file when its priority changes (``set_priority``) while the runner, the Lab
-    and Bots pages and the ratings read it; and the runner moves it to done/ when it finishes."""
+    and Bots pages and the ratings read it; ``submit`` writes it, and the runner moves it to done/ when it finishes."""
 
     def setUp(self):
         super().setUp()
@@ -171,6 +171,42 @@ class LabFiles(Refused):
         with mock.patch.object(Path, "read_text", read_text):
             got = lab.overview()["experiments"]
         self.assertEqual([(e["name"], e["state"]) for e in got], [("fsutil-exp", "complete")])
+
+    def test_an_experiment_finished_after_its_read_shows_once(self):
+        """Moved to done/ after its queue file was read and before done/ is listed, it would show twice, queued and
+        complete: the overview reads the folders again. One queued again under the finished one's name (``lab
+        submit`` allows it) is another experiment, and both show."""
+        name = "fsutil-exp.json"
+        spec = {"name": "fsutil-exp", "games": 2, "submitted": "2026-10-12T00:00:00", "seats": []}
+        fsutil.write_text(lab.QUEUE / name, json.dumps(spec))
+        real = Path.read_text
+
+        def read_text(path, *args, **kwargs):
+            text = real(path, *args, **kwargs)
+            if path.parent == lab.QUEUE and path.name == name:
+                shutil.move(str(path), str(lab.DONE / name))       # the runner, finishing it just after
+            return text
+        with mock.patch.object(Path, "read_text", read_text):
+            got = lab.overview()["experiments"]
+        self.assertEqual([(e["name"], e["state"]) for e in got], [("fsutil-exp", "complete")])
+        fsutil.write_text(lab.QUEUE / name, json.dumps({**spec, "submitted": "2026-10-12T01:00:00"}))
+        got = lab.overview()["experiments"]
+        self.assertEqual([(e["name"], e["state"]) for e in got], [("fsutil-exp", "queued"), ("fsutil-exp", "complete")])
+
+    def test_an_experiment_read_while_it_is_submitted(self):
+        """``submit`` writes the file whole, by a temporary file and a rename: the Lab page polling meanwhile never
+        reads half of it."""
+        real = Path.write_text
+        polled = []
+
+        def write_text(path, text, *args, **kwargs):
+            real(path, text[: len(text) // 2], *args, **kwargs)        # half of it written so far
+            polled.append(lab.overview()["experiments"])
+            return real(path, text, *args, **kwargs)
+        with mock.patch.object(Path, "write_text", write_text):
+            lab.submit({"name": "fsutil-exp", "games": 2, "seats": [{"bot": "basic"}, {"bot": "basic"}]})
+        self.assertEqual(polled, [[]])
+        self.assertEqual([e["name"] for e in lab.overview()["experiments"]], ["fsutil-exp"])
 
 
 class BotProfileFiles(Refused):
