@@ -61,7 +61,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from .fsutil import replace as _fs_replace
+from .fsutil import read_text as _fs_read, replace as _fs_replace, write_text as _fs_write
 from . import paths
 
 LAB = paths.saves_path("lab")
@@ -184,16 +184,28 @@ def submit(spec: dict) -> dict:
 
 
 def load_queue() -> list[dict]:
-    """Every queued experiment, most important first."""
+    """Every queued experiment, most important first. A file read while the server changes its priority
+    (``set_priority``) is waited for: one skipped would leave its games unstarted, and an idle runner whose only
+    experiment it was would think the queue empty and exit."""
     _dirs()
     out = []
     for p in QUEUE.glob("*.json"):
         try:
-            out.append(json.loads(p.read_text(encoding="utf-8")))
+            out.append(json.loads(_fs_read(p)))
         except (OSError, json.JSONDecodeError):
             continue
     out.sort(key=lambda s: (-s.get("priority", 0), s.get("submitted", "")))
     return out
+
+
+def set_priority(name: str, priority: int) -> int:
+    """Change a queued experiment's priority (the Queue page), held to -100..100; returns it. The file is replaced
+    while the runner may be reading it, so both sides retry."""
+    path = QUEUE / f"{name}.json"
+    spec = json.loads(_fs_read(path))
+    spec["priority"] = max(-100, min(100, int(priority)))
+    _fs_write(path, json.dumps(spec, indent=1))
+    return spec["priority"]
 
 
 def complete_players(exp: dict, r: dict) -> dict:
@@ -756,7 +768,7 @@ def overview() -> dict:
     _dirs()
     now = time.time()
     try:
-        st = json.loads((LAB / "status.json").read_text(encoding="utf-8"))
+        st = json.loads(_fs_read(LAB / "status.json"))     # replaced by the runner every pass
     except (OSError, json.JSONDecodeError):
         st = {}
     alive = bool(st.get("pid")) and _pid_alive(st["pid"]) and not st.get("stopped")
@@ -780,7 +792,7 @@ def overview() -> dict:
                         "attempt": crashes.get((r["exp"], r["i"]), 0) + 1})
 
     experiments = []
-    specs = [(json.loads(p.read_text(encoding="utf-8")), "queued") for p in sorted(QUEUE.glob("*.json"))]
+    specs = [(json.loads(_fs_read(p)), "queued") for p in sorted(QUEUE.glob("*.json"))]
     specs += [(json.loads(p.read_text(encoding="utf-8")), "complete")
               for p in sorted(DONE.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
     remaining_minutes = 0.0
@@ -1024,7 +1036,7 @@ def cmd_report(names):
 def cmd_status():
     """Print what the runner is doing, or say that it is not running."""
     try:
-        st = json.loads((LAB / "status.json").read_text(encoding="utf-8"))
+        st = json.loads(_fs_read(LAB / "status.json"))
     except (OSError, json.JSONDecodeError):
         print("no status (runner never started?)")
         return

@@ -34,6 +34,11 @@ def read_text(path) -> str:
     return retry(lambda: path.read_text(encoding="utf-8"))
 
 
+def read_bytes(path) -> bytes:
+    """``read_text`` for a binary file (a gzipped scenario, an avatar)."""
+    return retry(Path(path).read_bytes)
+
+
 def write_text(path, text: str):
     """Atomic write: a temporary file next to the target, then a (retried) replace."""
     path = Path(path)

@@ -35,7 +35,7 @@ from typing import Iterator, Optional, Tuple
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from . import db, paths
+from . import db, fsutil, paths
 from .auth import access, audit
 from .db.models import ITEM_KINDS, AclEntry, OwnedItem, User
 
@@ -371,8 +371,10 @@ def register_system(session) -> int:
 # ---------------------------------------------------------------------------- adoption
 
 def _json_object(p: Path) -> dict:
-    """A JSON file's object ({} for any other JSON value); raises when the file does not read as JSON."""
-    d = json.loads(p.read_text(encoding="utf-8"))
+    """A JSON file's object ({} for any other JSON value); raises when the file does not read as JSON. Read retried:
+    adoption also runs when the first administrator is made, with the server running, and a run, report or experiment
+    with no row yet may be replacing its file."""
+    d = json.loads(fsutil.read_text(p))
     return d if isinstance(d, dict) else {}
 
 
@@ -423,8 +425,7 @@ def _describe(kind: str, path: Path) -> Tuple[Optional[str], Optional[str]]:
     """What an item's file says of it: (its name, the owner id it records), either None when it says none. Raises
     whatever reading it raises (a truncated or corrupt file): the caller decides what an unreadable file becomes."""
     if kind == "scenario":
-        with gzip.open(path, "rt", encoding="utf-8") as f:
-            d = json.load(f)
+        d = json.loads(gzip.decompress(fsutil.read_bytes(path)).decode("utf-8"))
         return (d.get("name") if isinstance(d, dict) else None), None
     if kind == "probe_run":
         d = _json_object(path / "run.json")

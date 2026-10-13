@@ -20,6 +20,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from . import fsutil
+
 SERVICE = "CITAR"
 _lock = threading.Lock()
 _passphrase: Optional[str] = os.environ.get("CITAR_KEYS_PASSPHRASE") or None
@@ -102,11 +104,12 @@ def _fernet(passphrase: str, salt: bytes):
 
 
 def _file_read(passphrase: str) -> dict:
-    """Decrypt and read the key file."""
+    """Decrypt and read the key file. ``get`` reads it without the lock, so it may be being replaced (``store``):
+    refused then, the key would be missing and a model call would go out without it."""
     p = _file_path()
     if not p.exists():
         return {}
-    blob = json.loads(p.read_text(encoding="utf-8"))
+    blob = json.loads(fsutil.read_text(p))
     salt = base64.b64decode(blob["salt"])
     from cryptography.fernet import InvalidToken
     try:
@@ -120,12 +123,12 @@ def _file_write(passphrase: str, keys: dict):
     """Encrypt and write the key file."""
     p = _file_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    salt = base64.b64decode(json.loads(p.read_text(encoding="utf-8"))["salt"]) if p.exists() else os.urandom(16)
+    salt = base64.b64decode(json.loads(fsutil.read_text(p))["salt"]) if p.exists() else os.urandom(16)
     token = _fernet(passphrase, salt).encrypt(json.dumps(keys).encode("utf-8")).decode("ascii")
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps({"format": "citar-keys", "salt": base64.b64encode(salt).decode("ascii"), "data": token}),
                    encoding="utf-8")
-    os.replace(tmp, p)
+    fsutil.replace(tmp, p)
     try:
         os.chmod(p, 0o600)
     except OSError:

@@ -1,7 +1,11 @@
-"""Readers of files another thread replaces (citar/fsutil.py). On Windows, for the moment ``os.replace`` takes, the old
-file is pending deletion and opening it fails with PermissionError; the suite's merge run of 3-10 caught a probe run's
-``run.json`` read so (``test_pooled_work.Probes``), so a reader tries again, as the writer does."""
+"""Readers of files another thread or process replaces (citar/fsutil.py). On Windows, for the moment ``os.replace``
+takes, the old file is pending deletion and opening it fails with PermissionError; the suite's merge run of 3-10 caught
+a probe run's ``run.json`` read so (``test_pooled_work.Probes``), so a reader tries again, as the writer does. One test
+per family of such files: each reader is refused its file once and must read it again."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import contextlib
+import gzip
+import io
 import json
 import secrets
 import shutil
@@ -10,22 +14,42 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from citar import fsutil, probes
+from citar import engine_api, fsutil, items, keystore, lab, probes
+from citar.bots import profiles as bot_profiles, ratings
+from citar.pool import registry_import
+from citar.reports import ReportRunner, data as report_data
+from citar.server import benchmarks, bots_api, users_api
 
 
-def refusing(times: int, name: str):
-    """A ``Path.read_text`` that refuses the file called *name* its first *times* reads, as Windows does while the
-    file is being replaced, and the calls it saw."""
-    real = Path.read_text
+def refusing(times: int, name: str, method: str = "read_text"):
+    """A ``Path.read_text`` (or ``Path.<method>``) that refuses the file called *name* its first *times* reads, as
+    Windows does while the file is being replaced, and the calls it saw."""
+    real = getattr(Path, method)
     seen = []
 
-    def read_text(self, *args, **kwargs):
+    def read(self, *args, **kwargs):
         if self.name == name:
             seen.append(self)
             if len(seen) <= times:
                 raise PermissionError(13, "Permission denied", str(self))
         return real(self, *args, **kwargs)
-    return read_text, seen
+    return read, seen
+
+
+class Refused(unittest.TestCase):
+    """A temporary folder, and ``read_refused_once``."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="citar-fsutil-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def read_refused_once(self, name: str, read, method: str = "read_text"):
+        """What ``read()`` returns while the file called *name* refuses its first read, checking it was read again."""
+        refuse, seen = refusing(1, name, method)
+        with mock.patch.object(Path, method, refuse), mock.patch.object(fsutil.time, "sleep"):
+            out = read()
+        self.assertGreaterEqual(len(seen), 2, f"{name} was not read again")
+        return out
 
 
 class ReadText(unittest.TestCase):
@@ -50,6 +74,14 @@ class ReadText(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 fsutil.read_text(p)
         self.assertEqual(len(seen), 40)
+
+    def test_a_binary_read_refused_for_a_moment_is_tried_again(self):
+        p = self.dir / "a.bin"
+        p.write_bytes(b"\x00\x01")
+        read_bytes, seen = refusing(1, "a.bin", "read_bytes")
+        with mock.patch.object(Path, "read_bytes", read_bytes), mock.patch.object(fsutil.time, "sleep"):
+            self.assertEqual(fsutil.read_bytes(p), b"\x00\x01")
+        self.assertEqual(len(seen), 2)
 
     def test_a_missing_file_is_not_waited_for(self):
         with mock.patch.object(fsutil.time, "sleep") as slept:
@@ -84,6 +116,184 @@ class ProbeFiles(unittest.TestCase):
             with mock.patch.object(Path, "read_text", read_text), mock.patch.object(fsutil.time, "sleep"):
                 self.assertEqual(read()["id"], pid)
             self.assertGreaterEqual(len(seen), 2)
+
+
+class LabFiles(Refused):
+    """The runner replaces ``status.json`` every pass while the Lab page (``overview``) and ``lab status`` read it; the
+    server replaces a queued experiment's file when its priority changes (``set_priority``) while the runner, the Lab
+    and Bots pages and the ratings read it."""
+
+    def setUp(self):
+        super().setUp()
+        for name, sub in (("LAB", ""), ("QUEUE", "queue"), ("DONE", "done"), ("RESULTS", "results"), ("JOBS", "jobs")):
+            patcher = mock.patch.object(lab, name, self.dir / sub)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        lab._dirs()
+
+    def test_the_runner_status_read_while_the_runner_replaces_it(self):
+        fsutil.write_text(lab.LAB / "status.json", json.dumps({
+            "pid": 4242, "updated": "2026-10-12T00:00:00", "stopped": False, "quiet_hours": False,
+            "target_workers": 2, "running": [], "games_last_hour": 0, "queue": {}}))
+        with mock.patch.object(lab, "_pid_alive", return_value=True):
+            runner = self.read_refused_once("status.json", lab.overview)["runner"]
+            self.assertEqual((runner["pid"], runner["alive"], runner["workers"]), (4242, True, 2))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.read_refused_once("status.json", lab.cmd_status)
+        self.assertIn("runner pid 4242 ALIVE", out.getvalue())
+
+    def test_a_queued_experiment_read_while_its_priority_changes(self):
+        name = "fsutil-exp.json"
+        fsutil.write_text(lab.QUEUE / name, json.dumps({
+            "name": "fsutil-exp", "games": 2, "priority": 0, "submitted": "2026-10-12T00:00:00",
+            "seats": [{"profile": "fsutil-bot", "label": "fsutil bot"}, {"bot": "basic", "label": "basic"}]}))
+        self.assertEqual([e["name"] for e in self.read_refused_once(name, lab.load_queue)], ["fsutil-exp"])
+        self.assertEqual([e["name"] for e in self.read_refused_once(name, lab.overview)["experiments"]], ["fsutil-exp"])
+        self.assertEqual([e["name"] for e in self.read_refused_once(name, lambda: bots_api._experiments_with("fsutil-bot"))],
+                         ["fsutil-exp"])
+        self.assertEqual([spec["name"] for spec, _ in self.read_refused_once(name, ratings._lab_files)], ["fsutil-exp"])
+        self.assertEqual(self.read_refused_once(name, lambda: lab.set_priority("fsutil-exp", 7)), 7)
+        self.assertEqual(json.loads((lab.QUEUE / name).read_text(encoding="utf-8"))["priority"], 7)
+
+
+class BotProfileFiles(Refused):
+    """A saved bot profile is replaced by its editor (``profiles.save``) while games, the lab and the Bots page read
+    it; refused, it reads as no such profile."""
+
+    def test_a_profile_read_while_its_file_is_replaced(self):
+        pid = f"fsutil-{secrets.token_hex(3)}"
+        path = bot_profiles._path(pid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fsutil.write_text(path, json.dumps({"id": pid, "name": "fsutil bot", "engine": "basic", "params": {}}))
+        self.addCleanup(path.unlink, missing_ok=True)
+        self.assertEqual(self.read_refused_once(path.name, lambda: bot_profiles.get(pid))["name"], "fsutil bot")
+        self.assertIn(pid, [p["id"] for p in self.read_refused_once(path.name, bot_profiles.list_profiles)])
+
+
+class MapAndScenarioFiles(Refused):
+    """A map or a scenario is replaced by the editor's save while the editor's lists, the lobby and the next save
+    read it."""
+
+    def test_a_map_read_while_its_file_is_replaced(self):
+        mid = f"fsutil-map-{secrets.token_hex(3)}"
+        blank = {**engine_api.blank_map(12, 10, "Grassland", "fsutil map"), "id": mid}
+        saved, _ = engine_api.save_map(blank)
+        self.addCleanup(engine_api.delete_map, mid)
+        path = engine_api.map_file(mid)
+        self.assertEqual(self.read_refused_once(path.name, lambda: engine_api.load_map(mid))["id"], mid)
+        self.assertIn(mid, [m["id"] for m in self.read_refused_once(path.name, engine_api.list_maps)])
+        # a save keeps the date the map was made, read from the file it replaces
+        fsutil.write_text(path, json.dumps({**saved, "created": "2020-01-01T00:00:00"}))
+        again, _ = self.read_refused_once(path.name, lambda: engine_api.save_map(blank))
+        self.assertEqual(again["created"], "2020-01-01T00:00:00")
+
+    def test_a_scenario_read_while_its_file_is_replaced(self):
+        sid = f"fsutil-scn-{secrets.token_hex(3)}"
+        game = engine_api.EngineGame.new({"map_size": "duel", "seed": 11, "barbarians": "off",
+                                          "players": [{"controller": "bot"}, {"controller": "bot"}]})
+        game.save_scenario(sid, "fsutil scenario")
+        path = engine_api.scenario_file(sid)
+        self.addCleanup(path.unlink, missing_ok=True)
+        loaded = self.read_refused_once(path.name, lambda: engine_api.load_scenario(sid), "read_bytes")
+        self.assertEqual(loaded["name"], "fsutil scenario")
+        self.assertIn(sid, [s["id"] for s in self.read_refused_once(path.name, engine_api.list_scenarios, "read_bytes")])
+
+
+class AdoptedFiles(Refused):
+    """Adoption (``items.adopt_orphans``) also runs when the first administrator is made, with the server running:
+    an item's file it reads may be being replaced."""
+
+    def test_an_item_file_read_while_it_is_replaced(self):
+        p = self.dir / "fsutil-bot.json"
+        fsutil.write_text(p, json.dumps({"id": "fsutil-bot", "name": "fsutil bot"}))
+        self.assertEqual(self.read_refused_once(p.name, lambda: items._describe("bot_profile", p)), ("fsutil bot", None))
+        scn = self.dir / "fsutil.citarscn"
+        scn.write_bytes(gzip.compress(json.dumps({"name": "fsutil scenario"}).encode("utf-8")))
+        self.assertEqual(self.read_refused_once(scn.name, lambda: items._describe("scenario", scn), "read_bytes"),
+                         ("fsutil scenario", None))
+
+
+class KeyFile(Refused):
+    """The encrypted key file is replaced when a key is stored, while model calls read it without the store's lock
+    (``keystore.get``); refused, the key reads as missing."""
+
+    def test_a_key_read_while_the_file_is_replaced(self):
+        path = self.dir / "keys.enc"
+        server = {"id": "sv_fsutil", "connection": {"key": {"backend": "file"}}}
+        with mock.patch.object(keystore, "_file_path", return_value=path), \
+                mock.patch.object(keystore, "_passphrase", "fsutil passphrase"):
+            keystore.store("sv_fsutil", "file", "sk-fsutil-1")
+            self.assertEqual(self.read_refused_once(path.name, lambda: keystore.get(server)), "sk-fsutil-1")
+            # the next write reads the file's salt before it replaces it
+            self.read_refused_once(path.name, lambda: keystore._file_write("fsutil passphrase",
+                                                                           {"server:sv_fsutil": "sk-fsutil-2"}))
+            self.assertEqual(keystore.get(server), "sk-fsutil-2")
+
+
+class RegistryFile(Refused):
+    """``config/servers.json`` may be being replaced by ``citar setup --local`` (``servers.register_offline``) as the
+    server imports it for its first administrator."""
+
+    def test_the_registry_read_while_a_tool_replaces_it(self):
+        p = self.dir / "servers.json"
+        fsutil.write_text(p, json.dumps({"format": "citar-servers", "version": 1, "servers": []}))
+        self.assertEqual(self.read_refused_once(p.name, lambda: registry_import.read_file(p))["servers"], [])
+
+
+class ReportFiles(Refused):
+    """A report's ``meta.json`` is replaced at every step of its build while the Reports page reads it; a report
+    being built gathers benchmark and probe runs whose files their schedulers replace as they go."""
+
+    def test_a_report_read_while_its_record_is_replaced(self):
+        runner = ReportRunner.__new__(ReportRunner)     # its files only: no threads
+        runner.dir, runner._deleting, runner._places = self.dir, set(), {}
+        rid = "20261012-000000-f5f5"
+        (self.dir / rid).mkdir()
+        fsutil.write_text(self.dir / rid / "meta.json", json.dumps({"id": rid, "title": "fsutil", "status": "running"}))
+        self.assertEqual(self.read_refused_once("meta.json", lambda: runner.meta(rid))["title"], "fsutil")
+        self.assertEqual([m["id"] for m in self.read_refused_once("meta.json", runner.list)], [rid])
+
+    def test_runs_gathered_while_their_files_are_replaced(self):
+        (self.dir / "bench" / "runs").mkdir(parents=True)
+        fsutil.write_text(self.dir / "bench" / "runs" / "fsutil-run.json",
+                          json.dumps({"id": "fsutil-run", "name": "fsutil run", "jobs": []}))
+        with mock.patch.object(benchmarks, "BENCH_DIR", self.dir / "bench"):
+            got = self.read_refused_once("fsutil-run.json", lambda: report_data._benchmark_runs({"fsutil-run"}))
+        self.assertEqual([r["id"] for r in got], ["fsutil-run"])
+        (self.dir / "probe-runs" / "fsutil-probe-run").mkdir(parents=True)
+        fsutil.write_text(self.dir / "probe-runs" / "fsutil-probe-run" / "run.json", json.dumps({"id": "fsutil-probe-run"}))
+        with mock.patch.object(probes, "RUNS", self.dir / "probe-runs"):
+            got = self.read_refused_once("run.json", lambda: report_data._probe_runs({"fsutil-probe-run"}))
+        self.assertEqual([r["id"] for r in got], ["fsutil-probe-run"])
+
+
+class BenchmarkSuites(Refused):
+    """A suite is replaced when it is saved while the Benchmarks page lists it or opens it."""
+
+    def test_a_suite_read_while_its_file_is_replaced(self):
+        sched = benchmarks.BenchmarkScheduler.__new__(benchmarks.BenchmarkScheduler)    # its files only
+        sched.suites_dir = self.dir
+        sched._write(self.dir / "fsutil-suite.json",
+                     {"id": "fsutil-suite", "name": "fsutil suite", "servers": [], "scenarios": []})
+        name = "fsutil-suite.json"
+        self.assertEqual(self.read_refused_once(name, lambda: sched.get_suite("fsutil-suite"))["name"], "fsutil suite")
+        self.assertEqual([s["id"] for s in self.read_refused_once(name, sched.list_suites)], ["fsutil-suite"])
+
+
+class AvatarFile(Refused):
+    """An avatar's file is named by its digest, so uploading the same image again replaces it while it may be being
+    served."""
+
+    def test_an_avatar_served_while_the_same_image_is_uploaded_again(self):
+        png = self.dir / "u1-0123456789ab.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\nfsutil")
+        user = mock.Mock()
+        user.field_levels.return_value = {"avatar": "global", "profile": "global"}
+        with mock.patch.object(users_api.profiles, "require_visible", return_value=user), \
+                mock.patch.object(users_api.profiles, "avatar_file", return_value=png):
+            got = self.read_refused_once(png.name, lambda: users_api.avatar("pat", mock.Mock(), None), "read_bytes")
+        self.assertEqual(got.body, b"\x89PNG\r\n\x1a\nfsutil")
 
 
 if __name__ == "__main__":
