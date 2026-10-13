@@ -92,7 +92,12 @@ In a benchmark the advisor is always off, and the model's prompts (its diplomat 
 answers) **wait for other benchmarks** with no start deadline: a call that waits behind another
 benchmark is answered by the model when its turn comes, not by the fallback bot, and the chat clock
 does not count that wait. The clock's model timeout still applies once the prompt has started, so a
-model that is reachable but silent falls back, and that fallback is the model's.
+model that is reachable but silent falls back, and that fallback is the model's. A chat whose time
+runs out while its prompt is still queued behind other pooled work (a report's narrative, another
+game's hybrid prompts) also falls back, but as *not started*: the machine's queue, not the model's.
+
+A hybrid job loads its model beside what the machine already runs: it never unloads another model,
+or reloads its own with a larger context, under the lobby games and pooled prompts it plays beside.
 
 **Every hybrid job has a control game**: the same game, settings and seed, with the hybrid seat
 played by the same bot profile deciding everything, at the hybrid seat's handicap and difficulty
@@ -101,7 +106,11 @@ differs only in who decides the model's categories. Controls are bot-only: they 
 server's CPU while the hybrid games play, once per scenario, seed, build and bots, and are kept under
 `benchmarks/controls/` and shared by every model's jobs of that scenario and seed, so a second model's
 run of a suite plays no control again. A control is played from its settings, so the same control
-played twice gives the same game, event for event.
+played twice gives the same game, event for event. Each seat's bot is pinned when the hybrid game
+starts (its bot version, parameters and aggression), so a profile edited or deleted while the control
+waits its turn changes neither what it plays nor which control it is. A control whose record no longer
+reads (a damaged file, an older layout) is played again; a skipped, cancelled or failed job's control
+is not played for nobody.
 
 A hybrid job's row shows its control game's state and, once both games are over, its **pair line**:
 the score difference (hybrid minus control) at the end, and at turns 100, 200 and 300 where both
@@ -115,7 +124,12 @@ everything, in gold from the seat's side, on the proposal's recorded terms again
 moment. Many proposals between bots open and close inside one drive, so reading the history after it
 is what values both arms alike. An accepted deal keeps the value of the proposal that was accepted.
 The game's events add the wars declared by and on the seat and how they ended, cities captured and
-lost, and peace made.
+lost, and peace made. A record that fails on an unexpected error stops there for the rest of the game
+(the server's log says so once), and its job gets no pair line: the row says "no pair line: its
+diplomacy record stopped", since an incomplete record would not compare like with like.
+
+In a [report](REPORTS.md), a hybrid job's Benchmarks row shows who decided what and its score against
+its control, not a game performance, and its seat stays out of the model's game figures.
 
 ## Scoring
 
