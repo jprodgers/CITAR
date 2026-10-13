@@ -830,6 +830,27 @@ class LLMAgent:
         (``ChatThread.exchange``), whose outcome it returns."""
         return self.chat_thread(nid).exchange(session, pid)
 
+    # What a chat's conversation is made of (``ChatThread``): a hybrid seat's model (``citar.agents.hybrid_agent``)
+    # answers its chats with the diplomat's prompt and tools, through its seat's veto.
+    def chat_system(self) -> str:
+        """The system prompt of the seat's chats: static, so the provider caches it."""
+        return chat_system_prompt(self.cfg.get("persona"))
+
+    def chat_tool_names(self) -> set:
+        """The tools of the seat's chats (P3.5.3)."""
+        return set(CHAT_TOOLS)
+
+    def chat_note(self, session, pid: int, nid: int) -> str:
+        """Anything more a chat's message tells the model (a hybrid seat's advisor: the bot's value of the deal), with
+        the session's lock held; nothing for a model seat."""
+        return ""
+
+    def chat_call(self, session, pid: int, name: str, args: dict) -> dict:
+        """One tool call of the seat's model in a chat: {"ok", "result"|"error"}, as ``session.call_tool`` answers."""
+        if name not in CHAT_TOOLS:
+            return {"ok": False, "error": f"Tool '{name}' is not available in a chat: answer with respond_negotiation."}
+        return session.call_tool(pid, name, args)
+
 
 class ChatThread:
     """One chat's conversation for a model seat (design/phase3-features.md P3.5.3), held by its agent while the chat is
@@ -892,7 +913,7 @@ class ChatThread:
                 self.binding = binding
             if binding is self.binding:
                 return self.conv
-        inner = make_conversation(a.cfg, chat_system_prompt(a.cfg.get("persona")), _tool_defs(CHAT_TOOLS))
+        inner = make_conversation(a.cfg, a.chat_system(), _tool_defs(a.chat_tool_names()))
         if binding is not None:
             from ..pool.scheduler import ScheduledConversation
             conv = ScheduledConversation(inner, binding, a.cfg)
@@ -932,6 +953,9 @@ class ChatThread:
             text = CHAT_UPDATE.format(other=view["with_name"], nid=self.nid, said=said, proposal=proposal_text(view),
                                       current=json.dumps({"current_proposal": view.get("current_proposal")}),
                                       time_left=left)
+        note = self.agent.chat_note(session, pid, self.nid)
+        if note:
+            text += "\n" + note.strip()
         return text, n["entries"]
 
     def exchange(self, session, pid: int) -> str:
@@ -1003,11 +1027,7 @@ class ChatThread:
                     continue
                 results = []
                 for c in step.tool_calls:
-                    if c.name not in CHAT_TOOLS:
-                        results.append((c.id, f"Tool '{c.name}' is not available in a chat: answer with "
-                                              "respond_negotiation.", True))
-                        continue
-                    res = session.call_tool(pid, c.name, c.args)
+                    res = a.chat_call(session, pid, c.name, c.args)
                     if c.name == "respond_negotiation" and res["ok"] and _same_nid(c.args, self.nid):
                         answered = True
                     results.append((c.id, _serialize(res["result"]) if res["ok"] else "Error: " + res["error"],
@@ -1021,7 +1041,7 @@ class ChatThread:
                 outcome = "cancelled"
             else:
                 a.last_error = f"{type(e).__name__}: {e}"
-                outcome, cause = "failed", _cause(e)
+                outcome, cause = "failed", cause_of(e)
                 session.errors.append({"t": time.time(), "player": pid, "where": "llm negotiation",
                                        "negotiation": self.nid, "trace": traceback.format_exc()})
         finally:
@@ -1055,13 +1075,20 @@ def _same_nid(args: dict, nid: int) -> bool:
         return False
 
 
-def _cause(e: BaseException) -> str:
+#: Why a model's prompt did not run, by the scheduler's refusal code (P3.5.2's causes).
+CAUSE_BY_CODE = {"benchmark": "queued_behind_benchmark", "expired": "timeout"}
+
+
+def cause_of(e: Optional[BaseException]) -> str:
     """Why a model's answer was not given (P3.5.2's causes): ``queued_behind_benchmark`` when a benchmark took or held
-    its machine, ``refused`` for any other refusal of the machine (a budget, a disabled machine, quiet hours, a
-    model not loaded), ``failed`` for an error of the model or its connection."""
+    its machine, ``timeout`` when its prompt did not start by its deadline (a chat's is the chat clock's), ``refused``
+    for any other refusal of the machine or its admission (a budget, a disabled machine, quiet hours, a model not
+    loaded), ``failed`` for an error of the model or its connection (and for no error at all)."""
+    if e is None:
+        return "failed"
     code = getattr(e, "code", "") or ""
-    if code == "benchmark":
-        return "queued_behind_benchmark"
+    if code in CAUSE_BY_CODE:
+        return CAUSE_BY_CODE[code]
     from ..pool.scheduler import SchedulerError
     if isinstance(e, SchedulerError) or code:
         return "refused"

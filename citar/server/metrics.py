@@ -75,7 +75,7 @@ class Metrics:
         parts = [b"{"]
         for i, (key, value) in enumerate(self.data.items()):
             parts.append((", " if i else "").encode() + json.dumps(key).encode() + b": ")
-            if key in ("turns", "negotiations") and isinstance(value, list):
+            if key in ("turns", "negotiations", "diplomat", "diplomat_refusals") and isinstance(value, list):
                 parts.extend(self._list_parts(key, value))
             else:
                 parts.append(json.dumps(value).encode())
@@ -261,6 +261,31 @@ class Metrics:
                                           "gen_s": round(gen_s or 0.0, 3), "queue_s": round(queue_s or 0.0, 3),
                                           "outcome": outcome, "cause": cause})
 
+    #: How a hybrid seat's diplomat phase ended (design/phase3-features.md P3.6.11): the model stopped or used its
+    #: steps; its time ran out; its ticket did not start in time (or the seat has no machine); the machine or its
+    #: admission refused it; the model failed; the seat was halted.
+    DIPLOMAT_OUTCOMES = ("done", "timeout", "skipped", "refused", "failed", "cancelled")
+
+    #: What a diplomat phase's row keeps (``diplomat``). Never free text: the game's viewers read its metrics
+    #: (``GET /api/games/{gid}/metrics``), and a refusal's or a provider's words can name another member's machine.
+    DIPLOMAT_FIELDS = ("triggers", "steps", "gen_s", "queue_s", "input_tokens", "output_tokens", "tools", "outcome",
+                       "cause")
+
+    def diplomat(self, pid: int, turn: int, row: dict, seconds: float = 0.0):
+        """Record one diplomat phase of a hybrid seat (P3.6.11): ``row`` holds its triggers, steps, ``gen_s``,
+        ``queue_s``, tokens, ``outcome`` (``DIPLOMAT_OUTCOMES``) with its ``cause`` code when it did not run, and the
+        tools it called ({"tool", "ok"}); anything else in it is not kept (``DIPLOMAT_FIELDS``)."""
+        self.data.setdefault("diplomat", []).append({"player": pid, "turn": turn, "t": time.time(),
+                                                     "seconds": round(seconds, 3),
+                                                     **{k: row.get(k) for k in self.DIPLOMAT_FIELDS}})
+
+    def diplomat_refusal(self, pid: int, tool: str, why: str, *, chat: bool = False):
+        """A hybrid seat's model called a tool the session refused (P3.6.6): ``why`` is ``category`` (none of its
+        categories gives it that tool) or ``veto`` (the bot values the deal below zero), in a phase or a chat
+        (``chat``). The refusal's words are the model's, in its tool result, not the metrics'."""
+        self.data.setdefault("diplomat_refusals", []).append({
+            "player": pid, "t": time.time(), "tool": tool, "why": why, "chat": bool(chat)})
+
     # ------------------------------------------------------------------
     def summary(self, players: dict) -> dict:
         """players: {pid: {"name", "controller", "model"}} — returns per-seat aggregates."""
@@ -268,7 +293,7 @@ class Metrics:
         for pid, info in players.items():
             turns = [r for r in self.data["turns"] if r["player"] == pid and self._valid(r)]
             if not turns:
-                out[pid] = {**info, "turns": 0}
+                out[pid] = {**info, "turns": 0, **_diplomat_totals(self.data, pid)}
                 continue
             walls = [r["wall_s"] for r in turns]
             model_s = sum(r["model_s"] for r in turns)
@@ -361,6 +386,7 @@ class Metrics:
                 if timed:
                     out[pid]["avg_chat_gen_s"] = round(statistics.mean(x.get("gen_s", 0.0) for x in timed), 2)
                     out[pid]["avg_chat_queue_s"] = round(statistics.mean(x.get("queue_s", 0.0) for x in timed), 2)
+            out[pid].update(_diplomat_totals(self.data, pid))
         return out
 
     def turn_rows(self) -> list[dict]:
@@ -400,6 +426,37 @@ def _bot_totals(turns: list[dict]) -> dict:
             agg["refused"] += refused
             agg["max_in_turn"] = max(agg["max_in_turn"], taken)
     return dict(sorted(out.items(), key=lambda kv: -kv[1]["taken"]))
+
+
+def _diplomat_totals(data: dict, pid: int) -> dict:
+    """A hybrid seat's diplomat over the game (P3.6.11), for the stats screen: its phases by outcome, the generation
+    and queue time of those that ran, the tools they called, and the calls the session refused (by ``category`` or the
+    bot's ``veto``). Empty for a seat with no diplomat."""
+    phases = [x for x in data.get("diplomat") or [] if x.get("player") == pid]
+    refused = [x for x in data.get("diplomat_refusals") or [] if x.get("player") == pid]
+    if not phases and not refused:
+        return {}
+    out: dict = {"diplomat_phases": len(phases)}
+    outcomes: dict = {}
+    tools: dict = {}
+    for x in phases:
+        outcomes[x.get("outcome")] = outcomes.get(x.get("outcome"), 0) + 1
+        for t in x.get("tools") or []:
+            tools[t.get("tool")] = tools.get(t.get("tool"), 0) + 1
+    out["diplomat_outcomes"] = outcomes
+    ran = [x for x in phases if x.get("steps")]
+    if ran:
+        out["avg_diplomat_gen_s"] = round(statistics.mean(x.get("gen_s", 0.0) for x in ran), 2)
+        out["avg_diplomat_queue_s"] = round(statistics.mean(x.get("queue_s", 0.0) for x in ran), 2)
+        out["avg_diplomat_steps"] = round(statistics.mean(x.get("steps", 0) for x in ran), 2)
+    if tools:
+        out["diplomat_tools"] = dict(sorted(tools.items(), key=lambda kv: -kv[1]))
+    if refused:
+        why: dict = {}
+        for x in refused:
+            why[x.get("why")] = why.get(x.get("why"), 0) + 1
+        out["diplomat_refused"] = why
+    return out
 
 
 def bot_actions_text(acts: Optional[dict]) -> str:

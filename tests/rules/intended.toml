@@ -397,3 +397,7 @@ reason = "The scenario editor's overview gave a city-state's influence with the 
 [[differences]]
 id = "one-great-person-of-a-kind-a-turn"
 reason = "A civilization's great people were born at the start of its turn for as long as its points covered the threshold, all at once, and for ever on points no game earns (a save's 1e300, which paying a threshold leaves where it was), hanging the game; Rust makes one great person of each kind a turn from its points, and one from its combat points, and the rest wait for the turns after"
+
+[[differences]]
+id = "scenario-seats-keep-hybrid"
+reason = "A scenario kept only a seat's model and bot settings, so a hybrid seat saved in one lost the kinds of diplomacy its model decides; Rust keeps the seat's hybrid settings too"

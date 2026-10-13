@@ -321,3 +321,26 @@ fn research_is_planned_before_it_is_written() {
 fn g_rules() -> &'static Ruleset {
     Ruleset::shared()
 }
+
+/// A scenario keeps a hybrid seat's `hybrid` block (who decides each kind of its diplomacy, its
+/// advisor and how often its model is asked) as it keeps the seat's `llm` and `bot`, without the
+/// model block's key, so a hybrid seat launches as one (design/phase3-features.md P3.6.2).
+// refcheck: scenario-seats-keep-hybrid
+#[test]
+fn a_scenario_keeps_a_hybrid_seat_s_categories() {
+    let g = arena();
+    let hybrid =
+        json!({"owners": {"trades": "llm", "chat": "llm"}, "advisor": true, "prompt_every": 3});
+    let seats = json!([
+        {"type": "hybrid", "handicap": "ai", "bot": {"profile": "standard"},
+         "llm": {"server_id": "sv_x", "model": "m", "api_key": "secret"}, "hybrid": hybrid},
+        {"type": "bot", "hybrid": "not an object"},
+    ]);
+    let out = scenario::normalize_seats(&g, Some(&seats)).expect("seats");
+    assert_eq!(out[0]["type"], json!("hybrid"));
+    assert_eq!(out[0]["hybrid"], hybrid);
+    assert_eq!(out[0]["llm"], json!({"server_id": "sv_x", "model": "m"}));
+    assert_eq!(out[0]["handicap"], json!("ai"));
+    assert!(out[1].get("hybrid").is_none(), "only an object is kept: {}", out[1]);
+    assert_eq!(out[2], json!(scenario::default_seats(&g)[2]));
+}

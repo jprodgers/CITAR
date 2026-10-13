@@ -77,17 +77,20 @@ def _details_of(game_id: str, s) -> dict:
         g = s.game
         out = {"game_id": game_id, "name": s.name, "turn": g.turn, "phase": g.phase, "victory": g.victory,
                "winner": g.winner, "seats": []}
-        for seat in [seat for seat in s.seats if seat.type == "llm"]:
+        # every seat a model plays, with its task class (P3.6.7): an LLM seat plays every turn, a hybrid seat's model
+        # is asked its diplomacy a prompt at a time
+        for seat in [seat for seat in s.seats if seat.model_seat]:
             model = seat.llm.get("model")
             try:
                 prog = game_progress(s, llm_player=seat.player, model=model)
             except Exception:
                 prog = {}
-            players = {seat.player: {"name": g.player_name(seat.player), "controller": "llm", "model": model}}
+            players = {seat.player: {"name": g.player_name(seat.player), "controller": seat.type, "model": model}}
             summ = s.metrics.summary(players).get(seat.player, {})
             prog.pop("series", None)
             out["seats"].append({"player": seat.player, "server_id": seat.llm.get("server_id"), "model": model,
-                                 "progress": prog, "metrics": summ})
+                                 "controller": seat.type, "class": seat.task_class, "progress": prog,
+                                 "metrics": summ})
     return out
 
 

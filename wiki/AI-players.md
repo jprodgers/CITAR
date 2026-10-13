@@ -1,6 +1,6 @@
 # AI players
 
-Four kinds of player can hold a seat. They all use the same interface, which is the point: a
+Five kinds of player can hold a seat. They all use the same interface, which is the point: a
 scripted bot, a local 4B model, Claude through the API and a human in the browser are issuing the
 same orders through the same rules.
 
@@ -9,6 +9,7 @@ same orders through the same rules.
 | **Human** | You, in the browser | Nothing |
 | **Scripted bot** | The built-in rule-based AI | Pick an aggression level |
 | **LLM** | A model the server drives | Pick a machine, model and load profile |
+| **Hybrid** | The bot plays the turns; a model decides the diplomacy you hand it | A bot, a machine and model, and the kinds of diplomacy that are the model's ([below](#hybrid-seats)) |
 | **MCP client** | An external agent — Claude Code, Claude Desktop | Copy the command from Join / Seats |
 
 ---
@@ -179,6 +180,90 @@ every chat the seat opened to be settled, as the game's clock allows.
 What the stats screen shows for each seat's chats: how many answers it gave and how each ended
 (answered, declined late by the clock, a fallback, closed before it answered), with the model's time
 and the time it waited for its machine apart.
+
+---
+
+## Hybrid seats
+
+A hybrid seat is a scripted bot that plays the turns (cities, research, units, every war's fighting)
+with a language model that decides the kinds of diplomacy the seat hands it. Its seat has the bot's
+settings, the model's machine (as an LLM seat names one), and `hybrid`:
+
+```json
+{"type": "hybrid", "handicap": "ai", "difficulty": "Prince",
+ "bot": {"profile": "standard"},
+ "llm": {"server_id": "...", "model": "..."},
+ "hybrid": {"owners": "all_but_war", "advisor": true, "prompt_every": 10}}
+```
+
+**The ten kinds of diplomacy**, each the bot's or the model's (`owners`: a map such as
+`{"trades": "llm", "chat": "llm"}`, every kind it does not name the bot's, or a preset):
+
+| Kind | The model's tools | What the bot no longer does |
+|---|---|---|
+| `trades` | `open_negotiation`, `respond_negotiation` with gold, gold per turn, resources, techs, maps, cities | trade luxuries, answer trades |
+| `agreements` | the same, with embassies, open borders, friendship, research agreements, defensive pacts | offer agreements |
+| `peace` | the same, with a peace treaty | offer or accept peace |
+| `war` | `declare_war` | prepare and declare wars (it still fights every war) |
+| `denounce` | `denounce` | (the bot never denounces) |
+| `un` | `un_vote` | the engine's vote for the seat: a vote the model does not cast is an abstention |
+| `city_states` | `get_city_states`, `city_state_action` | gifts of gold to city-states |
+| `espionage` | `get_espionage`, `move_spy`, `stage_coup` | place spies |
+| `captured_cities` | `get_cities`, `city_status` | the engine's annexation: a captured city stays a puppet until the model decides |
+| `chat` | `send_message`, and the chats that are only talk | canned replies |
+
+The presets: **trade only** (trades and chat), **all but war** (every kind but war) and
+**everything**. A seat must give its model at least one kind: one with none is a bot seat.
+
+The model always has `get_diplomacy`, `get_players`, `get_empire`, `get_victory_status`, its
+notebook (`read_notes`, `write_notes`) and `log_thought`. Any other tool it calls is refused, "That is
+the bot's to decide.", and counted.
+
+**Difficulty and handicap** are the keys every seat has: `difficulty` is its level, and `handicap`
+whose numbers it plays with: `ai` (the default: "AI bonuses, like the bot") or `human` ("a person's
+values, like a model").
+
+**When the model is asked.** After the bot has played its turn, the seat's diplomat is called when
+something happened since its last call: first contact with a civilization, a war declared on it,
+peace made, a denunciation of it, a deal of its that expired, was cut or ends next turn, a United
+Nations vote open (when the vote is the model's), a city it captured (when captured cities are), a
+city-state's news about it (when city-states are), a spy's (when espionage is), its score or its
+strength against a civilization it has met changed by more than a quarter, or `prompt_every` turns
+(1 to 50, 10 by default) since its last call. At most once a turn. Each call is one pooled prompt
+(a `diplomat` ticket on the model's machine, see [Workers](Workers)): it gets 30 seconds
+to start (or it is skipped and the bot's choices stand), three minutes once started
+(`phase_seconds`), and at most eight model calls. Its message gives what called it, the diplomatic
+situation, the empire at a glance and the notebook; with the **advisor** on (the default, never in a
+benchmark), the bot's view too: what each deal on the table is worth to the seat in gold, its war
+readiness, its spare luxuries and what it would ask for. The system prompt is the same text for every
+call of the seat, so a provider can cache it, and it names both chat timeouts. Pausing the game holds
+the diplomat before its next model call or action, as it holds an LLM seat's turn; its prompt gives
+the machine back meanwhile, and the time paused does not count against `phase_seconds`.
+
+**Mixed deals.** A deal the model offers, counters with or accepts that includes anything the bot
+decides must be one the bot would accept as a whole: the bot values the whole deal from the seat's
+side, and below zero the call is refused with the reason ("The bot decides agreements and values this
+deal at -120 gold for you, so it will not agree. Leave those items out, or make the deal better for
+Rome."). What lies wholly in the model's own kinds is the model's to give.
+
+**Chats.** A chat that waits on a hybrid seat goes to its bot first, which answers what it owns and
+leaves the rest to the model: a chat whose proposal touches a kind the model decides, or that is only
+talk when chat is the model's. The model answers it in a conversation of its own, as an LLM seat
+does, with the diplomat's prompt and the chat tools of its kinds, on a `chat` ticket that must start
+before the chat's time runs out. When that ticket is refused (a benchmark holds the machine, its quiet
+hours, a budget), does not start in time, or the model fails, the **fallback bot** (the same bot with
+every kind its own) answers at once, and the stats screen counts a fallback with its cause; when the
+chat's time runs out, the chat clock has the fallback bot answer it rather than decline. While the
+seat's diplomat is called, the seat answers no chat on the side: one that comes to it then is told to
+the diplomat, which answers it.
+
+A hybrid seat's prompts are pooled prompts, never a lease: it does not occupy its machine, it needs a
+grant for `pooled` (not `game`) on another member's machine, and quiet hours or a make-way pause
+never pause its game: its prompt is refused instead, and its bot answers. Its turns are its bot's, so
+it stays out of the model ranking. The game's metrics (`GET /api/games/{id}/metrics`, see
+[the API](HTTP-and-tool-API)) carry its diplomat's calls: each call's row (`diplomat`), and in the seat's
+summary their count by outcome (done, timeout, skipped, refused, failed, cancelled, with the cause's
+code), their generation and queue time, the tools they called and the calls the session refused.
 
 ---
 

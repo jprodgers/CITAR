@@ -197,6 +197,87 @@ def time_left_text(left_s, paused: bool = False) -> str:
             "you are taken to have declined.")
 
 
+#: A hybrid seat's diplomat (design/phase3-features.md P3.6.6): the same text for every call of a seat, its diplomat
+#: phases and its chat answers alike, so a provider can cache it. ``{yours}`` and ``{bots}`` are the categories, one
+#: line each and a list; the timeouts and the message cap are the game's.
+DIPLOMAT_SYSTEM = """You are the diplomat of {civ} in CITAR, a turn-based strategy game in the style of Civilization V. \
+A scripted bot runs everything else for your civilization: its cities, research, units and the fighting of any war. \
+You decide only these kinds of diplomacy:
+{yours}
+The bot decides {bots}. A deal that includes anything the bot decides must be one the bot would accept as a whole: if \
+it would not, your offer or acceptance is refused and you are told why. You are called when something happens (first \
+contact, a declaration of war, a deal running out, a United Nations vote, a large change in strength), every {n} \
+turns, and whenever another civilization talks to you. Each call is short: read what you are given, act with the \
+tools, then stop by answering without a tool call. Every negotiation entry needs a message. You have {model_minutes} \
+minutes to answer a chat that waits on you; the other side has {their_minutes} (a person) or {model_minutes} (another \
+AI) to answer yours, and a chat closes when its time runs out or at {cap} messages. Keep your agreements and \
+suspicions in your notebook (write_notes): it is shown at every call."""
+
+#: Each category as the diplomat's system prompt names it, one line each.
+CATEGORY_LINES = {
+    "trades": "- trades: gold, gold per turn, resources, technologies, world maps and cities in deals "
+              "(open_negotiation, respond_negotiation)",
+    "agreements": "- agreements: embassies, open borders, declarations of friendship, research agreements and "
+                  "defensive pacts in deals (open_negotiation, respond_negotiation)",
+    "peace": "- peace: peace treaties (open_negotiation, respond_negotiation)",
+    "war": "- war: declaring war (declare_war); the bot fights every war",
+    "denounce": "- denunciations (denounce)",
+    "un": "- the United Nations vote (un_vote); a vote you do not cast is an abstention",
+    "city_states": "- city-states: gifts, pledges of protection, tribute, buyouts, marriages and peace "
+                   "(get_city_states, city_state_action)",
+    "espionage": "- spies: where they go, and coups (get_espionage, move_spy, stage_coup)",
+    "captured_cities": "- the cities you capture: annex, keep as a puppet or raze (get_cities, city_status); one you "
+                       "do not decide on stays a puppet",
+    "chat": "- talk: messages (send_message), and chats that are only talk (respond_negotiation)",
+}
+
+
+def minutes(seconds: float) -> str:
+    """Seconds as the diplomat's prompt says them: whole minutes, or a fraction of one."""
+    m = float(seconds) / 60.0
+    return str(int(m)) if m == int(m) else f"{m:.1f}"
+
+
+def diplomat_system_prompt(civ: str, yours: list, bots: list, prompt_every: int, model_seconds: float,
+                           person_seconds: float, cap: int, persona: str | None = None) -> str:
+    """A hybrid seat's diplomat's system prompt (``DIPLOMAT_SYSTEM``): its civilization, the categories its model and
+    its bot decide, how often it is called, both chat timeouts and the message cap, then the persona, if any. The
+    same text for every call of the seat."""
+    text = DIPLOMAT_SYSTEM.format(
+        civ=civ, yours="\n".join(CATEGORY_LINES[c] for c in yours),
+        bots=", ".join(c.replace("_", " ") for c in bots) if bots else "nothing else",
+        n=prompt_every, model_minutes=minutes(model_seconds), their_minutes=minutes(person_seconds), cap=cap)
+    if persona:
+        text += PERSONA_BLOCK.format(persona=persona.strip())
+    return text
+
+
+#: A diplomat phase's message (P3.6.6): why it was called, the diplomatic situation, the empire at a glance, the
+#: notebook, and (with the advisor on) the bot's view.
+DIPLOMAT_PHASE = """DIPLOMAT PHASE, turn {turn}. You were called because: {triggers}.
+
+THE DIPLOMATIC SITUATION
+{situation}
+
+YOUR EMPIRE AT A GLANCE
+{empire}
+
+YOUR NOTEBOOK (its last 2,000 characters)
+{notebook}
+{advice}
+Act with the tools on what you decide, then answer without a tool call to end the phase."""
+
+#: The advisor's lines (P3.6.6), when the seat's advisor is on.
+DIPLOMAT_ADVICE = """
+THE BOT'S VIEW (deal values are in gold from your side; positive is good for you)
+{advice}
+"""
+
+#: A chat its bot left to a hybrid seat's model, told in the phase that holds the seat's voice (P3.6.5).
+DIPLOMAT_CHAT = ("CHAT: {other} is waiting for your answer in negotiation #{nid}: {said}; the proposal from your side: "
+                 "{proposal}.{value} {time_left} Answer with respond_negotiation, with a message.")
+
+
 def late_note(view: dict) -> str:
     """The note a model's turn gets for a chat it is in that changed since its last step, worded by where the chat
     stands, so a model is never asked to answer a chat that is closed (P3.5.3): waiting on it (their entry and the

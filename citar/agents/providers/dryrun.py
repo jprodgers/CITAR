@@ -30,6 +30,7 @@ class DryRunConversation(Conversation):
     """
     def __init__(self, cfg: dict, system: str, tools: list[dict]):
         self.cfg = cfg
+        self.system = system or ""
         try:
             delay = float(cfg.get("dry_run_delay") if cfg.get("dry_run_delay") is not None else 1.0)
         except (TypeError, ValueError):
@@ -78,6 +79,8 @@ class DryRunConversation(Conversation):
         if not self._tools:
             # a plain completion (a report's narrative): text, no orders
             return StepResult(text=DRY_NARRATIVE, stop_reason="stop")
+        if "end_turn" not in self._tools and "DIPLOMAT PHASE" in self._text:
+            return self._diplomat()
         if "respond_negotiation" in self._tools and "end_turn" not in self._tools:
             return self._negotiate()
         if self._step == 1:
@@ -115,6 +118,127 @@ class DryRunConversation(Conversation):
         if mode == "counter":
             args.update({"give": [], "receive": [{"type": "gold", "amount": 10}]})
         return StepResult(text=f"Dry run: {mode}.", tool_calls=[ToolCall("d_n", "respond_negotiation", args)])
+
+    # ------------------------------------------------------------------ the dry-run diplomat (P3.6.6, P3.9.4)
+    def _owned(self) -> set:
+        """The categories the diplomat decides, read from its system prompt's lines (``prompts.CATEGORY_LINES``)."""
+        names = {"trades": "- trades:", "agreements": "- agreements:", "peace": "- peace:", "war": "- war:",
+                 "denounce": "- denunciations", "un": "- the United Nations vote", "city_states": "- city-states:",
+                 "espionage": "- spies:", "captured_cities": "- the cities you capture", "chat": "- talk:"}
+        return {c for c, line in names.items() if line in self.system}
+
+    def _diplomat(self) -> StepResult:
+        """A diplomat phase, played as the QA needs it ("a diplomat that proposes, votes and annexes"): it looks (the
+        diplomacy, its empire, and what its categories let it see), then acts once in each category it decides where it
+        can (a deal to a civilization it has met, an abstention when a United Nations vote is open, an annexation of a
+        puppet it captured, a war, a denunciation, a gift of gold to a city-state, a spy moved home, a message),
+        answers the chats the phase was told of, and stops by answering without a tool call."""
+        self._dstep = getattr(self, "_dstep", 0) + 1
+        if self._dstep == 1:
+            calls = [ToolCall("dd_d", "get_diplomacy", {}), ToolCall("dd_e", "get_empire", {})]
+            for name in ("get_cities", "get_city_states", "get_espionage"):
+                if name in self._tools:
+                    calls.append(ToolCall(f"dd_{name}", name, {}))
+            return StepResult(text="Dry run diplomat: looking.", tool_calls=calls)
+        if self._dstep == 2:
+            calls = self._diplomacy_orders()
+            if calls:
+                return StepResult(text="Dry run diplomat: acting.", tool_calls=calls)
+        answers = self._chat_answers()
+        if answers:
+            return StepResult(text="Dry run diplomat: answering.", tool_calls=answers)
+        return StepResult(text="Dry run diplomat: done.", tool_calls=[])
+
+    def _looked(self) -> dict:
+        """What the first step's queries said, by tool (the results come back in the calls' order)."""
+        names = ["get_diplomacy", "get_empire"] + [n for n in ("get_cities", "get_city_states", "get_espionage")
+                                                   if n in self._tools]
+        out = {}
+        for name, text in zip(names, self._results):
+            try:
+                out[name] = json.loads(text)
+            except (TypeError, ValueError):
+                out[name] = None
+        return out
+
+    def _diplomacy_orders(self) -> list:
+        """The diplomat's acts (``_diplomat``), from what it looked at."""
+        seen = self._looked()
+        dip = seen.get("get_diplomacy") if isinstance(seen.get("get_diplomacy"), dict) else {}
+        empire = seen.get("get_empire") if isinstance(seen.get("get_empire"), dict) else {}
+        owned = self._owned()
+        tools = self._tools
+        met = [p for p in dip.get("players") or [] if isinstance(p, dict) and p.get("alive") is not False]
+        talking = {n.get("with") for n in dip.get("open_negotiations") or [] if isinstance(n, dict)}
+        calls: list = []
+        free = [p for p in met if p.get("id") not in talking]
+        if "open_negotiation" in tools and free:
+            deal = None
+            at_war = [p for p in free if p.get("at_war")]
+            if "peace" in owned and at_war:
+                deal = (at_war[0], [{"type": "peace_treaty"}], [{"type": "peace_treaty"}], "Let us make peace.")
+            elif "trades" in owned:
+                p = next((q for q in free if not q.get("at_war")), None)
+                if p is not None:
+                    deal = (p, [{"type": "share_map"}], [{"type": "share_map"}], "Shall we share our maps?")
+            elif "agreements" in owned:
+                for p in free:
+                    possible = ((p.get("trade_options") or {}).get("agreements_possible_now") or []) \
+                        if not p.get("at_war") else []
+                    kind = next((k for k in ("embassy", "declaration_of_friendship", "open_borders") if k in possible),
+                                None)
+                    if kind:
+                        item = {"type": kind, **({"turns": 30} if kind == "open_borders" else {})}
+                        deal = (p, [dict(item)], [dict(item)], "Shall we agree on this?")
+                        break
+            if deal is not None:
+                p, give, receive, text = deal
+                calls.append(ToolCall("dd_o", "open_negotiation", {"to": p["id"], "message": f"(dry run) {text}",
+                                                                    "give": give, "receive": receive}))
+        un = dip.get("united_nations") or {}
+        if "un_vote" in tools and un.get("voting_open") and un.get("your_vote") == "not cast":
+            # an abstention, cast: a vote for anyone could end the game with a diplomatic victory
+            calls.append(ToolCall("dd_v", "un_vote", {"candidate": "abstain"}))
+        cities = seen.get("get_cities") if isinstance(seen.get("get_cities"), list) else []
+        puppet = next((c for c in cities if isinstance(c, dict) and c.get("puppet")), None)
+        if "city_status" in tools and puppet is not None:
+            calls.append(ToolCall("dd_a", "city_status", {"city_id": puppet.get("id"), "status": "annex"}))
+        if "declare_war" in tools and not any(p.get("at_war") for p in met):
+            target = next((p for p in met if not p.get("peace_treaty_until")), None)
+            if target is not None:
+                calls.append(ToolCall("dd_w", "declare_war", {"player_id": target["id"],
+                                                               "message": "(dry run) War."}))
+        if "denounce" in tools and met:
+            calls.append(ToolCall("dd_n", "denounce", {"player_id": met[-1]["id"]}))
+        states = seen.get("get_city_states") if isinstance(seen.get("get_city_states"), list) else []
+        cs = next((c for c in states if isinstance(c, dict) and c.get("id") is not None), None)
+        if "city_state_action" in tools and cs is not None and (empire.get("gold") or 0) >= 100:
+            calls.append(ToolCall("dd_g", "city_state_action", {"player_id": cs["id"], "action": "gift_gold",
+                                                                 "amount": 100}))
+        spies = (seen.get("get_espionage") or {}).get("spies") if isinstance(seen.get("get_espionage"), dict) else []
+        spy = next((s for s in spies or [] if isinstance(s, dict) and s.get("city_id") is None), None)
+        if "move_spy" in tools and spy is not None and empire.get("capital") is not None:
+            calls.append(ToolCall("dd_s", "move_spy", {"spy": spy.get("name"), "city_id": empire["capital"]}))
+        if "send_message" in tools and met:
+            calls.append(ToolCall("dd_m", "send_message", {"to": met[0]["id"], "text": "(dry run) Greetings."}))
+        return calls + self._chat_answers()
+
+    def _chat_answers(self) -> list:
+        """An answer to each chat the phase was told of since its last answers (``CHAT: ... negotiation #n``), as a
+        chat's answer would be (``dry_run_negotiation``, else accepting when it gets as many items as it gives)."""
+        if "respond_negotiation" not in self._tools or not self._pending:
+            return []
+        self._pending = False
+        out = []
+        for i, m in enumerate(re.finditer(r"CHAT: .*? negotiation #(\d+): (.*)", self._chat)):
+            nid = int(m.group(1))
+            mode = self.cfg.get("dry_run_negotiation") or ("reply" if "none (no deal on the table)" in m.group(2)
+                                                           else "accept")
+            if mode == "counter":
+                mode = "reject"
+            out.append(ToolCall(f"dd_c{i}", "respond_negotiation", {"negotiation_id": nid, "action": mode,
+                                                                    "message": f"(dry run) {mode}"}))
+        return out
 
     def _proposing(self) -> bool:
         """Whether this turn opens a trade (``dry_run_propose_every``: on every turn that many turns divide)."""

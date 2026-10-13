@@ -377,8 +377,12 @@ def track_session(s, kind: str = "game", parent: Optional[dict] = None, ref: Opt
     act = getattr(s, "usage_act", None) or f"game:{s.id}"
     s.usage_act = act
     t = tracker()
-    seats = [{"player": seat.player, "type": seat.type, "server_id": seat.llm.get("server_id") if seat.type == "llm" else None,
-              "model": seat.llm.get("model") if seat.type == "llm" else None} for seat in s.seats]
+    # every seat a model plays, with its task class (P3.6.7): its machine is held only while a lease of the game's is
+    # live on it (``session_servers``), and a hybrid seat's prompts are tickets, which hold none
+    seats = [{"player": seat.player, "type": seat.type,
+              "server_id": seat.llm.get("server_id") if seat.model_seat else None,
+              "model": seat.llm.get("model") if seat.model_seat else None,
+              "class": seat.task_class} for seat in s.seats]
     t.activity(act, kind, name or s.name, parent=parent, ref={"game_id": s.id, **(ref or {})}, seats=seats)
     t.register(act, lambda: session_servers(s))
     return act

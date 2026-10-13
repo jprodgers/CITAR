@@ -30,8 +30,11 @@ use super::query_tools;
 use super::registry::{self, Op, Query, ToolKind, ToolSpec};
 use crate::base::ids::PlayerId;
 use crate::base::text::echo;
+use crate::game::action::Rule;
+use crate::game::diplomacy::negotiation::{RespondPlan, Response};
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::{Action, EventBatch, Game, Outcome};
+use crate::state::diplo::Terms;
 
 /// What a tool call returned.
 #[derive(Clone, Debug, PartialEq)]
@@ -95,6 +98,44 @@ impl Game {
             ));
         };
         answer(self, pid, spec, q, args)
+    }
+
+    /// The deal a tool call of `pid`'s would put on the table or conclude, read exactly as
+    /// [`Game::execute`] would read and check that call, with the other side: the proposal an
+    /// `open_negotiation` opens with, the counter-offer a `respond_negotiation` makes, or the
+    /// proposal it accepts. `None` for any other call (another tool, a reply, a rejection, an
+    /// opening with nothing concrete, a counter-offer the message cap would close the chat on)
+    /// and for a call the engine would refuse, which is then refused as the call's own. Reads
+    /// only. A hybrid seat's veto values this deal (`citar_bot::evaluate_call`;
+    /// design/phase3-features.md P3.6.6), so it sees the very deal the engine would make of what
+    /// the seat's model wrote: keys the engine drops, numbers written as text, an action in
+    /// capitals.
+    #[must_use]
+    pub fn offer_of_call(
+        &self,
+        pid: PlayerId,
+        tool: &str,
+        args: &Value,
+    ) -> Option<(PlayerId, Terms)> {
+        let spec = find(self, tool).ok()?;
+        if !matches!(spec.op, Op::Action) {
+            return None;
+        }
+        self.guard(pid, spec.any_time).ok()?;
+        match action_of(spec, normalize_with(&spec.args, args).ok()?).ok()? {
+            Action::OpenNegotiation(a) => {
+                let plan = a.check(self, pid).ok()?;
+                plan.proposal.map(|t| (plan.to, t))
+            }
+            Action::RespondNegotiation(a) => match a.check(self, pid).ok()? {
+                RespondPlan::Accept { other, terms, .. } => Some((other, terms)),
+                RespondPlan::Deliver { other, response: Response::Counter, proposal, .. } => {
+                    proposal.map(|t| (other, t))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 }
 

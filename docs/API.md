@@ -78,7 +78,7 @@ These take a signed-in account (a seat token is not one); see
 
 | Method and path | |
 |---|---|
-| `POST /api/games` | Create a game: `{"name", "config", "seats", "visibility", "data_sharing"}`. Counts against your game limit. A model seat names a machine (`{"llm": {"server_id", "model", ...}}`); a member's seat that describes one (a base URL, a key, a key variable) is refused with 400 |
+| `POST /api/games` | Create a game: `{"name", "config", "seats", "visibility", "data_sharing"}`. Counts against your game limit. A model seat (an LLM or a hybrid seat) names a machine (`{"llm": {"server_id", "model", ...}}`); a member's seat that describes one (a base URL, a key, a key variable) is refused with 400. A hybrid seat ([the seat](#a-hybrid-seat)) is admitted for pooled prompts on its machine, an LLM seat for games; hybrid settings that are not allowed are 400, with the reason |
 | `POST /api/games/{id}/seats/{player}` | Change a seat's type, model or name. A new model block, or a seat made an LLM seat, passes the same rule; a machine you may not use is 403, and the seat stays as it was. A new name alone checks nothing |
 | `DELETE /api/games/{id}` | Close the game (the lobby's End game): it stops, its saves stay yours, and it no longer counts against your limit |
 | `GET /api/games/{id}/sharing` | Its visibility (`private`, `allowlist`, `link`, `server`, `global`), its share link, who it is shared with, and its last unpublish (`at`, `reason`, and `by`: "you", "its owner", "an administrator", "a moderator" or "someone who manages it", never a handle) |
@@ -86,6 +86,33 @@ These take a signed-in account (a seat token is not one); see
 | `POST /api/games/{id}/sharing/users`, `DELETE .../sharing/users/{handle}` | Share with one account (`view`, `play` or `manage`), or stop |
 | `POST /api/games/{id}/unpublish` | `{"reason"}`: make it private and kill its links, for a moderator on a published game or for whoever manages it. The owner sees the reason |
 | `POST /api/scenarios/{id}/launch` | Start a game from a scenario you may see: your game, under the same seat rule and game limit |
+
+### A hybrid seat
+
+A seat of `POST /api/games`, of a scenario's seats, or (`type` aside) as `GET /api/games/{id}` lists it
+([AI players](AI_PLAYERS.md#hybrid-seats)):
+
+```json
+{"type": "hybrid", "name": "", "handicap": "ai", "difficulty": "Prince",
+ "bot": {"profile": "standard", "aggression": 0.4},
+ "llm": {"server_id": "sv_...", "model": "..."},
+ "hybrid": {"owners": {"trades": "llm", "chat": "llm"}, "advisor": true, "prompt_every": 10, "phase_seconds": 180}}
+```
+
+- `owners`: who decides each of `trades`, `agreements`, `peace`, `war`, `denounce`, `un`, `city_states`,
+  `espionage`, `captured_cities` and `chat`, `"bot"` or `"llm"` (`"bot"` for any not named), or a preset,
+  `"trade_only"`, `"all_but_war"` or `"everything"`. At least one must be the model's. Listed back as the
+  whole map, with `preset` when it is one.
+- `prompt_every`: 1 to 50 (10); `advisor`: true or false (true; always off in a benchmark game);
+  `phase_seconds`: 10 to 600 (180).
+- `handicap`: `ai` (the default) or `human`, whose numbers the seat plays with; `difficulty`, its level,
+  as for any seat.
+
+A game's summary (`GET /api/games/{id}/summary`) gives each seat a model plays its `model`, its task
+`class` (`full` for an LLM seat, `partial` for a hybrid seat) and a `label` ("Hybrid: standard +
+<model>"); its metrics (`GET /api/games/{id}/metrics`) give the diplomat's phases (`diplomat`: turn,
+triggers, steps, `gen_s`, `queue_s`, tokens, outcome, cause, tools) and, per seat, their totals
+(`diplomat_phases`, `diplomat_outcomes`, `diplomat_tools`, `diplomat_refused`).
 
 ### Owned items
 

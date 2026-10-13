@@ -11,6 +11,8 @@
 //!   ahead.
 //! - Parameters of 0 that Python divided by (`diplo_every`, `war_need_city_div`) play a turn,
 //!   with a `lux_trade_every` of 0, which Python's `max(1, ...)` already read as 1.
+//! - A tool call is valued as the deal the engine would make of it (`evaluate_call`, a hybrid
+//!   seat's veto; package 3-14), however the call is written.
 
 use std::sync::Arc;
 
@@ -20,6 +22,7 @@ use citar_bot::{Bot, BotSpec, Memory, Refusals, Tuning, VersionId, advice, clean
 use citar_engine::api::testops;
 use citar_engine::base::ids::{CityId, PlayerId};
 use citar_engine::game::city_states::influence::influence;
+use citar_engine::game::diplomacy::category::Category;
 use citar_engine::game::espionage::spies;
 use citar_engine::game::setup::config_from_value;
 use citar_engine::game::{
@@ -411,4 +414,103 @@ fn parameters_of_zero_that_python_divided_by_play_a_turn() {
     // A war is prepared, and not declared (the declare ratio is out of reach).
     assert!(memory(&g).war_prep.is_some());
     assert!(!g.at_war(ME, YOU));
+}
+
+/// `citar_bot::evaluate_call`, a hybrid seat's veto on its model's mixed deals
+/// (design/phase3-features.md P3.6.6; `Game::offer_of_call`): a tool call is valued as the deal
+/// the engine would make of it, however it is written (keys the engine drops, numbers as text or
+/// floats, an action in capitals), exactly as `evaluate_offer` values the same items written
+/// plainly, with the categories the deal touches; a call that makes no deal, or that the engine
+/// would refuse, is none.
+#[test]
+fn a_call_is_valued_as_the_deal_the_engine_would_make_of_it() {
+    let mut g = arena(2, 0);
+    cities(&mut g, 2);
+    ops(
+        &mut g,
+        &json!([
+            {"op": "meet", "a": 0, "b": 1},
+            {"op": "set_player", "player": "all", "gold": 900},
+            {"op": "grant_tech", "player": "all", "tech": "Writing"},
+        ]),
+    );
+    assert_eq!(g.current(), ME);
+    let bot = spec(&json!({}), None);
+    let names = |c: Vec<Category>| c.into_iter().map(Category::name).collect::<Vec<_>>();
+    let (give, receive) = (
+        json!([{"type": "gold", "amount": 300}, {"type": "embassy"}]),
+        json!([{"type": "embassy"}]),
+    );
+    let want = citar_bot::evaluate_offer(&g, &bot, ME, YOU, Some(&give), Some(&receive))
+        .expect("the plain items read");
+    assert!(want < 0.0, "300 gold for nothing the bot wants: {want}");
+    let spellings = [
+        (give.clone(), receive.clone()),
+        (
+            json!([{"type": "gold", "amount": "300"}, {"type": "embassy", "note": "x"}]),
+            json!([{"type": "embassy", "turns": 5}]),
+        ),
+        (json!([{"type": "gold", "amount": 300.0}, {"type": "embassy"}]), receive.clone()),
+    ];
+    for (give, receive) in spellings {
+        let call = json!({"to": "1", "message": "Gold and an embassy?", "give": give,
+                          "receive": receive, "unknown": true});
+        let (cats, value) = citar_bot::evaluate_call(&g, &bot, ME, "open_negotiation", &call)
+            .unwrap_or_else(|| panic!("an offer: {call}"));
+        assert_eq!(names(cats), ["trades", "agreements"], "{call}");
+        assert_eq!(value.to_bits(), want.to_bits(), "{call}");
+    }
+    let none = [
+        ("open_negotiation", json!({"to": 1, "message": "Hello."})),
+        ("open_negotiation", json!({"to": 1, "give": give})),
+        (
+            "open_negotiation",
+            json!({"to": 1, "message": "Gold?", "give": [{"type": "gold",
+                                                                           "amount": "lots"}]}),
+        ),
+        ("declare_war", json!({"player_id": 1})),
+        ("get_diplomacy", json!({})),
+        ("no_such_tool", json!({})),
+    ];
+    for (tool, call) in none {
+        assert!(citar_bot::evaluate_call(&g, &bot, ME, tool, &call).is_none(), "{tool} {call}");
+    }
+    let theirs = json!({"to": 0, "message": "Gold?", "give": give, "receive": receive});
+    assert!(
+        citar_bot::evaluate_call(&g, &bot, YOU, "open_negotiation", &theirs).is_none(),
+        "not its turn"
+    );
+    // A response: the proposal on the table accepted, a counter-offer made, in any case.
+    let opened = testops::apply(
+        &mut g,
+        &json!([{"op": "open_negotiation_as", "player": 1, "to": 0, "message": "Your gold?",
+                 "give": receive, "receive": give}]),
+    )
+    .expect("opened")
+    .0;
+    let nid = opened[0]["negotiation_id"].as_i64().expect("its id");
+    for action in ["accept", "Accept", " ACCEPT "] {
+        let call = json!({"negotiation_id": nid.to_string(), "action": action, "message": "Yes."});
+        let (cats, value) = citar_bot::evaluate_call(&g, &bot, ME, "respond_negotiation", &call)
+            .unwrap_or_else(|| panic!("an acceptance: {call}"));
+        assert_eq!(names(cats), ["trades", "agreements"]);
+        assert_eq!(value.to_bits(), want.to_bits(), "{call}");
+    }
+    let counter = json!({"negotiation_id": nid, "action": "Counter", "message": "Less gold.",
+                         "give": [{"type": "gold", "amount": "100"}], "receive": []});
+    let (cats, value) = citar_bot::evaluate_call(&g, &bot, ME, "respond_negotiation", &counter)
+        .expect("a counter-offer");
+    let fewer = json!([{"type": "gold", "amount": 100}]);
+    let plain = citar_bot::evaluate_offer(&g, &bot, ME, YOU, Some(&fewer), Some(&json!([])))
+        .expect("reads");
+    assert_eq!((names(cats), value.to_bits()), (vec!["trades"], plain.to_bits()));
+    for action in ["reply", "reject"] {
+        let call = json!({"negotiation_id": nid, "action": action, "message": "No."});
+        assert!(citar_bot::evaluate_call(&g, &bot, ME, "respond_negotiation", &call).is_none());
+    }
+    let mine_to_accept = json!({"negotiation_id": nid, "action": "accept", "message": "Yes."});
+    assert!(
+        citar_bot::evaluate_call(&g, &bot, YOU, "respond_negotiation", &mine_to_accept).is_none(),
+        "its own proposal, which the engine refuses it"
+    );
 }
