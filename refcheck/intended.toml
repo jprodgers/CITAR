@@ -439,6 +439,6 @@ rust = { is = "absent" }
 
 [[differences]]
 id = "minimap-view-block"
-reason = "Python's client view had nothing for the minimap, which drew the whole map whatever a player had seen of it; a major civilization's own view in Rust carries a minimap block (its stage from its era, its capital, and the box of the tiles it has explored on its home continent), from which the browser bounds a person's minimap to the explored world and opens it out with the eras"
+reason = "Python's client view had nothing for the minimap, which drew the whole map whatever a player had seen of it; a major civilization's own view in Rust carries a minimap block (its stage from its era, its capital, and the box of the tiles of its home continent it has explored and seen joined to its home), from which the browser bounds a person's minimap to the explored world and opens it out with the eras"
 where = [{ group = "views", path = "civs[*].view.minimap" }]
 python = { is = "absent" }

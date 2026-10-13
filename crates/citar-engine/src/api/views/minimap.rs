@@ -6,13 +6,19 @@
 //! The Python engine's views had no such block (refcheck `minimap-view-block`); it replaces the
 //! browser's whole-map minimap, which needed no help from the engine (`game.js` before 3-17).
 //!
-//! The home box counts only tiles the seat has explored, so it tells the seat nothing its own
-//! view's tiles do not: a continent's unexplored coast never widens it. It is one pass over the
-//! explored tiles, in seat views only; the god view and a spectator's have no block.
+//! The home box counts only the tiles of the home continent the seat has explored and has seen
+//! joined to its home: those a search from the anchor reaches through explored tiles of that
+//! continent. So it tells the seat nothing its own view's tiles do not. A continent's unexplored
+//! coast never widens it, and neither does land a scout explored that only unexplored land joins
+//! to home: the continents are the map's, which the view does not carry, and counting every
+//! explored tile of the home continent would tell the seat which far land is home and which is
+//! not. The search visits only the tiles it reaches, in seat views only; the god view and a
+//! spectator's have no block.
 
 use serde::Serialize;
 
 use crate::base::ids::{EraId, PlayerId, TileIdx};
+use crate::base::sets::BitSet;
 use crate::game::Game;
 use crate::game::units;
 use crate::rules::Ruleset;
@@ -47,9 +53,9 @@ pub struct Minimap {
     pub stage: Stage,
     /// The capital's tile as `[x, y]`, or `None` without one.
     pub capital: Option<[i32; 2]>,
-    /// The box of the explored tiles of the home continent: the capital's; without a capital,
-    /// that of the seat's first city, else its first unit that founds cities. `None` with none of
-    /// them, or one at sea.
+    /// The box of the explored tiles of the home continent joined to the anchor through tiles the
+    /// seat has explored. The anchor is the capital; without a capital, the seat's first city,
+    /// else its first unit that founds cities. `None` with none of them, or one at sea.
     pub home: Option<TileBox>,
 }
 
@@ -112,7 +118,7 @@ impl Game {
                     .find(|u| units::type_has(self, u.base, UniqueType::FoundCity))
                     .map(|u| u.tile())
             });
-        let home = anchor.and_then(|t| self.continent(t)).and_then(|c| self.home_box(p, c));
+        let home = anchor.and_then(|t| self.home_box(p, t));
         Some(Minimap {
             stage: stage_of(self.rules(), crate::game::query::era(self, p)),
             capital: capital.map(|c| {
@@ -123,18 +129,34 @@ impl Game {
         })
     }
 
-    /// The box of the tiles of continent `continent` that `p` has explored.
-    fn home_box(&self, p: PlayerId, continent: u16) -> Option<TileBox> {
+    /// The box of the tiles `p` has explored that join `anchor` through explored tiles of its
+    /// continent; `None` for an anchor at sea or one `p` has not explored (its own city's or
+    /// unit's tile always is).
+    fn home_box(&self, p: PlayerId, anchor: TileIdx) -> Option<TileBox> {
+        let continent = self.continent(anchor)?;
         let explored = &self.player(p)?.explored;
-        let map = self.state().map();
+        if !explored.contains(anchor.0) {
+            return None;
+        }
+        let (map, grid) = (self.state().map(), self.grid());
         let (w, h) = (usize::from(map.width), usize::from(map.height));
         let (mut cols, mut rows) = (vec![false; w], vec![false; h]);
-        for t in explored.iter() {
-            if map.continent(TileIdx(t)) == Some(continent) {
-                let (x, y) = self.xy(TileIdx(t));
-                let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else { continue };
-                if let (Some(c), Some(r)) = (cols.get_mut(x), rows.get_mut(y)) {
-                    (*c, *r) = (true, true);
+        let mut reached = BitSet::with_capacity(map.size());
+        reached.insert(anchor.0);
+        let mut todo = vec![anchor];
+        while let Some(t) = todo.pop() {
+            let (x, y) = self.xy(t);
+            if let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y))
+                && let (Some(c), Some(r)) = (cols.get_mut(x), rows.get_mut(y))
+            {
+                (*c, *r) = (true, true);
+            }
+            for n in grid.neighbors(t) {
+                if explored.contains(n.0)
+                    && map.continent(n) == Some(continent)
+                    && reached.insert(n.0)
+                {
+                    todo.push(n);
                 }
             }
         }

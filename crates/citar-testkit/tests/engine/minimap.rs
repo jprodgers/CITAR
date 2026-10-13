@@ -5,9 +5,11 @@
 //!   name), on one whose eras are all renamed (by position: ⌈n/3⌉ and the second-to-last) and on
 //!   one whose names sit at other eras (the names win);
 //! - the home box on a map that does not wrap, one that wraps east-west and one that wraps both
-//!   ways, each checked against the view's own tiles: the explored tiles of the home continent,
-//!   covered the short way round;
-//! - a tile explored on another continent left out;
+//!   ways, each checked against the view's own tiles: the explored tiles of the home continent
+//!   joined to the anchor through explored tiles, covered the short way round;
+//! - a tile explored on another continent left out, and one explored on the home continent that
+//!   only unexplored land joins to home (a U-shaped continent's far arm) left out until the land
+//!   between is explored;
 //! - a seat with no capital (its first city, else its settler) and with no city and no settler; a
 //!   capital before an earlier city on another continent;
 //! - who has a block: a major's own view, never the god view nor a city-state's;
@@ -99,38 +101,98 @@ fn shortest_arc(on: &[bool], wrap: bool) -> Option<(usize, usize)> {
     best.map(|(len, _, start)| (start, (start + len - 1) % n))
 }
 
-/// The box the home continent's explored tiles make, as the view's own tiles show them: each
-/// tile the view lists is one the seat has explored.
-fn expected_home(g: &Game, v: &Value, continent: u16) -> Option<TileBox> {
-    let (w, h) = (v["width"].as_u64().expect("a width"), v["height"].as_u64().expect("a height"));
-    let mut cols = vec![false; usize::try_from(w).expect("small")];
-    let mut rows = vec![false; usize::try_from(h).expect("small")];
+/// The six neighbours of `(x, y)` on a `w` by `h` map, worked out here from the offset
+/// coordinates (odd rows half a tile east), not read from the engine's grid.
+fn neighbours(
+    x: i32,
+    y: i32,
+    (w, h): (i32, i32),
+    (wrap_x, wrap_y): (bool, bool),
+) -> Vec<(i32, i32)> {
+    let steps = if y & 1 == 1 {
+        [(1, 0), (1, -1), (0, -1), (-1, 0), (0, 1), (1, 1)]
+    } else {
+        [(1, 0), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1)]
+    };
+    steps
+        .iter()
+        .map(|&(dx, dy)| {
+            let (nx, ny) = (x + dx, y + dy);
+            (if wrap_x { nx.rem_euclid(w) } else { nx }, if wrap_y { ny.rem_euclid(h) } else { ny })
+        })
+        .filter(|&(nx, ny)| (0..w).contains(&nx) && (0..h).contains(&ny))
+        .collect()
+}
+
+/// The box the home tiles the view shows make: a search from `anchor` through the view's own
+/// tiles (each one the seat has explored) of the anchor's continent. Explored land of that
+/// continent that only unexplored land joins to the anchor is left out.
+fn expected_home(g: &Game, v: &Value, anchor: TileIdx) -> Option<TileBox> {
+    let w = i32::try_from(v["width"].as_u64().expect("a width")).expect("small");
+    let h = i32::try_from(v["height"].as_u64().expect("a height")).expect("small");
+    let wraps = (v["wrap_x"] == json!(true), v["wrap_y"] == json!(true));
+    let continent = g.continent(anchor)?;
+    let index = |x: i32, y: i32| usize::try_from(y * w + x).expect("on the map");
+    let (wu, hu) = (usize::try_from(w).expect("small"), usize::try_from(h).expect("small"));
+    let mut shown = vec![false; wu * hu];
     for row in v["tiles"].as_array().expect("tiles") {
-        let i = u32::try_from(row[0].as_u64().expect("an index")).expect("small");
-        if g.continent(TileIdx(i)) == Some(continent) {
-            let (x, y) = g.xy(TileIdx(i));
-            cols[usize::try_from(x).expect("on the map")] = true;
-            rows[usize::try_from(y).expect("on the map")] = true;
+        shown[usize::try_from(row[0].as_u64().expect("an index")).expect("small")] = true;
+    }
+    let home = |x: i32, y: i32| {
+        let i = index(x, y);
+        shown[i] && g.continent(TileIdx(u32::try_from(i).expect("small"))) == Some(continent)
+    };
+    let (ax, ay) = g.xy(anchor);
+    if !home(ax, ay) {
+        return None;
+    }
+    let mut reached = vec![false; shown.len()];
+    reached[index(ax, ay)] = true;
+    let (mut todo, mut cols, mut rows) = (vec![(ax, ay)], vec![false; wu], vec![false; hu]);
+    while let Some((x, y)) = todo.pop() {
+        cols[usize::try_from(x).expect("on the map")] = true;
+        rows[usize::try_from(y).expect("on the map")] = true;
+        for (nx, ny) in neighbours(x, y, (w, h), wraps) {
+            if home(nx, ny) && !reached[index(nx, ny)] {
+                reached[index(nx, ny)] = true;
+                todo.push((nx, ny));
+            }
         }
     }
-    let (x0, x1) = shortest_arc(&cols, v["wrap_x"] == json!(true))?;
-    let (y0, y1) = shortest_arc(&rows, v["wrap_y"] == json!(true))?;
+    let (x0, x1) = shortest_arc(&cols, wraps.0)?;
+    let (y0, y1) = shortest_arc(&rows, wraps.1)?;
     let at = |i: usize| i32::try_from(i).expect("small");
     Some(TileBox { x0: at(x0), y0: at(y0), x1: at(x1), y1: at(y1) })
 }
 
-/// The seat's block, read from its view, with its home box checked against the view's tiles.
-fn block(g: &Game, p: PlayerId, home_continent: Option<u16>) -> Minimap {
+/// The seat's block, read from its view, with its home box checked against the view's tiles
+/// searched from `anchor`, the tile the test expects the home to be read from (`None`: no home).
+fn block(g: &Game, p: PlayerId, anchor: Option<(i32, i32)>) -> Minimap {
     let v = view(g, Some(p));
     let m = g.minimap(p).expect("a major has a block");
     assert_eq!(v["minimap"], serde_json::to_value(m).expect("JSON"), "the view writes the block");
-    let want = home_continent.and_then(|c| expected_home(g, &v, c));
-    assert_eq!(m.home, want, "the home box is the explored home continent's");
+    let want = anchor.and_then(|(x, y)| expected_home(g, &v, tile_at(g, x, y)));
+    assert_eq!(m.home, want, "the home box is the explored home tiles joined to {anchor:?}");
     m
 }
 
 fn tile_at(g: &Game, x: i32, y: i32) -> TileIdx {
     g.grid().idx(x, y).expect("on the map")
+}
+
+/// Where the seat's first settler stands, as its view shows it.
+fn settler_at(g: &Game, p: PlayerId) -> (i32, i32) {
+    let v = view(g, Some(p));
+    let mut settlers: Vec<&Value> = v["units"]
+        .as_array()
+        .expect("units")
+        .iter()
+        .filter(|u| u["owner"] == json!(p.0) && u["type"] == json!("Settler"))
+        .collect();
+    settlers.sort_by_key(|u| u["id"].as_u64());
+    let s = settlers.first().expect("a settler");
+    let at = |k: &str| i32::try_from(s[k].as_i64().expect("a coordinate")).expect("small");
+    (at("x"), at("y"))
 }
 
 // ---- The stages ---------------------------------------------------------------------------
@@ -162,12 +224,13 @@ fn stages(rules: &'static Ruleset) -> Vec<Stage> {
     let doc = map_doc(16, 10, (false, false), |x, _| (2..=13).contains(&x), [(4, 4), (11, 5)]);
     let mut g = game_on(rules, doc);
     let names: Vec<String> = rules.eras().as_slice().iter().map(|e| e.name.to_string()).collect();
-    let mut out = vec![block(&g, P0, g.continent(tile_at(&g, 4, 4))).stage];
+    let settler = Some(settler_at(&g, P0));
+    let mut out = vec![block(&g, P0, settler).stage];
     for name in &names[1..] {
         ops(&mut g, json!([{"op": "grant_era", "player": 0, "era": name}]));
         let era = citar_engine::game::query::era(&g, P0);
         assert_eq!(rules.name(era), Some(name.as_str()), "the civilization is in {name}");
-        out.push(block(&g, P0, g.continent(tile_at(&g, 4, 4))).stage);
+        out.push(block(&g, P0, settler).stage);
     }
     out
 }
@@ -255,7 +318,7 @@ fn home_box_checks(
     assert_ne!(home, away, "two continents");
     let mut boxes = Vec::new();
     // the start: no city yet, so the settler's continent
-    let m = block(&g, P0, Some(home));
+    let m = block(&g, P0, Some(settler_at(&g, P0)));
     assert_eq!((m.stage, m.capital), (Stage::Early, None));
     boxes.extend(m.home);
     // a capital
@@ -263,7 +326,7 @@ fn home_box_checks(
         &mut g,
         json!([{"op": "found_city", "player": 0, "x": start.0, "y": start.1, "capital": true}]),
     );
-    let m = block(&g, P0, Some(home));
+    let m = block(&g, P0, Some(start));
     assert_eq!(m.capital, Some([start.0, start.1]));
     boxes.extend(m.home);
     // a unit of the seat's on the other continent: what it sees there is explored, and left out
@@ -283,11 +346,11 @@ fn home_box_checks(
         })
         .count();
     assert!(there > 0, "the scout explored the other continent");
-    let m = block(&g, P0, Some(home));
+    let m = block(&g, P0, Some(start));
     assert_eq!(m.home, boxes.last().copied(), "the other continent's tiles change nothing");
     // everything explored: the whole home continent
     ops(&mut g, json!([{"op": "reveal", "player": 0}]));
-    let m = block(&g, P0, Some(home));
+    let m = block(&g, P0, Some(start));
     assert_eq!(m.home, Some(whole));
     boxes.extend(m.home);
     boxes
@@ -334,15 +397,66 @@ fn the_home_box_crosses_both_seams() {
         rows: |y| y >= 11 || y <= 2 || (5..=8).contains(&y),
     };
     let mut g = shape.game([(0, 0), (15, 7)]);
-    let home = g.continent(tile_at(&g, 0, 0)).expect("land");
-    let m = block(&g, P0, Some(home));
+    let settler = Some(settler_at(&g, P0));
+    let m = block(&g, P0, settler);
     let first = m.home.expect("a home");
     assert!(first.x0 > first.x1 && first.y0 > first.y1, "{first:?}");
     ops(&mut g, json!([{"op": "reveal", "player": 0}]));
     // rows 5 to 8 are land of their own in the columns of the home continent, but not joined to
     // it: another continent, as the engine counts them
-    let m = block(&g, P0, Some(home));
+    let m = block(&g, P0, settler);
     assert_eq!(m.home, Some(TileBox { x0: 25, y0: 11, x1: 4, y1: 2 }));
+}
+
+#[test]
+fn far_land_of_the_home_continent_counts_once_explored_land_joins_it() {
+    // a U: two arms joined only by a base at the bottom, which the seat has not explored; the
+    // other civilization on an island between the arms
+    let doc = map_doc(
+        30,
+        20,
+        (false, false),
+        |x, y| {
+            let (left, right) = ((2..=4).contains(&x), (20..=22).contains(&x));
+            let base = (15..=17).contains(&y) && (2..=22).contains(&x);
+            let island = (10..=14).contains(&x) && (2..=6).contains(&y);
+            ((left || right) && (1..=17).contains(&y)) || base || island
+        },
+        [(3, 2), (12, 4)],
+    );
+    let mut g = game_on(Ruleset::shared(), doc);
+    let settler = Some(settler_at(&g, P0));
+    let home = g.continent(tile_at(&g, 3, 2));
+    assert_eq!(home, g.continent(tile_at(&g, 21, 2)), "one continent, the U");
+    let first = block(&g, P0, settler).home.expect("a home");
+    assert!(first.x1 <= 5 && first.y1 < 15, "the top of the left arm: {first:?}");
+    // a scout at the top of the far arm explores land of the home continent ...
+    ops(&mut g, json!([{"op": "add_unit", "player": 0, "unit": "Scout", "x": 21, "y": 2}]));
+    test_ops(&mut g, json!([{"op": "refresh_visibility"}]));
+    let v = view(&g, Some(P0));
+    let far = v["tiles"]
+        .as_array()
+        .expect("tiles")
+        .iter()
+        .filter_map(|row| u32::try_from(row[0].as_u64()?).ok())
+        .filter(|&i| g.continent(TileIdx(i)) == home && g.xy(TileIdx(i)).0 >= 20)
+        .count();
+    assert!(far > 0, "the scout explored the far arm");
+    // ... which nothing the seat explored joins to home: the box does not tell it that it is home
+    assert_eq!(block(&g, P0, settler).home, Some(first), "the far arm left out");
+    // scouts down the near arm: the home grows along what they explore, the far arm still out
+    let down: Vec<Value> = [5, 8, 11, 14]
+        .iter()
+        .map(|y| json!({"op": "add_unit", "player": 0, "unit": "Scout", "x": 3, "y": y}))
+        .collect();
+    ops(&mut g, Value::Array(down));
+    test_ops(&mut g, json!([{"op": "refresh_visibility"}]));
+    let grown = block(&g, P0, settler).home.expect("a home");
+    assert!(grown.y1 >= 15 && grown.x1 < 20, "the near arm, not the far one: {grown:?}");
+    // everything explored: the base joins the arms, and the home is the whole U
+    ops(&mut g, json!([{"op": "reveal", "player": 0}]));
+    let m = block(&g, P0, settler);
+    assert_eq!(m.home, Some(TileBox { x0: 2, y0: 1, x1: 22, y1: 17 }));
 }
 
 /// The game as a save reloads it, with the seat's capital forgotten: a state Python wrote could
@@ -366,9 +480,8 @@ fn without_a_capital_the_first_city_then_a_settler_anchors_the_home() {
         rows: |y| (1..=12).contains(&y),
     };
     let mut g = shape.game([(6, 6), (21, 7)]);
-    let (a, b) = (g.continent(tile_at(&g, 6, 6)), g.continent(tile_at(&g, 21, 7)));
     // the settler at the start
-    let m = block(&g, P0, a);
+    let m = block(&g, P0, Some(settler_at(&g, P0)));
     assert_eq!((m.capital, m.home.is_some()), (None, true));
     // only a scout, on the other continent: no settler and no city, so no home
     test_ops(&mut g, json!([{"op": "clear_units", "player": 0}]));
@@ -378,15 +491,15 @@ fn without_a_capital_the_first_city_then_a_settler_anchors_the_home() {
     // a settler there makes it home
     ops(&mut g, json!([{"op": "add_unit", "player": 0, "unit": "Settler", "x": 22, "y": 4}]));
     test_ops(&mut g, json!([{"op": "refresh_visibility"}]));
-    assert!(block(&g, P0, b).home.is_some());
+    assert!(block(&g, P0, Some((22, 4))).home.is_some());
     // a city on the first continent is the capital, and wins over the settler
     ops(&mut g, json!([{"op": "found_city", "player": 0, "x": 8, "y": 9}]));
-    assert_eq!(block(&g, P0, a).capital, Some([8, 9]));
+    assert_eq!(block(&g, P0, Some((8, 9))).capital, Some([8, 9]));
     // a second city on the other continent; with the capital forgotten, the first city anchors
     // the home, not the second nor the settler
     ops(&mut g, json!([{"op": "found_city", "player": 0, "x": 25, "y": 10}]));
     let lost = without_capital(&g);
-    let m = block(&lost, P0, a);
+    let m = block(&lost, P0, Some((8, 9)));
     assert_eq!(m.capital, None, "cities, and no capital");
     assert!(m.home.is_some());
     // with nothing left, nothing
@@ -414,15 +527,17 @@ fn the_capital_anchors_the_home_before_an_earlier_city() {
         rows: |y| (1..=12).contains(&y),
     };
     let mut g = shape.game([(6, 6), (21, 7)]);
-    let (a, b) = (g.continent(tile_at(&g, 6, 6)), g.continent(tile_at(&g, 21, 7)));
     // the seat's first city on the other continent, then its capital moved home
     ops(&mut g, json!([{"op": "found_city", "player": 0, "x": 24, "y": 3}]));
-    assert_eq!(block(&g, P0, b).capital, Some([24, 3]), "the first city is the capital at first");
+    let first = block(&g, P0, Some((24, 3)));
+    assert_eq!(first.capital, Some([24, 3]), "the first city is the capital at first");
     ops(&mut g, json!([{"op": "found_city", "player": 0, "x": 8, "y": 9, "capital": true}]));
-    let m = block(&g, P0, a);
+    let m = block(&g, P0, Some((8, 9)));
     assert_eq!(m.capital, Some([8, 9]));
     let v = view(&g, Some(P0));
-    assert_ne!(m.home, expected_home(&g, &v, b.expect("land")), "not the first city's continent");
+    let there = expected_home(&g, &v, tile_at(&g, 24, 3));
+    assert!(there.is_some() && m.home.is_some());
+    assert_ne!(m.home, there, "not the first city's continent");
 }
 
 #[test]
