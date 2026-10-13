@@ -1190,14 +1190,19 @@ class ProbeRunRoute(_ProbeScenario):
                 ("dave", {"mode": "hybrid", "owners": "most"}, 400, "Unknown preset"),
                 ("dave", {"mode": "hybrid", "owners": {}}, 400, "nothing for its model"),
                 ("dave", {"mode": "sideways"}, 400, "mode"),
-                ("dave", {"mode": "hybrid", "llm": {"provider": "bot"}}, 400, "not the scripted bot")):
+                ("dave", {"mode": "hybrid", "llm": {"provider": "bot"}}, 400, "not the scripted bot"),
+                ("alice", {"mode": "hybrid"}, 200, None),                      # the machine's and the probe's owner
+                ("zara", {"mode": "hybrid"}, 200, None)):                      # an administrator
             with self.subTest(who=who, body=body):
                 got = self.client.post("/api/probes/pooled-probe/run", headers=self.headers[who], json={
                     "llm": {"server_id": self.box, "model": "dry-run"}, **body})
                 self.assertEqual(got.status_code, want, got.text[:300])
                 if says:
                     self.assertIn(says, got.json()["detail"])
-        self.assertEqual(self.started, [(self.ids["dave"], ["turn"]), (self.ids["dave"], None)])
+        self.assertEqual(self.started, [(self.ids["dave"], ["turn"]), (self.ids["dave"], None),
+                                        (self.ids["alice"], None), (self.ids["zara"], None)])
+        self.assertEqual([(kw["mode"], kw["owners"]) for kw in self.started_kw],
+                         [("hybrid", None), ("hybrid", {"trades": "llm"}), ("hybrid", None), ("hybrid", None)])
         self.assertEqual(self.client.post("/api/probes/pooled-probe/run", headers=self.headers["anon"], json={
             "llm": {"server_id": self.box, "model": "dry-run"}, "mode": "hybrid"}).status_code, 401)
         with db.session() as s:
@@ -1279,6 +1284,81 @@ class HybridProbes(_ProbeScenario):
         self.assertEqual(classes, {"partial"}, "every model call a pooled prompt")
         self.assertEqual(run["summary"]["cases"]["friends"]["answered_by"], {"bot": 1})
         self.assertEqual(run["summary"]["cases"]["gift"]["answered_by"], {"model": 1})
+
+
+class HybridSuiteRoutes(World):
+    """Package 3-16 (P3.6.9): a benchmark run whose suite has a hybrid scenario is admitted for pooled prompts as well
+    as benchmarks on its machines (its jobs' models are asked pooled prompts), a full suite for benchmarks alone; a
+    suite's hybrid settings are checked when it is saved (400 naming the scenario), and its hybrid seat's bot is one the
+    member may use. gina's grant on alice's machines is changed to cover benchmarks only, bob's to benchmarks and
+    pooled prompts. The scheduler is a stub: what is tested is who may start the run."""
+
+    def setUp(self):
+        super().setUp()
+        from fastapi.testclient import TestClient
+        from citar.db.models import AccessGrant
+        from citar.server import app as appmod
+        from sqlalchemy import select
+        with db.session() as s:
+            for handle, purposes in (("gina", ["benchmark"]), ("bob", ["benchmark", "pooled"])):
+                grant = s.scalars(select(AccessGrant).where(AccessGrant.subject_user_id == self.ids[handle])).one()
+                grant.purposes = purposes
+            items.register(s, "bot_profile", "carols-bot", self.ids["carol"], "Carol's bot")
+        self.started: list = []
+        stub = mock.Mock()
+        stub.create_run.side_effect = lambda suite, name, **kw: self.started.append(
+            (kw.get("owner_id"), [sc.get("mode") for sc in suite["scenarios"]])) or {"id": "stub-run", "jobs": []}
+        stub.save_suite.side_effect = lambda suite: suite
+        stub._suite_path.side_effect = lambda sid: _TMP / f"{sid}.json"
+        patcher = mock.patch.object(appmod, "_scheduler", return_value=stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(self.client.close)
+
+    def suite(self, mode: str, **hybrid) -> dict:
+        sc = {"name": "Tiny", "mode": mode, "map_size": "duel", "map_type": "pangaea", "opponents": 1, "turn_limit": 2}
+        if mode == "hybrid":
+            sc["hybrid"] = {"owners": "trade_only", **hybrid}
+        return {"name": "suite", "servers": [{"server_id": self.box, "models": [{"model": "dry-run"}]}],
+                "scenarios": [sc]}
+
+    def test_a_hybrid_run_is_admitted_for_pooled_prompts_too(self):
+        for who, mode, want, says in (
+                ("gina", "full", 200, None),                    # benchmarks only: a full run
+                ("gina", "hybrid", 403, "pooled prompts"),      # but its hybrid jobs ask pooled prompts
+                ("bob", "hybrid", 200, None),                   # benchmarks and pooled prompts
+                ("dave", "hybrid", 403, "benchmark"),           # pooled prompts but no benchmarks
+                ("carol", "hybrid", 403, "may not use"),        # no grant, and not her machine to see
+                ("anon", "hybrid", 401, None)):
+            with self.subTest(who=who, mode=mode):
+                got = self.client.post("/api/benchmarks/runs", headers=self.headers[who],
+                                       json={"suite": self.suite(mode)})
+                self.assertEqual(got.status_code, want, got.text[:300])
+                if says:
+                    self.assertIn(says, got.json()["detail"])
+        self.assertEqual(self.started, [(self.ids["gina"], ["full"]), (self.ids["bob"], ["hybrid"])])
+        self.assertEqual(self.client.post("/api/benchmarks/runs", headers=self.headers["alice"],
+                                          json={"suite": self.suite("hybrid")}).status_code, 200, "the owner")
+        self.assertEqual(self.client.post("/api/benchmarks/runs", headers=self.headers["zara"],
+                                          json={"suite": self.suite("hybrid")}).status_code, 200, "an administrator")
+
+    def test_a_suites_hybrid_settings_are_checked_when_it_is_saved(self):
+        for hybrid, want, says in (({"owners": {}}, 400, "nothing for its model"),
+                                   ({"handicap": "robot"}, 400, "handicap"),
+                                   ({"prompt_every": 99}, 400, "prompt_every"),
+                                   ({"bot_profile": "carols-bot"}, 404, None),
+                                   ({"bot_profile": "best"}, 200, None)):
+            with self.subTest(hybrid=hybrid):
+                got = self.client.post("/api/benchmarks/suites", headers=self.headers["bob"],
+                                       json=self.suite("hybrid", **hybrid))
+                self.assertEqual(got.status_code, want, got.text[:300])
+                if says:
+                    self.assertIn(says, got.json()["detail"])
+                    self.assertIn("Tiny", got.json()["detail"], "the scenario is named")
+        got = self.client.post("/api/benchmarks/suites", headers=self.headers["carol"],
+                               json=self.suite("hybrid", bot_profile="carols-bot"))
+        self.assertNotEqual(got.status_code, 404, "her own bot is hers to use")
 
 
 # ---------------------------------------------------------------------------- gate 4: the Queue page

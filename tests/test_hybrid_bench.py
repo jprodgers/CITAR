@@ -164,6 +164,13 @@ class Suite(Case):
                 self.assertFalse(game.seats[0].hybrid["advisor"], "the advisor is off in a benchmark")
         # the jobs' model seats made deals the bot valued, and the model acted in its categories
         self.assertTrue(any(j["result"]["pair"]["deals"] for j in run_a["jobs"]))
+        # the runs' list carries each job's pair line and record summary, not the record's rows (the run's file does)
+        listed = next(r for r in sch.list_runs() if r["id"] == run_a["id"])
+        for job, shown in zip(run_a["jobs"], listed["jobs"]):
+            self.assertEqual(shown["result"]["pair"], job["result"]["pair"])
+            self.assertEqual(shown["result"]["diplomacy"], {"summary": job["result"]["diplomacy"]["summary"]})
+            self.assertTrue(job["result"]["diplomacy"]["rows"], "the run itself keeps them")
+        self.assertEqual(listed["scenarios"][run_a["jobs"][0]["scenario_id"]]["mode"], "hybrid")
         run_b = sch.create_run(suite(sv, "m_suite_b", [scenario()], repeats=3))
         self.assertTrue(self.finished(sch, run_b))
         self.assertEqual([j["control"]["id"] for j in run_b["jobs"]], keys, "the second model's jobs share them")
