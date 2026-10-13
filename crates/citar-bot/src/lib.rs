@@ -38,7 +38,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use citar_engine::base::ids::{NegotiationId, PlayerId};
-use citar_engine::game::Game;
+use citar_engine::game::diplomacy::deals::make_proposal;
+use citar_engine::game::{ActionError, Game};
 use citar_engine::rules::{ENGINE_CODE, Ruleset};
 use citar_engine::state::diplo::DealItem;
 use serde::Serialize;
@@ -362,6 +363,27 @@ pub fn evaluate(
     let mind =
         basic1::diplomacy::evaluate::Mind { spec, params: spec.tuning.params(), memory: &memory };
     basic1::diplomacy::evaluate::evaluate(g, mind, pid, other, give, receive)
+}
+
+/// [`evaluate`] of the deal `open_negotiation` would make of deal items as a caller writes them
+/// (`[{"type": "gold", "amount": 50}]`): `pid` gives `give` to `other` and receives `receive`,
+/// read as the engine reads a proposal (`deals::make_proposal`: a mutual agreement on either side
+/// goes on both), its worth in gold from `pid`'s side. 0 for no items on either side. A hybrid
+/// seat's veto on its model's mixed deals and the diplomacy leaderboard's valuation of each
+/// proposal (design/phase3-features.md P3.6.6, P3.6.10), through `EngineGame.bot_evaluate`.
+///
+/// # Errors
+/// Items that do not read, as the engine refuses them (`deals::normalize_items`).
+pub fn evaluate_offer(
+    g: &Game,
+    spec: &BotSpec,
+    pid: PlayerId,
+    other: PlayerId,
+    give: Option<&Value>,
+    receive: Option<&Value>,
+) -> Result<f64, ActionError> {
+    let terms = make_proposal(g, pid, other, give, receive)?;
+    Ok(terms.map_or(0.0, |t| evaluate(g, spec, pid, other, t.gives(pid), t.gives(other))))
 }
 
 /// The `basic-1` memory seat `pid` keeps in `g` (fresh if it keeps none, or another driver's).
