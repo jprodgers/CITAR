@@ -266,20 +266,25 @@ class Metrics:
     #: admission refused it; the model failed; the seat was halted.
     DIPLOMAT_OUTCOMES = ("done", "timeout", "skipped", "refused", "failed", "cancelled")
 
+    #: What a diplomat phase's row keeps (``diplomat``). Never free text: the game's viewers read its metrics
+    #: (``GET /api/games/{gid}/metrics``), and a refusal's or a provider's words can name another member's machine.
+    DIPLOMAT_FIELDS = ("triggers", "steps", "gen_s", "queue_s", "input_tokens", "output_tokens", "tools", "outcome",
+                       "cause")
+
     def diplomat(self, pid: int, turn: int, row: dict, seconds: float = 0.0):
         """Record one diplomat phase of a hybrid seat (P3.6.11): ``row`` holds its triggers, steps, ``gen_s``,
-        ``queue_s``, tokens, ``outcome`` (``DIPLOMAT_OUTCOMES``) with its ``cause`` when it did not run, and the tools it
-        called ({"tool", "ok"})."""
+        ``queue_s``, tokens, ``outcome`` (``DIPLOMAT_OUTCOMES``) with its ``cause`` code when it did not run, and the
+        tools it called ({"tool", "ok"}); anything else in it is not kept (``DIPLOMAT_FIELDS``)."""
         self.data.setdefault("diplomat", []).append({"player": pid, "turn": turn, "t": time.time(),
-                                                     "seconds": round(seconds, 3), **row})
+                                                     "seconds": round(seconds, 3),
+                                                     **{k: row.get(k) for k in self.DIPLOMAT_FIELDS}})
 
-    def diplomat_refusal(self, pid: int, tool: str, why: str, *, chat: bool = False, detail: Optional[str] = None):
+    def diplomat_refusal(self, pid: int, tool: str, why: str, *, chat: bool = False):
         """A hybrid seat's model called a tool the session refused (P3.6.6): ``why`` is ``category`` (none of its
         categories gives it that tool) or ``veto`` (the bot values the deal below zero), in a phase or a chat
-        (``chat``)."""
+        (``chat``). The refusal's words are the model's, in its tool result, not the metrics'."""
         self.data.setdefault("diplomat_refusals", []).append({
-            "player": pid, "t": time.time(), "tool": tool, "why": why, "chat": bool(chat),
-            **({"detail": detail[:300]} if detail else {})})
+            "player": pid, "t": time.time(), "tool": tool, "why": why, "chat": bool(chat)})
 
     # ------------------------------------------------------------------
     def summary(self, players: dict) -> dict:

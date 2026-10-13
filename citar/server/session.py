@@ -51,6 +51,11 @@ class Seat:
     #: A hybrid seat's settings (``citar.agents.hybrid.normalize_hybrid``: owners, advisor, prompt_every,
     #: phase_seconds); saved with the session record, so it needs no save-format change (P3.1.5).
     hybrid: dict = field(default_factory=dict)
+    #: The engine settings the seat's own entry chose (its lobby or scenario entry, or a seat change that named one):
+    #: ``handicap`` and ``auto`` (some of the engine's automatic decisions), never a hybrid seat's, which follow its
+    #: owners. A change of controller sets every setting explicitly from these and the new controller's defaults
+    #: (``GameSession.update_seat``), since the engine keeps any setting once set explicitly.
+    engine: dict = field(default_factory=dict)
 
     # Every place that asks "is this an LLM seat?" asks one of these (design/phase3-features.md P3.6.7).
     @property
@@ -686,7 +691,7 @@ class GameSession:
         with self.lock:
             veto = agent.veto(self, pid, name, args)
             if veto:
-                self.metrics.diplomat_refusal(pid, name, "veto", chat=chat, detail=veto)
+                self.metrics.diplomat_refusal(pid, name, "veto", chat=chat)
                 return {"ok": False, "error": veto}
             return self.call_tool(pid, name, args)
 
@@ -760,24 +765,30 @@ class GameSession:
             with self.lock:
                 if self.agents.get(pid) is agent:
                     self.cancel_agent(pid, halt=False)     # its answer in progress, if any, goes on with the new one
-        if seat.type == "llm" and self._leases_ended():
+        if seat.type == "llm":
+            return None if self._leases_ended() else self._llm_agent(pid, seat, answering)
+        if seat.type not in ("bot", "hybrid"):
             return None
-        if seat.type == "bot":
-            from ..agents.bot_agent import BotAgent
-            # the bot draws from the game's seed, so the same map seed plays the same game
-            agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")})
-        elif seat.type == "hybrid":
-            from ..agents.hybrid_agent import HybridAgent
-            # its bot handles at once (no database read: drives make it under the lock), its model's configuration
-            # when first needed, off the lock; the diplomat reads the events from here on (P3.6.4)
-            last = self.game.events(last=1)
-            agent = HybridAgent(seat, started_turn=self.game.turn, event_mark=last[-1]["id"] if last else None)
-        elif seat.type == "llm":
-            return self._llm_agent(pid, seat, answering)
-        else:
-            return None
-        self.agents[pid] = agent
-        return agent
+        from ..agents.bot_agent import BotAgent
+        from ..agents.hybrid_agent import HybridAgent
+        with self.lock:
+            # made and kept in one hold of the lock (no database read: its bot handles only, its model's configuration
+            # is read when first needed, off the lock), so the threads that ask at once (the driver, the responders,
+            # the chat clock) get one agent: a hybrid seat's diplomat state and its one voice live on it (P3.6.5)
+            kept = self.agents.get(pid)
+            if kept is not None and not self._stale(kept):
+                return kept
+            if seat.type == "bot":
+                # the bot draws from the game's seed, so the same map seed plays the same game
+                agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")})
+            elif seat.type == "hybrid":
+                # the diplomat reads the events from here on (P3.6.4)
+                last = self.game.events(last=1)
+                agent = HybridAgent(seat, started_turn=self.game.turn, event_mark=last[-1]["id"] if last else None)
+            else:
+                return None                 # the seat changed meanwhile
+            self.agents[pid] = agent
+            return agent
 
     @staticmethod
     def _stale(agent) -> bool:
@@ -1136,13 +1147,15 @@ class GameSession:
         """Change who controls a seat, or how, and abort a turn in progress so the new controller takes over.
 
         A new seat type is also the civilization's new engine controller, so its difficulty numbers and the
-        decisions the engine takes for it follow the change (except any its seat set explicitly). A hybrid seat
-        (design/phase3-features.md P3.6.2) is the engine's ``hybrid`` controller with its seat's handicap (``ai`` unless
-        ``handicap`` says otherwise) and the automatic decisions its owners leave to the bot (``hybrid.engine_auto``);
-        a seat that stops being hybrid takes its new controller's handicap and automatic decisions explicitly, so
-        nothing of its hybrid settings stays behind. ``hybrid`` is checked (``normalize_hybrid``) before anything
-        changes. Raises ValueError for an unknown seat type or hybrid settings that are not allowed, and EngineCrash
-        on a game whose engine has stopped (the session is then crashed, as everywhere).
+        decisions the engine takes for it follow the change: those its seat chose itself (``Seat.engine``: its lobby or
+        scenario entry's ``handicap`` and ``auto``, or a ``handicap`` given here), and the new controller's defaults for
+        the rest. Every one is set explicitly, at every change of controller: the engine keeps a setting once it was
+        set explicitly, and a hybrid seat's are, so a seat that was ever hybrid would otherwise carry them through
+        every later change. A hybrid seat (design/phase3-features.md P3.6.2) is the engine's ``hybrid`` controller with
+        its seat's handicap (``ai`` unless ``handicap`` says otherwise) and the automatic decisions its owners leave to
+        the bot (``hybrid.engine_auto``). ``hybrid`` is checked (``normalize_hybrid``) before anything changes. Raises
+        ValueError for an unknown seat type, a handicap that is none, or hybrid settings that are not allowed, and
+        EngineCrash on a game whose engine has stopped (the session is then crashed, as everywhere).
         """
         from ..agents import hybrid as hybrid_mod
         moved = False
@@ -1158,19 +1171,20 @@ class GameSession:
                                                     benchmark=bool(self.benchmark))
                 if handicap is not None or seat.type != "hybrid":
                     handicap = hybrid_mod.check_handicap(handicap)
+            own = dict(seat.engine or {})
+            if new_type != "hybrid" and handicap is not None:
+                own["handicap"] = handicap          # the engine refuses one that is none, below
             try:
                 if block is not None:
                     self.game.set_controller(pid, "hybrid", handicap, hybrid_mod.engine_auto(block["owners"]))
-                elif type and seat.type == "hybrid" and type != "hybrid":
-                    # leaving hybrid: the new controller's own numbers and decisions, set explicitly, since the hybrid
-                    # seat's were (an engine seat keeps what was set explicitly)
-                    self.game.set_controller(pid, type, handicap or hybrid_mod.default_handicap(type),
-                                             hybrid_mod.default_auto(type))
-                elif type:
-                    self.game.set_controller(pid, type, handicap)
+                elif new_type != "hybrid" and (type or handicap is not None):
+                    self.game.set_controller(
+                        pid, new_type, own.get("handicap") or hybrid_mod.default_handicap(new_type),
+                        {**hybrid_mod.default_auto(new_type), **(own.get("auto") or {})})
             except EngineCrash as e:
                 self._crashed(str(e))
                 raise
+            seat.engine = own
             if type:
                 seat.type = type
             if block is not None:
@@ -2268,6 +2282,14 @@ def all_sessions() -> list:
 
 
 
+def _own_engine(sc: dict, stype: str) -> dict:
+    """What a seat's entry chose of its engine settings (``Seat.engine``): its ``handicap`` and ``auto``, except a
+    hybrid seat's, which follow its owners."""
+    if stype == "hybrid":
+        return {}
+    return {k: sc[k] for k in ("handicap", "auto") if sc.get(k) is not None}
+
+
 def _engine_seat(sc: dict, stype: str, pid: int) -> tuple:
     """A new seat's engine settings from its lobby or scenario entry: (handicap, automatic decisions, its ``hybrid``
     block). A hybrid seat's block is checked (``normalize_hybrid``), its handicap is ``ai`` unless it says ``human``,
@@ -2323,7 +2345,7 @@ class SessionManager:
                             "leader": sc.get("leader"), "nation": sc.get("nation"), "controller": stype,
                             "handicap": handicap, "auto": auto, "difficulty": sc.get("difficulty") or None})
             seats.append(Seat(player=i, type=stype, name=sc.get("name") or "", llm=sc.get("llm") or {},
-                              bot=_pin_best(sc.get("bot") or {}), hybrid=block))
+                              bot=_pin_best(sc.get("bot") or {}), hybrid=block, engine=_own_engine(sc, stype)))
         cfg = dict(config)
         cfg["players"] = players
         game = EngineGame.new(cfg)
@@ -2384,7 +2406,8 @@ class SessionManager:
             if sc.get("difficulty"):
                 g.set_difficulty(pid, sc["difficulty"])
             seats.append(Seat(player=pid, type=stype, name=sc.get("name") or sc.get("label") or "",
-                              llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {}), hybrid=block))
+                              llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {}), hybrid=block,
+                              engine=_own_engine(sc, stype)))
         s = GameSession(g, seats, name or scn.get("name") or "Scenario")
         if register:
             self.register_new(s)

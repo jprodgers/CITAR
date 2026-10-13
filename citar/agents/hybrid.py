@@ -20,6 +20,7 @@ Replaces: nothing; before 3-14 the server had no hybrid seat (``BotAgent`` drove
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from .. import engine_api
@@ -91,6 +92,14 @@ def preset_of(owners: dict) -> Optional[str]:
     return None
 
 
+def _number(v) -> bool:
+    """Whether ``v`` is a finite number (not a boolean, which Python counts as one). An int of any size is (one too big
+    for a float would overflow ``math.isfinite``)."""
+    if isinstance(v, bool):
+        return False
+    return isinstance(v, int) or (isinstance(v, float) and math.isfinite(v))
+
+
 def normalize_hybrid(block, *, benchmark: bool = False) -> dict:
     """A hybrid seat's ``hybrid`` block checked and completed (P3.6.2): ``owners`` the whole map (from a preset or a
     map, through the engine's parser), at least one category the model's ("a hybrid seat with nothing for its model is
@@ -106,15 +115,14 @@ def normalize_hybrid(block, *, benchmark: bool = False) -> dict:
         raise ValueError("A hybrid seat with nothing for its model is a bot seat: give its model at least one kind "
                          "of diplomacy, or make it a bot seat.")
     every = block.get("prompt_every", PROMPT_EVERY_DEFAULT)
-    if isinstance(every, bool) or not isinstance(every, (int, float)) or every != int(every) \
-            or not PROMPT_EVERY_MIN <= int(every) <= PROMPT_EVERY_MAX:
+    # finite before int(): JSON as Python reads it allows Infinity and NaN, and int() of them is no ValueError
+    if not _number(every) or every != int(every) or not PROMPT_EVERY_MIN <= int(every) <= PROMPT_EVERY_MAX:
         raise ValueError(f"prompt_every is a whole number of turns from {PROMPT_EVERY_MIN} to {PROMPT_EVERY_MAX}.")
     advisor = block.get("advisor", True)
     if not isinstance(advisor, bool):
         raise ValueError("advisor is true or false.")
     phase = block.get("phase_seconds", PHASE_SECONDS_DEFAULT)
-    if isinstance(phase, bool) or not isinstance(phase, (int, float)) or phase != phase \
-            or not PHASE_SECONDS_MIN <= float(phase) <= PHASE_SECONDS_MAX:
+    if not _number(phase) or not PHASE_SECONDS_MIN <= phase <= PHASE_SECONDS_MAX:
         raise ValueError(f"phase_seconds is from {PHASE_SECONDS_MIN:.0f} to {PHASE_SECONDS_MAX:.0f} seconds.")
     out = {"owners": owners, "advisor": bool(advisor) and not benchmark, "prompt_every": int(every),
            "phase_seconds": float(phase)}
@@ -181,16 +189,3 @@ def chat_tools(owners: dict) -> list:
     and ``respond_negotiation``."""
     allowed = set(diplomat_tools(owners)) | {"respond_negotiation"}
     return [t for t in CHAT_TOOLS if t in allowed]
-
-
-def items_categories(*lists) -> set:
-    """The categories deal items (as a caller writes them) touch; an item that does not read is left to the engine to
-    refuse."""
-    out = set()
-    for items in lists:
-        for item in items if isinstance(items, list) else ():
-            try:
-                out.add(engine_api.item_category(item))
-            except (ValueError, TypeError):
-                continue
-    return out

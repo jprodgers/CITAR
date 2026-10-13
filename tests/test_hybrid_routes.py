@@ -105,6 +105,37 @@ class Routes(unittest.TestCase):
                 self.assertIn(words, r.json()["detail"])
         r = self.create("zara", [{"type": "human"}, {**HYBRID, "handicap": "god"}])
         self.assertEqual(r.status_code, 400, r.text)
+        # numbers JSON as Python reads it allows, which int() does not take: a refusal, never a 500
+        for number in ("Infinity", "-Infinity", "NaN", "1e400"):
+            with self.subTest(prompt_every=number):
+                body = ('{"name": "hybrid", "config": {"map_size": "duel", "seed": 9, "barbarians": "off", '
+                        '"city_states": 0}, "seats": [{"type": "human"}, {"type": "hybrid", "llm": {"provider": '
+                        '"dryrun", "model": "dry-run"}, "hybrid": {"owners": "trade_only", "prompt_every": '
+                        + number + '}}]}')
+                r = self.client.post("/api/games", headers={**self.headers["zara"],
+                                                            "content-type": "application/json"}, content=body)
+                self.assertEqual(r.status_code, 400, r.text)
+                self.assertIn("prompt_every", r.json()["detail"])
+
+    def test_a_viewer_s_metrics_carry_no_words_of_a_refusal(self):
+        """The game's viewers read its metrics: the diplomat's rows keep codes (P3.9.1: an ACL viewer reads 200)."""
+        r = self.create("zara", [{"type": "human"}, dict(HYBRID)])
+        self.assertEqual(r.status_code, 200, r.text)
+        gid = r.json()["id"]
+        s = self.manager.get(gid)
+        with s.lock:
+            s.metrics.diplomat(1, 1, {"outcome": "refused", "cause": "refused", "steps": 0, "tools": [],
+                                      "note": "Test GPU box: your access to bob's group ended"})
+        shared = self.client.post(f"/api/games/{gid}/sharing/users", headers=self.headers["zara"],
+                                  json={"handle": "bob", "permission": "view"})
+        self.assertEqual(shared.status_code, 200, shared.text)
+        got = self.client.get(f"/api/games/{gid}/metrics", headers=self.headers["bob"])
+        self.assertEqual(got.status_code, 200, got.text)
+        self.assertEqual([(x["outcome"], x["cause"]) for x in got.json()["diplomat"]], [("refused", "refused")])
+        self.assertNotIn("note", got.json()["diplomat"][0])
+        self.assertNotIn("Test GPU box", got.text)
+        self.assertEqual(self.client.get(f"/api/games/{gid}/metrics", headers=self.headers["alice"]).status_code, 404,
+                         "a stranger")
 
     def test_a_member_s_hybrid_seat_names_a_machine_and_is_admitted_by_its_class(self):
         r = self.create("alice", [{"type": "human"}, {**HYBRID, "llm": {"base_url": "http://evil.test/v1",

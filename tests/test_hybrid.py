@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import tests  # noqa: F401  (temporary saves folder and registry; must be imported before citar)
 
+import json
 import re
 import shutil
 import tempfile
@@ -156,8 +157,17 @@ class Settings(unittest.TestCase):
             ({"owners": "trade_only", "prompt_every": 0}, "prompt_every"),
             ({"owners": "trade_only", "prompt_every": 51}, "prompt_every"),
             ({"owners": "trade_only", "prompt_every": 2.5}, "prompt_every"),
+            # JSON as Python reads it allows these, and int() of them is no ValueError
+            ({"owners": "trade_only", "prompt_every": float("inf")}, "prompt_every"),
+            ({"owners": "trade_only", "prompt_every": float("-inf")}, "prompt_every"),
+            ({"owners": "trade_only", "prompt_every": float("nan")}, "prompt_every"),
+            ({"owners": "trade_only", "prompt_every": 10 ** 400}, "prompt_every"),
+            ({"owners": "trade_only", "prompt_every": True}, "prompt_every"),
             ({"owners": "trade_only", "advisor": "yes"}, "advisor"),
             ({"owners": "trade_only", "phase_seconds": 5}, "phase_seconds"),
+            ({"owners": "trade_only", "phase_seconds": float("inf")}, "phase_seconds"),
+            ({"owners": "trade_only", "phase_seconds": float("nan")}, "phase_seconds"),
+            ({"owners": "trade_only", "phase_seconds": 10 ** 400}, "phase_seconds"),
             ("trade_only", "an object"),
         ]
         for block, words in cases:
@@ -165,6 +175,7 @@ class Settings(unittest.TestCase):
                 with self.assertRaises(ValueError) as e:
                     hybrid.normalize_hybrid(block)
                 self.assertIn(words, str(e.exception))
+        self.assertEqual(hybrid.normalize_hybrid({"prompt_every": 7.0, "phase_seconds": 60})["prompt_every"], 7)
         self.assertEqual(hybrid.check_handicap(None), "ai")
         self.assertEqual(hybrid.check_handicap("human"), "human")
         with self.assertRaises(ValueError):
@@ -234,6 +245,79 @@ class Creation(Case):
         p = s.game.player(1)
         self.assertEqual((s.seats[1].hybrid, p["controller"], p["handicap"], p["auto"]),
                          ({}, "bot", "ai", {"un_vote": True, "conquest": True, "free_picks": True}))
+
+    def test_nothing_of_a_hybrid_seat_stays_behind_through_later_changes(self):
+        """The engine keeps a seat's handicap and automatic decisions once they were set explicitly, and a hybrid
+        seat's are: every later change of controller sets them all again, from the seat's own entry and the new
+        controller's defaults, so a seat that was ever hybrid plays as any seat of its new kind."""
+        on = {"un_vote": True, "conquest": True, "free_picks": True}
+        off = {"un_vote": False, "conquest": False, "free_picks": False}
+
+        def engine(pid):
+            p = s.game.player(pid)
+            return p["controller"], p["handicap"], p["auto"]
+        s = self.game([{"type": "bot"}, seat({"un": "llm", "captured_cities": "llm"}) | {"handicap": "human"},
+                       {"type": "bot", "handicap": "human", "auto": {"un_vote": False}}])
+        # a bot seat made hybrid, then a bot, then an LLM seat
+        s.update_seat(0, type="hybrid", llm=dict(DRY), hybrid={"owners": {"un": "llm"}}, handicap="human")
+        self.assertEqual(engine(0), ("hybrid", "human", {"un_vote": False, "conquest": True, "free_picks": True}))
+        s.update_seat(0, type="bot")
+        self.assertEqual(engine(0), ("bot", "ai", on))
+        s.update_seat(0, type="llm", llm=dict(DRY))
+        self.assertEqual(engine(0), ("llm", "human", off))
+        s.update_seat(0, type="bot")
+        self.assertEqual(engine(0), ("bot", "ai", on))
+        # a seat made hybrid in the lobby, then an LLM seat, then a bot, then a person
+        self.assertEqual(engine(1), ("hybrid", "human", {"un_vote": False, "conquest": False, "free_picks": True}))
+        s.update_seat(1, type="llm")
+        self.assertEqual(engine(1), ("llm", "human", off))
+        s.update_seat(1, type="bot")
+        self.assertEqual(engine(1), ("bot", "ai", on))
+        s.update_seat(1, type="human")
+        self.assertEqual(engine(1), ("human", "human", off))
+        # what a seat's own entry chose stays its choice through a spell as a hybrid seat
+        self.assertEqual(engine(2), ("bot", "human", {"un_vote": False, "conquest": True, "free_picks": True}))
+        s.update_seat(2, type="hybrid", llm=dict(DRY), hybrid={"owners": "trade_only"})
+        self.assertEqual(engine(2), ("hybrid", "ai", on))
+        s.update_seat(2, type="llm", llm=dict(DRY))
+        self.assertEqual(engine(2), ("llm", "human", {"un_vote": False, "conquest": False, "free_picks": False}))
+        s.update_seat(2, type="bot")
+        self.assertEqual(engine(2), ("bot", "human", {"un_vote": False, "conquest": True, "free_picks": True}))
+        # a handicap given with a change is the seat's own from then on; one that is none changes nothing
+        s.update_seat(0, type="bot", handicap="human")
+        self.assertEqual(engine(0), ("bot", "human", on))
+        s.update_seat(0, type="llm", llm=dict(DRY))
+        self.assertEqual(engine(0)[1], "human")
+        with self.assertRaises(ValueError):
+            s.update_seat(0, type="bot", handicap="god")
+        self.assertEqual((s.seats[0].type, engine(0)[0], s.seats[0].engine), ("llm", "llm", {"handicap": "human"}))
+        # and the seat's own choices are saved with it
+        path = s.save("engine-choices")
+        gid = s.id
+        self.manager.delete(gid)
+        back = self.manager.load(path)
+        self.assertEqual(back.seats[2].engine, {"handicap": "human", "auto": {"un_vote": False}})
+        self.assertEqual(back.seats[1].engine, {})
+
+    def test_concurrent_askers_get_the_seat_s_one_agent(self):
+        """The driver, the responders and the chat clock may all ask for a seat's agent at once (after a seat change,
+        a resume or a load): they get one, whose diplomat state and voice are the seat's (P3.6.5)."""
+        s = self.game([{"type": "human"}, seat("trade_only")])
+        real = HybridAgent.__init__
+
+        def slow(agent, *a, **kw):
+            time.sleep(0.05)
+            real(agent, *a, **kw)
+        got: list = []
+        with mock.patch.object(HybridAgent, "__init__", slow):
+            threads = [threading.Thread(target=lambda: got.append(s.get_agent(1))) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+        self.assertEqual(len(got), 4)
+        self.assertEqual(len({id(a) for a in got}), 1, "one agent for the seat")
+        self.assertIs(s.agents[1], got[0])
 
     def test_a_scenario_launches_its_hybrid_seat(self):
         g = engine_api.EngineGame.new({"map_size": "duel", "seed": 21, "barbarians": "off", "city_states": 0,
@@ -311,15 +395,16 @@ class Categories(Case):
                     table = e["proposal"]
         return out
 
-    def _model_deals(self, category: str) -> list:
-        return [c for c in self.calls.ok("open_negotiation")
-                if category in hybrid.items_categories(c["args"].get("give"), c["args"].get("receive"))]
+    def _model_deals(self, s: GameSession, category: str) -> list:
+        """The chats the model opened whose proposal, as the engine recorded it, touches ``category``."""
+        return [c for c in self.calls.ok("open_negotiation") if c.get("nid") is not None
+                and category in proposal_categories(s.game.negotiation(c["nid"])["history"][0].get("proposal"))]
 
     def _deal_category(self, category: str) -> GameSession:
         s = self._play(category)
         bad = [d for d in self._bot_deals(s) if category in d[2]]
         self.assertEqual(bad, [], f"the bot proposed or accepted {category}")
-        self.assertTrue(self._model_deals(category), f"the model proposed {category}: {self.calls.calls[:6]}")
+        self.assertTrue(self._model_deals(s, category), f"the model proposed {category}: {self.calls.calls[:6]}")
         return s
 
     def test_trades(self):
@@ -335,7 +420,7 @@ class Categories(Case):
         s = self._play("peace", at_war)
         bad = [d for d in self._bot_deals(s) if "peace" in d[2]]
         self.assertEqual(bad, [], "the bot proposed or accepted peace")
-        self.assertTrue(self._model_deals("peace"), self.calls.calls[:6])
+        self.assertTrue(self._model_deals(s, "peace"), self.calls.calls[:6])
 
     def test_war(self):
         s = self._play("war")
@@ -469,10 +554,11 @@ class Fake(Conversation):
     answer = "accept"
     phase = None
     turn = None
+    delay = 0.0                 # how long a chat's answer takes
 
     @classmethod
     def reset(cls):
-        cls.made, cls.mode, cls.answer, cls.phase, cls.turn = [], "reply", "accept", None, None
+        cls.made, cls.mode, cls.answer, cls.phase, cls.turn, cls.delay = [], "reply", "accept", None, None, 0.0
 
     def __init__(self, cfg, system, tools):
         self.cfg = cfg
@@ -528,6 +614,8 @@ class Fake(Conversation):
             raise RuntimeError("cancelled")
         if Fake.mode == "mute" or not self.pending or self.nid is None:
             return StepResult(text="hmm")
+        if Fake.delay:
+            time.sleep(Fake.delay)
         self.pending = False
         return StepResult(text="answer", tool_calls=[ToolCall("r", "respond_negotiation", {
             "negotiation_id": self.nid, "action": Fake.answer, "message": f"model: {Fake.answer}"})])
@@ -749,6 +837,66 @@ class Veto(Scripted):
         self.assertTrue(r["ok"], r)
         self.assertEqual([x["why"] for x in s.metrics.data["diplomat_refusals"]], ["veto", "veto"])
 
+    def test_the_action_is_read_as_the_engine_reads_it(self):
+        """The engine reads a response in any case, its spaces stripped: so does the veto."""
+        s = self.s
+        give, receive = [{"type": "embassy"}, {"type": "gold", "amount": 300}], [{"type": "embassy"}]
+        nid = self.offer(s, give=receive, receive=give)
+        responders.halt(s, 1)
+        for action in ("Accept", "ACCEPT", " accept ", "COUNTER", "Counter"):
+            with self.subTest(action=action):
+                args = {"negotiation_id": nid, "action": action, "message": "Yes."}
+                if action.strip().lower() == "counter":
+                    args.update(give=[{"type": "gold", "amount": 300}, {"type": "embassy"}],
+                                receive=[{"type": "embassy"}])
+                r = s.diplomat_call(1, "respond_negotiation", args, chat=True)
+                self.assertFalse(r["ok"], r)
+                self.assertIn("The bot decides agreements", r["error"])
+        with s.lock:
+            self.assertEqual(s.game.negotiation_head(nid)["status"], "open", "nothing was accepted")
+        # a string id, as the engine coerces it
+        r = s.diplomat_call(1, "respond_negotiation", {"negotiation_id": str(nid), "action": "accept",
+                                                       "message": "Yes."}, chat=True)
+        self.assertIn("The bot decides agreements", r.get("error") or "", r)
+        self.assertEqual([x["why"] for x in s.metrics.data["diplomat_refusals"]], ["veto"] * 6)
+
+    def test_the_items_are_read_as_the_engine_reads_them(self):
+        """What the engine makes of the items is what the bot values: keys it drops, amounts written as text or as
+        floats, a term on an item that has none, the gold of a seat whose trades are the bot's."""
+        s = self.s
+        s.game.force_turn(1)
+        variants = [
+            ([{"type": "gold", "amount": 300}, {"type": "embassy", "note": "x"}], [{"type": "embassy", "note": "x"}]),
+            ([{"type": "gold", "amount": "300"}, {"type": "embassy"}], [{"type": "embassy"}]),
+            ([{"type": "gold", "amount": 300.0}, {"type": "embassy"}], [{"type": "embassy"}]),
+            ([{"type": "gold", "amount": 300}, {"type": "embassy", "turns": 30}], [{"type": "embassy", "turns": 5}]),
+        ]
+        for give, receive in variants:
+            with self.subTest(give=give, receive=receive):
+                r = s.diplomat_call(1, "open_negotiation", {"to": 0, "message": "Gold and an embassy?",
+                                                             "give": give, "receive": receive})
+                self.assertFalse(r["ok"], r)
+                self.assertIn("The bot decides agreements", r["error"])
+        r = s.diplomat_call(1, "open_negotiation", {"to": "0", "message": "Gold and an embassy?",
+                                                     "give": variants[0][0], "receive": variants[0][1]})
+        self.assertIn("The bot decides agreements", r.get("error") or "", "a partner written as text")
+        self.assertEqual(s.game.open_negotiations(1), [], "nothing was opened")
+        # the same with trades the bot's and agreements the model's: the gold written as text is still trade
+        s.update_seat(1, hybrid={"owners": {"agreements": "llm"}})
+        s.get_agent(1)
+        r = s.diplomat_call(1, "open_negotiation", {"to": 0, "message": "Gold and an embassy?",
+                                                     "give": [{"type": "gold", "amount": "300"}, {"type": "embassy"}],
+                                                     "receive": [{"type": "embassy"}]})
+        self.assertFalse(r["ok"], r)
+        self.assertIn("The bot decides trades", r["error"])
+        self.assertEqual(s.game.open_negotiations(1), [])
+        # and a call the engine refuses is the engine's to refuse, not the veto's
+        r = s.diplomat_call(1, "open_negotiation", {"to": 0, "message": "Gold?",
+                                                     "give": [{"type": "gold", "amount": "lots"}]})
+        self.assertFalse(r["ok"])
+        self.assertNotIn("The bot decides", r["error"])
+        self.assertEqual(len(s.metrics.data["diplomat_refusals"]), 6)
+
 
 # ---------------------------------------------------------------------------- gate 5: the tools and the prompt
 class Tools(Scripted):
@@ -908,6 +1056,117 @@ class OneMachine(Scripted):
         self.assertIn({"tool": "respond_negotiation", "ok": True}, row["tools"])
 
 
+# ---------------------------------------------------------------------------- what holds a phase
+class PhaseHolds(Scripted):
+    """A diplomat phase waits for a pause and for the seat's own chat answer, and neither costs it its turn."""
+
+    def _phase(self, s, pid: int = 1) -> threading.Thread:
+        """The seat's phase, run as its turn would run it, on a thread of its own."""
+        agent = s.get_agent(pid)
+        t = threading.Thread(target=agent._phase, args=(s, pid, ["a test"]), daemon=True)
+        t.start()
+        self.addCleanup(t.join, 10)
+        return t
+
+    def test_a_pause_holds_the_phase_before_its_next_call_and_gives_its_machine_back(self):
+        """``set_paused`` promises an AI mid-turn holds before its next model call: the phase holds before its next
+        step and its next tool call, gives its ticket back meanwhile (the one-slot machine is free), and goes on after
+        the resume, the pause not counted against its time."""
+        s = self.game([{"type": "human"}, self.on("sv_gpu", phase_seconds=10)])
+        self.met(s)
+        s.game.force_turn(1)
+        paused_at = threading.Event()
+
+        def phase(conv):
+            if conv.steps == 1:
+                s.set_paused(True)          # the pause comes while the model thinks
+                paused_at.set()
+                return StepResult(text="trade", tool_calls=[ToolCall("o", "open_negotiation", {
+                    "to": 0, "message": "Maps for maps?", "give": [{"type": "share_map"}],
+                    "receive": [{"type": "share_map"}]})])
+            return StepResult(text="done")
+        Fake.phase = phase
+        # a second of the phase's own time: the pause (1.5 s) would end it if it counted
+        s.get_agent(1).phase_seconds = 1.0
+        t = self._phase(s)
+        self.assertTrue(paused_at.wait(10))
+        self.assertTrue(until(lambda: s.agent_status.get(1) == "paused", 5), s.agent_status)
+        time.sleep(1.5)
+        conv = next(m["conv"] for m in Fake.made if m["phase"])
+        self.assertEqual(conv.steps, 1, "no model call during the pause")
+        self.assertEqual(s.game.negotiations(), [], "no tool call during the pause")
+        self.assertEqual(len(S.get().machine("sv_gpu").slots), 0, "the machine's one slot is free during the pause")
+        self.assertNotIn("diplomat", s.metrics.data, "the phase still waits")
+        s.set_paused(False)
+        t.join(10)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(len(s.game.negotiations()), 1, "the call made after the resume")
+        row = s.metrics.data["diplomat"][-1]
+        self.assertEqual((row["outcome"], row["steps"], row["tools"]),
+                         ("done", 2, [{"tool": "open_negotiation", "ok": True}]))
+        self.assertEqual(s.agent_status.get(1), "thinking")
+
+    def test_a_pause_before_the_phase_s_first_call_holds_it_too(self):
+        s = self.game([{"type": "human"}, self.on("sv_dryrun")])
+        self.met(s)
+        s.set_paused(True)
+        t = self._phase(s)
+        self.assertTrue(until(lambda: s.agent_status.get(1) == "paused", 5), s.agent_status)
+        time.sleep(0.5)
+        self.assertFalse([m for m in Fake.made if m["phase"] and m["conv"].steps], "no model call while paused")
+        s.set_paused(False)
+        t.join(10)
+        self.assertEqual(s.metrics.data["diplomat"][-1]["outcome"], "done")
+
+    def test_a_seat_halted_during_a_pause_ends_its_phase(self):
+        s = self.game([{"type": "human"}, self.on("sv_dryrun")])
+        self.met(s)
+        s.set_paused(True)
+        agent = s.get_agent(1)
+        t = self._phase(s)
+        self.assertTrue(until(lambda: s.agent_status.get(1) == "paused", 5))
+        agent.cancel()
+        t.join(10)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(s.metrics.data["diplomat"][-1]["outcome"], "cancelled")
+
+    def test_the_seat_s_own_chat_answer_does_not_use_up_the_phase_s_start(self):
+        """The phase takes the seat's voice before its ticket: a chat answer of the seat's model already under way on
+        their one-slot machine is waited for first, so the phase's 30 s to start (here 1 s) begin after it."""
+        Fake.delay = 2.5
+        s = self.game([{"type": "human"}, self.on("sv_gpu")])
+        self.met(s)
+        nid = self.offer(s)
+        self.assertTrue(until(lambda: self.chats_made(nid) and self.chats_made(nid)[0]["conv"].started.is_set(), 10))
+        with mock.patch("citar.agents.hybrid_agent.PHASE_START_SECONDS", 1.0):
+            t = self._phase(s)
+            t.join(15)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(s.game.negotiation(nid)["status"], "accepted", "the chat's answer was the model's")
+        self.assertEqual(self.rows(s, nid), [("answered", None)])
+        row = s.metrics.data["diplomat"][-1]
+        self.assertEqual((row["outcome"], row["cause"]), ("done", None))
+
+    def test_the_rows_keep_codes_not_words(self):
+        """A phase's row and a refused call keep the cause's code: a refusal's words name the machine (here another
+        member's would be), and the game's viewers read its metrics."""
+        s = self.game([{"type": "human"}, self.on("sv_gpu", {"trades": "llm"})])
+        self.met(s)
+        bench = S.get().lease("sv_gpu", "dry-run", kind="benchmark", label="a benchmark")
+        self.addCleanup(bench.release)
+        self._phase(s).join(10)
+        s.game.force_turn(1)
+        self.assertEqual(s.diplomat_call(1, "declare_war", {"player_id": 0})["error"], hybrid.NOT_YOURS)
+        row = s.metrics.data["diplomat"][-1]
+        self.assertEqual((row["outcome"], row["cause"]), ("refused", "queued_behind_benchmark"))
+        self.assertEqual(set(row), {"player", "turn", "t", "seconds", *s.metrics.DIPLOMAT_FIELDS})
+        self.assertEqual([set(r) for r in s.metrics.data["diplomat_refusals"]], [{"player", "t", "tool", "why", "chat"}])
+        self.assertNotIn("Test GPU box", json.dumps(s.metrics_report()), "the machine is not named")
+        # whatever a caller hands it
+        s.metrics.diplomat(1, 1, {"outcome": "failed", "cause": "failed", "note": "http://10.0.0.5:1234 refused"})
+        self.assertNotIn("note", s.metrics.data["diplomat"][-1])
+
+
 # ---------------------------------------------------------------------------- gate 4: the triggers
 class Triggers(Scripted):
     """Gate 4: each trigger of P3.6.4 fires one phase. A person (seat 0) plays through the API, and on its turn does
@@ -1063,6 +1322,90 @@ class Triggers(Scripted):
         # never two phases in a turn
         turns = [r["turn"] for r in s.metrics.data["diplomat"]]
         self.assertEqual(len(turns), len(set(turns)), turns)
+
+
+class _LookGame:
+    """Just what a hybrid seat's look at its triggers reads of a game (``HybridAgent._triggers``), set by the test."""
+
+    def __init__(self):
+        self.turn = 1
+        self.score = 20
+        self.log: list = []
+        self.dip: dict = {"players": [{"id": 2, "name": "Babylon", "alive": True}]}
+
+    def events(self, last: int = 0):
+        return self.log[-last:]
+
+    def execute(self, pid, tool, args):
+        assert tool == "get_diplomacy"
+        return self.dip
+
+    def standing(self, pid):
+        return {"score": self.score}
+
+    def stats(self, last: int = 0):
+        return [{"players": {"1": {"military": 0}, "2": {"military": 0}}}]
+
+    def player_name(self, pid):
+        return {1: "Rome", 2: "Babylon"}.get(pid, "?")
+
+    def player(self, pid):
+        return {"kind": "major"}
+
+    def event(self, kind: str, **data):
+        self.log.append({"id": len(self.log), "type": kind, "players": [1, 2], "data": data})
+
+
+class PendingTriggers(unittest.TestCase):
+    """Triggers that wait through phases that did not run (a benchmark holding the machine for hours, quiet hours)
+    stay true and bounded (P3.6.4): a swing is measured again at every look, a dated one goes with its date, and the
+    events' are the latest twenty, with a count of the rest."""
+
+    def test_waiting_triggers_stay_true_and_bounded(self):
+        from types import SimpleNamespace
+        g = _LookGame()
+        session = SimpleNamespace(game=g, lock=threading.RLock())
+        seat_ = SimpleNamespace(hybrid={"owners": "everything", "prompt_every": 50}, bot={}, llm={})
+        agent = HybridAgent(seat_, started_turn=1, event_mark=-1)
+        # turn 1: a deal's term ends next turn, the vote is open; the first look sets the standings' baseline
+        g.dip.update(active_deals=[{"id": 7, "with_name": "Babylon", "ongoing": [{"type": "gold_per_turn",
+                                                                                 "until_turn": 2}]}],
+                     united_nations={"voting_open": True, "your_vote": "not cast", "next_vote_turn": 3})
+        self.assertEqual(agent._triggers(session, 1), ["your deal with Babylon (gold per turn) ends next turn",
+                                                       "the United Nations vote is open"])
+        # turn 2, no phase ran: the term's end is past (its expiry is the news now), the score swung
+        g.turn, g.score = 2, 40
+        g.dip["active_deals"] = []
+        g.event("deal_expired")
+        self.assertEqual(agent._triggers(session, 1), ["the United Nations vote is open", "a deal with Babylon expired",
+                                                       "your score went from 20 to 40"])
+        # turn 3: the swing is told as it stands now, once; the vote closed; thirty denunciations, of which the
+        # latest twenty are listed
+        g.turn, g.score = 3, 45
+        g.dip["united_nations"] = {"voting_open": False, "your_vote": "not cast", "next_vote_turn": 6}
+        for _ in range(30):
+            g.event("denounce", a=2, b=1)
+        got = agent._triggers(session, 1)
+        self.assertEqual(len(got), 22, got)
+        self.assertEqual(got.count("Babylon denounced you"), 20)
+        self.assertEqual([t for t in got if "score" in t], ["your score went from 20 to 45"])
+        self.assertEqual(got[-1], "and 11 earlier events not listed", "the deal's expiry and ten denunciations")
+        self.assertEqual(len(agent.pending), 21)
+        # turn 4: the score came back: no swing to tell
+        g.turn, g.score = 4, 21
+        g.dip["players"][0]["open_borders_until"] = 5
+        got = agent._triggers(session, 1)
+        self.assertFalse([t for t in got if "score" in t], got)
+        self.assertIn("your open borders with Babylon ends next turn", got)
+        # a phase that ran settles them all; its dated triggers are not told again, until their date has passed
+        agent._phase_ran(session, 1, 4)
+        self.assertEqual((agent.pending, agent.dropped_events), ({}, 0))
+        self.assertEqual(agent._triggers(session, 1), [])
+        self.assertIn(("treaty", 2, "open_borders_until", 5), agent.fired)
+        g.turn = 6
+        g.dip["players"][0].pop("open_borders_until")
+        agent._triggers(session, 1)
+        self.assertEqual(agent.fired, set(), "what was told and is past is forgotten")
 
 
 class Schedule(Scripted):

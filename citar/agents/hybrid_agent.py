@@ -59,6 +59,11 @@ STRENGTH_FLOOR = 20
 EVENT_WINDOW = 2000
 #: How long a phase waits for a chat answer of the seat's model already under way before it cancels it (P3.6.5).
 VOICE_WAIT_SECONDS = 30.0
+#: The most events' triggers a phase is told; older ones, while phases keep not running, are only counted.
+MAX_EVENT_TRIGGERS = 20
+#: The kinds of trigger that carry a date (``_dated_triggers``), and those measured again at every look (``_swings``).
+DATED = ("deal", "treaty", "un")
+SWINGS = ("score", "strength")
 
 
 class DiplomatModel(LLMAgent):
@@ -127,8 +132,12 @@ class HybridAgent:
         self.phase_turn: Optional[int] = None
         self.tried_turn: Optional[int] = None
         self.event_mark = event_mark
-        self.pending: list = []
+        #: the triggers no phase that ran has been told yet, keyed by what each is about (``_triggers``)
+        self.pending: dict = {}
+        #: the events' triggers left out of ``pending`` beyond ``MAX_EVENT_TRIGGERS``, since the last phase that ran
+        self.dropped_events = 0
         self.baseline: Optional[dict] = None
+        #: the dated triggers a phase that ran was told (until their date has passed)
         self.fired: set = set()
         # one voice per seat (P3.6.5): a phase holds the seat's model; chats that come to it then are the phase's
         self.phase_running = False
@@ -337,34 +346,61 @@ class HybridAgent:
 
     def _triggers(self, session, pid: int) -> list:
         """What calls the diplomat now (P3.6.4), from the events since the last look and the standings since the last
-        phase that ran: each in words. Triggers of a phase that did not run (refused, skipped) wait for the next.
-        Session's lock held."""
+        phase that ran: each in words. Triggers of a phase that did not run (refused, skipped) wait for the next, each
+        kept under what it is about (``pending``), so that the wait stays true however long it lasts (a benchmark
+        holding the machine for hours, its quiet hours): a swing is measured again at every look (its entry replaced,
+        or gone when the standing came back), a dated one (a deal's term or a treaty ending next turn, the United
+        Nations vote open) goes once its date has passed or the vote closed or was cast, and the events' own are the
+        latest ``MAX_EVENT_TRIGGERS``, with a count of those before. Session's lock held."""
         g = session.game
         turn = g.turn
-        new: list = []
         events = g.events(last=EVENT_WINDOW)
         mark = self.event_mark if self.event_mark is not None else -1
         name = g.player_name
         for e in events:
             if e.get("id", -1) <= mark:
                 continue
-            new.extend(self._event_trigger(g, pid, e, name))
+            for i, text in enumerate(self._event_trigger(g, pid, e, name)):
+                self.pending[("event", e.get("id"), i)] = text
         if events:
             self.event_mark = max(mark, max(e.get("id", -1) for e in events))
+        told = [k for k in self.pending if k[0] == "event"]
+        for k in told[:max(0, len(told) - MAX_EVENT_TRIGGERS)]:
+            del self.pending[k]
+            self.dropped_events += 1
         try:
             dip = g.execute(pid, "get_diplomacy", {})
         except ActionError:
             dip = {}
-        new.extend(self._dated_triggers(pid, turn, dip, name))
-        new.extend(self._swings(g, pid, dip))
-        for t in new:
-            if t not in self.pending:
-                self.pending.append(t)
+        for kinds, now in ((DATED, self._dated_triggers(pid, turn, dip, name)),
+                           (SWINGS, self._swings(g, pid, dip))):
+            for k in [k for k in self.pending if k[0] in kinds and k not in now]:
+                del self.pending[k]         # past its date, or no longer a swing
+            self.pending.update(now)
+        # what a phase was told and whose date has passed can never come again
+        self.fired = {k for k in self.fired if not (isinstance(k[-1], int) and k[-1] < turn)}
         due = turn - (self.phase_turn if self.phase_turn is not None else self.started_turn) >= self.prompt_every
-        out = list(self.pending)
+        out = list(self.pending.values())
+        if self.dropped_events:
+            out.append(f"and {self.dropped_events} earlier event{'s' if self.dropped_events != 1 else ''} not listed")
         if due:
             out.append(f"it is {self.prompt_every} turn{'s' if self.prompt_every != 1 else ''} since the last call")
         return out
+
+    def _phase_ran(self, session, pid: int, turn: int) -> None:
+        """A phase ran (done, or its time ran out): what it was told is settled, and the swings are measured from
+        here. Its dated triggers are not told again (``fired``)."""
+        self.phase_turn = turn
+        self.fired.update(k for k in self.pending if k[0] in DATED)
+        self.pending = {}
+        self.dropped_events = 0
+        self.phases += 1
+        with session.lock:
+            try:
+                dip = session.game.execute(pid, "get_diplomacy", {})
+            except ActionError:
+                dip = {}
+            self.baseline = self._standings(session.game, pid, dip)
 
     def _event_trigger(self, g, pid: int, e: dict, name) -> list:
         """The triggers one event is (P3.6.4)."""
@@ -399,31 +435,29 @@ class HybridAgent:
             return [f"espionage: {e.get('text') or 'news of a spy'}"]
         return []
 
-    def _dated_triggers(self, pid: int, turn: int, dip: dict, name) -> list:
+    def _dated_triggers(self, pid: int, turn: int, dip: dict, name) -> dict:
         """Deals and treaties of the seat's that end next turn, and a United Nations vote open that it has not cast
-        (when the vote is the model's), each told once (``fired``)."""
-        out = []
+        (when the vote is the model's), as they stand now, each keyed by what it is about with its date last; those a
+        phase that ran was told already (``fired``) are left out."""
+        out = {}
         ending = turn + 1
         for d in dip.get("active_deals") or []:
             for item in d.get("ongoing") or []:
                 key = ("deal", d.get("id"), item.get("type"), item.get("until_turn"))
                 if item.get("until_turn") == ending and key not in self.fired:
-                    self.fired.add(key)
-                    out.append(f"your deal with {d.get('with_name')} ({item.get('type', 'a term').replace('_', ' ')}) "
-                               "ends next turn")
+                    out[key] = (f"your deal with {d.get('with_name')} "
+                                f"({item.get('type', 'a term').replace('_', ' ')}) ends next turn")
         for p in dip.get("players") or []:
             for k, v in p.items():
                 if k.endswith("_until") and v == ending:
                     key = ("treaty", p.get("id"), k, v)
                     if key not in self.fired:
-                        self.fired.add(key)
-                        out.append(f"your {k[:-len('_until')].replace('_', ' ')} with {p.get('name')} ends next turn")
+                        out[key] = f"your {k[:-len('_until')].replace('_', ' ')} with {p.get('name')} ends next turn"
         un = dip.get("united_nations") or {}
         if self.owners.get("un") == "llm" and un.get("voting_open") and un.get("your_vote") == "not cast":
             key = ("un", un.get("next_vote_turn"))
             if key not in self.fired:
-                self.fired.add(key)
-                out.append("the United Nations vote is open")
+                out[key] = "the United Nations vote is open"
         return out
 
     def _standings(self, g, pid: int, dip: dict) -> dict:
@@ -443,24 +477,23 @@ class HybridAgent:
             ratios[q] = (mine + STRENGTH_FLOOR) / (military.get(q, 0) + STRENGTH_FLOOR)
         return {"score": me.get("score") or 0, "ratios": ratios}
 
-    def _swings(self, g, pid: int, dip: dict) -> list:
+    def _swings(self, g, pid: int, dip: dict) -> dict:
         """The seat's score, or its strength against a civilization it has met, changed by more than a quarter since
-        the last phase that ran (P3.6.4). The first look sets the baseline."""
+        the last phase that ran (P3.6.4), as it stands now: keyed ``("score",)`` and ``("strength", civilization)``.
+        The first look sets the baseline."""
         now = self._standings(g, pid, dip)
         if self.baseline is None:
             self.baseline = now
-            return []
-        out = []
+            return {}
+        out = {}
         was = self.baseline
         if abs(now["score"] - was["score"]) > SWING * max(SWING_SCORE_FLOOR, was["score"]):
-            out.append(f"your score went from {was['score']} to {now['score']}")
+            out[("score",)] = f"your score went from {was['score']} to {now['score']}"
         for q, ratio in now["ratios"].items():
             before = was["ratios"].get(q)
             if before is not None and abs(ratio - before) > SWING * max(before, 0.1):
-                key = ("strength", q, round(ratio, 2))
-                if key not in self.fired:
-                    self.fired.add(key)
-                    out.append(f"your strength against {g.player_name(q)} changed from {before:.2f} to {ratio:.2f}")
+                out[("strength", q)] = (f"your strength against {g.player_name(q)} changed from {before:.2f} to "
+                                        f"{ratio:.2f}")
         return out
 
     # ------------------------------------------------------------------ the diplomat phase (P3.6.6)
@@ -468,7 +501,16 @@ class HybridAgent:
         """One diplomat phase, off the session's lock (module docstring). Its row goes on the game's metrics
         (``Metrics.diplomat``): outcome ``done`` (the model stopped, or used its steps), ``timeout`` (its budget ran
         out), ``skipped`` (its ticket did not start within 30 s, or the seat has no machine), ``refused`` (the machine
-        or its admission refused the ticket), ``failed`` (the model's error) or ``cancelled`` (the seat halted)."""
+        or its admission refused the ticket), ``failed`` (the model's error) or ``cancelled`` (the seat halted). The
+        row keeps the cause's code, never a refusal's or an error's words, which can name another member's machine
+        and which the game's viewers read in its metrics: the model's error is the seat's ``last_error`` and the
+        session's errors, which only its managers see.
+
+        The phase takes the seat's voice before its ticket (``_hold_voice``), so the start deadline of its ticket does
+        not run while a chat answer of the seat's own model finishes. A pause from the game screen holds it as it holds
+        an LLM seat's turn (``GameSession.set_paused``): before its next model call and before each tool call, and its
+        ticket goes back meanwhile (the machine is free for others) and is taken again on the resume; paused time does
+        not count against ``phase_seconds``."""
         g = session.game
         turn = g.turn
         t0 = time.perf_counter()
@@ -476,28 +518,63 @@ class HybridAgent:
                "output_tokens": 0, "tools": [], "outcome": None, "cause": None}
         model = self.model(session, pid)
         if model is None:
-            row.update(outcome="skipped", cause="refused", note=self._model_error)
+            row.update(outcome="skipped", cause="refused")         # why: the seat's last_error (``model``)
             self._row(session, pid, turn, row, t0)
             return
         system = self.system_text(session, pid)
-        ticket = self._ticket(session, pid, "diplomat", start_within=PHASE_START_SECONDS, steps=PHASE_STEPS)
-        if ticket.state != "queued":
-            row.update(outcome="skipped" if ticket.state == "expired" else "refused", cause=cause_of(ticket.error),
-                       note=ticket.reason)
-            self._row(session, pid, turn, row, t0)
-            return
-        self._hold_voice(session, pid)
         from ..pool.scheduler import ScheduledConversation, SchedulerError, TicketExpired
-        inner = make_conversation(model.cfg, system, _tool_defs(set(hybrid.diplomat_tools(self.owners))))
-        conv = ScheduledConversation(inner, ticket, model.cfg)
-        conv.halted = lambda: self.cancelled or session.stopped or bool(session.crashed)
-        conv.on_wait = lambda place: self._status(session, pid, "queued" if place is not None else "diplomat", place)
-        self._phase_conv = conv
-        self._status(session, pid, "diplomat")
-        told: dict = {}
-        started: Optional[float] = None
-        before = dict(getattr(inner, "usage", {}) or {})
+        self._hold_voice(session, pid)
+        ticket = conv = inner = None
+        before: dict = {}
         try:
+            ticket = self._ticket(session, pid, "diplomat", start_within=PHASE_START_SECONDS, steps=PHASE_STEPS)
+            if ticket.state != "queued":
+                row.update(outcome="skipped" if ticket.state == "expired" else "refused",
+                           cause=cause_of(ticket.error))
+                return
+            steps_cap = ticket.steps
+            inner = make_conversation(model.cfg, system, _tool_defs(set(hybrid.diplomat_tools(self.owners))))
+            conv = ScheduledConversation(inner, ticket, model.cfg)
+            conv.halted = lambda: self.cancelled or session.stopped or bool(session.crashed)
+            conv.on_wait = lambda place: self._status(session, pid, "queued" if place is not None else "diplomat",
+                                                      place)
+            self._phase_conv = conv
+            self._status(session, pid, "diplomat")
+            told: dict = {}
+            started: Optional[float] = None
+            paused = [0.0]                  # paused time since the phase started, which its budget does not count
+            before = dict(getattr(inner, "usage", {}) or {})
+
+            def spent() -> float:
+                return 0.0 if started is None else time.perf_counter() - started - paused[0]
+
+            def hold() -> bool:
+                """Wait out a pause (the ticket given back meanwhile and taken again after); False when the phase
+                ends instead: the seat halted, or its new ticket did not come."""
+                nonlocal ticket
+                if not session.paused:
+                    return True
+                t = time.perf_counter()
+                ticket.close()              # the machine's slot goes back for the pause
+                self._status(session, pid, "paused")
+                with session.lock:
+                    session._await(lambda: not session.paused, float("inf"),
+                                   halted=lambda: self.cancelled or bool(session.crashed))
+                if started is not None:
+                    paused[0] += time.perf_counter() - t
+                if self.cancelled or session.stopped or session.crashed:
+                    row["outcome"] = "cancelled"
+                    return False
+                ticket = self._ticket(session, pid, "diplomat", start_within=PHASE_START_SECONDS,
+                                      steps=max(1, steps_cap - row["steps"]))
+                if ticket.state != "queued":
+                    row.update(outcome="skipped" if ticket.state == "expired" else "refused",
+                               cause=cause_of(ticket.error))
+                    return False
+                conv.rebind(ticket)
+                self._status(session, pid, "diplomat")
+                return True
+
             with session.lock:
                 text = self._phase_message(session, pid, triggers, told)
             conv.add_user_text(text)
@@ -505,10 +582,12 @@ class HybridAgent:
                 if self.cancelled or session.stopped or session.crashed:
                     row["outcome"] = "cancelled"
                     break
-                if row["steps"] >= ticket.steps:
+                if row["steps"] >= steps_cap:
                     row["outcome"] = "done"
                     break
-                if started is not None and time.perf_counter() - started >= self.phase_seconds:
+                if not hold():
+                    break
+                if spent() >= self.phase_seconds:
                     row["outcome"] = "timeout"
                     break
                 if row["steps"]:
@@ -516,9 +595,7 @@ class HybridAgent:
                         news = self._chat_notes(session, pid, told)
                     if news:
                         conv.add_user_text("\n\n".join(news))
-                begun = started
-                conv.budget = lambda queued, b=begun: max(5.0, self.phase_seconds - (
-                    time.perf_counter() - (b if b is not None else time.perf_counter())))
+                conv.budget = lambda queued: max(5.0, self.phase_seconds - spent())
                 step = conv.step()
                 if started is None:
                     started = time.perf_counter() - float(conv.last_gen_s or 0.0)
@@ -532,7 +609,7 @@ class HybridAgent:
                     break
                 results = []
                 for c in step.tool_calls:
-                    if self.cancelled or session.stopped:
+                    if self.cancelled or session.stopped or not hold():
                         break
                     if "__invalid_json__" in (c.args or {}):
                         res = {"ok": False, "error": "your tool arguments were not valid JSON."}
@@ -545,43 +622,39 @@ class HybridAgent:
                         args = json.dumps(c.args, ensure_ascii=False)[:200]
                         outcome = "ok" if res.get("ok") else f"ERROR: {str(res.get('error'))[:200]}"
                         self._thought(session, pid, f"{c.name} {args} → {outcome}", "action")
+                if row["outcome"] is not None:
+                    break                   # a pause that ended the phase (halted, or no ticket after it)
                 conv.add_tool_results(results)
-        except TicketExpired as e:
-            row.update(outcome="skipped", cause="timeout", note=str(e))
+        except TicketExpired:
+            row.update(outcome="skipped", cause="timeout")
         except SchedulerError as e:
             halted = self.cancelled or session.stopped
-            row.update(outcome="cancelled" if halted else "refused", cause=None if halted else cause_of(e),
-                       note=str(e))
+            row.update(outcome="cancelled" if halted else "refused", cause=None if halted else cause_of(e))
         except Exception as e:
             if self.cancelled or session.stopped:
                 row["outcome"] = "cancelled"
             else:
                 self.last_error = f"{type(e).__name__}: {e}"
-                row.update(outcome="failed", cause="failed", note=self.last_error[:300])
+                row.update(outcome="failed", cause="failed")
                 session.errors.append({"t": time.time(), "player": pid, "where": "diplomat phase",
                                        "trace": traceback.format_exc()})
         finally:
             self._phase_conv = None
-            ticket.close()
-            try:
-                conv.close()                # the provider's client goes with the phase
-            except Exception:
-                log.debug("closing a diplomat phase's conversation failed", exc_info=True)
-            usage = dict(getattr(inner, "usage", {}) or {})
-            for k in ("input_tokens", "output_tokens"):
-                row[k] = int(usage.get(k, 0) or 0) - int(before.get(k, 0) or 0)
-            for k, v in usage.items():
-                model.usage_total[k] = model.usage_total.get(k, 0) + v - (before.get(k, 0) or 0)
+            if ticket is not None:
+                ticket.close()
+            if conv is not None:
+                try:
+                    conv.close()            # the provider's client goes with the phase
+                except Exception:
+                    log.debug("closing a diplomat phase's conversation failed", exc_info=True)
+            if inner is not None:
+                usage = dict(getattr(inner, "usage", {}) or {})
+                for k in ("input_tokens", "output_tokens"):
+                    row[k] = int(usage.get(k, 0) or 0) - int(before.get(k, 0) or 0)
+                for k, v in usage.items():
+                    model.usage_total[k] = model.usage_total.get(k, 0) + v - (before.get(k, 0) or 0)
             if row["outcome"] in ("done", "timeout"):
-                self.phase_turn = turn
-                self.pending = []
-                self.phases += 1
-                with session.lock:
-                    try:
-                        dip = session.game.execute(pid, "get_diplomacy", {})
-                    except ActionError:
-                        dip = {}
-                    self.baseline = self._standings(session.game, pid, dip)
+                self._phase_ran(session, pid, turn)
             self._release_voice()
             self._status(session, pid, "thinking")
             row["gen_s"], row["queue_s"] = round(row["gen_s"], 3), round(row["queue_s"], 3)
@@ -706,38 +779,25 @@ class HybridAgent:
     def veto(self, session, pid: int, name: str, args: dict) -> Optional[str]:
         """Why the bot refuses a deal its seat's model offers (``open_negotiation``), counters with or accepts
         (``respond_negotiation``), or None: a deal that includes anything in a category the bot decides must be one the
-        bot would accept as a whole (``EngineGame.bot_evaluate`` of the whole deal, from the seat's side, below zero
-        refuses). What lies wholly in the model's own categories is the model's to give. Items that do not read are left
-        to the engine to refuse. Session's lock held."""
+        bot would accept as a whole (``EngineGame.bot_evaluate_call``'s value of the whole deal, from the seat's side,
+        below zero refuses). What lies wholly in the model's own categories is the model's to give.
+
+        The deal is the engine's own reading of the call (``EngineGame.bot_evaluate_call``: the arguments coerced and
+        checked as ``execute`` does, the action in any case, the items as ``open_negotiation`` reads them), so what the
+        model wrote cannot slip a deal past the veto that the engine then makes: keys the engine drops, amounts written
+        as text, ``Accept`` for ``accept``. A call the engine would refuse is left to it. Session's lock held."""
+        if name not in ("open_negotiation", "respond_negotiation"):
+            return None
         g = session.game
-        action = args.get("action") if name == "respond_negotiation" else None
-        if name == "open_negotiation":
-            other, give, receive = args.get("to"), args.get("give"), args.get("receive")
-        elif action in ("counter", "accept"):
-            try:
-                n = g.negotiation(int(args.get("negotiation_id")))
-            except (ActionError, TypeError, ValueError):
-                return None
-            if pid not in (n["initiator"], n["responder"]):
-                return None
-            other = n["responder"] if n["initiator"] == pid else n["initiator"]
-            if action == "counter":
-                give, receive = args.get("give"), args.get("receive")
-            else:
-                prop = n.get("proposal") or {}
-                give, receive = prop.get(str(pid)) or [], prop.get(str(other)) or []
-        else:
-            return None
-        cats = hybrid.items_categories(give, receive)
-        bots = [c for c in hybrid.CATEGORIES if c in cats and self.owners.get(c) != "llm"]
-        if not bots:
-            return None
         try:
-            value = g.bot_evaluate(pid, self.bot, int(other), give if isinstance(give, list) else None,
-                                   receive if isinstance(receive, list) else None)
+            seen = g.bot_evaluate_call(pid, self.bot, name, args)
         except (ActionError, ValueError, TypeError):
+            return None                     # the engine refuses the call itself
+        if seen is None:
             return None
-        if value >= 0:
+        cats, value = seen
+        bots = [c for c in hybrid.CATEGORIES if c in cats and self.owners.get(c) != "llm"]
+        if not bots or value >= 0:
             return None
         return (f"The bot decides {', '.join(c.replace('_', ' ') for c in bots)} and values this deal at "
                 f"{round(value, 1):g} gold for you, so it will not agree. Leave those items out, or make the deal "
