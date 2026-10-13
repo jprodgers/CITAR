@@ -244,10 +244,17 @@ class SideEffectTests(ServerCase):
         self.assertTrue(r.json()["ok"], r.json())
         nid = r.json()["result"]["negotiation_id"]
         self.assertTrue(wait(lambda: s.game.negotiation_head(nid)["awaiting"] != 1, 30), "the bot answered")
-        self.assertTrue(wait(lambda: any(m["type"] == "update" and m["version"] >= s.version for _, m in rec.all()),
-                             10))
-        msgs = [m for _, m in rec.all()]
-        events = [i for i, m in enumerate(msgs) if m["type"] == "event" and m["event"]["type"] == "negotiation"]
+
+        def seen():
+            msgs = [m for _, m in rec.all()]
+            return msgs, [i for i, m in enumerate(msgs) if m["type"] == "event" and m["event"]["type"] == "negotiation"]
+
+        # Waited for as asserted: the bot's answer is in the game before its responder broadcasts it, and an update
+        # newer than the session's version as read before that broadcast was the proposal's (CI, test.yml run
+        # 38432154278, ubuntu / Python 3.12: only the proposal had come).
+        self.assertTrue(wait(lambda: len(seen()[1]) >= 2 and any(m["type"] == "update"
+                                                                for m in seen()[0][seen()[1][1] + 1:]), 10))
+        msgs, events = seen()
         self.assertGreaterEqual(len(events), 2, "the proposal, then the bot's answer")
         answer = events[1]
         self.assertTrue(any(m["type"] == "update" for m in msgs[answer + 1:]),
