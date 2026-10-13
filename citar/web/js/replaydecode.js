@@ -79,9 +79,19 @@ class Reader {
   }
 }
 
-/** The bytes of a record as the replay sends it ({turn, keyframe, bytes: base64}), decoded once and kept. */
+/**
+ * The bytes of a record as the replay sends it ({turn, keyframe, bytes: base64}), decoded once and kept. Anything
+ * else (no object, bytes that are no base64 text) is a FrameError like any record that does not decode, so the replay
+ * leaves it out rather than failing whole: atob's own error is a DOMException.
+ */
 function recordBytes(rec) {
-  if (!rec._bytes) rec._bytes = rec.bytes instanceof Uint8Array ? rec.bytes : b64decode(rec.bytes || "");
+  if (!rec || typeof rec !== "object") throw new FrameError("a record is no object");
+  if (rec._bytes) return rec._bytes;
+  if (rec.bytes instanceof Uint8Array) rec._bytes = rec.bytes;
+  else if (typeof rec.bytes !== "string") throw new FrameError("a record has no bytes");
+  else {
+    try { rec._bytes = b64decode(rec.bytes); } catch { throw new FrameError("the bytes are not base64"); }
+  }
   return rec._bytes;
 }
 

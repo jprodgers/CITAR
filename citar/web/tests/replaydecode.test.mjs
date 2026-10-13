@@ -275,6 +275,30 @@ test("records that are not frames are refused, never misread", () => {
   refused(variant((b) => { b[tail + 4 + 4 + 1 + 4 + 2] = 2; }), /capital flag 2/, "a capital flag of 2");
   // a count larger than what is left
   refused(variant((b) => { b[8] = 0xff; b[9] = 0xff; b[10] = 0xff; b[11] = 0x0f; }), /cannot fit the bytes left/, "a tile count past the bytes");
+  // what is no record at all: atob's own error would be a DOMException, which would fail the whole replay
+  refused({ ...good, bytes: "***" }, /the bytes are not base64/, "bytes that are not base64");
+  refused({ ...good, bytes: "QUJD=" }, /the bytes are not base64/, "base64 cut in the middle of its padding");
+  refused({ turn: 1, keyframe: true }, /has no bytes/, "a record with no bytes");
+  refused({ ...good, bytes: 12 }, /has no bytes/, "bytes that are no text");
+  refused(null, /no object/, "no record");
+  refused("CF", /no object/, "text for a record");
+});
+
+test("a record that is no frame at all is left out, never failing the replay", () => {
+  const want = rounds();
+  const w = new Writer();
+  const recs = want.map((f, i) => w.push(f, { key: i === 3 }));
+  // before the second keyframe: bytes that are no base64, then a record with none, then no record
+  const bad = [...recs.slice(0, 3), { turn: 3, keyframe: false, bytes: "***" }, { turn: 3, keyframe: true }, null, ...recs.slice(3)];
+  const fr = new ReplayFrames(bad);
+  assert.equal(fr.dropped, 3);
+  assert.deepEqual([...Array(fr.length).keys()].map((i) => fr.turn(i)), [1, 2, 3, 4, 5], "the frames around them all served");
+  for (const i of [4, 0, 3, 2]) assert.deepEqual(fullShape(fr.at(i), REPLAY), fullShape(want[i], REPLAY), `frame ${i}`);
+  // garbage in the middle of a run of deltas: the deltas after it wait for the next keyframe
+  const mid = [recs[0], { turn: 2, keyframe: false, bytes: "%%%" }, ...recs.slice(1)];
+  const fm = new ReplayFrames(mid);
+  assert.equal(fm.dropped, 3, "the garbage, and the two deltas after it");
+  assert.deepEqual([...Array(fm.length).keys()].map((i) => fm.turn(i)), [1, 4, 5]);
 });
 
 // ------------------------------------------------------------------------------------------------ chats as threads
