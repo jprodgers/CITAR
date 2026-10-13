@@ -162,7 +162,8 @@ def validate(data: dict) -> dict:
 
 
 def list_probes() -> list[dict]:
-    """Every saved probe, in summary."""
+    """Every saved probe, in summary, with what a run of all its cases is admitted for (``purposes``,
+    ``case_purposes``), so the run dialog can show a machine's refusal before the run is asked."""
     BASE.mkdir(parents=True, exist_ok=True)
     out = []
     for p in sorted(BASE.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -171,6 +172,7 @@ def list_probes() -> list[dict]:
             out.append({"id": d.get("id"), "name": d.get("name"), "description": d.get("description", ""),
                         "scenario": d.get("scenario"), "cases": len(d.get("cases") or []), "repeats": d.get("repeats", 1),
                         "subject": d.get("subject"), "counterparty": d.get("counterparty"),
+                        "purposes": list(case_purposes(d)),
                         "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds")})
         except (OSError, ValueError):
             continue

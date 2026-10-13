@@ -308,7 +308,8 @@ function runDialog(p, ctx) {
   const botCfg = { profile: null };
   const draw = () => {
     clear(box);
-    if (who.value === "model") box.append(llmForm(L, draw));
+    // the run is admitted for what its cases are (the probe list's `purposes`: probe, pooled or both)
+    if (who.value === "model") box.append(llmForm(L, draw, { purpose: p.purposes || ["probe", "pooled"] }));
     else box.append(el("div", { class: "field" }, el("label", {}, "Bot"), profileSelect(botCfg, "profile", null, { best: true })));
   };
   who.onchange = draw;

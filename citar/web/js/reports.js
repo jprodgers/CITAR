@@ -162,8 +162,10 @@ function renderBuilder(card, ctx, redraw) {
     el("b", {}, "Have a model write an analysis"), el("span", { class: "muted small" }, "Optional. The computed findings and charts never need a model; this adds a written summary. Its cost is tracked like any other use.")), narrBox);
   if (n.enabled) {
     // the picker writes server_id / model_id / profile_id straight into the narrative settings
-    const redrawNarr = () => { clear(narrBox).append(llmForm(n, redrawNarr, { seat: false })); };
-    narrBox.append(llmForm(n, redrawNarr, { seat: false }));
+    // a narrative is a pooled prompt (citar.reports.NARRATIVE_PURPOSE): the machines show that admission
+    const narrForm = () => llmForm(n, redrawNarr, { seat: false, purpose: "pooled" });
+    const redrawNarr = () => { clear(narrBox).append(narrForm()); };
+    narrBox.append(narrForm());
     narr.appendChild(el("div", { class: "field" }, el("label", {}, "Extra instructions (optional)"),
       el("textarea", { rows: 2, value: n.instructions, placeholder: "e.g. Focus on whether the desktop is worth it compared with the Claude API.", oninput: (e) => { n.instructions = e.target.value; } })));
   }

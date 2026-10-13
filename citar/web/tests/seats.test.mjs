@@ -1,15 +1,16 @@
 // Seats as the pages name and send them (citar/web/js/seats.js; design/phase3-features.md P3.6.7, P3.6.8): the seat
 // label for each seat shape ("Hybrid: <bot> + <model>"), the hybrid seat's owners and presets, the lobby's payloads
-// (fixtures/hybrid-seats.json, which tests/test_hybrid_lobby.py posts), the seat route's body, and what an AI seat is
-// doing as the game screen says it. Run with `node --test "citar/web/tests/*.test.mjs"` from the checkout.
+// (fixtures/hybrid-seats.json, which tests/test_hybrid_lobby.py posts), the seat route's body, what an AI seat is
+// doing as the game screen says it, and a machine's admission for several kinds of work as a seat's form lists it.
+// Run with `node --test "citar/web/tests/*.test.mjs"` from the checkout.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  CATEGORIES, CATEGORY_KEYS, HANDICAPS, PRESETS, agentState, botName, controllerLabel, diplomatText, hybridBlock,
-  hybridProblem, hybridState, isModelSeat, modelCategories, modelName, newHybrid, outcomeText, ownersMap, presetOf,
-  queuedText, seatLabel, seatPayload, seatUpdate,
+  CATEGORIES, CATEGORY_KEYS, HANDICAPS, PRESETS, agentState, botName, controllerLabel, diplomatText, firstRefusal,
+  hybridBlock, hybridProblem, hybridState, isModelSeat, modelCategories, modelName, newHybrid, outcomeText, ownersMap,
+  presetOf, queuedText, seatLabel, seatPayload, seatUpdate,
 } from "../js/seats.js";
 
 const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/hybrid-seats.json", import.meta.url), "utf-8"));
@@ -166,6 +167,22 @@ test("what an LLM seat (and a bot) is doing reads as before", () => {
   assert.equal(queuedText(null), "waiting for its machine…");
   assert.equal(queuedText({ position: 11 }), "waiting for its machine: 11th in line");
   assert.equal(queuedText({ machine: "Box", position: 23 }), "waiting for Box: 23rd in line");
+});
+
+test("a machine's admission for several kinds of work is the first refusal among them", () => {
+  const ok = { allowed: true, reason: "" };
+  const noProbes = { allowed: false, reason: "limited to pooled prompts, and this is probes" };
+  const noPooled = { allowed: false, reason: "limited to probes, and this is pooled prompts" };
+  // a probe run of turn and offer cases: probe and pooled, either refusal shown (the run would be refused)
+  assert.deepEqual(firstRefusal([noProbes, ok]), noProbes);
+  assert.deepEqual(firstRefusal([ok, noPooled]), noPooled);
+  assert.deepEqual(firstRefusal([noProbes, noPooled]), noProbes);
+  assert.deepEqual(firstRefusal([ok, ok]), ok, "admitted for both: no note");
+  // a list that did not name the machine says nothing of it
+  assert.deepEqual(firstRefusal([undefined, ok]), ok);
+  assert.equal(firstRefusal([undefined]), null);
+  assert.equal(firstRefusal([]), null);
+  assert.deepEqual(firstRefusal([noPooled]), noPooled, "one kind of work: its own admission");
 });
 
 test("the stats screen names a hybrid row and sums up its diplomat", () => {

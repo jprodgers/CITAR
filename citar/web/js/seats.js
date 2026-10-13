@@ -193,6 +193,15 @@ export function queuedText(w) {
   return parts.length ? `${where}: ${parts.join(", ")}` : `${where}…`;
 }
 
+/** A machine's admission for work of several kinds, as a seat's form lists the machine: the first refusal among
+ *  them, else the first admission; null when none says. `answers` holds one admission per kind (`{allowed, reason}`
+ *  as `/api/pool/servers?purpose=` gives it, undefined where that list did not name the machine): a probe run of
+ *  turn cases and offer cases is admitted for `probe` and `pooled` both (P3.3.7), and either refusal stops it. */
+export function firstRefusal(answers) {
+  const given = (answers || []).filter(Boolean);
+  return given.find((a) => !a.allowed) || given[0] || null;
+}
+
 /** What an AI seat is doing, from its `agent` status (and, while queued, its place), as the game screen's player list
  *  and turn box say it; null when there is nothing to say. A hybrid seat (P3.6.8): "bot playing" while its bot plays,
  *  "diplomat thinking" while its model decides, "queued #n" while the diplomat's prompt waits for its machine, and

@@ -8,8 +8,8 @@ import { setupState, welcomeBanner } from "./setup.js";
 import { pageHeader } from "./nav.js";
 import { registry } from "./servers.js";
 import { shareButton } from "./share.js";
-import { CATEGORIES, HANDICAPS, PRESETS, PROMPT_EVERY, hybridProblem, hybridState, isModelSeat, newHybrid, ownersMap,
-  presetOf, seatLabel, seatPayload, seatUpdate } from "./seats.js";
+import { CATEGORIES, HANDICAPS, PRESETS, PROMPT_EVERY, firstRefusal, hybridProblem, hybridState, isModelSeat, newHybrid,
+  ownersMap, presetOf, seatLabel, seatPayload, seatUpdate } from "./seats.js";
 
 // Civilization colours (the server sends the same palette as rules.player_colors), most distinct first.
 const COLORS = ["#aa0000", "#0000aa", "#00aa00", "#aaaa00", "#50006e", "#c85a00", "#ff00e6", "#299bcc",
@@ -328,18 +328,25 @@ function pooledEntries(pool) {
 // Every machine a seat may name: the caller's own (every one for an administrator) as the registry lists them, a
 // helper machine as its helper reports it, and the machines shared with the caller (P3.2.8: every machine is a row),
 // each with whether the caller is admitted there for `purpose`: `game` for a seat that plays every turn, `pooled` for
-// a hybrid seat's model, whose prompts are pooled prompts (P3.3.7).
+// a hybrid seat's model, a report's narrative or a probe's offer and message cases, whose prompts are pooled prompts,
+// `probe` for a probe's turn cases (P3.3.7). Several purposes (a probe run of both kinds of case): each machine's
+// admission is the first refusal among them (firstRefusal).
 export async function seatServers(force = false, purpose = "game") {
-  const [reg, pool] = await Promise.all([
+  const purposes = [].concat(purpose);
+  const [reg, ...pools] = await Promise.all([
     registry(force).catch(() => ({ servers: [] })),
-    api.poolServers(purpose).catch(() => ({ servers: [] }))]);
+    ...purposes.map((p) => api.poolServers(p).catch(() => ({ servers: [] })))]);
+  const answer = (q, id) => ((q.servers || []).find((x) => x.id === id) || {}).admission;
+  const pool = { ...pools[0], servers: (pools[0].servers || []).map((s) => (
+    { ...s, admission: firstRefusal(pools.map((q) => answer(q, s.id))) })) };
   const own = (reg.servers || []).filter((s) => s.reach !== "worker");
   const ids = new Set(own.map((s) => s.id));
   return { ...reg, servers: [...own, ...pooledEntries(pool).filter((s) => !ids.has(s.id))] };
 }
 
 // Editable LLM seat configuration: server -> model -> load profile, plus overrides. `rerender` redraws the parent.
-// `purpose` is what the caller must be admitted for on the machine (`pooled` for a hybrid seat's model); without
+// `purpose` is what the caller must be admitted for on the machine (`game` for an LLM seat, `pooled` for a hybrid seat's
+// model or a report's narrative, a probe's purposes for its run: seatServers), whose refusal the form shows; without
 // `turns` (a hybrid seat's model, which plays no turns) the per-turn settings are left out.
 export function llmForm(L, rerender, { seat = true, purpose = "game", turns = true } = {}) {
   const field = (label, input, extra = {}) => el("div", { class: "field", ...extra }, el("label", {}, label), input);
