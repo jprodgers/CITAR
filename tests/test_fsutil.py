@@ -3,6 +3,7 @@ takes, the old file is pending deletion and opening it fails with PermissionErro
 a probe run's ``run.json`` read so (``test_pooled_work.Probes``), so a reader tries again, as the writer does. One test
 per family of such files: each reader is refused its file once and must read it again."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import collections
 import contextlib
 import gzip
 import io
@@ -10,6 +11,7 @@ import json
 import secrets
 import shutil
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -166,7 +168,7 @@ class LabFiles(Refused):
 
         def read_text(path, *args, **kwargs):
             if path.parent == lab.QUEUE and path.name == name:
-                shutil.move(str(path), str(lab.DONE / name))       # the runner, finishing it
+                fsutil.replace(path, lab.DONE / name)       # the runner, finishing it
             return real(path, *args, **kwargs)
         with mock.patch.object(Path, "read_text", read_text):
             got = lab.overview()["experiments"]
@@ -184,7 +186,7 @@ class LabFiles(Refused):
         def read_text(path, *args, **kwargs):
             text = real(path, *args, **kwargs)
             if path.parent == lab.QUEUE and path.name == name:
-                shutil.move(str(path), str(lab.DONE / name))       # the runner, finishing it just after
+                fsutil.replace(path, lab.DONE / name)       # the runner, finishing it just after
             return text
         with mock.patch.object(Path, "read_text", read_text):
             got = lab.overview()["experiments"]
@@ -207,6 +209,29 @@ class LabFiles(Refused):
             lab.submit({"name": "fsutil-exp", "games": 2, "seats": [{"bot": "basic"}, {"bot": "basic"}]})
         self.assertEqual(polled, [[]])
         self.assertEqual([e["name"] for e in lab.overview()["experiments"]], ["fsutil-exp"])
+
+    def test_a_finished_experiment_is_renamed_over_a_done_one_of_its_name(self):
+        """The runner moves a finished experiment to done/ by a rename, also over an earlier experiment of its name
+        there (``lab submit`` may reuse a finished one's name), so a reader of done/ sees one whole file or the other.
+        A move that met a file there copied over it in place, readable half written."""
+        name = "fsutil-exp.json"
+        spec = {"name": "fsutil-exp", "games": 1, "seats": []}
+        fsutil.write_text(lab.DONE / name, json.dumps({**spec, "submitted": "2026-10-01T00:00:00"}))
+        fsutil.write_text(lab.QUEUE / name, json.dumps({**spec, "submitted": "2026-10-12T00:00:00"}))
+        (lab.RESULTS / "fsutil-exp.jsonl").write_text(json.dumps({"i": 0}) + "\n", encoding="utf-8")
+        finished = (lab.QUEUE / name).stat().st_ino
+        args = types.SimpleNamespace(workers=1, night_workers=1, max_minutes=60, exit_when_idle=False)
+        self.assertFalse(lab._runner_step(args, {}, collections.Counter(), [], 0, 1))
+        self.assertFalse((lab.QUEUE / name).exists())
+        self.assertEqual(json.loads((lab.DONE / name).read_text(encoding="utf-8"))["submitted"], "2026-10-12T00:00:00")
+        self.assertEqual((lab.DONE / name).stat().st_ino, finished, "copied over the done file, not renamed into place")
+
+    def test_a_done_experiment_reported_while_its_file_is_replaced(self):
+        """The Lab page's report of an experiment reads its spec from done/, where a re-queued name's finishing
+        replaces it."""
+        fsutil.write_text(lab.DONE / "fsutil-exp.json", json.dumps({"name": "fsutil-exp", "games": 2, "seats": []}))
+        text = self.read_refused_once("fsutil-exp.json", lambda: lab.report_text("fsutil-exp"))
+        self.assertIn("=== fsutil-exp: 0 games of 2", text)
 
 
 class BotProfileFiles(Refused):

@@ -52,7 +52,6 @@ import argparse
 import json
 import math
 import os
-import shutil
 import statistics
 import sys
 import time
@@ -632,8 +631,9 @@ def _runner_step(args, running, attempts, finished_times, flags, max_workers) ->
             done = {r["i"] for r in load_results(exp["name"])}
             if len(done) >= exp["games"]:
                 if not any(k[0] == exp["name"] for k in running):
-                    _retry(lambda exp=exp: shutil.move(str(QUEUE / f"{exp['name']}.json"),
-                                                       str(DONE / f"{exp['name']}.json")))
+                    # a rename, also over an earlier experiment of the name in done/ (`lab submit` may reuse a
+                    # finished one's), where a move would copy over it in place, readable half written
+                    _fs_replace(QUEUE / f"{exp['name']}.json", DONE / f"{exp['name']}.json")
                     log(f"experiment {exp['name']} complete")
                 continue
             for i in range(exp["games"]):
@@ -1056,7 +1056,7 @@ def cmd_report(names):
     for name in names:
         exp = queue.get(name)
         if exp is None and (DONE / f"{name}.json").exists():
-            exp = json.loads((DONE / f"{name}.json").read_text(encoding="utf-8"))
+            exp = json.loads(_fs_read(DONE / f"{name}.json"))      # replaced when a re-queued name finishes
         results = [complete_players(exp, r) for r in load_results(name)]
         if exp and exp.get("factors"):
             s = summarize(results)
