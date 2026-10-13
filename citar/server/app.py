@@ -580,9 +580,13 @@ def game_summary(gid: str, request: Request, p: Principal = Depends(principal), 
             seat = seats.get(pl["id"])
             d = {"id": pl["id"], "name": pl["name"], "color": pl["color"], "alive": pl["alive"],
                  "seat": seat.type if seat else None,
-                 "model": (seat.llm.get("model") or seat.llm.get("model_id")) if seat and seat.type == "llm" else None,
+                 "model": (seat.llm.get("model") or seat.llm.get("model_id")) if seat and seat.model_seat else None,
                  "status": s.agent_status.get(pl["id"]),
                  "error": getattr(s.agents.get(pl["id"]), "last_error", None) if full else None}
+            if seat is not None and seat.model_seat:
+                # labelled (P3.6.7): its task class, and a hybrid seat as its bot and its model
+                d["class"] = seat.task_class
+                d["label"] = _seat_label(seat, d["model"])
             if full:
                 st = g.standing(pl["id"])
                 d.update({"score": st["score"], "cities": st["cities"], "pop": st["population"], "techs": st["techs"],
@@ -598,6 +602,14 @@ def game_summary(gid: str, request: Request, p: Principal = Depends(principal), 
                                         "ai_delay", "created", "config", "crashed")},
                 "turn_limit": summ["turn_limit"], "current": current, "players": players, "events": events,
                 "full": full, "can_manage": access.MANAGE in perms}
+
+
+def _seat_label(seat, model: Optional[str]) -> str:
+    """How a seat a model plays is named where its game is summed up: its model, or, for a hybrid seat, "Hybrid: <the
+    bot's profile> + <the model>" (P3.6.7)."""
+    if seat.type == "hybrid":
+        return f"Hybrid: {(seat.bot or {}).get('profile') or 'standard'} + {model or 'its model'}"
+    return model or "a model"
 
 
 @app.post("/api/games")

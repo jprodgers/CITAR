@@ -24,7 +24,8 @@ from .. import paths
 # citar.paths decides the rest (a checkout writes beside the code, an install writes per-user).
 SAVE_DIR = paths.saves_path()
 log = logging.getLogger("citar.session")
-SEAT_TYPES = ("human", "mcp", "llm", "bot")
+#: Who plays a seat (P3.6.2 added ``hybrid``: a bot plays the turns, a model decides the diplomacy it is given).
+SEAT_TYPES = ("human", "mcp", "llm", "bot", "hybrid")
 #: The pauses the server makes, which a restart does not keep (``mark_live``): the check that made each runs again (a
 #: model server unreachable, quiet hours, making way in the queue, a machine's budget spent).
 SERVER_PAUSES = ("disconnect", "restricted", "queue", "budget")
@@ -41,18 +42,41 @@ class Seat:
     agent join a game with no account at all.
     """
     player: int
-    type: str = "bot"                 # human | mcp | llm | bot (see SEAT_TYPES)
+    type: str = "bot"                 # human | mcp | llm | bot | hybrid (see SEAT_TYPES)
     token: str = field(default_factory=lambda: secrets.token_urlsafe(12))
     name: str = ""
     llm: dict = field(default_factory=dict)   # provider, model, base_url, api_key_env, tool_mode, persona, ...
-    bot: dict = field(default_factory=dict)   # aggression
+    bot: dict = field(default_factory=dict)   # profile, aggression
     connected: bool = False
+    #: A hybrid seat's settings (``citar.agents.hybrid.normalize_hybrid``: owners, advisor, prompt_every,
+    #: phase_seconds); saved with the session record, so it needs no save-format change (P3.1.5).
+    hybrid: dict = field(default_factory=dict)
+
+    # Every place that asks "is this an LLM seat?" asks one of these (design/phase3-features.md P3.6.7).
+    @property
+    def model_seat(self) -> bool:
+        """Whether a model plays the seat: an LLM seat, or a hybrid seat with a model."""
+        return self.type == "llm" or (self.type == "hybrid" and bool(self.llm))
+
+    @property
+    def task_class(self):
+        """The seat's task class (P3.3.7): ``full`` for an LLM seat (a lease), ``partial`` for a hybrid seat (tickets),
+        None for a seat that plays no model."""
+        from ..pool import seats as pool_seats
+        return pool_seats.seat_class(self)
+
+    @property
+    def has_bot(self) -> bool:
+        """Whether a bot plays the seat's turns: a bot seat, or a hybrid seat."""
+        return self.type in ("bot", "hybrid")
 
     def public(self, include_token: bool = False) -> dict:
         """The seat as the client sees it. The token is included only for whoever may have it."""
         d = {"player": self.player, "type": self.type, "name": self.name, "connected": self.connected,
              "llm": {k: v for k, v in self.llm.items() if k not in ("api_key",)}, "bot": self.bot}
-        if self.type == "llm" and self.llm.get("server_id"):
+        if self.type == "hybrid":
+            d["hybrid"] = self.hybrid
+        if self.model_seat and self.llm.get("server_id"):
             from .. import servers
             d["llm_info"] = servers.describe_seat(self.llm)
         if include_token:
@@ -256,18 +280,23 @@ class GameSession:
         turn, current, phase = key
         if phase == "playing" and current < len(self.seats) and g.is_alive(current):
             seat = self.seats[current]
-            self.metrics.begin_turn(current, turn, seat.type, seat.llm.get("model") if seat.type == "llm" else None)
+            self.metrics.begin_turn(current, turn, seat.type, seat.llm.get("model") if seat.model_seat else None)
 
     def metrics_report(self) -> dict:
         """Per-seat metrics for this game, as the stats screen and reports use them."""
         players = {}
         for s in self.seats:
             players[s.player] = {"name": self.game.player_name(s.player), "controller": s.type,
-                                 "model": s.llm.get("model") if s.type == "llm" else None,
+                                 "model": s.llm.get("model") if s.model_seat else None,
                                  "settings": {k: s.llm.get(k) for k in ("provider", "base_url", "tool_mode", "reasoning_effort", "effort")}
-                                 if s.type == "llm" else None}
+                                 if s.model_seat else None}
+            if s.type == "hybrid":
+                # marked (P3.6.7): its turns are its bot's, its model's work the diplomat rows and chat answers
+                players[s.player].update({"hybrid": True, "bot": (s.bot or {}).get("profile") or "standard",
+                                          "owners": (s.hybrid or {}).get("owners")})
         return {"summary": self.metrics.summary(players), "turns": self.metrics.turn_rows(),
-                "negotiations": self.metrics.data["negotiations"], "game_turn": self.game.turn}
+                "negotiations": self.metrics.data["negotiations"],
+                "diplomat": self.metrics.data.get("diplomat") or [], "game_turn": self.game.turn}
 
     def _after_action(self, before_turn: int, before_current: int):
         """Bump the version, notify watchers and autosave after something changed."""
@@ -294,7 +323,8 @@ class GameSession:
         """One drive of the game's bot seats on ``pid``'s turn (``EngineGame.drive``, one seat's turn at most), with
         every side effect an action has. Called with the lock held, by ``pid``'s BotAgent.
 
-        Every bot seat is passed, so a negotiation one bot opens with another is answered inside the drive. The drive's
+        Every seat with a bot (bot and hybrid seats) is passed, so a negotiation one bot opens with another is answered
+        inside the drive, and a hybrid seat's drive stops at ``hybrid_diplomat`` for its model's diplomacy. The drive's
         action counts for ``pid`` go on its turn's metrics record (``bot_actions``), whose ``end_reason`` is
         ``end_turn`` when the drive ended the turn; then ``_after_action`` runs: the version, the metrics turns, the
         responders of the seats a chat now waits on, the broadcasts and the autosave. Returns the drive's stop
@@ -306,7 +336,8 @@ class GameSession:
         self._track_turn()          # pid's turn has its metrics record, however the turn came to it
         bots = {}
         for seat in self.seats:
-            if seat.type == "bot":
+            if seat.has_bot:
+                # a hybrid seat's bot leaves its model's categories alone, and defers the chats they touch (P3.6.3)
                 agent = self.get_agent(seat.player)
                 if agent is not None:
                     bots[seat.player] = agent.bot
@@ -423,8 +454,9 @@ class GameSession:
         This is why an agent should wait on ``wait_for_turn`` rather than polling for its own turn: a negotiation
         opened on somebody else's turn blocks that turn until it is answered. The current player's own agent handles
         the replies to the chats it opened during its turn (its loop's notes and end_turn's wait), so those are not
-        handed out. A model seat whose machine the game paused for, or of a loaded game not yet resumed
-        (``answers_held``), answers when it resumes.
+        handed out, except a hybrid seat's: its turn is its bot's, and what comes back to it goes to its line (its bot
+        first, then its model, P3.6.5) like any other chat. A model seat whose machine the game paused for, or of a
+        loaded game not yet resumed (``answers_held``), answers when it resumes.
         ``again`` hands out once more a chat whose key is still held but which no line of its seat holds now (an answer
         that stopped for such a pause).
         """
@@ -435,9 +467,9 @@ class GameSession:
             if pid is None or (pids is not None and pid not in pids):
                 continue
             seat = self.seats[pid] if pid < len(self.seats) else None
-            if seat is None or seat.type not in ("bot", "llm"):
+            if seat is None or seat.type not in ("bot", "llm", "hybrid"):
                 continue
-            if current == pid and n["initiator"] == pid:
+            if current == pid and n["initiator"] == pid and seat.type != "hybrid":
                 continue
             key = (n["id"], n["entries"])
             if key in self._responding and (not again or responders.busy_with(self, pid, n["id"])):
@@ -445,7 +477,8 @@ class GameSession:
             if seat.type == "llm" and self.answers_held():
                 continue
             self._responding[key] = pid
-            responders.submit(self, pid, n["id"], n["entries"], "bot" if seat.type == "bot" else "model")
+            # a hybrid seat's bot answers first, on the bot pool, and leaves what it does not own to its model
+            responders.submit(self, pid, n["id"], n["entries"], "model" if seat.type == "llm" else "bot")
 
     #: The pauses during which a model seat's chat answers wait for the resume: the game paused because its machine is
     #: out of reach (a disconnect), in its quiet hours, or its budget is spent, so an answer asked then could only
@@ -470,11 +503,13 @@ class GameSession:
         with self.lock:
             self._dispatch_negotiation_interrupts(pids, again=True)
 
-    def _run_responder(self, pid: int, nid: int, key, epoch: Optional[int] = None):
+    def _run_responder(self, pid: int, nid: int, key, epoch: Optional[int] = None, kind: str = "model"):
         """Run an AI seat's answer to a negotiation, on its line's pool thread (``citar.agents.responders``). A bot seat
         answers through the engine (``EngineGame.answer``, BotAgent.respond_negotiation), a model seat through its
-        chat's conversation (``ChatThread``). A model seat of a game that made way answers on a lease of its own for the
-        answer (``lease_for(answering=True)``), which goes when its last answer ends (``_answered``).
+        chat's conversation (``ChatThread``), a hybrid seat as its line's ``kind`` says (its bot's pass, then its
+        model's answer: ``HybridAgent.respond_negotiation``, which never leaves a chat it could not answer to be
+        declined: its fallback bot answers it). A model seat of a game that made way answers on a lease of its own for
+        the answer (``lease_for(answering=True)``), which goes when its last answer ends (``_answered``).
 
         A halt never declines (P3.5.3): an answer whose seat was halted since it was taken (``epoch``: a suspension, a
         seat change, a crash) returns without a word, and the chat waits for the seat's next responder or the chat
@@ -491,7 +526,10 @@ class GameSession:
             if agent is not None and not responders.halted(self, pid, epoch):
                 # the answer's CPU is this game's, whichever thread runs it (P3.4.3)
                 with ledger.cpu_unit(self.cpu_activity):
-                    outcome = agent.respond_negotiation(self, pid, nid)
+                    if self.seats[pid].type == "hybrid":
+                        outcome = agent.respond_negotiation(self, pid, nid, kind=kind, epoch=epoch)
+                    else:
+                        outcome = agent.respond_negotiation(self, pid, nid)
         except EngineCrash as e:
             self._crashed(str(e))
         except Exception:
@@ -587,11 +625,30 @@ class GameSession:
         """The chat clock's action for a hybrid seat whose model's time ran out: its fallback bot answers
         (``EngineGame.answer``, design/phase3-features.md P3.6.5), or, with no bot to answer, the seat declines as a
         model seat does. Returns whether the chat moved."""
-        bot = getattr(self.agents.get(pid), "fallback_bot", None)
+        agent = self.agents.get(pid)
+        if agent is None and 0 <= pid < len(self.seats) and self.seats[pid].type == "hybrid" and not self._stop:
+            agent = self.get_agent(pid)
+        bot = getattr(agent, "fallback_bot", None)
         if bot is None:
             return self.decline_late(pid, nid, entries, cause)
+        return self.fallback_answer(pid, nid, bot, cause, entries=entries,
+                                    seconds=self.chat.timeout("hybrid") or 0.0)
+
+    def fallback_answer(self, pid: int, nid: int, bot, cause: str, *, entries: Optional[int] = None,
+                        record: bool = True, seconds: float = 0.0) -> bool:
+        """A hybrid seat's fallback bot (``bot``: every category the bot's) answers chat ``nid`` for it, unless the chat
+        no longer waits on it (or, with ``entries``, moved since the clock saw it): the chat clock at its deadline, the
+        seat's responder when its model's prompt was refused, expired or failed, or its turn past its safety cap
+        (P3.6.5). The metrics record a ``fallback`` with its ``cause`` (``chat.CAUSES``) unless ``record`` is False (the
+        model's conversation wrote it). Returns whether the chat moved. Non-blocking beyond the engine's answer."""
         with self.lock:
-            if self._stop or self.crashed or not self._chat_still(nid, pid, entries):
+            if self._stop or self.crashed:
+                return False
+            try:
+                n = self.game.negotiation_head(nid)
+            except ActionError:
+                return False
+            if n["status"] != "open" or n["awaiting"] != pid or (entries is not None and n["entries"] != entries):
                 return False
             before = (self.game.turn, self.game.current)
             try:
@@ -601,11 +658,37 @@ class GameSession:
             except EngineCrash as e:
                 self._crashed(str(e))
                 return False
-            self.metrics.negotiation(pid, self.chat.timeout("hybrid") or 0.0, 0, 0, 0, nid=nid, outcome="fallback",
-                                     cause=cause)
+            self.metrics.bot_actions(pid, r.get("actions"))
+            if record:
+                self.metrics.negotiation(pid, seconds, 0, 0, 0, nid=nid, outcome="fallback", cause=cause)
             if r.get("outcome") == "done":
                 self._after_action(*before)
             return r.get("outcome") == "done"
+
+    def diplomat_call(self, pid: int, name: str, args: Optional[dict] = None, *, chat: bool = False) -> dict:
+        """A tool call of a hybrid seat's model (design/phase3-features.md P3.6.6): its diplomat phase's, or its chat
+        answer's (``chat``). The session refuses a tool none of its categories gives it, "That is the bot's to decide.",
+        and the bot's veto refuses an offer, a counter or an acceptance of a deal that includes something the bot
+        decides and that the bot values below zero (``HybridAgent.veto``); each refusal is counted
+        (``Metrics.diplomat_refusal``). Otherwise the call goes through ``call_tool``, in the same hold of the lock as
+        the veto, so the deal it accepts is the one the bot valued. Returns {"ok", "result"|"error"}."""
+        from ..agents import hybrid
+        args = args if isinstance(args, dict) else {}
+        agent = self.agents.get(pid)
+        owners = getattr(agent, "owners", None)
+        if owners is None or self.seats[pid].type != "hybrid":
+            return {"ok": False, "error": "This seat has no diplomat."}
+        allowed = hybrid.chat_tools(owners) if chat else hybrid.diplomat_tools(owners)
+        if name not in allowed:
+            with self.lock:
+                self.metrics.diplomat_refusal(pid, name, "category", chat=chat)
+            return {"ok": False, "error": hybrid.NOT_YOURS}
+        with self.lock:
+            veto = agent.veto(self, pid, name, args)
+            if veto:
+                self.metrics.diplomat_refusal(pid, name, "veto", chat=chat, detail=veto)
+                return {"ok": False, "error": veto}
+            return self.call_tool(pid, name, args)
 
     def expire_chat(self, nid: int, entries: int) -> bool:
         """The chat clock's action for a chat whose person's time ran out: it closes as expired, "(no reply in time)",
@@ -683,6 +766,12 @@ class GameSession:
             from ..agents.bot_agent import BotAgent
             # the bot draws from the game's seed, so the same map seed plays the same game
             agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")})
+        elif seat.type == "hybrid":
+            from ..agents.hybrid_agent import HybridAgent
+            # its bot handles at once (no database read: drives make it under the lock), its model's configuration
+            # when first needed, off the lock; the diplomat reads the events from here on (P3.6.4)
+            last = self.game.events(last=1)
+            agent = HybridAgent(seat, started_turn=self.game.turn, event_mark=last[-1]["id"] if last else None)
         elif seat.type == "llm":
             return self._llm_agent(pid, seat, answering)
         else:
@@ -1042,27 +1131,52 @@ class GameSession:
             responders.halt(self, pid)
 
     def update_seat(self, pid: int, type: Optional[str] = None, llm: Optional[dict] = None,
-                    bot: Optional[dict] = None, name: Optional[str] = None):
+                    bot: Optional[dict] = None, name: Optional[str] = None, hybrid: Optional[dict] = None,
+                    handicap: Optional[str] = None):
         """Change who controls a seat, or how, and abort a turn in progress so the new controller takes over.
 
         A new seat type is also the civilization's new engine controller, so its difficulty numbers and the
-        decisions the engine takes for it follow the change (except any its seat set explicitly). Raises
-        ValueError for an unknown seat type, and EngineCrash on a game whose engine has stopped (the session is
-        then crashed, as everywhere).
+        decisions the engine takes for it follow the change (except any its seat set explicitly). A hybrid seat
+        (design/phase3-features.md P3.6.2) is the engine's ``hybrid`` controller with its seat's handicap (``ai`` unless
+        ``handicap`` says otherwise) and the automatic decisions its owners leave to the bot (``hybrid.engine_auto``);
+        a seat that stops being hybrid takes its new controller's handicap and automatic decisions explicitly, so
+        nothing of its hybrid settings stays behind. ``hybrid`` is checked (``normalize_hybrid``) before anything
+        changes. Raises ValueError for an unknown seat type or hybrid settings that are not allowed, and EngineCrash
+        on a game whose engine has stopped (the session is then crashed, as everywhere).
         """
+        from ..agents import hybrid as hybrid_mod
         moved = False
         with self.lock:
             seat = self.seats[pid]
             before = (seat.type, (seat.llm or {}).get("server_id"), (seat.llm or {}).get("model"))
+            new_type = type or seat.type
+            if type and type not in SEAT_TYPES:
+                raise ValueError(f"Unknown seat type '{type}' (one of {', '.join(SEAT_TYPES)}).")
+            block = None
+            if new_type == "hybrid" and (hybrid is not None or seat.type != "hybrid" or handicap is not None):
+                block = hybrid_mod.normalize_hybrid(hybrid if hybrid is not None else seat.hybrid,
+                                                    benchmark=bool(self.benchmark))
+                if handicap is not None or seat.type != "hybrid":
+                    handicap = hybrid_mod.check_handicap(handicap)
+            try:
+                if block is not None:
+                    self.game.set_controller(pid, "hybrid", handicap, hybrid_mod.engine_auto(block["owners"]))
+                elif type and seat.type == "hybrid" and type != "hybrid":
+                    # leaving hybrid: the new controller's own numbers and decisions, set explicitly, since the hybrid
+                    # seat's were (an engine seat keeps what was set explicitly)
+                    self.game.set_controller(pid, type, handicap or hybrid_mod.default_handicap(type),
+                                             hybrid_mod.default_auto(type))
+                elif type:
+                    self.game.set_controller(pid, type, handicap)
+            except EngineCrash as e:
+                self._crashed(str(e))
+                raise
             if type:
-                if type not in SEAT_TYPES:
-                    raise ValueError(f"Unknown seat type '{type}' (one of {', '.join(SEAT_TYPES)}).")
-                try:
-                    self.game.set_controller(pid, type)
-                except EngineCrash as e:
-                    self._crashed(str(e))
-                    raise
                 seat.type = type
+            if block is not None:
+                seat.hybrid = block
+            elif seat.type != "hybrid":
+                seat.hybrid = {}
             if llm is not None:
                 seat.llm = llm
             if bot is not None:
@@ -1415,7 +1529,7 @@ class GameSession:
                 if (g.turn, g.current) == turn_marker and g.phase == "playing":
                     rec = self.metrics.current(pid)
                     if rec is not None and not rec["end_reason"]:
-                        rec["end_reason"] = "end_turn" if seat.type == "bot" else "ended_by_server"
+                        rec["end_reason"] = "end_turn" if seat.has_bot else "ended_by_server"
                     try:
                         before = (g.turn, g.current)
                         # the end_turn tool refuses while a chat the seat is in is open, which would stall the
@@ -2154,6 +2268,22 @@ def all_sessions() -> list:
 
 
 
+def _engine_seat(sc: dict, stype: str, pid: int) -> tuple:
+    """A new seat's engine settings from its lobby or scenario entry: (handicap, automatic decisions, its ``hybrid``
+    block). A hybrid seat's block is checked (``normalize_hybrid``), its handicap is ``ai`` unless it says ``human``,
+    and its automatic decisions are those its owners leave to the bot (P3.6.2); any other seat's are its entry's own.
+    Raises ValueError, naming the seat, for hybrid settings that are not allowed."""
+    if stype != "hybrid":
+        return sc.get("handicap"), sc.get("auto"), {}
+    from ..agents import hybrid
+    try:
+        block = hybrid.normalize_hybrid(sc.get("hybrid"))
+        handicap = hybrid.check_handicap(sc.get("handicap"))
+    except ValueError as e:
+        raise ValueError(f"Seat {pid + 1}: {e}") from None
+    return handicap, hybrid.engine_auto(block["owners"]), block
+
+
 def _pin_best(bot: dict) -> dict:
     """A bot seat asking for "best" gets the profile that is best-ranked right now, recorded in the seat, so the
     game keeps playing (and reporting) that bot even after the rankings change."""
@@ -2188,12 +2318,12 @@ class SessionManager:
             stype = sc.get("type", "bot")
             if stype not in SEAT_TYPES:
                 raise ValueError(f"Unknown seat type '{stype}'")
+            handicap, auto, block = _engine_seat(sc, stype, i)
             players.append({"name": sc.get("civ_name") or None, "color": sc.get("color"),
                             "leader": sc.get("leader"), "nation": sc.get("nation"), "controller": stype,
-                            "handicap": sc.get("handicap"), "auto": sc.get("auto"),
-                            "difficulty": sc.get("difficulty") or None})
+                            "handicap": handicap, "auto": auto, "difficulty": sc.get("difficulty") or None})
             seats.append(Seat(player=i, type=stype, name=sc.get("name") or "", llm=sc.get("llm") or {},
-                              bot=_pin_best(sc.get("bot") or {})))
+                              bot=_pin_best(sc.get("bot") or {}), hybrid=block))
         cfg = dict(config)
         cfg["players"] = players
         game = EngineGame.new(cfg)
@@ -2212,8 +2342,9 @@ class SessionManager:
 
     @staticmethod
     def track(s: "GameSession"):
-        """Record the game in the usage ledger (games with an AI model seat; others cost next to nothing)."""
-        if not any(seat.type == "llm" for seat in s.seats) and not s.usage_act:
+        """Record the game in the usage ledger (games with a seat a model plays, hybrid seats included; others cost
+        next to nothing)."""
+        if not any(seat.model_seat for seat in s.seats) and not s.usage_act:
             return
         from .. import usage
         try:
@@ -2248,11 +2379,12 @@ class SessionManager:
                 stype = "human"
             if stype not in SEAT_TYPES:
                 raise ValueError(f"Unknown seat type '{stype}'")
-            g.set_controller(pid, stype, sc.get("handicap"), sc.get("auto"))
+            handicap, auto, block = _engine_seat(sc, stype, pid)
+            g.set_controller(pid, stype, handicap, auto)
             if sc.get("difficulty"):
                 g.set_difficulty(pid, sc["difficulty"])
             seats.append(Seat(player=pid, type=stype, name=sc.get("name") or sc.get("label") or "",
-                              llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {})))
+                              llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {}), hybrid=block))
         s = GameSession(g, seats, name or scn.get("name") or "Scenario")
         if register:
             self.register_new(s)

@@ -353,7 +353,7 @@ def _drain(session, pid: int, ln: SeatLine, kind: str, held: Optional[str] = Non
                 ln.items.popleft()
                 ln.current = (nid, epoch)
             try:
-                session._run_responder(pid, nid, (nid, entries), epoch=epoch)
+                session._run_responder(pid, nid, (nid, entries), epoch=epoch, kind=want)
             except BaseException:
                 log.exception("seat %s's answer to negotiation %s failed", pid, nid)
             finally:

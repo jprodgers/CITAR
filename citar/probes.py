@@ -1062,7 +1062,8 @@ class ProbeRunner:
         if s is not None:
             try:
                 with s.lock:
-                    subj = next((seat.player for seat in s.seats if seat.type == "llm"), None)
+                    # the subject: the seat a model plays (P3.6.7: an LLM seat, or a hybrid seat's model)
+                    subj = next((seat.player for seat in s.seats if seat.model_seat), None)
                     live["thoughts"] = [{"kind": t.get("kind"), "text": (t.get("text") or "")[:1500]}
                                         for t in (s.game.thoughts(subj) if subj is not None else [])][-6:]
             except Exception:

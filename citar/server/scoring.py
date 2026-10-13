@@ -59,9 +59,10 @@ def _digest_save(path: Path) -> Optional[dict]:
     summary = {}
     if metrics:
         m = Metrics(metrics)
+        # a hybrid seat's turns are its bot's: it stays out of the model ranking (P3.6.7, plan H4)
         summary = m.summary({st["player"]: {"name": state["names"][st["player"]], "controller": st["type"],
                                             "model": (st.get("llm") or {}).get("model") if st["type"] == "llm" else None}
-                             for st in seats})
+                             for st in seats if st.get("type") != "hybrid"})
     dry = {st["player"] for st in seats if (st.get("llm") or {}).get("provider") == "dryrun"}
     summary = {pid: row for pid, row in summary.items() if pid not in dry}
     bench = _benchmark_from_state(sess, seats, state)
@@ -121,7 +122,10 @@ def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
                          "run_id": s.benchmark.get("run_id"), "job_id": s.benchmark.get("job_id"),
                          "turns": max(0, s.game.turn - 1), "turn_limit": p["turn_limit"], "phase": p["phase"],
                          "performance": p["performance"], "score": p["score"], "best_bot_score": p["best_bot_score"]}
-            summary = {pid: row for pid, row in s.metrics_report()["summary"].items() if pid not in dry}
+            # a hybrid seat's turns are its bot's: it stays out of the model ranking (P3.6.7, plan H4)
+            hybrid = {st.player for st in s.seats if st.type == "hybrid"}
+            summary = {pid: row for pid, row in s.metrics_report()["summary"].items()
+                       if pid not in dry and pid not in hybrid}
             out[s.id] = {"name": s.name, "turn": s.game.turn, "summary": summary, "benchmark": bench}
     if SAVE_DIR.exists():
         seen = set(out)

@@ -385,12 +385,13 @@ class Pools(unittest.TestCase):
         def __init__(self):
             self._lines, self._responding, self.stopped = {}, {}, False
             self.seats = [types.SimpleNamespace(type="hybrid", llm={})]
-            self.ran, self.go = [], threading.Event()
+            self.ran, self.go, self.kinds = [], threading.Event(), []
 
-        def _run_responder(self, pid, nid, key, epoch=None):
+        def _run_responder(self, pid, nid, key, epoch=None, kind=None):
             if not self.ran:
                 self.go.wait(5)
             self.ran.append((nid, threading.current_thread().name.rsplit("-", 1)[0]))
+            self.kinds.append(kind)
 
     def test_each_answer_of_a_line_runs_on_its_own_kinds_pool(self):
         """A hybrid seat's bot-first pass and its model's answer share the seat's line, each on its own pool: a model's
@@ -408,6 +409,7 @@ class Pools(unittest.TestCase):
         s.go.set()
         self.assertTrue(until(lambda: len(s.ran) == 3 and not s._lines[0].running, 5), s.ran)
         self.assertEqual(s.ran, [(nid, f"{kind}-responder") for nid, kind in enumerate(kinds, 1)])
+        self.assertEqual(s.kinds, list(kinds), "each answer is told which kind it is (a hybrid seat's pass or answer)")
 
     def test_a_machines_place_goes_to_its_parked_lines_in_order(self):
         gate = responders._Machines()
