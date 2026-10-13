@@ -416,7 +416,7 @@ export class ChatModel {
  * `{left, width, bottom, maxHeight, tabs, active}`. */
 export function dockLayout({ width, height, turnBox, windows, active = null, margin = 10, gap = 8,
                              windowWidth = 340, minWidth = 260, tabWidth = 150, minTab = 96, tabHeight = 32,
-                             maxWindowHeight = 460, narrowAt = NARROW_WIDTH } = {}) {
+                             maxWindowHeight = 520, narrowAt = NARROW_WIDTH } = {}) {
   const W = Math.max(0, width || 0), H = Math.max(0, height || 0);
   const box = turnBox || { left: W - margin, top: H - margin, width: 0, height: 0 };
   const list = (windows || []).filter((w) => w && w.civ != null);

@@ -170,7 +170,7 @@ export class ChatDock {
     if (st.state === "clear") return null;
     const more = st.more ? ` (+${st.more})` : "";
     if (st.state === "answer") {
-      return el("button", { class: "end-turn blocked attention", "aria-disabled": "true", "data-chat": st.state,
+      return el("button", { class: "end-turn answer", "data-chat": st.state,
         title: `${st.name} waits for your answer: the turn cannot end while a chat you are in is open.${st.armed ? "\nArmed: the turn ends once every chat has closed." : ""}`,
         onclick: (e) => onClick(!!(e.ctrlKey || e.metaKey)) }, `Answer ${st.name} first${more}${st.armed ? " · armed" : ""}`);
     }

@@ -116,6 +116,7 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .minimap { position: absolute; left: 10px; top: 10px; border: 1px solid var(--border); border-radius: 4px; background: #000; cursor: pointer; }
 .banner { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: rgba(20,24,32,.92); border: 1px solid var(--border); font-weight: 600; z-index: 5; }
 /* End Turn while a chat holds the turn (chat.js): waiting with its countdown, armed to end when they answer */
+.end-turn.answer { background: #4a3b10; border-color: var(--warn); color: #ffe08a; }
 .end-turn.waiting { background: #2a2e38; border-color: var(--accent); }
 .end-turn.armed { background: #22324f; border-color: var(--good); }
 .end-turn .chat-cancel { opacity: .7; }
@@ -146,7 +147,10 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .chat-dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--gold); flex: none; }
 .chat-win.unread .chat-dot { display: inline-block; }
 .chat-body { display: flex; flex-direction: column; gap: 6px; padding: 8px; overflow-y: auto; min-height: 0; }
-.chat-log { flex: 1 1 auto; min-height: 60px; max-height: 220px; overflow-y: auto; background: #0d1016; border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+/* only the log gives up height when the window is short; the rest keeps its size and the body scrolls */
+.chat-body > * { flex: none; }
+.chat-body > .chat-log { flex: 1 1 auto; min-height: 90px; max-height: 240px; }
+.chat-log { overflow-y: auto; background: #0d1016; border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
 .chat-log .msg { max-width: 92%; }
 .chat-divider { text-align: center; color: var(--muted); font-size: 11px; margin: 4px 0; }
 .chat-note { color: var(--muted); font-size: 12px; text-align: center; margin: 2px 0; font-style: italic; }
