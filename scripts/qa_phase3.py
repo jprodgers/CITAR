@@ -55,10 +55,9 @@ which side answered each case; with ``--keep`` the server stays up for the brows
 (3-17: a person's seat on a standard map that wraps east-west, moved on through ``POST /api/games/{gid}/debug/ops``: a
 capital, scouts at the edges of what it explored, each era's techs, the whole map revealed; its view's minimap block
 moving from early to renaissance to information, its home box only growing, over the seam, and at every step the
-box of the land the seat explored joined to its home through land it explored; the route's gate; with ``--keep`` the server stays up for the browser checklist's F1), and later
-``machines``; ``all`` runs every
-part written so far. It needs the
-extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
+box of the land the seat explored joined to its home through land it explored; the route's gate; with ``--keep`` the
+server stays up for the browser checklist's F1), and later ``machines``; ``all`` runs every part written so far.
+It needs the extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
 from __future__ import annotations
 
@@ -2938,7 +2937,7 @@ def _joined_home(view: dict, anchor) -> tuple:
     """The land the seat explored joined to ``anchor`` (``[x, y]``) through land it explored, worked out from its view
     alone (each tile the view lists is explored; land is any terrain not in ``WATER``), and that land's box covered the
     short way round: what the engine's home box must be (design/phase3-features.md P3.7.2), no more, so that it tells
-    the seat nothing its own view does not. ``(None, set())`` without an anchor or one at sea."""
+    the seat nothing its own view does not. ``(None, set())`` without an anchor, or for one at sea or not explored."""
     w, h = view["width"], view["height"]
     wraps = (bool(view.get("wrap_x")), bool(view.get("wrap_y")))
     land = {t[0] for t in view.get("tiles") or [] if t[1] not in WATER}
