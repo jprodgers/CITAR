@@ -73,13 +73,13 @@ function grow(s, by, n, wrap) {
   return { start: lo, len: hi - lo + 1 };
 }
 
-/** `len` positions centred on `c`: clamped at the map's edges, round a wrapping axis. */
+/** `len` positions centred on `c`: round a wrapping axis; on one that does not, moved inside the map's edges, so the
+ * window keeps its size near an edge. */
 function centred(c, len, n, wrap) {
   if (len >= n) return { start: 0, len: n };
   const start = c - Math.floor(len / 2);
   if (wrap) return { start: mod(start, n), len };
-  const lo = Math.max(0, start), hi = Math.min(n - 1, start + len - 1);
-  return { start: lo, len: hi - lo + 1 };
+  return { start: Math.min(Math.max(0, start), n - len), len };
 }
 
 /** The positions of `a` that `b` also covers, from the first to the last along `a` (null when none): so a window is
@@ -156,7 +156,8 @@ export function exploredBox(tiles, width, height, wrapX, wrapY) {
  * The window a person's minimap shows (P3.7.3):
  *  1. the explored box (`explored`, exploredBox's), padded by PAD tiles, clamped on an axis that does not wrap;
  *  2. capped by the stage (the engine's `minimap.stage`): `early`, on an axis longer than EARLY's, to EARLY's size
- *     centred on the capital (or the explored box's middle), within the explored box; `renaissance`, to the home box
+ *     centred on the capital (or the explored box's middle; inside the map near an edge that does not wrap), within
+ *     the explored box; `renaissance`, to the home box
  *     (`home`, the engine's: the explored tiles of the home continent) padded by PAD, within the explored box;
  *     `information`, the whole map;
  *  3. united with `prev`, the window shown before (the smallest box covering both), so that it never shrinks.

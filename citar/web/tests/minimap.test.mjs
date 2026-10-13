@@ -65,6 +65,10 @@ test("early on a large map: the 44 by 28 tiles around the capital, within what w
   // the margin stops at an edge that does not wrap, and runs over the one that does
   const edge = computeWindow({ ...BIG, stage: "early", explored: { x0: 0, y0: 0, x1: 5, y1: 4 }, capital: [2, 2] });
   assert.deepEqual(box(edge), { x0: 77, y0: 0, x1: 8, y1: 7 });
+  // near an edge that does not wrap, the 44 rows keep their size, moved inside the map
+  const flat = { width: 80, height: 52, wrapX: false, wrapY: false };
+  const west = computeWindow({ ...flat, stage: "early", explored: { x0: 0, y0: 0, x1: 50, y1: 50 }, capital: [2, 49] });
+  assert.deepEqual(box(west), { x0: 0, y0: 24, x1: 43, y1: 51 });
   // without a capital, the explored box's middle
   const middle = computeWindow({ ...BIG, stage: "early", explored, capital: null });
   assert.deepEqual([middle.x0, middle.x1, middle.cols, middle.rows], [18, 61, 44, 28]);
