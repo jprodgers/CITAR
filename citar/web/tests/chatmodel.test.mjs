@@ -232,6 +232,7 @@ test("window state: your move, their move, closed, and no chat yet", () => {
   assert.equal(st.input, true, "a chat waiting on you is answered on anyone's turn");
   assert.deepEqual(st.can, { send: true, accept: true, reject: true, counter: false, withdraw: false, open: false });
   assert.equal(st.status.text, "Waiting for you, 3:12 left");
+  assert.deepEqual(st.count, { messages: 1, max: 30, left: 29, text: "1/30 messages", tone: "muted" });
   builder.add(m.draft(1), "give", { type: "gold", amount: 5 });
   assert.equal(m.windowState(1, 0, { name: "Rome" }).can.counter, true);
   assert.equal(m.windowState(1, 140000, { name: "Rome" }).status.text, "Waiting for you, 0:52 left");
@@ -246,11 +247,13 @@ test("window state: your move, their move, closed, and no chat yet", () => {
   assert.equal(st.input, false);
   assert.deepEqual(st.can, { send: false, accept: false, reject: false, counter: false, withdraw: true, open: false });
   assert.equal(st.status.text, "Waiting for Rome…", "no clock heard yet");
+  assert.equal(st.count.text, "4/30 messages");
   // closed
   m.applyNegotiation(view(3, [entry(1, false, "open"), entry(2, true, "counter"), entry(3, false, "reply"), entry(4, true, "reply"),
                               entry(5, false, "reject", "(no reply in time)")], { status: "rejected" }), 3000);
   st = m.windowState(1, 3000, { myTurn: true, name: "Rome" });
   assert.equal(st.mode, "closed");
+  assert.equal(st.count, null, "a closed chat has no count");
   assert.equal(st.can.open, true);
   assert.match(st.status.text, /^Chat #3 declined\./);
   for (const [s, text] of Object.entries(CLOSED_TEXT)) {
@@ -258,6 +261,22 @@ test("window state: your move, their move, closed, and no chat yet", () => {
     mm.applyNegotiation(view(8, [entry(1, true, "open"), { seq: 2, by: null, you: false, action: "close", message: "", note: "(no reply in time)" }], { status: s }), 0);
     assert.equal(mm.windowState(1, 0, { myTurn: false, name: "Rome" }).status.text, `Chat #8 ${text}. You can start a chat on your turn.`);
   }
+});
+
+test("the message count: from the entries when they are ahead of the view, close notes left out, warning near the cap", () => {
+  const m = new ChatModel(YOU);
+  const nv = view(4, [entry(1, true, "open"), entry(2, false, "reply")]);
+  m.applyNegotiation({ ...nv, max_messages: 5 }, 0);
+  assert.deepEqual(m.windowState(1, 0).count, { messages: 2, max: 5, left: 3, text: "2/5 messages", tone: "muted" });
+  m.applyNegotiation({ ...view(4, [entry(1, true, "open"), entry(2, false, "reply"), entry(3, true, "reply")]), max_messages: 5 }, 0);
+  // a stale view (two messages) after the read of three: the count stays at three
+  m.applyNegotiation({ ...nv, max_messages: 5 }, 0);
+  assert.equal(m.windowState(1, 0).count.messages, 3);
+  assert.equal(m.windowState(1, 0).count.tone, "warn", "two left");
+  // a status alone knows no cap: no count
+  const s = new ChatModel(YOU);
+  s.applyStatus(status(9, "waiting", { entries: 1 }), 0);
+  assert.equal(s.windowState(1, 0).count, null);
 });
 
 test("window state follows each status of the other side: queued, thinking, waiting, held, paused", () => {
@@ -375,9 +394,27 @@ test("a new chat takes the narrow window, unless you are answering another", () 
 
 function boxRect(it) { return { left: it.left, width: it.width, bottom: it.bottom, height: it.maxHeight }; }
 
-test("the dock never covers the End Turn box, at any size", () => {
+/** The game screen's panels at a size (style.css), each shown or not at random: the unit panel at the bottom left
+ * (up to 60% high), the city panel from the top down to 64 px (it hides the side panel), the side panel at the top
+ * right (up to 45%, 420 px), the minimap; and now and then a panel of any size anywhere. In the area's terms. */
+function panels(rand, width, height) {
+  const out = [];
+  const city = rand() < 0.3;
+  if (rand() < 0.4 && !city) out.push({ left: 10, top: 0, width: 330, height: Math.floor(height * 0.6 * rand()) + 40 });
+  if (city) out.push({ left: width - 10 - 380, top: 10, width: 380, height: height - 10 - 64 });
+  else out.push({ left: width - 10 - 320, top: 10, width: 320, height: Math.floor(Math.min(height * 0.45, 420) * rand()) + 30 });
+  out.push({ left: 10, top: 10, width: 200, height: 130 });
+  if (rand() < 0.2) {
+    const w = 40 + Math.floor(rand() * width / 2), h = 40 + Math.floor(rand() * height / 2);
+    out.push({ left: Math.floor(rand() * (width - w)), top: Math.floor(rand() * (height - h)), width: w, height: h });
+  }
+  for (const p of out) if (p.left === 10 && p.width === 330) p.top = height - 10 - p.height;   // the unit panel sits on the bottom edge
+  return out;
+}
+
+test("the dock never covers the End Turn box or a panel shown, at any size, and the active window is never folded", () => {
   const rand = rng(7);
-  let wides = 0, narrows = 0;
+  let wides = 0, narrows = 0, cleared = 0;
   for (let i = 0; i < 500; i++) {
     const width = 320 + Math.floor(rand() * 2300), height = 360 + Math.floor(rand() * 1100);
     const bw = 90 + Math.floor(rand() * Math.min(900, width - 20)), bh = 40 + Math.floor(rand() * 90);
@@ -385,11 +422,13 @@ test("the dock never covers the End Turn box, at any size", () => {
     const n = 1 + Math.floor(rand() * 8);
     const windows = Array.from({ length: n }, (_, k) => ({ civ: k + 1, minimised: rand() < 0.25 }));
     const active = windows[Math.floor(rand() * n)].civ;
-    const plan = dockLayout({ width, height, turnBox, windows, active });
+    const obstacles = rand() < 0.8 ? panels(rand, width, height) : [];
+    const plan = dockLayout({ width, height, turnBox, windows, active, obstacles });
     const box = { left: turnBox.left, width: turnBox.width, bottom: height - turnBox.top - turnBox.height, height: turnBox.height };
-    const where = `case ${i}: ${width}x${height}, box ${bw}x${bh}, ${n} windows`;
+    const where = `case ${i}: ${width}x${height}, box ${bw}x${bh}, ${n} windows, ${obstacles.length} panels`;
     if (plan.mode === "wide") {
       wides++;
+      if (obstacles.length) cleared++;
       assert.ok(width > NARROW_WIDTH, where);
       assert.equal(plan.items.length, n, `${where}: every window is a window or a tab`);
       for (const it of plan.items) {
@@ -397,10 +436,19 @@ test("the dock never covers the End Turn box, at any size", () => {
         assert.ok(it.left + it.width <= turnBox.left - 8 + 1e-9, `${where}: ${it.kind} ${it.civ} reaches the box`);
         assert.ok(it.left >= 10 - 1e-9, `${where}: off the left edge`);
         assert.ok(it.kind === "tab" || it.width >= 260, `${where}: a window too narrow to use`);
+        assert.ok(it.kind === "tab" || it.maxHeight >= Math.min(200, height - 20), `${where}: a window too short to use`);
+        for (const p of obstacles) {
+          const panel = { left: p.left, width: p.width, bottom: height - p.top - p.height, height: p.height };
+          assert.ok(!overlaps(boxRect(it), panel), `${where}: ${it.kind} ${it.civ} over a panel ${JSON.stringify(p)}`);
+        }
       }
       for (const a of plan.items) for (const b of plan.items) {
         if (a !== b) assert.ok(!overlaps(boxRect(a), boxRect(b)), `${where}: ${a.civ} and ${b.civ} overlap`);
       }
+      // the window last opened or brought up is a window: a click on its tab brings it up
+      const wanted = windows.find((w) => w.civ === active && !w.minimised);
+      if (wanted) assert.equal(plan.items.find((it) => it.civ === active).kind, "window", `${where}: the active window folded`);
+      if (windows.some((w) => !w.minimised)) assert.ok(plan.items.some((it) => it.kind === "window"), `${where}: every window folded`);
     } else {
       narrows++;
       assert.ok(plan.items.length <= 1, `${where}: one window at a time`);
@@ -411,7 +459,52 @@ test("the dock never covers the End Turn box, at any size", () => {
       if (plan.items.length) assert.equal(plan.items[0].civ, c.active);
     }
   }
-  assert.ok(wides > 100 && narrows > 50, `both layouts were tried (${wides} wide, ${narrows} narrow)`);
+  assert.ok(wides > 100 && narrows > 50 && cleared > 50, `both layouts were tried (${wides} wide, ${cleared} of them by panels; ${narrows} narrow)`);
+});
+
+test("wide, the windows keep clear of the panels: the unit panel's and the city panel's columns, under the side panel", () => {
+  const width = 1280, height = 740;
+  const turnBox = { left: 1280 - 10 - 290, top: 740 - 10 - 50, width: 290, height: 50 };
+  const windows = [1, 2].map((civ) => ({ civ, minimised: false }));
+  const unit = { left: 10, top: 740 - 10 - 420, width: 330, height: 420 };
+  const side = { left: 1280 - 10 - 320, top: 10, width: 320, height: 330 };
+  const city = { left: 1280 - 10 - 380, top: 10, width: 380, height: 740 - 10 - 64 };
+  const minimap = { left: 10, top: 10, width: 200, height: 130 };
+  // nothing open: the first next to End Turn, as tall as a window gets
+  const free = dockLayout({ width, height, turnBox, windows, active: 2 });
+  assert.deepEqual(free.items.map((it) => [it.civ, it.left + it.width, it.maxHeight]), [[1, 1280 - 10 - 290 - 8, 520], [2, 1280 - 10 - 290 - 8 - 340 - 8, 520]]);
+  // the unit panel and the side panel: the row starts right of the unit panel; the window under the side panel
+  // stops 8 px below it (its lower edge 400 px from the bottom)
+  const a = dockLayout({ width, height, turnBox, windows, active: 2, obstacles: [unit, side, minimap] });
+  assert.equal(a.mode, "wide");
+  assert.ok(a.items.every((it) => it.left >= 10 + 330 + 8), JSON.stringify(a.items));
+  assert.equal(a.items[0].maxHeight, 740 - 340 - 8 - 10);
+  // a city's panel (from the top down to 64 px above the bottom) takes its columns: the row ends left of it
+  const b = dockLayout({ width, height, turnBox, windows, active: 2, obstacles: [city, minimap] });
+  assert.ok(b.items.every((it) => it.left + it.width <= 1280 - 10 - 380 - 8), JSON.stringify(b.items));
+  assert.deepEqual(b.items.map((it) => it.kind), ["window", "window"]);
+  // the unit panel too, on a narrower screen: no room left for a window beside the tabs, so narrow (one window above
+  // End Turn, the panel the person opened lying over it)
+  const c = dockLayout({ width: 1000, height, turnBox: { ...turnBox, left: 1000 - 10 - 290 }, windows, active: 2, obstacles: [unit] });
+  assert.equal(c.mode, "narrow");
+  assert.deepEqual(c.items.map((it) => it.civ), [2]);
+});
+
+test("wide never folds every window: with no room for one beside the others' tabs, one window and a strip of tabs", () => {
+  // the review's probe: 1000 px, End Turn 280 px, six windows, the first brought up
+  const width = 1000, height = 800;
+  const turnBox = { left: 1000 - 10 - 280, top: 800 - 10 - 50, width: 280, height: 50 };
+  const windows = [1, 2, 3, 4, 5, 6].map((civ) => ({ civ, minimised: false }));
+  const plan = dockLayout({ width, height, turnBox, windows, active: 1 });
+  assert.equal(plan.mode, "narrow");
+  assert.deepEqual(plan.items.map((it) => it.civ), [1], "the one brought up shows");
+  assert.deepEqual(plan.container.tabs, [1, 2, 3, 4, 5, 6]);
+  // each tab's click brings its window up
+  for (const civ of [2, 6]) assert.deepEqual(dockLayout({ width, height, turnBox, windows, active: civ }).items.map((it) => it.civ), [civ]);
+  // with room beside the tabs: wide, the one brought up a window (and the newest beside it)
+  const roomy = dockLayout({ width: 1400, height, turnBox: { ...turnBox, left: 1400 - 10 - 280 }, windows, active: 1 });
+  assert.equal(roomy.mode, "wide");
+  assert.deepEqual(roomy.items.filter((it) => it.kind === "window").map((it) => it.civ), [1, 6]);
 });
 
 test("at 700 px one window shows, full width above End Turn, with a tab for each", () => {
@@ -428,8 +521,13 @@ test("at 700 px one window shows, full width above End Turn, with a tab for each
   const none = dockLayout({ width, height, turnBox, windows: [{ civ: 1, minimised: true }], active: 1 });
   assert.deepEqual(none.items, []);
   assert.deepEqual(none.container.tabs, [1]);
-  // one pixel wider, with room: side by side again
-  assert.equal(dockLayout({ width: 701, height, turnBox: { ...turnBox, left: 701 - 10 - 330 }, windows, active: 2 }).mode, "wide");
+  // one pixel wider, with room for a window beside the tabs: side by side again
+  const small = { ...turnBox, left: 701 - 10 - 90, width: 90 };
+  const wider = dockLayout({ width: 701, height, turnBox: small, windows, active: 2 });
+  assert.equal(wider.mode, "wide");
+  assert.deepEqual(wider.items.filter((it) => it.kind === "window").map((it) => it.civ), [2]);
+  // ... but not when no window fits there: every window folded would leave nothing a tab could bring up
+  assert.equal(dockLayout({ width: 701, height, turnBox: { ...turnBox, left: 701 - 10 - 330 }, windows, active: 2 }).mode, "narrow");
 });
 
 test("wide: from right to left in the order they opened; the oldest become tabs when they do not fit", () => {

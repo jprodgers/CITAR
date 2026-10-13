@@ -266,11 +266,23 @@ export class ChatModel {
     return [...this.chats.values()].filter((c) => c.status === "open").sort((a, b) => a.nid - b.nid);
   }
 
+  /** How many messages an open chat has had against the game's cap (`{messages, max, left, text, tone}`, or null when
+   * the cap is not known yet): the message that would pass the cap closes the chat instead, so the window says so
+   * (`warn` with two or fewer left). The game's close notes are not messages. */
+  messageCount(chat) {
+    if (!chat || chat.status !== "open" || !(chat.maxMessages > 0)) return null;
+    const said = chat.entries.filter((e) => e.action !== "close").length;
+    const messages = Math.max(chat.messages || 0, said);
+    const left = Math.max(0, chat.maxMessages - messages);
+    return { messages, max: chat.maxMessages, left, text: `${messages}/${chat.maxMessages} messages`,
+             tone: left <= 2 ? "warn" : "muted" };
+  }
+
   /** What a window with `civ` shows and allows at `now`:
    * `{mode: new|your_move|their_move|closed, chat, input, can: {send, accept, reject, counter, withdraw, open},
-   *   status: {text, leftS, tone}}`. Strict turn-taking: the text box and the answers work only on your move; on
-   * theirs you may only withdraw (the way out of waiting, since End Turn waits for the chat). A chat is opened on
-   * your own turn (`myTurn`), as the engine requires. `name` names the civilization. */
+   *   status: {text, leftS, tone}, count: messageCount}`. Strict turn-taking: the text box and the answers work only
+   * on your move; on theirs you may only withdraw (the way out of waiting, since End Turn waits for the chat). A chat
+   * is opened on your own turn (`myTurn`), as the engine requires. `name` names the civilization. */
   windowState(civ, now, { myTurn = false, name = "", draft = null } = {}) {
     const chat = this.chatWith(civ);
     const who = name || (chat && chat.withName) || "They";
@@ -282,17 +294,19 @@ export class ChatModel {
       const lead = chat ? `Chat #${chat.nid} ${CLOSED_TEXT[chat.status] || chat.status}.` : "";
       const text = myTurn ? `${lead}${lead ? " " : ""}Write to start a chat, or build a deal below.`
         : `${lead}${lead ? " " : ""}You can start a chat on your turn.`;
-      return { mode, chat, input: myTurn, can: { ...none, open: myTurn }, status: { text: text.trim(), leftS: null, tone: "muted" } };
+      return { mode, chat, input: myTurn, can: { ...none, open: myTurn }, status: { text: text.trim(), leftS: null, tone: "muted" },
+               count: null };
     }
     const timing = chat.clock;
     const left = leftAt(timing, now);
+    const count = this.messageCount(chat);
     if (chat.waitingOn === this.you) {
       const tone = left != null && left < 60 ? "warn" : "you";
       const text = timing && timing.paused ? "Waiting for you (the game is paused)"
         : left != null ? `Waiting for you, ${fmtClock(left)} left` : "Your move";
       const can = { ...none, send: true, reject: true, counter: hasDeal,
                     accept: !!chat.proposal && chat.proposalByYou === false };
-      return { mode: "your_move", chat, input: true, can, status: { text, leftS: left, tone } };
+      return { mode: "your_move", chat, input: true, can, status: { text, leftS: left, tone }, count };
     }
     const live = chat.live && chat.live.ver >= chat.ver ? chat.live : null;
     let text;
@@ -308,7 +322,7 @@ export class ChatModel {
     else if (left != null) text = `Waiting for ${who}, ${fmtClock(left)} left`;
     else text = `Waiting for ${who}…`;
     if (live && left != null && !(timing && timing.paused)) text += ` · ${fmtClock(left)} left`;
-    return { mode: "their_move", chat, input: false, can: { ...none, withdraw: true }, status: { text, leftS: left, tone: "them" } };
+    return { mode: "their_move", chat, input: false, can: { ...none, withdraw: true }, status: { text, leftS: left, tone: "them" }, count };
   }
 
   // ------------------------------------------------------------------ End Turn
@@ -412,69 +426,39 @@ export class ChatModel {
   }
 }
 
-/** Where the docked windows go (P3.5.6): along the bottom edge, to the left of the End Turn box, never over it.
+/** Where the docked windows go (P3.5.6): along the bottom edge, to the left of the End Turn box, never over it, and
+ * clear of the game screen's panels when there is room.
  *
  * `width`/`height` are the game area's; `turnBox` is the End Turn box's rectangle in it ({left, top, width,
- * height}); `windows` are the model's, oldest first ({civ, minimised}); `active` the window shown when narrow, and
- * the one kept open when wide.
+ * height}); `obstacles` the panels shown over the map (a unit's or a city's, the side panel, the minimap), as
+ * rectangles in the same terms; `windows` are the model's, oldest first ({civ, minimised}); `active` the window shown
+ * when narrow, and the one kept open when wide.
  *
  * Wide: windows side by side from right to left in the order they opened, the first next to the End Turn box;
  * minimised ones are tabs at the left end of the row; when the open ones do not fit, the oldest but `active` are
- * made tabs (`overflow`) until they do. Narrow (`width` at most NARROW_WIDTH, or no room beside the box for one window, or
- * for every window as a tab): one window at a time, full width above the End Turn box, under a strip with a tab
- * per window.
+ * made tabs (`overflow`) until they do. A panel that comes down into the row's lowest `minHeight` (the unit panel at
+ * the bottom left, the city panel above End Turn) takes its columns from the row, which is the free stretch nearest
+ * the End Turn box; a panel higher up (the side panel, the minimap) lowers the windows under it. Narrow (`width` at
+ * most NARROW_WIDTH, or no room in the row for one window beside a tab for each of the others): one window at a
+ * time, full width above the End Turn box, under a strip with a tab per window (the panels the person opened lie
+ * over it there: style.css).
  *
  * Returns `{mode, items, overflow, container}`: items `{civ, kind: window|tab, left, width, bottom, maxHeight}` in
  * pixels from the area's left and bottom edges (a tab's `maxHeight` is its height). Narrow, `container` is the box
  * that holds the strip (`tabs`, the `active` one marked) over the one window (`items`' only entry, if any is open):
  * `{left, width, bottom, maxHeight, tabs, active}`. */
-export function dockLayout({ width, height, turnBox, windows, active = null, margin = 10, gap = 8,
-                             windowWidth = 340, minWidth = 260, tabWidth = 150, minTab = 96, tabHeight = 32,
-                             maxWindowHeight = 520, narrowAt = NARROW_WIDTH } = {}) {
+export function dockLayout({ width, height, turnBox, windows, active = null, obstacles = [], margin = 10, gap = 8,
+                             windowWidth = 340, minWidth = 260, minHeight = 200, tabWidth = 150, minTab = 96,
+                             tabHeight = 32, maxWindowHeight = 520, narrowAt = NARROW_WIDTH } = {}) {
   const W = Math.max(0, width || 0), H = Math.max(0, height || 0);
   const box = turnBox || { left: W - margin, top: H - margin, width: 0, height: 0 };
   const list = (windows || []).filter((w) => w && w.civ != null);
-  const right = Math.min(W - margin, box.left - gap);   // the row's right edge: left of the End Turn box
-  const room = right - margin;
   const winHeight = Math.max(80, Math.min(maxWindowHeight, H - 2 * margin));
-  const wide = W > narrowAt && room >= minWidth && list.length * (minTab + gap) - gap <= room;
-  if (wide) {
-    const order = list.map((w) => ({ civ: w.civ, minimised: !!w.minimised }));
-    const overflow = [];
-    const fits = () => {
-      const open = order.filter((w) => !w.minimised);
-      const tabs = order.length - open.length;
-      const ww = open.length ? Math.min(windowWidth, Math.floor((room - (open.length - 1) * gap - tabs * (minTab + gap)) / open.length)) : 0;
-      return { ok: !open.length || ww >= minWidth, ww, tabs };
-    };
-    let f = fits();
-    while (!f.ok) {
-      // the oldest fold first, but never the active one (the one last opened or brought up): a tab clicked to bring
-      // its window up must come up, and another fold in its place
-      const open = order.filter((w) => !w.minimised);
-      const fold = open.find((w) => w.civ !== active) || open[0];
-      fold.minimised = true;
-      overflow.push(fold.civ);
-      f = fits();
-    }
-    const open = order.filter((w) => !w.minimised);
-    const tabs = order.filter((w) => w.minimised);
-    const items = [];
-    let x = right;
-    for (const w of open) {                 // the oldest next to the End Turn box, the newer ones to its left
-      x -= f.ww;
-      items.push({ civ: w.civ, kind: "window", left: x, width: f.ww, bottom: margin, maxHeight: winHeight });
-      x -= gap;
-    }
-    const tabRoom = x - margin;            // x is already a gap left of the last window
-    const tw = tabs.length ? Math.max(minTab, Math.min(tabWidth, Math.floor((tabRoom - (tabs.length - 1) * gap) / tabs.length))) : 0;
-    let tx = margin;
-    for (const w of tabs) {                 // the tabs at the left end, oldest first
-      items.push({ civ: w.civ, kind: "tab", left: tx, width: tw, bottom: margin, maxHeight: tabHeight });
-      tx += tw + gap;
-    }
-    return { mode: "wide", items, overflow, container: null };
-  }
+  const wide = W > narrowAt
+    ? wideRow({ H, W, box, list, active, obstacles, margin, gap, windowWidth, minWidth, minHeight: Math.min(minHeight, winHeight),
+                minTab, tabWidth, tabHeight, winHeight })
+    : null;
+  if (wide) return wide;
   // narrow: one window, above the End Turn box, under its tab strip
   const shown = list.find((w) => w.civ === active && !w.minimised) ? active : null;
   const bottom = Math.max(margin, H - box.top + gap);
@@ -484,6 +468,65 @@ export function dockLayout({ width, height, turnBox, windows, active = null, mar
                                         maxHeight: Math.max(0, maxHeight - tabHeight - 4) }];
   const container = list.length ? { left: margin, width: full, bottom, maxHeight, tabs: list.map((w) => w.civ), active: shown } : null;
   return { mode: "narrow", items, overflow: [], container };
+}
+
+/** dockLayout's wide plan, or null when the windows cannot lie side by side (no free stretch holds a window, or even
+ * one would not fit beside a tab for each of the others: folding the last open window, or the one just brought up,
+ * would leave nothing a tab's click could bring up). */
+function wideRow({ W, H, box, list, active, obstacles, margin, gap, windowWidth, minWidth, minHeight, minTab, tabWidth,
+                   tabHeight, winHeight }) {
+  // the panels in the row's terms: from the left edge, and their lower edge from the bottom
+  const panels = (obstacles || []).filter((o) => o && o.width > 0 && o.height > 0)
+    .map((o) => ({ left: o.left, right: o.left + o.width, bottom: H - o.top - o.height }));
+  const floor = margin + minHeight + gap;   // a panel whose lower edge is under this takes its columns from the row
+  let spans = [[margin, Math.min(W - margin, box.left - gap)]];
+  for (const p of panels) {
+    if (p.bottom >= floor) continue;
+    const a = p.left - gap, b = p.right + gap;
+    spans = spans.flatMap(([l, r]) => (b <= l || a >= r ? [[l, r]] : [[l, a], [b, r]].filter(([x, y]) => y > x)));
+  }
+  const span = spans.filter(([l, r]) => r - l >= minWidth).pop();   // the free stretch nearest End Turn
+  if (!span) return null;
+  const [lo, right] = span;
+  const room = right - lo;
+  if (list.length * (minTab + gap) - gap > room) return null;
+  const order = list.map((w) => ({ civ: w.civ, minimised: !!w.minimised }));
+  const overflow = [];
+  const fits = () => {
+    const open = order.filter((w) => !w.minimised);
+    const tabs = order.length - open.length;
+    const ww = open.length ? Math.min(windowWidth, Math.floor((room - (open.length - 1) * gap - tabs * (minTab + gap)) / open.length)) : 0;
+    return { ok: !open.length || ww >= minWidth, ww, open };
+  };
+  let f = fits();
+  while (!f.ok) {
+    // the oldest fold first, never the active one (the one last opened or brought up): a tab clicked to bring its
+    // window up must come up, and another fold in its place. With one left that does not fit, narrow instead.
+    if (f.open.length <= 1) return null;
+    const fold = f.open.find((w) => w.civ !== active);
+    fold.minimised = true;
+    overflow.push(fold.civ);
+    f = fits();
+  }
+  // how tall a window over columns [l, r] may be: under every panel above it
+  const tallest = (l, r) => panels.reduce((h, p) => (p.bottom >= floor && p.left < r + gap && p.right > l - gap
+    ? Math.min(h, p.bottom - gap - margin) : h), winHeight);
+  const items = [];
+  let x = right;
+  for (const w of f.open) {               // the oldest next to the End Turn box, the newer ones to its left
+    x -= f.ww;
+    items.push({ civ: w.civ, kind: "window", left: x, width: f.ww, bottom: margin, maxHeight: tallest(x, x + f.ww) });
+    x -= gap;
+  }
+  const tabs = order.filter((w) => w.minimised);
+  const tabRoom = x - lo;                 // x is already a gap left of the last window
+  const tw = tabs.length ? Math.max(minTab, Math.min(tabWidth, Math.floor((tabRoom - (tabs.length - 1) * gap) / tabs.length))) : 0;
+  let tx = lo;
+  for (const w of tabs) {                 // the tabs at the row's left end, oldest first
+    items.push({ civ: w.civ, kind: "tab", left: tx, width: tw, bottom: margin, maxHeight: tabHeight });
+    tx += tw + gap;
+  }
+  return { mode: "wide", items, overflow, container: null };
 }
 
 /** Whether two rectangles in the dock's terms ({left, width, bottom, height} from the area's left and bottom) meet. */
