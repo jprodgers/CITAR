@@ -110,10 +110,11 @@ function rng(seed) {
   };
 }
 
-/** The chats as the server keeps them, and what the chat route answers (`prefix`: answer with only the first n
+/** The chats as the server keeps them. `view` is a chat as the view's `diplomacy` block lists it (no clock: the real
+ * view has none), `route` as the chat route answers it, with its `clock` (`prefix`: answer with only the first n
  * entries, as a read that left before the last entry would). */
 class Server {
-  constructor() { this.chats = new Map(); this.reads = []; this.prefix = null; }
+  constructor() { this.chats = new Map(); this.reads = []; this.prefix = null; this.max = 30; }
   chat(nid, withCiv, name) { const c = { nid, with: withCiv, name, status: "open", history: [], proposal: null, byYou: null }; this.chats.set(nid, c); return c; }
   say(nid, you, action = "reply", message = "", extra = {}) {
     const c = this.chats.get(nid);
@@ -129,15 +130,29 @@ class Server {
     const last = history[history.length - 1];
     const status = history.length === c.history.length ? c.status : "open";
     return { id: nid, with: c.with, with_name: c.name, status, you_initiated: !!(history[0] && history[0].you),
-             your_move: status === "open" && !!last && !last.you, turn: 4, messages: history.length, max_messages: 30,
-             current_proposal: c.proposal, proposal_by_you: c.byYou, history,
-             clock: { waiting_on: status !== "open" ? null : last && !last.you ? YOU : c.with, kind: "model", left_s: 300, paused: false } };
+             your_move: status === "open" && !!last && !last.you, turn: 4, messages: history.length, max_messages: this.max,
+             current_proposal: c.proposal, proposal_by_you: c.byYou, history };
+  }
+  route(nid, n = null) {
+    const v = this.view(nid, n);
+    const last = v.history[v.history.length - 1];
+    return { ...v, clock: { waiting_on: v.status !== "open" ? null : last && !last.you ? YOU : v.with, kind: "model", left_s: 300, paused: false } };
+  }
+  /** The view's chats as they stand: the open ones and the rest. */
+  diplomacy() {
+    const all = [...this.chats.keys()].map((nid) => this.view(nid));
+    return { open_negotiations: all.filter((v) => v.status === "open"), recent_negotiations: all.filter((v) => v.status !== "open") };
   }
 }
 
-function makeGame({ myTurn = true, width = 1366, height = 860, boxWidth = 300 } = {}) {
+/** The turn's other decisions, as GameScreen.turnBlockers reads them from the view. */
+function blockersOf(view) {
+  return (view.alerts || []).filter((a) => ["research", "idle_city"].includes(a.type));
+}
+
+function makeGame({ myTurn = true, width = 1366, height = 860, boxWidth = 300, obstacles = [] } = {}) {
   const server = new Server();
-  const state = { now: 0, ended: [], tools: [], topbars: 0, button: null };
+  const state = { now: 0, ended: [], blocked: 0, clicks: [], syncs: 0, viewFails: 0, nextView: null, tools: [], topbars: 0, button: null };
   const host = new FakeElement("div");
   host.clientWidth = width; host.clientHeight = height;
   host._rect = { left: 0, top: 44, width, height };
@@ -147,7 +162,7 @@ function makeGame({ myTurn = true, width = 1366, height = 860, boxWidth = 300 } 
     you: YOU, myTurn,
     rules: { resources: { Iron: { resourceType: "Strategic" }, Wheat: { resourceType: "Bonus" } }, techs: { Writing: {} }, speeds: {} },
     view: {
-      turn: 4, current_player: YOU, you: YOU, spectator: false, config: { speed: "Standard" }, cities: [],
+      turn: 4, current_player: YOU, you: YOU, spectator: false, config: { speed: "Standard" }, cities: [], alerts: [],
       empire: { gold: 120, per_turn: { gold: 4 }, strategic_resources: { Iron: { available: 2 } }, luxuries: {} },
       players: [{ id: 0, name: "Greece", color: "#36f" }, { id: 1, name: "Rome", color: "#c33" }, { id: 2, name: "Persia", color: "#cc3" }],
       diplomacy: { players: [{ id: 1, name: "Rome", trade_options: { their_gold: 80, they_could_give: { luxuries: ["Silk"] }, you_could_give: { strategic: { Iron: 2 } }, agreements_possible_now: ["open_borders"] } },
@@ -165,18 +180,45 @@ function makeGame({ myTurn = true, width = 1366, height = 860, boxWidth = 300 } 
       }
       return {};
     },
-    async endTurn(force) { state.ended.push(force); },
-    renderTopbar() { state.topbars++; state.button = dock.endTurnButton((force) => onEndTurn(force)); },
+    // as GameScreen.syncView: a view fetched now (the server's chats as they stand, and what `nextView` adds), or,
+    // when the fetch fails (`viewFails`), the view in hand stays
+    async syncView() {
+      state.syncs++;
+      if (state.viewFails > 0) { state.viewFails--; return; }
+      const extra = state.nextView ? state.nextView() : {};
+      game.view = { ...game.view, diplomacy: { ...game.view.diplomacy, ...server.diplomacy() }, ...extra };
+      dock.onView(game.view);
+    },
+    // as GameScreen.endTurn: the turn's other decisions stop a plain end
+    async endTurn(force) {
+      if (!game.myTurn) return;
+      if (blockersOf(game.view).length && !force) { state.blocked++; return; }
+      state.ended.push(force);
+    },
+    renderTopbar() {
+      state.topbars++;
+      // the game screen's own End Turn when no chat holds the turn
+      state.button = dock.endTurnButton((force) => onEndTurn(force)) || plainEndTurn();
+    },
   };
-  function onEndTurn(force) {
-    const st = dock.endTurnState();
-    if (st.state === "answer") return dock.open(st.with);
-    if (st.state === "armed") return dock.disarm();
-    if (st.state === "waiting") return dock.arm(force);
-    return game.endTurn(force);
+  function plainEndTurn() {
+    const b = new FakeElement("button");
+    b.setAttribute("data-chat", "none");
+    b.append("End Turn");
+    b.addEventListener("click", (e) => onEndTurn(!!(e.ctrlKey || e.metaKey)));
+    return b;
   }
-  const dock = new ChatDock(game, { host, turnBox, now: () => state.now, timers: {},
-                                    fetchChat: async (nid) => { server.reads.push(nid); return server.view(nid, state.prefix ? state.prefix(nid) : null); } });
+  // as GameScreen.onEndTurn: a thin caller of the dock's decision
+  function onEndTurn(force) {
+    if (!game.myTurn) return;
+    const blockers = blockersOf(game.view);
+    const next = dock.endTurnClick(force, blockers);
+    state.clicks.push(next);
+    if (next === "blocked") { state.blocked++; return; }
+    if (next === "end") return game.endTurn(force);
+  }
+  const dock = new ChatDock(game, { host, turnBox, obstacles, now: () => state.now, timers: {},
+                                    fetchChat: async (nid) => { server.reads.push(nid); return server.route(nid, state.prefix ? state.prefix(nid) : null); } });
   return { game, dock, server, state, host };
 }
 
@@ -386,6 +428,7 @@ test("End Turn: waiting with a countdown, armed by a click, ending the turn once
   server.say(7, true, "open", "A gift for you");
   game.view.diplomacy.open_negotiations = [server.view(7)];
   dock.onView(game.view);
+  await flush();                  // the view has no clock: the chat is read for it
   game.renderTopbar();
   let btn = state.button;
   assert.equal(btn.getAttribute("data-chat"), "waiting");
@@ -410,10 +453,13 @@ test("End Turn: waiting with a countdown, armed by a click, ending the turn once
                   status: "accepted", position: null, eta_s: null, deadline: null });
   await flush(); await flush();
   assert.deepEqual(state.ended, [false]);
+  assert.equal(state.syncs, 1, "on a view fetched after the close");
+  assert.deepEqual(state.clicks, ["arm", "disarm", "arm"]);
   dock.tick();
   dock.onView(game.view);
   await flush();
   assert.deepEqual(state.ended, [false], "only once");
+  assert.equal(state.syncs, 1);
   assert.equal(dock.model.armed, null);
 });
 
@@ -527,4 +573,313 @@ test("a spectator gets no windows", () => {
   assert.equal(dock.root.style.display, "none");
   dock.onStatus({ type: "negotiation_status", negotiation: 1, players: [1, 2], state: "thinking" });
   assert.equal(dock.windows.size, 0);
+});
+
+test("armed End Turn ends the turn on a view fetched after the close: a decision the deal brought stops a plain arming, not a Ctrl one", async () => {
+  for (const ctrl of [false, true]) {
+    const { game, dock, server, state } = makeGame();
+    dock.onView(game.view);
+    server.chat(7, 1, "Rome");
+    server.say(7, true, "open", "Your gold for my technology?");
+    game.view.diplomacy.open_negotiations = [server.view(7)];
+    dock.onView(game.view);
+    await flush();
+    game.renderTopbar();
+    state.button.click(ctrl ? { ctrlKey: true } : {});
+    assert.equal(dock.model.armed.force, ctrl);
+    // the technology they give finishes the research: the view after the close asks for a new one, which the view
+    // in hand (fetched before the deal) does not
+    state.nextView = () => ({ alerts: [{ type: "research", text: "Choose a research." }] });
+    server.say(7, false, "accept", "Done.");
+    dock.onStatus({ type: "negotiation_status", negotiation: 7, players: [0, 1], waiting_on: null, kind: null, state: "closed",
+                    status: "accepted", position: null, eta_s: null, deadline: null, entries: 2 });
+    await flush(); await flush();
+    assert.equal(state.syncs, 1, "a view fetched after the close");
+    if (ctrl) {
+      assert.deepEqual(state.ended, [true], "Ctrl armed it: the turn ends anyway");
+    } else {
+      assert.deepEqual(state.ended, [], "the new decision stops it, as End Turn would");
+      assert.equal(state.blocked, 1);
+    }
+    assert.equal(dock.model.armed, null, "fired once");
+    state.now += 5000;
+    dock.tick();
+    await flush();
+    assert.equal(state.syncs, 1, "and only once");
+  }
+});
+
+test("armed End Turn whose fresh view did not come stays armed and tries again a second later; a chat opened meanwhile holds it", async () => {
+  const { game, dock, server, state } = makeGame();
+  dock.onView(game.view);
+  server.chat(7, 1, "Rome");
+  server.say(7, true, "open", "Peace?");
+  game.view.diplomacy.open_negotiations = [server.view(7)];
+  dock.onView(game.view);
+  await flush();
+  game.renderTopbar();
+  state.button.click();
+  state.viewFails = 1;
+  server.say(7, false, "reject", "No.");
+  dock.onStatus({ type: "negotiation_status", negotiation: 7, players: [0, 1], waiting_on: null, kind: null, state: "closed",
+                  status: "rejected", position: null, eta_s: null, deadline: null, entries: 2 });
+  await flush(); await flush();
+  assert.equal(state.syncs, 1);
+  assert.deepEqual(state.ended, []);
+  assert.deepEqual(dock.model.armed, { turnKey: "4:0", force: false }, "armed again");
+  dock.tick();
+  await flush();
+  assert.equal(state.syncs, 1, "not at once: a second later");
+  // meanwhile the person opened a chat with Persia: the fresh view lists it, so the arming holds for it
+  state.nextView = () => {
+    if (!server.chats.has(9)) { server.chat(9, 2, "Persia"); server.say(9, true, "open", "And you?"); }
+    return {};
+  };
+  state.now += 1000;
+  dock.tick();
+  await flush(); await flush();
+  assert.equal(state.syncs, 2);
+  assert.deepEqual(state.ended, []);
+  assert.ok(dock.model.armed, "armed still, for Persia's answer");
+  game.renderTopbar();
+  assert.equal(state.button.getAttribute("data-chat"), "armed");
+  // Persia answers no: the turn ends, on a view fetched then
+  state.nextView = null;
+  server.say(9, false, "reject", "No.");
+  dock.onStatus({ type: "negotiation_status", negotiation: 9, players: [0, 2], waiting_on: null, kind: null, state: "closed",
+                  status: "rejected", position: null, eta_s: null, deadline: null, entries: 2 });
+  await flush(); await flush();
+  assert.equal(state.syncs, 3);
+  assert.deepEqual(state.ended, [false]);
+});
+
+test("End Turn's click: answer first, cancel, the turn's other decisions, arm, end", async () => {
+  const { game, dock, server, state } = makeGame();
+  const click = async (ctrl = false) => { game.renderTopbar(); state.button.click(ctrl ? { ctrlKey: true } : {}); await flush(); };
+  dock.onView(game.view);
+  // nothing holds the turn: a click ends it, unless decisions are left (Ctrl ends it anyway)
+  game.view.alerts = [{ type: "research", text: "Choose a research." }];
+  await click();
+  await click(true);
+  assert.deepEqual(state.clicks, ["blocked", "end"]);
+  assert.deepEqual(state.ended, [true]);
+  // a chat waiting on Rome: a plain click with decisions left goes to them and arms nothing; Ctrl arms anyway
+  server.chat(3, 1, "Rome");
+  server.say(3, true, "open", "Hello");
+  game.view.diplomacy.open_negotiations = [server.view(3)];
+  dock.onView(game.view);
+  await flush();
+  await click();
+  assert.equal(dock.model.armed, null, "nothing armed");
+  assert.equal(state.blocked, 2);
+  await click(true);
+  assert.deepEqual(dock.model.armed, { turnKey: "4:0", force: true });
+  // armed: a click cancels
+  await click();
+  assert.equal(dock.model.armed, null);
+  // with nothing left to decide, a plain click arms
+  game.view.alerts = [];
+  await click();
+  assert.deepEqual(dock.model.armed, { turnKey: "4:0", force: false });
+  // a chat waiting on you: the click opens it, decisions or not
+  server.say(3, false, "reply", "Well?");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 3 } });
+  await flush();
+  dock.close(1);
+  game.view.alerts = [{ type: "idle_city", text: "A city has nothing to build." }];
+  await click();
+  assert.ok(dock.windows.get(1), "its window opened");
+  assert.equal(focused, dock.windows.get(1).text);
+  assert.deepEqual(state.clicks, ["blocked", "end", "blocked", "arm", "disarm", "arm", "open"]);
+  assert.deepEqual(state.ended, [true]);
+  // not your turn: nothing
+  game.myTurn = false;
+  assert.equal(dock.endTurnClick(false, []), "none");
+});
+
+test("after a page load an open chat's clock is read once, so its window and End Turn count down", async () => {
+  const { game, dock, server, state } = makeGame();
+  server.chat(5, 1, "Rome");
+  server.say(5, false, "open", "Silk for gold?");
+  server.chat(6, 2, "Persia");
+  server.say(6, true, "open", "Peace?");
+  // the first view (a reload mid-chat): no clock in it, and nothing has changed for a status to say so
+  game.view.diplomacy.open_negotiations = [server.view(5), server.view(6)];
+  dock.onView(game.view);
+  await flush();
+  assert.deepEqual([...server.reads].sort(), [5, 6], "each read once");
+  const rome = dock.windows.get(1), persia = dock.windows.get(2);
+  assert.equal(rome.status.textContent, "Waiting for you, 5:00 left");
+  assert.equal(persia.status.textContent, "Waiting for Persia, 5:00 left");
+  game.renderTopbar();
+  assert.equal(state.button.textContent, "Answer Rome first");
+  state.now += 30000;
+  dock.tick();
+  assert.equal(rome.status.textContent, "Waiting for you, 4:30 left");
+  // more views of the same chats ask nothing more
+  dock.onView(game.view);
+  dock.onView(game.view);
+  await flush();
+  assert.equal(server.reads.length, 2);
+  // a view that shows a chat moving before its status came: read once more, at the new version
+  server.say(6, false, "reply", "What do you offer?");
+  game.view.diplomacy.open_negotiations = [server.view(5), server.view(6)];
+  dock.onView(game.view);
+  dock.onView(game.view);
+  await flush();
+  assert.deepEqual(server.reads.slice(2), [6]);
+  assert.equal(persia.status.textContent, "Waiting for you, 5:00 left");
+});
+
+test("a window closed with ✕ comes back with the other side's news: the chat closing, or their word", async () => {
+  const { game, dock, server } = makeGame();
+  // a page load's recent chats are not news: no window for them
+  server.chat(2, 2, "Persia");
+  server.say(2, true, "open", "Hello");
+  server.say(2, false, "reject", "No.");
+  game.view.diplomacy.recent_negotiations = [server.view(2)];
+  dock.onView(game.view);
+  await flush();
+  assert.equal(dock.windows.get(2), undefined);
+  // a chat to Rome, its window closed while Rome thinks
+  server.chat(4, 1, "Rome");
+  server.say(4, true, "open", "Iron for silk?");
+  game.view.diplomacy.open_negotiations = [server.view(4)];
+  dock.onView(game.view);
+  await flush();
+  dock.close(1);
+  dock.onStatus({ type: "negotiation_status", negotiation: 4, players: [0, 1], waiting_on: 1, kind: "model", state: "thinking",
+                  position: null, eta_s: null, deadline: 1, left_s: 500, paused: false, entries: 1 });
+  assert.equal(dock.windows.get(1), undefined, "their thinking is not news");
+  // Rome accepts: the close brings the window back, and the read their answer
+  server.say(4, false, "accept", "Agreed, gladly.");
+  dock.onStatus({ type: "negotiation_status", negotiation: 4, players: [0, 1], waiting_on: null, kind: null, state: "closed",
+                  status: "accepted", position: null, eta_s: null, deadline: null, entries: 2 });
+  assert.ok(dock.windows.get(1), "the close brings it back");
+  await flush();
+  assert.match(dock.windows.get(1).log.textContent, /Agreed, gladly\./);
+  assert.match(dock.windows.get(1).status.textContent, /^Chat #4 accepted/);
+  // closed again; a reply in a chat waiting on them brings it back when only the read says so
+  server.chat(8, 1, "Rome");
+  server.say(8, true, "open", "Again?");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 8 } });
+  await flush();
+  dock.close(1);
+  server.say(8, false, "reply", "Perhaps.");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 8 } });
+  await flush();
+  assert.ok(dock.windows.get(1), "their word brings it back");
+  assert.match(dock.windows.get(1).log.textContent, /Perhaps\./);
+});
+
+test("at 700 px the tab strip keeps its buttons through redraws, so a tap between press and release lands", async () => {
+  const { game, dock, server } = makeGame({ width: 700, height: 800, boxWidth: 330 });
+  dock.onView(game.view);
+  for (const [nid, civ, name] of [[21, 1, "Rome"], [22, 2, "Persia"]]) {
+    server.chat(nid, civ, name);
+    server.say(nid, true, "open", "Hello");
+  }
+  game.view.diplomacy.open_negotiations = [server.view(21), server.view(22)];
+  dock.onView(game.view);
+  await flush();
+  const tabs = dock.strip.children.slice();
+  assert.deepEqual(tabs.map((t) => t.textContent), ["Rome", "Persia"]);
+  // statuses, views and top bar redraws: the same buttons
+  for (let i = 0; i < 5; i++) {
+    dock.onStatus({ type: "negotiation_status", negotiation: 22, players: [0, 2], waiting_on: 2, kind: "model", state: i % 2 ? "queued" : "thinking",
+                    position: 1, eta_s: 5, deadline: 1, left_s: 300 - i, paused: false, entries: 1 });
+    dock.onView(game.view);
+    game.renderTopbar();
+    dock.layout();
+  }
+  assert.ok(dock.strip.children.every((b, i) => b === tabs[i]), "no button made again");
+  assert.match(tabs[1].className, /\bactive\b/, "the newest chat is the one shown");
+  // news for the tab not shown (Rome's): its look changes in place
+  server.say(21, false, "reply", "Hello to you");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 21 } });
+  await flush();
+  assert.equal(dock.strip.children[0], tabs[0]);
+  assert.match(tabs[0].className, /\bunread\b/);
+  assert.match(tabs[0].className, /\byours\b/);
+  assert.equal(tabs[0].title, "Rome waits for your answer");
+  // the tap made before those redraws still lands
+  tabs[0].click();
+  const shown = [...dock.windows.entries()].filter(([, w]) => w.root.style.display !== "none").map(([civ]) => civ);
+  assert.deepEqual(shown, [1]);
+  assert.match(tabs[0].className, /\bactive\b/);
+  assert.doesNotMatch(tabs[0].className, /\bunread\b/);
+  assert.doesNotMatch(tabs[1].className, /\bactive\b/);
+  // a tab for a new window: the strip is made again
+  server.chat(23, 2, "Persia");
+  dock.open(1);
+  assert.equal(dock.strip.children.length, 2);
+  dock.close(1);
+  assert.deepEqual(dock.strip.children.map((t) => t.textContent), ["Persia"]);
+});
+
+test("a window shows how many messages its chat has had against the cap, warning near it", async () => {
+  const { game, dock, server } = makeGame();
+  server.max = 5;
+  dock.onView(game.view);
+  server.chat(3, 1, "Rome");
+  server.say(3, false, "open", "Talk?");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 3 } });
+  await flush();
+  const win = dock.windows.get(1);
+  assert.equal(win.count.textContent, "1/5 messages (4 left)");
+  assert.equal(win.count.className.trim(), "chat-count muted");
+  server.say(3, true, "reply", "Yes");
+  server.say(3, false, "reply", "Then?");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 3 } });
+  await flush();
+  assert.equal(win.count.textContent, "3/5 messages (2 left)");
+  assert.equal(win.count.className.trim(), "chat-count warn");
+  server.say(3, true, "reply", "Gold?");
+  server.say(3, false, "reply", "No.");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 3 } });
+  await flush();
+  assert.equal(win.count.textContent, "5/5 messages: the next closes the chat");
+  server.say(3, true, "reject", "Goodbye.");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 3 } });
+  await flush();
+  assert.equal(win.count.style.display, "none", "a closed chat has no count");
+});
+
+test("the windows keep clear of the unit and city panels shown, and come back beside End Turn when they go", async () => {
+  const unit = new FakeElement("div"), city = new FakeElement("div"), side = new FakeElement("div");
+  const W = 1280, H = 740;
+  // the game screen's panels (style.css): the unit panel at the bottom left, the city panel from the top down to just
+  // above End Turn, the side panel at the top right; a hidden one is display: none
+  unit._rect = { left: 10, top: 44 + H - 10 - 400, width: 330, height: 400 };
+  city._rect = { left: W - 10 - 380, top: 44 + 10, width: 380, height: H - 10 - 64 };
+  side._rect = { left: W - 10 - 320, top: 44 + 10, width: 320, height: 300 };
+  city.style.display = "none";
+  const { game, dock, server } = makeGame({ width: W, height: H, boxWidth: 290, obstacles: [unit, city, side] });
+  dock.onView(game.view);
+  for (const [nid, civ, name] of [[31, 1, "Rome"], [32, 2, "Persia"]]) {
+    server.chat(nid, civ, name);
+    server.say(nid, true, "open", "Hello");
+  }
+  game.view.diplomacy.open_negotiations = [server.view(31), server.view(32)];
+  dock.onView(game.view);
+  await flush();
+  const place = (civ) => {
+    const s = dock.windows.get(civ).root.style;
+    return { left: parseInt(s.left, 10), right: parseInt(s.left, 10) + parseInt(s.width, 10), maxHeight: parseInt(s.maxHeight, 10) };
+  };
+  // the unit panel and the side panel shown: the row starts right of the unit panel, and the window under the side
+  // panel stops below it
+  assert.equal(dock.plan.mode, "wide");
+  assert.ok(place(1).right <= W - 10 - 290 - 8 && place(2).left >= 10 + 330 + 8, JSON.stringify([place(1), place(2)]));
+  assert.ok(place(1).maxHeight <= H - (10 + 300) - 8 - 10, "under the side panel");
+  // a city opened: its panel hides the side panel, and the windows move left of it
+  side.style.display = "none";
+  city.style.display = "";
+  unit.style.display = "none";
+  dock.layout();
+  assert.ok(place(1).right <= W - 10 - 380 - 8, `left of the city panel: ${JSON.stringify(place(1))}`);
+  // closed again: next to End Turn
+  city.style.display = "none";
+  dock.layout();
+  assert.equal(place(1).right, W - 10 - 290 - 8);
 });

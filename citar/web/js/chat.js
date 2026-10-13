@@ -28,22 +28,29 @@ const ACTION_TEXT = { open: "opened the chat", counter: "counter-offer", accept:
 
 export class ChatDock {
   /** `game` is the game screen: its `view`, `you`, `myTurn`, `rules`, `tool(name, args)` (a tool call that reports
-   * its own errors and returns the result or null), `endTurn(force)` and `renderTopbar()`. `host` is the element
-   * the windows are placed in (the map's area), `turnBox` the End Turn box in it. `fetchChat(nid)` reads the chat
-   * route; `now()` is a monotonic clock in ms; `timers` holds setInterval/clearInterval (tests pass their own). */
-  constructor(game, { host, turnBox, fetchChat, now = () => performance.now(), timers = globalThis } = {}) {
+   * its own errors and returns the result or null), `endTurn(force)` (which checks the turn's other decisions unless
+   * forced), `syncView()` (fetches a view issued after the call, once any in flight has come) and `renderTopbar()`.
+   * `host` is the element the windows are placed in (the map's area), `turnBox` the End Turn box in it, `obstacles`
+   * the panels over the map that the windows keep clear of when there is room (a unit's, a city's, the side panel,
+   * the minimap: those shown count). `fetchChat(nid)` reads the chat route; `now()` is a monotonic clock in ms;
+   * `timers` holds setInterval/clearInterval (tests pass their own). */
+  constructor(game, { host, turnBox, obstacles = [], fetchChat, now = () => performance.now(), timers = globalThis } = {}) {
     this.game = game;
     this.host = host;
     this.turnBox = turnBox;
+    this.obstacles = obstacles.filter(Boolean);
     this.fetchChat = fetchChat;
     this.now = now;
     this.timers = timers;
     this.model = new ChatModel(null);
     this.windows = new Map();     // civ -> ChatWindow
     this.fetching = new Map();    // nid -> true while a read is out (and asked again meanwhile: "again")
+    this.clockAsked = new Map();  // nid -> the chat's version a read was asked at for want of its clock
     this.enabled = false;
     this._endKey = null;          // the End Turn state the turn box was last drawn with
     this._endClock = null;        // its countdown
+    this._stripKey = null;        // what the narrow layout's tab strip was last built from
+    this._fireAfter = -Infinity;  // an armed End Turn whose fresh view did not come tries again from then
     this.root = el("div", { class: "chat-dock wide" });
     this.strip = el("div", { class: "chat-strip" });
     this.root.appendChild(this.strip);
@@ -52,8 +59,9 @@ export class ChatDock {
     this._onResize = () => this.layout();
     if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("resize", this._onResize);
     if (typeof ResizeObserver !== "undefined") {
+      // the area, End Turn and the panels: a panel shown, hidden or grown moves the windows clear of it
       this._observer = new ResizeObserver(() => this.layout());
-      for (const node of [host, turnBox]) if (node) this._observer.observe(node);
+      for (const node of [host, turnBox, ...this.obstacles]) if (node) this._observer.observe(node);
     }
   }
 
@@ -67,7 +75,9 @@ export class ChatDock {
   // ------------------------------------------------------------------ what comes in
 
   /** Each view the game screen fetched: the chats in its `diplomacy` block, and whose turn it is. Called before the
-   * game screen draws its top bar, which then draws End Turn from the chats as they now stand. */
+   * game screen draws its top bar, which then draws End Turn from the chats as they now stand. The view says nothing
+   * of a chat's clock, and the server tells a clock only when it changes, so an open chat the client knows no clock
+   * of (after a page load, or one the view showed moving first) is read once at that version for it. */
   onView(view) {
     this.enabled = !!(view && view.you != null && !view.spectator && view.diplomacy);
     this.root.style.display = this.enabled ? "" : "none";
@@ -77,6 +87,11 @@ export class ChatDock {
     const res = this.model.applyView(view.diplomacy, this.now());
     for (const change of res.changes) this.consider(change);
     for (const nid of res.missing) this.read(nid);
+    for (const chat of this.model.openChats()) {
+      if (chat.clock || this.clockAsked.get(chat.nid) === chat.ver) continue;
+      this.clockAsked.set(chat.nid, chat.ver);
+      this.read(chat.nid);
+    }
     this.render({ topbar: false });
   }
 
@@ -100,15 +115,18 @@ export class ChatDock {
   }
 
   /** What a change of a chat means for its window: a new open chat pops up (restored if minimised, and the one shown
-   * at narrow widths unless you are answering another); a chat that comes back to you, or anything the other side
-   * said, lights the window up (a closed window opens; a minimised one only marks its tab). */
+   * at narrow widths unless you are answering another); news of a chat the client knew (it comes back to you, the
+   * other side or the game said something, it closed) lights the window up: a window closed with ✕ opens again, a
+   * minimised one only marks its tab. A chat first seen closed (a page load's recent chats) is not news. */
   consider(change) {
     const chat = change && change.chat;
     if (!chat || chat.with == null) return;
+    if (change.created) {
+      if (chat.status === "open") this.model.notify(chat.with, { restore: true, focus: true });
+      return;
+    }
     const theirs = (change.added || []).some((e) => !e.you);
-    if (change.created && chat.status === "open") this.model.notify(chat.with, { restore: true, focus: true });
-    else if (change.turnedToYou) this.model.notify(chat.with);
-    else if (theirs && this.model.windowOf(chat.with)) this.model.notify(chat.with);
+    if (change.turnedToYou || theirs || change.closed) this.model.notify(chat.with);
   }
 
   /** Read chat `nid` from the chat route; one read at a time per chat, and once more if asked meanwhile. */
@@ -159,6 +177,25 @@ export class ChatDock {
 
   arm(force = false) { this.model.arm(this.turnKey(), force); this.render(); this.game.renderTopbar(); }
   disarm() { this.model.disarm(); this.render(); this.game.renderTopbar(); }
+
+  /** End Turn clicked, or Shift+Enter (`GameScreen.onEndTurn`): `force` when Ctrl or ⌘ was held, `blockers` the
+   * turn's other open decisions (`GameScreen.turnBlockers`). Does the chats' part and returns what the game screen
+   * does next:
+   * - `open`: a chat waits on you; its window opened, the cursor in it ("Answer Rome first");
+   * - `disarm`: End Turn was armed; the click cancelled it;
+   * - `blocked`: decisions are left and Ctrl was not held; the game screen shows the first (nothing armed);
+   * - `arm`: chats wait on the others; armed, the turn ends once they have all closed (`force` kept for then);
+   * - `end`: nothing holds the turn; the game screen ends it;
+   * - `none`: not your turn. */
+  endTurnClick(force = false, blockers = []) {
+    if (!this.game.myTurn) return "none";
+    const st = this.endTurnState();
+    if (st.state === "answer") { this.open(st.with); return "open"; }
+    if (st.state === "armed") { this.disarm(); return "disarm"; }
+    if (blockers.length && !force) return "blocked";
+    if (st.state === "waiting") { this.arm(force); return "arm"; }
+    return "end";
+  }
 
   /** The End Turn button while a chat holds the turn (null when none does: the game screen draws its own). `onClick`
    * gets whether Ctrl or ⌘ was held. */
@@ -219,13 +256,30 @@ export class ChatDock {
   }
 
   /** Armed End Turn with nothing left open: end the turn (once), as the click that armed it would have. Its other
-   * decisions were checked when it was armed; a deal may have brought a new one (a technology to choose), which a
-   * plain arming checks again and stops at, as End Turn does, and a Ctrl+click arming skips. */
+   * decisions were checked when it was armed; a deal may have brought a new one (a technology received that finishes
+   * the research, a city to give orders to), which a plain arming checks again and stops at, as End Turn does, and a
+   * Ctrl+click arming skips. That check reads the view, and the one in hand may predate the close, so a view
+   * fetched after it comes first (`game.syncView`). It is disarmed at once, so it fires once; it is armed again when
+   * no fresh view came (it tries again a second later, at a tick) or a chat opened meanwhile (it fires when that one
+   * closes). */
   fire(st) {
-    if (!st.fire || !this.game.myTurn) return;
-    const force = !!(this.model.armed && this.model.armed.force);
-    this.model.disarm();          // at once: whatever comes before the end of turn's answer finds it disarmed
-    Promise.resolve().then(() => this.game.endTurn(force));
+    if (!st.fire || !this.game.myTurn || !this.model.armed || this.now() < this._fireAfter) return;
+    const { force, turnKey } = this.model.armed;
+    this.model.disarm();
+    const before = this.game.view;
+    const again = (wait) => {
+      if (!this.enabled || this.model.armed || !this.game.myTurn || this.turnKey() !== turnKey) return;
+      this.model.arm(turnKey, force);
+      if (wait) this._fireAfter = this.now() + 1000;
+      this.render();
+      this.game.renderTopbar();
+    };
+    Promise.resolve().then(() => this.game.syncView()).then(() => {
+      if (!this.enabled || !this.game.myTurn || this.turnKey() !== turnKey) return;
+      if (this.game.view === before) { again(true); return; }
+      if (this.endTurnState().state !== "clear") { again(false); return; }
+      return this.game.endTurn(force);
+    }).catch(() => { again(true); });
   }
 
   /** Every second: the countdowns. */
@@ -241,17 +295,18 @@ export class ChatDock {
     this.fire(this.endTurnState());
   }
 
-  /** Place the windows (chatmodel's `dockLayout`) in the game's map area. */
+  /** Place the windows (chatmodel's `dockLayout`) in the game's map area, clear of End Turn and of the panels shown. */
   layout() {
     if (!this.enabled || !this.host) return;
     const hostRect = rect(this.host);
     const boxRect = rect(this.turnBox);
     const width = this.host.clientWidth || hostRect.width;
     const height = this.host.clientHeight || hostRect.height;
-    const turnBox = boxRect.width || boxRect.height
-      ? { left: boxRect.left - hostRect.left, top: boxRect.top - hostRect.top, width: boxRect.width, height: boxRect.height }
-      : { left: width - 10, top: height - 10, width: 0, height: 0 };
-    const plan = dockLayout({ width, height, turnBox, windows: this.model.windows, active: this.model.active });
+    const inHost = (r) => ({ left: r.left - hostRect.left, top: r.top - hostRect.top, width: r.width, height: r.height });
+    const turnBox = boxRect.width || boxRect.height ? inHost(boxRect) : { left: width - 10, top: height - 10, width: 0, height: 0 };
+    const obstacles = this.obstacles.filter((n) => !(n.style && n.style.display === "none")).map(rect)
+      .filter((r) => r.width > 0 && r.height > 0).map(inHost);
+    const plan = dockLayout({ width, height, turnBox, obstacles, windows: this.model.windows, active: this.model.active });
     const placed = new Map(plan.items.map((it) => [it.civ, it]));
     this.root.className = `chat-dock ${plan.mode}`;
     const rs = this.root.style;
@@ -280,20 +335,39 @@ export class ChatDock {
     this.plan = plan;
   }
 
+  /** The narrow layout's tab strip. Its buttons are made again only when the tabs themselves change (which windows,
+   * their names and colours); a tab's look (shown, unread, yours) changes in place. `layout` runs on every status and
+   * every top bar redraw, several times a second in a fast game, and a tap whose button was replaced between press
+   * and release would be lost: on a phone the strip is the only way between windows. */
   drawStrip(plan) {
-    const strip = clear(this.strip);
-    if (plan.mode !== "narrow" || !plan.container) { strip.style.display = "none"; return; }
-    strip.style.display = "";
-    for (const civ of plan.container.tabs) {
+    const strip = this.strip;
+    if (plan.mode !== "narrow" || !plan.container) {
+      if (strip.style.display !== "none") strip.style.display = "none";
+      return;
+    }
+    if (strip.style.display !== "") strip.style.display = "";
+    const tabs = plan.container.tabs.map((civ) => ({ civ, p: this.player(civ) }));
+    const key = JSON.stringify(tabs.map(({ civ, p }) => [civ, p.name, p.color]));
+    if (key !== this._stripKey) {
+      this._stripKey = key;
+      clear(strip);
+      for (const { civ, p } of tabs) {
+        // the click reads where things stand when it lands, not when the button was made
+        strip.appendChild(el("button", { class: "chat-tab", "data-civ": civ,
+          onclick: () => (this.plan && this.plan.container && this.plan.container.active === civ ? this.minimise(civ) : this.restore(civ)) },
+          el("span", { class: "swatch", style: { background: p.color } }), p.name || `#${civ}`));
+      }
+    }
+    for (const btn of strip.children) {
+      const civ = Number(btn.getAttribute("data-civ"));
       const w = this.model.windowOf(civ);
-      const p = this.player(civ);
       const chat = this.model.chatWith(civ);
-      const yours = chat && chat.status === "open" && chat.waitingOn === this.model.you;
-      strip.appendChild(el("button", {
-        class: `chat-tab ${civ === plan.container.active ? "active" : ""} ${w && w.unread ? "unread" : ""} ${yours ? "yours" : ""}`,
-        "data-civ": civ, title: yours ? `${p.name} waits for your answer` : p.name,
-        onclick: () => (civ === plan.container.active ? this.minimise(civ) : this.restore(civ)) },
-        el("span", { class: "swatch", style: { background: p.color } }), p.name || `#${civ}`));
+      const yours = !!chat && chat.status === "open" && chat.waitingOn === this.model.you;
+      const cls = `chat-tab${civ === plan.container.active ? " active" : ""}${w && w.unread ? " unread" : ""}${yours ? " yours" : ""}`;
+      if (btn.className !== cls) btn.className = cls;
+      const name = this.player(civ).name;
+      const title = yours ? `${name} waits for your answer` : name;
+      if (btn.title !== title) btn.title = title;
     }
   }
 }
@@ -333,6 +407,7 @@ class ChatWindow {
     } });
     this.proposal = el("div", { class: "chat-proposal" });
     this.status = el("div", { class: "chat-status" });
+    this.count = el("div", { class: "chat-count" });   // messages against the game's cap
     this.text = el("textarea", { class: "chat-text", rows: 2, placeholder: "Write a message…", value: this.draft.text,
       oninput: () => { this.draft.text = this.text.value; this.updateButtons(); },
       onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.primary(); } } });
@@ -354,7 +429,7 @@ class ChatWindow {
     this.dealBody = el("div", { class: "chat-deal-body" },
       el("div", { class: "deal-builder" }, this.giveList, this.receiveList), this.hints, this.adder, this.dealNote);
     this.deal = el("div", { class: "chat-deal" }, this.dealToggle, this.dealBody);
-    this.body = el("div", { class: "chat-body" }, this.log, this.proposal, this.status, this.text, this.buttons, this.deal);
+    this.body = el("div", { class: "chat-body" }, this.log, this.proposal, this.status, this.count, this.text, this.buttons, this.deal);
     this.root = el("div", { class: "chat-win", "data-civ": civ, role: "dialog", "aria-label": `Chat with ${p.name || civ}` }, this.head, this.body);
     this.tab = false;
     this.drawDeal();
@@ -473,6 +548,14 @@ class ChatWindow {
     if (this.status.textContent !== s.text) this.status.textContent = s.text;
     const cls = `chat-status ${s.tone || ""}`;
     if (this.status.className !== cls) this.status.className = cls;
+    // how many messages it has had against the cap: the one that would pass it closes the chat instead
+    const c = st.count;
+    const text = c ? (c.left ? `${c.text} (${c.left} left)` : `${c.text}: the next closes the chat`) : "";
+    if (this.count.textContent !== text) this.count.textContent = text;
+    const ccls = `chat-count ${c ? c.tone : ""}`;
+    if (this.count.className !== ccls) this.count.className = ccls;
+    const show = c ? "" : "none";
+    if (this.count.style.display !== show) this.count.style.display = show;
   }
 
   /** Strict turn-taking: the text box and the answers only on your move (Withdraw on theirs); opening a chat only on

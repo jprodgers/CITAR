@@ -32,8 +32,9 @@ export class GameScreen {
     this._lastTurnKey = null;
     this._centered = false;
     this.build();
-    // the docked chat windows, left of End Turn (design/phase3-features.md P3.5.6)
+    // the docked chat windows, left of End Turn (design/phase3-features.md P3.5.6), clear of the panels when there is room
     this.chat = new ChatDock(this, { host: this.main, turnBox: this.turnBox,
+                                     obstacles: [this.unitPanel, this.cityPanel, this.sidePanel, this.minimap],
                                      fetchChat: (nid) => api.negotiation(this.gid, this.token, nid) });
     this.refresh();
     this.ws = connectWS(gid, token, (m) => this.onWS(m));
@@ -571,34 +572,27 @@ export class GameScreen {
     else if (a.unit != null) this.selectUnit(a.unit);
   }
 
-  // End Turn (the button, Shift+Enter) while chats hold the turn (chat.js's states): a chat waiting on you opens;
-  // one waiting on the other side arms End Turn, which then ends the turn once every chat has closed (the other
-  // decisions are checked first, as for any end of turn: Ctrl+click arms it anyway); armed, a click disarms it.
+  // End Turn (the button, Shift+Enter). The chats decide first (chat.js's endTurnClick, tested there): a chat waiting
+  // on you opens; armed, a click disarms; with other decisions left a plain click goes to the first; a chat waiting on
+  // the other side arms End Turn, which ends the turn once every chat has closed (checking the other decisions again
+  // on a view fetched then, unless Ctrl armed it); with nothing holding the turn, it ends.
   onEndTurn(force = false) {
     if (!this.myTurn) return;
-    const st = this.chat.endTurnState();
-    if (st.state === "answer") return this.chat.open(st.with);
-    if (st.state === "armed") return this.chat.disarm();
-    if (st.state === "waiting") {
-      const blockers = this.turnBlockers();
-      if (blockers.length && !force) {
-        toast(`Before ending the turn: ${blockers.map((a) => a.text).join(" ")} (Ctrl+click End Turn to end it anyway.)`, "info", 5000);
-        this.goToBlocker(blockers[0]);
-        return;
-      }
-      return this.chat.arm(force);
-    }
-    return this.endTurn(force);
+    const blockers = this.turnBlockers();
+    const next = this.chat.endTurnClick(force, blockers);
+    if (next === "blocked") return this.showBlockers(blockers);
+    if (next === "end") return this.endTurn(force);
+  }
+
+  showBlockers(blockers) {
+    toast(`Before ending the turn: ${blockers.map((a) => a.text).join(" ")} (Ctrl+click End Turn to end it anyway.)`, "info", 5000);
+    this.goToBlocker(blockers[0]);
   }
 
   async endTurn(force = false) {
     if (!this.myTurn) return;
     const blockers = this.turnBlockers();
-    if (blockers.length && !force) {
-      toast(`Before ending the turn: ${blockers.map((a) => a.text).join(" ")} (Ctrl+click End Turn to end it anyway.)`, "info", 5000);
-      this.goToBlocker(blockers[0]);
-      return;
-    }
+    if (blockers.length && !force) return this.showBlockers(blockers);
     this.deselect();
     await this.tool("end_turn");
   }
@@ -936,6 +930,7 @@ export class GameScreen {
       this.cityPanel.style.display = "none";
       this.sidePanel.style.display = "flex";
     }
+    if (this.chat) this.chat.layout();   // the docked chat windows keep clear of the panels shown
   }
 
   renderSide() {
