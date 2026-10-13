@@ -251,7 +251,9 @@ def summarize(rows: Iterable[dict], pid: int, final: Optional[dict] = None) -> d
 def fallbacks_of(metrics_data: dict, pid: int) -> dict:
     """A hybrid seat's fallbacks in a game, by cause (P3.6.5, P3.6.11): its chats its fallback bot answered (the
     metrics' ``fallback`` rows) and its diplomat phases that did not run (``skipped``, ``refused``, ``failed``), each
-    with its cause; ``model`` counts the ones the model caused (``MODEL_CAUSES``), ``other`` the rest by cause."""
+    with its cause; ``model`` counts the ones the model caused (``MODEL_CAUSES``: a chat it was too slow for once its
+    prompt had started, a call that failed), ``other`` the rest by cause. A phase that never started (``skipped``: its
+    prompt waited past its 30 s, which a benchmark game's never does) is the machine's, ``not_started``."""
     chat: dict = {}
     for x in (metrics_data or {}).get("negotiations") or []:
         if x.get("player") == pid and x.get("outcome") == "fallback":
@@ -259,9 +261,13 @@ def fallbacks_of(metrics_data: dict, pid: int) -> dict:
             chat[cause] = chat.get(cause, 0) + 1
     phases: dict = {}
     for x in (metrics_data or {}).get("diplomat") or []:
-        if x.get("player") == pid and x.get("outcome") in ("skipped", "refused", "failed"):
-            cause = x.get("cause") or ("failed" if x.get("outcome") == "failed" else "refused")
-            phases[cause] = phases.get(cause, 0) + 1
+        if x.get("player") != pid or x.get("outcome") not in ("skipped", "refused", "failed"):
+            continue
+        if x.get("outcome") == "failed":
+            cause = "failed"
+        else:
+            cause = x.get("cause") if x.get("cause") in OTHER_CAUSES else "not_started"
+        phases[cause] = phases.get(cause, 0) + 1
     total: dict = {}
     for part in (chat, phases):
         for k, v in part.items():

@@ -146,7 +146,7 @@ pairs, one line per model and owners preset (what the model decided):
 | Accepted | How many of the seat's own proposals the other side accepted |
 | Wars declared, captures / losses | Per game |
 | Control | The control games' deals per game and their mean value, valued the same way |
-| Fallbacks | Chats the fallback bot answered and diplomat calls that did not run because of the model (it timed out or failed), per game; those a benchmark's queue or a refusal caused are listed beside, not counted against it |
+| Fallbacks | Chats the fallback bot answered and diplomat calls that did not run because of the model (it timed out or failed), per game; those a benchmark's queue, a refusal or a prompt that never started caused are listed beside, not counted against it |
 
 Only benchmark pairs count (a lobby game has no control). A member's lines are made from their own
 pairs and the pairs of other members' runs they may see whose games pool (the [pooling

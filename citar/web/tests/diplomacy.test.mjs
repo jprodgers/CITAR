@@ -44,6 +44,8 @@ test("a line's score difference carries its 90% interval", () => {
 test("the model's fallbacks are counted, the others listed beside them", () => {
   assert.equal(fallbackText(LINE), "0.3 a game; not the model's: 2 queued behind a benchmark, 1 refused");
   assert.equal(fallbackText({ fallbacks_per_game: 0, other_fallbacks: {} }), "0 a game");
+  assert.equal(fallbackText({ fallbacks_per_game: 1, other_fallbacks: { not_started: 2 } }),
+    "1 a game; not the model's: 2 not started in time");
 });
 
 test("the board's rows are the lines in the server's order, as text", () => {

@@ -48,7 +48,7 @@ export function diffText(line) {
  *  model's: 2 queued behind a benchmark, 1 refused"). */
 export function fallbackText(line) {
   if (!line) return "–";
-  const words = { queued_behind_benchmark: "queued behind a benchmark", refused: "refused" };
+  const words = { queued_behind_benchmark: "queued behind a benchmark", refused: "refused", not_started: "not started in time" };
   const others = Object.entries(line.other_fallbacks || {}).filter(([, v]) => v)
     .map(([k, v]) => `${v} ${words[k] || k.replace(/_/g, " ")}`);
   const mine = `${num(line.fallbacks_per_game)} a game`;

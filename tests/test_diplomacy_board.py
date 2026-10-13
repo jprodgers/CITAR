@@ -128,13 +128,15 @@ class Lines(unittest.TestCase):
             {"player": 2, "outcome": "fallback", "cause": "timeout"}],
             "diplomat": [{"player": 1, "outcome": "skipped", "cause": "queued_behind_benchmark"},
                          {"player": 1, "outcome": "failed", "cause": "failed"},
+                         {"player": 1, "outcome": "skipped", "cause": "timeout"},     # its prompt never started
+                         {"player": 1, "outcome": "timeout", "cause": None},          # ran out of its budget: ran
                          {"player": 1, "outcome": "done", "cause": None}]}
         fb = D.fallbacks_of(data, 1)
         self.assertEqual(fb["model"], 3, "two timeouts or failures of its chats and one failed phase")
-        self.assertEqual(fb["other"], {"queued_behind_benchmark": 2, "refused": 1})
+        self.assertEqual(fb["other"], {"not_started": 1, "queued_behind_benchmark": 2, "refused": 1})
         line = D.leaderboard([pair("m", "trade_only", 0, arm(), arm(), fb)])[0]
         self.assertEqual((line["fallbacks_per_game"], line["other_fallbacks"]),
-                         (3.0, {"queued_behind_benchmark": 2, "refused": 1}))
+                         (3.0, {"not_started": 1, "queued_behind_benchmark": 2, "refused": 1}))
 
 
 #: The runs: (run id, owner, visibility, game id, model, score difference).
