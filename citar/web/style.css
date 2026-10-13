@@ -107,7 +107,7 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .end-turn.blocked:hover { color: #aab1c0; }
 .attention { box-shadow: 0 0 0 2px var(--gold), 0 4px 16px #0008; }
 .tooltip { position: absolute; pointer-events: none; background: rgba(10,12,18,.95); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; max-width: 280px; z-index: 20; }
-.turn-box { position: absolute; right: 10px; bottom: 10px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: center; z-index: 6; max-width: calc(100% - 360px); }
+.turn-box { position: absolute; right: 10px; bottom: 10px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: center; z-index: 9; max-width: calc(100% - 360px); }
 .turn-box .end-turn { font-size: 16px; padding: 9px 22px; box-shadow: 0 4px 16px #0008; }
 .turn-box .pill { font-size: 13px; padding: 6px 12px; background: rgba(20,24,32,.95); }
 .alert-btn { background: #4a1616; border-color: #a33; }
@@ -115,6 +115,66 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .alert-icon { width: 18px; text-align: center; flex: none; }
 .minimap { position: absolute; left: 10px; top: 10px; border: 1px solid var(--border); border-radius: 4px; background: #000; cursor: pointer; }
 .banner { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: rgba(20,24,32,.92); border: 1px solid var(--border); font-weight: 600; z-index: 5; }
+/* End Turn while a chat holds the turn (chat.js): waiting with its countdown, armed to end when they answer */
+.end-turn.answer { background: #4a3b10; border-color: var(--warn); color: #ffe08a; }
+.end-turn.waiting { background: #2a2e38; border-color: var(--accent); }
+.end-turn.armed { background: #22324f; border-color: var(--good); }
+.end-turn .chat-cancel { opacity: .7; }
+.end-turn .chat-clock { font-variant-numeric: tabular-nums; }
+
+/* ---------- the docked chat windows (chat.js; placed by chatmodel.js's dockLayout) ---------- */
+/* wide: the dock lies over the map area without taking its clicks; each window sits on the bottom edge, left of the
+   End Turn box, which it never covers */
+.chat-dock { z-index: 7; }
+/* the windows keep clear of the panels when there is room (dockLayout's obstacles); when there is none (narrow), the
+   unit or city panel the person opened lies over them, and End Turn over everything */
+.unit-panel, .city-panel { z-index: 8; }
+.chat-dock.wide { position: absolute; inset: 0; pointer-events: none; }
+.chat-dock.wide .chat-win { position: absolute; pointer-events: auto; }
+.chat-dock.wide .chat-strip { display: none; }
+/* narrow (700 px or less): one window, full width above the End Turn box, under a strip with a tab per window */
+.chat-dock.narrow { position: absolute; display: flex; flex-direction: column; gap: 4px; pointer-events: auto; }
+.chat-dock.narrow .chat-win { position: relative; flex: 1 1 auto; min-height: 0; }
+.chat-strip { display: flex; gap: 4px; overflow-x: auto; flex: none; }
+.chat-tab { flex: none; padding: 4px 10px; font-size: 12px; background: rgba(20,24,32,.95); white-space: nowrap; }
+.chat-tab.active { border-color: var(--accent); background: #22324f; }
+.chat-tab.yours { color: var(--warn); }
+.chat-tab.unread, .chat-win.tab.unread { box-shadow: 0 0 0 2px var(--gold), 0 6px 24px #000a; }
+.chat-win { display: flex; flex-direction: column; background: rgba(20,24,32,.97); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 6px 24px #000a; overflow: hidden; }
+.chat-win.yours { border-color: var(--warn); }
+.chat-win.tab .chat-body { display: none; }
+.chat-win.tab .chat-head { cursor: pointer; border-bottom: none; }
+.chat-head { display: flex; align-items: center; gap: 4px; padding: 5px 6px 5px 10px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-weight: 600; white-space: nowrap; overflow: hidden; flex: none; }
+.chat-head .chat-name { overflow: hidden; text-overflow: ellipsis; }
+.chat-head button { padding: 0 7px; }
+.chat-dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--gold); flex: none; }
+.chat-win.unread .chat-dot { display: inline-block; }
+.chat-body { display: flex; flex-direction: column; gap: 6px; padding: 8px; overflow-y: auto; min-height: 0; }
+/* the log gives up a little height when the window is short (down to 120 px); then the body scrolls */
+.chat-body > * { flex: none; }
+.chat-body > .chat-log { flex: 0 1 auto; min-height: 120px; max-height: 240px; }
+.chat-log { overflow-y: auto; background: #0d1016; border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+.chat-log .msg { max-width: 92%; }
+.chat-divider { text-align: center; color: var(--muted); font-size: 11px; margin: 4px 0; }
+.chat-note { color: var(--muted); font-size: 12px; text-align: center; margin: 2px 0; font-style: italic; }
+.msg .chat-note { text-align: left; }
+.chat-card { margin-top: 4px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: #151b27; font-size: 12px; }
+.chat-proposal { font-size: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.chat-status { font-size: 12px; color: var(--muted); }
+.chat-status.you { color: var(--warn); }
+.chat-status.warn { color: var(--bad); }
+.chat-count { font-size: 11px; color: var(--muted); }
+.chat-count.warn { color: var(--warn); }
+.chat-text { width: 100%; }
+.chat-buttons { margin-top: 0; }
+.chat-deal { display: flex; flex-direction: column; gap: 6px; }
+.chat-deal-toggle { align-self: flex-start; }
+.chat-deal-adder select, .chat-deal-adder input { max-width: 150px; }
+.chat-deal-note { font-size: 11px; }
+@media (max-width: 700px) {
+  /* the End Turn box may take the width it needs: the chat windows sit above it */
+  .turn-box { max-width: calc(100% - 20px); }
+}
 
 /* ---------- modals ---------- */
 /* anchored near the top: a modal whose content grows (deal builder, tech tree) must not jump under the mouse */

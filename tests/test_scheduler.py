@@ -796,6 +796,51 @@ class Wrapper(unittest.TestCase):
         self.assertLess(time.perf_counter() - t0, 1.5)
         self.assertEqual(m.waiting, [])
 
+    def test_a_place_in_the_line_heard_after_the_wait_ended_is_not_told(self):
+        """The notifier may be behind. A chat's answer whose wait was cancelled (an answer halted by a suspension, a
+        seat change) has told its chat ``done`` (``waiting``); its place in the line, delivered after that, would stand
+        on the chat as ``queued`` while nothing answers it (3-12's review). Only a step still waiting tells it."""
+        sched = S.Scheduler(settings=lambda sid: S.MachineSettings(known=True, slots=1, name="box"),
+                            background=False)
+        m = sched.machine("box")
+        m.take(m.submit(sched.lease("box", "m", kind="game")))         # the one slot is busy
+
+        def waiting_step(conv, out):
+            def run():
+                try:
+                    conv.step()
+                except S.Cancelled as e:
+                    out["e"] = e
+            # a failed assertion must not leave the step waiting for ever: it is closed at the test's end
+            self.addCleanup(conv.close)
+            t = threading.Thread(target=run, name="late-queued-step", daemon=True)
+            t.start()
+            deadline = time.monotonic() + 5
+            while not any(r.conv is conv for r in m.waiting) and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(any(r.conv is conv for r in m.waiting), "the step waits for the slot")
+            return t
+
+        # while a step waits, its place is told
+        told_a, out_a = [], {}
+        a = S.ScheduledConversation(Inner([]), sched.lease("box", "m", kind="game"))
+        a.on_status = told_a.append
+        ta = waiting_step(a, out_a)
+        self.assertGreater(sched.deliver(), 0)
+        self.assertEqual([p["state"] for p in told_a], ["queued"])
+        a.close()
+        ta.join(5)
+        # its wait cancelled before the notifier caught up: the late place is dropped
+        told_b, out_b = [], {}
+        b = S.ScheduledConversation(Inner([]), sched.lease("box", "m", kind="game"))
+        b.on_status = told_b.append
+        tb = waiting_step(b, out_b)
+        b.close()
+        tb.join(5)
+        self.assertIn("e", out_b)
+        self.assertGreater(sched.deliver(), 0, "its place was still on the notifier's queue")
+        self.assertEqual(told_b, [], "nothing told after the wait ended")
+
     def test_tokens_are_capped_and_an_unscheduled_binding_still_meters(self):
         sched = S.Scheduler(settings=lambda sid: S.MachineSettings(known=True, slots=1, name="box"),
                             background=False)

@@ -231,9 +231,10 @@ jobs:
           done
           exit $failed
       - name: Test the client's pure modules
-        # citar/web/tests: the parts of the client with no network (the Servers page's rules, machines.js; util.js's
-        # dialogs over stand-ins for the DOM).
-        # Node 22 takes the test files as a pattern, not a folder.
+        # citar/web/tests: the parts of the client with no network (the Servers page's rules, machines.js; the chat
+        # window's state, chatmodel.js; util.js's dialogs and chat.js's docked windows over stand-ins for the DOM).
+        # Node 22 takes the test files as a pattern, not a folder: `node --test citar/web/tests/` runs the folder as
+        # one file and fails, on Node 24 too.
         run: node --test "citar/web/tests/*.test.mjs"
 
   package:

@@ -67,6 +67,9 @@ export const api = {
     request("GET", `/api/games/${gid}/view?token=${encodeURIComponent(token)}` + (asPlayer != null ? `&as_player=${asPlayer}` : "")),
   tool: (gid, token, tool, args = {}) =>
     request("POST", `/api/games/${gid}/tool?token=${encodeURIComponent(token)}`, { tool, args }),
+  // one chat as the seat sees it, with where its clock stands (the chat window, chat.js)
+  negotiation: (gid, token, nid) =>
+    request("GET", `/api/games/${gid}/negotiations/${nid}?token=${encodeURIComponent(token || "")}`),
   replay: (gid, token) => request("GET", `/api/games/${gid}/replay?token=${encodeURIComponent(token || "")}`),
   save: (gid, name) => request("POST", `/api/games/${gid}/save`, { name }),
   saves: () => request("GET", "/api/saves"),

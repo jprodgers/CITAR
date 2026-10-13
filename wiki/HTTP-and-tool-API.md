@@ -56,13 +56,17 @@ Full schemas: `GET /api/tools`, or `/docs` for the generated OpenAPI browser.
 ### A chat's status on the socket
 
 `{"type": "negotiation_status", "negotiation": 4, "players": [0, 2], "waiting_on": 2, "kind": "model",
-"state": "queued", "position": 1, "eta_s": 9.9, "deadline": 1791840929.6, "left_s": 583.0, "paused": false}`
+"state": "queued", "position": 1, "eta_s": 9.9, "deadline": 1791840929.6, "left_s": 583.0, "paused": false,
+"entries": 1}`
 
 - `state`: `waiting` (the chat waits on `waiting_on`, until `deadline`, in epoch seconds, `left_s` from now; no
   deadline while the game is paused or for a bot, which is never timed), `queued` (the answering model's request
   waits for its machine: `position` in its line and `eta_s`), `thinking` (the model is generating its answer), or
   `closed` (with the chat's `status`: `accepted`, `rejected` or `expired`).
 - `kind` is the side it waits on: `model` (an LLM or MCP seat), `person`, `bot` (or `hybrid`).
+- `entries` (every state but `closed`) is how many entries the chat had when this was said. A chat's
+  history only grows, so a client that has read more entries than that knows the status came late,
+  and one that has read fewer knows to read the chat (`GET /api/games/{id}/negotiations/{nid}`).
 - It goes to the sockets of the two seats in `players` and to spectators while the god view is allowed (no person
   plays, or the game is over); to nobody else.
 

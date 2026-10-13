@@ -1671,7 +1671,8 @@ class ScheduledConversation(Conversation):
         #: ``thinking`` (its slot granted, on the stepping thread, before the provider is asked): a chat's answer passes
         #: it on to the chat (``ChatClock.answer_status``).
         self.on_status: Optional[Callable[[dict], None]] = None
-        self._started = False             # the step under way has its slot: a late ``queued`` is not told
+        self._waiting = False             # a step waits for its slot: only then is a ``queued`` told (the notifier may
+        #                                   deliver one after the step started, or after its wait was cancelled)
         self.last_queue_s = 0.0
         self.last_gen_s = 0.0
         self.last_event: Optional[StepEvent] = None
@@ -1715,8 +1716,10 @@ class ScheduledConversation(Conversation):
 
     def heard(self, payload: dict) -> None:
         """The machine's word on a waiting request of this conversation (``Machine._conv_status``, the notifier
-        thread): passed on, unless the step has started meanwhile (the notifier is behind)."""
-        if payload.get("state") == "queued" and self._started:
+        thread): passed on only while a step still waits for its slot. The notifier may be behind: a ``queued`` that
+        comes once the step has its slot, or once its wait ended without one (cancelled: a halted answer, a seat
+        change), is stale, and passed on it would stand on the chat after the answer's end said ``waiting``."""
+        if payload.get("state") == "queued" and not self._waiting:
             return
         self._tell(payload)
 
@@ -1764,9 +1767,11 @@ class ScheduledConversation(Conversation):
         inner = self.inner
         queued = 0.0
         self.last_queue_s = self.last_gen_s = 0.0
-        self._started = False
-        grant = b.acquire(self, self.halted, self.on_wait)
-        self._started = True
+        self._waiting = True
+        try:
+            grant = b.acquire(self, self.halted, self.on_wait)
+        finally:
+            self._waiting = False
         self._tell({"state": "thinking"})
         hold = None
         while True:
@@ -1796,10 +1801,12 @@ class ScheduledConversation(Conversation):
                 if t0 is not None and _is_busy(e) and not self._closed and grant.request is not None:
                     # the helper had no slot after all: no sleep, nothing metered; wait like any other request
                     queued += sched.clock() - t0
-                    self._started = False
-                    b.busy(grant)
-                    grant = b.wait(grant.request, self, self.halted)
-                    self._started = True
+                    self._waiting = True            # back in its machine's line: its place is told again
+                    try:
+                        b.busy(grant)
+                        grant = b.wait(grant.request, self, self.halted)
+                    finally:
+                        self._waiting = False
                     continue
                 # a request the provider abandoned (cancelled, timed out) may still be generating on its helper
                 b.finish(grant, unfinished=getattr(inner, "unfinished", None) if t0 is not None else None)
