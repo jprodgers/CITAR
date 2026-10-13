@@ -47,7 +47,9 @@ end, both chat timeouts 20 s: a model's answer, one queued and then declined for
 closed as expired, the models' trades on their turns waiting for her; every ``negotiation_status`` her socket heard,
 none on a spectator's), ``hybrid`` (3-14, the server half: a hybrid seat on another member's dry-run machine shared for
 pooled prompts, with a person and two bots, 30 rounds, ``prompt_every`` 3: its diplomat's phases, chats answered by its
-model and by its bot, the chat clock's fallback, no lease held), and later ``minimap``, ``machines``; ``all`` runs every
+model and by its bot, the chat clock's fallback, no lease held; 3-15: the seat route making a seat hybrid and back, and
+a scenario saved with a hybrid seat launched with it; with ``--keep`` the server stays up for the browser checklist's
+D1), and later ``minimap``, ``machines``; ``all`` runs every
 part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
@@ -2441,6 +2443,82 @@ def finished_replay(h: Harness, gid: str, tokens: list, data: dict, gi: dict) ->
     data["replay"] = {"frames": len(frames), "bytes": len(got.content), "keyframes": sum(1 for f in frames if f.get("keyframe"))}
 
 
+def _hybrid_seat_routes(h: Harness, model: dict) -> None:
+    """3-15's checks (P3.6.8): what the lobby, the Join/Seats dialog and the scenario seats send. On bob's machine
+    (alice's grant: pooled prompts), the seat route makes a bot seat hybrid (all but war, a person's values) and back to
+    a bot, and an LLM seat is refused her there (each change that makes a model seat is admitted again); a scenario
+    saved with a hybrid seat launches with it, its model's machine named at launch. The games and the scenario go
+    afterwards, kept or not: the browser checklist's D1 makes its own."""
+    r = h.report
+    alice = h.accounts["alice"]
+    made: list = []
+    sid = ""
+    hybrid_seat = {"type": "hybrid", "llm": dict(model), "bot": {"profile": "standard"}, "handicap": "human",
+                   "hybrid": {"owners": "all_but_war", "advisor": True, "prompt_every": 4}}
+    config = {"map_size": "duel", "map_type": "pangaea", "seed": 3315, "barbarians": "off", "city_states": 0}
+    try:
+        g = alice.post("/api/games", json={"name": f"QA seat route {h.tag}", "config": config,
+                                           "seats": [{"type": "human"}, {"type": "bot"}]})
+        gid = g.json().get("id", "") if g.status_code == 200 else ""
+        if gid:
+            made.append(gid)
+        to_hybrid = alice.post(f"/api/games/{gid}/seats/1", json=hybrid_seat)
+        info = alice.get(f"/api/games/{gid}").json() if gid else {}
+        seat, player = (info.get("seats") or [{}, {}])[1], (info.get("players") or [{}, {}])[1]
+        label = next((p.get("label") for p in alice.get(f"/api/games/{gid}/summary").json().get("players") or []
+                      if p.get("id") == 1), None) if gid else None
+        to_llm = alice.post(f"/api/games/{gid}/seats/1", json={"type": "llm", "llm": dict(model)})
+        kept = (alice.get(f"/api/games/{gid}").json().get("seats") or [{}, {}])[1].get("type") if gid else None
+        to_bot = alice.post(f"/api/games/{gid}/seats/1", json={"type": "bot"})
+        back = alice.get(f"/api/games/{gid}").json() if gid else {}
+        r.check("the seat route makes a bot seat hybrid on bob's machine (all but war, a person's values); an LLM seat "
+                "there is refused her (no grant for games), leaving it hybrid; then back to a bot with a bot's numbers",
+                to_hybrid.status_code == 200 and seat.get("type") == "hybrid"
+                and (seat.get("hybrid") or {}).get("preset") == "all_but_war" and player.get("handicap") == "human"
+                and label == "Hybrid: standard + dry-run" and to_llm.status_code == 403 and kept == "hybrid"
+                and to_bot.status_code == 200
+                and (back.get("seats") or [{}, {}])[1].get("type") == "bot"
+                and (back.get("players") or [{}, {}])[1].get("handicap") == "ai",
+                f"game {g.status_code}; hybrid {to_hybrid.status_code} ({seat.get('type')}, "
+                f"{(seat.get('hybrid') or {}).get('preset')}, {player.get('handicap')}, {label!r}); llm "
+                f"{to_llm.status_code} (still {kept}); bot {to_bot.status_code} "
+                f"({(back.get('players') or [{}, {}])[1].get('handicap')})")
+        ed = alice.post("/api/scenario-editor", json={"source": "generate", "config": config,
+                                                       "players": [{"type": "human"}, {"type": "hybrid"}]})
+        eid = ed.json().get("editor_id", "") if ed.status_code == 200 else ""
+        scenario_seat = {k: v for k, v in hybrid_seat.items() if k != "llm"}
+        saved = alice.post(f"/api/scenario-editor/{eid}/save", json={"name": f"QA hybrid scenario {h.tag}",
+                                                                    "seats": [{"type": "human"}, scenario_seat]})
+        sid = saved.json().get("id", "") if saved.status_code == 200 else ""
+        if eid:
+            alice.delete(f"/api/scenario-editor/{eid}")
+        listed = (alice.get(f"/api/scenarios/{sid}").json().get("seats") or [{}, {}])[1] if sid else {}
+        launched = alice.post(f"/api/scenarios/{sid}/launch", json={"seats": [{}, {"llm": dict(model)}]})
+        lgid = launched.json().get("id", "") if launched.status_code == 200 else ""
+        if lgid:
+            made.append(lgid)
+        linfo = alice.get(f"/api/games/{lgid}").json() if lgid else {}
+        lseat, lplayer = (linfo.get("seats") or [{}, {}])[1], (linfo.get("players") or [{}, {}])[1]
+        r.check("a scenario saved with a hybrid seat (all but war, a person's values) launches with it",
+                saved.status_code == 200 and (listed.get("hybrid") or {}).get("preset") == "all_but_war"
+                and launched.status_code == 200 and lseat.get("type") == "hybrid"
+                and (lseat.get("hybrid") or {}).get("preset") == "all_but_war" and lplayer.get("handicap") == "human",
+                f"editor {ed.status_code}; saved {saved.status_code} ({(listed.get('hybrid') or {}).get('preset')}); "
+                f"launched {launched.status_code}: {lseat.get('type')}, {(lseat.get('hybrid') or {}).get('preset')}, "
+                f"{lplayer.get('handicap')}")
+    finally:
+        for gid in made:
+            try:
+                alice.delete(f"/api/games/{gid}")
+            except httpx.HTTPError:
+                pass
+        if sid:
+            try:
+                alice.delete(f"/api/scenarios/{sid}")
+            except httpx.HTTPError:
+                pass
+
+
 def part_hybrid(h: Harness) -> None:
     """3-14's checks, the server half of hybrid seats (design/phase3-features.md P3.6.2-P3.6.7, P3.6.11): bob's dry-run
     machine (one slot) is shared with alice for pooled prompts only. Her game seats her person, a hybrid seat on bob's
@@ -2483,6 +2561,7 @@ def part_hybrid(h: Harness) -> None:
                                               "seats": [{"type": "human"}, {"type": "llm", "llm": dict(model)}]})
         r.check("a seat that plays every turn on bob's machine is refused her: her grant covers pooled prompts only",
                 full.status_code == 403, f"HTTP {full.status_code}: {full.text[:200]}")
+        _hybrid_seat_routes(h, model)
         hybrid_seat = {"type": "hybrid", "llm": dict(model), "bot": {"profile": "standard"},
                        "hybrid": {"owners": "trade_only", "prompt_every": 3}}
         g = alice.post("/api/games", json={"name": f"QA hybrid game {h.tag}", "config": config,
