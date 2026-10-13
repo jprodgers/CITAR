@@ -346,22 +346,44 @@ class GameSession:
             from ..agents.hybrid_agent import valuation_bot
             from ..diplomacy_stats import DiplomacyRecorder
             rows = self.metrics.data.setdefault("diplomacy", [])
-            rec = self.recorders[pid] = DiplomacyRecorder(pid, valuation_bot(self.seats[pid].bot), rows)
+            try:
+                bot = valuation_bot(self.seats[pid].bot)
+            except Exception as e:
+                # no bot to value with: the record stops before it starts, said once (``_record_failed``)
+                rec = self.recorders[pid] = DiplomacyRecorder(pid, None, rows)
+                self._record_failed(rec, e)
+                return rec
+            rec = self.recorders[pid] = DiplomacyRecorder(pid, bot, rows)
         return rec
 
+    def _record_failed(self, rec, exc: BaseException) -> None:
+        """Seat ``rec.pid``'s diplomacy record failed unexpectedly: it stops for the rest of the game, its rows saying
+        so (``DiplomacyRecorder.fail``: a save keeps it, and its benchmark job pairs nothing, since rows missed or
+        valued late are not its control's measure), and the failure is the server's news once (``errors``, with its
+        traceback; call it from the ``except``), never the action's nor the event's. Lock held."""
+        if rec.broken is not None:
+            return
+        rec.fail(self.game.turn, type(exc).__name__)
+        self.errors.append({"t": time.time(), "player": rec.pid, "where": "diplomacy record",
+                            "trace": traceback.format_exc()})
+        log.warning("game %s: seat %s's diplomacy record failed (%s: %s); it stops here", self.id, rec.pid,
+                    type(exc).__name__, exc)
+
     def _record_diplomacy(self) -> None:
-        """Every hybrid seat's record reads what moved (``DiplomacyRecorder.observe``). Lock held; a failure is the
-        server's news (``errors``), never the action's."""
+        """Every hybrid seat's record reads what moved (``DiplomacyRecorder.observe``). Lock held; a failure stops that
+        seat's record and is the server's news (``_record_failed``), never the action's."""
         for seat in self.seats:
             if seat.type != "hybrid":
                 continue
+            rec = self._recorder(seat.player)
+            if rec.broken is not None:
+                continue
             try:
-                self._recorder(seat.player).observe(self.game)
+                rec.observe(self.game)
             except EngineCrash:
                 raise
-            except Exception:
-                self.errors.append({"t": time.time(), "player": seat.player, "where": "diplomacy record",
-                                    "trace": traceback.format_exc()})
+            except Exception as e:
+                self._record_failed(rec, e)
 
     def drive_bots(self, pid: int) -> dict:
         """One drive of the game's bot seats on ``pid``'s turn (``EngineGame.drive``, one seat's turn at most), with
@@ -1691,13 +1713,16 @@ class GameSession:
         kind = ev.get("type")
         if kind in DIPLOMACY_EVENTS:
             for seat in self.seats:
-                if seat.type == "hybrid":
-                    try:
-                        self._recorder(seat.player).on_event(ev)
-                    except Exception:
-                        # the record's failure is the server's news; the event's own effects below still happen
-                        self.errors.append({"t": time.time(), "player": seat.player, "where": "diplomacy record",
-                                            "trace": traceback.format_exc()})
+                if seat.type != "hybrid":
+                    continue
+                rec = None
+                try:
+                    rec = self._recorder(seat.player)
+                    rec.on_event(ev)
+                except Exception as e:
+                    # the record's failure stops it and is the server's news; the event's own effects below still happen
+                    if rec is not None:
+                        self._record_failed(rec, e)
         if kind == "negotiation":
             self._chat_moved(ev)
         elif kind == "eliminated":

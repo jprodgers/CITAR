@@ -331,6 +331,10 @@ def config_rollup(data: dict) -> dict:
             if g.get("phase") != "playing":
                 c["finished"] += 1
             for seat in g["seats"]:
+                if seat.get("class") == "partial":
+                    # a hybrid seat's game is its bot's play (P3.6.7): its performance, wins and turns are not the
+                    # model's (its diplomacy is measured against a control game, P3.6.10)
+                    continue
                 p, m = seat.get("progress") or {}, seat.get("metrics") or {}
                 if p.get("performance") is not None:
                     c["perf"].append(p["performance"])

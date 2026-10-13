@@ -728,13 +728,17 @@ class BenchmarkScheduler:
         """One pass: check running jobs, start what can start, write what changed."""
         with self.lock:
             self._check_restrictions()
+            wanted: set = set()
             for run in sorted(self.runs.values(), key=lambda r: r["created"]):
                 if run["status"] in ("running", "paused"):
                     self._check_jobs(run)
                 else:
                     for job in run["jobs"]:
                         self._close_finished_view(job)
-                self._check_controls(run)
+                wanted |= self._check_controls(run)
+            # a control no job can pair with any more (its jobs cancelled, skipped or failed, or their runs deleted) is
+            # not played for nobody
+            self.controls.keep_only(wanted)
             self._start_jobs()
             self._flush()
 
@@ -967,8 +971,10 @@ class BenchmarkScheduler:
         would sit behind its steps for hours. And a full job never starts beside an active hybrid job of this
         scheduler, whose prompts it would hold off the machine (its lease never lends, and drains pooled work first)."""
         from ..pool import seats as pool_seats
+        # each job by the machine it really plays on (``_machine``: a machine registered again has a new id), as the
+        # resume path's ``machine`` is, so the rule holds there too
         ours = [(r, j) for r in self.runs.values() for j in r["jobs"]
-                if j is not job and j["status"] in ACTIVE and not self._preempted(j) and j["server_key"] == machine]
+                if j is not job and j["status"] in ACTIVE and not self._preempted(j) and self._machine(j) == machine]
         if job.get("mode") == "hybrid":
             holders = [{"kind": "benchmark", "id": r["id"], "label": f"benchmark run “{r['name']}”"}
                        for r, j in ours if j.get("mode", "full") != "hybrid"]
@@ -1014,13 +1020,17 @@ class BenchmarkScheduler:
                 self._flush()
 
     def _ensure_model(self, run: dict, job: dict) -> float:
-        """Load the model a job needs, if CITAR manages loading on that server."""
+        """Load the model a job needs, if CITAR manages loading on that server. A hybrid job starts beside the machine's
+        lobby games and pooled prompts (it waits only for benchmark leases and the job limit, P3.3.5), so it loads its
+        model beside theirs (``shared``): it never unloads another model, nor reloads its own with another context,
+        under work it must not stop (P3.3.6)."""
         if self._server(run, job).get("pooled"):
             return 0.0              # somebody else's machine: its owner decides what is loaded
         sv = REG.get(job["server_id"])
         m = self._model_cfg(run, job)
         entry = REG.model_entry(sv, m.get("model_id") or m["model"])
-        return REG.ensure_model(sv, m["model"], REG.profile(entry, m.get("profile_id")))
+        return REG.ensure_model(sv, m["model"], REG.profile(entry, m.get("profile_id")),
+                                shared=job.get("mode") == "hybrid")
 
     def _llm_config(self, run: dict, job: dict) -> dict:
         """The seat's llm block: a reference into the registry plus suite overrides (resolved when the agent starts)."""
@@ -1210,16 +1220,21 @@ class BenchmarkScheduler:
     @staticmethod
     def _hybrid_result(s: GameSession) -> dict:
         """What a finished hybrid job's result adds (P3.6.10): its seat's diplomacy record (the recorder's rows, and
-        their summary with how the game ended) and its fallbacks by cause."""
+        their summary with how the game ended) and its fallbacks by cause. A record that broke off during the game
+        (``DiplomacyRecorder.broken``) says so (``incomplete``: the kind of error; its ``broken`` row has the turn) and
+        pairs nothing: its rows would miss entries, or value them late, while its control's record is whole."""
         from ..diplomacy_stats import fallbacks_of, final_of, summarize
         pid = (s.benchmark or {}).get("llm_player", 0)
         with s.lock:
+            s._record_diplomacy()
             rec = s._recorder(pid)
-            rec.observe(s.game)
             rows = rec.mine()
             summary = summarize(rows, pid, final_of(s.game, pid))
             fallbacks = fallbacks_of(s.metrics.data, pid)
-        return {"diplomacy": {"rows": rows, "summary": summary}, "fallbacks": fallbacks}
+        diplomacy = {"rows": rows, "summary": summary}
+        if rec.broken is not None:
+            diplomacy["incomplete"] = rec.broken
+        return {"diplomacy": diplomacy, "fallbacks": fallbacks}
 
     def _pair(self, job: dict) -> bool:
         """A finished hybrid job's pair line, once its control has been played (``diplomacy_stats.pair_line``): on the
@@ -1227,7 +1242,7 @@ class BenchmarkScheduler:
         ctl = job.get("control") or {}
         res = job.get("result") or {}
         if job.get("mode") != "hybrid" or job["status"] != "done" or not ctl.get("id") or res.get("pair") \
-                or not res.get("diplomacy"):
+                or not res.get("diplomacy") or res["diplomacy"].get("incomplete"):
             return False
         rec = self.controls.get(ctl["id"])
         if rec is None:
@@ -1237,13 +1252,30 @@ class BenchmarkScheduler:
         ctl["status"] = "done"
         return True
 
-    def _check_controls(self, run: dict) -> None:
-        """Follow each hybrid job's control (P3.6.9): its status on the job, asked for again when this process has not
-        (a restart), and the job's pair line once both games are over."""
+    @staticmethod
+    def _awaits_control(job: dict) -> bool:
+        """Whether a hybrid job still wants its control: it plays (its pair follows once both games are over), or it is
+        done with a whole diplomacy record and no pair line yet. A cancelled, skipped or failed job never pairs (a retry
+        asks for its control afresh), nor does a done one whose record could not be read or broke off."""
+        ctl = job.get("control") or {}
+        res = job.get("result") or {}
+        if job.get("mode") != "hybrid" or not ctl.get("id") or res.get("pair"):
+            return False
+        if job["status"] in ACTIVE:
+            return True
+        dip = res.get("diplomacy")
+        return job["status"] == "done" and isinstance(dip, dict) and not dip.get("incomplete")
+
+    def _check_controls(self, run: dict) -> set:
+        """Follow the control of each hybrid job that still wants one (``_awaits_control``, P3.6.9): its status on the
+        job, asked for again when this process has not (a restart), and the job's pair line once both games are over.
+        Returns the ids of the controls the run's jobs still want."""
+        wanted: set = set()
         for job in run["jobs"]:
-            ctl = job.get("control")
-            if job.get("mode") != "hybrid" or not ctl or not ctl.get("id") or (job.get("result") or {}).get("pair"):
+            if not self._awaits_control(job):
                 continue
+            ctl = job["control"]
+            wanted.add(ctl["id"])
             st = self.controls.status(ctl["id"])
             if st["status"] == "missing":
                 try:
@@ -1259,6 +1291,7 @@ class BenchmarkScheduler:
                     ctl["error"] = st["error"]
             if self._pair(job) or changed:
                 self._touch(run)
+        return wanted
 
     def pairs(self, visible: Optional[set] = None) -> list:
         """Every finished hybrid job's pair (P3.6.10), of the runs in ``visible`` (None: every run): {"model", "owners"

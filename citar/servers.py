@@ -1693,9 +1693,12 @@ def loaded_config(server: dict, model_key: str) -> Optional[dict]:
     return None
 
 
-def ensure_model(server: dict, model_key: str, prof: Optional[dict]) -> float:
+def ensure_model(server: dict, model_key: str, prof: Optional[dict], *, shared: bool = False) -> float:
     """Load a model on a server that CITAR manages (LM Studio, this PC or an LM Link device) with its load profile.
-    Returns the seconds spent loading (0 when it was already loaded suitably or the server isn't managed)."""
+    Returns the seconds spent loading (0 when it was already loaded suitably or the server isn't managed). ``shared``:
+    the load comes beside other work on the machine (a hybrid benchmark job's, design/phase3-features.md P3.3.6), so it
+    unloads nothing: not the other models (whatever the profile's ``exclusive``), and not this one to load it again
+    with a larger context (it is used as it is loaded)."""
     conn = server["connection"]
     if conn["provider"] != "lmstudio" or not conn.get("manage_loading") or _helper_refusal(server):
         return 0.0
@@ -1712,8 +1715,9 @@ def ensure_model(server: dict, model_key: str, prof: Optional[dict]) -> float:
                                f"{server['name']} right now. Load it there (with your preset) and start again.")
         return 0.0
     want_ctx = int((prof or {}).get("context") or 0)
-    exclusive = (prof or {}).get("exclusive", True)
-    if st["loaded"] and (not want_ctx or (st["context"] or want_ctx) >= want_ctx) and not (exclusive and st["others"]):
+    exclusive = (prof or {}).get("exclusive", True) and not shared
+    if st["loaded"] and (shared or not want_ctx or (st["context"] or want_ctx) >= want_ctx) \
+            and not (exclusive and st["others"]):
         return 0.0
     started = time.time()
     import subprocess

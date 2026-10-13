@@ -12,7 +12,10 @@ the same points of the game.
 A control is bot-only and needs no machine: it runs headless on the server's CPU (``run_control``: a loop over
 ``EngineGame.drive`` with the recorder), one at a time on its own thread (``ControlGames``), once per spec (the game's
 settings and seed, the seats' bots with their fingerprints, the build) under ``<benchmark dir>/controls/<id>.json``, and
-every model's job of the same scenario and seed shares it.
+every model's job of the same scenario and seed shares it. The spec pins each seat's bot as the hybrid game set it up
+(``pin_bot``: the bot version, its parameters and aggression), since a control may play long after its hybrid game
+started, behind others on its queue: a profile edited or deleted meanwhile changes neither what the control plays nor
+its id, and a pinned bot this build cannot make fails the control rather than play another bot.
 
 Replaces: nothing; before 3-16 there were no hybrid benchmark jobs.
 """
@@ -46,38 +49,58 @@ class ControlStopped(Exception):
     """The server is stopping: a control under way is left to be played again later."""
 
 
+def pin_bot(bot_cfg: Optional[dict]) -> dict:
+    """A seat's bot as its game plays it now, pinned (``profiles.resolve(..., pin=True)``): the profile (the standard
+    bot when the seat names none, or names one deleted since the game was set up, as ``hybrid_agent.bot_args`` and
+    ``BotAgent`` play it), its revision, the bot version it plays, its parameters, the profile's fixed aggression and
+    the seat's own. ``bot_handle`` makes the bot from it alone, whatever happens to the profile afterwards."""
+    from ..agents.hybrid_agent import bot_args
+    from ..bots import profiles
+    ref, kw = bot_args(bot_cfg)
+    r = profiles.resolve(ref, pin=True)
+    return {"profile": r["profile"], "profile_rev": r["profile_rev"], "engine": r["engine"], "params": r["params"],
+            "fixed_aggression": r["aggression"], "aggression": kw.get("aggression")}
+
+
+def bot_handle(pinned: dict):
+    """The bot a pinned seat's bot (``pin_bot``) plays: a fresh handle, with every category the bot's. Raises
+    ValueError when this build cannot make it (a spec of an older layout, a version no longer compiled in): the
+    control then fails rather than play another bot."""
+    if not isinstance(pinned, dict) or not pinned.get("engine"):
+        raise ValueError("the control's spec does not pin its bots (an older layout); retry the job to play it again")
+    agg = pinned.get("aggression")
+    fixed = pinned.get("fixed_aggression")
+    return engine_api.bot_instance(pinned["engine"], aggression=float(agg) if agg is not None else 0.4,
+                                   params=pinned.get("params") or {},
+                                   fixed_aggression=float(fixed) if fixed is not None else None)
+
+
 def control_spec(engine_config: dict, seats, pid: int, ops: Optional[list] = None) -> dict:
     """The control of a hybrid game made from ``engine_config`` (``GameSession.engine_config``: what the engine was
     given) whose seats are ``seats`` (the session's, their bots as the server pinned them), the hybrid seat ``pid``:
     the same configuration and seed, the control seat's automatic decisions a bot seat's (``BOT_AUTO``), and each seat
-    a bot plays with its profile and aggression (the hybrid seat's bot with every category the bot's). ``ops`` are
-    scenario operations the hybrid game was given before its first turn, which the control is given too."""
+    a bot plays with its bot pinned now (``pin_bot``; the hybrid seat's bot with every category the bot's). ``ops`` are
+    scenario operations the hybrid game was given before its first turn, which the control is given too. Reads the
+    bot profiles: off any session's lock."""
     cfg = copy.deepcopy(engine_config)
     players = cfg.get("players") or []
     players[pid] = {**players[pid], "auto": dict(BOT_AUTO)}
     bots = {}
     for seat in seats:
         if seat.type in ("bot", "hybrid"):
-            b = seat.bot or {}
-            bots[str(seat.player)] = {"profile": b.get("profile"), "aggression": b.get("aggression")}
+            bots[str(seat.player)] = pin_bot(seat.bot)
     return {"format": FORMAT, "config": cfg, "bots": bots, "pid": int(pid), "ops": list(ops or [])}
 
 
 def _bots(spec: dict) -> dict:
-    """The control's bot handles, by seat (``hybrid_agent.bot_args``: a deleted profile plays the standard bot)."""
-    from ..agents.hybrid_agent import bot_args
-    from ..bots import profiles
-    out = {}
-    for pid, cfg in spec["bots"].items():
-        ref, kw = bot_args(cfg)
-        out[int(pid)] = profiles.make_bot(ref, **kw)
-    return out
+    """The control's bot handles, by seat, from the bots its spec pinned (``bot_handle``)."""
+    return {int(pid): bot_handle(pinned) for pid, pinned in spec["bots"].items()}
 
 
 def control_key(spec: dict) -> str:
-    """The control's id: a hash of its spec, the build (``engine_api.build_info``'s id, over the engine's and the bot's
-    code and the ruleset) and every bot's fingerprint (what it plays). Two hybrid jobs of the same scenario and seed,
-    whatever their models, have the same control; a new build or bot plays it again."""
+    """The control's id: a hash of its spec (the bots pinned in it), the build (``engine_api.build_info``'s id, over
+    the engine's and the bot's code and the ruleset) and every bot's fingerprint (what it plays). Two hybrid jobs of
+    the same scenario and seed, whatever their models, have the same control; a new build or bot plays it again."""
     fingerprints = {str(pid): engine_api.bot_fingerprint(b) for pid, b in sorted(_bots(spec).items())}
     raw = json.dumps({"spec": spec, "build": engine_api.build_info().get("build_id"),
                       "fingerprints": fingerprints}, sort_keys=True, separators=(",", ":"), default=str)
@@ -90,15 +113,16 @@ def run_control(spec: dict, *, stop: Optional[Callable[[], bool]] = None, events
     the game ended, ``final_of``), how many events it made and their hash (``events_sha256``), its drives and seconds.
     ``events``, when given, gets every event (a test comparing two runs). Raises ControlStopped when ``stop()`` says
     so, RuntimeError for a game that does not end."""
-    from ..agents.hybrid_agent import valuation_bot
     from ..diplomacy_stats import DiplomacyRecorder, final_of, summarize
     pid = int(spec["pid"])
     t0 = time.perf_counter()
+    bots = _bots(spec)
+    # the seat's own bot with every category the bot's values its proposals, as the hybrid seat's fallback bot does in
+    # the other arm (a handle of its own: the one playing the seat keeps its memory of the game)
+    rec = DiplomacyRecorder(pid, bot_handle(spec["bots"][str(pid)]))
     g = engine_api.EngineGame.new(spec["config"])
     if spec.get("ops"):
         g.apply_ops(spec["ops"])
-    bots = _bots(spec)
-    rec = DiplomacyRecorder(pid, valuation_bot(spec["bots"].get(str(pid))))
     digest = hashlib.sha256()
     count = [0]
 
@@ -194,13 +218,13 @@ class ControlGames:
         return rec
 
     def status(self, key: str) -> dict:
-        """Where control ``key`` stands: ``done`` (cached), ``running``, ``queued``, ``failed`` (with ``error``), or
-        ``missing`` (never asked for in this process, and not cached)."""
-        try:
-            if key in self._cache or self.path(key).exists():
-                return {"status": "done"}
-        except KeyError:
+        """Where control ``key`` stands: ``done`` (its record reads), ``running``, ``queued``, ``failed`` (with
+        ``error``), or ``missing`` (never asked for in this process, and no record that reads: a file of another layout
+        or a damaged one is no record, so the job asks for the control again and it is played again)."""
+        if not self._valid(key):
             return {"status": "missing"}
+        if self.get(key) is not None:
+            return {"status": "done"}
         with self.lock:
             if self._running == key:
                 return {"status": "running"}
@@ -247,6 +271,15 @@ class ControlGames:
     def stop(self) -> None:
         """Stop the thread: a control under way is dropped and played again when next asked for."""
         self._stop.set()
+
+    def keep_only(self, wanted: set) -> list:
+        """Drop the queued controls no job wants any more (``wanted``: the ids of the controls of jobs that can still
+        pair: a cancelled, failed or skipped job's control is not played for nobody). The one under way plays on (it
+        is cached for whoever asks next). Returns the ids dropped."""
+        with self.lock:
+            dropped = [k for k in self._queue if k not in wanted]
+            self._queue = [k for k in self._queue if k in wanted]
+        return dropped
 
     def _loop(self) -> None:
         """The controls' thread: play the queue, oldest first, each control once."""

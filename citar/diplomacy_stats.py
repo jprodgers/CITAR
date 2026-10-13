@@ -12,7 +12,9 @@ open, and ``bot_advice``'s value would be null for them: reading the history aft
 the same way. An accepted deal keeps the value of the proposal that was accepted. The game's events give the rest
 (``on_event``): wars declared by and on the seat, cities it captured and lost, peace, eliminations. Rows are
 append-only (a session keeps them in its metrics, ``Metrics.data["diplomacy"]``, so they are saved with the game and
-come back with it); what the recorder has read so far is worked out again from them (``_sync``).
+come back with it); what the recorder has read so far is worked out again from them (``_sync``). A record that fails
+unexpectedly stops for good (``fail``: a ``broken`` row, kept with the others), since rows missed or valued late are not
+the same measure as its control's; its job then pairs nothing.
 
 **A pair's line** (``pair_line``): the score difference (the hybrid seat's minus the control seat's) at the end and at
 turns 100, 200 and 300 where both games reached them, the deals made, their total and mean value, the acceptance rate of
@@ -20,7 +22,8 @@ the seat's own proposals, its wars and how they ended, its captures and losses, 
 them. **The leaderboard** (``leaderboard``): per model and owners preset, the pairs, the mean score difference with a
 90% bootstrap interval (``BOOTSTRAP_RESAMPLES`` seeded resamples), deals per game, mean deal value, acceptance rate,
 wars declared per game, captures and losses, and the fallbacks: those the model caused (``MODEL_CAUSES``) counted as
-its, the others (``OTHER_CAUSES``: a benchmark's queue, a refusal) listed beside the line.
+its, the others (``OTHER_CAUSES``: a benchmark's queue, a refusal, a prompt that never started) listed beside the
+line.
 
 Replaces: nothing; before 3-16 hybrid seats had no benchmark and no leaderboard.
 """
@@ -40,11 +43,12 @@ BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 316
 #: The interval's coverage: 90%, from the 5th to the 95th percentile of the resampled means.
 BOOTSTRAP_COVERAGE = 0.90
-#: Fallback causes that are the model's doing (a model reachable but silent past its time, or one that failed), and
-#: those that are not (it waited behind another benchmark, or the machine or its admission refused it): the leaderboard
-#: counts the first against the model and lists the second beside its line (P3.6.10).
+#: Fallback causes that are the model's doing (a model reachable but silent past its time once its prompt had started,
+#: or one that failed), and those that are not (it waited behind another benchmark, the machine or its admission
+#: refused it, or its prompt never started: ``chat.ChatClock._cause``): the leaderboard counts the first against the
+#: model and lists the second beside its line (P3.6.10).
 MODEL_CAUSES = ("timeout", "failed")
-OTHER_CAUSES = ("queued_behind_benchmark", "refused")
+OTHER_CAUSES = ("queued_behind_benchmark", "refused", "not_started")
 #: Event types the recorder keeps a row of, when they concern its seat (``on_event``).
 EVENT_KINDS = ("war_declared", "peace", "city_captured", "eliminated")
 
@@ -69,6 +73,17 @@ class DiplomacyRecorder:
         self._watch: set = set()    # the seat's negotiations still open when last looked at
         self._next = 1              # the next negotiation id never looked at
         self._synced = False
+        #: why the record stopped (``fail``), or None: a loaded game's rows say so with a ``broken`` row. A broken record
+        #: reads nothing more
+        self.broken: Optional[str] = next((r.get("error") or "failed" for r in self.rows
+                                           if r.get("player") == self.pid and r.get("kind") == "broken"), None)
+
+    def fail(self, turn, why: str) -> None:
+        """The record failed unexpectedly (``why``: the error's kind, never its words, which the game's save keeps):
+        it stops here, a ``broken`` row saying so (once)."""
+        if self.broken is None:
+            self.broken = str(why) or "failed"
+            self.rows.append({"player": self.pid, "kind": "broken", "turn": turn, "error": self.broken})
 
     # ------------------------------------------------------------------ reading the game
     def on_event(self, ev: dict) -> None:
@@ -76,7 +91,7 @@ class DiplomacyRecorder:
         the seat, peace it made, a city it captured or lost, and an elimination (its own, or a civilization's it was at
         war with: a war's outcome)."""
         kind = ev.get("type")
-        if kind not in EVENT_KINDS:
+        if kind not in EVENT_KINDS or self.broken is not None:
             return
         d = ev.get("data") or {}
         pid = self.pid
@@ -99,7 +114,9 @@ class DiplomacyRecorder:
     def observe(self, g) -> None:
         """Read what moved since the last look: every negotiation of the seat with entries not yet recorded, each new
         entry a row (``_entry``), its proposal valued against the game as it stands now. Cheap: a negotiation's head is
-        read without copying its history, and only those that moved are read whole."""
+        read without copying its history, and only those that moved are read whole. A broken record reads nothing."""
+        if self.broken is not None:
+            return
         if not self._synced:
             self._sync()
         pid = self.pid
@@ -252,8 +269,9 @@ def fallbacks_of(metrics_data: dict, pid: int) -> dict:
     """A hybrid seat's fallbacks in a game, by cause (P3.6.5, P3.6.11): its chats its fallback bot answered (the
     metrics' ``fallback`` rows) and its diplomat phases that did not run (``skipped``, ``refused``, ``failed``), each
     with its cause; ``model`` counts the ones the model caused (``MODEL_CAUSES``: a chat it was too slow for once its
-    prompt had started, a call that failed), ``other`` the rest by cause. A phase that never started (``skipped``: its
-    prompt waited past its 30 s, which a benchmark game's never does) is the machine's, ``not_started``."""
+    prompt had started, a call that failed), ``other`` the rest by cause. A chat whose time ran out before its prompt
+    started (``not_started``, the chat clock's cause in a benchmark game) and a phase that never started (``skipped``:
+    its prompt waited past its 30 s, which a benchmark game's never does) are the machine's, ``not_started``."""
     chat: dict = {}
     for x in (metrics_data or {}).get("negotiations") or []:
         if x.get("player") == pid and x.get("outcome") == "fallback":

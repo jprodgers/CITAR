@@ -617,6 +617,10 @@ class HybridAgent:
                 step = conv.step()
                 if started is None:
                     started = time.perf_counter() - float(conv.last_gen_s or 0.0)
+                for nid, entries in told.items():
+                    # the model has the chats it was told of: a chat's time that runs out now is the model's
+                    # (``ChatClock._cause``), not its queue's
+                    session.chat.model_told(nid, pid, entries)
                 row["steps"] += 1
                 row["gen_s"] += float(conv.last_gen_s or 0.0)
                 row["queue_s"] += float(conv.last_queue_s or 0.0)
