@@ -871,3 +871,298 @@ class OneMachine(Scripted):
         self.assertEqual(self.rows(s, nid), [], "no chat answer, no fallback")
         row = next(r for r in s.metrics.data["diplomat"] if r["turn"] == turn + 1)
         self.assertIn({"tool": "respond_negotiation", "ok": True}, row["tools"])
+
+
+# ---------------------------------------------------------------------------- gate 4: the triggers
+class Triggers(Scripted):
+    """Gate 4: each trigger of P3.6.4 fires one phase. A person (seat 0) plays through the API, and on its turn does
+    what makes a trigger; the hybrid seat (1, every category but war its model's, ``prompt_every`` 50) plays next, and
+    its phase that turn names the trigger. A phase never runs twice in a turn."""
+
+    def setUp(self):
+        super().setUp()
+        s = self.s = self.game([{"type": "human"}, self.on("sv_dryrun", "all_but_war", prompt_every=50),
+                                {"type": "bot"}, {"type": "bot"}], espionage=True)
+        self.target = {}
+        with s.lock:
+            g = s.game
+            g.apply_ops([{"op": "meet", "a": 0, "b": 1}, {"op": "set_player", "player": "all", "gold": 900}])
+            home = self.home = next(u for u in g.execute(0, "get_units", {}) if u["type"] == "Settler")
+            g.apply_ops([{"op": "found_city", "player": 0, "x": home["x"], "y": home["y"], "capital": True,
+                          "buildings": ["United Nations"]}])
+            theirs = next(u for u in g.execute(2, "get_units", {}) if u["type"] == "Settler")
+            city = g.apply_ops([{"op": "found_city", "player": 2, "x": theirs["x"], "y": theirs["y"],
+                                 "name": "Target"}])[0]["city_id"]
+            self.target = {"id": city, "x": theirs["x"], "y": theirs["y"]}
+        s.start()
+
+    def phases(self, turn: int) -> list:
+        return [r for r in self.s.metrics.data.get("diplomat") or [] if r["turn"] == turn and r["player"] == 1]
+
+    def fired(self, turn: int, words: str) -> list:
+        """The hybrid seat's phase of ``turn``, which must exist, be the turn's only one, and name ``words``."""
+        rows = self.phases(turn)
+        self.assertEqual(len(rows), 1, f"one phase on turn {turn}: {rows}")
+        self.assertTrue(any(words in t for t in rows[0]["triggers"]), (words, rows[0]["triggers"]))
+        return rows[0]["triggers"]
+
+    def test_each_trigger_fires_one_phase(self):
+        s, g = self.s, self.s.game
+        name = g.player_name
+        t = self.round(s)
+        self.assertEqual(self.phases(t), [], "nothing has happened yet")
+        # first contact with a major civilization
+        t = self.round(s, lambda: g.apply_ops([{"op": "meet", "a": 1, "b": 2}]))
+        self.fired(t, f"first contact with {name(2)}")
+        # war declared on the seat
+        t = self.round(s, lambda: self.assertTrue(s.call_tool(0, "declare_war", {"player_id": 1})["ok"]))
+        self.fired(t, f"{name(0)} declared war on you")
+
+        # peace made (the person's peace, which the seat's model accepts)
+        def peace():
+            nid = self.offer(s, give=[{"type": "peace_treaty"}], receive=[{"type": "peace_treaty"}])
+            self.assertTrue(until(lambda: g.negotiation(nid)["status"] == "accepted", 15), g.negotiation(nid))
+        t = self.round(s, peace)
+        self.fired(t, f"peace was made with {name(0)}")
+        # the seat denounced
+        t = self.round(s, lambda: self.assertTrue(s.call_tool(0, "denounce", {"player_id": 1})["ok"]))
+        self.fired(t, f"{name(0)} denounced you")
+
+        # a deal of the seat's that ends next turn, then expires
+        def deal():
+            nid = self.offer(s, give=[{"type": "gold_per_turn", "amount": 1, "turns": 2}], receive=[])
+            self.assertTrue(until(lambda: g.negotiation(nid)["status"] == "accepted", 15), g.negotiation(nid))
+        dealt = self.round(s, deal)
+        seen = {}
+        for _ in range(4):
+            t = self.round(s)
+            for row in self.phases(t):
+                for trig in row["triggers"]:
+                    seen.setdefault(trig, t)
+        ending = [t for trig, t in seen.items() if "ends next turn" in trig and name(0) in trig]
+        expired = [t for trig, t in seen.items() if trig == f"a deal with {name(0)} expired"]
+        self.assertTrue(ending and expired, (dealt, seen))
+        self.assertLess(ending[0], expired[0])
+
+        # a deal of the seat's cut short: the person's cotton, traded for ten turns, gone
+        cotton = {}
+
+        def trade():
+            g.apply_ops([{"op": "grant_tech", "player": 0, "tech": "Calendar"}])
+            for x, y in neighbours(self.home["x"], self.home["y"]):
+                try:
+                    g.apply_ops([{"op": "set_tile", "x": x, "y": y, "resource": "Cotton", "improvement": "Plantation"}])
+                except engine_api.ActionError:
+                    continue
+                cotton.update(x=x, y=y)
+                break
+            nid = self.offer(s, give=[{"type": "resource", "resource": "Cotton", "amount": 1, "turns": 10}],
+                             receive=[])
+            self.assertTrue(until(lambda: g.negotiation(nid)["status"] == "accepted", 15), g.negotiation(nid))
+        self.round(s, trade)
+        cut = self.round(s, lambda: g.apply_ops([{"op": "set_tile", "x": cotton["x"], "y": cotton["y"],
+                                                  "resource": None}]))
+        self.round(s)                       # the round's end cuts it: the seat's next look sees it
+        rows = self.phases(cut) + self.phases(cut + 1)
+        self.assertTrue(any(f"a deal with {name(0)} was cut" in x for r in rows for x in r["triggers"]), rows)
+        # a city-state event about the seat (city-states are its model's)
+        cs = next(p["id"] for p in g.summary()["players"] if p["kind"] != "major")
+        t = self.round(s, lambda: g.apply_ops([{"op": "meet", "a": 1, "b": cs}]))
+        self.fired(t, "city-states: ")
+        # a spy (espionage is its model's)
+        t = self.round(s, lambda: g.test_ops([{"op": "add_spy", "player": 1}]))
+        self.fired(t, "espionage: ")
+
+        # a city the seat captured (captured cities are its model's: it stays a puppet until the model decides)
+        def capture():
+            g.apply_ops([{"op": "set_relation", "a": 1, "b": 2, "state": "war"}])
+            for x, y in neighbours(self.target["x"], self.target["y"]):
+                try:
+                    g.apply_ops([{"op": "add_unit", "player": 1, "unit": "Swordsman", "x": x, "y": y, "count": 12}])
+                    break
+                except engine_api.ActionError:
+                    continue
+            for u in [u for u in g.execute(1, "get_units", {}) if u["type"] == "Swordsman"]:
+                # it is the person's turn: the seat's new units are given their moves
+                g.test_ops([{"op": "set_unit", "unit": u["id"], "moves": 2},
+                            {"op": "attack_as", "unit": u["id"], "x": self.target["x"], "y": self.target["y"]}])
+                if any(c["id"] == self.target["id"] for c in g.execute(1, "get_cities", {})):
+                    return
+            self.fail("the city was not captured")
+        t = self.round(s, capture)
+        self.fired(t, "you captured")
+        city = next(c for c in g.execute(1, "get_cities", {}) if c["id"] == self.target["id"])
+        self.assertTrue(city["puppet"], "the engine did not annex it")
+        # the seat's score changes by more than a quarter
+        t = self.round(s, lambda: g.apply_ops([{"op": "grant_era", "player": 1, "era": "Medieval era"}]))
+        self.fired(t, "your score went from")
+
+        # its strength against a civilization it has met changes by more than a quarter (the turn's statistics are
+        # the round's: the next turn's look sees it)
+        def army():
+            at = next(u for u in g.execute(1, "get_units", {}) if u["type"] == "Swordsman")
+            g.apply_ops([{"op": "add_unit", "player": 1, "unit": "Swordsman", "x": at["x"], "y": at["y"],
+                          "count": 30}])
+        t = self.round(s, army)
+        strength = [r for turn in (t, t + 1) for r in self.phases(turn)
+                    if any(x.startswith("your strength against") for x in r["triggers"])]
+        if not strength:
+            t = self.round(s)
+            strength = [r for r in self.phases(t) if any(x.startswith("your strength against") for x in r["triggers"])]
+        self.assertTrue(strength, s.metrics.data["diplomat"][-3:])
+
+        # two triggers in one turn: one phase, naming both
+        other = [p["id"] for p in g.summary()["players"] if p["kind"] != "major"][1]
+
+        def two():
+            g.apply_ops([{"op": "meet", "a": 1, "b": other}])
+            g.test_ops([{"op": "add_spy", "player": 1}])
+        t = self.round(s, two)
+        both = self.fired(t, "city-states: ")
+        self.assertTrue(any(x.startswith("espionage: ") for x in both), both)
+        # the United Nations' vote opens on turn 15, the turn before the vote (its builder, the person, founded it on
+        # turn 1): that turn's phase names it, whatever else it names
+        while g.turn <= 15:
+            self.round(s)
+        self.fired(15, "the United Nations vote is open")
+        # never two phases in a turn
+        turns = [r["turn"] for r in s.metrics.data["diplomat"]]
+        self.assertEqual(len(turns), len(set(turns)), turns)
+
+
+class Schedule(Scripted):
+    def test_prompt_every_fires_on_schedule(self):
+        s = self.game([{"type": "human"}, self.on("sv_dryrun", {"un": "llm"}, prompt_every=3), {"type": "bot"}])
+        self.met(s)
+        s.start()
+        for _ in range(13):
+            self.round(s)
+        rows = [r for r in s.metrics.data["diplomat"] if r["player"] == 1]
+        last = 1                                    # the seat's first turn: the schedule counts from it
+        scheduled = []
+        for r in rows:
+            due = any(t.startswith("it is 3 turns since the last call") for t in r["triggers"])
+            self.assertEqual(due, r["turn"] - last >= 3, (r["turn"], last, r["triggers"]))
+            if due:
+                scheduled.append(r["turn"])
+            last = r["turn"]
+        self.assertGreaterEqual(len(scheduled), 3, rows)
+        self.assertIn(4, [r["turn"] for r in rows], "the first, three turns after the seat's first")
+
+
+# ---------------------------------------------------------------------------- gate 8: every place that asks "is this an LLM seat?"
+class SeatSites(Scripted):
+    """Each Python row of P3.6.7, as the hybrid seat is to be seen there."""
+
+    def test_the_seat_s_public_shape_its_agent_and_its_turns_metrics(self):
+        s = self.game([{"type": "human"}, self.on("sv_dryrun", "trade_only")])
+        self.met(s)
+        info = s.info()["seats"][1]
+        self.assertEqual((info["type"], info["llm_info"]["server_id"]), ("hybrid", "sv_dryrun"))
+        self.assertEqual(info["hybrid"]["preset"], "trade_only")
+        self.assertIsInstance(s.get_agent(1), HybridAgent)            # get_agent
+        s.start()
+        for _ in range(3):
+            self.round(s)
+        recs = [r for r in s.metrics.data["turns"] if r["player"] == 1 and r["ended"]]
+        self.assertTrue(recs)
+        self.assertEqual({(r["controller"], r["model"]) for r in recs}, {("hybrid", "dry-run")})    # _track_turn
+        self.assertTrue(any(r.get("bot_actions") for r in recs), "its turns are its bot's drives")   # drive_bots
+        row = s.metrics_report()["summary"][1]                                                       # metrics_report
+        self.assertEqual((row["controller"], row["model"], row["hybrid"], row["bot"]),
+                         ("hybrid", "dry-run", True, "standard"))
+        self.assertEqual(row["owners"]["trades"], "llm")
+
+    def test_its_chats_go_to_its_bot_first_on_the_bot_pool(self):
+        """``_dispatch_negotiation_interrupts``: a chat its bot owns is answered by the bot, on the bot pool, and its
+        model is never asked."""
+        seen = []
+        real = HybridAgent.respond_negotiation
+
+        def spy(agent, session, pid, nid, kind="bot", epoch=None):
+            seen.append((kind, threading.current_thread().name.rsplit("-", 1)[0]))
+            return real(agent, session, pid, nid, kind=kind, epoch=epoch)
+        s = self.game([{"type": "human"}, self.on("sv_dryrun", {"denounce": "llm"})])
+        self.met(s)
+        with mock.patch.object(HybridAgent, "respond_negotiation", spy):
+            nid = self.offer(s)
+            self.assertTrue(self.settled(s, nid))
+        self.assertEqual(seen, [("bot", "bot-responder")])
+        self.assertEqual(self.chats_made(), [])
+        self.assertEqual(s.game.negotiation(nid)["history"][-1]["by"], 1)
+
+    def test_occupancy_quiet_hours_and_making_way_are_full_seats_business(self):
+        """``occupied`` lists leases only, and a hybrid seat holds none; quiet hours and making way pause a game for
+        its full seats only, and a hybrid seat's prompt in its machine's quiet hours is refused (the fallback bot
+        answers)."""
+        from datetime import datetime, timedelta
+        from citar.pool import seats as pool_seats
+        s = self.game([{"type": "human"}, self.on("sv_dryrun"), {"type": "bot"}])
+        s.registered = True
+        self.met(s)
+        s.start()
+        self.assertTrue(until(lambda: s.game.current == 0, 10))
+        self.assertEqual(pool_seats.occupied("sv_dryrun"), [], "a hybrid seat holds no lease")
+        self.assertEqual(s.leases, {})
+        self.assertIsNone(s.queue_machine())
+        later = datetime.now() + timedelta(hours=2)
+        with mock.patch("citar.servers.restricted_now", return_value=later):
+            self.assertFalse(s._quiet_hours(1, s.seats[1]), "the game is not paused for a hybrid seat's machine")
+        self.assertFalse(s._make_way(1, s.seats[1]))
+        with mock.patch.object(S.Machine, "_quiet", lambda m: later):
+            nid = self.offer(s)
+            self.assertTrue(self.settled(s, nid))
+        self.assertEqual(self.rows(s, nid), [("fallback", "refused")])
+        # a full seat on the same machine is listed
+        other = self.game([{"type": "llm", "llm": {"server_id": "sv_dryrun", "model": "dry-run"}}, {"type": "human"}])
+        other.start()
+        self.assertTrue(until(lambda: pool_seats.occupied("sv_dryrun"), 10))
+
+    def test_usage_lists_every_model_seat_with_its_class_and_tracks_a_hybrid_game(self):
+        from citar import usage
+        rows = []
+        with mock.patch.object(usage.Tracker, "activity",
+                               lambda t, act, kind, name="", parent=None, ref=None, **fields: rows.append(fields)):
+            s = self.manager.create({"map_size": "duel", "seed": 3, "barbarians": "off"},
+                                    [{"type": "human"}, self.on("sv_dryrun"),
+                                     {"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}],
+                                    start=False)
+        self.assertTrue(s.usage_act, "a game whose model seat is hybrid is tracked")
+        seats = rows[0]["seats"]
+        self.assertEqual(seats[1], {"player": 1, "type": "hybrid", "server_id": "sv_dryrun", "model": "dry-run",
+                                    "class": "partial"})
+        self.assertEqual(seats[2]["class"], "full")
+        self.assertEqual((seats[0]["class"], seats[0]["server_id"]), (None, None))
+        self.assertEqual(usage.session_servers(s).get("sv_dryrun"), None, "a hybrid seat holds its machine never")
+
+    def test_scoring_leaves_hybrid_seats_out_of_the_model_ranking(self):
+        from citar.server import scoring
+        m = {"provider": "mock", "model": "m-1"}
+        s = self.game([{"type": "llm", "llm": dict(m)}, {"type": "hybrid", "llm": dict(m),
+                                                         "hybrid": {"owners": "trade_only"}}, {"type": "human"}])
+        for pid, controller in ((0, "llm"), (1, "hybrid")):
+            for turn in (1, 2, 3):
+                s.metrics.begin_turn(pid, turn, controller, "m-1")
+                s.metrics.end_turn(pid, "end_turn")
+        reports = scoring._reports(self.manager)
+        self.assertEqual(sorted(reports[s.id]["summary"]), [0, 2])
+        rows = {r["model"]: r for r in scoring.compare_models(self.manager)}
+        self.assertEqual((rows["m-1"]["turns"], rows["m-1"]["games"]), (3, 1), "the LLM seat's turns only")
+        # a save's digest the same
+        path = s.save("scored")
+        digest = scoring._digest_save(path)
+        self.assertNotIn(1, digest["summary"])
+        self.assertIn(0, digest["summary"])
+
+    def test_reports_and_probes_read_model_seats(self):
+        from citar.probes import ProbeRunner
+        from citar.reports import data as report_data
+        s = self.game([{"type": "human"}, self.on("sv_dryrun")])
+        with s.lock:
+            s.game.add_thought(1, "the diplomat's thought", "diplomacy")
+        seats = report_data._details_of(s.id, s)["seats"]
+        self.assertEqual([(x["player"], x["controller"], x["class"], x["model"]) for x in seats],
+                         [(1, "hybrid", "partial", "dry-run")])
+        runner = ProbeRunner(self.manager)
+        runner._set_live("r1", {"session": s, "run": "r1"})
+        self.assertEqual([t["text"] for t in runner.status()["live"]["thoughts"]], ["the diplomat's thought"])
