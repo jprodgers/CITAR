@@ -12,10 +12,10 @@
   (``crates/citar-testkit/tests/engine/minimap.rs``): through the binding it is a fraction of a percent of a view, below
   this laptop's run-to-run noise.
 - **The debug ops route**, ``POST /api/games/{gid}/debug/ops`` (P3.7.5): not there (404) unless the server runs with
-  ``CITAR_DEBUG=1``; then 200 for whoever manages the game (its owner, an administrator), 404 for another member and a
+  ``CITAR_DEBUG=1``, whoever calls and whatever the body; then 200 for whoever manages the game (its owner, an administrator), 404 for another member and a
   moderator, 401 or 404 for a visitor, 403 for a member it is shared with to view (a write) and, the game published,
-  for a moderator (control) and a visitor, and refused without the session's CSRF token (P3.9.1). The operations
-  apply all or nothing, under the game's lock, and are announced as any action is: the version moves, and the view's
+  for a moderator (control) and a visitor, and refused without the session's CSRF token (P3.9.1), each before its
+  body is judged (a body not a list of objects is a 422 for the manager only). The operations apply all or nothing, under the game's lock, and are announced as any action is: the version moves, and the view's
   ETag with it.
 """
 from __future__ import annotations
@@ -341,12 +341,34 @@ class DebugOps(Case):
     """Gate 3: ``POST /api/games/{gid}/debug/ops`` (P3.7.5), its gate by every kind of caller (P3.9.1)."""
 
     def test_it_is_not_there_without_the_debug_flag(self):
+        """Without the flag the route is not there, whoever calls and whatever JSON the body holds: the flag is checked
+        before the caller is resolved and before the body is judged. So is ``/debug/{action}``."""
         info = self.create("alice", [{"type": "human"}, {"type": "bot"}])
+        gid = info["id"]
+        bodies = ([{"op": "reveal", "player": 0}], [], {"op": "reveal"}, "x", [1, 2], None, 7)
         with mock.patch.dict(os.environ, {"CITAR_DEBUG": ""}):
-            r = self.ops(info["id"], [{"op": "reveal", "player": 0}], who="alice")
-        self.assertEqual(r.status_code, 404, r.text)
-        with mock.patch.dict(os.environ, {"CITAR_DEBUG": ""}):
-            self.assertEqual(self.ops(info["id"], [], who="zara").status_code, 404, "not for an administrator either")
+            for who in (None, "bob", "alice", "zara"):
+                for body in bodies:
+                    r = self.ops(gid, body, who=who)
+                    self.assertEqual(r.status_code, 404, f"{who or 'a visitor'}, {body!r}: {r.text}")
+                    self.assertEqual(r.json(), {"detail": "Debug endpoints are disabled."}, "nothing of the body")
+            anon = self.client.post("/api/games/nosuchgame/debug/ops", content=b"")
+            self.assertEqual(anon.status_code, 404, f"a visitor, no game, no body: {anon.text}")
+            text = self.client.post(f"/api/games/{gid}/debug/ops", content=b"{not json",
+                                    headers={"content-type": "text/plain"})
+            self.assertEqual(text.status_code, 404, f"text that is not JSON: {text.text}")
+            # text declared JSON that does not parse is FastAPI's 422 on any route that takes a body, before the flag
+            bad = self.client.post(f"/api/games/{gid}/debug/ops", content=b"{not json",
+                                   headers={"content-type": "application/json"})
+            self.assertEqual((bad.status_code, bad.json()["detail"][0]["type"]), (422, "json_invalid"), bad.text)
+            self.assertNotIn("not json", bad.text, "the body is not echoed")
+            for who in (None, "alice"):
+                r = self.client.post(f"/api/games/{gid}/debug/reveal", headers=self.headers[who] if who else {})
+                self.assertEqual(r.status_code, 404, f"the named actions, {who or 'a visitor'}: {r.text}")
+        s = self.manager.get(gid)
+        with s.lock:
+            seat = json.loads(s.game.view_json(0))
+        self.assertLess(len(seat["tiles"]), seat["width"] * seat["height"], "nothing was revealed")
 
     def test_who_may_apply_operations(self):
         info = self.create("alice", [{"type": "human"}, {"type": "bot"}])
@@ -362,6 +384,11 @@ class DebugOps(Case):
                           "the spectator link")
             no_csrf = {k: v for k, v in self.headers["alice"].items() if k != sessions.CSRF_HEADER}
             self.assertEqual(self.ops(gid, gold, headers=no_csrf).status_code, 403, "a cookie without its CSRF token")
+            # a body that is not a list of operations is judged only once the gate let the caller through
+            for body in ({"op": "reveal"}, "x", [1, 2], None):
+                self.assertEqual(self.ops(gid, body, who="bob").status_code, 404, f"a stranger's {body!r}")
+                self.assertIn(self.ops(gid, body).status_code, (401, 404), f"a visitor's {body!r}")
+                self.assertEqual(self.ops(gid, body, headers=no_csrf).status_code, 403, f"no CSRF token, {body!r}")
             shared = self.client.post(f"/api/games/{gid}/sharing/users", headers=self.headers["alice"],
                                       json={"handle": "bob", "permission": "view"})
             self.assertEqual(shared.status_code, 200, shared.text)
@@ -403,8 +430,10 @@ class DebugOps(Case):
             self.assertEqual(self.view(gid, token=token).content, first.content, "a refused list changed nothing")
             many = self.ops(gid, [{"op": "set_player", "player": 0, "gold": 5}] * 201, who="alice")
             self.assertEqual(many.status_code, 400, many.text)
-            for body in ({"op": "reveal"}, "reveal", [1, 2]):
-                self.assertEqual(self.ops(gid, body, who="alice").status_code, 422, f"not a list of operations: {body}")
+            for body in ({"op": "reveal"}, "reveal", [1, 2], None, 7):
+                r = self.ops(gid, body, who="alice")
+                self.assertEqual(r.status_code, 422, f"not a list of operations: {body!r}")
+                self.assertIn("list of operations", r.json()["detail"])
             good = self.ops(gid, [{"op": "grant_era", "player": 0, "era": "Renaissance era"}], who="alice")
             self.assertEqual(good.status_code, 200, good.text)
         with s.lock:

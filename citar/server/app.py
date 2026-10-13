@@ -948,26 +948,34 @@ DEBUG_OPS_MAX = 200
 
 def _debug_enabled() -> None:
     """The debug routes answer only on a server started with ``CITAR_DEBUG=1`` (``--debug``; the dev server sets it):
-    anywhere else they are not there, 404."""
+    anywhere else they are not there, 404.
+
+    The routes take it as a route dependency, so it runs before anything else of theirs: before the caller is
+    resolved and before a body is judged, so every caller and every body (that is JSON at all) gets the same 404."""
     import os
     if os.environ.get("CITAR_DEBUG") != "1":
         raise HTTPException(404, "Debug endpoints are disabled.")
 
 
-@app.post("/api/games/{gid}/debug/ops")
-def debug_ops(gid: str, request: Request, ops: list[dict] = Body(...), p: Principal = Depends(principal),
+@app.post("/api/games/{gid}/debug/ops", dependencies=[Depends(_debug_enabled)])
+def debug_ops(gid: str, request: Request, ops: Any = Body(None), p: Principal = Depends(principal),
               sdb: DbSession = Depends(get_db)):
     """Apply scenario operations to a live game, as the scenario editor applies them to a scenario
     (``EngineGame.apply_ops``: all or nothing; ``GET /api/scenario-ops`` lists them): what a script that talks to a dev
     server over HTTP moves a game on with, such as the QA script giving a seat each era's techs
     (design/phase3-features.md P3.7.5). The body is the list of operations; the answer is each one's result.
 
-    Gated as ``/debug/{action}`` is: 404 unless the server runs with ``CITAR_DEBUG=1``, then MANAGE on the game (a
-    stranger 404, a visitor 401 or 404). A refused list is a 400 naming the operation that failed, the game as it was;
-    more than ``DEBUG_OPS_MAX`` operations are a 400 too. Applied under the game's lock, then announced as any action
-    is (``_after_action``: the version, the watchers, an autosave at a new turn)."""
-    _debug_enabled()
+    Gated as ``/debug/{action}`` is: 404 unless the server runs with ``CITAR_DEBUG=1`` (``_debug_enabled``, a route
+    dependency), then MANAGE on the game (a stranger 404, a visitor 401 or 404, a cookie without its CSRF token 403).
+    The body is taken as anything and judged only after the gate, so a caller the gate refuses learns nothing from its
+    body: one that is not a list of objects is a 422 then. Text sent as JSON that does not parse is FastAPI's own 422
+    (``json_invalid``) before any of this runs, on every route that takes a body, so it says nothing of this route or
+    the game. A refused list is a 400 naming the operation that
+    failed, the game as it was; more than ``DEBUG_OPS_MAX`` operations are a 400 too. Applied under the game's lock,
+    then announced as any action is (``_after_action``: the version, the watchers, an autosave at a new turn)."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
+    if not isinstance(ops, list) or not all(isinstance(o, dict) for o in ops):
+        raise HTTPException(422, "The body must be a list of operations, each an object.")
     if len(ops) > DEBUG_OPS_MAX:
         raise HTTPException(400, f"At most {DEBUG_OPS_MAX} operations at once.")
     with s.lock, _crash_guard(s):
@@ -981,15 +989,14 @@ def debug_ops(gid: str, request: Request, ops: list[dict] = Body(...), p: Princi
     return {"ok": True, "results": results}
 
 
-@app.post("/api/games/{gid}/debug/{action}")
+@app.post("/api/games/{gid}/debug/{action}", dependencies=[Depends(_debug_enabled)])
 def debug_action(gid: str, action: str, request: Request, p: Principal = Depends(principal),
                  sdb: DbSession = Depends(get_db)):
-    """Developer helpers, only available when the server runs with --debug.
+    """Developer helpers, only available when the server runs with --debug (``_debug_enabled``, a route dependency).
 
     These hand out gold and reveal the map, so they are gated on managing the game as well as on
     the debug flag — otherwise a spectator on a public game could cheat in it.
     """
-    _debug_enabled()
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     with s.lock, _crash_guard(s):
         g = s.game
