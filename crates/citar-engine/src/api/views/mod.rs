@@ -32,6 +32,8 @@
 //! - [`events`]: an event as JSON for a viewer, the UN tally named (`game.py:880-990`);
 //! - [`alerts`]: what needs attention this turn (`briefing.alert_items`);
 //! - [`client`]: `client_view` and [`Game::view_json`] (`views.py:716-763`), and `path_preview`;
+//! - [`minimap`] (package 3-17): the minimap's block of a seat's own view, which Python's views had
+//!   not;
 //! - [`replay`]: [`Game::replay_data`], the frames as the journal stores them (DESIGN.md 4.11);
 //! - [`rules`] (package 1d-03): the rules as `get_rules` looks them up (`views.rules_lookup`).
 
@@ -49,6 +51,7 @@ pub mod client;
 pub mod empire;
 pub mod events;
 pub mod info;
+pub mod minimap;
 pub mod players;
 pub mod replay;
 pub mod rules;
@@ -57,6 +60,7 @@ pub mod units;
 
 pub use self::client::{ClientView, PathPreview};
 pub use self::empire::{EmpireSummary, Standing};
+pub use self::minimap::{Minimap, Stage, TileBox};
 
 /// JSON as Python's `json.dumps` wrote the views' numbers: a float as its `repr` (`2.0`,
 /// `1e+16`, `5e-05`, through [`PyFloat`](crate::base::fmt::PyFloat)), where `serde_json` would

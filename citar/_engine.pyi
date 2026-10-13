@@ -293,8 +293,9 @@ class Game:
     def execute(self, pid: int, tool: str, args_json: Optional[bytes] = None) -> tuple[bytes, bytes]:
         """(the tool's result, the events: none for a query, which is a read and never counts in writes). ActionError."""
     def view_json(self, pid: Optional[int] = None, event_limit: int = 150,
-                  extra_json: Optional[bytes] = None) -> bytes:
-        """The client view, with extra_json's keys added (a key of the view's own is a ValueError)."""
+                  extra_json: Optional[bytes] = None, minimap: bool = True) -> bytes:
+        """The client view, with extra_json's keys added (a key of the view's own is a ValueError); a major
+        civilization's own carries its minimap block unless minimap is False (a spectator looking through it)."""
     def briefing(self, pid: int) -> str: ...
     def turn_progress(self, pid: int) -> str: ...
     def empire_summary(self, pid: int) -> bytes: ...

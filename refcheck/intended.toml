@@ -434,3 +434,11 @@ id = "client-view-trade-options-on-demand"
 reason = "Python's client view carried, for every civilization a player had met, what the two could trade (gold, spare luxuries and strategic resources, technologies, the agreements possible now), built again on every refresh though only the deal builder reads it; Rust's view leaves it out, the chat window's deal builder fetches it while it is open (GET /api/games/{gid}/trade-options/{other}), and the get_diplomacy tool keeps it"
 where = [{ group = "views", path = "civs[*].view.diplomacy.players[*].trade_options" }]
 rust = { is = "absent" }
+
+# Package 3-17 (design/phase3-features.md P3.7): the minimap.
+
+[[differences]]
+id = "minimap-view-block"
+reason = "Python's client view had nothing for the minimap, which drew the whole map whatever a player had seen of it; a major civilization's own view in Rust carries a minimap block (its stage from its era, its capital, and the box of the tiles it has explored on its home continent), from which the browser bounds a person's minimap to the explored world and opens it out with the eras"
+where = [{ group = "views", path = "civs[*].view.minimap" }]
+python = { is = "absent" }

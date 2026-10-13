@@ -23,6 +23,7 @@ mod engine {
     mod maps;
     #[cfg(feature = "stats")]
     mod memos;
+    mod minimap;
     mod production;
     mod religion;
     mod rules;

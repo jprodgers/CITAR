@@ -55,6 +55,9 @@ const CULTURAL: &str = "Cultural";
 const DOMINATION: &str = "Domination";
 const DIPLOMATIC: &str = "Diplomatic";
 const TIME: &str = "Time";
+// The eras the minimap's stages begin at (design/phase3-features.md P3.7.2).
+const RENAISSANCE_ERA: &str = "Renaissance era";
+const INFORMATION_ERA: &str = "Information era";
 
 // The terrains and resources map generation names (`mapgen.py:551-1660`).
 const OCEAN: &str = "Ocean";
@@ -142,6 +145,20 @@ pub struct Known {
     pub map: KnownMap,
     /// The victories the rules of victory name.
     pub victories: KnownVictories,
+    /// The eras the minimap's stages begin at.
+    pub minimap: MinimapEras,
+}
+
+/// The eras at which a seat's minimap opens out (design/phase3-features.md P3.7.2, package
+/// 3-17): the era named "Renaissance era" and the one named "Information era", or, in a ruleset
+/// without the name, the era at ⌈n/3⌉ and the second-to-last of its n (3 and 7 of the shipped
+/// nine). A positional Information era comes after the Renaissance's: with fewer than five eras
+/// the second-to-last is not, and the last one is taken, or none when the Renaissance's is the
+/// last. `None` for a stage the ruleset never reaches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MinimapEras {
+    pub renaissance: Option<EraId>,
+    pub information: Option<EraId>,
 }
 
 /// The victories Python named (`game.py:46`, `victory.py`), each only if the ruleset has it: the
@@ -283,6 +300,7 @@ impl Derived {
                 city_state_builds: [None; 8],
                 map: KnownMap::default(),
                 victories: KnownVictories::default(),
+                minimap: MinimapEras::default(),
             },
             moves: MoveRules::default(),
             combat: CombatRules::default(),
@@ -419,6 +437,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
             .map(|name| r.buildings.iter().find(|(_, b)| &*b.name == name).map(|(id, _)| id)),
         map: known_map(r),
         victories: known_victories(r),
+        minimap: minimap_eras(r.eras.as_slice().iter().map(|e| &*e.name)),
     };
 
     let UnitLists { great_person_units, spaceship_parts, builder_classes } = derive_units(r, p);
@@ -563,6 +582,26 @@ fn known_victories(r: &Ruleset) -> KnownVictories {
         diplomatic: victory(DIPLOMATIC),
         time: victory(TIME),
     }
+}
+
+/// The eras the minimap's stages begin at ([`MinimapEras`]), from the eras' names in order.
+pub(crate) fn minimap_eras<'a>(names: impl ExactSizeIterator<Item = &'a str>) -> MinimapEras {
+    let n = names.len();
+    let (mut renaissance, mut information) = (None, None);
+    for (i, name) in names.enumerate() {
+        match name {
+            RENAISSANCE_ERA if renaissance.is_none() => renaissance = Some(i),
+            INFORMATION_ERA if information.is_none() => information = Some(i),
+            _ => {}
+        }
+    }
+    let renaissance = renaissance.or(Some(n.div_ceil(3))).filter(|&i| i < n);
+    let information = information.or_else(|| {
+        let at = n.checked_sub(2)?;
+        Some(renaissance.map_or(at, |r| at.max(r + 1)))
+    });
+    let era = |i: Option<usize>| i.filter(|&i| i < n).and_then(EraId::from_index);
+    MinimapEras { renaissance: era(renaissance), information: era(information) }
 }
 
 /// The objects map generation names, each where the ruleset has it as the kind generation uses.
@@ -773,5 +812,56 @@ fn derive_buildings(r: &mut Ruleset) {
             mask.insert(Stat::Happiness);
         }
         b.stat_related = mask;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eras(names: &[&str]) -> MinimapEras {
+        minimap_eras(names.iter().copied())
+    }
+
+    fn at(i: u8) -> Option<EraId> {
+        Some(EraId(i))
+    }
+
+    #[test]
+    fn the_minimap_eras_are_found_by_name_first() {
+        let shipped = [
+            "Ancient era",
+            "Classical era",
+            "Medieval era",
+            "Renaissance era",
+            "Industrial era",
+            "Modern era",
+            "Atomic era",
+            "Information era",
+            "Future era",
+        ];
+        assert_eq!(eras(&shipped), MinimapEras { renaissance: at(3), information: at(7) });
+        // the names win over the positions
+        let moved = ["A", "Renaissance era", "C", "D", "Information era", "F", "G", "H", "I"];
+        assert_eq!(eras(&moved), MinimapEras { renaissance: at(1), information: at(4) });
+        // one name found, the other by position
+        let one = ["A", "B", "C", "D", "E", "F", "G", "Renaissance era", "I"];
+        assert_eq!(eras(&one), MinimapEras { renaissance: at(7), information: at(8) });
+    }
+
+    #[test]
+    fn without_the_names_the_positions_count() {
+        let names = ["E0", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "E10", "E11"];
+        let of = |n: usize| eras(&names[..n]);
+        assert_eq!(of(9), MinimapEras { renaissance: at(3), information: at(7) });
+        assert_eq!(of(12), MinimapEras { renaissance: at(4), information: at(10) });
+        assert_eq!(of(6), MinimapEras { renaissance: at(2), information: at(4) });
+        assert_eq!(of(5), MinimapEras { renaissance: at(2), information: at(3) });
+        // fewer than five: the second-to-last is not after the Renaissance's, so the last
+        assert_eq!(of(4), MinimapEras { renaissance: at(2), information: at(3) });
+        assert_eq!(of(3), MinimapEras { renaissance: at(1), information: at(2) });
+        assert_eq!(of(2), MinimapEras { renaissance: at(1), information: None });
+        assert_eq!(of(1), MinimapEras { renaissance: None, information: None });
+        assert_eq!(of(0), MinimapEras::default());
     }
 }
