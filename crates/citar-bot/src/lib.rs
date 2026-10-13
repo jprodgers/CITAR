@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use citar_engine::base::ids::{NegotiationId, PlayerId};
+use citar_engine::game::diplomacy::category::{Category, proposal_categories};
 use citar_engine::game::diplomacy::deals::make_proposal;
 use citar_engine::game::{ActionError, Game};
 use citar_engine::rules::{ENGINE_CODE, Ruleset};
@@ -384,6 +385,26 @@ pub fn evaluate_offer(
 ) -> Result<f64, ActionError> {
     let terms = make_proposal(g, pid, other, give, receive)?;
     Ok(terms.map_or(0.0, |t| evaluate(g, spec, pid, other, t.gives(pid), t.gives(other))))
+}
+
+/// [`evaluate`] of the deal a tool call of `pid`'s would offer, counter with or accept, as the
+/// engine reads and checks that call (`Game::offer_of_call`), with the categories of diplomacy
+/// the deal touches, in their order. A hybrid seat's veto on its model's mixed deals
+/// (design/phase3-features.md P3.6.6), through `EngineGame.bot_evaluate_call`: it values the
+/// very deal the call would make, whatever the model wrote (keys the engine drops, amounts
+/// written as text, an action in capitals). `None` for a call that makes no deal, and for one the
+/// engine would refuse.
+#[must_use]
+pub fn evaluate_call(
+    g: &Game,
+    spec: &BotSpec,
+    pid: PlayerId,
+    tool: &str,
+    args: &Value,
+) -> Option<(Vec<Category>, f64)> {
+    let (other, t) = g.offer_of_call(pid, tool, args)?;
+    let value = evaluate(g, spec, pid, other, t.gives(pid), t.gives(other));
+    Some((proposal_categories(Some(&t)), value))
 }
 
 /// The `basic-1` memory seat `pid` keeps in `g` (fresh if it keeps none, or another driver's).

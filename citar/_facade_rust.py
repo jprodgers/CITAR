@@ -1104,6 +1104,22 @@ class EngineGame:
                                           None if give is None else _dumps(give),
                                           None if receive is None else _dumps(receive)))
 
+    def bot_evaluate_call(self, pid: int, bot, tool: str, args: Optional[dict] = None) -> Optional[tuple]:
+        """What ``bot``, playing ``pid``, makes of the deal a tool call of ``pid``'s would offer, counter with or accept,
+        read and checked exactly as :meth:`execute` would read and check that call (an ``open_negotiation``'s
+        proposal, a ``respond_negotiation`` counter-offer or the proposal it accepts): ``(categories, value)``, the
+        categories of diplomacy the deal touches (a set) and its worth in gold from ``pid``'s side
+        (``citar_bot::evaluate_call``). None for a call that makes no deal (another tool, a reply, a rejection), and for
+        one the engine would refuse. A hybrid seat's veto on its model's mixed deals (design/phase3-features.md P3.6.6):
+        it values the very deal the call would make, whatever the model wrote. Reads only. Raises ValueError for a
+        player that is no major civilization, or arguments that are no JSON."""
+        try:
+            raw = _dumps(args or {})
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"The tool's arguments are no JSON: {e}") from None
+        out = self._g.bot_evaluate_call(int(pid), _bot(bot), str(tool), raw)
+        return None if out is None else (set(out[0]), float(out[1]))
+
     # ------------------------------------------------------------------ scenario, map and debug ops
     def apply_ops(self, ops: list[dict]) -> list[dict]:
         """Apply scenario edit operations in order (see scenario_ops_help), all or nothing: ActionError names the
