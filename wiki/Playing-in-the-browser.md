@@ -125,7 +125,8 @@ two civilizations have one chat open at a time, and play goes on while it is ope
 
 - **It pops up.** A chat another civilization opens with you appears at once, whoever's turn it is.
   Their answers appear as they come, with a proposal as a card in the conversation and the game's own
-  notes in grey ("(no reply in time)").
+  notes in grey ("(no reply in time)"). A window you closed comes back with their next word, or when
+  the chat ends (they accept, decline or run out of time).
 - **Your move, their move.** You write only when it is your move. Otherwise the window says what the
   other side is doing: "Rome is thinking…", "queued #3, about 40 s" while an AI's model waits for its
   machine, or "Waiting for Rome, 4:12 left". On your move it shows the time you have left: "Waiting
@@ -135,6 +136,9 @@ two civilizations have one chat open at a time, and play goes on while it is ope
   **Accept** takes the proposal on the table, **No deal** declines, and **Counter with the deal**
   proposes what is in the deal builder. Each answer carries the text you typed, or a plain line
   ("Agreed.", "No deal.") when the box is empty. While you wait for them, **Withdraw** gives up a chat.
+  Under the status line the window counts the chat's messages against the game's cap ("12/30
+  messages (18 left)"), warning when two or fewer are left: the message that would pass the cap closes
+  the chat instead.
 - **The deal builder** sits in the window and folds away. It holds what you give and what they give:
   gold, gold per turn, resources, open borders, embassies, peace, declarations of friendship,
   research agreements, defensive pacts, war on a third party, cities, maps and technologies.
@@ -145,15 +149,21 @@ two civilizations have one chat open at a time, and play goes on while it is ope
 - **What you are writing stays.** A half-written message and the deal you are building survive
   everything that happens meanwhile, and closing and reopening the window, but not reloading the page.
 - **Minimise** (–) folds a window into a tab, which lights up when the other side says something.
-  **Close** (✕) only hides the window; the chat goes on, and End Turn or Diplomacy opens it again.
-  When the windows do not fit beside End Turn, the oldest fold into tabs.
+  **Close** (✕) only hides the window; the chat goes on, and End Turn, Diplomacy or the other side's
+  next word opens it again. When the windows do not fit beside End Turn, the oldest fold into tabs.
+- **The windows keep clear of the panels**: of a unit's panel at the bottom left, a city's panel above
+  End Turn and the side panel at the top right. When there is no room left beside them, the windows
+  show one at a time above End Turn, as on a narrow screen, and an open unit or city panel lies over
+  them until you close it.
 - **End Turn** waits for your chats, because a turn cannot end while one you are in is open. While a
   chat waits on you, the button reads "Answer Rome first" and opens that chat. While a chat waits on
   the other side, it reads "Waiting for Rome… 4:12". Click it then and it reads "End turn when they
   answer": the turn ends by itself once every chat has closed. Click again to cancel. Other
   unfinished business (idle units, no research) is checked first, as for any end of turn, and again
-  when the turn would end by itself, since a deal can bring something new to decide; Ctrl+click skips
-  that check both times.
+  when the turn would end by itself, on the game as it stands after the last answer, since a deal can
+  bring something new to decide (a technology that finishes your research, a city); Ctrl+click skips
+  that check both times. If the screen cannot fetch the game just then, it stays armed and tries again
+  a second later.
 - **On a narrow screen** (700 pixels wide or less) one window shows at a time, full width above End
   Turn, with a tab for each chat.
 
