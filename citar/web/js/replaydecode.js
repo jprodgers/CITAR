@@ -250,6 +250,7 @@ export class ReplayFrames {
     }
     this.cur = null;   // the frame in hand
     this.idx = -1;     // which record it is
+    this.steps = 0;    // how many records the last `at` decoded: at most 64 (from a keyframe)
   }
 
   get length() { return this.records.length; }
@@ -267,7 +268,9 @@ export class ReplayFrames {
     // on from the frame in hand when it is between that keyframe and i
     let k = this.idx >= from && this.idx < i ? this.idx + 1 : from;
     let f = k === from ? null : this.cur;
+    this.steps = 0;
     for (; k <= i; k++) {
+      this.steps++;
       const rec = this.records[k];
       f = decodeRecord(rec, rec.keyframe ? null : f);
     }

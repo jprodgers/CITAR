@@ -664,6 +664,11 @@ test("the deal builder fetches the trade options when it opens, after each entry
   win.dealToggle.click();
   await flush();
   assert.deepEqual(server.optionReads, [1, 1, 1, 1], "opened again");
+  // folded and opened again with nothing new meanwhile: still asked again (what either side has may have moved)
+  win.dealToggle.click();
+  win.dealToggle.click();
+  await flush();
+  assert.deepEqual(server.optionReads, [1, 1, 1, 1, 1], "each opening asks");
   // two asks while one is out: one more fetch after it, not two
   let release;
   const gate = new Promise((r) => { release = r; });

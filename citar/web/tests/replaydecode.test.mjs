@@ -59,6 +59,14 @@ test("frames read at random, backwards and across the reload, are the same frame
     assert.deepEqual(fullShape(frames.at(i), FIXTURE), FIXTURE.full[i], `frame ${i}`);
     assert.equal(frames.at(i), frames.at(i), "asked again: the frame in hand");
   }
+  // a jump decodes from the nearest keyframe (at most 64 records), never on from a frame before it
+  frames.at(0);
+  frames.at(99);
+  assert.equal(frames.steps, 99 - 69 + 1, "from the keyframe of round 70");
+  frames.at(60);
+  assert.equal(frames.steps, 61, "from round 1's keyframe");
+  frames.at(62);
+  assert.equal(frames.steps, 2, "on from the frame in hand");
   assert.equal(frames.indexOfTurn(70), 69);
   assert.equal(frames.indexOfTurn(500), -1);
   assert.equal(frames.at(-1), null);
