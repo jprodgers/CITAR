@@ -236,7 +236,9 @@ to start (or it is skipped and the bot's choices stand), three minutes once star
 situation, the empire at a glance and the notebook; with the **advisor** on (the default, never in a
 benchmark), the bot's view too: what each deal on the table is worth to the seat in gold, its war
 readiness, its spare luxuries and what it would ask for. The system prompt is the same text for every
-call of the seat, so a provider can cache it, and it names both chat timeouts.
+call of the seat, so a provider can cache it, and it names both chat timeouts. Pausing the game holds
+the diplomat before its next model call or action, as it holds an LLM seat's turn; its prompt gives
+the machine back meanwhile, and the time paused does not count against `phase_seconds`.
 
 **Mixed deals.** A deal the model offers, counters with or accepts that includes anything the bot
 decides must be one the bot would accept as a whole: the bot values the whole deal from the seat's
@@ -258,9 +260,10 @@ the diplomat, which answers it.
 A hybrid seat's prompts are pooled prompts, never a lease: it does not occupy its machine, it needs a
 grant for `pooled` (not `game`) on another member's machine, and quiet hours or a make-way pause
 never pause its game: its prompt is refused instead, and its bot answers. Its turns are its bot's, so
-it stays out of the model ranking. The stats screen shows its diplomat's calls by outcome (done, timeout, skipped, refused,
-failed, cancelled), their generation and queue time, the tools they called and the calls the session
-refused.
+it stays out of the model ranking. The game's metrics (`GET /api/games/{id}/metrics`, see
+[the API](API.md)) carry its diplomat's calls: each call's row (`diplomat`), and in the seat's
+summary their count by outcome (done, timeout, skipped, refused, failed, cancelled, with the cause's
+code), their generation and queue time, the tools they called and the calls the session refused.
 
 ---
 

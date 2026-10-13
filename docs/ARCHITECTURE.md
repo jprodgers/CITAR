@@ -301,8 +301,11 @@ played. `HybridAgent` (`citar/agents/hybrid_agent.py`) is the seat's agent, on t
    the static diplomat prompt (`prompts.DIPLOMAT_SYSTEM`), and the tools of the model's kinds, each
    call through `GameSession.diplomat_call`: a tool none of its kinds gives it is refused, and a deal
    it offers, counters with or accepts that includes anything the bot decides goes through only when
-   `EngineGame.bot_evaluate` (`citar_bot::evaluate_offer`) values it at zero or more from the seat's
-   side;
+   `EngineGame.bot_evaluate_call` (`citar_bot::evaluate_call`) values it at zero or more from the
+   seat's side. That deal is the engine's own reading of the call (`Game::offer_of_call`: the
+   arguments coerced and checked as `execute` does), so nothing the model writes reaches the engine
+   as a deal the veto did not value. A pause from the game screen holds the phase before its next
+   model call or tool call, its ticket given back until the resume;
 3. under the lock, the drive again: the turn ends, or the drive stops at `awaiting_reply` for chats
    that wait on another seat or on this seat's model, waited for as a bot seat waits.
 
