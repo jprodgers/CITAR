@@ -354,8 +354,10 @@ A negotiation is a chat (`design/phase3-features.md` P3.5). Three pieces of the 
 "eta_s", "deadline", "left_s", "paused", "entries"}` goes out on the game's socket: `waiting` (with the deadline) from
 the clock, `queued` (with the place and ETA) and `thinking` from the answering conversation's requests in the prompt
 scheduler (`ScheduledConversation.on_status`, delivered by the notifier thread), `closed` (with the chat's `status`)
-from the session. The clock tells a chat `waiting` when it begins to wait (and again when a pause moves its
-deadline), never over an answer's `queued` or `thinking`, which stand until the answer ends. `entries` is the chat's
+from the session. The clock tells a chat `waiting` when it begins to wait, never over an answer's `queued` or
+`thinking`, which stand until the answer ends. A pause or a resume tells each chat again where it stands, with its
+new deadline: an answer that goes on through a person's pause keeps its `queued` or `thinking`, and a suspension,
+which halts the answers until the resume, says `waiting`. `entries` is the chat's
 length when it was said, so a client tells a late status from a current one. The socket gives it to the seats in
 `players` and to spectators while the god view is allowed, and to nobody else.
 

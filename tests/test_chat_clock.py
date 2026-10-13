@@ -406,6 +406,33 @@ class AnswerStatuses(Base):
         clock.advance(2)
         self.assertEqual(states()[6:], [("waiting", 0, False)], "the chat moved: it waits on the other side")
 
+    def test_an_answer_that_goes_on_through_a_persons_pause_stays_thinking_and_a_suspension_says_waiting(self):
+        s = self.game(["human", "mcp"])
+        clock = use(s)
+        heard = []
+        s.subscribers.append(lambda msg: heard.append(msg) if msg.get("type") == "negotiation_status" else None)
+        nid = self.open(s, 0, 1)
+        said = lambda: [(m["state"], m["paused"], m["left_s"], m.get("position")) for m in heard if m["negotiation"] == nid]  # noqa: E731
+        clock.advance(10)
+        s.chat.answer_status(nid, 1, {"state": "queued", "position": 3, "eta_s": 40.0, "machine_name": "gpu"})
+        s.set_paused(True)                                    # a person's pause: the answer goes on (P3.5.3)
+        clock.advance(30)
+        s.set_paused(False)
+        self.assertEqual(said()[1:], [("queued", False, 590.0, 3), ("queued", True, 590.0, 3),
+                                      ("queued", False, 590.0, 3)], "queued, with its place, through the pause")
+        queued = [m for m in heard if m["negotiation"] == nid and m["state"] == "queued"]
+        self.assertEqual({m["machine"] for m in queued}, {"gpu"})
+        s.chat.answer_status(nid, 1, {"state": "thinking"})
+        clock.advance(5)
+        s.set_paused(True)
+        s.set_paused(False)
+        self.assertEqual(said()[4:], [("thinking", False, 590.0, None), ("thinking", True, 585.0, None),
+                                      ("thinking", False, 585.0, None)], "thinking through the pause, its deadline moved")
+        s.suspend({"kind": "restricted", "text": "quiet hours"})   # every answer halted until the resume
+        self.assertEqual(said()[7:], [("waiting", True, 585.0, None)], "a suspension halts the answer: waiting")
+        s.resume()
+        self.assertEqual(said()[8:], [("waiting", False, 585.0, None)])
+
 
 class AfterALoad(Base):
     """Gate 1: after a load every open chat's clock starts afresh."""

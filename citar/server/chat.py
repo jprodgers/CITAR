@@ -140,6 +140,8 @@ class _Chat:
     failures: int = 0               # actions at its deadline that failed with the chat where it stood
     retry_at: float = 0.0           # the clock's time before which a failed action is not tried again
     published: Optional[tuple] = None            # the last status sent, so an unchanged one is not sent again
+    answering: Optional[tuple] = None            # the answer's own status while it runs: ("queued", position, eta_s,
+    #                                              machine) or ("thinking",), told again when a pause moves the deadline
 
 
 class ChatClock:
@@ -283,10 +285,10 @@ class ChatClock:
                           self.timeout(kind) if awaiting is not None else None)
                 self.chats[nid] = c
             if c.published is None:
-                # only a chat nobody has been told of yet (new, moved, or to be told again after the pause changed):
-                # one already told keeps what was said last, so an answer's queued or thinking stands until the
-                # answer ends (``answer_status``) rather than being turned back to waiting by the next look
-                msg = self._waiting(c)
+                # only a chat nobody has been told of yet (new, or moved: a new record): one already told keeps what
+                # was said last, so an answer's queued or thinking stands until the answer ends (``answer_status``)
+                # rather than being turned back to waiting by the next look
+                msg = self._said(c)
                 if msg is not None:
                     out.append(msg)
         for nid in [nid for nid in self.chats if nid not in seen]:
@@ -387,20 +389,30 @@ class ChatClock:
             if state == "queued":
                 if bool(payload.get("benchmark")) and bool(s.benchmark):
                     c.held = True
-                msg = self._status(c, "queued", position=payload.get("position"), eta_s=payload.get("eta_s"),
-                                   machine=payload.get("machine_name"),
-                                   **({"held": "benchmark"} if c.held else {}))
+                c.answering = ("queued", payload.get("position"), payload.get("eta_s"), payload.get("machine_name"))
             elif state in ("thinking", "running", "granted"):
                 if c.held:
                     c.held = False
                     c.counted = 0.0                 # counted from the prompt's start (a benchmark game)
-                msg = self._status(c, "thinking")
+                c.answering = ("thinking",)
             else:
                 if c.held:
                     c.held = False
                     c.counted = 0.0
-                msg = self._waiting(c)
+                c.answering = None
+            msg = self._said(c)
         self._send([msg] if msg is not None else [])
+
+    def _said(self, c: _Chat) -> Optional[dict]:
+        """What ``c`` stands at for its two sides: its answer's own status while one runs (queued with its place, or
+        thinking), else ``waiting``; None when that is what was sent last. Lock held."""
+        if c.answering is None:
+            return self._waiting(c)
+        if c.answering[0] == "queued":
+            _, position, eta_s, machine = c.answering
+            return self._status(c, "queued", position=position, eta_s=eta_s, machine=machine,
+                                **({"held": "benchmark"} if c.held else {}))
+        return self._status(c, "thinking")
 
     # ------------------------------------------------------------------ what clients are told
     def left(self, c: _Chat) -> Optional[float]:
@@ -453,14 +465,19 @@ class ChatClock:
         held."""
         return self._status(c, "waiting", **({"held": "benchmark"} if c.held else {}))
 
-    def republish(self) -> None:
-        """Send every timed chat's ``waiting`` again: the game paused or resumed, so the deadlines changed."""
+    def republish(self, answers_halted: bool = False) -> None:
+        """Tell every timed chat where it stands again: the game paused or resumed, so the deadlines changed. An answer
+        that goes on through the pause (a person's: P3.5.3) keeps its ``queued`` or ``thinking``, with the new
+        deadline; ``answers_halted`` (a suspension, which halts every answer until the resume dispatches them again)
+        tells each chat ``waiting``, since nothing answers it meanwhile."""
         with self._lock:
             self._settle(self.clock.now())
             msgs = []
             for c in self.chats.values():
                 c.published = None
-                msg = self._waiting(c)
+                if answers_halted:
+                    c.answering = None
+                msg = self._said(c)
                 if msg is not None:
                     msgs.append(msg)
         self._send(msgs)

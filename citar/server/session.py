@@ -1124,7 +1124,7 @@ class GameSession:
             for pid in list(self.agents):
                 self.cancel_agent(pid)
             self._halt_answers()            # never declined: answered again on resume (P3.5.3)
-            self.chat.republish()
+            self.chat.republish(answers_halted=True)
             if (reason or {}).get("kind") == "queue":
                 # it makes way for higher-priority work: its machines are free until it resumes (P3.3.3); every other
                 # pause keeps them, since the game resumes where it left off
