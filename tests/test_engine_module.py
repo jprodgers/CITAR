@@ -732,26 +732,38 @@ class ParallelismTests(unittest.TestCase):
                 n += 1
             return n / seconds
 
-        solo = count(0.4)
-        stop = threading.Event()
+        def one_try() -> tuple[float, float]:
+            solo = count(0.4)
+            stop = threading.Event()
 
-        def drive():
-            # A whole game in each call (about 0.1 s): a drive that held the GIL would starve the counter for all of
-            # it, not for one switch interval at a time.
-            seed, bots = 200, idle_bots()
-            while not stop.is_set():
-                small(seed).drive(bots, 0)
-                seed += 1
+            def drive():
+                # A whole game in each call (about 0.1 s): a drive that held the GIL would starve the counter for all
+                # of it, not for one switch interval at a time.
+                seed, bots = 200, idle_bots()
+                while not stop.is_set():
+                    small(seed).drive(bots, 0)
+                    seed += 1
 
-        t = threading.Thread(target=drive)
-        t.start()
-        try:
-            time.sleep(0.05)
-            shared = count(0.4)
-        finally:
-            stop.set()
-            t.join(60)
-        self.assertGreaterEqual(shared, solo / 2, f"{shared:.0f} counts a second beside a drive, {solo:.0f} alone")
+            t = threading.Thread(target=drive)
+            t.start()
+            try:
+                time.sleep(0.05)
+                shared = count(0.4)
+            finally:
+                stop.set()
+                t.join(60)
+            return shared, solo
+
+        # The best of five tries, each against a fresh count alone, as the CPU test above: a shared CI runner (macOS's
+        # has three cores, and other tests' games may still play in the process) can take a core away for part of one
+        # (0.38 once, where the laptop counts 0.92 to 1.01), while a drive that held the GIL would starve the counter
+        # in every one.
+        tries: list[tuple[float, float]] = []
+        while len(tries) < 5 and not any(shared >= solo / 2 for shared, solo in tries):
+            tries.append(one_try())
+        shared, solo = max(tries, key=lambda t: t[0] / t[1])
+        self.assertGreaterEqual(shared, solo / 2, f"{shared:.0f} counts a second beside a drive, {solo:.0f} alone; "
+                                                  f"the best of {', '.join(f'{a / b:.2f}' for a, b in tries)}")
 
     def test_cheap_reads_never_wait_for_a_drive(self):
         g = small(300, turn_limit=330)
