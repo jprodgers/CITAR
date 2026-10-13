@@ -75,7 +75,7 @@ class Metrics:
         parts = [b"{"]
         for i, (key, value) in enumerate(self.data.items()):
             parts.append((", " if i else "").encode() + json.dumps(key).encode() + b": ")
-            if key in ("turns", "negotiations", "diplomat", "diplomat_refusals") and isinstance(value, list):
+            if key in ("turns", "negotiations", "diplomat", "diplomat_refusals", "diplomacy") and isinstance(value, list):
                 parts.extend(self._list_parts(key, value))
             else:
                 parts.append(json.dumps(value).encode())

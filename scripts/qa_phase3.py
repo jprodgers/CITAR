@@ -48,8 +48,11 @@ closed as expired, the models' trades on their turns waiting for her; every ``ne
 none on a spectator's), ``hybrid`` (3-14, the server half: a hybrid seat on another member's dry-run machine shared for
 pooled prompts, with a person and two bots, 30 rounds, ``prompt_every`` 3: its diplomat's phases, chats answered by its
 model and by its bot, the chat clock's fallback, no lease held; 3-15: the seat route making a seat hybrid and back, and
-a scenario saved with a hybrid seat launched with it; with ``--keep`` the server stays up for the browser checklist's
-D1), and later ``minimap``, ``machines``; ``all`` runs every
+a scenario saved with a hybrid seat launched with it; 3-16: a hybrid benchmark suite on another member's machine (two
+seeds), each job paired with a bot-only control game, a second model's run reusing those controls, the diplomacy
+leaderboard as the run's owner, another member, an administrator and a visitor see it, and a hybrid probe run recording
+which side answered each case; with ``--keep`` the server stays up for the browser checklist's D1 and D2), and later
+``minimap``, ``machines``; ``all`` runs every
 part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
@@ -2519,6 +2522,167 @@ def _hybrid_seat_routes(h: Harness, model: dict) -> None:
                 pass
 
 
+def _wait_runs(who: "Account", run_ids: list, limit: float) -> dict:
+    """Poll the benchmark runs' list until each of ``run_ids`` is done and its hybrid jobs have their pair lines (or
+    ``limit`` seconds pass); the runs by id as the list last gave them."""
+    seen: dict = {}
+
+    def done() -> bool:
+        got = who.get("/api/benchmarks/runs")
+        runs = {x["id"]: x for x in (got.json() if got.status_code == 200 else []) if isinstance(x, dict)}
+        seen.update({rid: runs[rid] for rid in run_ids if rid in runs})
+        return all(rid in runs and runs[rid].get("status") == "done"
+                   and all((j.get("result") or {}).get("pair") for j in runs[rid].get("jobs") or []
+                           if j.get("mode") == "hybrid") for rid in run_ids)
+    wait_until(done, limit, 0.5)
+    return seen
+
+
+def _hybrid_benchmarks(h: Harness) -> None:
+    """3-16's checks (design/phase3-features.md P3.6.9, P3.6.10). Bob's second dry-run machine (two models, two slots)
+    is shared with alice for benchmarks and pooled prompts. She runs a hybrid suite on it with one model (a small
+    pangaea with three bots, two seeds, 60 turns, the model deciding all but war): each job a hybrid seat with the
+    advisor off, paired with its control game; then the same suite with the other model, whose jobs share those
+    controls. The diplomacy leaderboard: her lines with her pairs named; bob, who may not see her private runs, none
+    of them; the administrator every pair; a visitor 401. Then a hybrid probe run on the machine (an offer of gold, an
+    offer of friendship, a message, a turn; trade only): the run records its model answering the gold and the message,
+    its bot the friendship, and its turn case's forced diplomat phase."""
+    r = h.report
+    admin, alice, bob = (h.accounts[k] for k in ("admin", "alice", "bob"))
+    data = r.data.setdefault("hybrid", {}).setdefault("benchmarks", {})
+    made = bob.post("/api/servers", json={"name": f"QA hybrid bench machine {h.tag}", "kind": "test",
+                                          "connection": {"provider": "dryrun", "dry_run_delay": 0.02,
+                                                         "max_parallel": 2},
+                                          "models": [{"key": "dry-run"}, {"key": "dry-run-b"}]})
+    mid = made.json().get("id", "") if made.status_code == 200 else ""
+    group = bob.post("/api/pool/groups", json={"name": f"QA hybrid bench group {h.tag}", "visibility": "private"})
+    group_id = group.json().get("id") if group.status_code == 200 else ""
+    put = bob.put(f"/api/pool/servers/{mid}", json={"group_id": group_id})
+    grant = bob.post(f"/api/pool/groups/{group_id}/grants",
+                     json={"subject_type": "user", "handle": alice.handle, "purposes": ["benchmark", "pooled"]})
+    r.check("bob's second dry-run machine (two models, two slots) shared with alice for benchmarks and pooled prompts",
+            bool(mid) and (group.status_code, put.status_code, grant.status_code) == (200, 200, 200),
+            f"machine {made.status_code}, group {group.status_code}, put {put.status_code}, grant {grant.status_code}")
+    data["machine"] = mid
+    scenario = {"name": "QA hybrid pangaea", "mode": "hybrid", "map_size": "small", "map_type": "pangaea",
+                "seed": 3361, "opponents": 3, "turn_limit": 60, "barbarians": "off", "city_states": 2,
+                "max_turn_minutes": 5, "hybrid": {"owners": "all_but_war", "prompt_every": 3}}
+
+    def suite(model: str) -> dict:
+        return {"name": f"QA hybrid suite {h.tag}", "mode": "parallel", "repeats": 2,
+                "servers": [{"server_id": mid, "models": [{"model": model}]}], "scenarios": [scenario]}
+    t0 = time.time()
+    first = alice.post("/api/benchmarks/runs", json={"suite": suite("dry-run"), "name": f"QA hybrid A {h.tag}"})
+    run_a = first.json().get("id", "") if first.status_code == 200 else ""
+    runs = _wait_runs(alice, [run_a], 300) if run_a else {}
+    jobs_a = (runs.get(run_a) or {}).get("jobs") or []
+    controls = [(j.get("control") or {}).get("id") for j in jobs_a]
+    pairs = [(j.get("result") or {}).get("pair") or {} for j in jobs_a]
+    r.check("her hybrid suite (one scenario, two seeds) ran two hybrid jobs, each paired with its own control game",
+            first.status_code == 200 and len(jobs_a) == 2 and all(j.get("status") == "done" for j in jobs_a)
+            and all(j.get("mode") == "hybrid" and j.get("owners") == "all_but_war" for j in jobs_a)
+            and len(set(controls)) == 2 and all(controls)
+            and all((j.get("control") or {}).get("status") == "done" for j in jobs_a)
+            and all("end" in (p.get("score_diff") or {}) for p in pairs),
+            f"HTTP {first.status_code} {first.text[:160] if first.status_code != 200 else ''}; "
+            f"{[(j.get('status'), j.get('seed'), (j.get('control') or {}).get('status')) for j in jobs_a]}",
+            seconds=round(time.time() - t0, 1))
+    game = alice.get(f"/api/games/{jobs_a[0]['game_id']}") if jobs_a and jobs_a[0].get("game_id") else None
+    seat = ((game.json().get("seats") or [{}])[0] if game is not None and game.status_code == 200 else {})
+    r.check("a job's model plays a hybrid seat with the advisor off (it waits for benchmarks, never the bot's view)",
+            seat.get("type") == "hybrid" and (seat.get("hybrid") or {}).get("advisor") is False,
+            json.dumps({"type": seat.get("type"), "hybrid": seat.get("hybrid")})[:300])
+    second = alice.post("/api/benchmarks/runs", json={"suite": suite("dry-run-b"), "name": f"QA hybrid B {h.tag}"})
+    run_b = second.json().get("id", "") if second.status_code == 200 else ""
+    runs = _wait_runs(alice, [run_b], 300) if run_b else {}
+    jobs_b = (runs.get(run_b) or {}).get("jobs") or []
+    r.check("the other model's run of the suite reuses the two cached control games",
+            second.status_code == 200 and [(j.get("control") or {}).get("id") for j in jobs_b] == controls
+            and all((j.get("result") or {}).get("pair") for j in jobs_b),
+            f"HTTP {second.status_code}; controls {[(j.get('control') or {}).get('id') for j in jobs_b]} vs {controls}")
+
+    def board(who: Optional["Account"]) -> tuple:
+        got = (who.get("/api/models/diplomacy") if who is not None
+               else h.anonymous().get("/api/models/diplomacy"))
+        body = got.json() if got.status_code == 200 else {}
+        return got.status_code, {(x.get("model"), x.get("owners")): x for x in body.get("lines") or []}, body
+    code_a, lines_a, body_a = board(alice)
+    mine_a = lines_a.get(("dry-run", "all_but_war")) or {}
+    mine_b = lines_a.get(("dry-run-b", "all_but_war")) or {}
+    r.check("the diplomacy leaderboard: her two models' lines (all but war), two pairs each, her pairs named, with the "
+            "mean score difference and its 90% interval",
+            code_a == 200 and mine_a.get("pairs") == 2 and mine_b.get("pairs") == 2
+            and sorted(g.get("run_id") for g in mine_a.get("games") or []) == [run_a, run_a]
+            and isinstance(mine_a.get("ci90"), list) and mine_a.get("mean_score_diff") is not None
+            and "deals_per_game" in mine_a and "other_fallbacks" in mine_a,
+            json.dumps({k: {f: v.get(f) for f in ("pairs", "mean_score_diff", "ci90", "deals_per_game",
+                                                  "mean_deal_value", "fallbacks_per_game")}
+                        for k, v in ((str(k), v) for k, v in lines_a.items())})[:600])
+    code_b, lines_b, body_b = board(bob)
+    code_z, lines_z, _ = board(admin)
+    code_v, _lines_v, _ = board(None)
+    zline = lines_z.get(("dry-run", "all_but_war")) or {}
+    r.check("bob, who may not see her private runs, sees none of their pairs; the administrator sees every pair named; "
+            "a visitor is refused",
+            code_b == 200 and not any(k[0] in ("dry-run", "dry-run-b") for k in lines_b)
+            and run_a not in json.dumps(body_b) and code_z == 200 and zline.get("pairs") == 2
+            and len(zline.get("games") or []) == 2 and code_v == 401,
+            f"bob {code_b} {sorted(lines_b)}; admin {code_z} {zline.get('pairs')}; visitor {code_v}")
+    data.update({"runs": [run_a, run_b], "controls": controls,
+                 "pairs": [{"seed": j.get("seed"), **{k: (j.get("result") or {}).get("pair", {}).get(k)
+                                                      for k in ("score_diff", "deals", "deal_value_mean",
+                                                                "acceptance_rate")}} for j in jobs_a + jobs_b],
+                 "board": {str(k): {f: v.get(f) for f in ("pairs", "mean_score_diff", "ci90", "deals_per_game",
+                                                          "mean_deal_value", "acceptance_rate",
+                                                          "fallbacks_per_game", "other_fallbacks")}
+                           for k, v in lines_a.items()}})
+
+    # ---- a hybrid probe run: which side answered each case
+    ed = alice.post("/api/scenario-editor", json={"source": "generate", "config": {
+        "map_size": "duel", "map_type": "pangaea", "seed": 3363, "barbarians": "off", "city_states": 0},
+        "players": [{"type": "human"}, {"type": "llm"}]})
+    eid = ed.json().get("editor_id", "") if ed.status_code == 200 else ""
+    if eid:
+        alice.post(f"/api/scenario-editor/{eid}/ops", json={"ops": [
+            {"op": "meet", "a": 0, "b": 1}, {"op": "set_player", "player": "all", "gold": 500}]})
+    saved = alice.post(f"/api/scenario-editor/{eid}/save", json={"name": f"QA hybrid probe {h.tag}"})
+    scn = saved.json().get("id", "") if saved.status_code == 200 else ""
+    if eid:
+        alice.delete(f"/api/scenario-editor/{eid}")
+    pid = f"qa-hybrid-probe-{h.tag}"
+    dof = [{"type": "declaration_of_friendship"}]
+    put_probe = alice.put(f"/api/probes/{pid}", json={
+        "name": "QA hybrid probe", "scenario": scn, "subject": 1, "counterparty": 0, "cases": [
+            {"id": "gift", "kind": "offer", "message": "A gift.", "give": [{"type": "gold", "amount": 100}],
+             "receive": []},
+            {"id": "friends", "kind": "offer", "message": "Friends?", "give": dof, "receive": dof},
+            {"id": "hello", "kind": "message", "message": "Greetings."},
+            {"id": "turn", "kind": "turn"}]})
+    run = alice.post(f"/api/probes/{pid}/run", json={"llm": {"server_id": mid, "model": "dry-run"}, "mode": "hybrid",
+                                                     "owners": "trade_only"})
+    rid = run.json().get("id", "") if run.status_code == 200 else ""
+
+    def probe_done() -> dict:
+        got = alice.get(f"/api/probe-runs/{rid}")
+        body = got.json() if got.status_code == 200 else {}
+        return body if (body.get("run") or {}).get("status") in ("finished", "failed", "stopped") else {}
+    body = wait_until(probe_done, 180, 0.5) if rid else {}
+    results = {x.get("case"): x for x in (body or {}).get("results") or []}
+    sides = {c: x.get("answered_by") for c, x in results.items()}
+    turn_phases = (results.get("turn") or {}).get("diplomat") or []
+    r.check("a hybrid probe run records which side answered each case: its model the gold and the message (trade "
+            "only), its bot the friendship, its turn case's forced diplomat phase the model's",
+            run.status_code == 200 and ((body or {}).get("run") or {}).get("status") == "finished"
+            and ((body or {}).get("run") or {}).get("mode") == "hybrid"
+            and sides == {"gift": "model", "friends": "bot", "hello": "model", "turn": "model"}
+            and [x.get("outcome") for x in turn_phases] == ["done"],
+            f"scenario {saved.status_code}, probe {put_probe.status_code}, run {run.status_code} {run.text[:160]}; "
+            f"status {((body or {}).get('run') or {}).get('status')}; sides {sides}; "
+            f"phases {[x.get('outcome') for x in turn_phases]}")
+    data["probe"] = {"run": rid, "answered_by": sides,
+                     "outcomes": {c: x.get("outcome") for c, x in results.items()}}
+
+
 def part_hybrid(h: Harness) -> None:
     """3-14's checks, the server half of hybrid seats (design/phase3-features.md P3.6.2-P3.6.7, P3.6.11): bob's dry-run
     machine (one slot) is shared with alice for pooled prompts only. Her game seats her person, a hybrid seat on bob's
@@ -2709,6 +2873,7 @@ def part_hybrid(h: Harness) -> None:
                     if x.get("server_id") == mid), {})
         r.check("bob's machine holds no lease for the hybrid seat (its prompts are tickets)",
                 q.status_code == 200 and not box.get("leases"), json.dumps(box)[:300])
+        _hybrid_benchmarks(h)
         data.update({"chats": {"trade": t_id, "friendship": f_id, "slow": s_id}, "fallback_after_s": round(s_took, 1),
                      "phases": [{k: x.get(k) for k in ("turn", "triggers", "steps", "outcome", "tools")}
                                 for x in phases],

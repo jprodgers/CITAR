@@ -377,18 +377,41 @@ def s_benchmarks(x: Ctx) -> str:
         for j in run["jobs"]:
             p = j.get("result") or j.get("progress") or {}
             a = cost_by_job.get(j["id"])
-            rows.append([j.get("label") or j["model"], j.get("server_name") or "", j.get("scenario_name"),
+            label, perf = j.get("label") or j["model"], (f"{p['performance']:.0f}" if p.get("performance") is not None
+                                                         else "–")
+            avg = f"{p['avg_turn_s']:.0f}s" if p.get("avg_turn_s") else "–"
+            if j.get("mode") == "hybrid":
+                # a hybrid job's game is its bot's play: the model is measured against its control game (P3.6.10)
+                label = f"{label} · hybrid: {str(j.get('owners') or 'custom').replace('_', ' ')}"
+                perf, avg = _pair_text(p.get("pair"), j), "–"
+            rows.append([label, j.get("server_name") or "", j.get("scenario_name"),
                          j["status"] + (f" · {p['outcome']}" if p.get("outcome") else ""),
                          f"{max(0, (p.get('turn') or 1) - 1)}" + (f" / {p['turn_limit']}" if p.get("turn_limit") else ""),
-                         f"{p['performance']:.0f}" if p.get("performance") is not None else "–",
-                         f"{p['avg_turn_s']:.0f}s" if p.get("avg_turn_s") else "–",
-                         x.money(a["total"]) if a else "–"])
+                         perf, avg, x.money(a["total"]) if a else "–"])
         sm = run["summary"]
         out.append(f'<h3>{esc(run["name"])} <span class="pill">{esc(run["status"])}</span></h3>'
                    f'<p class="lead">Started {_date(run.get("created"))} · {sm["turns_done"]:,} of {sm["turns_total"]:,} turns · '
                    f'{len(run["jobs"])} games</p>')
         out.append(C.table(["Model", "Server", "Scenario", "Status", "Turns", "Performance", "Avg turn", "Cost"], rows))
+    if any(j.get("mode") == "hybrid" for run in d["benchmark_runs"] for j in run["jobs"]):
+        out.append("<p class='muted small'>A hybrid job's bot plays every turn and its model decides the diplomacy named "
+                   "beside it: its Performance is its score against its control game (the same game with the bot deciding "
+                   "everything) and the deals it made, not the model's game performance.</p>")
     return "".join(out)
+
+
+def _pair_text(pair, job: dict) -> str:
+    """A hybrid job's measure in the Benchmarks table: its pair line's score difference with its control and its deals
+    ("+12 vs control · 9 deals"), or why there is none yet."""
+    if pair:
+        d = (pair.get("score_diff") or {}).get("end") or 0
+        n = pair.get("deals") or 0
+        return f"{d:+d} vs control · {n} deal{'' if n == 1 else 's'}"
+    if job.get("status") != "done":
+        return "–"
+    if ((job.get("result") or {}).get("diplomacy") or {}).get("incomplete"):
+        return "no pair (record incomplete)"
+    return "control pending" if (job.get("control") or {}).get("status") in ("queued", "running") else "no pair"
 
 
 def s_probes(x: Ctx) -> str:

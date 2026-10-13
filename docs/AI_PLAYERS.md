@@ -261,7 +261,8 @@ the diplomat, which answers it.
 A hybrid seat's prompts are pooled prompts, never a lease: it does not occupy its machine, it needs a
 grant for `pooled` (not `game`) on another member's machine, and quiet hours or a make-way pause
 never pause its game: its prompt is refused instead, and its bot answers. Its turns are its bot's, so
-it stays out of the model ranking. The game's metrics (`GET /api/games/{id}/metrics`, see
+it stays out of the model ranking; its own is the Models page's **Diplomacy** tab, from hybrid
+benchmark suites, each job against a bot-only control game ([Benchmarks](BENCHMARKS.md#hybrid-suites)). The game's metrics (`GET /api/games/{id}/metrics`, see
 [the API](API.md)) carry its diplomat's calls: each call's row (`diplomat`), and in the seat's
 summary their count by outcome (done, timeout, skipped, refused, failed, cancelled, with the cause's
 code), their generation and queue time, the tools they called and the calls the session refused. The

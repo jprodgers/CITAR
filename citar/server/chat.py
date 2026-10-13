@@ -17,7 +17,10 @@ setting; the engine enforces it, and reports it (``EngineGame.max_chat_messages`
 
 The clock stands still while the game is paused, and for a chat whose answer is a pooled prompt queued behind a
 benchmark in a benchmark game (``answer_status``: the ticket's status says so), which then counts from the prompt's
-start. A change of a chat's entries or of the seat it waits on starts that chat's clock again; a session loaded or
+start. A hybrid seat's chat in a benchmark game whose time runs out while its model never started on it (its answer's
+ticket queued behind other pooled work) falls back with the cause ``not_started``, not ``timeout``: the diplomacy
+leaderboard counts a timeout against the model only once its prompt has started (P3.6.9, ``_cause``). A change of a
+chat's entries or of the seat it waits on starts that chat's clock again; a session loaded or
 brought back by ``restore_live`` starts every open chat's clock afresh (a new session has a new clock); a resume carries
 on where the pause left it.
 
@@ -66,7 +69,7 @@ MIN_REPLY_SECONDS, MAX_REPLY_SECONDS = 1.0, 7 * 86400.0
 #: The note a chat closes with, or a seat declines with, when its time runs out.
 NO_REPLY = "(no reply in time)"
 #: Why a seat's answer did not come from its model (P3.5.2), recorded with every fallback and decline.
-CAUSES = ("timeout", "queued_behind_benchmark", "refused", "failed")
+CAUSES = ("timeout", "queued_behind_benchmark", "refused", "failed", "not_started")
 #: The kind of side a chat waits on, by seat type.
 KINDS = {"llm": "model", "mcp": "model", "hybrid": "hybrid", "human": "person", "bot": "bot"}
 #: The longest the clock's thread sleeps between looks (it also wakes on the session's condition).
@@ -142,6 +145,8 @@ class _Chat:
     published: Optional[tuple] = None            # the last status sent, so an unchanged one is not sent again
     answering: Optional[tuple] = None            # the answer's own status while it runs: ("queued", position, eta_s,
     #                                              machine) or ("thinking",), told again when a pause moves the deadline
+    started: bool = False           # the model was seen at work on the chat as it stands (``_cause``)
+    cause: str = "timeout"          # why the model did not answer, worked out when its deadline came (``_cause``)
 
 
 class ChatClock:
@@ -352,6 +357,7 @@ class ChatClock:
                     if c.timeout is not None and not c.acted and not c.held and c.counted >= c.timeout \
                             and now >= c.retry_at:
                         c.acted = True
+                        c.cause = self._cause(c)
                         due.append(c)
             return msgs, due
 
@@ -364,12 +370,33 @@ class ChatClock:
             return False
         s.cancel_chat_answer(pid, c.nid)
         if c.kind == "model":
-            return s.decline_late(pid, c.nid, c.entries, "timeout")
+            return s.decline_late(pid, c.nid, c.entries, c.cause)
         if c.kind == "hybrid":
-            return s.chat_fallback(pid, c.nid, c.entries, "timeout")
+            return s.chat_fallback(pid, c.nid, c.entries, c.cause)
         if c.kind == "person":
             return s.expire_chat(c.nid, c.entries)
         return False
+
+    def _cause(self, c: _Chat) -> str:
+        """Why the model did not answer chat ``c`` by its deadline, recorded with the fallback or the decline (P3.5.2,
+        P3.6.9): ``timeout``, which the diplomacy leaderboard counts against the model, except in a benchmark game for a
+        hybrid seat's model that was never seen at work on the chat as it stands (its answer's ticket still queued
+        behind other pooled work, a report's or another game's, or the chat held for a diplomat phase that had not
+        reached it): ``not_started``, the machine's queue and not the model, listed beside the line. A lobby game's
+        model timeout includes its queue time (the owner's rule), so its cause stays ``timeout``; a full seat's answer
+        waits only on its own lease. Lock held."""
+        if c.kind == "hybrid" and self.session.benchmark and not c.started:
+            return "not_started"
+        return "timeout"
+
+    def model_told(self, nid: int, pid: int, entries: int) -> None:
+        """Seat ``pid``'s model was asked about chat ``nid`` as it stood at ``entries`` outside an answer of its own (a
+        hybrid seat's diplomat phase ran a step that told it the chat, P3.6.5): it counts as at work on it
+        (``_cause``). Non-blocking."""
+        with self._lock:
+            c = self.chats.get(nid)
+            if c is not None and c.awaiting == pid and c.entries == entries:
+                c.started = True
 
     # ------------------------------------------------------------------ the answering side
     def answer_status(self, nid: int, pid: int, payload: dict) -> None:
@@ -395,6 +422,7 @@ class ChatClock:
                     c.held = False
                     c.counted = 0.0                 # counted from the prompt's start (a benchmark game)
                 c.answering = ("thinking",)
+                c.started = True
             else:
                 if c.held:
                     c.held = False

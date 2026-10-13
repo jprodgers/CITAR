@@ -89,6 +89,7 @@ export const api = {
   metrics: (gid) => request("GET", `/api/games/${gid}/metrics`),
   compareModels: () => request("GET", "/api/metrics/compare"),
   modelScores: () => request("GET", "/api/models/scores"),
+  modelDiplomacy: () => request("GET", "/api/models/diplomacy"),
   maps: () => request("GET", "/api/maps"),
   map: (id) => request("GET", `/api/maps/${encodeURIComponent(id)}`),
   saveMap: (id, map) => request("PUT", `/api/maps/${encodeURIComponent(id)}`, map),

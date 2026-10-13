@@ -87,6 +87,8 @@ def _benchmark_from_state(sess: dict, seats: list, state: dict) -> Optional[dict
         llm = next((st["player"] for st in seats if st["type"] == "llm"), None)
     if llm is None:
         return None
+    if (bench or {}).get("mode") == "hybrid" or (llm < len(seats) and seats[llm].get("type") == "hybrid"):
+        return None             # a hybrid job's turns are its bot's: it is the diplomacy leaderboard's (P3.6.10)
     scores = state["scores"]
     if not scores:
         return None             # no turn has been scored yet
@@ -114,7 +116,11 @@ def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
             # dry-run seats test a setup; they are not models and don't count toward scores
             dry = {st.player for st in s.seats if st.type == "llm" and st.llm.get("provider") == "dryrun"}
             bench = None
-            if s.benchmark and s.benchmark.get("llm_player", 0) not in dry:
+            pid = (s.benchmark or {}).get("llm_player", 0)
+            # a hybrid job's turns are its bot's: it is the diplomacy leaderboard's, not the model ranking's (P3.6.10)
+            hybrid_job = bool(s.benchmark) and (s.benchmark.get("mode") == "hybrid"
+                                                or (pid < len(s.seats) and s.seats[pid].type == "hybrid"))
+            if s.benchmark and pid not in dry and not hybrid_job:
                 p = game_progress(s)
                 bench = {"llm_player": s.benchmark.get("llm_player", 0),
                          "contaminated": bool(s.benchmark.get("contaminated")),

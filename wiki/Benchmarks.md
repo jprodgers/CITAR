@@ -20,6 +20,7 @@ profile. Include the **Dry run** server to check a suite end to end without spen
 | Speed | Quick | |
 | Turn limit | 330 | Quick's time-victory turn. `0` plays to the end |
 | Max time per model turn | | A turn cut off after this is replayed later and left out of the timing statistics |
+| Mode | Full | *Full*: the model plays every turn. *Hybrid*: a bot plays, the model negotiates ([below](#hybrid-suites)) |
 
 Every seat plays **BenchmarkCiv** unless the scenario names civilizations, so a comparison is about
 the player rather than about Babylon's free scientist.
@@ -64,9 +65,71 @@ ones start there. The server's models can be unloaded so its GPU idles. Everythi
 window ends; other servers keep going. This exists because a GPU in a room somebody sleeps in is a
 real constraint.
 
+**Full and hybrid jobs keep off each other's machines.** A hybrid job holds no lease, but it counts
+against its machine's **Games at once** like any job, and it never starts on a machine where a full
+benchmark job (this server's, or a lease anyone's benchmark holds) is playing: its prompts wait for
+benchmarks, so beside one they would sit behind its steps for hours. A full job likewise waits for a
+running hybrid job on its machine. The job says which it waits for.
+
 **Multi-day runs survive restarts.** Runs are saved under `benchmarks/runs/`, and when the server
 starts, games that were in progress are reloaded from their autosaves and continue. Starting a
 benchmark that will take three days is a normal thing to do.
+
+## Hybrid suites
+
+A scenario in **Hybrid** mode seats the model in a [hybrid seat](AI-players#hybrid-seats): the
+seat's bot plays every turn, and the model decides only the kinds of diplomacy the scenario hands it.
+The scenario's hybrid settings:
+
+| Setting | Default | Notes |
+|---|---|---|
+| The model decides | All but war | A preset (trade only, all but war, everything) or a choice of its own among the ten kinds |
+| The seat's bot | the standard profile | "Best bot" is pinned when each job starts, as a lobby seat's is |
+| Handicap | AI bonuses | Or a person's values; the control game copies it |
+| Call the diplomat at least every N turns | 10 | It is also called on its triggers (first contact, a war, a deal running out...) |
+
+In a benchmark the advisor is always off, and the model's prompts (its diplomat calls and its chat
+answers) **wait for other benchmarks** with no start deadline: a call that waits behind another
+benchmark is answered by the model when its turn comes, not by the fallback bot, and the chat clock
+does not count that wait. The clock's model timeout still applies once the prompt has started, so a
+model that is reachable but silent falls back, and that fallback is the model's. A chat whose time
+runs out while its prompt is still queued behind other pooled work (a report's narrative, another
+game's hybrid prompts) also falls back, but as *not started*: the machine's queue, not the model's.
+
+A hybrid job loads its model beside what the machine already runs: it never unloads another model,
+or reloads its own with a larger context, under the lobby games and pooled prompts it plays beside.
+
+**Every hybrid job has a control game**: the same game, settings and seed, with the hybrid seat
+played by the same bot profile deciding everything, at the hybrid seat's handicap and difficulty
+level (its automatic decisions, the United Nations vote and annexing, are a bot seat's). The pair
+differs only in who decides the model's categories. Controls are bot-only: they play headless on the
+server's CPU while the hybrid games play, once per scenario, seed, build and bots, and are kept under
+`benchmarks/controls/` and shared by every model's jobs of that scenario and seed, so a second model's
+run of a suite plays no control again. A control is played from its settings, so the same control
+played twice gives the same game, event for event. Each seat's bot is pinned when the hybrid game
+starts (its bot version, parameters and aggression), so a profile edited or deleted while the control
+waits its turn changes neither what it plays nor which control it is. A control whose record no longer
+reads (a damaged file, an older layout) is played again; a skipped, cancelled or failed job's control
+is not played for nobody.
+
+A hybrid job's row shows its control game's state and, once both games are over, its **pair line**:
+the score difference (hybrid minus control) at the end, and at turns 100, 200 and 300 where both
+games reached them; the deals made and their mean value; and the control's own deals. Hybrid jobs
+stay out of the model scores below: their turns are the bot's.
+
+**The diplomacy record.** Both games of a pair are recorded the same way. After every drive, answer
+and tool call, the hybrid seat's (and the control seat's) negotiations that moved are read from the
+game's history, and each proposal the seat made or received is valued by its own bot profile deciding
+everything, in gold from the seat's side, on the proposal's recorded terms against the game at that
+moment. Many proposals between bots open and close inside one drive, so reading the history after it
+is what values both arms alike. An accepted deal keeps the value of the proposal that was accepted.
+The game's events add the wars declared by and on the seat and how they ended, cities captured and
+lost, and peace made. A record that fails on an unexpected error stops there for the rest of the game
+(the server's log says so once), and its job gets no pair line: the row says "no pair line: its
+diplomacy record stopped", since an incomplete record would not compare like with like.
+
+In a [report](Servers-costs-and-reports), a hybrid job's Benchmarks row shows who decided what and its score against
+its control, not a game performance, and its seat stays out of the model's game figures.
 
 ## Scoring
 
@@ -83,6 +146,26 @@ an overall score, and dry-run games never count.
 
 Clicking a model shows its benchmark games. The page also carries the detailed comparison table —
 timing, steps, calls, errors, repeats, tokens, turn endings — across every running and saved game.
+
+### The diplomacy leaderboard
+
+The Models page's **Diplomacy** tab ranks models by what their diplomacy did in hybrid benchmark
+pairs, one line per model and owners preset (what the model decided):
+
+| Column | What it measures |
+|---|---|
+| Pairs | Hybrid jobs with their control games played |
+| Score vs control | The hybrid seat's final score minus its control's, averaged, with a 90% bootstrap interval (2,000 resamples, a fixed seed, so a line reads the same every time) |
+| Deals / game, mean deal value | The hybrid seat's deals and what its bot makes of them, in gold from the seat's side |
+| Accepted | How many of the seat's own proposals the other side accepted |
+| Wars declared, captures / losses | Per game |
+| Control | The control games' deals per game and their mean value, valued the same way |
+| Fallbacks | Chats the fallback bot answered and diplomat calls that did not run because of the model (it timed out or failed), per game; those a benchmark's queue, a refusal or a prompt that never started caused are listed beside, not counted against it |
+
+Only benchmark pairs count (a lobby game has no control). A member's lines are made from their own
+pairs and the pairs of other members' runs they may see whose games pool (the [pooling
+rule](Design-accounts-and-sharing#data-pooling)): another member's pairs count only once enough accounts are behind a line,
+and are never named. An administrator's lines cover every pair.
 
 ### What the metrics mean
 
@@ -129,6 +212,7 @@ and a detached CLI run leaves you with no idea how far along it is.
 | | |
 |---|---|
 | Suites and runs | `benchmarks/` |
+| Control games of hybrid jobs | `benchmarks/controls/` |
 | Game saves | `saves/<game id>/` |
 | Per-turn metrics | inside each game's save, and as CSV from the stats screen |
 | Usage for costing | `saves/usage/*.jsonl` |

@@ -8,6 +8,8 @@ import { pageHeader, secs, bar } from "./nav.js";
 import { openMetrics } from "./metrics.js";
 import { seatServers } from "./lobby.js";
 import { mapOptionsForm } from "./mapoptions.js";
+import { CATEGORIES, HANDICAPS, PRESETS, PROMPT_EVERY, modelCategories, ownersMap, presetOf } from "./seats.js";
+import { controlText, ownersText, pairText, recordText } from "./diplomacy.js";
 
 const STATUS_CLASS = { running: "live", loading: "live", resuming: "live", paused: "warn", queued: "", done: "good", failed: "bad", cancelled: "muted" };
 const COLORS = { llm: "#4f8cff", bot: "#e8c547" };
@@ -177,8 +179,14 @@ function renderJob(run, job, ctx) {
   const clean = p.turns_played ? Math.round(100 * ((p.end_reasons || {}).end_turn || 0) / p.turns_played) : null;
   const trend = el("canvas", { width: 120, height: 30, class: "spark" });
   drawSpark(trend, p.series || []);
+  const hybrid = job.mode === "hybrid";
+  const pair = hybrid ? pairText((job.result || {}).pair) : null;
   const row = el("tr", { class: `job ${watchable ? "clickable" : ""}`, title: watchable ? "Click to watch this game" : "", onclick: watch },
     el("td", {}, el("b", {}, job.label), job.profile || job.tool_mode ? el("div", { class: "muted small" }, [job.profile ? `profile: ${job.profile}` : null, job.tool_mode ? `tools: ${job.tool_mode}` : null].filter(Boolean).join(" · ")) : null,
+        hybrid ? el("div", { class: "small" }, el("span", { class: "pill", title: "A bot plays the turns; the model decides this diplomacy" },
+          `hybrid: ${ownersText(job.owners)}`)) : null,
+        hybrid && job.control ? el("div", { class: `small ${job.control.status === "failed" ? "bad" : "muted"}` }, controlText(job.control)) : null,
+        hybrid && recordText(job) ? el("div", { class: "warn small" }, recordText(job)) : null,
         job.pause_pending ? el("div", { class: "warn small" }, "pausing after this turn (restricted hours)") : null),
     el("td", {}, sc.name || job.scenario_name, run.jobs.some((j) => j.repeat > 1) ? el("span", { class: "muted" }, ` #${job.repeat}`) : null,
       el("div", { class: "muted small" }, `${sc.map_size || ""} ${sc.map_type || ""} · ${sc.opponents || "?"} bot${sc.opponents > 1 ? "s" : ""}`)),
@@ -186,7 +194,8 @@ function renderJob(run, job, ctx) {
       job.error ? el("div", { class: "bad small", title: job.error }, job.error.slice(0, 80)) : null),
     el("td", { style: { minWidth: "130px" } }, limit ? bar(played / limit, `T${played} / ${limit}`) : (p.turn ? `T${played}` : "–")),
     el("td", {}, p.score != null ? el("span", {}, el("b", { style: { color: COLORS.llm } }, p.score), " vs ", el("span", { style: { color: COLORS.bot } }, p.best_bot_score)) : "–",
-      perf != null ? el("div", { class: "small" }, bar(perf / 100, `performance ${Math.round(perf)}`, perf >= 50 ? "good" : "bad")) : null),
+      perf != null ? el("div", { class: "small" }, bar(perf / 100, `performance ${Math.round(perf)}`, perf >= 50 ? "good" : "bad")) : null,
+      pair ? el("div", { class: "small", title: "Against its control game: the same game with the seat's bot deciding everything" }, pair) : null),
     el("td", {}, trend),
     el("td", {}, secs(p.avg_turn_s), p.max_turn_s ? el("div", { class: "muted small" }, `max ${secs(p.max_turn_s)}`) : null,
       drainNote(p)),
@@ -410,6 +419,37 @@ function openSuiteEditor(suite, ctx, isNew) {
     sc.bot_difficulty = sc.bot_difficulty || "";
     sc.barbarian_difficulty = sc.barbarian_difficulty || "";
     if (sc.nations == null) sc.nations = "BenchmarkCiv";
+    sc.mode = sc.mode || "full";
+    const hybridBox = el("div", { class: "hybrid-scenario" });
+    const drawHybrid = () => {
+      clear(hybridBox);
+      if (sc.mode !== "hybrid") return;
+      sc.hybrid = sc.hybrid || { owners: "all_but_war", handicap: "ai", prompt_every: PROMPT_EVERY.default, bot_profile: null };
+      const h = sc.hybrid;
+      const preset = presetOf(h.owners);
+      const owners = ownersMap(h.owners);
+      const set = (map) => { h.owners = presetOf(map) || map; drawHybrid(); };
+      const grid = el("div", { class: "hybrid-grid" }, ...CATEGORIES.map(([k, label, help]) => el("label", { title: help },
+        el("input", { type: "checkbox", checked: owners[k] === "llm", onchange: (e) => set({ ...owners, [k]: e.target.checked ? "llm" : "bot" }) }),
+        ` ${label}`)));
+      hybridBox.append(
+        el("p", { class: "muted small" }, "The model plays a hybrid seat: the seat's bot plays every turn, the model decides the kinds of diplomacy " +
+          "ticked below (its calls wait for other benchmarks rather than fall back, and the advisor is off). Each job is paired with a control " +
+          "game, the same game with the bot deciding everything, played once and shared by every model; the pairs make the Models page's " +
+          "Diplomacy tab."),
+        el("div", { class: "grid-scenario" },
+          field("The model decides", el("select", { onchange: (e) => set(e.target.value === "custom" ? owners : ownersMap(e.target.value)) },
+            ...PRESETS.map(([k, label]) => el("option", { value: k, selected: preset === k }, label)),
+            el("option", { value: "custom", selected: !preset }, "A choice of its own"))),
+          field("The seat's bot", profileSelect(h, "bot_profile", null, { best: true })),
+          field("Handicap (the control copies it)", el("select", { onchange: (e) => { h.handicap = e.target.value; } },
+            ...HANDICAPS.map(([k, label]) => el("option", { value: k, selected: (h.handicap || "ai") === k }, label)))),
+          field("Call the diplomat at least every N turns", el("input", { type: "number", min: PROMPT_EVERY.min, max: PROMPT_EVERY.max,
+            value: h.prompt_every ?? PROMPT_EVERY.default, oninput: (e) => { h.prompt_every = e.target.value === "" ? PROMPT_EVERY.default : +e.target.value; } }))),
+        grid,
+        modelCategories(h.owners).length ? null : el("div", { class: "warn small" }, "The model decides nothing: tick at least one kind of diplomacy."));
+    };
+    drawHybrid();
     const vic = (k, label) => el("label", {}, el("input", { type: "checkbox", checked: sc.victories[k] !== false, onchange: (e) => { sc.victories[k] = e.target.checked; } }), ` ${label}`);
     return el("div", { class: `scenario-edit ${sc.enabled ? "" : "disabled"}` },
       el("div", { class: "row" },
@@ -418,6 +458,10 @@ function openSuiteEditor(suite, ctx, isNew) {
         el("span", { class: "grow" }),
         el("button", { class: "small danger", disabled: S.scenarios.length <= 1, onclick: () => { S.scenarios.splice(i, 1); draw(); } }, "Remove")),
       el("div", { class: "grid-scenario" },
+        field("Mode", el("select", { title: "Full: the model plays every turn. Hybrid: a bot plays, the model negotiates.",
+          onchange: (e) => { sc.mode = e.target.value; drawHybrid(); } },
+        ...[["full", "Full (the model plays)"], ["hybrid", "Hybrid (bot + model)"]].map(([v, t]) =>
+          el("option", { value: v, selected: sc.mode === v }, t)))),
         field("Map size", sel("map_size", Object.entries(rules.map_sizes).map(([k, v]) => [k, `${v.name} (${v.width}×${v.height})`]))),
         field("Map type", sel("map_type", Object.entries(rules.map_types).map(([k, v]) => [k, v.name]))),
         field("Speed", sel("speed", Object.keys(rules.speeds).map((k) => [k, `${k} (${rules.max_turns[k]} turns)`]))),
@@ -434,6 +478,7 @@ function openSuiteEditor(suite, ctx, isNew) {
         field("Turn limit (0 = speed's normal length)", num("turn_limit", { min: 0, max: 2000 })),
         field("Max minutes per model turn", num("max_turn_minutes", { min: 1, max: 600 })),
         el("div", { class: "field" }, el("label", {}, "Victory conditions"), el("div", { class: "row" }, ...Object.keys(rules.victories).map((k) => vic(k, k))))),
+      hybridBox,
       mapOptionsForm(rules, {
         initial: { map_edges: sc.map_edges, river_density: sc.river_density, resources: sc.resources },
         onChange: (v) => { sc.map_edges = v.map_edges; sc.river_density = v.river_density; sc.resources = v.resources; },
