@@ -59,6 +59,8 @@ STRENGTH_FLOOR = 20
 EVENT_WINDOW = 2000
 #: How long a phase waits for a chat answer of the seat's model already under way before it cancels it (P3.6.5).
 VOICE_WAIT_SECONDS = 30.0
+
+
 class DiplomatModel(LLMAgent):
     """A hybrid seat's model as its chat answers use it: ``LLMAgent``'s chat machinery (``ChatThread``: one
     conversation per chat, on a ticket per answer) with the diplomat's system prompt, the chat tools of the model's
@@ -175,6 +177,9 @@ class HybridAgent:
         from .. import servers
         block = self.llm_block
         try:
+            if not block:
+                # never a provider's default: a seat with no model block dials nothing, and its bot answers for it
+                raise servers.ServerError("This hybrid seat has no model: its bot decides everything.")
             cfg = servers.resolve_llm(block, inline_ok=session._inline_llm_allowed(block))
             model, error = DiplomatModel(cfg, self), None
         except servers.ServerError as e:
@@ -268,9 +273,11 @@ class HybridAgent:
                     # chats left to this seat's model are its responder's: handed out again if no line holds them
                     session._dispatch_negotiation_interrupts([pid], again=True)
                     if spent < cap:
-                        spent += session._await(
-                            lambda nids=waiting: len(self._open(session, nids)) < len(nids),
-                            cap - spent, halted=lambda: self.cancelled, hold_paused=True)
+                        # until one of them moves or closes, and then the drive again: what came back to the seat
+                        # goes to its bot inside the drive, as a bot seat's does
+                        was = self._marks(session, waiting)
+                        spent += session._await(lambda nids=waiting, then=was: self._marks(session, nids) != then,
+                                                cap - spent, halted=lambda: self.cancelled, hold_paused=True)
                     session._await(lambda: not session.paused, float("inf"),
                                    halted=lambda: self.cancelled or bool(session.crashed))
                     if session.stopped or session.crashed or self.cancelled:
@@ -285,6 +292,19 @@ class HybridAgent:
                                 session.close_negotiation(nid, "expired", "(no reply in time)")
                 stop = session.drive_bots(pid)
         raise RuntimeError(f"player {pid}'s hybrid turn did not end after 10,000 drives")
+
+    @staticmethod
+    def _marks(session, nids) -> list:
+        """Where each of ``nids`` stands: (status, awaiting, entries). Lock held."""
+        out = []
+        for nid in nids:
+            try:
+                n = session.game.negotiation_head(nid)
+            except ActionError:
+                out.append(None)
+                continue
+            out.append((n["status"], n["awaiting"], n["entries"]))
+        return out
 
     @staticmethod
     def _open(session, nids) -> list:
@@ -457,14 +477,14 @@ class HybridAgent:
         model = self.model(session, pid)
         if model is None:
             row.update(outcome="skipped", cause="refused", note=self._model_error)
-            session.metrics.diplomat(pid, turn, row, seconds=time.perf_counter() - t0)
+            self._row(session, pid, turn, row, t0)
             return
         system = self.system_text(session, pid)
         ticket = self._ticket(session, pid, "diplomat", start_within=PHASE_START_SECONDS, steps=PHASE_STEPS)
         if ticket.state != "queued":
             row.update(outcome="skipped" if ticket.state == "expired" else "refused", cause=cause_of(ticket.error),
                        note=ticket.reason)
-            session.metrics.diplomat(pid, turn, row, seconds=time.perf_counter() - t0)
+            self._row(session, pid, turn, row, t0)
             return
         self._hold_voice(session, pid)
         from ..pool.scheduler import ScheduledConversation, SchedulerError, TicketExpired
@@ -543,6 +563,10 @@ class HybridAgent:
         finally:
             self._phase_conv = None
             ticket.close()
+            try:
+                conv.close()                # the provider's client goes with the phase
+            except Exception:
+                log.debug("closing a diplomat phase's conversation failed", exc_info=True)
             usage = dict(getattr(inner, "usage", {}) or {})
             for k in ("input_tokens", "output_tokens"):
                 row[k] = int(usage.get(k, 0) or 0) - int(before.get(k, 0) or 0)
@@ -561,9 +585,15 @@ class HybridAgent:
             self._release_voice()
             self._status(session, pid, "thinking")
             row["gen_s"], row["queue_s"] = round(row["gen_s"], 3), round(row["queue_s"], 3)
-            session.metrics.diplomat(pid, turn, row, seconds=time.perf_counter() - t0)
+            self._row(session, pid, turn, row, t0)
             # what came to the seat's model during the phase and still waits goes to its responder (P3.6.5)
             session.dispatch_waiting([pid])
+
+    @staticmethod
+    def _row(session, pid: int, turn: int, row: dict, t0: float) -> None:
+        """The phase's row on the game's metrics, under the game's lock (a save encodes the metrics under it)."""
+        with session.lock:
+            session.metrics.diplomat(pid, turn, row, seconds=time.perf_counter() - t0)
 
     def _hold_voice(self, session, pid: int) -> None:
         """The phase takes the seat's voice (P3.6.5): no chat answer of its model starts on its own ticket from now,

@@ -45,7 +45,10 @@ following its visibility; with ``--keep`` the server stays up for the browser ch
 server half: a person, two dry-run model seats on a one-slot machine and a bot chatting in a short game played to its
 end, both chat timeouts 20 s: a model's answer, one queued and then declined for by the chat clock, a person's chat
 closed as expired, the models' trades on their turns waiting for her; every ``negotiation_status`` her socket heard,
-none on a spectator's), and later ``hybrid``, ``minimap``, ``machines``; ``all`` runs every part written so far. It needs the
+none on a spectator's), ``hybrid`` (3-14, the server half: a hybrid seat on another member's dry-run machine shared for
+pooled prompts, with a person and two bots, 30 rounds, ``prompt_every`` 3: its diplomat's phases, chats answered by its
+model and by its bot, the chat clock's fallback, no lease held), and later ``minimap``, ``machines``; ``all`` runs every
+part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
 from __future__ import annotations
@@ -81,7 +84,7 @@ DEV_SERVER_PORT = 8799
 #: The owner's dev server's directory: never a harness's, whatever is in it.
 OWNER_PLAY_DIR = Path("C:/dev/citar-play")
 #: Parts a later package writes (P3.9.4): asked for now, the harness says so and refuses.
-LATER = {"hybrid": "3-14 to 3-16", "minimap": "3-17", "machines": "3-18"}
+LATER = {"minimap": "3-17", "machines": "3-18"}
 
 
 def _dev_server():
@@ -2438,9 +2441,215 @@ def finished_replay(h: Harness, gid: str, tokens: list, data: dict, gi: dict) ->
     data["replay"] = {"frames": len(frames), "bytes": len(got.content), "keyframes": sum(1 for f in frames if f.get("keyframe"))}
 
 
+def part_hybrid(h: Harness) -> None:
+    """3-14's checks, the server half of hybrid seats (design/phase3-features.md P3.6.2-P3.6.7, P3.6.11): bob's dry-run
+    machine (one slot) is shared with alice for pooled prompts only. Her game seats her person, a hybrid seat on bob's
+    machine (the standard bot with trades and talk its model's, ``prompt_every`` 3) and two bots, 30 rounds, the model's
+    chat timeout 20 s. A model seat that plays every turn on bob's machine is refused her (no grant for games); the
+    hybrid seat is the engine's hybrid controller with the AI's handicap. On her first turn she offers the seat a trade
+    (its model answers) and a declaration of friendship (its bot answers, the model never asked), on her second a trade
+    whose message keeps the dry-run model past its 20 s (the chat clock's fallback bot answers, cause ``timeout``;
+    the engine takes two openings a turn between a pair). She plays the game
+    to its end, answering the seat's offers. The evidence: the diplomat's phases (three turns apart, or sooner on a
+    trigger, each done), the chat answers by the model and by the bot, the fallback with its cause, her socket's
+    statuses of the seat's chats (kind ``hybrid``), and bob's machine never holding a lease."""
+    r = h.report
+    alice, bob = h.accounts["alice"], h.accounts["bob"]
+    data = r.data.setdefault("hybrid", {})
+    sockets: list = []
+    gid = ""
+    timeout = 20
+    try:
+        made = bob.post("/api/servers", json={"name": f"QA hybrid machine {h.tag}", "kind": "test",
+                                              "connection": {"provider": "dryrun", "dry_run_delay": 0.3,
+                                                             "max_parallel": 1},
+                                              "models": [{"key": "dry-run"}]})
+        mid = made.json().get("id", "") if made.status_code == 200 else ""
+        group = bob.post("/api/pool/groups", json={"name": f"QA hybrid group {h.tag}", "visibility": "private"})
+        group_id = group.json().get("id") if group.status_code == 200 else ""
+        put = bob.put(f"/api/pool/servers/{mid}", json={"group_id": group_id})
+        grant = bob.post(f"/api/pool/groups/{group_id}/grants",
+                         json={"subject_type": "user", "handle": alice.handle, "purposes": ["pooled"]})
+        r.check("bob's dry-run machine (one slot) shared with alice for pooled prompts only",
+                bool(mid) and (group.status_code, put.status_code, grant.status_code) == (200, 200, 200)
+                and grant.json().get("purposes") == ["pooled"],
+                f"machine {made.status_code}, group {group.status_code}, put {put.status_code}, grant "
+                f"{grant.status_code}")
+        data["machine"] = mid
+        model = {"server_id": mid, "model": "dry-run"}
+        config = {"map_size": "small", "map_type": "pangaea", "seed": 3341, "barbarians": "off", "city_states": 0,
+                  "turn_limit": 30, "chat_model_reply_seconds": timeout, "chat_person_reply_seconds": 60}
+        full = alice.post("/api/games", json={"name": f"QA no full seat {h.tag}", "config": config,
+                                              "seats": [{"type": "human"}, {"type": "llm", "llm": dict(model)}]})
+        r.check("a seat that plays every turn on bob's machine is refused her: her grant covers pooled prompts only",
+                full.status_code == 403, f"HTTP {full.status_code}: {full.text[:200]}")
+        hybrid_seat = {"type": "hybrid", "llm": dict(model), "bot": {"profile": "standard"},
+                       "hybrid": {"owners": "trade_only", "prompt_every": 3}}
+        g = alice.post("/api/games", json={"name": f"QA hybrid game {h.tag}", "config": config,
+                                           "seats": [{"type": "human"}, hybrid_seat, {"type": "bot"},
+                                                     {"type": "bot"}]})
+        info = g.json() if g.status_code == 200 else {}
+        gid = info.get("id", "")
+        tokens = [seat["token"] for seat in info.get("seats") or []]
+        seat = (info.get("seats") or [{}, {}])[1]
+        r.check("alice's game seats the hybrid seat on bob's machine: trades and talk its model's, prompt every 3",
+                bool(gid) and seat.get("type") == "hybrid" and (seat.get("hybrid") or {}).get("preset") == "trade_only"
+                and (seat.get("hybrid") or {}).get("prompt_every") == 3,
+                f"HTTP {g.status_code}; seat {json.dumps(seat.get('hybrid'))}")
+        if not gid:
+            return
+        data["game"] = gid
+        met = alice.post(f"/api/games/{gid}/debug/meet_all")
+        rich = alice.post(f"/api/games/{gid}/debug/gold")           # 500 gold each, for the trades
+        mine = Socket(h, gid, tokens[0])
+        sockets.append(mine)
+
+        def tool(name: str, args: dict) -> dict:
+            got = alice.post(f"/api/games/{gid}/tool", params={"token": tokens[0]}, json={"tool": name, "args": args})
+            return got.json() if got.status_code == 200 else {"ok": False, "error": got.text}
+
+        def head(nid: int) -> dict:
+            got = alice.get(f"/api/games/{gid}/negotiations/{nid}", params={"token": tokens[0]})
+            return got.json() if got.status_code == 200 else {}
+
+        def game() -> dict:
+            got = alice.get(f"/api/games/{gid}")
+            return got.json() if got.status_code == 200 else {}
+
+        def metrics() -> dict:
+            got = alice.get(f"/api/games/{gid}/metrics")
+            return got.json() if got.status_code == 200 else {}
+
+        def rows(nid: int) -> list:
+            return [(x.get("outcome"), x.get("cause")) for x in metrics().get("negotiations") or []
+                    if x.get("nid") == nid]
+
+        controller = alice.get(f"/api/games/{gid}/summary").json()
+        hybrid_row = next((p for p in controller.get("players") or [] if p.get("id") == 1), {})
+        r.check("the summary labels the seat (its bot and its model) with its task class",
+                hybrid_row.get("label") == "Hybrid: standard + dry-run" and hybrid_row.get("class") == "partial",
+                json.dumps(hybrid_row)[:300])
+
+        # ---- turn 1: three chats with the hybrid seat
+        t0 = time.time()
+        trade = tool("open_negotiation", {"to": 1, "message": "QA-T: maps for gold?",
+                                          "give": [{"type": "gold", "amount": 25}],
+                                          "receive": [{"type": "share_map"}]})
+        t_id = (trade.get("result") or {}).get("negotiation_id")
+        answered = wait_until(lambda: head(t_id).get("status") not in (None, "open"), 30, 0.25)
+        r.check("a trade (its model's): the model answered it, accepting, with no fallback",
+                bool(met.status_code == 200 and rich.status_code == 200 and answered)
+                and head(t_id).get("status") == "accepted" and rows(t_id) == [("answered", None)],
+                f"meet_all {met.status_code}, gold {rich.status_code}; {trade.get('ok') or trade.get('error')}; "
+                f"status {head(t_id).get('status')}; rows {rows(t_id)}", seconds=round(time.time() - t0, 1))
+        friends = tool("open_negotiation", {"to": 1, "message": "QA-F: friends?",
+                                            "give": [{"type": "declaration_of_friendship"}],
+                                            "receive": [{"type": "declaration_of_friendship"}]})
+        f_id = (friends.get("result") or {}).get("negotiation_id")
+        by_bot = wait_until(lambda: (head(f_id).get("clock") or {}).get("waiting_on") != 1, 10, 0.1)
+        f_view = head(f_id)
+        r.check("a declaration of friendship (an agreement: the bot's): its bot answered at once, the model never asked",
+                bool(friends.get("ok") and by_bot) and rows(f_id) == []
+                and any(not e.get("you") for e in f_view.get("history") or []),
+                f"{friends.get('ok') or friends.get('error')}; status {f_view.get('status')}; rows {rows(f_id)}; "
+                f"history {[(e.get('by'), e.get('action')) for e in f_view.get('history') or []]}")
+        # the engine takes two openings a turn between a pair: the third chat is her next turn's
+        ended = tool("end_turn", {})
+        wait_until(lambda: game().get("current_player") == 0 and game().get("turn") == 2, 60, 0.25)
+        slow = tool("open_negotiation", {"to": 1, "message": "[dry run: wait 45 s] QA-S: gold for maps?",
+                                         "give": [{"type": "gold", "amount": 20}],
+                                         "receive": [{"type": "share_map"}]})
+        s_id = (slow.get("result") or {}).get("negotiation_id")
+        s_opened = time.time()
+        fell_back = wait_until(lambda: head(s_id).get("status") not in (None, "open")
+                               or (head(s_id).get("clock") or {}).get("waiting_on") == 0, 40, 0.25)
+        s_took = time.time() - s_opened
+        s_view = head(s_id)
+        r.check("a trade the model is too slow for (45 s against its 20 s): the chat clock's fallback bot answered it "
+                "at 20 s, cause timeout",
+                bool(ended.get("ok") and fell_back) and ("fallback", "timeout") in rows(s_id) and 18 <= s_took <= 30
+                and (s_view.get("history") or [{}])[-1].get("message") != "(no reply in time)",
+                f"turn 1 ended {ended.get('ok') or ended.get('error')}; {slow.get('ok') or slow.get('error')}; after "
+                f"{s_took:.1f} s; rows {rows(s_id)}; last {(s_view.get('history') or [{}])[-1]}",
+                seconds=round(s_took, 1))
+        for nid in (f_id, s_id):
+            if head(nid).get("status") == "open" and (head(nid).get("clock") or {}).get("waiting_on") == 0:
+                tool("respond_negotiation", {"negotiation_id": nid, "action": "reject", "message": "QA: no."})
+
+        # ---- the rest of the game: she ends her turns and answers the seat's offers
+        answered_offers: dict = {}
+        deadline = time.time() + 900
+        while time.time() < deadline:
+            gi = game()
+            if gi.get("phase") != "playing":
+                break
+            for s in mine.statuses():
+                nid = s["negotiation"]
+                if s.get("state") != "waiting" or s.get("waiting_on") != 0 or nid in answered_offers:
+                    continue
+                view = head(nid)
+                if view.get("status") == "open" and (view.get("clock") or {}).get("waiting_on") == 0:
+                    answered_offers[nid] = tool("respond_negotiation", {"negotiation_id": nid, "action": "accept",
+                                                                         "message": "QA: agreed."}).get("ok")
+            if gi.get("current_player") == 0:
+                view = alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]}).json()
+                if not (view.get("diplomacy") or {}).get("open_negotiations"):
+                    tool("end_turn", {})
+            time.sleep(0.3)
+        gi = game()
+        r.check("the game was played to its end (turn limit 30)", gi.get("phase") != "playing",
+                f"phase {gi.get('phase')}, turn {gi.get('turn')}", seconds=round(time.time() - t0, 1))
+        m = metrics()
+        phases = [x for x in m.get("diplomat") or [] if x.get("player") == 1]
+        turns = [x["turn"] for x in phases]
+        scheduled = [x for x in phases if any(t.startswith("it is 3 turns") for t in x.get("triggers") or [])]
+        r.check("the diplomat's phases: one at most a turn, every one done, at least every three turns",
+                len(phases) >= 9 and len(turns) == len(set(turns)) and all(x["outcome"] == "done" for x in phases)
+                and all(b - a <= 3 for a, b in zip([1] + turns, turns + [30])) and len(scheduled) >= 3,
+                f"{len(phases)} phases on turns {turns}; outcomes {sorted({x['outcome'] for x in phases})}; "
+                f"{len(scheduled)} on schedule", phases=len(phases))
+        summary = (m.get("summary") or {}).get("1") or {}
+        r.check("the seat's summary: its turns its bot's (bot actions), its phases and its chat answers",
+                summary.get("controller") == "hybrid" and summary.get("diplomat_phases") == len(phases)
+                and summary.get("avg_bot_actions", 0) > 0
+                and (summary.get("chat_answers") or {}).get("answered", 0) >= 1
+                and (summary.get("chat_answers") or {}).get("fallback", 0) >= 1
+                and (summary.get("chat_fallback_causes") or {}).get("timeout", 0) >= 1,
+                json.dumps({k: summary.get(k) for k in ("controller", "diplomat_phases", "diplomat_outcomes",
+                                                         "chat_answers", "chat_fallback_causes",
+                                                         "avg_bot_actions")}))
+        hybrid_statuses = [s for s in mine.statuses() if s.get("kind") == "hybrid"]
+        states = {s["state"] for s in mine.statuses() if 1 in (s.get("players") or [])}
+        r.check("her socket heard the seat's chats as a hybrid seat's (waiting with a deadline, the model's queued or "
+                "thinking, closed)",
+                bool(hybrid_statuses) and any(s.get("deadline") for s in hybrid_statuses)
+                and ({"thinking", "queued"} & states) and "closed" in states,
+                f"{len(hybrid_statuses)} statuses of kind hybrid; states {sorted(states)}")
+        q = bob.get("/api/queue")
+        box = next((x for x in (q.json() if q.status_code == 200 else {}).get("machines") or []
+                    if x.get("server_id") == mid), {})
+        r.check("bob's machine holds no lease for the hybrid seat (its prompts are tickets)",
+                q.status_code == 200 and not box.get("leases"), json.dumps(box)[:300])
+        data.update({"chats": {"trade": t_id, "friendship": f_id, "slow": s_id}, "fallback_after_s": round(s_took, 1),
+                     "phases": [{k: x.get(k) for k in ("turn", "triggers", "steps", "outcome", "tools")}
+                                for x in phases],
+                     "offers_answered": {str(k): v for k, v in answered_offers.items()},
+                     "summary": {k: summary.get(k) for k in ("diplomat_phases", "diplomat_outcomes", "diplomat_tools",
+                                                             "chat_answers", "chat_fallback_causes")},
+                     "statuses": len(mine.statuses()), "hybrid_statuses": len(hybrid_statuses)})
+    finally:
+        for s in sockets:
+            s.close()
+        if gid and not h.keep:
+            try:
+                alice.delete(f"/api/games/{gid}")
+            except httpx.HTTPError:
+                pass
+
+
 #: The parts written so far, in the order ``all`` runs them.
 PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue, "ledger": part_ledger,
-                                               "chat": part_chat}
+                                               "chat": part_chat, "hybrid": part_hybrid}
 
 
 # ---------------------------------------------------------------------------- the run

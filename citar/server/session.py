@@ -2459,10 +2459,10 @@ class SessionManager:
         s.start()               # its chat clock is new: every open chat is timed afresh from here (ChatClock.start)
         self.track(s)
         s.mark_live()
-        # its bots answer the chats waiting on them now; a game opened only to be looked at answers nothing (its end
-        # state is what is looked at)
+        # its bots answer the chats waiting on them now (a hybrid seat's bot its own part: its model's waits for the
+        # resume); a game opened only to be looked at answers nothing (its end state is what is looked at)
         if leases:
-            s.dispatch_waiting([p for p, seat in enumerate(s.seats) if seat.type == "bot"])
+            s.dispatch_waiting([p for p, seat in enumerate(s.seats) if seat.has_bot])
 
     def _reopen(self, live: GameSession, paused: bool):
         """Bring back a game ``load`` stopped for a save that then did not load (its history, in the journal the game
