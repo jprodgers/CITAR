@@ -2190,7 +2190,7 @@ def part_chat(h: Harness) -> None:
     and the clock's declines; the chat route reads a chat with its clock.
 
     3-13's checks, the client's payloads (P3.5.8): her view answers with an ETag, a refresh that sends it back gets 304
-    until something changes; her view's diplomacy carries no trade options, the trade options route gives her those
+    until something changes, a query between two looks (the game screen's for its selected unit) included; her view's diplomacy carries no trade options, the trade options route gives her those
     of a civilization she has met (not her own, not a stranger's); and the finished game's replay is the journal's
     frames, a keyframe and then deltas, one per round."""
     r = h.report
@@ -2382,6 +2382,22 @@ def payloads_while_playing(h: Harness, gid: str, tokens: list, data: dict, tool)
             break
     r.check("alice's view answers with an ETag, and a refresh that sends it back gets 304 Not Modified, empty",
             any(t[0] == 200 and t[1] and t[2] == 304 and t[3] == 0 for t in tries), json.dumps(tries))
+    # the game screen asks for its selected unit (get_unit) after every refresh: a query is a read, so it never moves
+    # the tag, and the next refresh is still a 304 (the same three tries, for the same race)
+    units = [u["id"] for u in first.json().get("units") or [] if u.get("owner") == 0] if first.status_code == 200 else []
+    query_tries = []
+    for _ in range(3 if units else 0):
+        before = view()
+        held = before.headers.get("etag")
+        asked = tool("get_unit", {"unit_id": units[0]})
+        still = view(held)
+        query_tries.append((before.status_code, bool(held), asked.get("ok"), still.status_code, len(still.content)))
+        if still.status_code == 304:
+            break
+    r.check("a query between two looks (get_unit, as the game screen asks for its selected unit) leaves the view as it "
+            "was: the second look, with the first's tag, is still a 304",
+            any(t[0] == 200 and t[1] and t[2] is True and t[3] == 304 and t[4] == 0 for t in query_tries),
+            json.dumps({"units": units[:3], "tries": query_tries}))
     moved = tool("set_research", {"tech": "Pottery"})
     after = view(tag)
     r.check("after she sets her research the same tag gets the new view (200) under a new tag",
@@ -2400,7 +2416,7 @@ def payloads_while_playing(h: Harness, gid: str, tokens: list, data: dict, tool)
             and own.status_code == 404 and stranger.status_code == 404,
             f"listed {[p.get('id') for p in listed]}; options {opts.status_code} {sorted(body.get('trade_options') or {})}; "
             f"own {own.status_code}; stranger {stranger.status_code}")
-    data["payloads"] = {"etag_tries": tries, "trade_options": body}
+    data["payloads"] = {"etag_tries": tries, "query_tries": query_tries, "trade_options": body}
 
 
 def finished_replay(h: Harness, gid: str, tokens: list, data: dict, gi: dict) -> None:
