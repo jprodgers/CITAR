@@ -301,6 +301,9 @@ class SeatRoute(World):
         summary = self.call("alice", "GET", f"/api/games/{gid}/summary").json()
         row = next(p for p in summary["players"] if p["id"] == 1)
         self.assertEqual(row["label"], f"Hybrid: {bot['profile']} (best) + dry-run")
+        # the stats screen labels it the same way (seats.js controllerLabel reads bot and bot_best)
+        metrics = self.call("alice", "GET", f"/api/games/{gid}/metrics").json()["summary"]["1"]
+        self.assertEqual((metrics["controller"], metrics["bot"], metrics["bot_best"]), ("hybrid", bot["profile"], True))
 
     def test_who_may_change_a_seat_to_hybrid(self):
         """P3.9.1 on the changed route: another member 404, an anonymous caller 401 or 404, an ACL viewer 403, a
