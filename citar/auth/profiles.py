@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 import secrets
 import unicodedata
@@ -33,7 +32,7 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException
 from sqlalchemy import and_, func, or_, select
 
-from .. import paths
+from .. import fsutil, paths
 from ..db.models import (FIELD_LEVELS, USER_FIELD_DEFAULTS, Game as GameRow, OwnedItem, User)
 from . import access, audit, images
 
@@ -361,7 +360,7 @@ def store_avatar(user: User, data: bytes) -> images.ImageInfo:
     tmp = folder / f".{name}.{secrets.token_hex(4)}.part"
     try:
         tmp.write_bytes(data)
-        os.replace(tmp, folder / name)
+        fsutil.replace(tmp, folder / name)       # the same image again lands on its own name, maybe being served
     finally:
         if tmp.exists():
             try:

@@ -10,7 +10,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 
-from .. import costing, servers as S, usage as U
+from .. import costing, fsutil, servers as S, usage as U
 from .reach import Reach, pooled_models
 
 _save_cache: dict = {}
@@ -100,7 +100,7 @@ def _benchmark_runs(run_ids: set) -> list[dict]:
         if not p.exists():
             continue
         try:
-            run = json.loads(p.read_text(encoding="utf-8"))
+            run = json.loads(fsutil.read_text(p))     # the scheduler replaces it as the run goes
         except (OSError, ValueError):
             continue
         run["summary"] = run_summary(run)
@@ -115,7 +115,7 @@ def _probe_runs(run_ids: set) -> list[dict]:
     for rid in run_ids:
         d = RUNS / rid
         try:
-            run = json.loads((d / "run.json").read_text(encoding="utf-8"))
+            run = json.loads(fsutil.read_text(d / "run.json"))     # the probe runner replaces it as the run goes
         except (OSError, ValueError):
             continue
         results = []

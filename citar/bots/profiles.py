@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import engine_api, paths
-from ..fsutil import replace as _fs_replace
+from ..fsutil import read_text as _fs_read, replace as _fs_replace
 
 PROFILES_DIR = paths.saves_path("bots", "profiles")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,59}$")
@@ -208,7 +208,7 @@ def list_profiles() -> list[dict]:
     if PROFILES_DIR.exists():
         for p in PROFILES_DIR.glob("*.json"):
             try:
-                d = json.loads(p.read_text(encoding="utf-8"))
+                d = json.loads(_fs_read(p))
             except (OSError, json.JSONDecodeError):
                 continue
             if d.get("id") and d["id"] not in _BUILTIN_IDS:
@@ -218,14 +218,15 @@ def list_profiles() -> list[dict]:
 
 
 def get(pid: str) -> dict:
-    """One profile by id, or ProfileError."""
+    """One profile by id, or ProfileError. A file being replaced (``save``) is waited for: refused, it would read as
+    no such profile, and a save then starts the profile again at revision 1 with no history."""
     b = _builtin(pid)
     if b is not None:
         return b
     if not ID_RE.match(pid or ""):
         raise ProfileError(f"No bot profile called '{pid}'.")
     try:
-        return json.loads(_path(pid).read_text(encoding="utf-8"))
+        return json.loads(_fs_read(_path(pid)))
     except (OSError, json.JSONDecodeError):
         raise ProfileError(f"No bot profile called '{pid}'.") from None
 

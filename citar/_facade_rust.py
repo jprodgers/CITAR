@@ -42,7 +42,7 @@ from typing import Any, Callable, Optional
 
 from . import _engine as _E
 from . import paths
-from .fsutil import replace as _fs_replace
+from .fsutil import read_bytes as _fs_read_bytes, read_text as _fs_read, replace as _fs_replace
 
 # citar/engine_api.py's list, which its import holds this module to.
 __all__ = [
@@ -246,18 +246,18 @@ def list_maps() -> list[dict]:
     out = []
     for p in sorted(MAP_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
-            out.append(map_summary(json.loads(p.read_text(encoding="utf-8"))))
+            out.append(map_summary(json.loads(_fs_read(p))))
         except (OSError, ValueError, KeyError):
             continue
     return out
 
 
 def load_map(map_id: str) -> dict:
-    """One saved map. Raises MapError."""
+    """One saved map. Raises MapError. A map being saved (``save_map`` replaces its file) is waited for."""
     p = _map_path(map_id)
     if not p.exists():
         raise MapError(f"No map '{map_id}'.")
-    return json.loads(p.read_text(encoding="utf-8"))
+    return json.loads(_fs_read(p))
 
 
 def save_map(data: dict) -> tuple[dict, list[str]]:
@@ -269,7 +269,7 @@ def save_map(data: dict) -> tuple[dict, list[str]]:
     clean["modified"] = now
     if p.exists():
         try:
-            clean.setdefault("created", json.loads(p.read_text(encoding="utf-8")).get("created", now))
+            clean.setdefault("created", json.loads(_fs_read(p)).get("created", now))
         except (OSError, ValueError):
             clean.setdefault("created", now)
     else:
@@ -349,8 +349,7 @@ def list_scenarios() -> list[dict]:
     out = []
     for p in sorted(SCENARIO_DIR.glob("*.citarscn"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
-            with gzip.open(p, "rt", encoding="utf-8") as f:
-                out.append(scenario_summary(json.load(f)))
+            out.append(scenario_summary(_read_scenario(p)))
         except (OSError, ValueError, KeyError, ActionError):
             continue
     return out
@@ -361,8 +360,13 @@ def load_scenario(sid: str) -> dict:
     p = _scenario_path(sid)
     if not p.exists():
         raise _action_error(f"No scenario '{sid}'.")
-    with gzip.open(p, "rt", encoding="utf-8") as f:
-        return json.load(f)
+    return _read_scenario(p)
+
+
+def _read_scenario(p: Path) -> dict:
+    """A scenario file's document. Read whole and retried, not streamed: ``save_scenario`` replaces the file, and
+    for that moment Windows refuses to open it."""
+    return json.loads(gzip.decompress(_fs_read_bytes(p)).decode("utf-8"))
 
 
 def scenario_summary(data: dict) -> dict:

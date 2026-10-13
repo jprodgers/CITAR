@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
+from .. import fsutil
 from ..auth import audit, images, profiles
 from ..auth.deps import Principal, get_db, principal, require_user
 
@@ -67,7 +68,8 @@ def avatar(handle: str, p: Principal = Depends(principal), s: Session = Depends(
         raise HTTPException(404, "No such profile.")
     mime = images.MIME_BY_EXT[path.suffix.lstrip(".")]
     public = "global" == user.field_levels()["avatar"] == user.field_levels()["profile"]
-    return Response(path.read_bytes(), media_type=mime, headers={
+    # read retried: uploading the same image again replaces its file (its name is its digest) under this read
+    return Response(fsutil.read_bytes(path), media_type=mime, headers={
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
         "Content-Disposition": "inline",

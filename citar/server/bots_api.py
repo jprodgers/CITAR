@@ -272,14 +272,14 @@ def queue_experiment(body: ExperimentBody, user: User = Depends(require_cap("run
 def _experiments_with(pid: str) -> list[dict]:
     """Lab experiments with a seat playing this profile, newest first."""
     import json
-    from .. import lab
+    from .. import fsutil, lab
     out = []
     for d, state in ((lab.QUEUE, "queued"), (lab.DONE, "complete")):
         if not d.exists():
             continue
         for p in d.glob("*.json"):
             try:
-                spec = json.loads(p.read_text(encoding="utf-8"))
+                spec = json.loads(fsutil.read_text(p))      # a queued one's priority may be being changed
             except (OSError, json.JSONDecodeError):
                 continue
             if any(s.get("profile") == pid for s in spec.get("seats", [])) or spec.get("profile") == pid:
