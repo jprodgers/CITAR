@@ -10,9 +10,10 @@
   this laptop's run-to-run noise.
 - **The debug ops route**, ``POST /api/games/{gid}/debug/ops`` (P3.7.5): not there (404) unless the server runs with
   ``CITAR_DEBUG=1``; then 200 for whoever manages the game (its owner, an administrator), 404 for another member and a
-  moderator, 401 or 404 for a visitor, 403 for a member it is shared with to view (a write), and refused without the
-  session's CSRF token (P3.9.1). The operations apply all or nothing, under the game's lock, and are announced as any
-  action is: the version moves, and the view's ETag with it.
+  moderator, 401 or 404 for a visitor, 403 for a member it is shared with to view (a write) and, the game published,
+  for a moderator (control) and a visitor, and refused without the session's CSRF token (P3.9.1). The operations
+  apply all or nothing, under the game's lock, and are announced as any action is: the version moves, and the view's
+  ETag with it.
 """
 from __future__ import annotations
 
@@ -296,6 +297,11 @@ class DebugOps(Case):
                                       json={"handle": "bob", "permission": "view"})
             self.assertEqual(shared.status_code, 200, shared.text)
             self.assertEqual(self.ops(gid, gold, who="bob").status_code, 403, "an ACL viewer may not write")
+            public = self.client.put(f"/api/games/{gid}/sharing", headers=self.headers["zara"],
+                                     json={"visibility": "global"})
+            self.assertEqual(public.status_code, 200, public.text)
+            self.assertEqual(self.ops(gid, gold, who="moe").status_code, 403, "published: a moderator may not control")
+            self.assertIn(self.ops(gid, gold).status_code, (401, 403), "published: a visitor may not either")
             s = self.manager.get(gid)
             with s.lock:
                 self.assertNotEqual(s.game.view(0)["empire"]["gold"], 777, "none of them changed the game")
