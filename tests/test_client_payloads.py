@@ -20,6 +20,7 @@ import base64
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -43,6 +44,26 @@ from citar.pool import scheduler as S
 
 settings.reset()
 
+
+
+def _stand_still(s, hold: float = 0.3, timeout: float = 15.0) -> None:
+    """Wait until a paused game stands still. The game plays from its creation, and a pause holds an AI only before
+    its next turn: a bot's turn already under way when it comes runs on, its end included, and moves every view (CI,
+    test.yml run 38385560480: a view's tag moved between two requests of a paused game). Still for ``hold`` seconds:
+    its turn, the seat to move and every seat's agent status unchanged."""
+    def mark():
+        with s.lock:
+            return s.game.turn, s.game.current, tuple(sorted(s.agent_status.items()))
+    end = time.monotonic() + timeout
+    last, since = mark(), time.monotonic()
+    while time.monotonic() < end:
+        time.sleep(0.02)
+        now = mark()
+        if now != last:
+            last, since = now, time.monotonic()
+        elif time.monotonic() - since >= hold:
+            return
+    raise AssertionError("the paused game never stood still")
 
 class Case(unittest.TestCase):
     WHO = (("alice", "user"), ("bob", "user"), ("moe", "moderator"), ("zara", "admin"))
@@ -90,6 +111,7 @@ class Case(unittest.TestCase):
         self.games.append(info["id"])
         s = self.manager.get(info["id"])
         s.set_paused(True)
+        _stand_still(s)
         n = len(seats)
         pairs = [(a, b) for a in range(n) for b in range(a + 1, n)] if meet is None else meet
         with s.lock:

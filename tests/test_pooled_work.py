@@ -554,6 +554,27 @@ class Reports(_ReportCase):
         self.assertEqual(self.runner._deleting, set())
         seat.idle()
 
+    def test_a_listing_never_shows_a_report_whose_deletion_ends_while_it_reads(self):
+        """A deleted report's build removes its folder and then lets go of its id. A listing that read the report's
+        record just before must not show it once the id is let go (CI, test.yml run 38385560480: the report above was
+        listed again right after its deletion, its build having ended between ``list``'s read and its look)."""
+        rid = "20261013-000000-race"
+        folder = self.runner.dir / rid
+        folder.mkdir(parents=True)
+        (folder / "meta.json").write_text(json.dumps({"id": rid, "title": "Raced", "status": "done"}), encoding="utf-8")
+        self.runner._deleting.add(rid)
+        real = self.reports.fsutil.read_text
+
+        def read_then_let_go(p):
+            text = real(p)
+            if Path(p).parent == folder:            # the build's last steps (``_build``), between the read and the look
+                shutil.rmtree(folder)
+                self.runner._deleting.discard(rid)
+            return text
+        with mock.patch.object(self.reports.fsutil, "read_text", read_then_let_go):
+            listed = [m["id"] for m in self.runner.list()]
+        self.assertNotIn(rid, listed)
+
     def test_a_report_the_server_restarted_under_is_built_again(self):
         """A report the server restarted under (left ``running``) is queued again by the next runner and built, its
         restart counted; one restarted under ``MAX_RESTARTS`` times already fails, so a build that brings the server

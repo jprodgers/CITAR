@@ -269,7 +269,9 @@ class ReportRunner:
                 m = json.loads(fsutil.read_text(p))         # a report being built would drop out of the list
             except (OSError, ValueError):
                 continue
-            if m.get("id") not in self._deleting:
+            # Read, then looked at: a deleted report's build removes its folder and only then lets go of its id
+            # (``_build``), so a record read just before that is either still being deleted or gone by now.
+            if m.get("id") not in self._deleting and p.exists():
                 out.append(self._live(m))
         return out
 
