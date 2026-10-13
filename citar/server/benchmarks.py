@@ -49,8 +49,15 @@ DEFAULT_SETTINGS = {
 ACTIVE = ("loading", "running", "resuming", "paused")      # job states that hold a slot on their server
 FINISHED_SESSION_GRACE = 600                                 # seconds a finished benchmark game stays open for viewers
 #: The model seat's statuses that mean it is in the middle of its turn: thinking, or waiting for its machine (the
-#: prompt scheduler's queue, design/phase3-features.md P3.3.3), which a pause's grace waits out the same way.
-MID_TURN = ("thinking", "queued")
+#: prompt scheduler's queue, design/phase3-features.md P3.3.3), which a pause's grace waits out the same way; a hybrid
+#: seat's diplomat phase (``diplomat``) too.
+MID_TURN = ("thinking", "queued", "diplomat")
+#: A scenario's modes (design/phase3-features.md P3.6.9): ``full`` seats the model in an LLM seat that plays every turn
+#: (a lease on its machine); ``hybrid`` seats it in a hybrid seat (a bot plays the turns, the model decides the
+#: diplomacy the scenario's ``hybrid`` block hands it, on pooled prompts), paired with a bot-only control game.
+SCENARIO_MODES = ("full", "hybrid")
+#: What a hybrid scenario hands its model unless it says otherwise.
+HYBRID_DEFAULT_OWNERS = "all_but_war"
 
 
 def _new_id(prefix: str = "") -> str:
@@ -73,7 +80,8 @@ BENCH_NATION = "BenchmarkCiv"  # every seat plays the civilization without speci
 
 def default_scenario(**kw) -> dict:
     """A scenario with defaults that produce a short, meaningful benchmark game."""
-    sc = {"id": _new_id("sc_"), "name": "Duel — continents", "enabled": True, "map_size": "duel", "map_type": "continents",
+    sc = {"id": _new_id("sc_"), "name": "Duel — continents", "enabled": True, "mode": "full",
+          "map_size": "duel", "map_type": "continents",
           "speed": BENCH_SPEED, "difficulty": "Prince", "barbarians": "normal", "opponents": 1, "bot_aggression": 0.4,
           "seed": 7, "turn_limit": BENCH_TURNS, "max_turn_minutes": 30,
           "victories": {"Scientific": True, "Cultural": True, "Domination": True, "Diplomatic": True, "Time": True},
@@ -81,6 +89,33 @@ def default_scenario(**kw) -> dict:
           "nations": BENCH_NATION}
     sc.update(kw)
     return sc
+
+
+def normalize_scenario_hybrid(block) -> dict:
+    """A hybrid scenario's ``hybrid`` block checked and completed (P3.6.9): ``owners`` a preset or a map, at least one
+    category the model's (``hybrid.normalize_hybrid``; kept as the preset's name when it is one), ``bot_profile`` the
+    hybrid seat's bot (None: the standard profile; "best" is pinned when each job starts, as a seat's is), ``handicap``
+    ``ai`` (the default, as a lobby hybrid seat's) or ``human``, which the control game copies with the scenario's
+    difficulty, ``prompt_every`` (1..50, 10) and ``phase_seconds`` (10..600, 180). The advisor is always off in a
+    benchmark. The opponents keep the scenario's own ``bot_profile``. Raises ValueError with the reason."""
+    from ..agents import hybrid
+    if block is None:
+        block = {}
+    if not isinstance(block, dict):
+        raise ValueError("A hybrid scenario's settings are an object: {\"owners\": ..., \"bot_profile\": ..., "
+                         "\"handicap\": ..., \"prompt_every\": ...}.")
+    checked = hybrid.normalize_hybrid({"owners": block.get("owners", HYBRID_DEFAULT_OWNERS),
+                                       "prompt_every": block.get("prompt_every", hybrid.PROMPT_EVERY_DEFAULT),
+                                       "phase_seconds": block.get("phase_seconds", hybrid.PHASE_SECONDS_DEFAULT),
+                                       "advisor": False}, benchmark=True)
+    profile = block.get("bot_profile")
+    if profile in ("", None):
+        profile = None
+    elif not isinstance(profile, str):
+        raise ValueError("A hybrid scenario's bot_profile is a bot profile's name.")
+    return {"owners": checked.get("preset") or checked["owners"], "bot_profile": profile,
+            "handicap": hybrid.check_handicap(block.get("handicap")), "prompt_every": checked["prompt_every"],
+            "phase_seconds": checked["phase_seconds"]}
 
 
 def _scenario_speed(sc: dict) -> str:
@@ -192,6 +227,14 @@ def _normalize_suite(d: dict) -> dict:
         base["turn_limit"] = max(0, int(base.get("turn_limit") or 0))
         base["speed"] = _scenario_speed(base)        # older suites used CIGAR speeds ("normal", ...)
         base.pop("villages", None)
+        base["mode"] = base.get("mode") if base.get("mode") in SCENARIO_MODES else "full"
+        if base["mode"] == "hybrid":
+            try:
+                base["hybrid"] = normalize_scenario_hybrid(base.get("hybrid"))
+            except ValueError as e:
+                raise ValueError(f"Scenario '{base.get('name')}': {e}") from None
+        else:
+            base.pop("hybrid", None)
         s["scenarios"].append(base)
     if not s["scenarios"]:
         s["scenarios"].append(default_scenario())
@@ -233,6 +276,9 @@ class BenchmarkScheduler:
         self._progress_dirty: set[str] = set()
         self._progress_flushed = 0.0
         self._clock = datetime.now     # overridable in tests
+        # the hybrid jobs' bot-only control games, cached here and shared by every model's run (P3.6.9)
+        from .controls import ControlGames
+        self.controls = ControlGames(self.dir / "controls")
         self._load()
         from ..pool import queue as work_queue
         work_queue.register("benchmark", self.queue_items, self.running_items)
@@ -438,7 +484,7 @@ class BenchmarkScheduler:
                 for sv in suite["servers"]:
                     for m in [x for x in sv["models"] if x.get("enabled", True)]:
                         seed = sc.get("seed")
-                        jobs.append({
+                        job = {
                             "id": _new_id("job_"), "server_id": sv["id"], "server_name": sv["name"],
                             "server_key": sv["id"], "model_id": m["id"], "model": m["model"],
                             "profile": m.get("profile_name"),
@@ -446,7 +492,13 @@ class BenchmarkScheduler:
                             "repeat": rep + 1, "seed": (int(seed) + rep) if seed not in (None, "") else None,
                             "status": "queued", "pause_reason": None, "game_id": None, "created": _now(),
                             "started": None, "finished": None, "error": None, "result": None, "progress": None,
-                        })
+                            "mode": sc.get("mode") or "full",
+                        }
+                        if job["mode"] == "hybrid":
+                            from ..diplomacy_stats import owners_label
+                            # who decides what, as the leaderboard files the pair (a preset's name, or "custom")
+                            job["owners"] = owners_label(sc["hybrid"]["owners"])
+                        jobs.append(job)
         if not jobs:
             raise ValueError("This suite has no enabled models and scenarios to run.")
         run = {"id": _new_id("run_"), "name": name or suite["name"], "suite_id": suite["id"], "suite": suite,
@@ -556,6 +608,8 @@ class BenchmarkScheduler:
             elif action == "retry" and job["status"] in ("failed", "cancelled"):
                 job.update({"status": "queued", "pause_reason": None, "game_id": None, "started": None, "finished": None,
                             "error": None, "result": None, "progress": None})
+                job.pop("control", None)        # a hybrid job's control is asked for again when it starts
+                job.pop("seed_used", None)
                 if run["status"] in ("done", "cancelled"):
                     run["status"], run["finished"] = "running", None
             else:
@@ -629,8 +683,10 @@ class BenchmarkScheduler:
         self._thread.start()
 
     def stop(self):
-        """Stop the scheduler thread and let running games finish their current turn."""
+        """Stop the scheduler thread and let running games finish their current turn. A control game under way is
+        dropped, and played again when its job next asks for it."""
         self._stop.set()
+        self.controls.stop()
 
     def _loop(self):
         """The scheduler thread: tick, sleep, repeat."""
@@ -678,6 +734,7 @@ class BenchmarkScheduler:
                 else:
                     for job in run["jobs"]:
                         self._close_finished_view(job)
+                self._check_controls(run)
             self._start_jobs()
             self._flush()
 
@@ -825,7 +882,8 @@ class BenchmarkScheduler:
             limit = self._server(run, job).get("max_parallel", 1)
             in_use = sum(1 for r in self.runs.values() for j in r["jobs"]
                          if j["status"] in ACTIVE and not self._preempted(j) and self._machine(j) == machine)
-            if in_use + len(pool_seats.occupied(machine, exclude=ours)) >= limit:
+            held = pool_seats.occupants(machine, exclude=ours)
+            if in_use + len(held) >= limit or self._mode_wait(run, job, machine, held) is not None:
                 return
             if work_queue.first_ahead(machine, (-prio, job["created"]), exclude=("benchmark", job["id"])) is None:
                 self._request_resume(run, job)
@@ -879,6 +937,11 @@ class BenchmarkScheduler:
                     if self._set_waiting(job, note):
                         self._touch(run)
                     continue
+                why = self._mode_wait(run, job, job["server_key"], held)
+                if why is not None:
+                    if self._set_waiting(job, why):
+                        self._touch(run)
+                    continue
                 first = work_queue.ahead_of(job["server_key"], "benchmark", (-prio, job["created"]))
                 if first is not None:
                     note = pool_seats.note("waiting: ", [pool_seats.queue_holder(first)],
@@ -894,6 +957,32 @@ class BenchmarkScheduler:
                 self._touch(run)
                 threading.Thread(target=self._in_job_thread,
                                  args=(self._launch_job, run["id"], job["id"]), daemon=True).start()
+
+    def _mode_wait(self, run: dict, job: dict, machine: str, held: list) -> Optional[dict]:
+        """Why ``job`` may not start (or resume) on ``machine`` beside the work of the other mode, as a waiting note
+        (``pool.seats.note``), or None (design/phase3-features.md P3.3.5, P3.6.9). A hybrid job holds no lease but counts
+        against its machine's job limit like any job (``_start_jobs``' ``busy``), and it never starts where a benchmark
+        lease is live, a full job of this scheduler's (active, paused for a person or quiet hours: it keeps its slot) or
+        anyone's (``held``: the machine's other leases): its prompts wait for benchmarks, so beside a full job they
+        would sit behind its steps for hours. And a full job never starts beside an active hybrid job of this
+        scheduler, whose prompts it would hold off the machine (its lease never lends, and drains pooled work first)."""
+        from ..pool import seats as pool_seats
+        ours = [(r, j) for r in self.runs.values() for j in r["jobs"]
+                if j is not job and j["status"] in ACTIVE and not self._preempted(j) and j["server_key"] == machine]
+        if job.get("mode") == "hybrid":
+            holders = [{"kind": "benchmark", "id": r["id"], "label": f"benchmark run “{r['name']}”"}
+                       for r, j in ours if j.get("mode", "full") != "hybrid"]
+            holders += [h for h in pool_seats.distinct(held) if h.get("kind") == "benchmark"]
+            if holders:
+                return pool_seats.note(f"waiting: {job['server_name']} plays a full benchmark for ",
+                                       pool_seats.distinct(holders))
+        else:
+            holders = [{"kind": "benchmark", "id": r["id"], "label": f"benchmark run “{r['name']}”"}
+                       for r, j in ours if j.get("mode") == "hybrid"]
+            if holders:
+                return pool_seats.note(f"waiting: {job['server_name']} plays a hybrid benchmark for ",
+                                       pool_seats.distinct(holders))
+        return None
 
     # ------------------------------------------------------------------ job threads
     def _in_job_thread(self, what, run_id: str, job_id: str):
@@ -979,13 +1068,29 @@ class BenchmarkScheduler:
                       **{k: sc[k] for k in ("map_edges", "river_density", "resources") if sc.get(k) is not None}}
             n_opp = int(sc.get("opponents") or 1)
             nations = _seat_nations(sc, n_opp + 1)
-            seats = [{"type": "llm", "civ_name": None, "llm": llm, "nation": nations[0]}]
+            hybrid = job.get("mode") == "hybrid"
+            if hybrid:
+                # the model as a hybrid seat with the advisor off (P3.6.9): its bot plays the turns, its model decides
+                # what the scenario hands it, on prompts that wait for benchmarks with no start deadline. The seed is
+                # drawn here when the scenario gives none, so the control game plays the very same game.
+                h = sc["hybrid"]
+                if config["seed"] is None:
+                    config["seed"] = secrets.randbelow(2 ** 31)
+                    job["seed_used"] = config["seed"]
+                seats = [{"type": "hybrid", "civ_name": None, "llm": llm, "nation": nations[0],
+                          "bot": {"aggression": float(sc.get("bot_aggression", 0.4)), "profile": h.get("bot_profile")},
+                          "handicap": h["handicap"],
+                          "hybrid": {"owners": h["owners"], "prompt_every": h["prompt_every"],
+                                     "phase_seconds": h["phase_seconds"], "advisor": False}}]
+            else:
+                seats = [{"type": "llm", "civ_name": None, "llm": llm, "nation": nations[0]}]
             seats += [{"type": "bot", "civ_name": None, "nation": nations[i + 1],
                        "difficulty": sc.get("bot_difficulty") or None,
                        "bot": {"aggression": float(sc.get("bot_aggression", 0.4)),
                                "profile": sc.get("bot_profile") or None}} for i in range(n_opp)]
             try:
                 s = self.manager.create(config, seats, name=f"Bench · {job['label']} · {sc['name']}"
+                                                            + (" (hybrid)" if hybrid else "")
                                                             + (f" #{job['repeat']}" if run["suite"]["repeats"] > 1 else ""),
                                         track=False, start=False)
             except Exception as e:
@@ -998,7 +1103,18 @@ class BenchmarkScheduler:
             s.benchmark = {"run_id": run["id"], "job_id": job["id"], "run_name": run["name"], "suite_id": run["suite_id"],
                            "scenario": sc["name"], "scenario_id": sc["id"], "model": job["model"], "server": job["server_name"],
                            "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.turn_limit,
-                           "server_id": job["server_id"], "profile": job.get("profile")}
+                           "server_id": job["server_id"], "profile": job.get("profile"), "mode": job.get("mode", "full")}
+            if hybrid:
+                s.benchmark["owners"] = job.get("owners")
+                try:
+                    # its control: the same game with the seat's bot deciding everything, played on the CPU meanwhile
+                    # (or already played for another model's job of this scenario and seed)
+                    from .controls import control_spec
+                    job["control"] = {"id": self.controls.ensure(control_spec(s.engine_config, s.seats, 0)),
+                                      "status": "queued"}
+                except Exception as e:
+                    job["control"] = {"id": None, "status": "failed", "error": f"{type(e).__name__}: {e}"[:300]}
+                    self._log(f"{job['label']}: its control game could not be set up: {e}", run["id"])
             # the run's owner owns its games' rows, at the run's visibility (P3.2.4), before the first save syncs them
             ownership.register_quietly(s, run.get("owner_id"), kind="benchmark", item=("benchmark_run", run["id"]))
             self.manager.track(s)
@@ -1068,7 +1184,10 @@ class BenchmarkScheduler:
         """Finish a job: final score, timing, and release the game."""
         self._record_progress(run, job, s)
         job["result"] = job["progress"]
+        if job.get("mode") == "hybrid":
+            job["result"] = dict(job["result"], **self._hybrid_result(s))
         job.update({"status": "done", "finished": _now(), "pause_reason": None})
+        self._pair(job)
         try:
             if s.game.phase == "playing":
                 # The model was eliminated: stop the bots playing out a settled game, saved in the same hold of the lock
@@ -1081,6 +1200,82 @@ class BenchmarkScheduler:
             job["error"] = f"Could not save the finished game: {e}"
         self._log(f"Finished {job['label']} on {job['scenario_name']}: {job['result'].get('outcome')}.", run["id"])
         self._touch(run)
+
+    # ------------------------------------------------------------------ hybrid jobs and their controls (P3.6.9)
+    @staticmethod
+    def _hybrid_result(s: GameSession) -> dict:
+        """What a finished hybrid job's result adds (P3.6.10): its seat's diplomacy record (the recorder's rows, and
+        their summary with how the game ended) and its fallbacks by cause."""
+        from ..diplomacy_stats import fallbacks_of, final_of, summarize
+        pid = (s.benchmark or {}).get("llm_player", 0)
+        with s.lock:
+            rec = s._recorder(pid)
+            rec.observe(s.game)
+            rows = rec.mine()
+            summary = summarize(rows, pid, final_of(s.game, pid))
+            fallbacks = fallbacks_of(s.metrics.data, pid)
+        return {"diplomacy": {"rows": rows, "summary": summary}, "fallbacks": fallbacks}
+
+    def _pair(self, job: dict) -> bool:
+        """A finished hybrid job's pair line, once its control has been played (``diplomacy_stats.pair_line``): on the
+        job's result as ``pair``. Returns whether the job changed."""
+        ctl = job.get("control") or {}
+        res = job.get("result") or {}
+        if job.get("mode") != "hybrid" or job["status"] != "done" or not ctl.get("id") or res.get("pair") \
+                or not res.get("diplomacy"):
+            return False
+        rec = self.controls.get(ctl["id"])
+        if rec is None:
+            return False
+        from ..diplomacy_stats import pair_line
+        res["pair"] = pair_line(res["diplomacy"]["summary"], rec["summary"])
+        ctl["status"] = "done"
+        return True
+
+    def _check_controls(self, run: dict) -> None:
+        """Follow each hybrid job's control (P3.6.9): its status on the job, asked for again when this process has not
+        (a restart), and the job's pair line once both games are over."""
+        for job in run["jobs"]:
+            ctl = job.get("control")
+            if job.get("mode") != "hybrid" or not ctl or not ctl.get("id") or (job.get("result") or {}).get("pair"):
+                continue
+            st = self.controls.status(ctl["id"])
+            if st["status"] == "missing":
+                try:
+                    self.controls.ensure(key=ctl["id"])
+                    st = self.controls.status(ctl["id"])
+                except KeyError:
+                    st = {"status": "failed", "error": "Its spec is gone; retry the job to play it again."}
+            changed = st["status"] != ctl.get("status") or st.get("error") != ctl.get("error")
+            if changed:
+                ctl["status"] = st["status"]
+                ctl.pop("error", None)
+                if st.get("error"):
+                    ctl["error"] = st["error"]
+            if self._pair(job) or changed:
+                self._touch(run)
+
+    def pairs(self, visible: Optional[set] = None) -> list:
+        """Every finished hybrid job's pair (P3.6.10), of the runs in ``visible`` (None: every run): {"model", "owners"
+        (as the board files it), "line", "fallbacks", "run_id", "run", "job_id", "game_id", "owner_id", "scenario",
+        "seed", "control"}."""
+        out = []
+        with self.lock:
+            for run in self.runs.values():
+                if visible is not None and run["id"] not in visible:
+                    continue
+                for job in run["jobs"]:
+                    res = job.get("result") or {}
+                    if job.get("mode") != "hybrid" or job["status"] != "done" or not res.get("pair"):
+                        continue
+                    sc = next((x for x in run["suite"]["scenarios"] if x["id"] == job["scenario_id"]), {})
+                    out.append({"model": job["model"], "owners": (sc.get("hybrid") or {}).get("owners"),
+                                "line": res["pair"], "fallbacks": res.get("fallbacks") or {},
+                                "run_id": run["id"], "run": run["name"], "job_id": job["id"],
+                                "game_id": job.get("game_id"), "owner_id": run.get("owner_id"),
+                                "scenario": job["scenario_name"], "seed": job.get("seed_used", job.get("seed")),
+                                "control": (job.get("control") or {}).get("id")})
+        return out
 
     # ------------------------------------------------------------------ views
     def status(self, visible: Optional[set] = None, restricted: Optional[list] = None) -> dict:
@@ -1107,13 +1302,15 @@ class BenchmarkScheduler:
                 if visible is not None and run["id"] not in visible:
                     continue
                 r = {k: v for k, v in run.items() if k != "suite"}
+                r["jobs"] = [_job_view(j) for j in run["jobs"]]
                 r["mode"] = run["suite"]["mode"]
                 r["servers"] = [{"id": sv["id"], "name": sv["name"], "base_url": sv.get("base_url"), "provider": sv.get("provider"),
                                  "max_parallel": sv.get("max_parallel", 1), "restricted_until":
                                  (lambda e: e.strftime("%H:%M") if e else None)(self.restricted_until(sv["id"]))}
                                 for sv in run["suite"]["servers"]]
                 r["scenarios"] = {sc["id"]: {"name": sc["name"], "turn_limit": sc.get("turn_limit"), "map_size": sc["map_size"],
-                                             "map_type": sc["map_type"], "opponents": sc.get("opponents")}
+                                             "map_type": sc["map_type"], "opponents": sc.get("opponents"),
+                                             "mode": sc.get("mode") or "full", "hybrid": sc.get("hybrid")}
                                   for sc in run["suite"]["scenarios"]}
                 r["summary"] = run_summary(run)
                 out.append(r)
@@ -1184,6 +1381,15 @@ def game_progress(s: GameSession, llm_player: Optional[int] = None, model: Optio
         "drain_s": bench.get("drain_s"), "contaminated": bool(bench.get("contaminated")),
         "updated": _now(),
     }
+
+
+def _job_view(job: dict) -> dict:
+    """A job as the runs' list shows it: a hybrid job's result without its diplomacy record's rows (hundreds a game;
+    the run's file keeps them), its summary and pair line kept."""
+    res = job.get("result")
+    if not isinstance(res, dict) or not isinstance(res.get("diplomacy"), dict):
+        return job
+    return {**job, "result": {**res, "diplomacy": {k: v for k, v in res["diplomacy"].items() if k != "rows"}}}
 
 
 def run_summary(run: dict) -> dict:

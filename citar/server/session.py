@@ -19,6 +19,7 @@ from ..engine_api import ActionError, EngineCrash, EngineGame
 from .chat import NO_REPLY, ChatClock, RealClock
 from .metrics import Metrics
 from .. import paths
+from ..diplomacy_stats import EVENT_KINDS as DIPLOMACY_EVENTS
 
 # CITAR_SAVE_DIR lets the test suite keep its throwaway games out of the real save folder;
 # citar.paths decides the rest (a checkout writes beside the code, an install writes per-user).
@@ -137,6 +138,7 @@ class GameSession:
         self.metrics = Metrics()
         self._metrics_current: Optional[tuple] = None
         self.benchmark: Optional[dict] = None   # {"run_id", "job_id", "suite", "scenario", "model", ...} for benchmark games
+        self.engine_config: Optional[dict] = None   # the configuration the engine made a new game from (create)
         # The account the game belongs to, from its row in the games index (ownership.register and index_loaded), or the
         # benchmark or probe run's owner; None for the server's own (tests, scripts). Read by the model seats' gate
         # (_inline_llm_allowed) and, from Phase 3's scheduler and ledger on, as the consumer of the game's compute.
@@ -175,6 +177,9 @@ class GameSession:
         # side it waits on (design/phase3-features.md P3.5.2); its thread starts with the driver
         self.clock = RealClock()
         self.chat = ChatClock(self)
+        # each hybrid seat's diplomacy record for the leaderboard (citar.diplomacy_stats, design/phase3-features.md
+        # P3.6.10): made when first needed (``_recorder``), its rows kept in the metrics so a save keeps them
+        self.recorders: dict = {}
         game.subscribe(self._on_event)
         self._track_turn()
         from ..pool import scheduler as prompt_scheduler
@@ -308,9 +313,12 @@ class GameSession:
                 "diplomat": self.metrics.data.get("diplomat") or [], "game_turn": self.game.turn}
 
     def _after_action(self, before_turn: int, before_current: int):
-        """Bump the version, notify watchers and autosave after something changed."""
+        """Bump the version, notify watchers and autosave after something changed. The hybrid seats' diplomacy records
+        read the negotiations first (``_record_diplomacy``), so each proposal is valued against the game as the drive,
+        answer or tool call left it, and the autosave below keeps what they wrote."""
         self.version += 1
         g = self.game
+        self._record_diplomacy()
         self._track_turn()
         self._dispatch_negotiation_interrupts()
         if g.current != before_current or g.turn != before_turn:
@@ -327,6 +335,33 @@ class GameSession:
                 self.autosave()
         self._broadcast({"type": "update", "version": self.version, "turn": g.turn, "current_player": g.current,
                          "phase": g.phase})
+
+    def _recorder(self, pid: int):
+        """Seat ``pid``'s diplomacy record (``citar.diplomacy_stats.DiplomacyRecorder``), made the first time it is
+        needed: its rows go to the metrics' ``diplomacy`` list (rows a loaded game's save holds are where it carries
+        on from), and its proposals are valued by the seat's own bot profile playing every category (the hybrid seat's
+        fallback bot, ``hybrid_agent.valuation_bot``). Lock held."""
+        rec = self.recorders.get(pid)
+        if rec is None:
+            from ..agents.hybrid_agent import valuation_bot
+            from ..diplomacy_stats import DiplomacyRecorder
+            rows = self.metrics.data.setdefault("diplomacy", [])
+            rec = self.recorders[pid] = DiplomacyRecorder(pid, valuation_bot(self.seats[pid].bot), rows)
+        return rec
+
+    def _record_diplomacy(self) -> None:
+        """Every hybrid seat's record reads what moved (``DiplomacyRecorder.observe``). Lock held; a failure is the
+        server's news (``errors``), never the action's."""
+        for seat in self.seats:
+            if seat.type != "hybrid":
+                continue
+            try:
+                self._recorder(seat.player).observe(self.game)
+            except EngineCrash:
+                raise
+            except Exception:
+                self.errors.append({"t": time.time(), "player": seat.player, "where": "diplomacy record",
+                                    "trace": traceback.format_exc()})
 
     def drive_bots(self, pid: int) -> dict:
         """One drive of the game's bot seats on ``pid``'s turn (``EngineGame.drive``, one seat's turn at most), with
@@ -1212,6 +1247,8 @@ class GameSession:
                 seat.bot = bot
             if name is not None:
                 seat.name = name
+            # its diplomacy record values with the seat's bot as it is now, carrying on from the rows it wrote
+            self.recorders.pop(pid, None)
             self.cancel_agent(pid)
             if (seat.type, (seat.llm or {}).get("server_id"), (seat.llm or {}).get("model")) != before:
                 # another machine, another model, or no model: the old lease goes and the seat's new one is made
@@ -1652,6 +1689,10 @@ class GameSession:
         is told to its two sides (``negotiation_status`` ``closed``) and its conversations let go. Called after the
         engine call that caused it, usually with the lock held: none of this blocks."""
         kind = ev.get("type")
+        if kind in DIPLOMACY_EVENTS:
+            for seat in self.seats:
+                if seat.type == "hybrid":
+                    self._recorder(seat.player).on_event(ev)
         if kind == "negotiation":
             self._chat_moved(ev)
         elif kind == "eliminated":
@@ -1925,6 +1966,7 @@ class GameSession:
             s.metrics = Metrics(doc.metrics)
             s._metrics_current = None
             s._track_turn()
+            s.recorders = {}                     # the hybrid seats' records carry on from the rows the save holds
         s.created = sess.get("created", time.time())
         if sess.get("spectator_token"):
             s.spectator_token = sess["spectator_token"]
@@ -2388,6 +2430,9 @@ class SessionManager:
         cfg["players"] = players
         game = EngineGame.new(cfg)
         s = GameSession(game, seats, name)
+        # what the engine was given, so a hybrid benchmark job's control game is made from the very same settings
+        # (citar.server.controls, design/phase3-features.md P3.6.9)
+        s.engine_config = json.loads(json.dumps(cfg))
         s.owner_id = owner_id
         s.open_timeline()                    # before anything can reach the session, so before anything can save it
         s.registered = True

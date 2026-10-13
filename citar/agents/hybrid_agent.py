@@ -66,6 +66,27 @@ DATED = ("deal", "treaty", "un")
 SWINGS = ("score", "strength")
 
 
+def bot_args(bot_cfg: Optional[dict]) -> tuple:
+    """A seat's bot block as ``profiles.make_bot``'s arguments: its profile (the standard bot when it names none, or one
+    deleted since the game was set up) and its aggression, when it gives one."""
+    bot_cfg = dict(bot_cfg or {})
+    ref = bot_cfg.get("profile") or profiles.DEFAULT_PROFILE
+    try:
+        profiles.resolve(ref)
+    except profiles.ProfileError:
+        ref = profiles.DEFAULT_PROFILE
+    aggression = bot_cfg.get("aggression")
+    return ref, ({"aggression": float(aggression)} if aggression is not None else {})
+
+
+def valuation_bot(bot_cfg: Optional[dict]):
+    """A bot handle of a seat's profile with every category the bot's: what a hybrid seat's fallback bot is, and what
+    values every proposal its seat makes or receives on the diplomacy leaderboard, in the hybrid game and in its control
+    alike (``citar.diplomacy_stats``, design/phase3-features.md P3.6.10)."""
+    ref, kw = bot_args(bot_cfg)
+    return profiles.make_bot(ref, **kw)
+
+
 class DiplomatModel(LLMAgent):
     """A hybrid seat's model as its chat answers use it: ``LLMAgent``'s chat machinery (``ChatThread``: one
     conversation per chat, on a ticket per answer) with the diplomat's system prompt, the chat tools of the model's
@@ -99,20 +120,13 @@ class HybridAgent:
             self.owners = hybrid.owners_map(owners if owners is not None else "trade_only")
         except ValueError:
             self.owners = hybrid.owners_map("trade_only")
-        bot_cfg = dict(seat.bot or {})
-        profile = bot_cfg.get("profile")
-        aggression = bot_cfg.get("aggression")
-        ref = profile or profiles.DEFAULT_PROFILE
-        try:
-            profiles.resolve(ref)
-        except profiles.ProfileError:            # deleted since the game was set up: play the standard bot
-            ref = profiles.DEFAULT_PROFILE
-        kw = {"aggression": float(aggression)} if aggression is not None else {}
+        # a profile deleted since the game was set up plays the standard bot
+        ref, kw = bot_args(seat.bot)
         #: the seat's bot: it plays the turns and leaves the model's categories alone
         self.bot = profiles.make_bot(ref, **kw)
         engine_api.bot_set_diplomacy(self.bot, self.owners)
         #: the fallback: the same profile with every category the bot's, answering what the model could not
-        self.fallback_bot = profiles.make_bot(ref, **kw)
+        self.fallback_bot = valuation_bot(seat.bot)
         self.llm_block = dict(seat.llm or {})
         self.prompt_every = int(self.hybrid.get("prompt_every") or hybrid.PROMPT_EVERY_DEFAULT)
         self.phase_seconds = float(self.hybrid.get("phase_seconds") or hybrid.PHASE_SECONDS_DEFAULT)
@@ -145,6 +159,8 @@ class HybridAgent:
         self._answering = 0
         self._phase_conv = None
         self.phases = 0
+        #: every trigger forced: a phase at each turn's stop, whatever happened (a probe's turn case, P3.6.9)
+        self.force_phase = False
 
     # ------------------------------------------------------------------ control
     def cancel(self):
@@ -385,6 +401,8 @@ class HybridAgent:
             out.append(f"and {self.dropped_events} earlier event{'s' if self.dropped_events != 1 else ''} not listed")
         if due:
             out.append(f"it is {self.prompt_every} turn{'s' if self.prompt_every != 1 else ''} since the last call")
+        elif self.force_phase:
+            out.append("you are called now, whatever happened (a probe of your diplomacy)")
         return out
 
     def _phase_ran(self, session, pid: int, turn: int) -> None:

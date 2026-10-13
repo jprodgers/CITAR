@@ -11,7 +11,7 @@ import time
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect)
 from sqlalchemy.orm import Session as DbSession
@@ -1089,6 +1089,9 @@ def _suite_gate(sdb: DbSession, user, suite: dict) -> None:
     for sc in suite.get("scenarios") or []:
         if isinstance(sc, dict):
             _may_use(sdb, user, "bot_profile", sc.get("bot_profile"))
+            if isinstance(sc.get("hybrid"), dict):
+                # a hybrid scenario's own seat plays a bot profile too (P3.6.9)
+                _may_use(sdb, user, "bot_profile", sc["hybrid"].get("bot_profile"))
     if _is_admin(user):
         return
     for group in suite.get("servers") or []:
@@ -1245,7 +1248,12 @@ def bench_start_run(body: RunBody, request: Request, me=Depends(require_cap("run
     else:
         raise HTTPException(400, "Give a suite_id or a suite.")
     _suite_gate(sdb, me, suite)
-    _admit(sdb, me, [g.get("server_id") for g in suite.get("servers") or [] if isinstance(g, dict)], "benchmark")
+    machines = [g.get("server_id") for g in suite.get("servers") or [] if isinstance(g, dict)]
+    _admit(sdb, me, machines, "benchmark")
+    if any(isinstance(sc, dict) and sc.get("mode") == "hybrid" and sc.get("enabled", True)
+           for sc in suite.get("scenarios") or []):
+        # a hybrid job's model is asked pooled prompts (its diplomat phases and chat answers), as a hybrid seat's is
+        _admit(sdb, me, machines, "pooled")
     run = _bench_call(sch.create_run, suite, body.name, owner_id=me.id, session=sdb)
     return {"id": run["id"], "jobs": len(run["jobs"])}
 
@@ -1850,11 +1858,15 @@ def probes_delete(pid: str, request: Request, me=Depends(require_user), sdb: DbS
 
 
 class ProbeRunBody(BaseModel):
-    """Which model to run a probe against, and how many repeats."""
+    """Which model to run a probe against, and how many repeats; ``mode`` ``hybrid`` seats it as a hybrid seat whose
+    model decides ``owners`` (a preset or a map) beside ``bot_profile``'s bot (design/phase3-features.md P3.6.9)."""
     llm: dict
     repeats: Optional[int] = None
     name: str = ""
     cases: Optional[list[str]] = None
+    mode: str = "full"
+    owners: Optional[Any] = None
+    bot_profile: Optional[str] = None
 
 
 def _probe_subject(sdb: DbSession, user, llm, purposes=("probe",)) -> dict:
@@ -1892,8 +1904,14 @@ def probes_run(pid: str, body: ProbeRunBody, request: Request, me=Depends(requir
     # scenario runs only for those who may see the scenario too
     probe = _probe_call(P.load_probe, pid)
     _probe_scenario(sdb, me, probe)
-    llm = _probe_subject(sdb, me, body.llm, _probe_call(P.case_purposes, probe, body.cases))
-    return _probe_call(_probes().start, pid, llm, body.repeats, body.name, body.cases, owner_id=me.id, session=sdb)
+    # a hybrid run's settings are checked before its machine is: their refusal is the caller's to fix first
+    _probe_call(P.hybrid_settings, body.mode, body.llm if isinstance(body.llm, dict) else {}, body.owners,
+                body.bot_profile)
+    if body.mode == "hybrid":
+        _may_use(sdb, me, "bot_profile", body.bot_profile)
+    llm = _probe_subject(sdb, me, body.llm, _probe_call(P.case_purposes, probe, body.cases, body.mode))
+    return _probe_call(_probes().start, pid, llm, body.repeats, body.name, body.cases, owner_id=me.id, session=sdb,
+                       mode=body.mode, owners=body.owners, bot_profile=body.bot_profile)
 
 
 def _probe_status(sdb: DbSession, user, runner) -> dict:
@@ -1920,7 +1938,7 @@ def probe_runs(request: Request, p: Principal = Depends(principal), sdb: DbSessi
         if seen is not None and r.get("id") not in seen:
             continue
         out.append({k: r.get(k) for k in ("id", "name", "status", "done", "created", "started", "finished",
-                                          "summary", "error", "repeats")} |
+                                          "summary", "error", "repeats", "mode", "hybrid")} |
                    {"total": len(r.get("jobs", [])), "probe_id": r["probe"].get("id"), "probe_name": r["probe"].get("name"),
                     "model": r.get("llm", {}).get("model"), "provider": r.get("llm", {}).get("provider")})
     return {"runs": _with_perms(sdb, "probe_run", p.user, out, slug=key), "status": _probe_status(sdb, p.user, runner)}
@@ -2197,6 +2215,18 @@ def models_scores(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
     ``/api/metrics/compare``)."""
     from .scoring import model_scores, viewer_scope
     return model_scores(manager, _scheduler().get_settings()["score_weights"], scope=viewer_scope(sdb, me))
+
+
+@app.get("/api/models/diplomacy")
+def models_diplomacy(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """The diplomacy leaderboard (design/phase3-features.md P3.6.10): per model and owners preset, the pairs of hybrid
+    benchmark jobs and their control games, from the runs the caller may see, a member's under the pooling rules
+    (``diplomacy_stats.board``): their own pairs and the pooled ones, another member's part of a line only when enough
+    accounts are behind it, and only their own pairs named."""
+    from .. import diplomacy_stats
+    from .scoring import viewer_scope
+    pairs = _scheduler().pairs(items.listed(sdb, "benchmark_run", me))
+    return diplomacy_stats.board(pairs, viewer_scope(sdb, me))
 
 
 # ----------------------------------------------------------------------------
