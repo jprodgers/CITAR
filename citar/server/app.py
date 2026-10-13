@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from .. import engine_api
 from ..engine_api import ActionError, EngineCrash, EngineGame
-from .session import CRASHED, SessionManager, GameSession, SAVE_DIR
+from .session import CRASHED, SessionManager, GameSession, SAVE_DIR, _clean_bot
 from .benchmarks import BenchmarkScheduler
 from .admin_api import router as admin_router
 from .items_api import router as items_router
@@ -703,8 +703,9 @@ def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
 
     A new model block, or a seat made a model seat (an LLM or a hybrid seat), goes through the same gates as a new
     game's (P3.2.9): a member's block names a machine, and the caller must be admitted to it by the seat's task class
-    (P3.3.7: games for an LLM seat, pooled prompts for a hybrid one), at every such change. Hybrid settings or a
-    handicap that are not allowed are a 400 with the reason. A refusal leaves the seat as it was."""
+    (P3.3.7: games for an LLM seat, pooled prompts for a hybrid one), at every such change. Hybrid settings, a
+    handicap or a bot that are not allowed are a 400 with the reason; a bot's "(best)" mark is the server's
+    (``GameSession.update_seat``). A refusal leaves the seat as it was."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     if not 0 <= pid < len(s.seats):
         raise HTTPException(404, "No such seat.")
@@ -1445,11 +1446,15 @@ def _editor_payload(eid: str, ed: dict, results=None) -> dict:
 def _game_seat_default(g: EngineGame, seat) -> dict:
     """A running game's seat as a scenario's default seat (``g`` the copy of its game the scenario starts from): its
     type and name, and a hybrid seat's settings, its bot and its handicap, so a scenario made from a game with a hybrid
-    seat launches with it. A model block stays behind: the launch names the machine."""
+    seat launches with it. A model block stays behind: the launch names the machine. A bot chosen as the best one is
+    "Best bot" again, pinned when the scenario is launched (the mark is the server's, never taken from a seat)."""
     out = {"type": seat.type, "label": seat.name}
     if seat.type == "hybrid":
         out["hybrid"] = dict(seat.hybrid or {})
-        out["bot"] = dict(seat.bot or {})
+        bot = dict(seat.bot or {})
+        if bot.pop("chosen_as", None) == "best":
+            bot["profile"] = "best"
+        out["bot"] = bot
         out["handicap"] = g.player(seat.player).get("handicap") or "ai"
     return out
 
@@ -1586,8 +1591,9 @@ def editor_meta(eid: str, body: EditorMeta, me=Depends(require_user)):
             normal = ed["game"].normalize_seats(body.seats)
         except ActionError as e:            # a seat's handicap or automatic decisions the engine does not read
             raise HTTPException(400, str(e)) from None
-        seats = [_scenario_hybrid(_member_seat(seat, me, playing=False), i) if isinstance(seat, dict) else seat
-                 for i, seat in enumerate(normal)]
+        sent = body.seats
+        seats = [_scenario_seat(_member_seat(seat, me, playing=False), i, sent[i] if i < len(sent) else None)
+                 if isinstance(seat, dict) else seat for i, seat in enumerate(normal)]
     for k in ("id", "name", "description"):
         if getattr(body, k) is not None:
             ed["meta"][k] = getattr(body, k)
@@ -1596,19 +1602,36 @@ def editor_meta(eid: str, body: EditorMeta, me=Depends(require_user)):
     return {"meta": ed["meta"]}
 
 
-def _scenario_hybrid(seat: dict, i: int) -> dict:
-    """A scenario's hybrid seat with its settings checked as a game's are (``normalize_hybrid``, P3.6.2) and kept as
-    they read, the owners as the whole map, and its handicap one there is: a 400 with the reason, naming the seat,
-    when they are not allowed, so a scenario is never saved with a seat its launch would refuse. Any other seat as it
-    is."""
-    if seat.get("type") != "hybrid":
-        return seat
+def _scenario_seat(seat: dict, i: int, sent=None) -> dict:
+    """A scenario's seat (``seat``, as ``normalize_seats`` made it of ``sent``, the entry the caller sent for it, if
+    any) checked as a game's seat is, so a scenario is never saved with a seat its launch would refuse: a 400 with the
+    reason, naming the seat as ``normalize_seats`` does ("Seat 1" for P1), when it is not allowed.
+
+    - A model block or a bot sent as anything but an object is refused, as a game's seat refuses it
+      (``servers.llm_block``, ``session._clean_bot``), and so are a hybrid seat's settings (``normalize_hybrid``):
+      ``normalize_seats`` keeps only objects, so the seat would otherwise be saved with defaults the caller never
+      sent. A non-hybrid seat's ``hybrid``, which nothing reads, is left to ``normalize_seats``, as a game's seat
+      ignores it.
+    - The bot is kept as the server keeps a seat's (``_clean_bot``: its aggression a number, no ``chosen_as``); "Best
+      bot" stays ``best``, pinned when the scenario is launched.
+    - A hybrid seat's settings are checked as a game's are (``normalize_hybrid``, P3.6.2) and kept as they read, the
+      owners as the whole map, and its handicap one there is."""
+    from .. import servers
     from ..agents import hybrid
+    given = sent if isinstance(sent, dict) else {}
     try:
-        block = hybrid.normalize_hybrid(seat.get("hybrid"))
+        servers.llm_block(given.get("llm"))
+        bot = given.get("bot") if given.get("bot") is not None else seat.get("bot")
+        if bot is not None:
+            seat = {**seat, "bot": _clean_bot(bot)}
+        if seat.get("type") != "hybrid":
+            return seat
+        settings = given.get("hybrid")
+        block = hybrid.normalize_hybrid(settings if settings is not None and not isinstance(settings, dict)
+                                        else seat.get("hybrid"))
         handicap = hybrid.check_handicap(seat.get("handicap"))
     except ValueError as e:
-        raise HTTPException(400, f"Seat {i + 1}: {e}") from None
+        raise HTTPException(400, f"Seat {i}: {e}") from None
     return {**seat, "hybrid": block, "handicap": handicap}
 
 
@@ -1622,7 +1645,7 @@ def editor_save(eid: str, body: EditorMeta, me=Depends(require_user), sdb: DbSes
     ed = _editor(eid, me)
     editor_meta(eid, body, me)
     m = ed["meta"]
-    m["seats"] = [_scenario_hybrid(_member_seat(seat, me, playing=False), i) if isinstance(seat, dict) else seat
+    m["seats"] = [_scenario_seat(_member_seat(seat, me, playing=False), i) if isinstance(seat, dict) else seat
                   for i, seat in enumerate(m.get("seats") or [])]
     if not (m.get("id") or m.get("name")):
         raise HTTPException(400, "Give the scenario a name.")

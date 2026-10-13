@@ -10,12 +10,16 @@ gates 1 and 2).
   hybrid and back to a bot works both ways, and every change that makes it a model seat is admitted again by its task
   class (P3.3.7): refused once her grant is gone, and an LLM seat (a grant for games) refused her all along, each
   refusal leaving the seat and its engine controller as they were. Settings that are not allowed are a 400 with the
-  reason; "Best bot" is pinned; the route answers a stranger 404, an anonymous caller 401 or 404, an ACL viewer and a
-  moderator on a published game 403, the owner and an administrator 200 (P3.9.1), and a member's hybrid seat that
-  describes a machine dials nothing (P3.2.9).
-- **Scenarios** (gate 2): a scenario saved with a hybrid seat (its settings checked when saved, 400 with the seat named)
-  launches with it, from its defaults or from the launch dialog's seats; launched as a bot, the seat keeps none of the
-  hybrid seat's handicap; a scenario made from a running game keeps its hybrid seat's settings.
+  reason; "Best bot" is pinned, and its "(best)" mark is the server's (kept while the seat's profile is the one pinned,
+  never taken from a client); a bot that is not one (not an object, an aggression that is no number) is a 400; the
+  route answers a stranger 404, an anonymous caller 401 or 404, an ACL viewer and a moderator on a published game 403,
+  the owner and an administrator 200 (P3.9.1), and a member's hybrid seat that describes a machine dials nothing
+  (P3.2.9).
+- **Scenarios** (gate 2): a scenario saved with a hybrid seat (its settings checked when saved, 400 with the seat named
+  as the engine names it, a block that is not an object refused rather than saved as the defaults) launches with it,
+  from its defaults or from the launch dialog's seats; launched as a bot, the seat keeps none of the hybrid seat's
+  handicap; a scenario made from a running game keeps its hybrid seat's settings, its "Best bot" pinned again at
+  launch.
 """
 from __future__ import annotations
 
@@ -305,6 +309,76 @@ class SeatRoute(World):
         metrics = self.call("alice", "GET", f"/api/games/{gid}/metrics").json()["summary"]["1"]
         self.assertEqual((metrics["controller"], metrics["bot"], metrics["bot_best"]), ("hybrid", bot["profile"], True))
 
+    def test_the_best_mark_is_the_server_s(self):
+        """A bot is marked "(best)" only while it is the profile "Best bot" was pinned to: the Join/Seats dialog sends
+        the seat's bot back as it was (the mark kept), with another profile picked (the mark gone, whatever the client
+        still sends), and a client's own ``chosen_as`` is never taken, at a seat change or at creation."""
+        gid = self.game()
+        s = self.manager.get(gid)
+
+        def label():
+            rows = self.call("alice", "GET", f"/api/games/{gid}/summary").json()["players"]
+            best = self.call("alice", "GET", f"/api/games/{gid}/metrics").json()["summary"]["1"]["bot_best"]
+            return next(p for p in rows if p["id"] == 1)["label"], best
+
+        with mock.patch("citar.bots.ratings.best_profile", return_value="classic-production"):
+            r = self.seat(gid, {**self.HYBRID, "bot": {"profile": "best", "aggression": 0.5}})
+        self.assertEqual(r.status_code, 200, r.text)
+        pinned = dict(s.seats[1].bot)
+        self.assertEqual(pinned, {"profile": "classic-production", "aggression": 0.5, "chosen_as": "best"})
+        self.assertEqual(label(), ("Hybrid: classic-production (best) + dry-run", True))
+        # the dialog sends the seat's bot back as it was, with another change: still the bot chosen as best
+        r = self.seat(gid, {**self.HYBRID, "bot": dict(pinned), "hybrid": {"owners": "everything"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(s.seats[1].bot, pinned)
+        # ... and without the mark (a client that never kept it): the same profile, still the one pinned
+        r = self.seat(gid, {"bot": {"profile": "classic-production", "aggression": 0.5}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(s.seats[1].bot, pinned)
+        # another profile picked, the old mark still in what the client sends: no longer the best one
+        r = self.seat(gid, {"bot": {**pinned, "profile": "standard"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(s.seats[1].bot, {"profile": "standard", "aggression": 0.5})
+        self.assertEqual(label(), ("Hybrid: standard + dry-run", False))
+        # a mark the client claims, for another profile or for the one the seat has: never taken
+        for bot in ({"profile": "idle", "chosen_as": "best"}, {"profile": "standard", "chosen_as": "best"}):
+            with self.subTest(bot=bot):
+                r = self.seat(gid, {"bot": bot})
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(s.seats[1].bot, {"profile": bot["profile"]})
+                self.assertEqual(label(), (f"Hybrid: {bot['profile']} + dry-run", False))
+        # nor at creation
+        r = self.create("alice", [{"type": "human"}, {"type": "bot", "bot": {"profile": "idle", "chosen_as": "best"}},
+                                  {**self.HYBRID, "bot": {"profile": "standard", "chosen_as": "best"}}])
+        self.assertEqual(r.status_code, 200, r.text)
+        made = self.manager.get(r.json()["id"])
+        self.assertEqual((made.seats[1].bot, made.seats[2].bot), ({"profile": "idle"}, {"profile": "standard"}))
+        self.assertEqual([(x.get("bot") or {}).get("chosen_as") for x in r.json()["seats"]], [None, None, None])
+
+    def test_a_bot_that_is_not_one_is_refused(self):
+        """A seat's bot is an object whose aggression is a number (or none): anything else is a 400 at the seat route
+        and at creation (it was taken, and the bot refused it only when it came to play), and nothing changes."""
+        gid = self.game()
+        s = self.manager.get(gid)
+        self.assertEqual(self.seat(gid, self.HYBRID).status_code, 200)
+        before = (dict(s.seats[1].bot), dict(s.seats[1].hybrid), self.engine_seat(gid, 1))
+        for aggression in ("x", True, "NaN"):
+            with self.subTest(aggression=aggression):
+                r = self.seat(gid, {"bot": {"profile": "standard", "aggression": aggression}})
+                self.assertEqual(r.status_code, 400, r.text)
+                self.assertIn("Aggression", r.json()["detail"])
+                self.assertEqual((dict(s.seats[1].bot), dict(s.seats[1].hybrid), self.engine_seat(gid, 1)), before)
+        r = self.seat(gid, {"bot": {"profile": "standard", "aggression": 1.5}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(s.seats[1].bot["aggression"], 1.0, "held to 0..1, as the bot holds it")
+        for seats, words in (([{"type": "human"}, {"type": "bot", "bot": "standard"}], "Seat 1: A seat's bot is an object"),
+                             ([{"type": "human"}, {"type": "bot", "bot": {"aggression": "x"}}], "Seat 1: Aggression"),
+                             ([{"type": "human"}, {**self.HYBRID, "bot": ["standard"]}], "Seat 1: A seat's bot")):
+            with self.subTest(seats=seats):
+                r = self.create("alice", seats)
+                self.assertEqual(r.status_code, 400, r.text)
+                self.assertTrue(r.json()["detail"].startswith(words), r.text)
+
     def test_who_may_change_a_seat_to_hybrid(self):
         """P3.9.1 on the changed route: another member 404, an anonymous caller 401 or 404, an ACL viewer 403, a
         moderator on a published game 403, the owner and an administrator 200; a refusal changes nothing."""
@@ -422,18 +496,37 @@ class Scenarios(World):
         self.assertEqual(self.engine_seat(r.json()["id"], 1)["handicap"], "human")
 
     def test_hybrid_settings_that_are_not_allowed_are_refused_when_saved(self):
+        """Refused when set or saved (400, nothing saved), the seat named "Seat 1" for P1 whichever check refused it,
+        the engine's (the handicap) or the server's (the settings, the blocks), as the engine's ``normalize_seats``
+        names it. A block that is not an object is refused as a game's seat refuses it, rather than dropped and the
+        seat saved with defaults the caller never sent."""
         eid = self.editor()
         before = {s["id"] for s in engine_api.list_scenarios()}
         for seat, words in (({**self.SEAT, "hybrid": {"owners": {}}}, "nothing for its model"),
                             ({**self.SEAT, "hybrid": {"owners": "trade_only", "prompt_every": 99}}, "prompt_every"),
                             ({**self.SEAT, "hybrid": {"owners": {"bribes": "llm"}}}, "bribes"),
-                            ({**self.SEAT, "handicap": "god"}, "god")):
+                            ({**self.SEAT, "handicap": "god"}, "god"),
+                            ({**self.SEAT, "hybrid": "everything"}, "settings are an object"),
+                            ({**self.SEAT, "hybrid": 5}, "settings are an object"),
+                            ({**self.SEAT, "bot": "standard"}, "bot is an object"),
+                            ({**self.SEAT, "bot": {"profile": "standard", "aggression": "x"}}, "Aggression"),
+                            ({**self.SEAT, "llm": "sv_dryrun"}, "model settings are an object"),
+                            ({"type": "bot", "bot": ["standard"]}, "bot is an object")):
             with self.subTest(seat=seat):
-                r = self.save(eid, [{"type": "human"}, seat])
-                self.assertEqual(r.status_code, 400, r.text)
-                self.assertIn(words, r.json()["detail"])
-                self.assertIn("Seat ", r.json()["detail"], "the seat is named")
+                for route in ("meta", "save"):
+                    r = self.call("alice", "POST", f"/api/scenario-editor/{eid}/{route}",
+                                  {"name": f"Refused {secrets.token_hex(3)}", "seats": [{"type": "human"}, seat]})
+                    self.assertEqual(r.status_code, 400, r.text)
+                    self.assertIn(words, r.json()["detail"])
+                    self.assertTrue(r.json()["detail"].startswith("Seat 1: "), r.text)
         self.assertEqual({s["id"] for s in engine_api.list_scenarios()}, before, "nothing saved")
+        # a seat that is not hybrid reads no hybrid settings, as a game's seat does not: nothing to refuse
+        r = self.save(eid, [{"type": "human"}, {"type": "bot", "hybrid": "everything",
+                                                "bot": {"profile": "standard", "aggression": 2, "chosen_as": "best"}}])
+        self.assertEqual(r.status_code, 200, r.text)
+        saved = engine_api.load_scenario(r.json()["id"])["seats"][1]
+        self.assertEqual((saved["type"], saved.get("hybrid"), saved["bot"]),
+                         ("bot", None, {"profile": "standard", "aggression": 1.0}))
 
     def test_a_member_launching_a_hybrid_seat_names_a_machine_she_may_use(self):
         eid = self.editor()
@@ -447,19 +540,29 @@ class Scenarios(World):
         self.assertEqual(self.games, [])
 
     def test_a_scenario_made_from_a_running_game_keeps_its_hybrid_seat(self):
-        r = self.create("alice", [{"type": "human"}, {**FIXTURE["cases"][1]["payload"], "llm": dict(LLM)}])
+        """Its settings, bot and handicap, without the machine; a bot chosen as the best one is "Best bot" again in the
+        scenario, pinned (and marked) when it is launched."""
+        payload = {**FIXTURE["cases"][1]["payload"], "llm": dict(LLM), "bot": {"profile": "best", "aggression": 0.7}}
+        with mock.patch("citar.bots.ratings.best_profile", return_value="classic-production"):
+            r = self.create("alice", [{"type": "human"}, payload])
         self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.manager.get(r.json()["id"]).seats[1].bot,
+                         {"profile": "classic-production", "aggression": 0.7, "chosen_as": "best"})
         opened = self.call("alice", "POST", "/api/scenario-editor", {"source": "game", "game_id": r.json()["id"]})
         self.assertEqual(opened.status_code, 200, opened.text)
         seat = opened.json()["meta"]["seats"][1]
         self.assertEqual((seat["type"], seat["hybrid"]["preset"], seat["hybrid"]["advisor"], seat["handicap"]),
                          ("hybrid", "all_but_war", False, "human"))
+        self.assertEqual(seat["bot"], {"profile": "best", "aggression": 0.7}, "Best bot, as it was chosen")
         self.assertNotIn("llm", seat, "the launch names the machine")
         sid = self.save(opened.json()["editor_id"], opened.json()["meta"]["seats"], name="From a game").json()["id"]
-        r = self.launch(sid, [{}, {"llm": dict(LLM)}])
+        with mock.patch("citar.bots.ratings.best_profile", return_value="standard"):
+            r = self.launch(sid, [{}, {"llm": dict(LLM)}])
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual((self.engine_seat(r.json()["id"], 1)["controller"],
                           self.engine_seat(r.json()["id"], 1)["handicap"]), ("hybrid", "human"))
+        self.assertEqual(self.manager.get(r.json()["id"]).seats[1].bot,
+                         {"profile": "standard", "aggression": 0.7, "chosen_as": "best"}, "pinned at launch")
 
 
 if __name__ == "__main__":
