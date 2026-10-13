@@ -377,6 +377,36 @@ class BenchmarkQueue(Base):
         ticket.cancel()
 
 
+class AnswerStatuses(Base):
+    """The clock's looks never put a ``waiting`` over the answering side's own status: a model still generating stays
+    ``thinking`` (a queued answer ``queued``) for both sides, which the chat window shows (P3.5.6, package 3-12), until
+    its answer ends (``done``: ``waiting`` again), the chat moves, or a pause changes the deadline."""
+
+    def test_thinking_stands_through_the_clocks_looks_until_the_answer_ends(self):
+        s = self.game(["human", "mcp"])
+        clock = use(s)
+        heard = []
+        s.subscribers.append(lambda msg: heard.append(msg) if msg.get("type") == "negotiation_status" else None)
+        nid = self.open(s, 0, 1)
+        states = lambda: [(m["state"], m["waiting_on"], m["paused"]) for m in heard if m["negotiation"] == nid]  # noqa: E731
+        clock.advance(2)
+        s.chat.answer_status(nid, 1, {"state": "queued", "position": 2, "eta_s": 30.0})
+        clock.advance(5)
+        s.chat.answer_status(nid, 1, {"state": "thinking"})
+        clock.advance(20)                                     # twenty looks while the model generates
+        self.assertEqual(states(), [("waiting", 1, False), ("queued", 1, False), ("thinking", 1, False)])
+        s.chat.answer_status(nid, 1, {"state": "done"})
+        clock.advance(3)
+        self.assertEqual(states()[3:], [("waiting", 1, False)], "the answer ended: waiting, once")
+        s.set_paused(True)
+        s.set_paused(False)
+        clock.advance(2)
+        self.assertEqual(states()[4:], [("waiting", 1, True), ("waiting", 1, False)], "a pause tells the deadline again")
+        self.answer(s, 1, nid)
+        clock.advance(2)
+        self.assertEqual(states()[6:], [("waiting", 0, False)], "the chat moved: it waits on the other side")
+
+
 class AfterALoad(Base):
     """Gate 1: after a load every open chat's clock starts afresh."""
 

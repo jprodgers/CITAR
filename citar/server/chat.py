@@ -282,9 +282,13 @@ class ChatClock:
                 c = _Chat(nid, (n["initiator"], n["responder"]), awaiting, n["entries"], kind,
                           self.timeout(kind) if awaiting is not None else None)
                 self.chats[nid] = c
-            msg = self._waiting(c)
-            if msg is not None:
-                out.append(msg)
+            if c.published is None:
+                # only a chat nobody has been told of yet (new, moved, or to be told again after the pause changed):
+                # one already told keeps what was said last, so an answer's queued or thinking stands until the
+                # answer ends (``answer_status``) rather than being turned back to waiting by the next look
+                msg = self._waiting(c)
+                if msg is not None:
+                    out.append(msg)
         for nid in [nid for nid in self.chats if nid not in seen]:
             del self.chats[nid]
         return out
