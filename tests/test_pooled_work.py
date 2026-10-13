@@ -1285,6 +1285,29 @@ class HybridProbes(_ProbeScenario):
         self.assertEqual(run["summary"]["cases"]["friends"]["answered_by"], {"bot": 1})
         self.assertEqual(run["summary"]["cases"]["gift"]["answered_by"], {"model": 1})
 
+    def test_a_case_whose_model_prompt_did_not_run_was_answered_by_nobody(self):
+        """The bot left the gift to the model, whose ticket was refused: nobody answered it (the case's error says
+        why), not its model."""
+        dof = [{"type": "declaration_of_friendship"}]
+        probe = dict(self.probe, cases=[c for c in self.probe["cases"] if c["id"] == "gift"] + [
+            {"id": "friends", "kind": "offer", "message": "Friends?", "give": dof, "receive": dof}])
+        rid = "pooled-hybrid-refused"
+        self.runner._write({"id": rid, "name": "hybrid run", "probe": probe,
+                            "llm": {"server_id": self.box, "model": "dry-run"}, "repeats": 1,
+                            "jobs": [{"case": c["id"], "rep": 0} for c in probe["cases"]], "status": "queued",
+                            "done": 0, "created": time.time(), "started": None, "finished": None, "summary": {},
+                            "owner_id": self.ids["bob"], "mode": "hybrid",
+                            "hybrid": self.P.hybrid_settings("hybrid", {}, "trade_only")})
+        refusal = "The prompt was not asked: the machine refused it (a test)."
+        with mock.patch.object(self.P, "_probe_ticket", return_value=(None, refusal)) as asked:
+            self.runner._run(rid)
+        self.assertTrue(asked.called, "the model was asked for the gift")
+        res = {r["case"]: r for r in self.runner.results(rid)}
+        self.assertEqual((res["gift"]["answered_by"], res["gift"]["answers"]), ("none", ["none"]))
+        self.assertEqual((res["gift"]["outcome"], res["gift"]["error"]), ("error", refusal))
+        self.assertEqual(res["friends"]["answered_by"], "bot")
+        self.assertEqual(self.runner.get_run(rid)["summary"]["cases"]["gift"]["answered_by"], {"none": 1})
+
 
 class HybridSuiteRoutes(World):
     """Package 3-16 (P3.6.9): a benchmark run whose suite has a hybrid scenario is admitted for pooled prompts as well

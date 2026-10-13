@@ -556,8 +556,9 @@ def _hybrid_answer(s, agent, subject: int, nid: int, calls: list, **kw) -> tuple
     """A hybrid subject's answer to the case's negotiation (P3.6.5, P3.6.9): its bot first (``EngineGame.answer``),
     which answers what it owns and leaves the rest to the model; then, for what it left, the model, as a ``probe``
     ticket (``_answer``) through its chat machinery (``HybridAgent.model``: the diplomat's prompt, the chat tools of its
-    categories, the veto). Returns (who answered: ``bot``, ``model``, or ``none`` when the model left the chat waiting;
-    why the model's answer did not run, or None)."""
+    categories, the veto). Returns (who answered: ``bot``, ``model``, or ``none`` when the model left the chat waiting
+    or its answer did not run: a ticket refused or expired, cut off by the machine; why the model's answer did not
+    run, or None)."""
     with s.lock:
         g = s.game
         n = g.negotiation_head(nid)
@@ -574,7 +575,7 @@ def _hybrid_answer(s, agent, subject: int, nid: int, calls: list, **kw) -> tuple
     agent.system_text(s, subject)
     refused = _answer(s, model, subject, nid, **kw)
     if refused:
-        return "model", refused
+        return "none", refused          # the model never answered: its prompt did not run (whole)
     return ("none" if _awaits(s, nid, subject) else "model"), None
 
 
