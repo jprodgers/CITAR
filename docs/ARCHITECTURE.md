@@ -351,11 +351,13 @@ A negotiation is a chat (`design/phase3-features.md` P3.5). Three pieces of the 
   (`_chat_news`). `BotAgent.play_turn` waits the same way.
 
 **Status events.** `{"type": "negotiation_status", "negotiation", "players", "waiting_on", "kind", "state", "position",
-"eta_s", "deadline", "left_s", "paused"}` goes out on the game's socket: `waiting` (with the deadline) from the clock,
-`queued` (with the place and ETA) and `thinking` from the answering conversation's requests in the prompt scheduler
-(`ScheduledConversation.on_status`, delivered by the notifier thread), `closed` (with the chat's `status`) from the
-session. The socket gives it to the seats in `players` and to spectators while the god view is allowed, and to
-nobody else.
+"eta_s", "deadline", "left_s", "paused", "entries"}` goes out on the game's socket: `waiting` (with the deadline) from
+the clock, `queued` (with the place and ETA) and `thinking` from the answering conversation's requests in the prompt
+scheduler (`ScheduledConversation.on_status`, delivered by the notifier thread), `closed` (with the chat's `status`)
+from the session. The clock tells a chat `waiting` when it begins to wait (and again when a pause moves its
+deadline), never over an answer's `queued` or `thinking`, which stand until the answer ends. `entries` is the chat's
+length when it was said, so a client tells a late status from a current one. The socket gives it to the seats in
+`players` and to spectators while the god view is allowed, and to nobody else.
 
 ### The prompt scheduler
 
@@ -459,6 +461,7 @@ a file and reloading is the whole development loop.
 | `app.js` | The router |
 | `api.js` | Every HTTP call, CSRF, share keys |
 | `game.js`, `render.js`, `hex.js`, `panels.js` | The game screen and the canvas renderer |
+| `chat.js`, `chatmodel.js` | The chat windows docked left of End Turn: one per civilization, opened from the socket (a `negotiation` event reads `GET /api/games/{id}/negotiations/{nid}`; `negotiation_status` moves the status line), with the deal builder inside. `chatmodel.js` decides, with no DOM or network: entries merged by `seq`, each window's state, End Turn's states (answer first, waiting, armed), the dock's layout, and the drafts no update touches. Node tests both (`citar/web/tests/`, `chat.js` over stand-ins for the DOM) |
 | `lobby.js`, `benchmarks.js`, `models.js`, `lab.js`, `probes.js`, `scenario.js`, `editor.js` | The other screens |
 | `pool.js`, `servers.js`, `machines.js` | The Servers page (`#/pool`): every machine the viewer owns or may use and the groups that share them; the machines' editors as dialogs; the page's rules (its old `#/servers` addresses, and which routes a viewer may call for a machine), kept apart so Node tests them (`citar/web/tests/`) |
 | `reports.js`, `console.js`, `setup.js` | Reports, operator console, first-run wizard |

@@ -110,11 +110,51 @@ for every victory type.
 really costs. Clicking a locked tech sets it as a research goal and CITAR fills in the path. The
 mouse wheel scrolls the tree sideways.
 
-**Diplomacy** (`D`) is where you send messages, denounce, and open negotiations. The deal builder
-covers gold, gold per turn, resources, open borders, embassies, peace, declarations of friendship,
-research agreements, defensive pacts, war on a third party, cities, maps and technologies.
-One-click suggestions show what each side has that the other wants. Bots answer at once, AI models in
-their own time; humans get a popup. United Nations votes are cast here too.
+**Diplomacy** (`D`) shows where you stand with each civilization you have met: war or peace,
+treaties, embassies and agreements. You denounce and declare war here, send messages (a message
+gets no reply; a chat does), and cast your United Nations vote. Each civilization has **Open chat**,
+which opens its chat window.
+
+### Chatting
+
+![A chat docked left of End Turn: the AI's answer, your half-written reply and the deal builder](assets/chat.png)
+
+A negotiation is a chat with one civilization, one message each in turn. Each chat has a window docked
+along the bottom of the screen, to the left of End Turn. There is one window per civilization, since
+two civilizations have one chat open at a time, and play goes on while it is open.
+
+- **It pops up.** A chat another civilization opens with you appears at once, whoever's turn it is.
+  Their answers appear as they come, with a proposal as a card in the conversation and the game's own
+  notes in grey ("(no reply in time)").
+- **Your move, their move.** You write only when it is your move. Otherwise the window says what the
+  other side is doing: "Rome is thinking…", "queued #3, about 40 s" while an AI's model waits for its
+  machine, or "Waiting for Rome, 4:12 left". On your move it shows the time you have left: "Waiting
+  for you, 3:12 left". When the time runs out, the chat closes as the [chat settings](#chat-settings)
+  say.
+- **Answering.** **Send** (or Enter) sends your message as a reply, and the other side answers it.
+  **Accept** takes the proposal on the table, **No deal** declines, and **Counter with the deal**
+  proposes what is in the deal builder. Each answer carries the text you typed, or a plain line
+  ("Agreed.", "No deal.") when the box is empty. While you wait for them, **Withdraw** gives up a chat.
+- **The deal builder** sits in the window and folds away. It holds what you give and what they give:
+  gold, gold per turn, resources, open borders, embassies, peace, declarations of friendship,
+  research agreements, defensive pacts, war on a third party, cities, maps and technologies.
+  One-click suggestions show what each side has that the other lacks. **Load into the builder**
+  copies the proposal on the table, so you can change it and counter.
+- **Starting a chat.** On your own turn, write a message or build a deal in a civilization's window,
+  then press **Open chat** (or **Propose the deal**). Bots answer at once, AI models in their own time.
+- **What you are writing stays.** A half-written message and the deal you are building survive
+  everything that happens meanwhile, and closing and reopening the window, but not reloading the page.
+- **Minimise** (–) folds a window into a tab, which lights up when the other side says something.
+  **Close** (✕) only hides the window; the chat goes on, and End Turn or Diplomacy opens it again.
+  When the windows do not fit beside End Turn, the oldest fold into tabs.
+- **End Turn** waits for your chats, because a turn cannot end while one you are in is open. While a
+  chat waits on you, the button reads "Answer Rome first" and opens that chat. While a chat waits on
+  the other side, it reads "Waiting for Rome… 4:12". Click it then and it reads "End turn when they
+  answer": the turn ends by itself once every chat has closed. Click again to cancel. Other
+  unfinished business (idle units, no research) is checked first, as for any end of turn; Ctrl+click
+  skips that check.
+- **On a narrow screen** (700 pixels wide or less) one window shows at a time, full width above End
+  Turn, with a tab for each chat.
 
 ### Chat settings
 

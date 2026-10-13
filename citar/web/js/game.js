@@ -258,8 +258,8 @@ export class GameScreen {
       if (this.feed.length > 400) this.feed.splice(0, this.feed.length - 400);
       this.maybeToastEvent(m.event);
       if (m.event.type === "negotiation") this.chat.onEvent(m.event);
-      // the Diplomacy screen shows relations and messages; chats are the docked windows' (chat.js)
-      if (this._diploModal && this._redrawDiplomacy && ["message", "deal", "war_declared", "peace", "first_contact"].includes(m.event.type)) {
+      // the Diplomacy screen shows relations, messages and which chats wait (it keeps the message being written)
+      if (this._diploModal && this._redrawDiplomacy && ["negotiation", "message", "deal", "war_declared", "peace", "first_contact"].includes(m.event.type)) {
         clearTimeout(this._diploTimer);
         this._diploTimer = setTimeout(() => this._redrawDiplomacy(), 250);
       }
