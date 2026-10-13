@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect)
+from fastapi import (Body, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect)
 from sqlalchemy.orm import Session as DbSession
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -811,7 +811,8 @@ def view(gid: str, request: Request, token: Optional[str] = None, as_player: Opt
         elif s.is_spectator(tok) or access.VIEW in perms:
             # Looking through one civilization's eyes is as revealing as the god view while a human is
             # playing: it shows that civ's private cities, units and diplomacy, and for the AI seats it
-            # is a map of everything they have scouted. Both follow the same rule.
+            # is a map of everything they have scouted. Both follow the same rule. A spectator keeps the
+            # whole-map minimap, so the seat's minimap block is left out (P3.7.4).
             if not s.god_view_allowed():
                 raise HTTPException(403, "Spectator views are disabled while humans are playing.")
             if as_player is not None and not 0 <= as_player < len(s.seats):
@@ -828,7 +829,7 @@ def view(gid: str, request: Request, token: Optional[str] = None, as_player: Opt
         headers = {"ETag": tag, "Cache-Control": VIEW_CACHE}
         if etag_matches(request.headers.get("if-none-match"), tag):
             return Response(status_code=304, headers=headers)
-        body = s.game.view_json(pid, extra)
+        body = s.game.view_json(pid, extra, minimap=seat is not None)
         if s.game.writes != writes:
             del headers["ETag"]        # a command came in meanwhile: the body may be the game after it
     return Response(body, media_type="application/json", headers=headers)
@@ -940,6 +941,46 @@ def wait_for_turn(gid: str, request: Request, token: Optional[str] = None, timeo
     return s.wait_for_turn(pid, max(1.0, min(timeout, 300.0)))
 
 
+#: The most scenario operations one call to the debug ops route applies: a script's step is a few, and the game's lock is
+#: held while they are applied.
+DEBUG_OPS_MAX = 200
+
+
+def _debug_enabled() -> None:
+    """The debug routes answer only on a server started with ``CITAR_DEBUG=1`` (``--debug``; the dev server sets it):
+    anywhere else they are not there, 404."""
+    import os
+    if os.environ.get("CITAR_DEBUG") != "1":
+        raise HTTPException(404, "Debug endpoints are disabled.")
+
+
+@app.post("/api/games/{gid}/debug/ops")
+def debug_ops(gid: str, request: Request, ops: list[dict] = Body(...), p: Principal = Depends(principal),
+              sdb: DbSession = Depends(get_db)):
+    """Apply scenario operations to a live game, as the scenario editor applies them to a scenario
+    (``EngineGame.apply_ops``: all or nothing; ``GET /api/scenario-ops`` lists them): what a script that talks to a dev
+    server over HTTP moves a game on with, such as the QA script giving a seat each era's techs
+    (design/phase3-features.md P3.7.5). The body is the list of operations; the answer is each one's result.
+
+    Gated as ``/debug/{action}`` is: 404 unless the server runs with ``CITAR_DEBUG=1``, then MANAGE on the game (a
+    stranger 404, a visitor 401 or 404). A refused list is a 400 naming the operation that failed, the game as it was;
+    more than ``DEBUG_OPS_MAX`` operations are a 400 too. Applied under the game's lock, then announced as any action
+    is (``_after_action``: the version, the watchers, an autosave at a new turn)."""
+    _debug_enabled()
+    s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
+    if len(ops) > DEBUG_OPS_MAX:
+        raise HTTPException(400, f"At most {DEBUG_OPS_MAX} operations at once.")
+    with s.lock, _crash_guard(s):
+        g = s.game
+        before_turn, before_current = g.turn, g.current
+        try:
+            results = g.apply_ops(ops)
+        except (ActionError, ValueError) as e:
+            raise HTTPException(400, str(e))
+        s._after_action(before_turn, before_current)
+    return {"ok": True, "results": results}
+
+
 @app.post("/api/games/{gid}/debug/{action}")
 def debug_action(gid: str, action: str, request: Request, p: Principal = Depends(principal),
                  sdb: DbSession = Depends(get_db)):
@@ -948,9 +989,7 @@ def debug_action(gid: str, action: str, request: Request, p: Principal = Depends
     These hand out gold and reveal the map, so they are gated on managing the game as well as on
     the debug flag — otherwise a spectator on a public game could cheat in it.
     """
-    import os
-    if os.environ.get("CITAR_DEBUG") != "1":
-        raise HTTPException(404, "Debug endpoints are disabled.")
+    _debug_enabled()
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     with s.lock, _crash_guard(s):
         g = s.game
