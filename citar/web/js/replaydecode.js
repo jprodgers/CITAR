@@ -335,6 +335,28 @@ export function chatThreads(negotiations, turn) {
   return out.sort((a, b) => a.nid - b.nid);
 }
 
+/**
+ * The turn's messages that are not a chat's words. The engine records every chat entry as a message to the other side
+ * too (as Python did), which the recap shows in its thread instead; each entry hides one message of the same turn,
+ * sender, lone recipient and text, and no more.
+ */
+export function plainMessages(messages, negotiations, turn) {
+  const said = new Map();
+  for (const n of negotiations || []) {
+    for (const e of n.history || []) {
+      if (!e || e.turn !== turn || e.by == null || e.action === "close") continue;
+      const key = JSON.stringify([e.by, e.by === n.initiator ? n.responder : n.initiator, e.message]);
+      said.set(key, (said.get(key) || 0) + 1);
+    }
+  }
+  return (messages || []).filter((m) => {
+    if (m.turn !== turn) return false;
+    const key = (m.to || []).length === 1 ? JSON.stringify([m.from, m.to[0], m.text]) : null;
+    if (key && said.get(key)) { said.set(key, said.get(key) - 1); return false; }
+    return true;
+  });
+}
+
 /** A proposal in the stored shape ({"<giver id>": [items]}) in words, each side named: "Rome gives 50 gold; Greece
  * gives Iron × 30t". `describe(item)` words one item; `nameOf(pid)` names a civilization. */
 export function describeTerms(terms, describe, nameOf) {

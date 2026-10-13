@@ -269,7 +269,8 @@ most 63 deltas from the nearest keyframe, updating one frame in place: memory st
 however long the game. The server sends only the records that decode, in order (a round after a
 lost journal chunk is left out until the next keyframe): each delta names its base by a hash the
 browser does not compute. The same module reads the replay's negotiations as the threads a round
-shows.
+shows, and leaves their words out of the round's messages (the engine records each chat entry as a
+message to the other side too).
 
 Until 0.1.6 the server expanded every frame into Python's shape, each layer of each round whole;
 that format (`replay_data("full")`) was retired once the browser decoded the deltas.

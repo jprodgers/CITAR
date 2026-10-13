@@ -4,7 +4,7 @@
 import { api } from "./api.js";
 import { el, clear, toast } from "./util.js";
 import { MapRenderer } from "./render.js";
-import { ReplayFrames, chatThreads, describeTerms, named } from "./replaydecode.js";
+import { ReplayFrames, chatThreads, describeTerms, named, plainMessages } from "./replaydecode.js";
 import { CLOSED_TEXT, describeItem } from "./chatmodel.js";
 
 const METRICS = [["score", "Score"], ["military", "Military strength"], ["techs", "Technologies"], ["cities", "Cities"],
@@ -170,7 +170,8 @@ export class ReplayScreen {
         } }, el("span", { class: "t" }, `T${e.turn}`), e.text));
       }
     } else if (this.feedTab === "diplomacy") {
-      const msgs = d.messages.filter((m) => m.turn === turn);
+      // the chats' own words are in their threads, not twice
+      const msgs = plainMessages(d.messages, d.negotiations, turn);
       const threads = chatThreads(d.negotiations, turn);
       if (!msgs.length && !threads.length) body.appendChild(el("div", { class: "muted" }, "No messages or chats this turn."));
       for (const m of msgs) body.appendChild(el("div", { class: "event" }, el("span", { class: "swatch", style: { background: pcolor(m.from) } }),

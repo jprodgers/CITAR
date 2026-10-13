@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 
-import { ReplayFrames, FrameError, b64decode, b64encode, chatThreads, copyFrame, decodeRecord, describeTerms, fullShape, named }
-  from "../js/replaydecode.js";
+import { ReplayFrames, FrameError, b64decode, b64encode, chatThreads, copyFrame, decodeRecord, describeTerms, fullShape, named,
+  plainMessages } from "../js/replaydecode.js";
 
 const FIXTURE = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/replay-delta.json.gz", import.meta.url))).toString("utf-8"));
 
@@ -303,6 +303,22 @@ test("the chats of a round read as threads, each as it stood at the end of that 
   assert.deepEqual(t6.map((t) => [t.nid, t.status, t.final, t.entries.length]), [[2, "expired", "expired", 2], [3, "open", "open", 1]]);
   assert.equal(t6[0].entries[1].note, "(no reply in time)");
   assert.deepEqual(chatThreads(null, 3), []);
+});
+
+test("a turn's messages leave out the chats' words, which their threads show, and keep the rest", () => {
+  // as the engine records them: each chat entry is a message to the other side too
+  const messages = [
+    { id: 1, turn: 3, from: 0, to: [1], text: "Silk for gold?" },          // chat 1's opening
+    { id: 2, turn: 3, from: 0, to: [1, 2], text: "Hello, all." },          // a message to everyone
+    { id: 3, turn: 3, from: 0, to: [1], text: "Silk for gold?" },          // the same words, sent again outside the chat
+    { id: 4, turn: 4, from: 1, to: [0], text: "Agreed." },                 // chat 1's accept, a turn later
+    { id: 5, turn: 4, from: 1, to: [0], text: "Peace?" },                  // chat 2's opening
+    { id: 6, turn: 4, from: 2, to: [0], text: "Peace?" },                  // the same words from another
+  ];
+  assert.deepEqual(plainMessages(messages, NEGOTIATIONS, 3).map((m) => m.id), [2, 3], "one entry hides one message");
+  assert.deepEqual(plainMessages(messages, NEGOTIATIONS, 4).map((m) => m.id), [6], "the accept and chat 2's opening");
+  assert.deepEqual(plainMessages(messages, [], 4).map((m) => m.id), [4, 5, 6], "no chats: every message of the turn");
+  assert.deepEqual(plainMessages(null, NEGOTIATIONS, 4), []);
 });
 
 test("a stored proposal reads side by side, each side named", () => {
