@@ -285,8 +285,14 @@ fn a_views_own_keys_are_the_ones_it_names_before_the_rest() {
         let v: Value = serde_json::from_slice(&g.view_json(viewer, 10)).expect("json");
         let keys: Vec<&str> =
             v.as_object().expect("an object").keys().map(String::as_str).collect();
-        assert_eq!(keys[..ClientView::FIELDS.len()], ClientView::FIELDS, "{viewer:?}");
-        assert!(keys[ClientView::FIELDS.len()..].iter().all(|k| !ClientView::FIELDS.contains(k)));
+        // the minimap's block only in a major civilization's own view (package 3-17)
+        let own: Vec<&str> = ClientView::FIELDS
+            .iter()
+            .copied()
+            .filter(|&k| viewer.is_some() || k != "minimap")
+            .collect();
+        assert_eq!(keys[..own.len()], own[..], "{viewer:?}");
+        assert!(keys[own.len()..].iter().all(|k| !ClientView::FIELDS.contains(k)));
     }
 }
 

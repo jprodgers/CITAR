@@ -3,7 +3,8 @@ gate 3): the dev server's port, a port in use, a directory that holds anything w
 owner's dev server's directory, CITAR's own data directory and a source checkout each exit 2 with nothing touched,
 before a server could start; a marked directory is emptied and used; every path of the instance is under its
 directory. The harness's run itself (``python scripts/qa_phase3.py accounts``) is S8, outside this suite: it starts a
-server and waits on the usage ledger's minute.
+server and waits on the usage ledger's minute. The ``minimap`` part's helpers, which its checks lean on, are tested
+here too (``MinimapHelpers``).
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import importlib.util
@@ -117,7 +118,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(_snapshot(stand_in), before, "every file is as it was")
 
     def test_a_part_not_written_yet(self):
-        r = subprocess.run([sys.executable, str(SCRIPT), "minimap", "--dir", str(self.tmp / "x")], cwd=str(ROOT),
+        r = subprocess.run([sys.executable, str(SCRIPT), "machines", "--dir", str(self.tmp / "x")], cwd=str(ROOT),
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("not written yet", r.stdout)
@@ -343,6 +344,41 @@ class CreateUser(unittest.TestCase):
                         stdin="short\n")
         self.assertEqual(weak.returncode, 1)
         self.assertNotIn("qa-weak", self.cli("list-users").stdout)
+
+
+class MinimapHelpers(unittest.TestCase):
+    """The ``minimap`` part's own helpers (3-17), which its checks lean on: ``_arc`` (the shortest interval covering
+    some positions, across the seam of an axis that wraps, the engine's choice of ties) and ``_joined_home`` (the land
+    a view lists joined to an anchor through land it lists, and its box: what the engine's home box must be)."""
+
+    def test_the_shortest_arc(self):
+        self.assertIsNone(qa._arc(set(), 10, True))
+        self.assertEqual(qa._arc({0, 1, 8, 9}, 10, False), (0, 9))
+        self.assertEqual(qa._arc({0, 1, 8, 9}, 10, True), (8, 1), "across the seam")
+        self.assertEqual(qa._arc({2, 3, 4}, 10, True), (2, 4))
+        self.assertEqual(qa._arc({2, 5}, 8, True), (2, 5), "two gaps as long: not across the seam")
+        self.assertEqual(qa._arc({0, 4, 8, 11}, 12, True), (4, 0), "two inside: the first left out")
+        self.assertEqual(qa._arc(set(range(6)), 6, True), (0, 5))
+
+    def test_the_land_joined_to_the_anchor(self):
+        # a 10 by 6 map: land at (2, 1) and (3, 1), sea at (4, 1), land again at (5, 1) to (7, 1), and at (9, 2) and
+        # (0, 2), which join over the seam of a map that wraps east-west; nothing listed joins (5, 1) to (3, 1)
+        def tile(x, y, terrain="Grassland"):
+            return [y * 10 + x, terrain]
+        view = {"width": 10, "height": 6, "wrap_x": False, "wrap_y": False,
+                "tiles": [tile(2, 1), tile(3, 1), tile(4, 1, "Coast"), tile(5, 1), tile(6, 1), tile(7, 1),
+                          tile(9, 2), tile(0, 2), tile(1, 1, "Ocean")]}
+        box, tiles = qa._joined_home(view, [2, 1])
+        self.assertEqual(box, {"x0": 2, "y0": 1, "x1": 3, "y1": 1}, "the sea between is not land")
+        self.assertEqual(tiles, {12, 13})
+        self.assertEqual(qa._joined_home(view, [6, 1])[0], {"x0": 5, "y0": 1, "x1": 7, "y1": 1})
+        self.assertEqual(qa._joined_home(view, [4, 1]), (None, set()), "an anchor at sea")
+        self.assertEqual(qa._joined_home(view, [8, 4]), (None, set()), "an anchor not explored")
+        self.assertEqual(qa._joined_home(view, None), (None, set()))
+        # (0, 2) is next to (9, 2) only over the seam
+        self.assertEqual(qa._joined_home(view, [9, 2])[0], {"x0": 9, "y0": 2, "x1": 9, "y1": 2}, "no wrap: alone")
+        wraps = {**view, "wrap_x": True}
+        self.assertEqual(qa._joined_home(wraps, [9, 2])[0], {"x0": 9, "y0": 2, "x1": 0, "y1": 2}, "over the seam")
 
 
 if __name__ == "__main__":

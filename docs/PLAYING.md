@@ -120,6 +120,25 @@ or "In city", and a city's name banner always opens the city.
 
 Settlers and work boats show suggested sites as green dashed tiles. Tile tooltips show yields.
 
+### The minimap
+
+The minimap in the top-left corner shows the world as your civilization knows it, and grows with it:
+
+- **Early on** it shows what you have explored around your capital, a few tiles past it, and at most
+  44 tiles across by 28 down on a larger map.
+- **From the Renaissance era** it shows what you have explored of your home continent (your capital's),
+  with a few tiles of sea around it. Land your scouts found far away counts once the land you explored
+  joins it to home: the minimap does not tell you whether far land is your continent before you know.
+- **From the Information era** it shows the whole map.
+
+It only ever grows: the minimap zooms out over the game and never back in, and remembers how far it
+had grown in this browser for each game and seat. Tiles you have not explored stay black, and the
+hexes keep their shape whatever part of the map is shown. On a map that wraps, the part shown runs
+over the edge when your lands do.
+
+Click the minimap to centre the map there, or drag on it to pan. The yellow box is what the map
+shows. A spectator, and a seat a model or a bot plays, sees the whole map.
+
 ### Keys
 
 `N` next unit · `F` fortify · `S` sleep · `Space` skip · `E` explore · `A` automate worker ·

@@ -877,11 +877,16 @@ class EngineGame:
             v["empires"] = _int_keys(v["empires"])
         return v
 
-    def view_json(self, pid: Optional[int], extra: Optional[dict] = None, event_limit: int = 150) -> bytes:
+    def view_json(self, pid: Optional[int], extra: Optional[dict] = None, event_limit: int = 150,
+                  minimap: bool = True) -> bytes:
         """:meth:`view` as JSON bytes, with ``extra``'s keys (the server's ``seat``, ``session``, ``version``,
         ``spectator``) spliced in, for a route to return as they are: a gargantuan god view would otherwise cost a
-        parse and a re-dump of megabytes per refresh. Raises ValueError for a key of the view's own."""
-        return self._g.view_json(pid, event_limit, None if extra is None else _dumps(extra))
+        parse and a re-dump of megabytes per refresh. Raises ValueError for a key of the view's own.
+
+        A major civilization's own view carries its ``minimap`` block (``stage``, ``capital``, ``home``:
+        design/phase3-features.md P3.7.2); ``minimap=False`` leaves it out, for a spectator looking through a seat's
+        eyes."""
+        return self._g.view_json(pid, event_limit, None if extra is None else _dumps(extra), minimap)
 
     def briefing(self, pid: int) -> str:
         """A language model's start-of-turn briefing."""

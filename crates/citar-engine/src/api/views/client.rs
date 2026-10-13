@@ -13,6 +13,7 @@ use super::alerts::alert_items;
 use super::cities::{CityView, city_view};
 use super::empire::empire_info;
 use super::events::events_json;
+use super::minimap::Minimap;
 use super::players::{diplomacy_info, players_overview};
 use super::tiles::{Known, resource_seen, route_name};
 use super::units::{UnitView, unit_view};
@@ -88,7 +89,8 @@ impl Serialize for FeatureNames<'_> {
 /// The client view (`views.client_view`): the map as the viewer knows it, the units and cities it
 /// sees (and the cities it remembers), everyone it knows of, the settings and its events; for a
 /// player its empire, diplomacy, notes and alerts, for a spectator the last statistics, every
-/// empire and the latest thoughts, messages and negotiations.
+/// empire and the latest thoughts, messages and negotiations. A major civilization's own view
+/// adds the minimap's block (`minimap`, package 3-17), which Python's had not.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ClientView<'a> {
     pub turn: i32,
@@ -109,6 +111,10 @@ pub struct ClientView<'a> {
     pub turn_limit: i32,
     pub config: Value,
     pub events: Vec<Value>,
+    /// A major civilization's minimap block ([`Game::minimap`]); absent from the god view, and
+    /// from a view a host asks for without it (a spectator looking through a seat's eyes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimap: Option<Minimap>,
     /// A player's `empire`, `diplomacy`, `notes` and `alerts`, or a spectator's `stats`,
     /// `empires`, `thoughts`, `messages` and `negotiations`.
     #[serde(flatten)]
@@ -116,10 +122,11 @@ pub struct ClientView<'a> {
 }
 
 impl ClientView<'_> {
-    /// The keys of the view's own fields, in the order they are written. A host that adds keys
-    /// of its own to the view (the server's `seat`, `session`, `version` and `spectator`, through
-    /// `rest`) must not repeat one of these, or the JSON would hold it twice.
-    pub const FIELDS: [&'static str; 18] = [
+    /// The keys of the view's own fields, in the order they are written (`minimap` only in a major
+    /// civilization's own view). A host that adds keys of its own to the view (the server's `seat`,
+    /// `session`, `version` and `spectator`, through `rest`) must not repeat one of these, or the
+    /// JSON would hold it twice.
+    pub const FIELDS: [&'static str; 19] = [
         "turn",
         "year",
         "current_player",
@@ -138,6 +145,7 @@ impl ClientView<'_> {
         "turn_limit",
         "config",
         "events",
+        "minimap",
     ];
 }
 
@@ -368,6 +376,8 @@ impl Game {
             turn_limit: g.total_turns(),
             config: config_json(g),
             events: events_json(g, viewer, event_limit),
+            // refcheck: minimap-view-block
+            minimap: viewer.and_then(|p| g.minimap(p)),
             rest,
         }
     }

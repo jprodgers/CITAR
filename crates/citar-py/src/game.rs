@@ -673,14 +673,17 @@ impl Game {
     /// The client view as JSON bytes, as player `pid` sees the game (everything for `None`),
     /// with the last `event_limit` of its events (`EngineGame.view`). `extra_json`'s keys are
     /// added to the view as they are (the server's `seat`, `session`, `version`,
-    /// `spectator`); a key of the view's own is refused with `ValueError`.
-    #[pyo3(signature = (pid = None, event_limit = 150, extra_json = None))]
+    /// `spectator`); a key of the view's own is refused with `ValueError`. `minimap` false
+    /// leaves out a seat's minimap block, as a spectator looking through its eyes gets the view
+    /// (design/phase3-features.md P3.7.2).
+    #[pyo3(signature = (pid = None, event_limit = 150, extra_json = None, minimap = true))]
     fn view_json(
         &self,
         py: Python<'_>,
         pid: Option<i64>,
         event_limit: u32,
         extra_json: Option<&[u8]>,
+        minimap: bool,
     ) -> PyResult<Bytes> {
         Ok(self.read(py, |g| {
             let viewer = pid.map(|p| player_of(g, p)).transpose()?;
@@ -697,6 +700,9 @@ impl Game {
                 return Err(Failure::Value(format!("{k} is the view's own key.")));
             }
             let mut view = g.client_view(viewer, i64::from(event_limit));
+            if !minimap {
+                view.minimap = None;
+            }
             view.rest.extend(extra);
             Ok(Bytes(to_py_json(&view)))
         })?)
