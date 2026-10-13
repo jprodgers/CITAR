@@ -428,14 +428,42 @@ class Recorder(Case):
         self.assertIn(2, s._seats_out, "the elimination still let the seat's lease go")
         self.assertEqual({e["where"] for e in s.errors}, {"diplomacy record"})
 
+    def _people_turns(self, s, rounds: int) -> None:
+        """Play the person's seat (3) for ``rounds`` turns: decline whatever waits on it, end its turn, and wait for
+        its next one (the bots, the hybrid seat's bot among them, play between); a game held at the person's turn
+        stands still, whatever the machine's speed. Returns at the person's turn (or the game's end)."""
+        def at_person() -> bool:
+            with s.lock:
+                for n in s.game.open_negotiation_heads(3):
+                    if n["awaiting"] == 3:
+                        s.call_tool(3, "respond_negotiation", {"negotiation_id": n["id"], "action": "reject",
+                                                               "message": "No."})
+                return s.game.current == 3 or s.game.phase != "playing"
+        for _ in range(rounds):
+            self.assertTrue(until(at_person, 60, 0.01), (s.game.turn, s.game.current, s.errors[:1]))
+            if s.game.phase != "playing":
+                return
+            turn = s.game.turn
+            self.assertTrue(until(lambda: s.call_tool(3, "end_turn", {})["ok"], 30), "the person's turn ended")
+            self.assertTrue(until(lambda t=turn: s.game.turn > t or s.game.phase != "playing", 60, 0.01))
+        self.assertTrue(until(at_person, 60, 0.01), (s.game.turn, s.game.current, s.errors[:1]))
+
     def test_a_hybrid_seats_rows_survive_a_save_and_a_load(self):
-        s = self._bots_game(turn_limit=40)
-        s.start()
-        self.assertTrue(until(lambda: s.game.turn >= 15, 60, 0.02))
-        s.set_paused(True)
-        self.assertTrue(until(lambda: s.agent_status.get(s.game.current) != "thinking" or s.game.current == 0, 10))
-        time.sleep(0.2)
+        """A hybrid seat, two bots and a person: the game stands at the person's turn when it is saved, so the rows
+        saved are exactly those the recorder held."""
+        seats = [{"type": "hybrid", "llm": {"provider": "dryrun", "dry_run_delay": 0}, "bot": {"profile": "standard"},
+                  "hybrid": {"owners": "trade_only", "prompt_every": 50}},
+                 {"type": "bot"}, {"type": "bot"}, {"type": "human"}]
+        s = self.manager.create({"map_size": "small", "seed": 11, "barbarians": "off", "city_states": 2,
+                                 "turn_limit": 200}, seats, track=False, start=False)
+        s.seats[0].hybrid = {**s.seats[0].hybrid, "owners": hybrid.owners_map({})}     # test-only: no model
+        s.game.set_controller(0, "hybrid", "ai", {"un_vote": True, "conquest": True, "free_picks": True})
         with s.lock:
+            s.game.apply_ops(self.OPS)
+        s.start()
+        self._people_turns(s, 15)
+        with s.lock:
+            self.assertEqual(s.game.current, 3)
             before = list(s._recorder(0).mine())
         self.assertTrue(before)
         path = s.save("mid")
@@ -444,7 +472,7 @@ class Recorder(Case):
         with loaded.lock:
             self.assertEqual(loaded._recorder(0).mine(), before, "the rows came back with the save")
         loaded.resume()
-        self.assertTrue(until(lambda: loaded.game.phase != "playing", 120, 0.05))
+        self._people_turns(loaded, 25)
         with loaded.lock:
             after = loaded._recorder(0).mine()
         self.assertEqual(after[:len(before)], before)
