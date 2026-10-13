@@ -635,7 +635,8 @@ function renderNewGame(card, rules, meta, refresh) {
       const color = colorPicker(palette, s, others, (c) => { s.color = c; renderSeats(); });
       const remove = el("button", { class: "small", disabled: seats.length <= 1, onclick: () => { seats.splice(i, 1); renderSeats(); } }, "✕");
       const diff = sel([["", "Game difficulty"], ...rules.difficulty_list.map((k) => [k, k])], s.difficulty || "");
-      diff.onchange = () => { s.difficulty = diff.value; };
+      // a hybrid seat's form names the level its handicap applies at: redrawn when the level changes
+      diff.onchange = () => { s.difficulty = diff.value; if (s.type === "hybrid") renderSeats(); };
       diff.title = s.type === "hybrid"
         ? "This seat's difficulty level. Its handicap (below, beside its bot) says whose numbers it plays with at that level."
         : "This seat's difficulty. Bots get the level's AI bonuses; humans and AI models get its player values.";
