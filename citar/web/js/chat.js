@@ -218,11 +218,14 @@ export class ChatDock {
     this.fire(st);
   }
 
-  /** Armed End Turn with nothing left open: end the turn (once). */
+  /** Armed End Turn with nothing left open: end the turn (once), as the click that armed it would have. Its other
+   * decisions were checked when it was armed; a deal may have brought a new one (a technology to choose), which a
+   * plain arming checks again and stops at, as End Turn does, and a Ctrl+click arming skips. */
   fire(st) {
     if (!st.fire || !this.game.myTurn) return;
+    const force = !!(this.model.armed && this.model.armed.force);
     this.model.disarm();          // at once: whatever comes before the end of turn's answer finds it disarmed
-    Promise.resolve().then(() => this.game.endTurn(true));
+    Promise.resolve().then(() => this.game.endTurn(force));
   }
 
   /** Every second: the countdowns. */

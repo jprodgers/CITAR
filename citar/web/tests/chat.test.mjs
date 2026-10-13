@@ -403,17 +403,36 @@ test("End Turn: waiting with a countdown, armed by a click, ending the turn once
   state.button.click();
   assert.equal(state.button.getAttribute("data-chat"), "armed");
   assert.deepEqual(state.ended, []);
-  // they accept: the chat closes and the turn ends, once
+  // they accept: the chat closes and the turn ends, once, as the plain click that armed it would (its other
+  // decisions checked again: a deal may bring one)
   server.say(7, false, "accept", "Thank you!");
   dock.onStatus({ type: "negotiation_status", negotiation: 7, players: [0, 1], waiting_on: null, kind: null, state: "closed",
                   status: "accepted", position: null, eta_s: null, deadline: null });
   await flush(); await flush();
-  assert.deepEqual(state.ended, [true]);
+  assert.deepEqual(state.ended, [false]);
   dock.tick();
   dock.onView(game.view);
   await flush();
-  assert.deepEqual(state.ended, [true], "only once");
+  assert.deepEqual(state.ended, [false], "only once");
   assert.equal(dock.model.armed, null);
+});
+
+test("End Turn armed with Ctrl+click ends the turn anyway when the last chat closes", async () => {
+  const { game, dock, server, state } = makeGame();
+  dock.onView(game.view);
+  server.chat(8, 2, "Persia");
+  server.say(8, true, "open", "Peace?");
+  game.view.diplomacy.open_negotiations = [server.view(8)];
+  dock.onView(game.view);
+  game.renderTopbar();
+  state.button.click({ ctrlKey: true });
+  assert.equal(state.button.getAttribute("data-chat"), "armed");
+  assert.deepEqual(dock.model.armed.force, true);
+  server.say(8, false, "reject", "No.");
+  dock.onStatus({ type: "negotiation_status", negotiation: 8, players: [0, 2], waiting_on: null, kind: null, state: "closed",
+                  status: "rejected", position: null, eta_s: null, deadline: null });
+  await flush(); await flush();
+  assert.deepEqual(state.ended, [true], "forced, as it was armed");
 });
 
 test("End Turn: a chat waiting on you is answered first; the click opens it", async () => {

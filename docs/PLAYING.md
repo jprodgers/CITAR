@@ -151,8 +151,9 @@ two civilizations have one chat open at a time, and play goes on while it is ope
   chat waits on you, the button reads "Answer Rome first" and opens that chat. While a chat waits on
   the other side, it reads "Waiting for Rome… 4:12". Click it then and it reads "End turn when they
   answer": the turn ends by itself once every chat has closed. Click again to cancel. Other
-  unfinished business (idle units, no research) is checked first, as for any end of turn; Ctrl+click
-  skips that check.
+  unfinished business (idle units, no research) is checked first, as for any end of turn, and again
+  when the turn would end by itself, since a deal can bring something new to decide; Ctrl+click skips
+  that check both times.
 - **On a narrow screen** (700 pixels wide or less) one window shows at a time, full width above End
   Turn, with a tab for each chat.
 
