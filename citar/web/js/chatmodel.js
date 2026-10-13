@@ -362,18 +362,29 @@ export class ChatModel {
   }
 
   /** Something new for you in the window with `civ`: a closed window opens, a minimised one is marked unread (its
-   * tab lights up) rather than taking the screen from what you are doing. */
-  notify(civ, { restore = false } = {}) {
+   * tab lights up) rather than taking the screen from what you are doing. `restore` expands it; `focus` makes it the
+   * one shown at narrow widths (a new chat does, unless you are answering another: `answering`). */
+  notify(civ, { restore = false, focus = false } = {}) {
+    const take = focus && !this.answering(civ);
     const w = this.windowOf(civ);
     if (!w) {
-      const made = this.openWindow(civ, { restore: true });
+      const made = this.openWindow(civ, { restore: true, focus: take });
       if (this.active !== civ) made.unread = true;   // at narrow widths only the active one shows
       return made;
     }
     if (restore) w.minimised = false;
+    if (take && !w.minimised) this.active = civ;
     if (w.minimised || (this.active != null && this.active !== civ)) w.unread = true;
     if (this.active == null) this.active = civ;
     return w;
+  }
+
+  /** Whether the window shown at narrow widths is another chat that waits on you (you are answering it). */
+  answering(civ) {
+    if (this.active == null || this.active === civ) return false;
+    const w = this.windowOf(this.active);
+    const chat = this.chatWith(this.active);
+    return !!w && !w.minimised && !!chat && chat.status === "open" && chat.waitingOn === this.you;
   }
 
   minimise(civ) {

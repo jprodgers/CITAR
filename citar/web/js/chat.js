@@ -100,14 +100,14 @@ export class ChatDock {
     this.render();
   }
 
-  /** What a change of a chat means for its window: a new open chat pops up (restored if minimised); a chat that
-   * comes back to you, or anything the other side said, lights the window up (a closed window opens; a minimised
-   * one only marks its tab). */
+  /** What a change of a chat means for its window: a new open chat pops up (restored if minimised, and the one shown
+   * at narrow widths unless you are answering another); a chat that comes back to you, or anything the other side
+   * said, lights the window up (a closed window opens; a minimised one only marks its tab). */
   consider(change) {
     const chat = change && change.chat;
     if (!chat || chat.with == null) return;
     const theirs = (change.added || []).some((e) => !e.you);
-    if (change.created && chat.status === "open") this.model.notify(chat.with, { restore: true });
+    if (change.created && chat.status === "open") this.model.notify(chat.with, { restore: true, focus: true });
     else if (change.turnedToYou) this.model.notify(chat.with);
     else if (theirs && this.model.windowOf(chat.with)) this.model.notify(chat.with);
   }

@@ -338,6 +338,25 @@ test("windows: open, minimise, restore, close; news marks a minimised one rather
   assert.equal(m.active, 3);
 });
 
+test("a new chat takes the narrow window, unless you are answering another", () => {
+  const m = new ChatModel(YOU);
+  m.applyNegotiation(view(1, [entry(1, true, "open"), entry(2, false, "accept")], { withCiv: 1, status: "accepted" }), 0);
+  m.openWindow(1, { focus: true });
+  // a closed chat on screen: the new one pops up in its place
+  m.applyNegotiation(view(2, [entry(1, false, "open")], { withCiv: 2 }), 0);
+  m.notify(2, { restore: true, focus: true });
+  assert.equal(m.active, 2);
+  assert.equal(m.windowOf(1).unread, false);
+  // answering Persia's (it waits on you): Egypt's new chat waits its turn as a lit tab
+  m.applyNegotiation(view(3, [entry(1, false, "open")], { withCiv: 3 }), 0);
+  m.notify(3, { restore: true, focus: true });
+  assert.equal(m.active, 2);
+  assert.equal(m.windowOf(3).unread, true);
+  // the same for an existing window
+  m.notify(1, { focus: true });
+  assert.equal(m.active, 2);
+});
+
 function boxRect(it) { return { left: it.left, width: it.width, bottom: it.bottom, height: it.maxHeight }; }
 
 test("the dock never covers the End Turn box, at any size", () => {
