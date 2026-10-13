@@ -1101,8 +1101,14 @@ export class GameScreen {
     layer.width = c.width; layer.height = c.height;
     const ctx = layer.getContext("2d");
     ctx.fillStyle = "#000"; ctx.fillRect(0, 0, layer.width, layer.height);
-    // each tile a box as wide as a hex and as tall as its row, so they tile the window with the map's proportions
+    // each tile a box as wide as a hex and as tall as its row, so they tile the window with the map's proportions; its
+    // edges on whole pixels, so neighbours meet with no seam and none bleeds into another (an unexplored one stays
+    // black, however small the tiles)
     const hw = f.scale * SQRT3, hh = f.scale * 1.5;
+    const cell = (cx, cy, w, h) => {
+      const x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2);
+      ctx.fillRect(x0, y0, Math.max(1, Math.round(cx + w / 2) - x0), Math.max(1, Math.round(cy + h / 2) - y0));
+    };
     for (let i = 0; i < m.tiles.length; i++) {
       const t = m.tiles[i];
       if (!t) continue;
@@ -1111,15 +1117,16 @@ export class GameScreen {
       const [cx, cy] = tileCentre(f, win, map, x, y);
       ctx.fillStyle = t.owner != null && m.players[t.owner] ? m.players[t.owner].color : (TERRAIN_COLORS[t.terrain] || "#444");
       ctx.globalAlpha = t.visible ? 1 : 0.55;
-      ctx.fillRect(cx - hw / 2, cy - hh / 2, hw + 0.5, hh + 0.5);
+      cell(cx, cy, hw, hh);
     }
     ctx.globalAlpha = 1;
     ctx.fillStyle = "#fff";
-    const dot = Math.max(2.5, Math.min(5, f.scale * 1.2));
+    // a city's dot inside its own tile
+    const dot = Math.max(1, Math.min(5, Math.floor(Math.min(hw, hh) * 0.75)));
     for (const city of v.cities) {
       if (!inWindow(win, map, city.x, city.y)) continue;
       const [cx, cy] = tileCentre(f, win, map, city.x, city.y);
-      ctx.fillRect(cx - dot / 2, cy - dot / 2, dot, dot);
+      cell(cx, cy, dot, dot);
     }
     return layer;
   }
