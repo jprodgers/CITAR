@@ -122,9 +122,10 @@ pub struct ClientView<'a> {
 }
 
 impl ClientView<'_> {
-    /// The keys of the view's own fields, in the order they are written. A host that adds keys
-    /// of its own to the view (the server's `seat`, `session`, `version` and `spectator`, through
-    /// `rest`) must not repeat one of these, or the JSON would hold it twice.
+    /// The keys of the view's own fields, in the order they are written (`minimap` only in a major
+    /// civilization's own view). A host that adds keys of its own to the view (the server's `seat`,
+    /// `session`, `version` and `spectator`, through `rest`) must not repeat one of these, or the
+    /// JSON would hold it twice.
     pub const FIELDS: [&'static str; 19] = [
         "turn",
         "year",
