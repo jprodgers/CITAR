@@ -34,6 +34,24 @@ def read_text(path) -> str:
     return retry(lambda: path.read_text(encoding="utf-8"))
 
 
+def newest_first(paths) -> list:
+    """``paths`` as ``(path, stat)`` pairs, the newest first, leaving out those gone since they were listed.
+
+    A listing that globs and then stats races every deletion: a file the glob found may be gone by its stat (a
+    ``FileNotFoundError``, which sorting by ``p.stat()`` raised out of the listing: a deleted report, save or map
+    turned its page's list into an error), or, on Windows, be the old file of a replace for a moment (a
+    ``PermissionError``: retried, as ``read_text`` retries)."""
+    found = []
+    for p in paths:
+        p = Path(p)
+        try:
+            found.append((p, retry(p.stat)))
+        except FileNotFoundError:
+            continue
+    found.sort(key=lambda t: t[1].st_mtime, reverse=True)
+    return found
+
+
 def read_bytes(path) -> bytes:
     """``read_text`` for a binary file (a gzipped scenario, an avatar)."""
     return retry(Path(path).read_bytes)

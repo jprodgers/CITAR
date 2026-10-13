@@ -45,7 +45,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .fsutil import read_text as _fs_read, replace as _fs_replace
+from .fsutil import newest_first as _fs_newest, read_text as _fs_read, replace as _fs_replace
 from typing import Optional
 
 from . import engine_api, paths
@@ -165,13 +165,13 @@ def list_probes() -> list[dict]:
     """Every saved probe, in summary."""
     BASE.mkdir(parents=True, exist_ok=True)
     out = []
-    for p in sorted(BASE.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for p, st in _fs_newest(BASE.glob("*.json")):
         try:
             d = json.loads(_fs_read(p))
             out.append({"id": d.get("id"), "name": d.get("name"), "description": d.get("description", ""),
                         "scenario": d.get("scenario"), "cases": len(d.get("cases") or []), "repeats": d.get("repeats", 1),
                         "subject": d.get("subject"), "counterparty": d.get("counterparty"),
-                        "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds")})
+                        "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")})
         except (OSError, ValueError):
             continue
     return out
@@ -640,7 +640,7 @@ class ProbeRunner:
     def list_runs(self) -> list[dict]:
         """Every run, newest first."""
         out = []
-        for p in sorted(RUNS.glob("*/run.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for p, _ in _fs_newest(RUNS.glob("*/run.json")):
             try:
                 out.append(json.loads(_fs_read(p)))
             except (OSError, ValueError):

@@ -367,7 +367,7 @@ class BenchmarkScheduler:
     def list_suites(self) -> list[dict]:
         """Every saved suite, in summary."""
         out = []
-        for p in sorted(self.suites_dir.glob("*.json"), key=lambda p: -p.stat().st_mtime):
+        for p, _ in fsutil.newest_first(self.suites_dir.glob("*.json")):
             try:
                 s = json.loads(fsutil.read_text(p))       # one being saved would drop out of the list
                 out.append({"id": s["id"], "name": s["name"], "description": s.get("description", ""),

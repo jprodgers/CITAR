@@ -8,6 +8,7 @@ import contextlib
 import gzip
 import io
 import json
+import os
 import secrets
 import shutil
 import tempfile
@@ -375,3 +376,53 @@ class AvatarFile(Refused):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Listings(Refused):
+    """Listings sorted newest first (``fsutil.newest_first``): a file the glob found and then deleted is left out, never
+    raised out of the listing (CI, test.yml run 38415083488, macos / Python 3.12: the Reports list raised
+    FileNotFoundError for a report whose build removed its folder between the glob and the sort's stat)."""
+
+    def test_newest_first_and_the_gone_left_out(self):
+        for i, name in enumerate(("old", "mid", "new")):
+            p = self.dir / f"{name}.json"
+            p.write_text("{}", encoding="utf-8")
+            os.utime(p, (1_000_000 + i, 1_000_000 + i))
+        listed = sorted(self.dir.glob("*.json")) + [self.dir / "gone.json"]
+        got = fsutil.newest_first(listed)
+        self.assertEqual([p.name for p, _ in got], ["new.json", "mid.json", "old.json"])
+        self.assertEqual([st.st_mtime for _, st in got], [1_000_002, 1_000_001, 1_000_000])
+
+    def test_a_stat_refused_for_a_moment_is_tried_again(self):
+        p = self.dir / "a.json"
+        p.write_text("{}", encoding="utf-8")
+        refuse, seen = refusing(1, "a.json", "stat")
+        with mock.patch.object(Path, "stat", refuse), mock.patch.object(fsutil.time, "sleep"):
+            got = fsutil.newest_first([p])
+        self.assertEqual([q for q, _ in got], [p])
+        self.assertEqual(len(seen), 2)
+
+    def test_a_report_deleted_between_the_glob_and_the_stat_is_left_out(self):
+        runner = ReportRunner.__new__(ReportRunner)     # its files only: no threads
+        runner.dir, runner._deleting, runner._places = self.dir, set(), {}
+        for rid in ("20261013-000000-aaaa", "20261013-000000-bbbb"):
+            (self.dir / rid).mkdir()
+            fsutil.write_text(self.dir / rid / "meta.json", json.dumps({"id": rid, "title": rid, "status": "done"}))
+        found = list(self.dir.glob("*/meta.json"))
+        shutil.rmtree(self.dir / "20261013-000000-aaaa")        # its build let go of it after the glob
+        with mock.patch.object(Path, "glob", lambda self_, pattern: iter(found)):
+            self.assertEqual([m["id"] for m in runner.list()], ["20261013-000000-bbbb"])
+
+    def test_a_save_deleted_between_the_glob_and_its_header_is_left_out(self):
+        from citar.server import session as sess
+        for gid in ("g1", "g2"):
+            (self.dir / gid).mkdir()
+            (self.dir / gid / "autosave.citar").write_bytes(b"x")
+
+        def meta(p):
+            if p.parent.name == "g1":
+                raise FileNotFoundError(2, "No such file", str(p))      # deleted after the glob, before its header
+            return {"name": "kept"}
+        with mock.patch.object(sess, "SAVE_DIR", self.dir),                 mock.patch.object(sess.SessionManager, "save_meta", side_effect=meta):
+            saves = sess.SessionManager.list_saves()
+        self.assertEqual([(s["game_id"], s["name"]) for s in saves], [("g2", "kept")])

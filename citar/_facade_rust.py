@@ -43,7 +43,7 @@ from typing import Any, Callable, Optional
 
 from . import _engine as _E
 from . import paths
-from .fsutil import read_bytes as _fs_read_bytes, read_text as _fs_read, replace as _fs_replace
+from .fsutil import newest_first as _fs_newest, read_bytes as _fs_read_bytes, read_text as _fs_read, replace as _fs_replace
 
 # citar/engine_api.py's list, which its import holds this module to.
 __all__ = [
@@ -245,7 +245,7 @@ def list_maps() -> list[dict]:
     """Saved maps, in summary, the newest first. A file that does not read as a map is left out."""
     MAP_DIR.mkdir(parents=True, exist_ok=True)
     out = []
-    for p in sorted(MAP_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for p, _ in _fs_newest(MAP_DIR.glob("*.json")):
         try:
             out.append(map_summary(json.loads(_fs_read(p))))
         except (OSError, ValueError, KeyError):
@@ -348,7 +348,7 @@ def list_scenarios() -> list[dict]:
     """Saved scenarios, in summary, the newest first. A file that does not read as a scenario is left out."""
     SCENARIO_DIR.mkdir(parents=True, exist_ok=True)
     out = []
-    for p in sorted(SCENARIO_DIR.glob("*.citarscn"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for p, _ in _fs_newest(SCENARIO_DIR.glob("*.citarscn")):
         try:
             out.append(scenario_summary(_read_scenario(p)))
         except (OSError, ValueError, KeyError, ActionError):

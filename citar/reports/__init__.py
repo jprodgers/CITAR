@@ -264,7 +264,7 @@ class ReportRunner:
     def list(self) -> list[dict]:
         """Every report, newest first (not one being deleted)."""
         out = []
-        for p in sorted(self.dir.glob("*/meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for p, _ in fsutil.newest_first(self.dir.glob("*/meta.json")):     # one deleted since is left out
             try:
                 m = json.loads(fsutil.read_text(p))         # a report being built would drop out of the list
             except (OSError, ValueError):

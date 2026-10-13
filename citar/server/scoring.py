@@ -22,7 +22,7 @@ import math
 from pathlib import Path
 from typing import Optional
 
-from .. import aggregate, engine_api
+from .. import aggregate, engine_api, fsutil
 from .metrics import Metrics
 from .session import SAVE_DIR, SessionManager
 
@@ -129,7 +129,7 @@ def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
             out[s.id] = {"name": s.name, "turn": s.game.turn, "summary": summary, "benchmark": bench}
     if SAVE_DIR.exists():
         seen = set(out)
-        for p in sorted(SAVE_DIR.glob("*/*.citar"), key=lambda p: -p.stat().st_mtime):
+        for p, _ in fsutil.newest_first(SAVE_DIR.glob("*/*.citar")):
             gid = p.parent.name
             if gid in seen or (allowed is not None and gid not in allowed):
                 continue

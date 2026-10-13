@@ -14,7 +14,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from .. import engine_api, ledger
+from .. import engine_api, fsutil, ledger
 from ..engine_api import ActionError, EngineCrash, EngineGame
 from .chat import NO_REPLY, ChatClock, RealClock
 from .metrics import Metrics
@@ -2615,9 +2615,13 @@ class SessionManager:
         out = []
         if not SAVE_DIR.exists():
             return out
-        for p in sorted(SAVE_DIR.glob("*/*.citar"), key=lambda p: -p.stat().st_mtime):
+        for p, st in fsutil.newest_first(SAVE_DIR.glob("*/*.citar")):
+            try:
+                meta = cls.save_meta(p)
+            except FileNotFoundError:
+                continue                    # deleted since the listing
             out.append({"path": str(p.relative_to(SAVE_DIR)).replace("\\", "/"), "game_id": p.parent.name,
-                        "name": p.stem, "modified": p.stat().st_mtime, "size": p.stat().st_size, **cls.save_meta(p)})
+                        "name": p.stem, "modified": st.st_mtime, "size": st.st_size, **meta})
         return out
 
     #: How old a temporary file beside a save must be before a deletion removes it: a fresher one may be a write in

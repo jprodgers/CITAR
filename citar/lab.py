@@ -60,7 +60,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from .fsutil import read_text as _fs_read, replace as _fs_replace, write_text as _fs_write
+from .fsutil import newest_first as _fs_newest, read_text as _fs_read, replace as _fs_replace, write_text as _fs_write
 from . import paths
 
 LAB = paths.saves_path("lab")
@@ -885,13 +885,13 @@ def overview() -> dict:
         e["eta_minutes"] = round(acc / workers, 1)
 
     side = []
-    for out in sorted(LAB.glob("*.out"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for out, out_st in _fs_newest(LAB.glob("*.out")):
         if out.name == "runner.out":
             continue
         text = _tail(out, 6000)
         lines = [ln for ln in text.splitlines() if ln.strip()]
-        age = now - out.stat().st_mtime
-        side.append({"name": out.stem, "modified": datetime.fromtimestamp(out.stat().st_mtime).isoformat(timespec="seconds"),
+        age = now - out_st.st_mtime
+        side.append({"name": out.stem, "modified": datetime.fromtimestamp(out_st.st_mtime).isoformat(timespec="seconds"),
                      "active": age < 900 and not any("Report written" in ln or "stopping" in ln for ln in lines[-6:]),
                      "tail": lines[-12:]})
 
