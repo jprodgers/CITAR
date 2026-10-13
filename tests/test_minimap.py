@@ -4,9 +4,10 @@
   ``capital``, and ``home``, the box of the tiles of its home continent it has explored, checked here against the view's
   own tiles (each one a tile the seat has explored) and the continents the state keeps, covered the short way round on
   a wrapping axis. The god view and a spectator's view, through a seat's eyes or not, have none (P3.7.2, P3.7.4).
-- **Its cost** through the binding, as the server pays it: a seat's view with the block against the same view without
-  it, alternating (P3.9.7; the engine's own timing of the block is the testkit's,
-  ``crates/citar-testkit/tests/engine/minimap.rs``).
+- **The binding** leaves the block out when asked (``view_json(..., minimap=False)``, a spectator's look through a seat's
+  eyes), and nothing else. The block's cost (P3.9.7) is a testkit timing of the block itself against the seat view
+  (``crates/citar-testkit/tests/engine/minimap.rs``): through the binding it is a fraction of a percent of a view, below
+  this laptop's run-to-run noise.
 - **The debug ops route**, ``POST /api/games/{gid}/debug/ops`` (P3.7.5): not there (404) unless the server runs with
   ``CITAR_DEBUG=1``; then 200 for whoever manages the game (its owner, an administrator), 404 for another member and a
   moderator, 401 or 404 for a visitor, 403 for a member it is shared with to view (a write), and refused without the
@@ -18,7 +19,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import statistics
 import tempfile
 import time
 import unittest
@@ -250,26 +250,21 @@ class Block(Case):
             self.assertNotIn("minimap", v, label)
             self.assertIn("tiles", v, label)
 
-    def test_the_block_costs_little_through_the_binding(self):
-        """P3.9.7, as the server pays it: a standard map all explored, the view with its block against the same view
-        without it, alternating, seven pairs of twenty; the median of the pairs' ratios within 5% (15% on CI)."""
-        g = EngineGame.new({"seed": 5, "map_size": "standard", "map_edges": "wrap_x", "city_states": 0,
+    def test_the_binding_leaves_the_block_out_when_asked(self):
+        """``view_json(..., minimap=False)``, as the view route asks for a spectator looking through a seat's eyes: the
+        same view, its block alone left out; the god view has none either way."""
+        g = EngineGame.new({"seed": 5, "map_size": "small", "map_edges": "wrap_x", "city_states": 0,
                             "players": [{"controller": "bot"}, {"controller": "bot"}]})
-        g.apply_ops([{"op": "reveal", "player": 0}])
-        self.assertIn(b'"minimap"', g.view_json(0))
-        self.assertNotIn(b'"minimap"', g.view_json(0, minimap=False))
-        ratios = []
-        for _ in range(7):
-            t = time.perf_counter()
-            for _ in range(20):
-                g.view_json(0)
-            with_block = time.perf_counter() - t
-            t = time.perf_counter()
-            for _ in range(20):
-                g.view_json(0, minimap=False)
-            ratios.append(with_block / (time.perf_counter() - t))
-        budget = 1.15 if os.environ.get("CI") else 1.05
-        self.assertLessEqual(statistics.median(ratios), budget, f"ratios {[round(r, 3) for r in ratios]}")
+        seat = json.loads(g.view_json(0))
+        without = json.loads(g.view_json(0, minimap=False))
+        self.assertEqual(set(seat["minimap"]), {"stage", "capital", "home"})
+        self.assertNotIn("minimap", without)
+        seat.pop("minimap")
+        self.assertEqual(seat, without, "nothing else differs")
+        self.assertNotIn("minimap", json.loads(g.view_json(None)), "the god view")
+        self.assertIn("minimap", g.view(1), "the facade's view, a seat's own")
+        with self.assertRaises(ValueError):
+            g.view_json(0, {"minimap": 1})          # a host may not splice a key of the view's own
 
 
 class DebugOps(Case):
