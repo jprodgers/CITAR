@@ -58,7 +58,7 @@ CALLERS = {"owner": ("olive", "user", {"edit_bots": True, "run_lab": True}), "st
 #: Every route under these prefixes is P3.2.4's, and must be in ROUTES.
 PREFIXES = ("/api/benchmarks", "/api/maps", "/api/scenario-editor", "/api/scenario-ops", "/api/scenarios",
             "/api/probes", "/api/probe-runs", "/api/lab", "/api/bots", "/api/reports", "/api/queue", "/api/items",
-            "/api/models/scores", "/api/metrics/compare")
+            "/api/models/scores", "/api/models/diplomacy", "/api/metrics/compare")
 
 
 def _reset():
@@ -354,6 +354,7 @@ ROUTES = {
     ("POST", "/api/queue/priority"): ("priority", None, None),
     ("POST", "/api/queue/tickets/{tid}/cancel"): ("ticket", None, None),
     ("GET", "/api/models/scores"): ("member", None, None),
+    ("GET", "/api/models/diplomacy"): ("member", None, None),
     ("GET", "/api/metrics/compare"): ("member", None, None),
     ("GET", "/api/items/{kind}/{ref}/sharing"): ("write", "map", None),
     ("PUT", "/api/items/{kind}/{ref}/sharing"): ("write", "map", {"visibility": "allowlist"}),
