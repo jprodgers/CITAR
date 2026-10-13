@@ -459,7 +459,7 @@ function openSuiteEditor(suite, ctx, isNew) {
       el("div", { class: "grid-scenario" },
         field("Mode", el("select", { title: "Full: the model plays every turn. Hybrid: a bot plays, the model negotiates.",
           onchange: (e) => { sc.mode = e.target.value; drawHybrid(); } },
-        ...[["full", "Full: the model plays every turn"], ["hybrid", "Hybrid: a bot plays, the model negotiates"]].map(([v, t]) =>
+        ...[["full", "Full (the model plays)"], ["hybrid", "Hybrid (bot + model)"]].map(([v, t]) =>
           el("option", { value: v, selected: sc.mode === v }, t)))),
         field("Map size", sel("map_size", Object.entries(rules.map_sizes).map(([k, v]) => [k, `${v.name} (${v.width}×${v.height})`]))),
         field("Map type", sel("map_type", Object.entries(rules.map_types).map(([k, v]) => [k, v.name]))),

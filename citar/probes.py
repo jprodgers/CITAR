@@ -768,7 +768,7 @@ class ProbeRunner:
             model = f"{model} @ {sv['name']}"
         if hybrid is not None:
             from .diplomacy_stats import owners_label
-            model = f"{model} (hybrid: {owners_label(hybrid['owners'])})"
+            model = f"{model} (hybrid: {owners_label(hybrid['owners']).replace('_', ' ')})"
         run = {"id": rid, "name": name or f"{probe['name']} · {model}", "probe": probe, "llm": {k: v for k, v in llm.items() if k != "api_key"},
                "repeats": n_rep, "jobs": [{"case": c["id"], "rep": r} for c in chosen for r in range(n_rep)],
                "status": "queued", "done": 0, "created": time.time(), "started": None, "finished": None,
