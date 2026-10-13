@@ -814,8 +814,9 @@ class EngineGame:
     @property
     def writes(self) -> int:
         """How many commands this game object has taken, refused or not: it moves on every call that may change the
-        game or its history (a message, a thought, a host's event included) and never on a read. With :attr:`instance`,
-        what the server's view ETag is made of (design/phase3-features.md P3.5.8)."""
+        game or its history (a message, a thought, a host's event included) and never on a read, a query tool's through
+        :meth:`execute` included. With :attr:`instance`, what the server's view ETag is made of
+        (design/phase3-features.md P3.5.8)."""
         return self._g.writes
 
     @property

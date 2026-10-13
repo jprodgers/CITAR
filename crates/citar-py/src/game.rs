@@ -22,6 +22,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use citar_bot::Bot as Driver;
 use citar_engine::api::game::DebugAction;
 use citar_engine::api::host::{Heads, NegotiationHead, phase_name};
+use citar_engine::api::tools::{self, ToolKind};
 use citar_engine::api::views::client::ClientView;
 use citar_engine::api::views::players::trade_options_with;
 use citar_engine::api::views::replay::deal_json;
@@ -56,7 +57,8 @@ pub struct Game {
     game: Mutex<EngineGame>,
     heads: Mutex<Heads>,
     /// How many commands the game has taken (every call through [`Game::write`], refused or
-    /// not): it moves on every change to the game, its history included, and never on a read.
+    /// not): it moves on every change to the game, its history included, and never on a read (a
+    /// query tool included).
     writes: AtomicU64,
 }
 
@@ -416,7 +418,8 @@ impl Game {
     }
 
     /// How many commands the game has taken, refused or not: it moves on every call that may
-    /// change the game or its history, and never on a read. Paired with the facade's own salt
+    /// change the game or its history, and never on a read, a query tool's included
+    /// ([`Game::execute`]). Paired with the facade's own salt
     /// (another game object counts from 0 again), it is the server's view ETag (P3.5.8).
     #[getter]
     fn writes(&self) -> u64 {
@@ -630,6 +633,12 @@ impl Game {
 
     /// Runs a player tool with JSON arguments (`EngineGame.execute`): the result and the events
     /// it appended (none for a query). `ActionError` for a refusal.
+    ///
+    /// A query changes nothing (property P8), so it is a read: it never counts in [`Game::writes`]
+    /// and so never moves the view's ETag. The browser asks for the selected unit or city after
+    /// every refresh, and models query freely, so counting queries would turn nearly every
+    /// refresh that found nothing changed into a full view (P3.5.8). A poisoned game refuses a
+    /// query as it refuses an action.
     #[pyo3(signature = (pid, tool, args_json = None))]
     fn execute(
         &self,
@@ -638,13 +647,25 @@ impl Game {
         tool: &str,
         args_json: Option<&[u8]>,
     ) -> PyResult<(Bytes, Bytes)> {
-        Ok(self.write(py, |g| {
-            let p = caller_of(pid)?;
-            let args = match parse_opt(args_json, "The tool's arguments")? {
+        let args_of = || -> Result<Value, Failure> {
+            Ok(match parse_opt(args_json, "The tool's arguments")? {
                 Value::Null => Value::Object(Map::new()),
                 other => other,
-            };
-            let done = g.execute(p, tool, &args)?;
+            })
+        };
+        if tools::kind(tool) == Some(ToolKind::Query) {
+            return Ok(self.read(py, |g| {
+                if let Some(why) = g.poisoned() {
+                    return Err(Failure::poisoned(why));
+                }
+                let p = caller_of(pid)?;
+                let result = g.execute_query(p, tool, &args_of()?)?;
+                Ok((Bytes(to_py_json(&result)), events_json(g, &EventBatch::default())))
+            })?);
+        }
+        Ok(self.write(py, |g| {
+            let p = caller_of(pid)?;
+            let done = g.execute(p, tool, &args_of()?)?;
             Ok((Bytes(to_py_json(&done.result)), events_json(g, &done.events)))
         })?)
     }

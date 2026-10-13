@@ -262,6 +262,50 @@ class ViewETags(Case):
         self.assertNotEqual(again.instance, s.game.instance)
         self.assertLessEqual(again.writes, s.game.writes)
 
+    def test_a_query_through_the_tool_route_leaves_the_tag(self):
+        """The browser asks for the selected unit (``get_unit``) or city after every refresh, and models query freely: a
+        query changes nothing (property P8), so the next refresh with the tag in hand is still a 304. An action, even a
+        refused one, moves the tag."""
+        info = self.create("alice", [{"type": "human"}, {"type": "bot"}])
+        gid, token = info["id"], info["seats"][0]["token"]
+        s = self.manager.get(gid)
+        # the seat's first tool call marks it connected (the seat's public part, in the view): done before the tag
+        self.assertTrue(self.tool(gid, token, "get_empire", {})["ok"])
+        tag, body = self.tag_and_body(gid, token=token)
+        unit = next(u["id"] for u in json.loads(body)["units"] if u["owner"] == 0)
+        writes, revision = s.game.writes, s.game._g.revision
+        real = s.game.view_json
+        built = []
+
+        def counted(*a, **k):
+            built.append(1)
+            return real(*a, **k)
+
+        with mock.patch.object(s.game, "view_json", side_effect=counted):
+            for name, args in (("get_unit", {"unit_id": unit}), ("get_diplomacy", {}), ("get_empire", {}),
+                               ("get_tile", {"x": 0, "y": 0})):
+                r = self.tool(gid, token, name, args)
+                self.assertTrue(r["ok"], r)
+                again = self.view(gid, token=token, etag=tag)
+                self.assertEqual((again.status_code, again.content), (304, b""), f"after {name}")
+                self.assertEqual(again.headers.get("etag"), tag)
+            # a refused query is a read too
+            self.assertFalse(self.tool(gid, token, "get_unit", {"unit_id": 99999})["ok"])
+            self.assertEqual(self.view(gid, token=token, etag=tag).status_code, 304, "after a refused query")
+            self.assertEqual(built, [], "no view was built")
+            self.assertEqual((s.game.writes, s.game._g.revision), (writes, revision), "a query counts as no command")
+            # a refused action is a command (the count moves, never wrongly a 304), and so is an action
+            self.assertFalse(self.tool(gid, token, "found_city", {"unit_id": 99999})["ok"])
+            self.assertEqual(s.game.writes, writes + 1)
+            refused = self.view(gid, token=token, etag=tag)
+            self.assertEqual((refused.status_code, refused.content), (200, body), "the same body under a new tag")
+            self.assertNotEqual(refused.headers.get("etag"), tag)
+            self.assertTrue(self.tool(gid, token, "set_research", {"tech": "Pottery"})["ok"])
+            moved = self.view(gid, token=token, etag=refused.headers.get("etag"))
+            self.assertEqual(moved.status_code, 200)
+            self.assertNotEqual(moved.content, body)
+            self.assertEqual(len(built), 2)
+
     def test_an_ai_game_viewer_through_one_civilizations_eyes(self):
         info = self.create("alice", [{"type": "bot"}, {"type": "bot"}])
         gid = info["id"]

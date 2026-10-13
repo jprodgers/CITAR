@@ -741,7 +741,8 @@ def view_etag(game: EngineGame, writes: int, pid: Optional[int], extra: dict) ->
     """A view's ETag: a hash of everything its body is made of. The engine's part is the game object
     (``EngineGame.instance``: another object, a loaded game, counts from 0 again), how many commands it had taken
     (``writes``, which moves on every change to the game or its history, where the engine's revision moves on its
-    state alone) and the perspective (``pid``); the server's part is the keys it splices in (``extra``: the seat or the
+    state alone, and never on a query tool, which the browser calls after every refresh for the selected unit or city)
+    and the perspective (``pid``); the server's part is the keys it splices in (``extra``: the seat or the
     spectator flag, ``session``, which is ``info()`` with its pause, agent statuses and seats, ``version`` and
     ``can_manage``), hashed as the view is written with them, so two answers with one tag have the same bytes."""
     h = hashlib.blake2b(digest_size=12)

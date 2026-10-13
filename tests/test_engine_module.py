@@ -280,6 +280,35 @@ class GameTests(unittest.TestCase):
         self.assertGreaterEqual(route["turns"], 1)
         self.assertEqual(json.loads(g.path_preview(1, uid, x + 2, y)), {"path": None}, "not player 1's unit")
 
+    def test_a_query_is_a_read_and_an_action_a_command(self):
+        """A query tool changes nothing (property P8): it moves neither the revision nor ``writes``, the count of
+        commands the server's view ETag is made of (design/phase3-features.md P3.5.8), whoever asks and whether or not
+        it is refused. An action is a command, refused or not."""
+        g = duel()
+        rev, writes = g.revision, g.writes
+        unit = json.loads(g.view_json(0))["units"][0]["id"]
+        for pid, tool, args in ((0, "get_unit", {"unit_id": unit}), (0, "get_diplomacy", {}), (1, "get_empire", {}),
+                                (0, "get_tile", {"x": 1, "y": 1}), (0, "get_briefing", {})):
+            result, events = g.execute(pid, tool, dumps(args))
+            self.assertTrue(json.loads(result), tool)
+            self.assertEqual(json.loads(events), [], f"{tool} appends nothing")
+        with self.assertRaises(E.ActionError):
+            g.execute(0, "get_unit", dumps({"unit_id": 9999}))
+        with self.assertRaises(E.ActionError):
+            g.execute(0, "get_unit")                                # a required argument missing
+        with self.assertRaises(E.ActionError) as e:
+            g.execute(300, "get_empire")                            # no player id at all
+        self.assertEqual(e.exception.code, "invalid_player")
+        with self.assertRaises(ValueError):
+            g.execute(0, "get_empire", b"not json")
+        self.assertEqual((g.revision, g.writes), (rev, writes), "queries are reads")
+        with self.assertRaises(E.ActionError):
+            g.execute(1, "end_turn")                                # not its turn: refused, yet a command
+        self.assertEqual((g.revision, g.writes), (rev, writes + 1))
+        g.execute(0, "set_research", dumps({"tech": "Pottery"}))
+        self.assertEqual(g.writes, writes + 2)
+        self.assertGreater(g.revision, rev)
+
     def test_negotiations(self):
         g = duel()
         g.meet(0, 1)
@@ -458,6 +487,17 @@ class TestOperationTests(unittest.TestCase):
                      lambda: g.add_thought(0, "x"), lambda: g.emit("x", "y")):
             with self.assertRaises(E.EngineCrash):
                 call()
+        # A query tool is a read and still refused, with the same words as a command: the game takes no more calls.
+        writes = g.writes
+        with self.assertRaises(E.EngineCrash) as e:
+            g.execute(0, "end_turn")
+        words = str(e.exception)
+        self.assertIn("takes no more commands", words)
+        for tool in ("get_empire", "get_unit", "no_such_tool"):
+            with self.assertRaises(E.EngineCrash) as e:
+                g.execute(0, tool)
+            self.assertEqual(str(e.exception), words, tool)
+        self.assertEqual(g.writes, writes, "a poisoned game counts no command either")
         # The lock is not poisoned: reads still answer, and so do saves.
         self.assertEqual(json.loads(g.summary())["turn"], 1)
         self.assertEqual(json.loads(g.view_json(0))["you"], 0)
