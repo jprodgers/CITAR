@@ -51,8 +51,12 @@ model and by its bot, the chat clock's fallback, no lease held; 3-15: the seat r
 a scenario saved with a hybrid seat launched with it; 3-16: a hybrid benchmark suite on another member's machine (two
 seeds), each job paired with a bot-only control game, a second model's run reusing those controls, the diplomacy
 leaderboard as the run's owner, another member, an administrator and a visitor see it, and a hybrid probe run recording
-which side answered each case; with ``--keep`` the server stays up for the browser checklist's D1 and D2), and later
-``minimap``, ``machines``; ``all`` runs every
+which side answered each case; with ``--keep`` the server stays up for the browser checklist's D1 and D2), ``minimap``
+(3-17: a person's seat on a standard map that wraps east-west, moved on through ``POST /api/games/{gid}/debug/ops``: a
+capital, scouts at the edges of what it explored, each era's techs, the whole map revealed; its view's minimap block
+moving from early to renaissance to information, its home box only growing, over the seam, within what the seat
+explored; the route's gate; with ``--keep`` the server stays up for the browser checklist's F1), and later
+``machines``; ``all`` runs every
 part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
@@ -89,7 +93,7 @@ DEV_SERVER_PORT = 8799
 #: The owner's dev server's directory: never a harness's, whatever is in it.
 OWNER_PLAY_DIR = Path("C:/dev/citar-play")
 #: Parts a later package writes (P3.9.4): asked for now, the harness says so and refuses.
-LATER = {"minimap": "3-17", "machines": "3-18"}
+LATER = {"machines": "3-18"}
 
 
 def _dev_server():
@@ -2891,9 +2895,178 @@ def part_hybrid(h: Harness) -> None:
                 pass
 
 
+# ---------------------------------------------------------------------------- the minimap (3-17)
+
+#: The minimap part's game: a standard map that wraps east-west, where seed 3242 starts the person's settler three
+#: columns from the seam, so its home runs over it once it has seen enough.
+MINIMAP_CONFIG = {"map_size": "standard", "map_type": "continents", "map_edges": "wrap_x", "seed": 3242,
+                  "barbarians": "off", "city_states": 0, "turn_limit": 400}
+#: The terrains a scout may not be put on.
+WATER = ("Ocean", "Coast", "Lakes")
+
+
+def _axis(lo: int, hi: int, n: int) -> list:
+    """The positions an inclusive interval covers on an axis of ``n``, the short way round when ``lo > hi``."""
+    out, i = [], lo
+    while True:
+        out.append(i)
+        if i == hi:
+            return out
+        i = (i + 1) % n
+
+
+def _box_covers(outer: dict, inner: dict, w: int, h: int) -> bool:
+    """Whether box ``outer`` covers box ``inner`` (corners inclusive, across a seam when x0 > x1 or y0 > y1)."""
+    xs, ys = set(_axis(outer["x0"], outer["x1"], w)), set(_axis(outer["y0"], outer["y1"], h))
+    return set(_axis(inner["x0"], inner["x1"], w)) <= xs and set(_axis(inner["y0"], inner["y1"], h)) <= ys
+
+
+def _home_touches(view: dict, home: dict) -> bool:
+    """Whether every edge of the home box is touched by a tile the seat explored inside it: the box is no wider than
+    what it saw (the engine's own tests check it against the continents)."""
+    w, h = view["width"], view["height"]
+    xs, ys = _axis(home["x0"], home["x1"], w), _axis(home["y0"], home["y1"], h)
+    seen = {(t[0] % w, t[0] // w) for t in view["tiles"]}
+    inside = {(x, y) for x, y in seen if x in xs and y in ys}
+    columns = all(any(x == edge for x, _ in inside) for edge in (xs[0], xs[-1]))
+    return columns and all(any(y == edge for _, y in inside) for edge in (ys[0], ys[-1]))
+
+
+def part_minimap(h: Harness) -> None:
+    """3-17's checks (design/phase3-features.md P3.7): alice's person seat and two bots on a standard map that wraps
+    east-west (``MINIMAP_CONFIG``), her game held at its first turn (she plays it, and does not end it). Through
+    ``POST /api/games/{gid}/debug/ops``, the route a script moves a live game on with (P3.7.5), she founds her capital
+    where her settler stands, puts scouts on land at the west and east edges of her home box, which explore past them,
+    takes the techs of the eras before the Renaissance (``grant_era``), puts more scouts at the edges, takes those
+    before the Information era, and has the whole map revealed. After each step her view's minimap block (P3.7.2):
+    its stage moves from early to renaissance to information; its home box only grows, the short way round the seam,
+    and stays within the tiles her view lists; at the end it is her whole continent, over the seam. Each step's
+    operations, answers, block and explored tiles are in the evidence. The route's gate: another member 404, a
+    visitor 401 or 404, an administrator 200. With ``--keep`` the game and the server stay for the browser
+    checklist's F1."""
+    r = h.report
+    alice, bob, admin = h.accounts["alice"], h.accounts["bob"], h.accounts["admin"]
+    data = r.data.setdefault("minimap", {})
+    gid = ""
+    try:
+        g = alice.post("/api/games", json={"name": f"QA minimap game {h.tag}", "config": dict(MINIMAP_CONFIG),
+                                           "seats": [{"type": "human"}, {"type": "bot"}, {"type": "bot"}]})
+        info = g.json() if g.status_code == 200 else {}
+        gid = info.get("id", "")
+        token = (info.get("seats") or [{}])[0].get("token", "")
+
+        def view() -> dict:
+            got = alice.get(f"/api/games/{gid}/view", params={"token": token})
+            return got.json() if got.status_code == 200 else {}
+
+        first = view() if gid else {}
+        r.check("alice's game: her person seat and two bots on a standard map that wraps east-west, larger than the "
+                "early window (44 by 28)",
+                bool(gid) and first.get("wrap_x") is True and first.get("width", 0) > 44
+                and first.get("height", 0) > 28 and first.get("you") == 0,
+                f"game {g.status_code}; {first.get('width')}x{first.get('height')}, wrap_x {first.get('wrap_x')}")
+        if not gid:
+            return
+        data.update({"game": gid, "seat_token": token, "config": MINIMAP_CONFIG,
+                     "map": {"width": first["width"], "height": first["height"], "wrap_x": first["wrap_x"]}})
+
+        # ---- the route's gate (P3.9.1): it is the dev server's (CITAR_DEBUG=1), for whoever manages the game
+        stranger = bob.post(f"/api/games/{gid}/debug/ops", json=[{"op": "reveal", "player": 0}])
+        with h.anonymous() as anon:
+            visitor = anon.post(f"/api/games/{gid}/debug/ops", json=[{"op": "reveal", "player": 0}])
+        by_admin = admin.post(f"/api/games/{gid}/debug/ops", json=[])
+        refused = alice.post(f"/api/games/{gid}/debug/ops", json=[{"op": "no_such_op"}])
+        r.check("the debug ops route: another member 404, a visitor 401 or 404, an administrator 200, an unknown "
+                "operation 400 naming it", stranger.status_code == 404 and visitor.status_code in (401, 404)
+                and by_admin.status_code == 200 and refused.status_code == 400
+                and "no_such_op" in refused.text,
+                f"bob {stranger.status_code}, visitor {visitor.status_code}, admin {by_admin.status_code} "
+                f"{by_admin.text[:80]}, unknown {refused.status_code} {refused.text[:120]}")
+
+        steps: list = []
+
+        def record(label: str, ops: list, answer) -> dict:
+            v = view()
+            block = v.get("minimap") or {}
+            results = None
+            if answer is not None:
+                results = answer.json().get("results") if answer.status_code == 200 else answer.text[:300]
+            steps.append({"step": label, "ops": ops, "status": answer.status_code if answer is not None else None,
+                          "results": results, "stage": block.get("stage"), "capital": block.get("capital"),
+                          "home": block.get("home"), "explored": len(v.get("tiles") or []), "turn": v.get("turn"),
+                          "within_explored": _home_touches(v, block["home"]) if block.get("home") else None})
+            return v
+
+        def send(label: str, ops: list) -> dict:
+            return record(label, ops, alice.post(f"/api/games/{gid}/debug/ops", json=ops))
+
+        def scouts_at_edges(v: dict) -> list:
+            """A scout on an explored land tile at the west and at the east edge of the home box, on its middle row
+            or the nearest."""
+            home, w = (v.get("minimap") or {}).get("home"), v["width"]
+            if not home:
+                return []
+            land = [(t[0] % w, t[0] // w) for t in v["tiles"] if t[1] not in WATER]
+            rows = _axis(home["y0"], home["y1"], v["height"])
+            middle = rows[len(rows) // 2]
+            out = []
+            for edge in (home["x0"], home["x1"]):
+                spots = sorted((abs(y - middle), x, y) for x, y in land if x == edge and y in rows)
+                if spots:
+                    out.append({"op": "add_unit", "player": 0, "unit": "Scout", "x": spots[0][1], "y": spots[0][2]})
+            return out
+
+        v = record("the start", [], None)
+        settler = next((u for u in v.get("units") or [] if u.get("owner") == 0 and u.get("type") == "Settler"), None)
+        start = steps[-1]
+        r.check("at the start the block is early, with no capital and the home box of what her settler's party "
+                "explored", start["stage"] == "early" and start["capital"] is None and bool(start["home"])
+                and settler is not None and _home_touches(v, start["home"]),
+                json.dumps({k: start[k] for k in ("stage", "capital", "home", "explored")}))
+        if settler is None:
+            return
+        v = send("her capital founded where the settler stands",
+                 [{"op": "found_city", "player": 0, "x": settler["x"], "y": settler["y"], "capital": True}])
+        v = send("scouts at the home box's west and east edges", scouts_at_edges(v))
+        v = send("the techs of the eras before the Renaissance",
+                 [{"op": "grant_era", "player": 0, "era": "Renaissance era"}])
+        v = send("more scouts at the edges", scouts_at_edges(v))
+        v = send("more scouts at the edges, again", scouts_at_edges(v))
+        v = send("the techs of the eras before the Information era",
+                 [{"op": "grant_era", "player": 0, "era": "Information era"}])
+        v = send("the whole map revealed", [{"op": "reveal", "player": 0}])
+        data["steps"] = steps
+        w, hgt = v.get("width", 0), v.get("height", 0)
+        r.check("every step's operations were applied through the route, each with its result (200)",
+                all(s["status"] == 200 and len(s["results"] or []) == len(s["ops"]) and s["ops"] for s in steps[1:]),
+                json.dumps([(s["step"], s["status"], len(s["ops"])) for s in steps]))
+        stages = [s["stage"] for s in steps]
+        r.check("the stage moved from early to renaissance to information as the seat took each era's techs",
+                stages == ["early"] * 3 + ["renaissance"] * 3 + ["information"] * 2, json.dumps(stages))
+        r.check("the capital is where the settler stood from the second step on",
+                all(s["capital"] == [settler["x"], settler["y"]] for s in steps[1:]),
+                json.dumps([s["capital"] for s in steps]))
+        homes = [s["home"] for s in steps]
+        grew = all(a and b and _box_covers(b, a, w, hgt) for a, b in zip(homes, homes[1:]))
+        r.check("the home box only grew, the short way round the seam, and grew with the scouts' exploring",
+                grew and homes[2] != homes[1] and homes[4] != homes[3] and steps[-1]["explored"] == w * hgt,
+                json.dumps([(s["step"], s["home"], s["explored"]) for s in steps]))
+        r.check("at every step the home box stays within the tiles her view lists: each of its edges touched by one "
+                "she explored", all(s["within_explored"] for s in steps),
+                json.dumps([s["within_explored"] for s in steps]))
+        r.check("revealed, the home box is her whole continent, across the seam (x0 > x1)",
+                homes[-1]["x0"] > homes[-1]["x1"] and homes[-1] != homes[-2], json.dumps(homes[-1]))
+    finally:
+        if gid and not h.keep:
+            try:
+                alice.delete(f"/api/games/{gid}")
+            except httpx.HTTPError:
+                pass
+
+
 #: The parts written so far, in the order ``all`` runs them.
 PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue, "ledger": part_ledger,
-                                               "chat": part_chat, "hybrid": part_hybrid}
+                                               "chat": part_chat, "hybrid": part_hybrid, "minimap": part_minimap}
 
 
 # ---------------------------------------------------------------------------- the run
