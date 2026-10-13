@@ -619,12 +619,18 @@ class Rollups(World):
         check("rolled up again")
 
     def test_the_rollup_thread_passes_survive_a_failure(self):
-        with mock.patch.object(ledger, "rollup", side_effect=RuntimeError("disk on fire")):
+        with mock.patch.object(ledger, "rollup", side_effect=RuntimeError("disk on fire")) as failing:
             with self.assertLogs("citar.ledger", "ERROR"):
                 led = ledger.Ledger(background=True)
                 with mock.patch.object(ledger, "ROLLUP_SECONDS", 0.05):
                     led.ensure_threads()
-                    time.sleep(0.3)
+                    # Until a pass after the failed one, not a fixed time: a pass reads the lab and the budgets before
+                    # it rolls up, and on a slow runner the first had not got there in the 0.3 s this slept once
+                    # (CI, test.yml run 38411953016, ubuntu / Python 3.11).
+                    end = time.monotonic() + 15
+                    while failing.call_count < 2 and time.monotonic() < end:
+                        time.sleep(0.02)
+                self.assertGreaterEqual(failing.call_count, 2, "a pass again after the failed one")
                 self.assertTrue(led._roller.is_alive(), "the loop carries on")
                 led.stop(2.0)
 
