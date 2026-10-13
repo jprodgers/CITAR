@@ -54,8 +54,8 @@ leaderboard as the run's owner, another member, an administrator and a visitor s
 which side answered each case; with ``--keep`` the server stays up for the browser checklist's D1 and D2), ``minimap``
 (3-17: a person's seat on a standard map that wraps east-west, moved on through ``POST /api/games/{gid}/debug/ops``: a
 capital, scouts at the edges of what it explored, each era's techs, the whole map revealed; its view's minimap block
-moving from early to renaissance to information, its home box only growing, over the seam, within what the seat
-explored; the route's gate; with ``--keep`` the server stays up for the browser checklist's F1), and later
+moving from early to renaissance to information, its home box only growing, over the seam, and at every step the
+box of the land the seat explored joined to its home through land it explored; the route's gate; with ``--keep`` the server stays up for the browser checklist's F1), and later
 ``machines``; ``all`` runs every
 part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
@@ -2921,6 +2921,46 @@ def _box_covers(outer: dict, inner: dict, w: int, h: int) -> bool:
     return set(_axis(inner["x0"], inner["x1"], w)) <= xs and set(_axis(inner["y0"], inner["y1"], h)) <= ys
 
 
+def _arc(marked: set, n: int, wrap: bool):
+    """The shortest interval of ``0..n`` covering ``marked``, as ``(lo, hi)`` inclusive (``lo > hi`` across the seam of
+    an axis that wraps), or None: of arcs as short, one that does not cross the seam, else the first to start (the
+    engine's choice)."""
+    if not marked:
+        return None
+    if not wrap:
+        return min(marked), max(marked)
+    length, _, start = min((span, s + span > n, s) for s in range(n)
+                           for span in [max((i - s) % n for i in marked) + 1])
+    return start, (start + length - 1) % n
+
+
+def _joined_home(view: dict, anchor) -> tuple:
+    """The land the seat explored joined to ``anchor`` (``[x, y]``) through land it explored, worked out from its view
+    alone (each tile the view lists is explored; land is any terrain not in ``WATER``), and that land's box covered the
+    short way round: what the engine's home box must be (design/phase3-features.md P3.7.2), no more, so that it tells
+    the seat nothing its own view does not. ``(None, set())`` without an anchor or one at sea."""
+    w, h = view["width"], view["height"]
+    wraps = (bool(view.get("wrap_x")), bool(view.get("wrap_y")))
+    land = {t[0] for t in view.get("tiles") or [] if t[1] not in WATER}
+    start = anchor[1] * w + anchor[0] if anchor else -1
+    if start not in land:
+        return None, set()
+    seen, todo = {start}, [start]
+    while todo:
+        i = todo.pop()
+        x, y = i % w, i // w
+        steps = ((1, 0), (1, -1), (0, -1), (-1, 0), (0, 1), (1, 1)) if y & 1 else \
+            ((1, 0), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1))
+        for dx, dy in steps:
+            nx, ny = (x + dx) % w if wraps[0] else x + dx, (y + dy) % h if wraps[1] else y + dy
+            n = ny * w + nx
+            if 0 <= nx < w and 0 <= ny < h and n in land and n not in seen:
+                seen.add(n)
+                todo.append(n)
+    xs, ys = _arc({i % w for i in seen}, w, wraps[0]), _arc({i // w for i in seen}, h, wraps[1])
+    return {"x0": xs[0], "y0": ys[0], "x1": xs[1], "y1": ys[1]}, seen
+
+
 def _home_touches(view: dict, home: dict) -> bool:
     """Whether every edge of the home box is touched by a tile the seat explored inside it: the box is no wider than
     what it saw (the engine's own tests check it against the continents)."""
@@ -2940,7 +2980,8 @@ def part_minimap(h: Harness) -> None:
     takes the techs of the eras before the Renaissance (``grant_era``), puts more scouts at the edges, takes those
     before the Information era, and has the whole map revealed. After each step her view's minimap block (P3.7.2):
     its stage moves from early to renaissance to information; its home box only grows, the short way round the seam,
-    and stays within the tiles her view lists; at the end it is her whole continent, over the seam. Each step's
+    and is at every step the box of the land her view lists joined to her capital (her settler before it) through land
+    it lists, no wider (``_joined_home``); at the end it is her whole continent, over the seam. Each step's
     operations, answers, block and explored tiles are in the evidence. The route's gate: another member 404, a
     visitor 401 or 404, an administrator 200. With ``--keep`` the game and the server stay for the browser
     checklist's F1."""
@@ -2985,28 +3026,39 @@ def part_minimap(h: Harness) -> None:
 
         steps: list = []
 
+        def anchor_of(v: dict, block: dict):
+            """Where her home is read from: her capital, else her first settler."""
+            if block.get("capital"):
+                return block["capital"]
+            settlers = sorted((u for u in v.get("units") or [] if u.get("owner") == 0 and u.get("type") == "Settler"),
+                              key=lambda u: u.get("id", 0))
+            return [settlers[0]["x"], settlers[0]["y"]] if settlers else None
+
         def record(label: str, ops: list, answer) -> dict:
             v = view()
             block = v.get("minimap") or {}
+            joined, _tiles = _joined_home(v, anchor_of(v, block)) if v else (None, set())
             results = None
             if answer is not None:
                 results = answer.json().get("results") if answer.status_code == 200 else answer.text[:300]
             steps.append({"step": label, "ops": ops, "status": answer.status_code if answer is not None else None,
                           "results": results, "stage": block.get("stage"), "capital": block.get("capital"),
                           "home": block.get("home"), "explored": len(v.get("tiles") or []), "turn": v.get("turn"),
-                          "within_explored": _home_touches(v, block["home"]) if block.get("home") else None})
+                          "within_explored": _home_touches(v, block["home"]) if block.get("home") else None,
+                          "joined_land": joined, "is_joined_land": bool(joined) and joined == block.get("home")})
             return v
 
         def send(label: str, ops: list) -> dict:
             return record(label, ops, alice.post(f"/api/games/{gid}/debug/ops", json=ops))
 
         def scouts_at_edges(v: dict) -> list:
-            """A scout on an explored land tile at the west and at the east edge of the home box, on its middle row
-            or the nearest."""
-            home, w = (v.get("minimap") or {}).get("home"), v["width"]
+            """A scout on a tile of her home land (explored, and joined to her capital through explored land) at the
+            west and at the east edge of the home box, on its middle row or the nearest."""
+            block = v.get("minimap") or {}
+            home, w = block.get("home"), v["width"]
             if not home:
                 return []
-            land = [(t[0] % w, t[0] // w) for t in v["tiles"] if t[1] not in WATER]
+            land = [(i % w, i // w) for i in _joined_home(v, anchor_of(v, block))[1]]
             rows = _axis(home["y0"], home["y1"], v["height"])
             middle = rows[len(rows) // 2]
             out = []
@@ -3051,9 +3103,10 @@ def part_minimap(h: Harness) -> None:
         r.check("the home box only grew, the short way round the seam, and grew with the scouts' exploring",
                 grew and homes[2] != homes[1] and homes[4] != homes[3] and steps[-1]["explored"] == w * hgt,
                 json.dumps([(s["step"], s["home"], s["explored"]) for s in steps]))
-        r.check("at every step the home box stays within the tiles her view lists: each of its edges touched by one "
-                "she explored", all(s["within_explored"] for s in steps),
-                json.dumps([s["within_explored"] for s in steps]))
+        r.check("at every step the home box is the box of the land her view lists joined to her capital (her "
+                "settler before it) through land it lists: no wider, so it tells her nothing her view does not",
+                all(s["is_joined_land"] and s["within_explored"] for s in steps),
+                json.dumps([(s["step"], s["home"], s["joined_land"]) for s in steps]))
         r.check("revealed, the home box is her whole continent, across the seam (x0 > x1)",
                 homes[-1]["x0"] > homes[-1]["x1"] and homes[-1] != homes[-2], json.dumps(homes[-1]))
     finally:

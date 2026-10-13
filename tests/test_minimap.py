@@ -1,9 +1,12 @@
 """The minimap (design/phase3-features.md P3.7, package 3-17; gate 3).
 
 - **The block.** A seat's view (``GET /api/games/{gid}/view`` with its token) has ``minimap``: ``stage`` from its era,
-  ``capital``, and ``home``, the box of the tiles of its home continent it has explored, checked here against the view's
-  own tiles (each one a tile the seat has explored) and the continents the state keeps, covered the short way round on
-  a wrapping axis. The god view and a spectator's view, through a seat's eyes or not, have none (P3.7.2, P3.7.4).
+  ``capital``, and ``home``, the box of the tiles of its home continent it has explored and seen joined to home, checked
+  here against a search from the anchor through the view's own tiles (each one a tile the seat has explored) of the
+  anchor's continent as the state keeps them, covered the short way round on a wrapping axis. Land of the home
+  continent a scout explored far away, which nothing explored joins to home, stays out of the box: the box would tell
+  the seat that land is home, which its view does not. The god view and a spectator's view, through a seat's eyes or
+  not, have none (P3.7.2, P3.7.4).
 - **The binding** leaves the block out when asked (``view_json(..., minimap=False)``, a spectator's look through a seat's
   eyes), and nothing else. The block's cost (P3.9.7) is a testkit timing of the block itself against the seat view
   (``crates/citar-testkit/tests/engine/minimap.rs``): through the binding it is a fraction of a percent of a view, below
@@ -90,18 +93,45 @@ def shortest_arc(marked: set, n: int, wrap: bool):
     return start, (start + length - 1) % n
 
 
-def expected_home(view: dict, cont: list, anchor: tuple):
-    """The home box the view's own tiles make: those of the anchor's continent, covered on each axis."""
+def neighbours(i: int, w: int, h: int, wrap_x: bool, wrap_y: bool):
+    """The six tiles next to tile ``i``, from its offset coordinates (odd rows half a tile east)."""
+    x, y = i % w, i // w
+    steps = ((1, 0), (1, -1), (0, -1), (-1, 0), (0, 1), (1, 1)) if y & 1 else \
+        ((1, 0), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1))
+    for dx, dy in steps:
+        nx, ny = x + dx, y + dy
+        nx, ny = nx % w if wrap_x else nx, ny % h if wrap_y else ny
+        if 0 <= nx < w and 0 <= ny < h:
+            yield ny * w + nx
+
+
+def box_of(view: dict, tiles) -> dict | None:
+    """The box of ``tiles`` (indexes), covered the short way round on a wrapping axis."""
     w, h = view["width"], view["height"]
-    home = cont[anchor[1] * w + anchor[0]]
-    if home == 0xFFFF:
-        return None
-    tiles = [t[0] for t in view["tiles"] if cont[t[0]] == home]
     xs = shortest_arc({i % w for i in tiles}, w, view["wrap_x"])
     ys = shortest_arc({i // w for i in tiles}, h, view["wrap_y"])
-    if xs is None:
-        return None
-    return {"x0": xs[0], "y0": ys[0], "x1": xs[1], "y1": ys[1]}
+    return None if xs is None else {"x0": xs[0], "y0": ys[0], "x1": xs[1], "y1": ys[1]}
+
+
+def home_tiles(view: dict, cont: list, anchor: tuple) -> set:
+    """The tiles of the anchor's continent the view's own tiles join to it: a search from the anchor through them."""
+    w, h = view["width"], view["height"]
+    start = anchor[1] * w + anchor[0]
+    shown = {t[0] for t in view["tiles"]}
+    if cont[start] == 0xFFFF or start not in shown:
+        return set()
+    seen, todo = {start}, [start]
+    while todo:
+        for n in neighbours(todo.pop(), w, h, view["wrap_x"], view["wrap_y"]):
+            if n in shown and cont[n] == cont[start] and n not in seen:
+                seen.add(n)
+                todo.append(n)
+    return seen
+
+
+def expected_home(view: dict, cont: list, anchor: tuple):
+    """The home box the view's own tiles make: those of the anchor's continent joined to it through them."""
+    return box_of(view, home_tiles(view, cont, anchor))
 
 
 def anchor_of(view: dict, pid: int):
@@ -222,9 +252,48 @@ class Block(Case):
             cont = continents(s.game.state_dict())
         home = cont[settler["y"] * v["width"] + settler["x"]]
         self.assertTrue(any(c not in (home, 0xFFFF) for c in cont), "another continent, left out of the box")
-        self.assertNotEqual(whole["home"], expected_home(v, [home if c != 0xFFFF else c for c in cont],
-                                                          (settler["x"], settler["y"])),
+        self.assertEqual(whole["home"], box_of(v, [i for i, c in enumerate(cont) if c == home]),
+                         "everything explored: the whole home continent")
+        self.assertNotEqual(whole["home"], box_of(v, [i for i, c in enumerate(cont) if c != 0xFFFF]),
                             "all land counted as home would be another box")
+
+    def test_far_land_of_the_home_continent_stays_out_until_explored_land_joins_it(self):
+        """A scout put down far away on the seat's own continent explores land there, which nothing the seat explored
+        joins to its home: the box stays as it was, though counting every explored tile of the continent would widen
+        it. Revealed, the land between is explored, and the box is the whole continent."""
+        info = self.create("alice", [{"type": "human"}, {"type": "bot"}])
+        gid, token = info["id"], info["seats"][0]["token"]
+        before = self.check_block(gid, token, 0)
+        v = json.loads(self.view(gid, token=token).content)
+        w = v["width"]
+        settler = next(u for u in v["units"] if u["owner"] == 0 and u["type"] == "Settler")
+        s = self.manager.get(gid)
+        with s.lock:
+            cont = continents(s.game.state_dict())
+        home = cont[settler["y"] * w + settler["x"]]
+
+        def apart(i: int) -> int:
+            dx = abs(i % w - settler["x"])
+            return min(dx, w - dx) + abs(i // w - settler["y"])
+        far = max((i for i, c in enumerate(cont) if c == home), key=apart)
+        self.assertGreater(apart(far), 12, "the home continent reaches far from the start")
+        with mock.patch.dict(os.environ, DEBUG):
+            r = self.ops(gid, [{"op": "add_unit", "player": 0, "unit": "Scout", "x": far % w, "y": far // w}],
+                         who="alice")
+        self.assertEqual(r.status_code, 200, r.text)
+        after = self.check_block(gid, token, 0)
+        v = json.loads(self.view(gid, token=token).content)
+        explored_home = [t[0] for t in v["tiles"] if cont[t[0]] == home]
+        self.assertIn(far, explored_home, "the scout's tile is explored, and on the home continent")
+        self.assertNotIn(far, home_tiles(v, cont, (settler["x"], settler["y"])), "nothing explored joins it to home")
+        self.assertEqual(after["home"], before["home"], "the far land stays out of the box")
+        self.assertNotEqual(box_of(v, explored_home), after["home"],
+                            "every explored tile of the continent counted would have widened it")
+        with mock.patch.dict(os.environ, DEBUG):
+            self.assertEqual(self.ops(gid, [{"op": "reveal", "player": 0}], who="alice").status_code, 200)
+        whole = self.check_block(gid, token, 0)
+        self.assertEqual(whole["home"], box_of(v, [i for i, c in enumerate(cont) if c == home]),
+                         "revealed: the whole continent")
 
     def test_the_stage_follows_the_era(self):
         info = self.create("alice", [{"type": "human"}, {"type": "bot"}])
