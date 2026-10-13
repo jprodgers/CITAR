@@ -365,7 +365,11 @@ export class ChatModel {
    * tab lights up) rather than taking the screen from what you are doing. */
   notify(civ, { restore = false } = {}) {
     const w = this.windowOf(civ);
-    if (!w) return this.openWindow(civ, { restore: true });
+    if (!w) {
+      const made = this.openWindow(civ, { restore: true });
+      if (this.active !== civ) made.unread = true;   // at narrow widths only the active one shows
+      return made;
+    }
     if (restore) w.minimised = false;
     if (w.minimised || (this.active != null && this.active !== civ)) w.unread = true;
     if (this.active == null) this.active = civ;

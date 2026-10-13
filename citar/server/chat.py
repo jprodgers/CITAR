@@ -431,7 +431,9 @@ class ChatClock:
 
     def _status(self, c: _Chat, state: str, *, position=None, eta_s=None, **extra) -> Optional[dict]:
         """A ``negotiation_status`` for ``c``, unless it says what the last one sent said (a deadline that only
-        counted down is not news: clients count it down themselves). Lock held."""
+        counted down is not news: clients count it down themselves). ``entries`` is how many entries the chat had
+        when it was said: a chat only grows, so a client tells a status that arrived late (fewer entries than it has
+        seen) from one ahead of the entries it has read (the chat window, P3.5.6). Lock held."""
         timing = self._timing(c)
         key = (state, position, eta_s, timing["deadline"] is None, timing["paused"], c.held, c.awaiting, c.entries)
         if key == c.published:
@@ -439,7 +441,8 @@ class ChatClock:
         c.published = key
         return {"type": "negotiation_status", "negotiation": c.nid, "players": list(c.players),
                 "waiting_on": c.awaiting, "kind": c.kind, "state": state, "position": position, "eta_s": eta_s,
-                "deadline": timing["deadline"], "left_s": timing["left_s"], "paused": timing["paused"], **extra}
+                "deadline": timing["deadline"], "left_s": timing["left_s"], "paused": timing["paused"],
+                "entries": c.entries, **extra}
 
     def _waiting(self, c: _Chat) -> Optional[dict]:
         """A chat's ``waiting`` status (with its deadline), unless it is unchanged since the last one sent. Lock

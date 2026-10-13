@@ -6,6 +6,7 @@ import { hexDistance, neighbors } from "./hex.js";
 import { renderUnitPanel, renderCityPanel, openTechTree, openDiplomacy, openEmpire, openNotes, openHelp, openPolicies,
          openReligion, openGreatPeople, openCityStates, openVictory, chooseBeliefs } from "./panels.js";
 import { openMetrics } from "./metrics.js";
+import { ChatDock } from "./chat.js";
 
 export class GameScreen {
   constructor(root, rules, gid, token, asPlayer) {
@@ -31,6 +32,9 @@ export class GameScreen {
     this._lastTurnKey = null;
     this._centered = false;
     this.build();
+    // the docked chat windows, left of End Turn (design/phase3-features.md P3.5.6)
+    this.chat = new ChatDock(this, { host: this.main, turnBox: this.turnBox,
+                                     fetchChat: (nid) => api.negotiation(this.gid, this.token, nid) });
     this.refresh();
     this.ws = connectWS(gid, token, (m) => this.onWS(m));
     this._keyHandler = (e) => this.onKey(e);
@@ -39,6 +43,7 @@ export class GameScreen {
 
   destroy() {
     if (this.ws) this.ws.close();
+    if (this.chat) this.chat.destroy();
     document.removeEventListener("keydown", this._keyHandler);
   }
 
@@ -195,6 +200,7 @@ export class GameScreen {
       if (this.selectedUnit != null && !v.units.some((u) => u.id === this.selectedUnit && u.owner === this.you)) this.deselect();
       if (this.selectedCity != null && !v.cities.some((c) => c.id === this.selectedCity && c.owner === this.you)) this.deselect();
       await this.refreshDetails();
+      this.chat.onView(v);
       this.renderTopbar();
       this.renderSide();
       this.renderBanner();
@@ -214,7 +220,6 @@ export class GameScreen {
           if (fresh && keys.size) this.showAlerts();
         }
       }
-      this.checkNegotiations();
       this.checkReturnOffers();
     } catch (e) {
       toast(e.message, "error");
@@ -252,7 +257,9 @@ export class GameScreen {
       this.feed.push(m.event);
       if (this.feed.length > 400) this.feed.splice(0, this.feed.length - 400);
       this.maybeToastEvent(m.event);
-      if (this._diploModal && this._redrawDiplomacy && ["negotiation", "message", "deal", "war_declared", "peace", "first_contact"].includes(m.event.type)) {
+      if (m.event.type === "negotiation") this.chat.onEvent(m.event);
+      // the Diplomacy screen shows relations and messages; chats are the docked windows' (chat.js)
+      if (this._diploModal && this._redrawDiplomacy && ["message", "deal", "war_declared", "peace", "first_contact"].includes(m.event.type)) {
         clearTimeout(this._diploTimer);
         this._diploTimer = setTimeout(() => this._redrawDiplomacy(), 250);
       }
@@ -266,6 +273,8 @@ export class GameScreen {
       if (m.status === "queued") this.agentWait[m.player] = m;
       else delete this.agentWait[m.player];
       this.renderTopbar();
+    } else if (m.type === "negotiation_status") {
+      this.chat.onStatus(m);
     } else if (m.type === "control") {
       this.scheduleRefresh(10);
     } else if (m.type === "crashed") {
@@ -281,7 +290,8 @@ export class GameScreen {
     if (ev.type === "agent_error" || ev.type === "game_paused") { toast(ev.text, "error", 12000); return; }
     if (ev.type === "game_resumed") { toast(ev.text, "info", 6000); return; }
     const mine = this.you != null && ev.players && ev.players.includes(this.you);
-    // the diplomacy window shows (or is about to show) these itself: a toast on top would only hide it
+    // the chat window shows (or is about to show) these itself, and the Diplomacy screen its messages: a toast on top
+    // would only hide them
     if (mine && (ev.type === "negotiation" || (ev.type === "message" && this._diploModal))) return;
     if (important.includes(ev.type) || (mine && ["unit_killed", "unit_captured", "negotiation", "message", "camp_cleared", "ruins", "tech",
         "wonder_built", "great_person_born", "golden_age", "natural_wonder", "spy", "un_vote"].includes(ev.type))) {
@@ -313,18 +323,6 @@ export class GameScreen {
       footer: [el("button", { onclick: () => decide(true) }, "Keep it"),
                el("button", { class: "primary", onclick: () => decide(false) }, `Return to ${who}`)],
     });
-  }
-
-  checkNegotiations() {
-    if (!this.view.diplomacy || this.isSpectator) return;
-    const waiting = this.view.diplomacy.open_negotiations.filter((n) => n.your_move);
-    for (const n of waiting) {
-      const key = `${n.id}:${n.history.length}`;
-      if (this._shownNeg === key) continue;
-      this._shownNeg = key;
-      openDiplomacy(this, n.with);
-      break;
-    }
   }
 
   // ------------------------------------------------------------------
@@ -510,7 +508,7 @@ export class GameScreen {
     const k = e.key.toLowerCase();
     if (k === "escape") this.deselect();
     else if (k === "n" || k === "tab") { e.preventDefault(); this.selectNextIdle(); }
-    else if (k === "enter" && e.shiftKey) this.endTurn(e.ctrlKey || e.metaKey);
+    else if (k === "enter" && e.shiftKey) this.onEndTurn(e.ctrlKey || e.metaKey);
     else if (k === "t") openTechTree(this);
     else if (k === "o") openPolicies(this);
     else if (k === "d") openDiplomacy(this);
@@ -543,11 +541,12 @@ export class GameScreen {
     if (r) { toast(`${a.name}: done`, "info", 2500); this.afterOrder(d.id); }
   }
 
-  // decisions still open this turn; any of them keeps End Turn greyed out (Ctrl+click ends the turn anyway)
+  // decisions still open this turn; any of them keeps End Turn greyed out (Ctrl+click ends the turn anyway). Open
+  // chats are End Turn's own states (chat.js: answer first, waiting, armed), not one of these.
   turnBlockers() {
     const v = this.view;
     if (!v || this.you == null) return [];
-    const BLOCKING = ["research", "free_tech", "policy", "great_person", "pantheon", "promotion", "negotiation", "un_vote", "idle_city",
+    const BLOCKING = ["research", "free_tech", "policy", "great_person", "pantheon", "promotion", "un_vote", "idle_city",
                       "return_civilian"];
     const out = (v.alerts || []).filter((a) => BLOCKING.includes(a.type));
     const idle = v.units.filter((u) => u.owner === this.you && !u.activity && u.moves > 0);
@@ -562,14 +561,34 @@ export class GameScreen {
       const u = this.view.units.find((x) => x.id === a.unit);
       if (u) { this.renderer.centerOn(u.x, u.y); this.selectUnit(u.id); return this.askReturnCivilian(u); }
     }
-    // a negotiation alert names the other side, so Diplomacy opens on that chat
-    if (a.type === "negotiation") return openDiplomacy(this, a.player ?? null);
+    // a negotiation alert names the other side: its chat window opens
+    if (a.type === "negotiation") return a.player != null ? this.chat.open(a.player) : openDiplomacy(this);
     const open = { research: openTechTree, free_tech: openTechTree, policy: openPolicies, great_person: openGreatPeople,
                    pantheon: openReligion, un_vote: openDiplomacy }[a.type];
     if (open) return open(this);
     if (a.x != null) this.renderer.centerOn(a.x, a.y);
     if (a.city != null) this.selectCity(a.city);
     else if (a.unit != null) this.selectUnit(a.unit);
+  }
+
+  // End Turn (the button, Shift+Enter) while chats hold the turn (chat.js's states): a chat waiting on you opens;
+  // one waiting on the other side arms End Turn, which then ends the turn once every chat has closed (the other
+  // decisions are checked first, as for any end of turn: Ctrl+click arms it anyway); armed, a click disarms it.
+  onEndTurn(force = false) {
+    if (!this.myTurn) return;
+    const st = this.chat.endTurnState();
+    if (st.state === "answer") return this.chat.open(st.with);
+    if (st.state === "armed") return this.chat.disarm();
+    if (st.state === "waiting") {
+      const blockers = this.turnBlockers();
+      if (blockers.length && !force) {
+        toast(`Before ending the turn: ${blockers.map((a) => a.text).join(" ")} (Ctrl+click End Turn to end it anyway.)`, "info", 5000);
+        this.goToBlocker(blockers[0]);
+        return;
+      }
+      return this.chat.arm(force);
+    }
+    return this.endTurn(force);
   }
 
   async endTurn(force = false) {
@@ -858,11 +877,12 @@ export class GameScreen {
           promos.length === 1 ? `▲ Promote ${u.name}` : `▲ ${promos.length} promotions`));
       }
       box.append(el("button", { disabled: !needs, onclick: () => this.selectNextIdle() }, `Next unit (${needs})`),
-        (() => {
+        // while a chat holds the turn, End Turn says so (answer first, waiting with its countdown, armed)
+        this.chat.endTurnButton((force) => this.onEndTurn(force)) || (() => {
           const blockers = this.turnBlockers();
           return el("button", { class: `end-turn ${blockers.length ? "blocked" : "ready"}`, "aria-disabled": blockers.length ? "true" : "false",
             title: blockers.length ? `Still to do:\n${blockers.map((a) => "• " + a.text).join("\n")}\n\nClick to go to the first one; Ctrl+click to end the turn anyway.` : "End your turn (Shift+Enter)",
-            onclick: (e) => this.endTurn(e.ctrlKey || e.metaKey) }, "End Turn");
+            onclick: (e) => this.onEndTurn(e.ctrlKey || e.metaKey) }, "End Turn");
         })());
     } else {
       const st = this.agentStatus[v.current_player];
@@ -870,6 +890,7 @@ export class GameScreen {
         : st === "paused" ? " (paused mid-turn)" : st === "queued" ? ` (${queuedText(this.agentWait[v.current_player])})` : "";
       box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${note}`));
     }
+    this.chat.layout();          // the End Turn box changed size: the docked windows stay clear of it
   }
 
   renderBanner() {
@@ -942,7 +963,7 @@ export class GameScreen {
       for (const a of alerts) {
         body.appendChild(el("div", { class: "event alert-item clickable", onclick: () => {
           if (a.x == null) {
-            if (a.type === "negotiation") { openDiplomacy(this, a.player ?? null); return; }
+            if (a.type === "negotiation") { if (a.player != null) this.chat.open(a.player); else openDiplomacy(this); return; }
             const open = { gold: openEmpire, happiness: openEmpire, research: openTechTree, free_tech: openTechTree, policy: openPolicies,
                            great_person: openGreatPeople, pantheon: openReligion, spy: openGreatPeople, un_vote: openDiplomacy }[a.type];
             if (open) open(this);

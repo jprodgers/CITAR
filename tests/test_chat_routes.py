@@ -257,6 +257,11 @@ class StatusEvents(Case):
             waiting = [x for x in mine if x["state"] == "waiting"]
             self.assertTrue(all(x["deadline"] and x["players"] == [0, 1] for x in waiting), waiting)
             self.assertEqual({x["waiting_on"] for x in waiting}, {0, 1}, "first the model, then the person")
+            # each names how many entries the chat had, so the chat window tells a late status from a current one
+            counts = [x["entries"] for x in mine if x["state"] != "closed"]
+            self.assertEqual(counts, sorted(counts), f"{side}: {counts}")
+            self.assertEqual({x["entries"] for x in mine if x["state"] in ("queued", "thinking")}, {1}, mine)
+            self.assertEqual({x["entries"] for x in waiting if x["waiting_on"] == 0}, {2}, "the model's answer is the second")
             self.assertEqual(mine[-1]["state"], "closed")
             self.assertEqual(mine[-1]["status"], "rejected")
         self.assertEqual(got["p2"], [], "a third seat hears nothing of it")
