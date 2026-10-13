@@ -263,11 +263,14 @@ test("window state: your move, their move, closed, and no chat yet", () => {
   }
 });
 
-test("the message count: from the entries when they are ahead of the view, close notes left out, warning near the cap", () => {
+test("the message count: the entries, or a status ahead of them; never back; warning near the cap", () => {
   const m = new ChatModel(YOU);
   const nv = view(4, [entry(1, true, "open"), entry(2, false, "reply")]);
   m.applyNegotiation({ ...nv, max_messages: 5 }, 0);
   assert.deepEqual(m.windowState(1, 0).count, { messages: 2, max: 5, left: 3, text: "2/5 messages", tone: "muted" });
+  // your answer's status comes before its read: the count moves with it
+  m.applyStatus(status(4, "waiting", { entries: 3 }), 0);
+  assert.equal(m.windowState(1, 0).count.messages, 3);
   m.applyNegotiation({ ...view(4, [entry(1, true, "open"), entry(2, false, "reply"), entry(3, true, "reply")]), max_messages: 5 }, 0);
   // a stale view (two messages) after the read of three: the count stays at three
   m.applyNegotiation({ ...nv, max_messages: 5 }, 0);

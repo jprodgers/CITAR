@@ -66,7 +66,7 @@ function newChat(nid) {
     ver: 0,                       // the version (number of entries) its status, side and clock come from
     propVer: -1,                  // ... and its proposal
     waitingOn: null,              // the seat it waits on while it is open
-    proposal: null, proposalByYou: null, messages: 0, maxMessages: null,
+    proposal: null, proposalByYou: null, maxMessages: null,
     clock: null,                  // {waitingOn, kind, leftS, at, paused, held, ver}
     live: null,                   // the answering side's request: {state: queued|thinking, position, etaS, machine, held, at, ver}
   };
@@ -179,7 +179,6 @@ export class ChatModel {
       chat.propVer = ver;
       chat.proposal = nv.current_proposal || null;
       chat.proposalByYou = nv.proposal_by_you ?? null;
-      if (Number.isFinite(nv.messages)) chat.messages = nv.messages;
       if (nv.max_messages != null) chat.maxMessages = nv.max_messages;
     }
     if (chat.status !== "open") { chat.live = null; chat.clock = null; chat.waitingOn = null; }
@@ -268,11 +267,12 @@ export class ChatModel {
 
   /** How many messages an open chat has had against the game's cap (`{messages, max, left, text, tone}`, or null when
    * the cap is not known yet): the message that would pass the cap closes the chat instead, so the window says so
-   * (`warn` with two or fewer left). Counted from the entries when they are ahead of the view's count: a close note
-   * is not a message, but it only ever ends a chat, so an open chat's entries are all messages. */
+   * (`warn` with two or fewer left). The chat's version is its number of entries as the latest view, read or status
+   * gave it (a status about the next message moves it before that message is read), never fewer than the client
+   * holds; a close note is not a message, but it only ever ends a chat, so an open chat's entries are all messages. */
   messageCount(chat) {
     if (!chat || chat.status !== "open" || !(chat.maxMessages > 0)) return null;
-    const messages = Math.max(chat.messages || 0, chat.entries.length);
+    const messages = chat.ver;
     const left = Math.max(0, chat.maxMessages - messages);
     return { messages, max: chat.maxMessages, left, text: `${messages}/${chat.maxMessages} messages`,
              tone: left <= 2 ? "warn" : "muted" };

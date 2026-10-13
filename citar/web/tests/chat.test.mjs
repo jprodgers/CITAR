@@ -828,6 +828,8 @@ test("a window shows how many messages its chat has had against the cap, warning
   const win = dock.windows.get(1);
   assert.equal(win.count.textContent, "1/5 messages (4 left)");
   assert.equal(win.count.className.trim(), "chat-count muted");
+  assert.equal(win.count.style.display, "", "shown");
+  assert.ok(win.body.children.includes(win.count), "in the window, under the status line");
   server.say(3, true, "reply", "Yes");
   server.say(3, false, "reply", "Then?");
   dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 3 } });
