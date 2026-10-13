@@ -410,6 +410,8 @@ function botFields(bot) {
     aggBox.appendChild(prof && prof.aggression != null
       ? fieldOf("Aggression", el("span", { class: "muted small" }, `${prof.aggression} (fixed by the profile)`))
       : fieldOf("Aggression", el("input", { type: "range", min: 0, max: 1, step: 0.1, value: bot.aggression, oninput: (e) => { bot.aggression = +e.target.value; } })));
+    // a seat's bot pinned as "Best bot" (the server's mark, chosen_as) keeps it until another profile is picked
+    if (bot.chosen_as === "best") aggBox.appendChild(el("div", { class: "muted small best-mark" }, "Chosen as the best bot when the seat was set up."));
   };
   if (bot.profile == null) bot.profile = "best";
   profileFor(bot.profile).then(drawAgg);
