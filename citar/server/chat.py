@@ -12,7 +12,8 @@ per session times every open chat by the side it waits on, from the lobby's two 
   "(no reply in time)", whoever opened it.
 - a chat waiting on a bot is never timed: a bot answers inside its drive or through its responder at once.
 
-``diplomacy.max_chat_messages`` (the ruleset's 30 by default) is the third chat setting; the engine enforces it.
+``diplomacy.max_chat_messages`` (the ruleset's cap, 30 in the shipped one, when the game sets none) is the third chat
+setting; the engine enforces it, and reports it (``EngineGame.max_chat_messages``).
 
 The clock stands still while the game is paused, and for a chat whose answer is a pooled prompt queued behind a
 benchmark in a benchmark game (``answer_status``: the ticket's status says so), which then counts from the prompt's
@@ -22,7 +23,10 @@ on where the pause left it.
 
 At a deadline the clock first cancels any answer still in progress for that chat (``GameSession.cancel_chat_answer``:
 the seat's conversation for it, or its ticket), then acts once through the session (``decline_late``, ``expire_chat``,
-``chat_fallback``), each an engine call a lost race turns into an ``ActionError``, which it ignores.
+``chat_fallback``), each an engine call a lost race turns into an ``ActionError``, which it ignores. An action that
+failed (an error, or the engine's refusal) on a chat that has not moved is tried again a little later
+(``RETRY_SECONDS``, doubling up to ``MAX_RETRY_SECONDS``): a chat between two people has no agent's safety cap to
+close it otherwise.
 
 It is the chat timer, with safety nets: ``BotAgent.play_turn`` and ``LLMAgent``'s waits keep a cap of twice the
 longest timeout (``safety_cap``) after which they close the chats themselves, and the session's driver still forces
@@ -47,7 +51,7 @@ import logging
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 log = logging.getLogger("citar.chat")
@@ -67,13 +71,16 @@ CAUSES = ("timeout", "queued_behind_benchmark", "refused", "failed")
 KINDS = {"llm": "model", "mcp": "model", "hybrid": "hybrid", "human": "person", "bot": "bot"}
 #: The longest the clock's thread sleeps between looks (it also wakes on the session's condition).
 WAKE_SECONDS = 1.0
+#: How long after a failed action at a deadline the clock tries again, doubling each time up to the longest.
+RETRY_SECONDS, MAX_RETRY_SECONDS = 1.0, 60.0
 
 
-def settings(config: Optional[dict]) -> dict:
+def settings(config: Optional[dict], max_messages: Optional[int] = None) -> dict:
     """A game's chat settings from its configuration (``EngineGame.config``, which keeps the lobby's keys verbatim):
     ``chat_model_reply_seconds``, ``chat_person_reply_seconds`` and ``max_chat_messages``, each the default when the
     game has none or something that is not a number, and the timeouts held within ``MIN_REPLY_SECONDS`` and
-    ``MAX_REPLY_SECONDS``."""
+    ``MAX_REPLY_SECONDS``. ``max_messages``, when given, is the cap the engine plays (``EngineGame.max_chat_messages``:
+    the game's own, else its ruleset's), which is what the game reports."""
     config = config or {}
 
     def seconds(key: str, default: float) -> float:
@@ -86,11 +93,15 @@ def settings(config: Optional[dict]) -> dict:
             return default
         return max(MIN_REPLY_SECONDS, min(MAX_REPLY_SECONDS, v))
 
-    cap = (config.get("diplomacy") or {}).get("max_chat_messages") if isinstance(config.get("diplomacy"), dict) else None
-    try:
-        cap = int(cap) if cap not in (None, 0) and not isinstance(cap, bool) else DEFAULT_MAX_MESSAGES
-    except (TypeError, ValueError):
-        cap = DEFAULT_MAX_MESSAGES
+    if max_messages is not None and not isinstance(max_messages, bool):
+        cap = int(max_messages)
+    else:
+        cap = (config.get("diplomacy") or {}).get("max_chat_messages") \
+            if isinstance(config.get("diplomacy"), dict) else None
+        try:
+            cap = int(cap) if cap not in (None, 0) and not isinstance(cap, bool) else DEFAULT_MAX_MESSAGES
+        except (TypeError, ValueError):
+            cap = DEFAULT_MAX_MESSAGES
     return {"chat_model_reply_seconds": seconds("chat_model_reply_seconds", DEFAULT_MODEL_REPLY_SECONDS),
             "chat_person_reply_seconds": seconds("chat_person_reply_seconds", DEFAULT_PERSON_REPLY_SECONDS),
             "max_chat_messages": max(2, cap)}
@@ -125,8 +136,9 @@ class _Chat:
     timeout: Optional[float]
     counted: float = 0.0            # seconds counted against the timeout since the chat began waiting on this side
     held: bool = False              # the answer is a prompt queued behind a benchmark (a benchmark game): not counted
-    acted: bool = False             # the clock acted at its deadline (once)
-    answer: dict = field(default_factory=dict)   # the answering side's last status (answer_status)
+    acted: bool = False             # the clock is acting, or has acted, at its deadline (once)
+    failures: int = 0               # actions at its deadline that failed with the chat where it stood
+    retry_at: float = 0.0           # the clock's time before which a failed action is not tried again
     published: Optional[tuple] = None            # the last status sent, so an unchanged one is not sent again
 
 
@@ -145,19 +157,22 @@ class ChatClock:
         self._settings: Optional[dict] = None
         self._thread: Optional[threading.Thread] = None
         self._stopped = False
-        #: ticks taken and actions done, for tests and the evidence
-        self.ticks = 0
-        self.acted: list[dict] = []
 
     # ------------------------------------------------------------------ settings
     @property
     def settings(self) -> dict:
-        """The game's chat settings (``settings``), read from its configuration once."""
+        """The game's chat settings (``settings``), read from its configuration once, with the message cap the engine
+        plays (the game's, else its ruleset's)."""
         if self._settings is None:
+            game = self.session.game
             try:
-                self._settings = settings(self.session.game.config)
+                cap = game.max_chat_messages()
             except Exception:
-                self._settings = settings(None)
+                cap = None
+            try:
+                self._settings = settings(game.config, cap)
+            except Exception:
+                self._settings = settings(None, cap)
         return self._settings
 
     def timeout(self, kind: str) -> Optional[float]:
@@ -292,27 +307,44 @@ class ChatClock:
         self._send(msgs)
         acted = 0
         for c in due:
+            done = False
             try:
-                if self._act(c):
-                    acted += 1
+                done = self._act(c)
             except Exception:
                 s.errors.append({"t": time.time(), "where": "chat clock", "player": c.awaiting,
                                  "trace": traceback.format_exc()})
                 log.exception("the chat clock could not act on negotiation %s", c.nid)
+            if done:
+                acted += 1
+            else:
+                self._again(c)
         return acted
+
+    def _again(self, c: _Chat) -> None:
+        """The action at ``c``'s deadline failed (an error, or the engine refused it, the chat where the clock saw it or
+        not): it is tried again after a pause that doubles with each failure, so a chat no agent's safety cap covers
+        (between two people) still closes. A chat that moved meanwhile is not: every look brings the timed chats up to
+        date before it acts (``_reconcile``), and a chat that moved or closed is timed afresh as a new record, or
+        dropped, so the failed record is never acted on again."""
+        with self._lock:
+            if self.chats.get(c.nid) is c:
+                c.failures += 1
+                c.retry_at = self.clock.now() + min(MAX_RETRY_SECONDS, RETRY_SECONDS * 2 ** (c.failures - 1))
+                c.acted = False
 
     def _look(self, act: bool) -> tuple:
         """(the statuses to send, the chats past their deadline to act on: none unless ``act``)."""
         s = self.session
         heads = s.game.open_negotiation_heads()
         with self._lock:
-            self.ticks += 1
-            self._settle(self.clock.now())
+            now = self.clock.now()
+            self._settle(now)
             msgs = self._reconcile(heads)
             due = []
             if act and not s.paused:
                 for c in self.chats.values():
-                    if c.timeout is not None and not c.acted and not c.held and c.counted >= c.timeout:
+                    if c.timeout is not None and not c.acted and not c.held and c.counted >= c.timeout \
+                            and now >= c.retry_at:
                         c.acted = True
                         due.append(c)
             return msgs, due
@@ -326,16 +358,12 @@ class ChatClock:
             return False
         s.cancel_chat_answer(pid, c.nid)
         if c.kind == "model":
-            done = s.decline_late(pid, c.nid, c.entries, "timeout")
-        elif c.kind == "hybrid":
-            done = s.chat_fallback(pid, c.nid, c.entries, "timeout")
-        elif c.kind == "person":
-            done = s.expire_chat(c.nid, c.entries)
-        else:
-            return False
-        if done:
-            self.acted.append({"negotiation": c.nid, "player": pid, "kind": c.kind, "entries": c.entries})
-        return done
+            return s.decline_late(pid, c.nid, c.entries, "timeout")
+        if c.kind == "hybrid":
+            return s.chat_fallback(pid, c.nid, c.entries, "timeout")
+        if c.kind == "person":
+            return s.expire_chat(c.nid, c.entries)
+        return False
 
     # ------------------------------------------------------------------ the answering side
     def answer_status(self, nid: int, pid: int, payload: dict) -> None:
@@ -353,11 +381,8 @@ class ChatClock:
             if c is None or c.awaiting != pid:
                 return
             if state == "queued":
-                behind = bool(payload.get("benchmark")) and bool(s.benchmark)
-                if behind and not c.held:
+                if bool(payload.get("benchmark")) and bool(s.benchmark):
                     c.held = True
-                c.answer = {"state": "queued", "position": payload.get("position"), "eta_s": payload.get("eta_s"),
-                            "benchmark": bool(payload.get("benchmark"))}
                 msg = self._status(c, "queued", position=payload.get("position"), eta_s=payload.get("eta_s"),
                                    machine=payload.get("machine_name"),
                                    **({"held": "benchmark"} if c.held else {}))
@@ -365,13 +390,11 @@ class ChatClock:
                 if c.held:
                     c.held = False
                     c.counted = 0.0                 # counted from the prompt's start (a benchmark game)
-                c.answer = {"state": "thinking"}
                 msg = self._status(c, "thinking")
             else:
                 if c.held:
                     c.held = False
                     c.counted = 0.0
-                c.answer = {}
                 msg = self._waiting(c)
         self._send([msg] if msg is not None else [])
 

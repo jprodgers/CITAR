@@ -432,15 +432,17 @@ function renderNewGame(card, rules, meta, refresh) {
   f.reconnect = el("input", { type: "number", min: 0, max: 86400, value: 180,
     title: "How long an AI keeps retrying its model server before the disconnect rule applies. Short drops inside this window cost nothing." });
   // Chat (design/phase3-features.md P3.5.2): how long a chat waits on each side, in minutes, and its message cap.
-  // The server holds the game to them; the defaults are the server's own (10 and 5 minutes, 30 messages).
+  // The server holds the game to them; the defaults are the server's own (10 and 5 minutes). The cap is sent only
+  // when it is filled in: left empty, the game keeps its ruleset's own (30 in the shipped one).
   f.chatModel = el("input", { type: "number", min: 0.5, max: 1440, step: 0.5, value: 10,
     title: "How long a chat waits for an AI model's answer (an LLM, MCP or hybrid seat), its time waiting for its machine "
       + "included. Then the model is taken to have declined (a hybrid seat's bot answers instead)." });
   f.chatPerson = el("input", { type: "number", min: 0.5, max: 1440, step: 0.5, value: 5,
     title: "How long a chat waits for a person's answer, whoever opened it. Then it closes as expired. "
       + "The clock stands still while the game is paused." });
-  f.chatCap = el("input", { type: "number", min: 2, max: 200, value: 30,
-    title: "The most messages one chat may hold; the message that would pass it closes the chat instead." });
+  f.chatCap = el("input", { type: "number", min: 2, max: 200, value: "", placeholder: "rules",
+    title: "The most messages one chat may hold; the message that would pass it closes the chat instead. "
+      + "Leave it empty for the ruleset's own cap (30 in the standard rules)." });
   // custom maps from the map editor
   f.map = sel([["", "Generate a new map"]], "");
   f.map.title = "Play on a map made in the map editor, or generate one from the size and type below.";

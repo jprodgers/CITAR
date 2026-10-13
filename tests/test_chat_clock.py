@@ -241,6 +241,53 @@ class Timeouts(Base):
         clock.advance(45)
         self.assertEqual(self.neg(s2, nid)["status"], "expired")
 
+    def test_the_message_cap_reported_is_the_one_the_engine_plays(self):
+        """A game that sets no cap plays its ruleset's (a modded ruleset may have its own): the game reports that one,
+        not the shipped default."""
+        s = self.game(["human", "human"])
+        with mock.patch.object(s.game, "max_chat_messages", return_value=12):
+            s.chat._settings = None
+            self.assertEqual(s.info()["config"]["max_chat_messages"], 12)
+        self.assertEqual(chat_mod.settings({}, 12)["max_chat_messages"], 12)
+        self.assertEqual(chat_mod.settings({"diplomacy": {"max_chat_messages": 6}}, 9)["max_chat_messages"], 9,
+                         "the engine's word is the cap")
+
+    def test_an_action_that_failed_at_the_deadline_is_tried_again(self):
+        """A person-to-person chat has no agent's safety cap: an expiry that failed (an error, then the engine's
+        refusal) is tried again a little later, until the chat closes."""
+        s = self.game(["human", "human"])
+        clock = use(s)
+        nid = self.open(s, 0, 1)
+        real = s.expire_chat
+        tries = []
+
+        def flaky(n, entries):
+            tries.append(clock.now())
+            if len(tries) == 1:
+                raise RuntimeError("the database is busy")
+            if len(tries) == 2:
+                return False                                # as the engine refusing it would
+            return real(n, entries)
+        with mock.patch.object(s, "expire_chat", flaky), self.assertLogs("citar.chat", level="ERROR"):
+            clock.advance(300)
+            self.assertEqual(self.neg(s, nid)["status"], "open")
+            clock.advance(10)
+        self.assertEqual(self.neg(s, nid)["status"], "expired", tries)
+        self.assertEqual(tries, [300.0, 301.0, 303.0], "tried again after 1 s, then 2 s")
+        self.assertTrue(any(e.get("where") == "chat clock" for e in s.errors))
+
+    def test_a_chat_the_engine_will_not_close_is_tried_again_at_most_every_minute(self):
+        s = self.game(["human", "human"])
+        clock = use(s)
+        nid = self.open(s, 0, 1)
+        tries = []
+        with mock.patch.object(s, "expire_chat", lambda n, entries: tries.append(clock.now()) or False):
+            clock.advance(300 + 600, step=1.0)
+        gaps = [b - a for a, b in zip(tries, tries[1:])]
+        self.assertEqual(gaps[:7], [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0])
+        self.assertTrue(all(g == 60.0 for g in gaps[6:]), gaps)
+        self.assertEqual(self.neg(s, nid)["status"], "open")
+
     def test_the_settings_are_read_and_held_within_bounds(self):
         st = chat_mod.settings
         self.assertEqual(st(None), {"chat_model_reply_seconds": 600.0, "chat_person_reply_seconds": 300.0,
