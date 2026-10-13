@@ -829,6 +829,39 @@ class OneMachine(Scripted):
         self.assertEqual(len(self.chats_made(nid)), 1)
         self.assertEqual(s.game.negotiation(nid)["history"][-1]["message"], "model: accept")
 
+    def test_a_chat_back_to_the_seat_after_its_phase_is_its_models_and_its_turn_waits_for_it(self):
+        """P3.6.3's last step: the drive after the phase stops for the chat the phase opened; the person counters, the
+        chat comes back to the seat on its own turn, its bot leaves it to the model, which answers it on a chat ticket
+        of its own, and only then does the seat's turn end."""
+        def phase(conv):
+            if conv.steps == 1:
+                return StepResult(text="trade", tool_calls=[ToolCall("o", "open_negotiation", {
+                    "to": 0, "message": "Maps for maps?", "give": [{"type": "share_map"}],
+                    "receive": [{"type": "share_map"}]})])
+            return StepResult(text="done")
+        Fake.phase = phase
+        s = self.game([{"type": "human"}, self.on("sv_dryrun", prompt_every=1)])
+        self.met(s)
+        s.start()
+        turn = self.round(s)
+        self.assertTrue(until(lambda: s.game.current == 0 and s.game.turn == turn + 1, 30))
+        self.assertTrue(s.call_tool(0, "end_turn", {})["ok"])            # the seat's phase is due on this turn
+        self.assertTrue(until(lambda: any(n["initiator"] == 1 for n in s.game.negotiations()), 30), s.errors)
+        nid = next(n["id"] for n in s.game.negotiations() if n["initiator"] == 1)
+        self.assertTrue(until(lambda: any(r["turn"] == turn + 1 and r["outcome"] == "done"
+                                          for r in s.metrics.data.get("diplomat") or []), 30), "the phase ended")
+        self.assertEqual((s.game.current, s.game.turn), (1, turn + 1), "the seat's turn waits for the chat")
+        r = s.call_tool(0, "respond_negotiation", {"negotiation_id": nid, "action": "counter",
+                                                   "message": "Your map and 20 gold.",
+                                                   "give": [{"type": "share_map"}],
+                                                   "receive": [{"type": "share_map"}, {"type": "gold", "amount": 20}]})
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(until(lambda: s.game.negotiation(nid)["status"] == "accepted", 30), s.game.negotiation(nid))
+        self.assertEqual(s.game.negotiation(nid)["history"][-1]["message"], "model: accept")
+        self.assertEqual(len(self.chats_made(nid)), 1, "its model's own conversation for the chat")
+        self.assertEqual(self.rows(s, nid), [("answered", None)])
+        self.assertTrue(until(lambda: s.game.current == 0 and s.game.turn == turn + 2, 30), "then the turn ended")
+
     def test_a_chat_back_to_the_seat_during_its_phase_is_the_phase_s(self):
         opened, countered = [], threading.Event()
 
@@ -863,7 +896,9 @@ class OneMachine(Scripted):
                                                    "give": [{"type": "share_map"}],
                                                    "receive": [{"type": "share_map"}, {"type": "gold", "amount": 20}]})
         self.assertTrue(r["ok"], r)
-        self.assertTrue(until(lambda: 1 in [h for h in [s.agents.get(1)] if h and nid in h._held] or True, 1))
+        # the chat came back to the seat while its phase holds its voice: given to the phase, not to an answer of its
+        # own (the phase is still in its second step, waiting for this)
+        self.assertTrue(until(lambda: nid in getattr(s.agents.get(1), "_held", ()), 10), "the chat is the phase's")
         countered.set()
         self.assertTrue(until(lambda: s.game.negotiation(nid)["status"] == "accepted", 30), s.game.negotiation(nid))
         self.assertEqual(s.game.negotiation(nid)["history"][-1]["message"], "phase: accept")
