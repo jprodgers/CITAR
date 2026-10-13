@@ -329,7 +329,8 @@ fn g_rules() -> &'static Ruleset {
 #[test]
 fn a_scenario_keeps_a_hybrid_seat_s_categories() {
     let g = arena();
-    let hybrid = json!({"owners": {"trades": "llm", "chat": "llm"}, "advisor": true, "prompt_every": 3});
+    let hybrid =
+        json!({"owners": {"trades": "llm", "chat": "llm"}, "advisor": true, "prompt_every": 3});
     let seats = json!([
         {"type": "hybrid", "handicap": "ai", "bot": {"profile": "standard"},
          "llm": {"server_id": "sv_x", "model": "m", "api_key": "secret"}, "hybrid": hybrid},
