@@ -81,7 +81,7 @@ fn bot_evaluate_is_the_bots_evaluate_on_every_recorded_deal() {
                     let refused = offer.expect_err("refused as the engine refuses it");
                     assert_eq!(refused.message, e.message, "{}: {d}", path.display());
                 }
-                Ok(None) => assert_eq!(offer.expect("no items"), 0.0),
+                Ok(None) => assert_eq!(offer.expect("no items").to_bits(), 0.0_f64.to_bits()),
                 Ok(Some(t)) => {
                     valued += 1;
                     let mine = citar_bot::evaluate(&g, &spec, a, b, t.gives(a), t.gives(b));
