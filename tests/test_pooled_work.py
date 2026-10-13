@@ -974,6 +974,31 @@ class Probes(_ProbeScenario):
         self.assertEqual((rec["outcome"], rec["passed"]), ("error", None), rec)
         self.assertIn("cut off 2 times", rec["error"] or "")
 
+    def test_a_benchmark_that_takes_the_machine_mid_answer_has_the_answer_asked_again(self):
+        """A benchmark takes the machine while the answer's first step runs: the scheduler cancels the ticket and
+        closes the conversation on it. The answer is asked again on a fresh ticket, in a new conversation (the closed
+        one refuses every step), and the case is the model's own answer (accept, passed), not a non-answer."""
+        from citar.agents.providers import dryrun
+        from citar.agents.providers.base import StepResult
+        original = dryrun.DryRunConversation._negotiate
+        held = {}
+
+        def first_cut(conv):
+            if not held:
+                held["bench"] = S.get().lease("sv_gpu", "dry-run", kind="benchmark", label="benchmark run “b”",
+                                              ref=("benchmark", "b"))
+                threading.Timer(1.0, held["bench"].release).start()
+                return StepResult(text="Let me think about this offer.", tool_calls=[])
+            conv._step = 1
+            return original(conv)
+        with mock.patch.object(dryrun.DryRunConversation, "_negotiate", first_cut), \
+                mock.patch.object(self.P, "PROBE_RETRY_SECONDS", 0.2):
+            rec = self.P.run_case(self.manager, self.P.engine_api.load_scenario("pooled-scn"), self.probe,
+                                  self.probe["cases"][0], {"server_id": "sv_gpu", "model": "dry-run"},
+                                  run_id="r-bench-mid")
+        self.assertEqual((rec["outcome"], rec["passed"], rec["error"]), ("accept", True, None), rec)
+        self.assertEqual([c["tool"] for c in rec["tool_calls"]], ["respond_negotiation"])
+
     def test_a_benchmark_that_takes_the_machine_between_cases_is_waited_for(self):
         """A benchmark takes the machine after the run's first case: the run waits for it at the job level, saying so
         (its status and waiting note), with no prompt waiting silently in the machine's line, and its next case

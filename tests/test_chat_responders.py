@@ -704,6 +704,70 @@ class LateReplies(unittest.TestCase):
         for note in notes:
             self.assertNotIn("Answer with respond_negotiation", note)
 
+    def test_a_chat_that_moved_while_the_model_opened_another_is_still_news(self):
+        """The model opens chat 1, then chat 2; while chat 2's step is generated the person in chat 1 accepts. The tool
+        result tells of chat 2 only, so chat 1's accept is the next step's news."""
+        s = self.game(2)
+        state = {}
+
+        def opens_first():
+            return [("open_negotiation", {"to": 1, "message": "Maps?", "give": [{"type": "share_map"}],
+                                          "receive": [{"type": "share_map"}]})]
+
+        def opens_second():
+            state["first"] = s.game.open_negotiation_heads(0)[0]["id"]
+            state["accept"] = s.call_tool(1, "respond_negotiation", {"negotiation_id": state["first"],
+                                                                     "action": "accept", "message": "Yes."})
+            return [("open_negotiation", {"to": 2, "message": "Maps too?", "give": [{"type": "share_map"}],
+                                          "receive": [{"type": "share_map"}]})]
+
+        def look():
+            state["told"] = list(Scripted.told)
+            heads = s.game.open_negotiation_heads(0)
+            return [("respond_negotiation", {"negotiation_id": heads[0]["id"], "action": "reject",
+                                             "message": "Bye."})] if heads else [("log_thought", {"text": "x"})]
+        Scripted.script = [opens_first, opens_second, look]
+        with mock.patch("citar.agents.llm_agent.make_conversation", Scripted):
+            s.get_agent(0).play_turn(s, 0)
+        self.assertTrue(state["accept"]["ok"], state)
+        news = [t for t in state["told"] if t.startswith("NEGOTIATION UPDATE")]
+        self.assertEqual(len(news), 1, state["told"])
+        self.assertIn(f"accepted negotiation #{state['first']}: the deal is in effect. No answer is needed.", news[0])
+
+    def test_a_chat_that_moved_before_end_turns_refusal_is_still_news(self):
+        """end_turn waits on chat 2; it is answered (the refusal says so), while chat 1 closed before the wait began
+        (accepted while the model generated end_turn): chat 1's accept is told before the next step."""
+        from tests.chatfake import use
+        s = self.game(2)
+        clock = use(s)
+        state = {}
+
+        def opens_both():
+            return [("open_negotiation", {"to": q, "message": f"Maps, {q}?", "give": [{"type": "share_map"}],
+                                          "receive": [{"type": "share_map"}]}) for q in (1, 2)]
+
+        def ends():
+            heads = {n["responder"]: n["id"] for n in s.game.open_negotiation_heads(0)}
+            state["ids"] = heads
+            s.call_tool(1, "respond_negotiation", {"negotiation_id": heads[1], "action": "accept", "message": "Yes."})
+            clock.at(clock.now() + 30, lambda: s.call_tool(2, "respond_negotiation", {
+                "negotiation_id": heads[2], "action": "reply", "message": "What else?"}))
+            return [("end_turn", {})]
+
+        def look():
+            state["told"] = list(Scripted.told)
+            return [("respond_negotiation", {"negotiation_id": state["ids"][2], "action": "reject",
+                                             "message": "Nothing."})]
+        Scripted.script = [opens_both, ends, look]
+        with mock.patch("citar.agents.llm_agent.make_conversation", Scripted):
+            agent = s.get_agent(0)
+            agent._clock = clock.now
+            agent.play_turn(s, 0)
+        news = [t for t in state["told"] if t.startswith("NEGOTIATION UPDATE")]
+        self.assertEqual(len(news), 1, state["told"])
+        self.assertIn(f"accepted negotiation #{state['ids'][1]}", news[0])
+        self.assertNotIn(f"#{state['ids'][2]}", news[0], "chat 2's answer was told in the refusal, not again")
+
     def test_a_chat_somebody_else_opened_is_its_responders_until_it_closes(self):
         """During the model's turn a chat another seat opened, waiting on the model, is answered by the seat's
         responder: the turn is not asked to answer it too, only told when it closes."""

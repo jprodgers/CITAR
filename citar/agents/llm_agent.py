@@ -525,10 +525,24 @@ class LLMAgent:
                     self._waited += max(0.0, self._clock() - t)
                     self._activate()
             result = session._reply_result(pid, nid, result)
-            self._marks = self._chat_marks(session, pid)       # what the result told the model
+            # what the result told the model, of this chat only: any other chat that moved meanwhile (while the model
+            # generated this step, or during the wait) is still news for its next step (``_chat_news``)
+            self._heard(session, pid, nid)
         if self._halted(session):
             raise _Halted()
         return result
+
+    def _heard(self, session, pid: int, nid: int) -> None:
+        """The model has been told where chat ``nid`` stands now: its mark is brought up to date (forgotten once the
+        chat is closed). Session's lock held."""
+        try:
+            n = session.game.negotiation_head(nid)
+        except engine_api.ActionError:
+            n = None
+        if n is not None and n["status"] == "open":
+            self._marks[nid] = (n["status"], n["awaiting"], n["entries"], n["initiator"])
+        else:
+            self._marks.pop(nid, None)
 
     def _wait_cap(self, session) -> float:
         """The safety cap on the turn's waits for chats: ``wait_cap`` when set (a probe's turn case, whose other seats
@@ -566,7 +580,6 @@ class LLMAgent:
                         break
                     error = g.end_turn_refusal(pid) + f" While you waited, they answered: {_serialize(heard)}"
                     session.metrics.tool_call(pid, "end_turn", {}, "action", False, 0.0, error, expected=True)
-                    self._marks = self._chat_marks(session, pid)
                     return {"ok": False, "error": error}
                 if spent >= cap:
                     # the chat clock should have closed them long since: the safety net (P3.5.2)
@@ -587,6 +600,9 @@ class LLMAgent:
                         news = session._reply_result(pid, nid, {}).get("negotiation")
                         if news:
                             heard.append(news)
+                            # told in the refusal, as it stands now: that chat's mark only (a chat this wait did not
+                            # watch keeps its own, and is news before the next step)
+                            self._heard(session, pid, nid)
             if self._halted(session):
                 raise _Halted()
         return session.call_tool(pid, "end_turn", {})
@@ -830,9 +846,9 @@ class ChatThread:
     it), ``moved`` (it no longer waits on the seat: answered or closed by somebody else), ``unanswered`` (the model
     used its steps without answering), ``failed`` (the model could not be asked: an error, a machine's refusal),
     ``cancelled`` (the seat halted, or the chat clock's deadline came: ``cancel``) or ``paused`` (the game paused for
-    its machine before the model was asked, ``GameSession.answers_held``: it answers when the game resumes). The
-    session declines only ``unanswered`` and ``failed`` ones ("(no response)"); a slow answer is the chat clock's to
-    decline."""
+    its machine, or loaded and not yet resumed, before the model was asked, ``GameSession.answers_held``: it answers
+    when the game resumes). The session declines only ``unanswered`` and ``failed`` ones ("(no response)"); a slow
+    answer is the chat clock's to decline."""
 
     def __init__(self, agent: LLMAgent, nid: int):
         self.agent = agent
@@ -926,7 +942,10 @@ class ChatThread:
         start = self.cancels
         if session.answers_held():
             return "paused"
-        fresh = self.conv is None or self._dead
+        # a conversation closed behind the thread's back (the scheduler cancelling the ticket it ran on: a benchmark
+        # took the machine) refuses every step: the chat starts a new one, told the whole chat again. ``is True``: a
+        # provider's own ``closed`` may be anything (an Event), and only the scheduler's wrapper says it so
+        fresh = self.conv is None or self._dead or getattr(self.conv, "closed", False) is True
         with session.lock:
             told = self._message(session, pid, fresh)
         if told is None:

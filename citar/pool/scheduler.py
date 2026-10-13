@@ -1688,6 +1688,12 @@ class ScheduledConversation(Conversation):
         return self.inner.usage
 
     @property
+    def closed(self) -> bool:
+        """Whether it was closed (``close``: by its caller, or by the scheduler cancelling its ticket): every step
+        after raises ``Cancelled``, so a caller that goes on talking starts a new conversation."""
+        return self._closed
+
+    @property
     def request_timeout(self):
         return getattr(self.inner, "request_timeout", None)
 
