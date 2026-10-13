@@ -4,7 +4,8 @@ Everything in the package and the scripts reaches the game through the facade's 
 test reads every module and fails on a way round it: importing the engine's extension (``citar._engine``) or the
 module behind the facade (``citar._facade_rust``), by name or at run time; taking a name from the facade that is not in
 its ``__all__``; or taking the engine's game out of an EngineGame (its private ``_g``). Only the facade's two modules
-import the extension; the tests may.
+import the extension; the tests may, the web client's among them (``citar/web/tests``, whose fixture recorder reads the
+extension's own formats).
 """
 import ast
 import unittest
@@ -16,6 +17,8 @@ SCRIPTS = PACKAGE.parent / "scripts"
 FACADE = PACKAGE / "engine_api.py"
 #: The facade's modules: the door, and the module behind it that binds the extension.
 FACADE_MODULES = {FACADE, PACKAGE / "_facade_rust.py"}
+#: The web client's tests: test code, as tests/ is, though it travels with the client it tests.
+WEB_TESTS = PACKAGE / "web" / "tests"
 #: What only the facade imports: the extension and the module behind the door.
 BEHIND = ("citar._engine", "citar._facade_rust")
 #: The EngineGame attribute that holds the engine's game.
@@ -162,7 +165,7 @@ class EngineBoundaryTests(unittest.TestCase):
     def test_nothing_goes_round_the_facade(self):
         found = []
         for path in sorted([*PACKAGE.rglob("*.py"), *SCRIPTS.rglob("*.py")]):
-            if path in FACADE_MODULES:
+            if path in FACADE_MODULES or WEB_TESTS in path.parents:
                 continue
             for v in violations(path.read_text(encoding="utf-8"), _module_name(path), path.name == "__init__.py"):
                 found.append(f"{path.relative_to(PACKAGE.parent).as_posix()}:{v}")

@@ -234,8 +234,11 @@ impl Game {
         super::EvalView::new(self)
     }
 
-    /// The revision the game is at: an ETag for the host's session, which moves on every write
-    /// and never on a read. Not saved.
+    /// The revision the game's state is at: it moves on every write to the state (a setter or a
+    /// touch, `game::mutate`) and never on a read. Not saved. The history is no state: a message,
+    /// a thought or a host's event appended on its own leaves it where it was, so a host that
+    /// needs every change (the server's view ETag) counts its own commands (citar-py's
+    /// `Game.writes`).
     #[must_use]
     pub const fn rev(&self) -> u64 {
         self.dv.revs.now().get()

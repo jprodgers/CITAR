@@ -234,6 +234,18 @@ one door), through `citar/_facade_rust.py`.
 - **Data crosses as bytes.** Views, replays and saves come back as the engine's own JSON (or a save
   file's bytes) and go to the client as they are: a gargantuan god view is never parsed and dumped
   again in Python.
+- **A view is built only when it changed.** Every view answers with an `ETag` made from everything
+  its body is made of: the game object (`EngineGame.instance`, random, since another object, a loaded
+  game, counts again from 0), how many commands it has taken (`EngineGame.writes`, counted by the
+  extension under the game's lock on every call that may change the game or its history; a query
+  tool is a read and never counts, or the selected unit's details, which the browser asks for after
+  every refresh, would make the next refresh a full view), the
+  perspective, and the keys the server splices in (the seat, `info()` with its pause, agent
+  statuses and seats, the session's version, `can_manage`), hashed as they are written. The browser
+  sends it back on every refresh (`If-None-Match`), and an unchanged view is a 304 with nothing
+  built. The engine's own revision (`Game::rev`) is not enough: it moves on writes to the state, and
+  a message, a thought or a host's event is history. A view built while a command came in carries
+  no tag, since its body may already be the game after it.
 - **A panic is a crashed game, not a dead server.** An engine panic poisons that game: every call on
   it raises `EngineCrash`; the session pauses, keeps its last good autosave, writes a `crash-NNN`
   save and stays readable, and the other games play on. A refused action is an `ActionError` with
@@ -241,6 +253,29 @@ one door), through `citar/_facade_rust.py`.
 - **Saves are written off the lock** (crates/citar-store): the session takes a snapshot under its
   lock, and its writer thread writes the journal's new records and then the `.citar` container
   that names them (see [The turn driver](#the-turn-driver)).
+
+### The recap's frames
+
+The recap gets the game's frames (the dynamic map at the end of each round: owners, improvements,
+routes, features, each major's explored tiles, the cities, the units and the round's events) as
+the journal stores them, never expanded on the server: a keyframe on the first round after a load
+and every 64 rounds, deltas between (the tiles that changed as 8-byte records, the land newly
+explored as LEB128 gaps), each record's bytes in base64. The layout is in `save::journal`'s
+module documentation. A keyframe carries the improvement, feature and unit names it numbers, so a
+frame recorded before a change of ruleset still names what it shows.
+
+`citar/web/js/replaydecode.js` decodes them with no DOM or network (Node tests it against a
+recorded game's frames in both formats, `citar/web/tests/fixtures/replay-delta.json.gz`).
+`ReplayFrames` walks the records once to find those that decode, then serves any round by walking at
+most 63 deltas from the nearest keyframe, updating one frame in place: memory stays at one frame
+however long the game. The server sends only the records that decode, in order (a round after a
+lost journal chunk is left out until the next keyframe): each delta names its base by a hash the
+browser does not compute. The same module reads the replay's negotiations as the threads a round
+shows, and leaves their words out of the round's messages (the engine records each chat entry as a
+message to the other side too).
+
+Until 0.1.6 the server expanded every frame into Python's shape, each layer of each round whole;
+that format (`replay_data("full")`) was retired once the browser decoded the deltas.
 
 ### Bots in the server, and without one
 
@@ -465,7 +500,8 @@ a file and reloading is the whole development loop.
 | `app.js` | The router |
 | `api.js` | Every HTTP call, CSRF, share keys |
 | `game.js`, `render.js`, `hex.js`, `panels.js` | The game screen and the canvas renderer |
-| `chat.js`, `chatmodel.js` | The chat windows docked left of End Turn: one per civilization, opened from the socket (a `negotiation` event reads `GET /api/games/{id}/negotiations/{nid}`; `negotiation_status` moves the status line), with the deal builder inside. The view carries no chat clock, so an open chat the client holds no clock for is read once at each version. End Turn's click is decided in `ChatDock.endTurnClick` (`GameScreen.onEndTurn` only calls it); an armed End Turn ends the turn on a view fetched after the last chat closed (`GameScreen.syncView`), so a decision a deal brought stops it. `chatmodel.js` decides, with no DOM or network: entries merged by `seq`, each window's state and message count, End Turn's states (answer first, waiting, armed), the dock's layout (clear of End Turn and of the unit, city and side panels shown), and the drafts no update touches. Node tests both (`citar/web/tests/`, `chat.js` over stand-ins for the DOM) |
+| `replay.js`, `replaydecode.js` | The recap: `replaydecode.js` decodes the frames (see [The recap's frames](#the-recaps-frames)) and reads the chats as threads, with no DOM or network, and Node tests it |
+| `chat.js`, `chatmodel.js` | The chat windows docked left of End Turn: one per civilization, opened from the socket (a `negotiation` event reads `GET /api/games/{id}/negotiations/{nid}`; `negotiation_status` moves the status line), with the deal builder inside, which fetches its trade options (`GET /api/games/{id}/trade-options/{other}`) while it is open: when it opens, after each entry in its chats and at each turn. The view carries no chat clock, so an open chat the client holds no clock for is read once at each version. End Turn's click is decided in `ChatDock.endTurnClick` (`GameScreen.onEndTurn` only calls it); an armed End Turn ends the turn on a view fetched after the last chat closed (`GameScreen.syncView`; a 304 saying the view in hand still is counts, `GameScreen.viewSeq`), so a decision a deal brought stops it. `chatmodel.js` decides, with no DOM or network: entries merged by `seq`, each window's state and message count, End Turn's states (answer first, waiting, armed), the dock's layout (clear of End Turn and of the unit, city and side panels shown), and the drafts no update touches. Node tests both (`citar/web/tests/`, `chat.js` over stand-ins for the DOM) |
 | `lobby.js`, `benchmarks.js`, `models.js`, `lab.js`, `probes.js`, `scenario.js`, `editor.js` | The other screens |
 | `pool.js`, `servers.js`, `machines.js` | The Servers page (`#/pool`): every machine the viewer owns or may use and the groups that share them; the machines' editors as dialogs; the page's rules (its old `#/servers` addresses, and which routes a viewer may call for a machine), kept apart so Node tests them (`citar/web/tests/`) |
 | `reports.js`, `console.js`, `setup.js` | Reports, operator console, first-run wizard |

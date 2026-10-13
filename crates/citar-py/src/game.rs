@@ -5,7 +5,7 @@
 //!   briefing, the replay, loads, saves) run with the GIL released ([`detached`]) and take the
 //!   game's lock inside, so no thread waits for a game while holding the GIL.
 //! - **Cheap reads** (`turn`, `current`, `phase`, `winner`, `victory`, `turn_limit`,
-//!   `revision`, `poisoned`, `is_alive`, `negotiation_head`, `open_negotiation_heads`) read
+//!   `revision`, `writes`, `poisoned`, `is_alive`, `negotiation_head`, `open_negotiation_heads`) read
 //!   [`Heads`] with the GIL held and never wait for the game: every call that changes the game
 //!   publishes a fresh copy before it lets go of the game's lock. The lock order is game, then
 //!   heads; the getters take only the heads, each for a copy.
@@ -16,14 +16,17 @@
 //!   which the facade fans out to its subscribers after the call.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use citar_bot::Bot as Driver;
 use citar_engine::api::game::DebugAction;
 use citar_engine::api::host::{Heads, NegotiationHead, phase_name};
+use citar_engine::api::tools::{self, ToolKind};
 use citar_engine::api::views::client::ClientView;
+use citar_engine::api::views::players::trade_options_with;
 use citar_engine::api::views::replay::deal_json;
-use citar_engine::api::views::{ReplayFormat, to_py_json};
+use citar_engine::api::views::to_py_json;
 use citar_engine::base::ids::{DealId, EventId, NegotiationId, PlayerId, UnitId};
 use citar_engine::base::sets::PlayerSet;
 use citar_engine::game::diplomacy::{deals, negotiation};
@@ -53,6 +56,10 @@ use crate::save::{self, Journal, Save, SaveSnapshot};
 pub struct Game {
     game: Mutex<EngineGame>,
     heads: Mutex<Heads>,
+    /// How many commands the game has taken (every call through [`Game::write`], refused or
+    /// not): it moves on every change to the game, its history included, and never on a read (a
+    /// query tool included).
+    writes: AtomicU64,
 }
 
 /// A player id as the engine takes one, for a game that has it.
@@ -164,7 +171,7 @@ impl Game {
     /// Wraps a game the engine made, publishing its heads.
     pub fn wrap(g: EngineGame) -> Self {
         let heads = g.heads();
-        Self { game: Mutex::new(g), heads: Mutex::new(heads) }
+        Self { game: Mutex::new(g), heads: Mutex::new(heads), writes: AtomicU64::new(0) }
     }
 
     fn lock(&self) -> MutexGuard<'_, EngineGame> {
@@ -226,6 +233,9 @@ impl Game {
             if let Some(why) = g.poisoned() {
                 return Err(Failure::poisoned(why));
             }
+            // Counted under the game's lock, before the call: a read that sees the new count
+            // waits for the lock, so it never reads the game as it was under the new count.
+            self.writes.fetch_add(1, Ordering::SeqCst);
             let done = match caught(|| f(&mut g)) {
                 Ok(done) => done,
                 Err(crash) => {
@@ -399,10 +409,21 @@ impl Game {
         self.heads().turn_limit
     }
 
-    /// The game's revision: it moves on every change, never on a read.
+    /// The game's revision ([`EngineGame::rev`]): it moves on every write to the state, never on
+    /// a read. The history is no state: a message, a thought or a host's event appended alone
+    /// leaves it where it was ([`Game::writes`] counts those too).
     #[getter]
     fn revision(&self) -> u64 {
         self.heads().revision
+    }
+
+    /// How many commands the game has taken, refused or not: it moves on every call that may
+    /// change the game or its history, and never on a read, a query tool's included
+    /// ([`Game::execute`]). Paired with the facade's own salt
+    /// (another game object counts from 0 again), it is the server's view ETag (P3.5.8).
+    #[getter]
+    fn writes(&self) -> u64 {
+        self.writes.load(Ordering::SeqCst)
     }
 
     /// Why the game stopped, once a panic has poisoned it.
@@ -612,6 +633,12 @@ impl Game {
 
     /// Runs a player tool with JSON arguments (`EngineGame.execute`): the result and the events
     /// it appended (none for a query). `ActionError` for a refusal.
+    ///
+    /// A query changes nothing (property P8), so it is a read: it never counts in [`Game::writes`]
+    /// and so never moves the view's ETag. The browser asks for the selected unit or city after
+    /// every refresh, and models query freely, so counting queries would turn nearly every
+    /// refresh that found nothing changed into a full view (P3.5.8). A poisoned game refuses a
+    /// query as it refuses an action.
     #[pyo3(signature = (pid, tool, args_json = None))]
     fn execute(
         &self,
@@ -620,13 +647,25 @@ impl Game {
         tool: &str,
         args_json: Option<&[u8]>,
     ) -> PyResult<(Bytes, Bytes)> {
-        Ok(self.write(py, |g| {
-            let p = caller_of(pid)?;
-            let args = match parse_opt(args_json, "The tool's arguments")? {
+        let args_of = || -> Result<Value, Failure> {
+            Ok(match parse_opt(args_json, "The tool's arguments")? {
                 Value::Null => Value::Object(Map::new()),
                 other => other,
-            };
-            let done = g.execute(p, tool, &args)?;
+            })
+        };
+        if tools::kind(tool) == Some(ToolKind::Query) {
+            return Ok(self.read(py, |g| {
+                if let Some(why) = g.poisoned() {
+                    return Err(Failure::poisoned(why));
+                }
+                let p = caller_of(pid)?;
+                let result = g.execute_query(p, tool, &args_of()?)?;
+                Ok((Bytes(to_py_json(&result)), events_json(g, &EventBatch::default())))
+            })?);
+        }
+        Ok(self.write(py, |g| {
+            let p = caller_of(pid)?;
+            let done = g.execute(p, tool, &args_of()?)?;
             Ok((Bytes(to_py_json(&done.result)), events_json(g, &done.events)))
         })?)
     }
@@ -724,6 +763,20 @@ impl Game {
             let id = negotiation_of(g, nid)?;
             let p = player_of(g, pid)?;
             Ok(Bytes(to_py_json(&g.negotiation_view(id, p)?)))
+        })?)
+    }
+
+    /// What `pid` and `other` could trade, as the deal builder offers it (`EngineGame.trade_options`;
+    /// `views::players::trade_options`): `None` unless `other` is a living major civilization
+    /// `pid` has met, as its diplomacy would list it (the client view leaves them out, P3.5.8),
+    /// or either is no player of the game.
+    fn trade_options(&self, py: Python<'_>, pid: i64, other: i64) -> PyResult<Option<Bytes>> {
+        Ok(self.read(py, |g| {
+            let id = |n: i64| u8::try_from(n).ok().map(PlayerId);
+            Ok(match (id(pid), id(other)) {
+                (Some(p), Some(o)) => trade_options_with(g, p, o).map(|v| Bytes(to_py_json(&v))),
+                _ => None,
+            })
         })?)
     }
 
@@ -955,16 +1008,24 @@ impl Game {
 
     // ---- The replay ------------------------------------------------------------------------
 
-    /// Everything the recap needs, as JSON bytes, the frames `full` (Python's shape) or `delta`
-    /// (as stored) (`EngineGame.replay_data`).
-    #[pyo3(signature = (format = "full"))]
+    /// Everything the recap needs, as JSON bytes, the frames as stored: keyframes and deltas
+    /// (`EngineGame.replay_data`). `format` is `delta`; `full`, every frame expanded on the
+    /// server, was retired in 0.1.6 (the browser decodes the deltas), and is refused.
+    #[pyo3(signature = (format = "delta"))]
     fn replay_data(&self, py: Python<'_>, format: &str) -> PyResult<Bytes> {
-        let f = match format {
-            "full" => ReplayFormat::Full,
-            "delta" => ReplayFormat::Delta,
+        match format {
+            "delta" => {}
+            "full" => {
+                return Err(Failure::Value(
+                    "The 'full' replay format was retired in 0.1.6: the replay's frames are \
+                     'delta', which the browser decodes."
+                        .to_owned(),
+                )
+                .into());
+            }
             other => return Err(Failure::Value(format!("Unknown replay format '{other}'.")).into()),
-        };
-        Ok(self.read(py, |g| Ok(Bytes(g.replay_data(f))))?)
+        }
+        Ok(self.read(py, |g| Ok(Bytes(g.replay_data())))?)
     }
 
     /// The replay as the server serves it (`/replay`): `extra_json`'s `id` and `name` first, then
@@ -983,7 +1044,7 @@ impl Game {
                 }
             };
             let seats = extra.shift_remove("seats").unwrap_or(Value::Null);
-            let mut data = g.replay_json(ReplayFormat::Full);
+            let mut data = g.replay_json();
             if let Some(players) = data.get_mut("players").and_then(Value::as_array_mut) {
                 for (i, p) in players.iter_mut().enumerate() {
                     if let Some(m) = p.as_object_mut() {

@@ -1,11 +1,12 @@
 //! The views (package 1d-02), with every check on.
 //!
 //! - Gate 3: the replay's frames. A hundred-turn arena game played by random agents, saved and
-//!   loaded halfway: `replay_data(Full)` holds, frame by frame, the map of the state as each round
-//!   recorded its frame, rebuilt here from the state itself as `victory.record_frame` built it
-//!   (through `records::on_frame_for_test`, not the engine's capture), and the frames the engine
-//!   captured; its last frame is the state as the game ends; and `replay_data(Delta)`'s records
-//!   decode back to the captured frames.
+//!   loaded halfway: `replay_data`'s records are the journal's as stored, and decode, frame by
+//!   frame, to the frames the engine captured and to the map of the state as each round recorded
+//!   its frame, rebuilt here from the state itself as `victory.record_frame` built it (through
+//!   `records::on_frame_for_test`, not the engine's capture); the last frame is the state as the
+//!   game ends. (Python's `Full` format, which expanded every frame on the server, was retired in
+//!   package 3-13; the browser decodes the records, `citar/web/js/replaydecode.js`.)
 //! - A view is a read: it changes neither the game nor its digest, and the bytes `view_json`
 //!   writes are the view.
 //!
@@ -13,7 +14,6 @@
 //! is `api::views::tests` in the engine, which emits the events it scrubs.
 
 use citar_engine::api::testops;
-use citar_engine::api::views::ReplayFormat;
 use citar_engine::base::codec::b64_decode;
 use citar_engine::base::ids::PlayerId;
 use citar_engine::game::victory::records;
@@ -214,7 +214,7 @@ fn python_shape(f: &StateFrame, replay: &Value, from: u32) -> Value {
 // ---- Gate 3: replay data ---------------------------------------------------------------------------------
 
 #[test]
-fn the_replay_holds_the_frames_each_round_captured_in_both_formats() {
+fn the_replay_holds_the_frames_each_round_captured() {
     let mut g = arena_game();
     records::capture_frames_for_test(true);
     records::on_frame_for_test(Some(rebuild));
@@ -225,12 +225,12 @@ fn the_replay_holds_the_frames_each_round_captured_in_both_formats() {
     let rebuilt = REBUILT.with(|r| std::mem::take(&mut *r.borrow_mut()));
     assert!(captured.len() >= 99, "a frame a round: {}", captured.len());
 
-    let full: Value = serde_json::from_slice(&g.replay_data(ReplayFormat::Full)).expect("JSON");
-    assert_eq!(full, g.replay_json(ReplayFormat::Full), "the bytes are the value");
-    assert_eq!(full["format"], json!("full"));
+    let replay: Value = serde_json::from_slice(&g.replay_data()).expect("JSON");
+    assert_eq!(replay, g.replay_json(), "the bytes are the value");
+    assert_eq!(replay["format"], json!("delta"));
     let r = g.rules();
     let names = |key: &str| -> Vec<String> {
-        full[key]
+        replay[key]
             .as_array()
             .expect("names")
             .iter()
@@ -239,38 +239,11 @@ fn the_replay_holds_the_frames_each_round_captured_in_both_formats() {
     };
     let imps: Vec<String> =
         r.improvements().as_slice().iter().map(|i| i.name.to_string()).collect();
-    assert_eq!(names("improvement_ids"), imps, "the ruleset's improvements number the frames");
+    assert_eq!(names("improvement_ids"), imps, "the ruleset's improvements, by name");
     let units: Vec<Box<str>> = r.base_units().as_slice().iter().map(|u| u.name.clone()).collect();
-    let frames = full["frames"].as_array().expect("frames");
-    assert_eq!(frames.len(), captured.len(), "a frame for each round");
-    assert_eq!(frames.len(), rebuilt.len(), "a frame for each round the state was read at");
-    let mut from = 0;
-    for ((got, want), state) in frames.iter().zip(&captured).zip(&rebuilt) {
-        assert_eq!(got, &python_shape(state, &full, from), "the frame of turn {}", state.turn);
-        assert_eq!(got, &python_frame(want, &units), "the captured frame of turn {}", want.turn);
-        from = state.last_event;
-    }
-    // Nothing moves the map after the last round's frame.
-    let last = frames.last().expect("a frame");
-    let mut end = python_shape(&state_frame(&g), &full, 0);
-    end["turn"] = last["turn"].clone();
-    end["event_range"] = last["event_range"].clone();
-    assert_eq!(last, &end, "the last frame is the state as the game ends");
 
-    // The rest of what the recap reads.
-    let chron = g.chronicle();
-    assert_eq!(full["events"].as_array().map(Vec::len), Some(chron.events().len()));
-    assert_eq!(full["stats"].as_array().map(Vec::len), Some(chron.stats().len()));
-    assert_eq!(full["terrain"].as_array().map(Vec::len), Some(g.grid().size() as usize));
-    assert_eq!(full["players"].as_array().map(Vec::len), Some(g.state().players().len()));
-    assert_eq!(full["phase"], json!("over"));
-    let row = &full["stats"][0]["players"]["0"];
-    assert!(row["score"].is_number() && row["alive"] == json!(true), "{row}");
-
-    // Delta: the records as stored, which decode back to the captured frames.
-    let delta = g.replay_json(ReplayFormat::Delta);
-    assert_eq!(delta["format"], json!("delta"));
-    let recs: Vec<FrameRecord> = delta["frames"]
+    // The records as stored, which decode back to the captured frames and to the state's.
+    let recs: Vec<FrameRecord> = replay["frames"]
         .as_array()
         .expect("frames")
         .iter()
@@ -282,14 +255,41 @@ fn the_replay_holds_the_frames_each_round_captured_in_both_formats() {
         .collect();
     assert_eq!(recs.as_slice(), g.chronicle().frames().frames.as_slice(), "the records as stored");
     assert!(recs.iter().filter(|r| r.keyframe).count() < recs.len() / 4, "mostly deltas");
+    assert_eq!(recs.len(), captured.len(), "a frame for each round");
+    assert_eq!(recs.len(), rebuilt.len(), "a frame for each round the state was read at");
     let mut dec = FrameDecoder::new();
-    for (rec, want) in recs.iter().zip(&captured) {
+    let mut from = 0;
+    let mut expanded = 0;
+    let mut last = Value::Null;
+    for ((rec, want), state) in recs.iter().zip(&captured).zip(&rebuilt) {
         let got = dec.apply(rec).unwrap_or_else(|e| panic!("turn {}: {e}", rec.turn));
         assert!(got == *want, "the delta of turn {} decodes to the captured frame", rec.turn);
+        let shape = python_frame(&got, &units);
+        assert_eq!(shape, python_shape(state, &replay, from), "the frame of turn {}", state.turn);
+        expanded += serde_json::to_vec(&shape).expect("JSON").len();
+        from = state.last_event;
+        last = shape;
     }
-    let delta_bytes = g.replay_data(ReplayFormat::Delta).len();
-    let full_bytes = g.replay_data(ReplayFormat::Full).len();
-    assert!(delta_bytes < full_bytes, "deltas are smaller: {delta_bytes} against {full_bytes}");
+    // Nothing moves the map after the last round's frame.
+    let mut end = python_shape(&state_frame(&g), &replay, 0);
+    end["turn"] = last["turn"].clone();
+    end["event_range"] = last["event_range"].clone();
+    assert_eq!(last, end, "the last frame is the state as the game ends");
+    // What the deltas save: every frame expanded, as the retired format sent them, is larger.
+    let sent: usize = replay["frames"]
+        .as_array()
+        .map_or(0, |f| f.iter().map(|x| serde_json::to_vec(x).expect("JSON").len()).sum());
+    assert!(sent * 3 < expanded, "deltas are smaller: {sent} bytes against {expanded} expanded");
+
+    // The rest of what the recap reads.
+    let chron = g.chronicle();
+    assert_eq!(replay["events"].as_array().map(Vec::len), Some(chron.events().len()));
+    assert_eq!(replay["stats"].as_array().map(Vec::len), Some(chron.stats().len()));
+    assert_eq!(replay["terrain"].as_array().map(Vec::len), Some(g.grid().size() as usize));
+    assert_eq!(replay["players"].as_array().map(Vec::len), Some(g.state().players().len()));
+    assert_eq!(replay["phase"], json!("over"));
+    let row = &replay["stats"][0]["players"]["0"];
+    assert!(row["score"].is_number() && row["alive"] == json!(true), "{row}");
 }
 
 // ---- Reads ------------------------------------------------------------------------------------------------
@@ -344,7 +344,7 @@ fn views_change_nothing_and_their_bytes_are_the_view() {
         nobody["events"].as_array().map(Vec::len),
         g.chronicle().events().iter().filter(|e| e.audience.is_none()).count().min(150).into()
     );
-    let _replay = g.replay_data(ReplayFormat::Full);
+    let _replay = g.replay_data();
     let _standings = g.standings();
     let _summary = g.empire_summary(PlayerId(0));
     let _path =

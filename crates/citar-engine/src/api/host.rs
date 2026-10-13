@@ -97,7 +97,7 @@ pub struct Heads {
     pub victory: Option<&'static str>,
     /// The turn the game ends on.
     pub turn_limit: Turn,
-    /// The game's revision ([`Game::rev`]): it moves on every write.
+    /// The game's revision ([`Game::rev`]): it moves on every write to the state.
     pub revision: u64,
     /// Whether each player, by id, is still in the game.
     pub alive: Vec<bool>,

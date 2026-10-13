@@ -258,6 +258,10 @@ class Game:
     @property
     def revision(self) -> int: ...
     @property
+    def writes(self) -> int:
+        """How many commands the game has taken, refused or not: moves on every call that may change it, never on a
+        read (a query tool through execute included)."""
+    @property
     def poisoned(self) -> Optional[str]: ...
     def is_alive(self, pid: int) -> bool: ...
     def negotiation_head(self, nid: int) -> dict:
@@ -287,7 +291,7 @@ class Game:
 
     # tools and views
     def execute(self, pid: int, tool: str, args_json: Optional[bytes] = None) -> tuple[bytes, bytes]:
-        """(the tool's result, the events). ActionError."""
+        """(the tool's result, the events: none for a query, which is a read and never counts in writes). ActionError."""
     def view_json(self, pid: Optional[int] = None, event_limit: int = 150,
                   extra_json: Optional[bytes] = None) -> bytes:
         """The client view, with extra_json's keys added (a key of the view's own is a ValueError)."""
@@ -301,6 +305,8 @@ class Game:
     def open_negotiations(self, pid: Optional[int] = None) -> bytes: ...
     def negotiations(self, pid: Optional[int] = None) -> bytes: ...
     def negotiation_view(self, nid: int, pid: int) -> bytes: ...
+    def trade_options(self, pid: int, other: int) -> Optional[bytes]:
+        """What pid and other could trade; None unless other is a living major pid has met."""
     def close_negotiation(self, nid: int, status: str, note: str, by: Optional[int] = None) -> tuple[bytes, bytes]: ...
     def max_chat_messages(self) -> int: ...
     def deal(self, deal_id: int) -> Optional[bytes]: ...
@@ -327,7 +333,8 @@ class Game:
     def debug(self, action: str) -> bytes: ...
 
     # the replay
-    def replay_data(self, format: str = "full") -> bytes: ...
+    def replay_data(self, format: str = "delta") -> bytes:
+        """The frames as stored (keyframes and deltas); "full" was retired in 0.1.6 and raises ValueError."""
     def replay_json(self, extra_json: Optional[bytes] = None) -> bytes:
         """extra_json's id and name first, then replay_data's keys; each player with its seat from extra_json's seats
         (a list by player id)."""

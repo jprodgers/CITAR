@@ -304,7 +304,8 @@ impl Game {
             Some(p) => {
                 let pl = g.player(p);
                 rest.insert("empire".into(), empire_info(g, p));
-                rest.insert("diplomacy".into(), diplomacy_info(g, p, MESSAGES_SHOWN));
+                // without the trade options, which the deal builder fetches (P3.5.8)
+                rest.insert("diplomacy".into(), diplomacy_info(g, p, MESSAGES_SHOWN, false));
                 let notes = pl.and_then(|x| x.major.as_deref()).map_or("", |m| &m.notes);
                 rest.insert("notes".into(), json!(notes));
                 let alerts: Vec<Value> = if pl.is_some_and(crate::state::players::Player::alive) {

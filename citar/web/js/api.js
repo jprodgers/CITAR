@@ -19,8 +19,11 @@ export class Forbidden extends Error {
   constructor(message) { super(message); this.name = "Forbidden"; }
 }
 
-async function request(method, url, body) {
-  const opts = { method, headers: {}, credentials: "same-origin" };
+async function request(method, url, body, { headers = {}, conditional = false } = {}) {
+  const opts = { method, headers: { ...headers }, credentials: "same-origin" };
+  // A conditional request of the caller's own: the browser's cache stays out of it, so a 304 reaches the caller
+  // (which holds the body) rather than being answered from a copy the browser kept.
+  if (conditional) opts.cache = "no-store";
   if (body instanceof FormData) {
     opts.body = body;                      // the browser writes the multipart type with its boundary
   } else if (body !== undefined) {
@@ -36,6 +39,7 @@ async function request(method, url, body) {
   if (key) opts.headers["x-citar-share-key"] = key;
 
   const res = await fetch(url, opts);
+  if (conditional && res.status === 304) return { notModified: true, etag: res.headers.get("etag") };
   let data = null;
   try { data = await res.json(); } catch (e) { data = null; }
   if (!res.ok) {
@@ -48,7 +52,7 @@ async function request(method, url, body) {
     err.retryAfter = res.headers.get("retry-after");
     throw err;
   }
-  return data;
+  return conditional ? { notModified: false, data, etag: res.headers.get("etag") } : data;
 }
 
 export const api = {
@@ -63,13 +67,19 @@ export const api = {
   control: (gid, body) => request("POST", `/api/games/${gid}/control`, body),
   path: (gid, token, unitId, x, y) =>
     request("GET", `/api/games/${gid}/path?token=${encodeURIComponent(token)}&unit_id=${unitId}&x=${x}&y=${y}`),
-  view: (gid, token, asPlayer) =>
-    request("GET", `/api/games/${gid}/view?token=${encodeURIComponent(token)}` + (asPlayer != null ? `&as_player=${asPlayer}` : "")),
+  // The view, sent with the ETag of the copy in hand (design/phase3-features.md P3.5.8): {notModified: true} when that
+  // copy is still the view (304: nothing was built or sent), else {notModified: false, data, etag}.
+  view: (gid, token, asPlayer, etag = null) =>
+    request("GET", `/api/games/${gid}/view?token=${encodeURIComponent(token)}` + (asPlayer != null ? `&as_player=${asPlayer}` : ""),
+      undefined, { headers: etag ? { "If-None-Match": etag } : {}, conditional: true }),
   tool: (gid, token, tool, args = {}) =>
     request("POST", `/api/games/${gid}/tool?token=${encodeURIComponent(token)}`, { tool, args }),
   // one chat as the seat sees it, with where its clock stands (the chat window, chat.js)
   negotiation: (gid, token, nid) =>
     request("GET", `/api/games/${gid}/negotiations/${nid}?token=${encodeURIComponent(token || "")}`),
+  // what the seat and civilization `other` could trade (the chat window's deal builder, chat.js)
+  tradeOptions: (gid, token, other) =>
+    request("GET", `/api/games/${gid}/trade-options/${other}?token=${encodeURIComponent(token || "")}`),
   replay: (gid, token) => request("GET", `/api/games/${gid}/replay?token=${encodeURIComponent(token || "")}`),
   save: (gid, name) => request("POST", `/api/games/${gid}/save`, { name }),
   saves: () => request("GET", "/api/saves"),

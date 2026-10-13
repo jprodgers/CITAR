@@ -1,7 +1,8 @@
 // The docked chat windows (citar/web/js/chat.js; design/phase3-features.md P3.5.6) over a few stand-ins for the DOM (the
 // repository has no DOM library): a window opens from the socket, what is typed and built in it survives every kind of
-// update (the same text box, the same builder, the entries appended in order), End Turn's states drive the turn, and
-// the narrow layout shows one window with a tab for each. Run with `node --test "citar/web/tests/*.test.mjs"`.
+// update (the same text box, the same builder, the entries appended in order), End Turn's states drive the turn, the
+// narrow layout shows one window with a tab for each, and the deal builder fetches the trade options it suggests while
+// it is open (P3.5.8). Run with `node --test "citar/web/tests/*.test.mjs"`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -114,7 +115,22 @@ function rng(seed) {
  * view has none), `route` as the chat route answers it, with its `clock` (`prefix`: answer with only the first n
  * entries, as a read that left before the last entry would). */
 class Server {
-  constructor() { this.chats = new Map(); this.reads = []; this.prefix = null; this.max = 30; }
+  constructor() {
+    this.chats = new Map(); this.reads = []; this.prefix = null; this.max = 30;
+    // what each civilization and the seat could trade (the trade options route), and who was asked
+    this.options = new Map([
+      [1, { their_gold: 80, they_could_give: { luxuries: ["Silk"] }, you_could_give: { strategic: { Iron: 2 } }, agreements_possible_now: ["open_borders"] }],
+      [2, { their_gold: 10 }],
+    ]);
+    this.optionReads = [];
+  }
+  /** The trade options route's answer for `civ`; a civilization it does not list is a 404. */
+  tradeOptions(civ) {
+    this.optionReads.push(civ);
+    const to = this.options.get(civ);
+    if (!to) throw Object.assign(new Error("No such trade."), { status: 404 });
+    return { player: YOU, with: civ, trade_options: JSON.parse(JSON.stringify(to)) };
+  }
   chat(nid, withCiv, name) { const c = { nid, with: withCiv, name, status: "open", history: [], proposal: null, byYou: null }; this.chats.set(nid, c); return c; }
   say(nid, you, action = "reply", message = "", extra = {}) {
     const c = this.chats.get(nid);
@@ -152,7 +168,7 @@ function blockersOf(view) {
 
 function makeGame({ myTurn = true, width = 1366, height = 860, boxWidth = 300, obstacles = [] } = {}) {
   const server = new Server();
-  const state = { now: 0, ended: [], blocked: 0, clicks: [], syncs: 0, viewFails: 0, nextView: null, tools: [], topbars: 0, button: null };
+  const state = { now: 0, ended: [], blocked: 0, clicks: [], syncs: 0, viewFails: 0, unchanged: 0, nextView: null, tools: [], topbars: 0, button: null };
   const host = new FakeElement("div");
   host.clientWidth = width; host.clientHeight = height;
   host._rect = { left: 0, top: 44, width, height };
@@ -165,10 +181,11 @@ function makeGame({ myTurn = true, width = 1366, height = 860, boxWidth = 300, o
       turn: 4, current_player: YOU, you: YOU, spectator: false, config: { speed: "Standard" }, cities: [], alerts: [],
       empire: { gold: 120, per_turn: { gold: 4 }, strategic_resources: { Iron: { available: 2 } }, luxuries: {} },
       players: [{ id: 0, name: "Greece", color: "#36f" }, { id: 1, name: "Rome", color: "#c33" }, { id: 2, name: "Persia", color: "#cc3" }],
-      diplomacy: { players: [{ id: 1, name: "Rome", trade_options: { their_gold: 80, they_could_give: { luxuries: ["Silk"] }, you_could_give: { strategic: { Iron: 2 } }, agreements_possible_now: ["open_borders"] } },
-                             { id: 2, name: "Persia", trade_options: { their_gold: 10 } }],
+      // as the server's view: the civilizations met, without the trade options (the deal builder fetches them)
+      diplomacy: { players: [{ id: 1, name: "Rome" }, { id: 2, name: "Persia" }],
                    open_negotiations: [], recent_negotiations: [], messages: [] },
     },
+    viewSeq: 0,
     async tool(name, args) {
       state.tools.push([name, JSON.parse(JSON.stringify(args))]);
       if (name === "respond_negotiation") { server.say(args.negotiation_id, true, args.action, args.message); return { ok: true }; }
@@ -181,10 +198,13 @@ function makeGame({ myTurn = true, width = 1366, height = 860, boxWidth = 300, o
       return {};
     },
     // as GameScreen.syncView: a view fetched now (the server's chats as they stand, and what `nextView` adds), or,
-    // when the fetch fails (`viewFails`), the view in hand stays
+    // when the fetch fails (`viewFails`), the view in hand stays and `viewSeq` with it; when the server answers 304
+    // (`unchanged`), the view in hand stays and `viewSeq` moves: it is still the view
     async syncView() {
       state.syncs++;
       if (state.viewFails > 0) { state.viewFails--; return; }
+      game.viewSeq++;
+      if (state.unchanged > 0) { state.unchanged--; dock.onView(game.view); return; }
       const extra = state.nextView ? state.nextView() : {};
       game.view = { ...game.view, diplomacy: { ...game.view.diplomacy, ...server.diplomacy() }, ...extra };
       dock.onView(game.view);
@@ -218,7 +238,8 @@ function makeGame({ myTurn = true, width = 1366, height = 860, boxWidth = 300, o
     if (next === "end") return game.endTurn(force);
   }
   const dock = new ChatDock(game, { host, turnBox, obstacles, now: () => state.now, timers: {},
-                                    fetchChat: async (nid) => { server.reads.push(nid); return server.route(nid, state.prefix ? state.prefix(nid) : null); } });
+                                    fetchChat: async (nid) => { server.reads.push(nid); return server.route(nid, state.prefix ? state.prefix(nid) : null); },
+                                    fetchOptions: async (civ) => server.tradeOptions(civ) });
   return { game, dock, server, state, host };
 }
 
@@ -247,7 +268,10 @@ test("a chat opened by the other side pops up from the socket, and keeps what is
   // half a message, the builder open, an item from a hint and one from the adder
   win.text.value = "Half a thought about ir";
   win.text.dispatch("input");
+  assert.deepEqual(server.optionReads, [], "a folded builder fetches nothing");
   win.dealToggle.click();
+  await flush();
+  assert.deepEqual(server.optionReads, [1], "the builder opened: the options fetched");
   win.hints.find(byText("+ Silk")).click();
   const adderType = win.adder.find((n) => n.tagName === "SELECT");
   adderType.value = "gold";
@@ -287,8 +311,12 @@ test("a chat opened by the other side pops up from the socket, and keeps what is
     } else if (kind === "tick") {
       dock.tick();
     } else if (kind === "hints") {
-      game.view.diplomacy.players[0].trade_options.their_gold = 80 + i;
+      // a new turn: what either side could give may have moved, and the open builder asks again
+      server.options.get(1).their_gold = 80 + i;
+      game.view = { ...game.view, turn: game.view.turn + 1 };
       dock.onView(game.view);
+      await flush();
+      assert.match(win.hints.textContent, new RegExp(`\\(${80 + i} gold\\)`), `update ${i}: the options fetched at the turn`);
     } else {
       // the other window's chat moves: Persia answers, or Greece does
       const c = server.chats.get(6);
@@ -463,6 +491,30 @@ test("End Turn: waiting with a countdown, armed by a click, ending the turn once
   assert.equal(dock.model.armed, null);
 });
 
+test("armed End Turn ends the turn when the view fetched after the close is a 304: the view in hand still is the view", async () => {
+  const { game, dock, server, state } = makeGame();
+  dock.onView(game.view);
+  server.chat(31, 1, "Rome");
+  server.say(31, true, "open", "Friends?");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 31 } });
+  await flush();
+  game.renderTopbar();
+  state.button.click();
+  assert.equal(dock.model.armed && dock.model.armed.force, false, "armed");
+  server.say(31, false, "accept", "Agreed.");
+  // the view in hand already shows the close (a refresh came first), so the fresh fetch is a 304: the same object
+  game.view = { ...game.view, diplomacy: { ...game.view.diplomacy, ...server.diplomacy() } };
+  state.unchanged = 1;
+  const held = game.view;
+  dock.onView(game.view);
+  await flush(); await flush();
+  assert.equal(state.syncs, 1, "a view was asked for after the close");
+  assert.equal(game.view, held, "and the one in hand was still the view");
+  assert.deepEqual(state.ended, [false], "the turn ended, once");
+  for (let k = 0; k < 3; k++) { state.now += 1500; dock.tick(); await flush(); }
+  assert.deepEqual(state.ended, [false], "and only once");
+});
+
 test("End Turn armed with Ctrl+click ends the turn anyway when the last chat closes", async () => {
   const { game, dock, server, state } = makeGame();
   dock.onView(game.view);
@@ -564,6 +616,85 @@ test("at 700 px one window shows, full width above End Turn, with a tab for each
   assert.equal(dock.root.className, "chat-dock wide");
   const lefts = [...dock.windows.values()].map((w) => parseInt(w.root.style.left, 10) + parseInt(w.root.style.width, 10));
   assert.ok(lefts.every((right) => right <= 1366 - 10 - 330 - 8));
+});
+
+test("the deal builder fetches the trade options when it opens, after each entry in its chats and at each turn while open", async () => {
+  const { game, dock, server } = makeGame();
+  dock.onView(game.view);
+  server.chat(41, 1, "Rome");
+  server.say(41, false, "open", "Trade?");
+  dock.onEvent({ type: "negotiation", players: [1, 0], data: { negotiation: 41 } });
+  await flush();
+  const win = dock.windows.get(1);
+  assert.ok(win);
+  assert.deepEqual(server.optionReads, [], "folded: nothing fetched");
+  assert.equal(win.hints.textContent, "");
+  win.dealToggle.click();
+  await flush();
+  assert.deepEqual(server.optionReads, [1], "opened: fetched once");
+  assert.match(win.hints.textContent, /Rome could give \(80 gold\): \+ Silk/);
+  assert.match(win.hints.textContent, /You could give: \+ Iron \(2 spare\)/);
+  assert.match(win.hints.textContent, /Agreements possible now: ⇄ open borders/);
+  // redraws, statuses and views with nothing new ask nothing
+  dock.render(); dock.onView(game.view); dock.tick();
+  dock.onStatus({ type: "negotiation_status", negotiation: 41, players: [0, 1], waiting_on: 0, kind: "person", state: "waiting",
+                  left_s: 200, paused: false, entries: 1 });
+  await flush();
+  assert.deepEqual(server.optionReads, [1], "nothing new: nothing asked");
+  // an entry in its chat: asked again, and the chips follow the answer
+  server.options.get(1).they_could_give = { luxuries: ["Silk", "Wine"] };
+  server.say(41, true, "reply", "Go on.");
+  dock.onEvent({ type: "negotiation", players: [0, 1], data: { negotiation: 41 } });
+  await flush(); await flush();
+  assert.deepEqual(server.optionReads, [1, 1], "after the entry");
+  assert.ok(win.hints.find(byText("+ Wine")), "the new chip");
+  // a new turn while open: asked again
+  game.view = { ...game.view, turn: game.view.turn + 1 };
+  dock.onView(game.view);
+  await flush();
+  assert.deepEqual(server.optionReads, [1, 1, 1], "at the turn");
+  // folded, nothing is asked whatever happens; opened again, asked again
+  win.dealToggle.click();
+  server.say(41, false, "reply", "Well?");
+  dock.onEvent({ type: "negotiation", players: [1, 0], data: { negotiation: 41 } });
+  game.view = { ...game.view, turn: game.view.turn + 1 };
+  dock.onView(game.view);
+  await flush(); await flush();
+  assert.deepEqual(server.optionReads, [1, 1, 1], "folded");
+  win.dealToggle.click();
+  await flush();
+  assert.deepEqual(server.optionReads, [1, 1, 1, 1], "opened again");
+  // folded and opened again with nothing new meanwhile: still asked again (what either side has may have moved)
+  win.dealToggle.click();
+  win.dealToggle.click();
+  await flush();
+  assert.deepEqual(server.optionReads, [1, 1, 1, 1, 1], "each opening asks");
+  // two asks while one is out: one more fetch after it, not two
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const real = dock.fetchOptions;
+  let calls = 0;
+  dock.fetchOptions = async (civ) => { calls++; if (calls === 1) await gate; return real(civ); };
+  game.view = { ...game.view, turn: game.view.turn + 1 };
+  dock.onView(game.view);
+  game.view = { ...game.view, turn: game.view.turn + 1 };
+  dock.onView(game.view);
+  game.view = { ...game.view, turn: game.view.turn + 1 };
+  dock.onView(game.view);
+  await flush();
+  assert.equal(calls, 1, "one out at a time");
+  release();
+  await flush(); await flush(); await flush();
+  assert.equal(calls, 2, "and once more for what came meanwhile");
+  dock.fetchOptions = real;
+  // a civilization the server no longer lists (a 404): nothing to suggest
+  server.options.delete(1);
+  game.view = { ...game.view, turn: game.view.turn + 1 };
+  dock.onView(game.view);
+  await flush(); await flush();
+  assert.equal(win.hints.textContent, "", "no chips");
+  // the builder's items are the draft's, untouched by any of it
+  assert.deepEqual(dock.model.draft(1).give, []);
 });
 
 test("a spectator gets no windows", () => {

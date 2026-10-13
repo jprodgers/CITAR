@@ -143,6 +143,8 @@ class AutosaveChainTests(SavesCase):
         got = self.as_it_is(back)
         self.assertEqual(got["digest"], live["digest"])
         self.assertEqual(got["events"], live["events"])
+        self.assertEqual(live["replay"]["format"], "delta")
+        self.assertEqual(got["replay"]["frames"], live["replay"]["frames"], "the frames' Delta bytes, record for record")
         self.assertEqual(got["replay"], live["replay"])
         self.assertEqual(got["stats"], live["stats"])
         self.assertEqual(back.journal.path.name, "journal.cjnl", "the timeline goes on in its journal")

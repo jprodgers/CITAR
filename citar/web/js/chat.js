@@ -32,14 +32,18 @@ export class ChatDock {
    * forced), `syncView()` (fetches a view issued after the call, once any in flight has come) and `renderTopbar()`.
    * `host` is the element the windows are placed in (the map's area), `turnBox` the End Turn box in it, `obstacles`
    * the panels over the map that the windows keep clear of when there is room (a unit's, a city's, the side panel,
-   * the minimap: those shown count). `fetchChat(nid)` reads the chat route; `now()` is a monotonic clock in ms;
-   * `timers` holds setInterval/clearInterval (tests pass their own). */
-  constructor(game, { host, turnBox, obstacles = [], fetchChat, now = () => performance.now(), timers = globalThis } = {}) {
+   * the minimap: those shown count). `fetchChat(nid)` reads the chat route, `fetchOptions(civ)` the trade options
+   * route (`{trade_options}`: what the deal builder suggests); `now()` is a monotonic clock in ms; `timers` holds
+   * setInterval/clearInterval (tests pass their own). The game's `viewSeq` counts the views it fetched (a 304 that
+   * says the one in hand still is counts too). */
+  constructor(game, { host, turnBox, obstacles = [], fetchChat, fetchOptions = null, now = () => performance.now(),
+                      timers = globalThis } = {}) {
     this.game = game;
     this.host = host;
     this.turnBox = turnBox;
     this.obstacles = obstacles.filter(Boolean);
     this.fetchChat = fetchChat;
+    this.fetchOptions = fetchOptions;
     this.now = now;
     this.timers = timers;
     this.model = new ChatModel(null);
@@ -259,14 +263,15 @@ export class ChatDock {
    * decisions were checked when it was armed; a deal may have brought a new one (a technology received that finishes
    * the research, a city to give orders to), which a plain arming checks again and stops at, as End Turn does, and a
    * Ctrl+click arming skips. That check reads the view, and the one in hand may predate the close, so a view
-   * fetched after it comes first (`game.syncView`). It is disarmed at once, so it fires once; it is armed again when
-   * no fresh view came (it tries again a second later, at a tick) or a chat opened meanwhile (it fires when that one
+   * fetched after it comes first (`game.syncView`: the game's `viewSeq` moves, whether the fetch brought a new view
+   * or a 304 said the one in hand still is). It is disarmed at once, so it fires once; it is armed again when no
+   * fresh view came (it tries again a second later, at a tick) or a chat opened meanwhile (it fires when that one
    * closes). */
   fire(st) {
     if (!st.fire || !this.game.myTurn || !this.model.armed || this.now() < this._fireAfter) return;
     const { force, turnKey } = this.model.armed;
     this.model.disarm();
-    const before = this.game.view;
+    const before = this.game.viewSeq;
     const again = (wait) => {
       if (!this.enabled || this.model.armed || !this.game.myTurn || this.turnKey() !== turnKey) return;
       this.model.arm(turnKey, force);
@@ -276,7 +281,7 @@ export class ChatDock {
     };
     Promise.resolve().then(() => this.game.syncView()).then(() => {
       if (!this.enabled || !this.game.myTurn || this.turnKey() !== turnKey) return;
-      if (this.game.view === before) { again(true); return; }
+      if (this.game.viewSeq === before) { again(true); return; }
       if (this.endTurnState().state !== "clear") { again(false); return; }
       return this.game.endTurn(force);
     }).catch(() => { again(true); });
@@ -391,6 +396,11 @@ class ChatWindow {
     this._proposalKey = null;
     this._hintsKey = null;
     this._noteKey = null;
+    // the trade options the deal builder suggests, fetched while it is open (`wantOptions`): what they were last
+    // asked at (the turn and the chats' entries), the answer, and whether a fetch is out ("again": asked meanwhile)
+    this._optionsKey = null;
+    this.options = null;
+    this._optionsBusy = false;
     const p = dock.player(civ);
     this.swatch = el("span", { class: "swatch", style: { background: p.color } });
     this.title = el("span", { class: "chat-name" }, p.name || `#${civ}`);
@@ -458,6 +468,7 @@ class ChatWindow {
     this.drawStatus(st);
     this.updateButtons(st);
     this.updateHead();
+    this.wantOptions();
     this.drawHints();
     this.drawDealNote();
   }
@@ -642,6 +653,7 @@ class ChatWindow {
     const n = d.give.length + d.receive.length;
     this.dealToggle.textContent = `${d.builderOpen ? "▾" : "▸"} Deal builder${n ? ` (${n} item${n === 1 ? "" : "s"})` : ""}`;
     this.dealBody.style.display = d.builderOpen ? "" : "none";
+    if (d.builderOpen) this.wantOptions(); else this._optionsKey = null;   // opened again: asked again
     this.pin();
     const name = this.dock.player(this.civ).name;
     const nameOf = (pid) => this.dock.player(pid).name;
@@ -665,11 +677,38 @@ class ChatWindow {
     return speed && speed.dealDuration ? speed.dealDuration : 30;
   }
 
-  /** What each side could give, from the view's `diplomacy` (redrawn only when it changes). */
+  /** The trade options, fetched while the builder is open (the view no longer carries them: design/phase3-features.md
+   * P3.5.8): when it opens, and again after each entry in a chat with this civilization and at each turn while it is
+   * open, the moments what either side could give moves. One fetch at a time, and once more if asked meanwhile. */
+  wantOptions() {
+    if (!this.draft.builderOpen || !this.dock.fetchOptions) return;
+    const entries = this.dock.model.chatsWith(this.civ).map((c) => `${c.nid}:${c.entries.length}`).join(",");
+    const key = `${this.dock.turnKey()}|${entries}`;
+    if (key === this._optionsKey) return;
+    this._optionsKey = key;
+    this.loadOptions();
+  }
+
+  loadOptions() {
+    if (this._optionsBusy) { this._optionsBusy = "again"; return; }
+    this._optionsBusy = true;
+    Promise.resolve().then(() => this.dock.fetchOptions(this.civ)).then((r) => {
+      this.options = (r && r.trade_options) || null;
+    }).catch((e) => {
+      // not met, or gone: nothing to suggest (a blip keeps what was there)
+      if (e && e.status === 404) this.options = null;
+    }).finally(() => {
+      const again = this._optionsBusy === "again";
+      this._optionsBusy = false;
+      this.drawHints();
+      if (again) this.loadOptions();
+    });
+  }
+
+  /** What each side could give, from the trade options fetched (redrawn only when they change). */
   drawHints() {
-    const v = this.dock.game.view;
-    const p = v && v.diplomacy && (v.diplomacy.players || []).find((q) => q.id === this.civ);
-    const to = p && p.trade_options;
+    const to = this.options;
+    const p = this.dock.player(this.civ);
     const key = to ? JSON.stringify(to) : "";
     if (key === this._hintsKey) return;
     this._hintsKey = key;
