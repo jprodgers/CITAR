@@ -28,6 +28,8 @@ from typing import Optional
 
 from sqlalchemy import event
 
+from .. import fsutil
+
 log = logging.getLogger("citar.registry_import")
 
 MARKER = "registry_imported"
@@ -45,9 +47,10 @@ def registry_file() -> Path:
 
 
 def read_file(path: Path) -> dict:
-    """The registry in ``path``. Raises ImportFailed when it does not read."""
+    """The registry in ``path``. Raises ImportFailed when it does not read. A command-line tool may be replacing it
+    (``servers.register_offline``) as the first administrator is made: that read is waited for, not put off."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(fsutil.read_text(path))
     except (OSError, ValueError) as exc:
         raise ImportFailed(f"{path} could not be read ({exc}); it is imported once it reads") from exc
     if not isinstance(data, dict) or not isinstance(data.get("servers") or [], list):

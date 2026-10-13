@@ -293,9 +293,10 @@ impl Game {
         })?)
     }
 
-    /// The game as one value (`EngineGame.to_save`): the state JSON, and the whole history as one
-    /// journal chunk (`None` before there is any), which `Game.load` reads back to the same
-    /// game. The game's own journal does not move. A session saves through `save_snapshot`.
+    /// The game as one value (`EngineGame.to_save`): the state JSON, its history counts those of
+    /// the chunk (`Game::save_whole`), and the whole history as one journal chunk (`None` before
+    /// there is any), which `Game.load` reads back whole. The game's own journal does not move. A
+    /// session saves through `save_snapshot`.
     fn save(&self, py: Python<'_>) -> PyResult<(Bytes, Option<Bytes>)> {
         Ok(self.read(py, |g| {
             let s = g.save_whole().map_err(|e| Failure::Runtime(e.to_string()))?;

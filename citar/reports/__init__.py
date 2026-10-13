@@ -25,7 +25,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from .. import paths
+from .. import fsutil, paths
 
 log = logging.getLogger("citar.reports")
 
@@ -227,16 +227,11 @@ class ReportRunner:
         return self.dir / rid
 
     def _stored(self, rid: str) -> dict:
-        """A report's metadata as its file holds it."""
+        """A report's metadata as its file holds it (which ``_set`` replaces at every step of a build)."""
         p = self._path(rid) / "meta.json"
         if not p.exists():
             raise KeyError(rid)
-        for _ in range(20):
-            try:
-                return json.loads(p.read_text(encoding="utf-8"))
-            except (PermissionError, ValueError):
-                time.sleep(0.05)
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(fsutil.read_text(p))
 
     def _live(self, m: dict) -> dict:
         """``m`` with where its narrative waits in its machine's line, while it waits (``_places``)."""
@@ -271,7 +266,7 @@ class ReportRunner:
         out = []
         for p in sorted(self.dir.glob("*/meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
-                m = json.loads(p.read_text(encoding="utf-8"))
+                m = json.loads(fsutil.read_text(p))         # a report being built would drop out of the list
             except (OSError, ValueError):
                 continue
             if m.get("id") not in self._deleting:

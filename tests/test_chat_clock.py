@@ -530,9 +530,13 @@ class Waits(Base):
         s = self.game(["human", "human"], chat_person_reply_seconds=1)
         s.start()
         self.assertTrue(wait(s.chat.alive))
+        first = s.chat._thread
         with self.assertLogs("citar.chat", level="WARNING") as logged:
-            with mock.patch.object(s.chat, "tick", side_effect=SystemExit("killed")):
-                self.assertTrue(wait(lambda: not s.chat.alive()), "the clock's thread died")
+            with mock.patch.object(s.chat, "tick", side_effect=SystemExit("killed")) as killer:
+                # The dead thread is not waited for: the driver may start a new one within a millisecond, before
+                # any poll sees the old one gone. Its replacement is what shows it died and came back.
+                self.assertTrue(wait(lambda: killer.call_count >= 1), "the clock ticked into the fault")
+                self.assertTrue(wait(lambda: s.chat._thread is not first), "the driver started it again")
             self.assertTrue(wait(s.chat.alive, 5), "the driver started it again at its next look")
         self.assertTrue(any("starting it again" in line for line in logged.output))
         nid = self.open(s, 0, 1)

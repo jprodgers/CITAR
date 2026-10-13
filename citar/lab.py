@@ -52,7 +52,6 @@ import argparse
 import json
 import math
 import os
-import shutil
 import statistics
 import sys
 import time
@@ -61,7 +60,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from .fsutil import replace as _fs_replace
+from .fsutil import read_text as _fs_read, replace as _fs_replace, write_text as _fs_write
 from . import paths
 
 LAB = paths.saves_path("lab")
@@ -173,27 +172,40 @@ def normalize(spec: dict) -> dict:
 
 
 def submit(spec: dict) -> dict:
-    """Queue an experiment, refusing to overwrite one of the same name."""
+    """Queue an experiment, refusing to overwrite one of the same name. Written whole (a temporary file, then a
+    rename): the runner and the Lab page list the queue whenever they like, and must never read half of it."""
     _dirs()
     s = normalize(spec)
     path = QUEUE / f"{s['name']}.json"
     if path.exists():
         raise ValueError(f"Experiment {s['name']} already exists (delete saves/lab/queue/{s['name']}.json first).")
-    path.write_text(json.dumps(s, indent=1), encoding="utf-8")
+    _fs_write(path, json.dumps(s, indent=1))
     return s
 
 
 def load_queue() -> list[dict]:
-    """Every queued experiment, most important first."""
+    """Every queued experiment, most important first. A file read while the server changes its priority
+    (``set_priority``) is waited for: one skipped would leave its games unstarted, and an idle runner whose only
+    experiment it was would think the queue empty and exit."""
     _dirs()
     out = []
     for p in QUEUE.glob("*.json"):
         try:
-            out.append(json.loads(p.read_text(encoding="utf-8")))
+            out.append(json.loads(_fs_read(p)))
         except (OSError, json.JSONDecodeError):
             continue
     out.sort(key=lambda s: (-s.get("priority", 0), s.get("submitted", "")))
     return out
+
+
+def set_priority(name: str, priority: int) -> int:
+    """Change a queued experiment's priority (the Queue page), held to -100..100; returns it. The file is replaced
+    while the runner may be reading it, so both sides retry."""
+    path = QUEUE / f"{name}.json"
+    spec = json.loads(_fs_read(path))
+    spec["priority"] = max(-100, min(100, int(priority)))
+    _fs_write(path, json.dumps(spec, indent=1))
+    return spec["priority"]
 
 
 def complete_players(exp: dict, r: dict) -> dict:
@@ -619,8 +631,9 @@ def _runner_step(args, running, attempts, finished_times, flags, max_workers) ->
             done = {r["i"] for r in load_results(exp["name"])}
             if len(done) >= exp["games"]:
                 if not any(k[0] == exp["name"] for k in running):
-                    _retry(lambda exp=exp: shutil.move(str(QUEUE / f"{exp['name']}.json"),
-                                                       str(DONE / f"{exp['name']}.json")))
+                    # a rename, also over an earlier experiment of the name in done/ (`lab submit` may reuse a
+                    # finished one's), where a move would copy over it in place, readable half written
+                    _fs_replace(QUEUE / f"{exp['name']}.json", DONE / f"{exp['name']}.json")
                     log(f"experiment {exp['name']} complete")
                 continue
             for i in range(exp["games"]):
@@ -750,13 +763,54 @@ def _game_left(r: dict, per_game: float) -> float:
     return max(per_game - r["minutes"], 0.1 * per_game)
 
 
+def _folders_now() -> list:
+    """The queue's and done/'s files as they stand: (folder, name, modified, size) each."""
+    out = []
+    for folder in (QUEUE, DONE):
+        for p in folder.glob("*.json"):
+            try:
+                st = p.stat()
+            except FileNotFoundError:
+                continue
+            out.append((folder.name, p.name, st.st_mtime_ns, st.st_size))
+    return sorted(out)
+
+
+def _experiment_specs(tries: int = 5) -> list[tuple[dict, str]]:
+    """Every experiment as (spec, "queued" or "complete"), the queue's first, then done/'s newest first, as one
+    reading of the two folders. The runner moves a finished experiment's file to done/ (a rename) whenever it
+    finishes, and the Queue page replaces a queued one's: an experiment moved after its queue file was read and before
+    done/ is listed would show twice, so a reading the folders changed under is taken again. Not merged by name
+    instead: ``lab submit`` may queue an experiment under a finished one's name, and both are shown. A folder still
+    changing after ``tries`` readings keeps the last, which at worst shows one experiment twice until the next poll."""
+    specs: list = []
+    for _ in range(tries):
+        before = _folders_now()
+        specs = []
+        for p in sorted(QUEUE.glob("*.json")):
+            try:
+                specs.append((json.loads(_fs_read(p)), "queued"))
+            except FileNotFoundError:
+                continue        # moved to done/ since the listing
+        done = []
+        for p in DONE.glob("*.json"):
+            try:
+                done.append((p.stat().st_mtime, json.loads(_fs_read(p))))
+            except FileNotFoundError:
+                continue
+        specs += [(spec, "complete") for _, spec in sorted(done, key=lambda d: d[0], reverse=True)]
+        if _folders_now() == before:
+            break
+    return specs
+
+
 def overview() -> dict:
     """Everything the web Lab page shows: runner health, per-experiment progress and ETA, running games with their
     current turn, recent log lines and the side runs (citar.bench jobs writing saves/lab/*.out)."""
     _dirs()
     now = time.time()
     try:
-        st = json.loads((LAB / "status.json").read_text(encoding="utf-8"))
+        st = json.loads(_fs_read(LAB / "status.json"))     # replaced by the runner every pass
     except (OSError, json.JSONDecodeError):
         st = {}
     alive = bool(st.get("pid")) and _pid_alive(st["pid"]) and not st.get("stopped")
@@ -780,9 +834,7 @@ def overview() -> dict:
                         "attempt": crashes.get((r["exp"], r["i"]), 0) + 1})
 
     experiments = []
-    specs = [(json.loads(p.read_text(encoding="utf-8")), "queued") for p in sorted(QUEUE.glob("*.json"))]
-    specs += [(json.loads(p.read_text(encoding="utf-8")), "complete")
-              for p in sorted(DONE.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
+    specs = _experiment_specs()
     remaining_minutes = 0.0
     for r in running:
         total = _projected_total(r)
@@ -1004,7 +1056,7 @@ def cmd_report(names):
     for name in names:
         exp = queue.get(name)
         if exp is None and (DONE / f"{name}.json").exists():
-            exp = json.loads((DONE / f"{name}.json").read_text(encoding="utf-8"))
+            exp = json.loads(_fs_read(DONE / f"{name}.json"))      # replaced when a re-queued name finishes
         results = [complete_players(exp, r) for r in load_results(name)]
         if exp and exp.get("factors"):
             s = summarize(results)
@@ -1024,7 +1076,7 @@ def cmd_report(names):
 def cmd_status():
     """Print what the runner is doing, or say that it is not running."""
     try:
-        st = json.loads((LAB / "status.json").read_text(encoding="utf-8"))
+        st = json.loads(_fs_read(LAB / "status.json"))
     except (OSError, json.JSONDecodeError):
         print("no status (runner never started?)")
         return

@@ -1981,7 +1981,6 @@ def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSes
     """Move work up or down the queue: the caller's own work, or work they manage (P3.2.4). A game is managed
     through its row in the games index. The work's pooled prompts follow it (P3.3.3: a ticket's priority is its
     class's base plus its work's)."""
-    import json as _json
     from ..pool import queue as work_queue, scheduler as prompt_scheduler
     if body.kind not in work_queue.KINDS and body.kind != "lab":
         raise HTTPException(400, "kind is benchmark, probe, report, game or lab.")
@@ -2005,12 +2004,7 @@ def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSes
     path = lab.QUEUE / f"{body.id}.json"
     if not path.exists():
         raise HTTPException(404, "No queued experiment of that name.")
-    spec = _json.loads(path.read_text(encoding="utf-8"))
-    spec["priority"] = max(-100, min(100, body.priority))
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(_json.dumps(spec, indent=1), encoding="utf-8")
-    tmp.replace(path)
-    return {"kind": "lab", "id": body.id, "priority": spec["priority"]}
+    return {"kind": "lab", "id": body.id, "priority": lab.set_priority(body.id, body.priority)}
 
 
 @app.post("/api/queue/tickets/{tid}/cancel")

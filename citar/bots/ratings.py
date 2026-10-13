@@ -47,14 +47,14 @@ _cache: dict = {}
 # ----------------------------------------------------------------------------------------------------------------------
 def _lab_files():
     """(experiment spec, results path) for every lab experiment, queued or done."""
-    from .. import lab
+    from .. import fsutil, lab
     out = []
     for d in (lab.QUEUE, lab.DONE):
         if not d.exists():
             continue
         for p in d.glob("*.json"):
             try:
-                spec = json.loads(p.read_text(encoding="utf-8"))
+                spec = json.loads(fsutil.read_text(p))      # a queued one's priority may be being changed
             except (OSError, json.JSONDecodeError):
                 continue
             out.append((spec, lab.RESULTS / f"{spec.get('name')}.jsonl"))

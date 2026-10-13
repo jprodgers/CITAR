@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .. import paths
+from .. import fsutil, paths
 from .. import servers as REG
 from . import ownership
 from .session import SAVE_DIR, SessionManager, GameSession
@@ -307,10 +307,11 @@ class BenchmarkScheduler:
                 self._log(f"Could not read run file {p.name}.")
 
     def _write(self, path: Path, data):
-        """Write a JSON file atomically."""
+        """Write a JSON file atomically, retrying while a reader (a report gathering a run, the page listing suites)
+        has it open."""
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-        tmp.replace(path)
+        fsutil.replace(tmp, path)
 
     def _save_run(self, run: dict):
         """Write one run to disk."""
@@ -368,7 +369,7 @@ class BenchmarkScheduler:
         out = []
         for p in sorted(self.suites_dir.glob("*.json"), key=lambda p: -p.stat().st_mtime):
             try:
-                s = json.loads(p.read_text(encoding="utf-8"))
+                s = json.loads(fsutil.read_text(p))       # one being saved would drop out of the list
                 out.append({"id": s["id"], "name": s["name"], "description": s.get("description", ""),
                             "updated": s.get("updated"), "mode": s.get("mode"),
                             "servers": [{"name": g["name"], "server_id": g["server_id"], "missing": g["missing"],
@@ -395,7 +396,7 @@ class BenchmarkScheduler:
         p = self._suite_path(suite_id)
         if not p.exists():
             raise KeyError(suite_id)
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(fsutil.read_text(p))
 
     def save_suite(self, data: dict) -> dict:
         """Create or replace a suite, after validating it."""
