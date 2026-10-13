@@ -1,0 +1,77 @@
+{
+  "about": "The lobby's hybrid seats (design/phase3-features.md P3.6.8): each case is a seat as the lobby's form holds it (`seat`) and the seat `POST /api/games` gets for it (`payload`, citar/web/js/seats.js seatPayload). seats.test.mjs checks that the form's seat makes the payload; tests/test_hybrid_lobby.py creates a game from each payload and checks the engine's seat. The model block is what llmForm makes for a member's seat on the shared dry-run machine (the test registry's sv_dryrun).",
+  "llm": {"server_id": "sv_dryrun", "model_id": "dry-run", "model": "dry-run", "profile_id": null,
+          "max_tool_calls_per_turn": 150, "persona": "", "server": "Dry run", "provider": "dryrun"},
+  "cases": [
+    {
+      "name": "trade only, the AI's bonuses (the lobby's defaults)",
+      "seat": {"type": "hybrid", "civ_name": "", "nation": "random", "color": "#0000aa", "difficulty": "",
+               "bot": {"aggression": 0.4, "profile": "standard"},
+               "hybrid": {"owners": {"trades": "llm", "agreements": "bot", "peace": "bot", "war": "bot", "denounce": "bot",
+                                     "un": "bot", "city_states": "bot", "espionage": "bot", "captured_cities": "bot",
+                                     "chat": "llm"},
+                          "advisor": true, "prompt_every": 10},
+               "handicap": "ai"},
+      "payload": {"type": "hybrid", "civ_name": null, "nation": null, "difficulty": null, "color": "#0000aa",
+                  "bot": {"aggression": 0.4, "profile": "standard"}, "handicap": "ai",
+                  "hybrid": {"owners": "trade_only", "advisor": true, "prompt_every": 10}}
+    },
+    {
+      "name": "all but war, a person's values, no advisor, every 5 turns",
+      "seat": {"type": "hybrid", "civ_name": "Diplomats", "nation": "Rome", "color": "#00aa00", "difficulty": "King",
+               "bot": {"aggression": 0.7, "profile": "standard"},
+               "hybrid": {"owners": {"trades": "llm", "agreements": "llm", "peace": "llm", "war": "bot", "denounce": "llm",
+                                     "un": "llm", "city_states": "llm", "espionage": "llm", "captured_cities": "llm",
+                                     "chat": "llm"},
+                          "advisor": false, "prompt_every": 5},
+               "handicap": "human"},
+      "payload": {"type": "hybrid", "civ_name": "Diplomats", "nation": "Rome", "difficulty": "King", "color": "#00aa00",
+                  "bot": {"aggression": 0.7, "profile": "standard"}, "handicap": "human",
+                  "hybrid": {"owners": "all_but_war", "advisor": false, "prompt_every": 5}}
+    },
+    {
+      "name": "everything, the AI's bonuses, every turn",
+      "seat": {"type": "hybrid", "civ_name": "", "nation": "random", "color": "#aaaa00", "difficulty": "Warlord",
+               "bot": {"aggression": 0.4, "profile": "standard"},
+               "hybrid": {"owners": {"trades": "llm", "agreements": "llm", "peace": "llm", "war": "llm", "denounce": "llm",
+                                     "un": "llm", "city_states": "llm", "espionage": "llm", "captured_cities": "llm",
+                                     "chat": "llm"},
+                          "advisor": true, "prompt_every": 1},
+               "handicap": "ai"},
+      "payload": {"type": "hybrid", "civ_name": null, "nation": null, "difficulty": "Warlord", "color": "#aaaa00",
+                  "bot": {"aggression": 0.4, "profile": "standard"}, "handicap": "ai",
+                  "hybrid": {"owners": "everything", "advisor": true, "prompt_every": 1}}
+    },
+    {
+      "name": "a grid of its own (war, the United Nations and captured cities), a person's values",
+      "seat": {"type": "hybrid", "civ_name": "", "nation": "random", "color": "#50006e", "difficulty": "",
+               "bot": {"aggression": 0.4, "profile": "standard"},
+               "hybrid": {"owners": {"trades": "bot", "agreements": "bot", "peace": "bot", "war": "llm", "denounce": "bot",
+                                     "un": "llm", "city_states": "bot", "espionage": "bot", "captured_cities": "llm",
+                                     "chat": "bot"},
+                          "advisor": true, "prompt_every": 50},
+               "handicap": "human"},
+      "payload": {"type": "hybrid", "civ_name": null, "nation": null, "difficulty": null, "color": "#50006e",
+                  "bot": {"aggression": 0.4, "profile": "standard"}, "handicap": "human",
+                  "hybrid": {"owners": {"trades": "bot", "agreements": "bot", "peace": "bot", "war": "llm",
+                                        "denounce": "bot", "un": "llm", "city_states": "bot", "espionage": "bot",
+                                        "captured_cities": "llm", "chat": "bot"},
+                             "advisor": true, "prompt_every": 50}}
+    },
+    {
+      "name": "a grid of its own (talk alone), the handicap left to its default",
+      "seat": {"type": "hybrid", "civ_name": "", "nation": "random", "color": "#c85a00", "difficulty": "",
+               "bot": {"aggression": 0.2, "profile": "standard"},
+               "hybrid": {"owners": {"trades": "bot", "agreements": "bot", "peace": "bot", "war": "bot", "denounce": "bot",
+                                     "un": "bot", "city_states": "bot", "espionage": "bot", "captured_cities": "bot",
+                                     "chat": "llm"},
+                          "advisor": true, "prompt_every": 12}},
+      "payload": {"type": "hybrid", "civ_name": null, "nation": null, "difficulty": null, "color": "#c85a00",
+                  "bot": {"aggression": 0.2, "profile": "standard"}, "handicap": "ai",
+                  "hybrid": {"owners": {"trades": "bot", "agreements": "bot", "peace": "bot", "war": "bot",
+                                        "denounce": "bot", "un": "bot", "city_states": "bot", "espionage": "bot",
+                                        "captured_cities": "bot", "chat": "llm"},
+                             "advisor": true, "prompt_every": 12}}
+    }
+  ]
+}
