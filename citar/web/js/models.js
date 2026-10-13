@@ -1,16 +1,26 @@
-// Models page: overall model scores (benchmark-weighted leaderboard) and the detailed metric comparison.
+// Models page: overall model scores (benchmark-weighted leaderboard) and the detailed metric comparison, and the
+// Diplomacy tab (#/models?tab=diplomacy): hybrid benchmark jobs against their bot-only control games, per model and
+// owners preset (design/phase3-features.md P3.6.10).
 import { api } from "./api.js";
 import { el, clear, toast } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
 import { renderComparison } from "./metrics.js";
 import { helperCard } from "./helper.js";
+import { boardRows } from "./diplomacy.js";
 
 const open = new Set();
+const openLines = new Set();
 
 export async function renderModels(root) {
   const page = el("div", { class: "lobby" });
   root.appendChild(page);
   page.appendChild(pageHeader("models"));
+  const tab = new URLSearchParams(location.hash.split("?")[1] || "").get("tab") === "diplomacy" ? "diplomacy" : "scores";
+  page.appendChild(el("div", { class: "tabbar" },
+    ...[["scores", "Model scores"], ["diplomacy", "Diplomacy"]].map(([k, label]) =>
+      el("button", { class: tab === k ? "active" : "", onclick: () => { location.hash = k === "scores" ? "#/models" : `#/models?tab=${k}`; } },
+        label))));
+  if (tab === "diplomacy") return renderDiplomacy(page);
   const board = el("div", { class: "card" });
   const compare = el("div", { class: "card" });
   // models live on the machines people connect: the way to add one is the helper
@@ -80,6 +90,71 @@ function drawBoard(card, data, refresh) {
       table.appendChild(el("tr", { class: "detail" }, el("td", { colspan: 10 }, inner)));
     }
   });
+  card.appendChild(el("div", { style: { overflowX: "auto" } }, table));
+  if (withheld.length) card.appendChild(el("details", {}, el("summary", { class: "muted" }, "Not enough pooled data yet"),
+    el("ul", { class: "muted small" }, ...withheld)));
+}
+
+// ---------------------------------------------------------------------------- the Diplomacy tab
+async function renderDiplomacy(page) {
+  const card = el("div", { class: "card" });
+  page.append(card);
+  const refresh = async () => {
+    try { drawDiplomacy(card, await api.modelDiplomacy(), refresh); } catch (e) { toast(e.message, "error"); }
+  };
+  await refresh();
+  const timer = setInterval(refresh, 30000);
+  return { destroy() { clearInterval(timer); } };
+}
+
+function drawDiplomacy(card, data, refresh) {
+  clear(card);
+  card.appendChild(el("div", { class: "row" }, el("h2", { style: { margin: 0 } }, "Diplomacy"),
+    el("span", { class: "muted" }, "Hybrid seats against bots: each hybrid benchmark job is paired with a control game, the same game with " +
+      "the seat's bot deciding everything, so the difference is what the model's diplomacy did."),
+    el("span", { class: "grow" }), el("button", { class: "small", onclick: refresh }, "Refresh")));
+  if (data.scope) card.appendChild(el("p", { class: "muted small" }, `From ${data.scope.description}. Other members' pairs count ` +
+    `only where at least ${data.scope.min_contributors} accounts are behind a line, and are never named.`));
+  const rows = boardRows(data);
+  const withheld = (data.withheld || []).map((w) => el("li", {}, el("b", {}, `${w.model} · ${w.owners}`), ": ", w.reason));
+  if (!rows.length) {
+    card.appendChild(el("p", { class: "muted" }, "No hybrid benchmark pairs yet. Give a benchmark scenario the hybrid mode " +
+      "(Benchmarks → a suite → a scenario's Mode) and run it."));
+    if (withheld.length) card.appendChild(el("ul", { class: "muted small" }, ...withheld));
+    return;
+  }
+  const help = {
+    diff: "The hybrid seat's final score minus its control's, averaged over the pairs, with a 90% bootstrap interval (2,000 seeded resamples).",
+    deals: "Deals the hybrid seat made per game.",
+    value: "What the seat's own bot makes of each deal, in gold from the seat's side, valued when the accepted proposal was made.",
+    acceptance: "How many of the seat's own proposals the other side accepted.",
+    control: "The control game's deals per game and their mean value, valued the same way.",
+    fallbacks: "Chats the bot answered and diplomat calls that did not run because of the model (it timed out or failed); the ones a benchmark's queue or a refusal caused are listed beside, not counted against it.",
+  };
+  const table = el("table", { class: "list leaderboard diplomacy-board" }, el("tr", {},
+    el("th", {}, "Model"), el("th", {}, "Model decides"), el("th", {}, "Pairs"),
+    el("th", { title: help.diff }, "Score vs control ⓘ"), el("th", { title: help.deals }, "Deals / game ⓘ"),
+    el("th", { title: help.value }, "Mean deal value ⓘ"), el("th", { title: help.acceptance }, "Accepted ⓘ"),
+    el("th", {}, "Wars declared / game"), el("th", {}, "Captures / losses per game"),
+    el("th", { title: help.control }, "Control ⓘ"), el("th", { title: help.fallbacks }, "Fallbacks ⓘ"), el("th", {}, "")));
+  for (const r of rows) {
+    const key = `${r.model}|${r.owners}`;
+    const expanded = openLines.has(key);
+    table.appendChild(el("tr", { class: "clickable", onclick: () => { expanded ? openLines.delete(key) : openLines.add(key); drawDiplomacy(card, data, refresh); } },
+      el("td", {}, el("b", {}, r.model)), el("td", {}, r.owners),
+      el("td", {}, `${r.pairs}`, r.pooled ? el("div", { class: "muted small" }, `${r.pooled} pooled`) : null),
+      el("td", {}, r.diff), el("td", {}, r.deals), el("td", {}, r.value), el("td", {}, r.acceptance),
+      el("td", {}, r.wars), el("td", {}, r.captures), el("td", { class: "small" }, r.control),
+      el("td", { class: "small" }, r.fallbacks), el("td", {}, r.games.length ? (expanded ? "▾" : "▸") : "")));
+    if (expanded && r.games.length) {
+      const inner = el("table", { class: "list" }, el("tr", {}, ...["Run", "Scenario", "Seed", "Score vs control", "Deals"].map((h) => el("th", {}, h))),
+        ...r.games.map((g) => el("tr", {}, el("td", {}, g.run || g.run_id), el("td", {}, g.scenario || "–"),
+          el("td", {}, g.seed != null ? `${g.seed}` : "–"),
+          el("td", {}, Object.entries(g.score_diff || {}).map(([k, v]) => `${k === "end" ? "end" : `T${k}`} ${v > 0 ? "+" : ""}${v}`).join(" · ")),
+          el("td", {}, `${g.deals ?? "–"}`))));
+      table.appendChild(el("tr", { class: "detail" }, el("td", { colspan: 12 }, inner)));
+    }
+  }
   card.appendChild(el("div", { style: { overflowX: "auto" } }, table));
   if (withheld.length) card.appendChild(el("details", {}, el("summary", { class: "muted" }, "Not enough pooled data yet"),
     el("ul", { class: "muted small" }, ...withheld)));

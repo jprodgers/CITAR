@@ -6,6 +6,8 @@ import { profileSelect } from "./bots.js";
 import { el, clear, toast, modal, confirmBox, keepPlace } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
 import { llmForm, defaultLLM } from "./lobby.js";
+import { CATEGORIES, PRESETS, modelCategories, ownersMap, presetOf } from "./seats.js";
+import { answeredText } from "./diplomacy.js";
 
 const ITEM_TYPES = ["gold", "gold_per_turn", "resource", "tech", "city", "open_borders", "embassy", "peace_treaty",
   "declaration_of_friendship", "research_agreement", "defensive_pact", "declare_war"];
@@ -108,7 +110,7 @@ function drawRuns(card, runs, ctx) {
     for (const c of Object.values((r.summary || {}).cases || {})) for (const [k, v] of Object.entries(c.outcomes)) outcomes[k] = (outcomes[k] || 0) + v;
     const open = openRuns.has(r.id);
     table.appendChild(el("tr", { class: "clickable", onclick: () => { open ? openRuns.delete(r.id) : openRuns.add(r.id); ctx.redrawRuns(); } },
-      el("td", {}, el("b", {}, r.name), el("div", { class: "muted small" }, `${r.provider || ""} ${r.model || ""} · ${new Date(r.created * 1000).toLocaleString()}`)),
+      el("td", {}, el("b", {}, r.name), el("div", { class: "muted small" }, `${r.provider || ""} ${r.model || ""}${r.mode === "hybrid" ? " · hybrid" : ""} · ${new Date(r.created * 1000).toLocaleString()}`)),
       el("td", {}, el("span", { class: `pill ${r.status === "running" ? "live" : r.status === "finished" ? "good" : r.status === "failed" ? "bad" : ""}`, title: r.waiting || null }, r.status)),
       el("td", {}, bar(r.done / Math.max(1, r.total), `${r.done} / ${r.total}`)),
       el("td", {}, r.summary && r.summary.pass_rate != null ? `${Math.round(r.summary.pass_rate * 100)}%` : "–"),
@@ -155,7 +157,8 @@ function drawResults(cell, d, ctx) {
       el("td", {}, el("b", {}, r.case), d.run.repeats > 1 ? el("span", { class: "muted" }, ` #${r.rep + 1}`) : null,
         el("div", { class: "muted small" }, r.offer_text || (c.message ? `"${c.message}"` : r.kind))),
       el("td", {}, el("span", { class: `pill ${OUTCOME_CLASS[r.outcome] || ""}` }, r.outcome || "?"),
-        r.passed === true ? el("span", { class: "good" }, " ✓") : r.passed === false ? el("span", { class: "bad" }, " ✗") : null),
+        r.passed === true ? el("span", { class: "good" }, " ✓") : r.passed === false ? el("span", { class: "bad" }, " ✗") : null,
+        answeredText(r) ? el("div", { class: "muted small" }, answeredText(r)) : null),
       el("td", { class: "small" }, c.expect || (c.expect_tools ? `uses ${c.expect_tools.join(", ")}` : "–")),
       el("td", { class: "small" }, said || el("span", { class: "muted" }, "–"), r.error ? el("div", { class: "bad" }, r.error) : null),
       el("td", { class: "small" }, `${r.seconds}s`),
@@ -204,7 +207,7 @@ async function newProbe(ctx, scenarioId) {
   try { scenarios = await api.scenarios(); } catch (e) { toast(e.message, "error"); return; }
   if (!scenarios.length) { toast("Make a scenario first (Scenarios page).", "error"); return; }
   const s = scenarios.find((x) => x.id === scenarioId) || scenarios[0];
-  const subject = Math.max(0, s.seats.findIndex((x) => x.type === "llm"));
+  const subject = Math.max(0, s.seats.findIndex((x) => x.type === "llm" || x.type === "hybrid"));
   const cp = s.seats.findIndex((x, i) => i !== subject && ["script", "human"].includes(x.type));
   try { openEditor(ctx, await api.probeExample(s.id, subject, cp >= 0 ? cp : (subject === 0 ? 1 : 0))); } catch (e) { toast(e.message, "error"); }
 }
@@ -306,19 +309,46 @@ function runDialog(p, ctx) {
   const who = el("select", {}, el("option", { value: "model" }, "A model"),
     el("option", { value: "bot" }, "The scripted bot (baseline to compare models with)"));
   const botCfg = { profile: null };
+  const H = { mode: "full", owners: "trade_only", bot: { profile: null } };
+  const mode = el("select", { title: "Full: the model plays the seat. Hybrid: the seat's bot plays and answers what it owns; the model decides the diplomacy you hand it." },
+    el("option", { value: "full" }, "The model plays the seat"), el("option", { value: "hybrid" }, "Hybrid: a bot plays, the model negotiates"));
+  const hybridFields = () => {
+    const owners = ownersMap(H.owners);
+    const preset = presetOf(H.owners);
+    const set = (map) => { H.owners = presetOf(map) || map; draw(); };
+    return el("div", { class: "hybrid-owners" },
+      el("p", { class: "muted small" }, "Each offer or message goes to the seat's bot first, and to the model when it is a kind the model " +
+        "decides; the results say which answered. A turn case plays the bot's turn, then calls the model's diplomat."),
+      el("div", { class: "row" }, el("span", {}, "The model decides"),
+        el("select", { onchange: (e) => set(e.target.value === "custom" ? owners : ownersMap(e.target.value)) },
+          ...PRESETS.map(([k, label]) => el("option", { value: k, selected: preset === k }, label)),
+          el("option", { value: "custom", selected: !preset }, "A choice of its own")),
+        el("span", {}, "The seat's bot"), profileSelect(H.bot, "profile", null, { best: true })),
+      el("div", { class: "hybrid-grid" }, ...CATEGORIES.map(([k, label, help]) => el("label", { title: help },
+        el("input", { type: "checkbox", checked: owners[k] === "llm", onchange: (e) => set({ ...owners, [k]: e.target.checked ? "llm" : "bot" }) }),
+        ` ${label}`))),
+      modelCategories(H.owners).length ? null : el("div", { class: "warn small" }, "The model decides nothing: tick at least one kind."));
+  };
   const draw = () => {
     clear(box);
-    // the run is admitted for what its cases are (the probe list's `purposes`: probe, pooled or both)
-    if (who.value === "model") box.append(llmForm(L, draw, { purpose: p.purposes || ["probe", "pooled"] }));
-    else box.append(el("div", { class: "field" }, el("label", {}, "Bot"), profileSelect(botCfg, "profile", null, { best: true })));
+    // the run is admitted for what its cases are (the probe list's `purposes`: probe, pooled or both); a hybrid run's
+    // model is asked pooled prompts only, its turn cases' diplomat included
+    if (who.value === "model") {
+      box.append(el("div", { class: "row" }, el("span", {}, "Mode"), mode));
+      if (H.mode === "hybrid") box.append(hybridFields());
+      box.append(llmForm(L, draw, { purpose: H.mode === "hybrid" ? ["pooled"] : (p.purposes || ["probe", "pooled"]) }));
+    } else box.append(el("div", { class: "field" }, el("label", {}, "Bot"), profileSelect(botCfg, "profile", null, { best: true })));
   };
+  mode.onchange = () => { H.mode = mode.value; draw(); };
   who.onchange = draw;
   draw();
   const go = el("button", { class: "primary", onclick: async () => {
     go.disabled = true;
     try {
       if (who.value === "model") lastLLM = L;
-      await api.runProbe(p.id, { llm: who.value === "bot" ? { provider: "bot", aggression: 0.4, profile: botCfg.profile } : L, repeats: +repeats.value || 1 });
+      const body = { llm: who.value === "bot" ? { provider: "bot", aggression: 0.4, profile: botCfg.profile } : L, repeats: +repeats.value || 1 };
+      if (who.value === "model" && H.mode === "hybrid") Object.assign(body, { mode: "hybrid", owners: H.owners, bot_profile: H.bot.profile });
+      await api.runProbe(p.id, body);
       dlg.close();
       toast("Probe run queued", "success");
       ctx.refresh();
