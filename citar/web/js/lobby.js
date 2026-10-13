@@ -372,7 +372,9 @@ export function llmForm(L, rerender, { seat = true, purpose = "game", turns = tr
     if (sv.kind === "api" && !(sv.key_status || {}).present) notes.push(el("div", { class: "bad small" }, `${sv.name} has no API key yet (Servers page).`));
     if (!m) notes.push(el("div", { class: "warn small" }, `${sv.name} has no models in its catalog yet (Servers page).`));
     if (sv.pooled && !sv.online) notes.push(el("div", { class: "warn small" }, `${sv.name}'s helper is not connected: start it on that machine.`));
-    else if (sv.pooled && sv.admission && !sv.admission.allowed) notes.push(el("div", { class: "warn small" }, sv.admission.reason));
+    // a machine shared with the caller says why it would refuse this seat's kind of work (a grant for games is not one
+    // for a hybrid seat's pooled prompts, and the other way round)
+    else if (sv.admission && !sv.admission.allowed) notes.push(el("div", { class: "warn small admission" }, sv.admission.reason));
     if (sv.pooled && m && !m.loaded && sv.models.some((x) => x.loaded)) notes.push(el("div", { class: "muted small" }, `${m.key} is not the loaded model on ${sv.name}; LM Studio will load it on the first turn if it can.`));
     const provider = sv.connection.provider;
     box.append(...[
