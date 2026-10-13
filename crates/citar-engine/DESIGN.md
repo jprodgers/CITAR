@@ -988,11 +988,8 @@ The top-level keys are written in this order:
     - units packed at 8 bytes each;
     - the event range.
 - **Loading history.** `Game::load` accepts the chunk payloads (`&mut dyn Iterator<Item = &[u8]>`) and rebuilds the `Chronicle`. If the counts or the running hash disagree with the heads, it sets `LoadReport.chronicle_incomplete`. The simulation is unaffected either way.
-- **Replay data.** `replay_data(format)` serves two formats:
-  - `Full` is the current frame shape, which `replay.js:91-118` decodes: full owner, improvement, route and feature layers, and each major's explored bitmap, per frame. It is kept for the transition.
-  - `Delta` is keyframes plus deltas, as stored.
-
-  Expanding full frames on the server recreates the payload bloat plan 6.8 removes. So Phase 3's web work teaches `replay.js` the `Delta` format, and `Full` is then retired.
+- **Replay data.** `replay_data()` serves the frames as stored: keyframes plus deltas, each record's bytes in base64, only those that decode (a record after a lost chunk is left out until the next keyframe, since its base's hash is the server's to check). The browser decodes them (`citar/web/js/replaydecode.js`).
+  - Until package 3-13 a `Full` format sent Python's frame shape, every layer and each major's explored bitmap whole per frame, which `replay.js` read. Expanding full frames on the server recreated the payload bloat plan 6.8 removes, so once `replay.js` read `Delta` (Phase 3, design/phase3-features.md P3.5.8) `Full` and its encoder were retired, and the binding refuses `replay_data("full")`.
 - **In `citar-store` (Phase 2):**
   - record framing: a `CITARJNL` header, then records of `len | kind | codec | blake3[..8] | payload`;
   - torn-tail recovery, and zstd;
@@ -2348,7 +2345,7 @@ pub fn events(&self, since: u32, limit: usize) -> &[Event];  pub fn event_view(&
 pub fn stats(&self, last: Option<usize>) -> &[StatsRow];  pub fn thoughts(&self, pid: Option<PlayerId>, since: u32) -> Vec<&Thought>;
 pub fn negotiation(&self, nid: NegotiationId) -> Option<&Negotiation>;  pub fn negotiations(&self) -> &[Negotiation];
 pub fn end_turn_refusal(&self, pid: PlayerId) -> Option<String>;  pub fn deal(&self, id: DealId) -> Option<&Deal>;
-pub fn replay_data(&self, f: ReplayFormat) -> Vec<u8>;  pub fn rev(&self) -> u64 /* session ETag, not saved */;  pub fn digest(&self) -> Digest;
+pub fn replay_data(&self) -> Vec<u8> /* Delta frames; Full retired in 3-13 */;  pub fn rev(&self) -> u64 /* the state's revision, not saved; the host's view ETag counts its own writes (3-13) */;  pub fn digest(&self) -> Digest;
 ```
 
 **Free functions:**
@@ -2392,7 +2389,7 @@ pub fn replay_data(&self, f: ReplayFormat) -> Vec<u8>;  pub fn rev(&self) -> u64
 | play_bot_turn, bot_respond, bot_advice | citar-bot through `drive` and `SeatDriver` (Phase 2) |
 | apply_ops, scenario_overview, default_seats, normalize_seats, save_scenario, export_map | `api::scenario`, `api::maps` (the file writes stay in Python) |
 | path_preview, has_met, meet, force_turn, debug | same names |
-| replay_data | `replay_data(Full)` until replay.js reads `Delta` (Phase 3) |
+| replay_data | `replay_data()`, the `Delta` frames as stored, which replay.js decodes (`replaydecode.js`); `Full` was retired in Phase 3 (3-13), and `replay_data("full")` is refused |
 | inspect, test_ops (new methods, not in `__all__`) | `api::inspect`, `api::testops` (feature `test-ops`) |
 
 ### 8.3 Tools and typed actions
@@ -4120,6 +4117,7 @@ As built: the strict run over the 262 states is clean (0 unexplained, 0 stale, e
 #### P2.1.2 Non-goals
 
 - **Phase 3:** the hybrid agent, its diplomat prompt and triggers; the trade-chat UI and rule T3's lobby timeouts; pooled prompts; `replay.js` reading the `Delta` format (the `Full` replay stays); ETags on views and trade options leaving the view (plan 6.8). The engine already stops for `HybridDiplomat` and honours `Deferred` (1c-09). Phase 2 keeps the bot side ready: switches, deferred answers and advice.
+  - Done in Phase 3's package 3-13 (design/phase3-features.md P3.5.8): `replay.js` decodes `Delta` and `Full` is retired; views answer with an ETag (the server's, from the extension's count of writes, since `Game::rev` moves on the state alone); the client view's diplomacy leaves `trade_options` out (`diplomacy_info`'s flag, refcheck `client-view-trade-options-on-demand`), and the deal builder fetches them (`views::players::trade_options_with`, `Game.trade_options` in citar-py).
 - **Phase 4:** the Rust helper, CPU jobs, signatures and trust, and a Python-free lab job. `citar-sim` and `citar-store` are libraries so the helper can link them.
 - **Phase 5:** the release wheel matrix, multi-arch Docker, installers, Scoop, winget, Homebrew and the VPS.
 - **Game-for-game parity with the Python bot.** The comparison is statistical (P2.4.4) and by deterministic sub-decisions (P2.3.11).

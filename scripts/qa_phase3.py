@@ -2187,7 +2187,12 @@ def part_chat(h: Harness) -> None:
     B's expire, and each model's turn ends when its chat is settled. The game is played to its end. Her socket gets
     every status of her chats (queued with a place, thinking, waiting with a deadline, closed); the bot seat's socket
     gets only those of chats it is in, and a spectator's none while she plays. The metrics count the models' answers
-    and the clock's declines; the chat route reads a chat with its clock."""
+    and the clock's declines; the chat route reads a chat with its clock.
+
+    3-13's checks, the client's payloads (P3.5.8): her view answers with an ETag, a refresh that sends it back gets 304
+    until something changes; her view's diplomacy carries no trade options, the trade options route gives her those
+    of a civilization she has met (not her own, not a stranger's); and the finished game's replay is the journal's
+    frames, a keyframe and then deltas, one per round."""
     r = h.report
     alice = h.accounts["alice"]
     data = r.data.setdefault("chat", {})
@@ -2250,6 +2255,7 @@ def part_chat(h: Harness) -> None:
         r.check("alice opened a chat with each model and the bot (meet_all first)",
                 met.status_code == 200 and all(x.get("ok") for x in (a, b, c)),
                 f"meet_all {met.status_code}; {[x.get('ok') or x.get('error') for x in (a, b, c)]}")
+        payloads_while_playing(h, gid, tokens, data, tool)
         answered = wait_until(lambda: (head(a_id).get("clock") or {}).get("waiting_on") == 0, 30, 0.25)
         a_view = head(a_id)
         theirs = [e for e in a_view.get("history") or [] if not e.get("you")]
@@ -2339,6 +2345,7 @@ def part_chat(h: Harness) -> None:
                 and (m2.get("chat_fallback_causes") or {}).get("timeout", 0) >= 1,
                 json.dumps({"1": m1.get("chat_answers"), "2": m2.get("chat_answers"),
                             "2_causes": m2.get("chat_fallback_causes")}))
+        finished_replay(h, gid, tokens, data, gi)
         data.update({"chats": {"a": a_id, "b": b_id, "bot": c_id}, "b_declined_after_s": round(b_took, 1),
                      "turn3_trades": {str(k): v[0] for k, v in decided.items()},
                      "statuses_seen": sorted(states), "statuses": mine.statuses()[:200],
@@ -2352,6 +2359,67 @@ def part_chat(h: Harness) -> None:
                 alice.delete(f"/api/games/{gid}")
             except httpx.HTTPError:
                 pass
+
+
+def payloads_while_playing(h: Harness, gid: str, tokens: list, data: dict, tool) -> None:
+    """3-13 (P3.5.8), during alice's first turn: the view's ETag and its 304, and trade options on demand."""
+    r = h.report
+    alice, bob = h.accounts["alice"], h.accounts["bob"]
+
+    def view(tag=None):
+        return alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]},
+                         headers={"If-None-Match": tag} if tag else {})
+
+    # the models answer their chats meanwhile, so a look can race a change: the first of three tries that finds
+    # the view unchanged between two looks shows the 304
+    tries = []
+    for _ in range(3):
+        first = view()
+        tag = first.headers.get("etag")
+        again = view(tag)
+        tries.append((first.status_code, bool(tag), again.status_code, len(again.content)))
+        if again.status_code == 304:
+            break
+    r.check("alice's view answers with an ETag, and a refresh that sends it back gets 304 Not Modified, empty",
+            any(t[0] == 200 and t[1] and t[2] == 304 and t[3] == 0 for t in tries), json.dumps(tries))
+    moved = tool("set_research", {"tech": "Pottery"})
+    after = view(tag)
+    r.check("after she sets her research the same tag gets the new view (200) under a new tag",
+            moved.get("ok") is True and after.status_code == 200 and after.headers.get("etag") not in (None, tag),
+            f"set_research {moved.get('ok') or moved.get('error')}; {after.status_code}")
+    listed = (after.json().get("diplomacy") or {}).get("players") or [] if after.status_code == 200 else []
+    opts = alice.get(f"/api/games/{gid}/trade-options/1", params={"token": tokens[0]})
+    body = opts.json() if opts.status_code == 200 else {}
+    own = alice.get(f"/api/games/{gid}/trade-options/0", params={"token": tokens[0]})
+    stranger = bob.get(f"/api/games/{gid}/trade-options/1", params={"as_player": 0})
+    r.check("her view lists the civilizations she met without trade options; the trade options route gives her "
+            "those of one she met, and 404s for her own civilization and for a stranger",
+            len(listed) == 3 and all("trade_options" not in p for p in listed)
+            and opts.status_code == 200 and body.get("with") == 1
+            and {"they_could_give", "you_could_give", "agreements_possible_now"} <= set(body.get("trade_options") or {})
+            and own.status_code == 404 and stranger.status_code == 404,
+            f"listed {[p.get('id') for p in listed]}; options {opts.status_code} {sorted(body.get('trade_options') or {})}; "
+            f"own {own.status_code}; stranger {stranger.status_code}")
+    data["payloads"] = {"etag_tries": tries, "trade_options": body}
+
+
+def finished_replay(h: Harness, gid: str, tokens: list, data: dict, gi: dict) -> None:
+    """3-13 (P3.5.8): the finished game's replay is the journal's frames as stored, one per round."""
+    import base64
+    r = h.report
+    got = h.accounts["alice"].get(f"/api/games/{gid}/replay", params={"token": tokens[0]})
+    replay = got.json() if got.status_code == 200 else {}
+    frames = replay.get("frames") or []
+    heads = [base64.b64decode(f.get("bytes") or "")[:4] for f in frames]
+    kinds = [b"CF\x01K" if f.get("keyframe") else b"CF\x01D" for f in frames]
+    r.check("the finished game's replay is Delta: a keyframe, then a delta a round, each record a version 1 frame",
+            got.status_code == 200 and replay.get("format") == "delta" and len(frames) >= 7
+            and frames[0].get("keyframe") is True and not any(f.get("keyframe") for f in frames[1:])
+            and heads == kinds and len(frames) == len(replay.get("stats") or []),
+            f"{got.status_code}; format {replay.get('format')}; {len(frames)} frames, turns "
+            f"{[f.get('turn') for f in frames]}; {len(got.content)} bytes; game turn {gi.get('turn')}",
+            frames=len(frames), bytes=len(got.content))
+    data["replay"] = {"frames": len(frames), "bytes": len(got.content), "keyframes": sum(1 for f in frames if f.get("keyframe"))}
 
 
 #: The parts written so far, in the order ``all`` runs them.
