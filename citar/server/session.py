@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from .. import engine_api, ledger
 from ..engine_api import ActionError, EngineCrash, EngineGame
+from .chat import NO_REPLY, ChatClock, RealClock
 from .metrics import Metrics
 from .. import paths
 
@@ -92,8 +93,13 @@ class GameSession:
         self.agents: dict[int, Any] = {}
         self.agent_status: dict[int, str] = {}
         self.errors: list[dict] = []
-        self._responding: set = set()
+        # the chats handed to the seats' responders: (negotiation id, entries) -> the seat answering (P3.5.3); a key
+        # goes when its chat moves or closes (_on_event), or when its seat is halted (responders.halt)
+        self._responding: dict = {}
+        self._lines: dict = {}          # seat -> its line of chats to answer (citar.agents.responders.SeatLine)
         self._answering: dict = {}      # seat -> its chat answers running now (_run_responder; under the lock)
+        # a loaded game's model seats answer no chat until it is first resumed (answers_held; _register_loaded)
+        self.held_from_load = False
         self._stop = False
         self._mark_lock = threading.Lock()   # a live mark is never written after the game is closed
         self._driver: Optional[threading.Thread] = None
@@ -136,6 +142,10 @@ class GameSession:
         # holds no machine until one of its seats is asked something (``SessionManager.load(leases=False)``)
         self.holds_machines = True
         self._writer = SaveWriter(self)
+        # the session's time (a test's fake clock replaces it) and the chat clock that times every open chat by the
+        # side it waits on (design/phase3-features.md P3.5.2); its thread starts with the driver
+        self.clock = RealClock()
+        self.chat = ChatClock(self)
         game.subscribe(self._on_event)
         self._track_turn()
         from ..pool import scheduler as prompt_scheduler
@@ -177,7 +187,9 @@ class GameSession:
             "created": self.created, "config": {k: config.get(k) for k in (
                 "map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians", "barbarian_aggression", "turn_limit", "victories", "city_states", "religion",
                 "espionage", "tech_trading", "ruins", "seed", "map_edges", "wrap_x", "wrap_y", "river_density",
-                "resources", "on_disconnect", "reconnect_seconds")},
+                "resources", "on_disconnect", "reconnect_seconds")}
+            # the lobby's chat settings as the game plays them: the defaults when it gave none (P3.5.2)
+            | self.chat.settings,
             "players": [{"id": p["id"], "name": p["name"], "color": p["color"], "alive": p["alive"], "kind": p["kind"],
                          **({"difficulty": p["difficulty"]} if p["kind"] == "major" else {})}
                         for p in summ["players"]],
@@ -334,6 +346,8 @@ class GameSession:
             self.metrics.pause()
             for pid in list(self.agents):
                 self.cancel_agent(pid)
+            self._halt_answers()
+            self.chat.stop()
             self.release_leases()
             self.metrics.interrupt_open()
             self._metrics_current = None
@@ -354,17 +368,18 @@ class GameSession:
         cancelled (a seat change, quiet hours) stops waiting at once, rather than keeping the driver thread in a turn
         that is no longer its own. With ``hold_paused``, time the game spends paused does not count: an agent's wait
         is part of its turn, whose clock stops in a pause, and a person who pauses to think over an offer should not
-        lose the chat to the clock.
+        lose the chat to the clock. Time is the session's ``clock`` (a test's fake clock passes it at once).
         """
         counted = 0.0
+        clock = self.clock
         while not done() and not self._stop and not (halted is not None and halted()):
             left = timeout - counted
             if left <= 0:
                 break
-            t = time.time()
-            self.cond.wait(timeout=min(left, 1.0))
+            t = clock.now()
+            clock.wait(self.cond, min(left, 1.0))
             if not (hold_paused and self.paused):
-                counted += time.time() - t
+                counted += clock.now() - t
         return counted
 
     def _await_reply(self, pid: int, nid: int, timeout: float, halted=None, hold_paused: bool = False) -> float:
@@ -397,63 +412,106 @@ class GameSession:
         return result
 
     # ------------------------------------------------------------------
-    # Negotiation interrupts for AI seats
+    # Chats: the seats' responders and the chat clock's actions (design/phase3-features.md P3.5.2, P3.5.3)
     # ------------------------------------------------------------------
-    def _dispatch_negotiation_interrupts(self):
-        """Wake the seats that owe an answer to an open negotiation.
+    def _dispatch_negotiation_interrupts(self, pids=None, again: bool = False):
+        """Hand the seats a program plays the chats that wait on them (``citar.agents.responders``: a line per seat,
+        one chat at a time, on the model or the bot pool). Called with the lock held, after every action (it reads the
+        negotiations' heads, not copies of their histories), and with ``again`` when the seats come back (a resume, a
+        load, a seat change: ``dispatch_waiting``).
 
-        This is why an agent should wait on ``wait_for_turn`` rather than polling for its own turn: a
-        negotiation opened on somebody else's turn blocks that turn until it is answered. It runs after every
-        action, so it reads the negotiations' heads, not copies of their histories.
+        This is why an agent should wait on ``wait_for_turn`` rather than polling for its own turn: a negotiation
+        opened on somebody else's turn blocks that turn until it is answered. The current player's own agent handles
+        the replies to the chats it opened during its turn (its loop's notes and end_turn's wait), so those are not
+        handed out. A model seat whose machine the game paused for, or of a loaded game not yet resumed
+        (``answers_held``), answers when it resumes.
+        ``again`` hands out once more a chat whose key is still held but which no line of its seat holds now (an answer
+        that stopped for such a pause).
         """
+        from ..agents import responders
         current = self.game.current
         for n in self.game.open_negotiation_heads():
-            if n["awaiting"] is None:
-                continue
             pid = n["awaiting"]
-            seat = self.seats[pid] if pid < len(self.seats) else None
-            key = (n["id"], n["entries"])
-            if seat is None or key in self._responding:
+            if pid is None or (pids is not None and pid not in pids):
                 continue
-            if seat.type in ("bot", "llm") and current != pid:
-                # the current player's own agent handles replies during its turn loop
-                self._responding.add(key)
-                threading.Thread(target=self._run_responder, args=(pid, n["id"], key), daemon=True).start()
-            elif seat.type in ("bot", "llm") and current == pid and n["initiator"] != pid:
-                self._responding.add(key)
-                threading.Thread(target=self._run_responder, args=(pid, n["id"], key), daemon=True).start()
+            seat = self.seats[pid] if pid < len(self.seats) else None
+            if seat is None or seat.type not in ("bot", "llm"):
+                continue
+            if current == pid and n["initiator"] == pid:
+                continue
+            key = (n["id"], n["entries"])
+            if key in self._responding and (not again or responders.busy_with(self, pid, n["id"])):
+                continue
+            if seat.type == "llm" and self.answers_held():
+                continue
+            self._responding[key] = pid
+            responders.submit(self, pid, n["id"], n["entries"], "bot" if seat.type == "bot" else "model")
 
-    def _run_responder(self, pid: int, nid: int, key):
-        """Run an AI seat's answer to a negotiation, off the turn driver. A bot seat answers through the engine
-        (``EngineGame.answer``, BotAgent.respond_negotiation), a model seat through its tool calls. A model seat of a
-        game that made way answers on a lease of its own for the answer (``lease_for(answering=True)``), which goes
-        when its last answer ends (``_answered``)."""
+    #: The pauses during which a model seat's chat answers wait for the resume: the game paused because its machine is
+    #: out of reach (a disconnect), in its quiet hours, or its budget is spent, so an answer asked then could only
+    #: fail, and be declined. A person's pause and a make-way pause hold no answer (a game that made way answers on a
+    #: lease of its own for the answer, ``lease_for(answering=True)``).
+    HOLD_ANSWERS = ("disconnect", "restricted", "budget")
+
+    def answers_held(self) -> bool:
+        """Whether the game's model seats' chat answers wait for its resume: a pause of ``HOLD_ANSWERS``, or the pause a
+        load leaves until the game is first resumed (``held_from_load``: a loaded game comes back paused so that its
+        model configuration can be checked before anything spends tokens, whatever acts in it meanwhile)."""
+        if not self.paused:
+            return False
+        return self.held_from_load or (self.pause_reason or {}).get("kind") in self.HOLD_ANSWERS
+
+    def dispatch_waiting(self, pids=None) -> None:
+        """Hand out again every open chat that waits on a bot or model seat (of ``pids``, when given) and no responder
+        holds (P3.5.3: on resume, load, ``restore_live`` and a seat change), so a chat that was waiting when the game
+        stopped or the seat changed is answered without anyone acting first."""
+        if self._stop or self.crashed:
+            return
+        with self.lock:
+            self._dispatch_negotiation_interrupts(pids, again=True)
+
+    def _run_responder(self, pid: int, nid: int, key, epoch: Optional[int] = None):
+        """Run an AI seat's answer to a negotiation, on its line's pool thread (``citar.agents.responders``). A bot seat
+        answers through the engine (``EngineGame.answer``, BotAgent.respond_negotiation), a model seat through its
+        chat's conversation (``ChatThread``). A model seat of a game that made way answers on a lease of its own for the
+        answer (``lease_for(answering=True)``), which goes when its last answer ends (``_answered``).
+
+        A halt never declines (P3.5.3): an answer whose seat was halted since it was taken (``epoch``: a suspension, a
+        seat change, a crash) returns without a word, and the chat waits for the seat's next responder or the chat
+        clock. Only an answer that ran and failed outright (an error, a model that used its steps without answering,
+        a seat with no machine) is declined, "(no response)"; a slow one is the chat clock's."""
+        from ..agents import responders
         if self._stop or self.crashed:
             return
         with self.lock:
             self._answering[pid] = self._answering.get(pid, 0) + 1
+        outcome, raised = None, False
         try:
             agent = self.get_agent(pid, answering=True)
-            if agent is not None:
+            if agent is not None and not responders.halted(self, pid, epoch):
                 # the answer's CPU is this game's, whichever thread runs it (P3.4.3)
                 with ledger.cpu_unit(self.cpu_activity):
-                    agent.respond_negotiation(self, pid, nid)
+                    outcome = agent.respond_negotiation(self, pid, nid)
         except EngineCrash as e:
             self._crashed(str(e))
         except Exception:
+            outcome, raised = "failed", True
             self.errors.append({"t": time.time(), "player": pid, "where": "negotiation responder",
                                 "trace": traceback.format_exc()})
         finally:
-            if not self._stop and not self.crashed:
-                self._reject_if_unanswered(pid, nid, key)
+            if (not self._stop and not self.crashed and not responders.halted(self, pid, epoch)
+                    and outcome in ("unanswered", "failed")):
+                self._reject_if_unanswered(pid, nid, key, record=raised)
             self._answered(pid)
 
     def _answered(self, pid: int) -> None:
-        """A chat answer of seat ``pid`` ended. When it was the seat's last one running and the game has made way
-        (P3.3.3: a make-way pause holds no lease until the resume), the lease the answer was made on goes, with the
-        agent bound to it: otherwise ``occupied()`` would list the game again, and the work it made way for would wait
-        for the game while the game waits for that work. The resume makes the seat's lease again (``_want_leases``).
-        Non-blocking (the lock is held only to look and release)."""
+        """A chat answer of seat ``pid`` ended. When it was the seat's last one, running or queued on its line, and the
+        game has made way (P3.3.3: a make-way pause holds no lease until the resume), the lease the answer was made on
+        goes, with the agent bound to it: otherwise ``occupied()`` would list the game again, and the work it made way
+        for would wait for the game while the game waits for that work. The resume makes the seat's lease again
+        (``_want_leases``). The seat's line answers one chat at a time, so a chat still queued on it keeps the lease
+        for its own answer, and the agent goes without a halt: a chat handed to the line meanwhile is answered on a
+        lease made for it, not dropped. Non-blocking (the lock is held only to look and release)."""
         with self.lock:
             left = self._answering.get(pid, 0) - 1
             if left > 0:
@@ -461,24 +519,119 @@ class GameSession:
                 return
             self._answering.pop(pid, None)
             if self._made_way() and self.leases.get(pid) is not None:
+                ln = self._lines.get(pid)
+                if ln is not None and ln.pending():
+                    return                  # the line's next answer runs on it; the last one lets it go
                 # a model seat's (a bot's answer holds no lease, and its agent keeps the bot's memory)
-                self.cancel_agent(pid)
+                self.cancel_agent(pid, halt=False)
                 self.release_leases([pid], for_good=False)
 
-    def _reject_if_unanswered(self, pid: int, nid: int, key):
-        """Reject a negotiation nobody answered, so the game cannot stall on it."""
+    def _reject_if_unanswered(self, pid: int, nid: int, key, record: bool = False):
+        """Reject a negotiation a seat failed to answer, so the other side is not left waiting on it for the chat
+        clock's whole timeout. ``record``: the failure was not the model's conversation's (which wrote its own metrics
+        row), so the row is written here."""
         with self.lock:
             try:
                 n = self.game.negotiation_head(nid)
                 if n["status"] == "open" and n["awaiting"] == pid and n["entries"] == key[1]:
-                    # agent failed to respond: reject so the other side isn't stuck
+                    before = (self.game.turn, self.game.current)
                     self.game.execute(pid, "respond_negotiation",
                                       {"negotiation_id": nid, "action": "reject", "message": "(no response)"})
-                    self._after_action(self.game.turn, self.game.current)
+                    if record and self.seats[pid].type in ("llm", "mcp"):
+                        self.metrics.negotiation(pid, 0.0, 0, 0, 0, nid=nid, outcome="fallback", cause="failed")
+                    self._after_action(*before)
             except ActionError:
                 pass
             except EngineCrash as e:
                 self._crashed(str(e))
+
+    def cancel_chat_answer(self, pid: int, nid: int) -> None:
+        """Stop the answer still in progress for chat ``nid`` (the chat clock, at its deadline): the seat's
+        conversation for it (``LLMAgent.cancel_chat``). Non-blocking; allowed with the lock held."""
+        fn = getattr(self.agents.get(pid), "cancel_chat", None)
+        if fn is not None:
+            try:
+                fn(nid)
+            except Exception:
+                log.debug("could not cancel seat %s's answer to negotiation %s", pid, nid, exc_info=True)
+
+    def _chat_still(self, nid: int, pid: Optional[int], entries: int) -> bool:
+        """Whether chat ``nid`` stands where the clock saw it: open, waiting on ``pid``, with ``entries``. Lock held."""
+        try:
+            n = self.game.negotiation_head(nid)
+        except ActionError:
+            return False
+        return n["status"] == "open" and n["awaiting"] == pid and n["entries"] == entries
+
+    def decline_late(self, pid: int, nid: int, entries: int, cause: str = "timeout") -> bool:
+        """The chat clock's action for a model seat (an LLM or MCP seat) whose time ran out: the seat declines,
+        "(no reply in time)", on its behalf, unless the chat moved meanwhile. Returns whether it declined."""
+        with self.lock:
+            if self._stop or self.crashed or not self._chat_still(nid, pid, entries):
+                return False
+            before = (self.game.turn, self.game.current)
+            try:
+                self.game.execute(pid, "respond_negotiation",
+                                  {"negotiation_id": nid, "action": "reject", "message": NO_REPLY})
+            except ActionError:
+                return False
+            except EngineCrash as e:
+                self._crashed(str(e))
+                return False
+            self.metrics.negotiation(pid, self.chat.timeout("model") or 0.0, 0, 0, 0, nid=nid,
+                                     outcome="declined_late", cause=cause)
+            self._after_action(*before)
+            return True
+
+    def chat_fallback(self, pid: int, nid: int, entries: int, cause: str = "timeout") -> bool:
+        """The chat clock's action for a hybrid seat whose model's time ran out: its fallback bot answers
+        (``EngineGame.answer``, design/phase3-features.md P3.6.5), or, with no bot to answer, the seat declines as a
+        model seat does. Returns whether the chat moved."""
+        bot = getattr(self.agents.get(pid), "fallback_bot", None)
+        if bot is None:
+            return self.decline_late(pid, nid, entries, cause)
+        with self.lock:
+            if self._stop or self.crashed or not self._chat_still(nid, pid, entries):
+                return False
+            before = (self.game.turn, self.game.current)
+            try:
+                r = self.game.answer(pid, nid, bot)
+            except ActionError:
+                return False
+            except EngineCrash as e:
+                self._crashed(str(e))
+                return False
+            self.metrics.negotiation(pid, self.chat.timeout("hybrid") or 0.0, 0, 0, 0, nid=nid, outcome="fallback",
+                                     cause=cause)
+            if r.get("outcome") == "done":
+                self._after_action(*before)
+            return r.get("outcome") == "done"
+
+    def expire_chat(self, nid: int, entries: int) -> bool:
+        """The chat clock's action for a chat whose person's time ran out: it closes as expired, "(no reply in time)",
+        whoever opened it, unless it moved meanwhile. Returns whether it closed."""
+        with self.lock:
+            try:
+                n = self.game.negotiation_head(nid)
+            except ActionError:
+                return False
+            if n["status"] != "open" or n["entries"] != entries:
+                return False
+            return self.close_negotiation(nid, "expired", NO_REPLY)
+
+    def chat_view(self, nid: int, pid: Optional[int]) -> dict:
+        """Chat ``nid`` as seat ``pid`` sees it (``negotiation_view``; the initiator's side for a spectator, ``pid``
+        None), with where its clock stands (``clock``): the chat window's ``GET /api/games/{gid}/negotiations/{nid}``.
+        Raises ActionError for a chat the game does not have, or one ``pid`` is not in. Lock held."""
+        n = self.game.negotiation_head(nid)
+        side = pid if pid is not None else n["initiator"]
+        if side not in (n["initiator"], n["responder"]):
+            raise ActionError(f"No such negotiation: {nid}.")
+        view = self.game.negotiation_view(nid, side)
+        timing = self.chat.deadline_of(nid) if n["status"] == "open" else {}
+        view["clock"] = {"waiting_on": n["awaiting"], "kind": timing.get("kind"), "deadline": timing.get("deadline"),
+                         "left_s": timing.get("left_s"), "paused": timing.get("paused", bool(self.paused))}
+        return view
 
     def close_negotiation(self, nid: int, status: str, note: str, by: Optional[int] = None) -> bool:
         """Time a chat out or force it closed (diplomacy.close_negotiation), and tell everyone watching.
@@ -523,7 +676,7 @@ class GameSession:
         if agent is not None:
             with self.lock:
                 if self.agents.get(pid) is agent:
-                    self.cancel_agent(pid)
+                    self.cancel_agent(pid, halt=False)     # its answer in progress, if any, goes on with the new one
         if seat.type == "llm" and self._leases_ended():
             return None
         if seat.type == "bot":
@@ -594,7 +747,7 @@ class GameSession:
         except servers.ServerError as e:
             agent = NoMachineAgent(str(e))
         with self.lock:
-            self.cancel_agent(pid)
+            self.cancel_agent(pid, halt=False)
             self.agents[pid] = agent        # the game's stop cancels it
         return agent
 
@@ -863,6 +1016,7 @@ class GameSession:
         starts here, so its machines are held from then on, whoever moves first."""
         if self._driver is None:
             self.open_leases()
+            self.chat.start()
             self._driver = threading.Thread(target=self._drive, daemon=True, name=f"driver-{self.id}")
             self._driver.start()
 
@@ -871,11 +1025,21 @@ class GameSession:
         """Whether this session has been shut down."""
         return self._stop
 
-    def cancel_agent(self, pid: int):
-        """Stop a seat's agent, so its configuration can be changed."""
+    def cancel_agent(self, pid: int, halt: bool = True):
+        """Stop a seat's agent, so its configuration can be changed, and halt its chat answers (``halt``): what they
+        were answering waits for the seat's next responder or the chat clock, never declined (P3.5.3). Non-blocking."""
         agent = self.agents.pop(pid, None)
         if agent is not None and hasattr(agent, "cancel"):
             agent.cancel()
+        if halt:
+            from ..agents import responders
+            responders.halt(self, pid)
+
+    def _halt_answers(self) -> None:
+        """Halt every seat's chat answers (a suspension, a crash, the game's end). Non-blocking."""
+        from ..agents import responders
+        for pid in list(self._lines):
+            responders.halt(self, pid)
 
     def update_seat(self, pid: int, type: Optional[str] = None, llm: Optional[dict] = None,
                     bot: Optional[dict] = None, name: Optional[str] = None):
@@ -911,8 +1075,11 @@ class GameSession:
                 self.release_leases([pid])
                 moved = True
             self.cond.notify_all()
+            self.chat.note()                # a chat waiting on the seat is timed for its new kind of player
         if moved:
             self._want_leases([pid])
+        # a chat that waited on the seat is answered by its new controller (P3.5.3)
+        self.dispatch_waiting([pid])
 
     def set_paused(self, paused: bool):
         """Pause or resume the AI players from the game screen.
@@ -924,15 +1091,21 @@ class GameSession:
         with self.lock:
             if paused == self.paused or self.crashed:
                 return
+            self.chat.settle()              # the chats' clocks stand still from here, or go on from here
             self.paused = paused
             self.pause_reason = None
+            if not paused:
+                self.held_from_load = False
             if paused:
                 self.metrics.pause()
             else:
                 self.metrics.unpause()
             self.cond.notify_all()
+            self.chat.republish()
             if not paused:
                 self._want_leases()         # a game that had made way holds its machines again
+                # its models answer what waited on them meanwhile (P3.5.3)
+                self._dispatch_negotiation_interrupts(again=True)
 
     def suspend(self, reason: Optional[dict] = None):
         """Pause the game immediately, aborting any AI turn in progress (used for quiet hours and benchmark pauses).
@@ -944,11 +1117,14 @@ class GameSession:
         with self.lock:
             if self.crashed:
                 return
+            self.chat.settle()
             self.paused = True
             self.pause_reason = reason
             self.metrics.pause()
             for pid in list(self.agents):
                 self.cancel_agent(pid)
+            self._halt_answers()            # never declined: answered again on resume (P3.5.3)
+            self.chat.republish()
             if (reason or {}).get("kind") == "queue":
                 # it makes way for higher-priority work: its machines are free until it resumes (P3.3.3); every other
                 # pause keeps them, since the game resumes where it left off
@@ -964,14 +1140,18 @@ class GameSession:
         with self.lock:
             if self.crashed:
                 return
+            self.chat.settle()
             self.paused = False
             self.pause_reason = None
+            self.held_from_load = False
             self.metrics.unpause()
             self._track_turn()
             self.cond.notify_all()
+            self.chat.republish()
         self.mark_live()
         self._broadcast({"type": "control", "paused": False, "ai_delay": self.ai_delay, "pause_reason": None})
         self._want_leases()                 # a game that made way holds its machines again
+        self.dispatch_waiting()             # the chats waiting on its bots and models are answered (P3.5.3)
 
     RECONNECT_POLL_SECONDS = 10.0     # how often a game paused by a disconnect checks whether the server is back
 
@@ -1148,6 +1328,8 @@ class GameSession:
             self.paused = True
         for pid in list(self.agents):
             self.cancel_agent(pid)
+        self._halt_answers()
+        self.chat.stop()
         self.release_leases()
         with self.lock:
             self.cond.notify_all()
@@ -1173,6 +1355,8 @@ class GameSession:
         finds the turn already over and leaves it; any other turn an agent leaves open is closed here.
         """
         while not self._stop and not self.crashed:
+            # the chat clock is a thread of its own: one that died is started again, with a log line (P3.9.2)
+            self.chat.ensure()
             if self._leases_due:
                 # asked for by a thread that held the lock (a resume or a seat change under it): made here, off it
                 self._leases_due = False
@@ -1260,44 +1444,56 @@ class GameSession:
         On pid's own turn with negotiations it is in still waiting on the other side, it waits for their answers
         instead ("negotiation_update" when one comes, "waiting_for_reply" when none has by the timeout): the end_turn
         tool refuses until they are settled, and this is how an agent playing over HTTP or MCP waits for a reply
-        without polling.
+        without polling. While the game plays, every answer lists the chats pid is in with their deadlines
+        (``chats``: ``negotiation_id``, ``with``, ``waiting_on`` you or them, ``deadline`` in epoch seconds,
+        ``seconds_left``; the chat clock, P3.5.4): a chat waiting on pid closes, or pid is taken to have declined,
+        when its time runs out.
         """
         deadline = time.time() + timeout
         chats = None            # on pid's turn: the open negotiations it is in, as they stood when the wait began
         with self.lock:
             while True:
-                if self.crashed:
-                    # the game takes no more moves (_crashed): an agent that kept waiting or acting would loop for good
-                    return {"status": "crashed", "turn": self.crashed["turn"], "message": CRASHED}
-                g = self.game
-                pending = [n["id"] for n in g.open_negotiation_heads(pid) if n["awaiting"] == pid]
-                if g.phase != "playing":
-                    return {"status": "game_over", "winner": g.winner, "victory": g.victory}
-                if not g.is_alive(pid):
-                    return {"status": "eliminated"}
-                if pending:
-                    return {"status": "negotiation", "negotiation_ids": pending,
-                            "your_turn": g.current == pid}
-                if g.current == pid:
-                    now = self._chat_marks(pid)
-                    if chats is None:
-                        chats = now
-                    changed = sorted(nid for nid, mark in chats.items() if now.get(nid) != mark)
-                    if changed:
-                        return {"status": "negotiation_update", "negotiation_ids": changed, "your_turn": True,
-                                "turn": g.turn}
-                    if not chats:
-                        return {"status": "your_turn", "turn": g.turn}
-                left = deadline - time.time()
-                if left <= 0:
-                    if chats and g.current == pid:
-                        return {"status": "waiting_for_reply", "negotiation_ids": sorted(chats), "your_turn": True,
-                                "turn": g.turn,
-                                "note": "No answer yet. Call wait_for_turn again to keep waiting, or withdraw with "
-                                        "respond_negotiation(action='reject', message=...) and end your turn."}
-                    return {"status": "waiting", "turn": g.turn, "current_player": g.current,
-                            "current_player_name": g.player_name(g.current)}
-                self.cond.wait(timeout=min(left, 1.0))
+                res, chats = self._wait_look(pid, deadline, chats)
+                if res is not None:
+                    if res["status"] not in ("crashed", "game_over", "eliminated"):
+                        res["chats"] = self.chat.chats_of(pid)
+                    return res
+                self.cond.wait(timeout=min(max(0.0, deadline - time.time()), 1.0))
+
+    def _wait_look(self, pid: int, deadline: float, chats) -> tuple:
+        """One look of ``wait_for_turn``: (its answer, or None when there is none yet; the chats it watches on pid's
+        turn, as they stood when the wait began). Lock held."""
+        if self.crashed:
+            # the game takes no more moves (_crashed): an agent that kept waiting or acting would loop for good
+            return {"status": "crashed", "turn": self.crashed["turn"], "message": CRASHED}, chats
+        g = self.game
+        pending = [n["id"] for n in g.open_negotiation_heads(pid) if n["awaiting"] == pid]
+        if g.phase != "playing":
+            return {"status": "game_over", "winner": g.winner, "victory": g.victory}, chats
+        if not g.is_alive(pid):
+            return {"status": "eliminated"}, chats
+        if pending:
+            return {"status": "negotiation", "negotiation_ids": pending, "your_turn": g.current == pid}, chats
+        if g.current == pid:
+            now = self._chat_marks(pid)
+            if chats is None:
+                chats = now
+            changed = sorted(nid for nid, mark in chats.items() if now.get(nid) != mark)
+            if changed:
+                return {"status": "negotiation_update", "negotiation_ids": changed, "your_turn": True,
+                        "turn": g.turn}, chats
+            if not chats:
+                return {"status": "your_turn", "turn": g.turn}, chats
+        if deadline - time.time() <= 0:
+            if chats and g.current == pid:
+                return {"status": "waiting_for_reply", "negotiation_ids": sorted(chats), "your_turn": True,
+                        "turn": g.turn,
+                        "note": "No answer yet. Call wait_for_turn again to keep waiting, or withdraw with "
+                                "respond_negotiation(action='reject', message=...) and end your turn. A chat closes "
+                                "by itself when its time runs out (see chats: seconds_left)."}, chats
+            return {"status": "waiting", "turn": g.turn, "current_player": g.current,
+                    "current_player_name": g.player_name(g.current)}, chats
+        return None, chats
 
     def _chat_marks(self, pid: int) -> dict:
         """The open negotiations pid is in, each as (awaiting, entries): what an answer changes."""
@@ -1308,16 +1504,44 @@ class GameSession:
     # ------------------------------------------------------------------
     def _on_event(self, ev: dict):
         """Forward a game event to everyone watching. An eliminated seat lets its lease go, and a game that is over
-        lets every lease go for good (P3.3.3): nothing will be asked of their machines again. Called after the engine
-        call that caused it, usually with the lock held: releasing never blocks."""
+        lets every lease go for good (P3.3.3): nothing will be asked of their machines again. A chat that moved or
+        closed leaves the responders' keys, and the chat clock times it as it now stands (P3.5.2, P3.5.3); a closed one
+        is told to its two sides (``negotiation_status`` ``closed``) and its conversations let go. Called after the
+        engine call that caused it, usually with the lock held: none of this blocks."""
         kind = ev.get("type")
-        if kind == "eliminated":
+        if kind == "negotiation":
+            self._chat_moved(ev)
+        elif kind == "eliminated":
             pid = (ev.get("data") or {}).get("player")
             if isinstance(pid, int) and 0 <= pid < len(self.seats):
                 self._seat_out(pid)
         elif kind in ("victory", "game_over"):
             self.release_leases()
         self._broadcast({"type": "event", "event": ev})
+
+    def _chat_moved(self, ev: dict) -> None:
+        """A negotiation event (``_on_event``): the chat it names moved (``data.awaiting``: it waits on that seat
+        now) or closed (``data.status``)."""
+        data = ev.get("data") or {}
+        nid = data.get("negotiation")
+        if nid is None:
+            return
+        for key in [k for k in list(self._responding) if k[0] == nid]:
+            self._responding.pop(key, None)
+        status = data.get("status")
+        if status:
+            players = [p for p in (ev.get("players") or []) if isinstance(p, int)]
+            for p in players:
+                fn = getattr(self.agents.get(p), "chat_closed", None)
+                if fn is not None:
+                    fn(nid)
+            self._broadcast({"type": "negotiation_status", "negotiation": nid, "players": players,
+                             "waiting_on": None, "kind": None, "state": "closed", "status": status,
+                             "position": None, "eta_s": None, "deadline": None})
+        try:
+            self.chat.note()
+        except Exception:
+            self.errors.append({"t": time.time(), "where": "chat clock", "trace": traceback.format_exc()})
 
     def _broadcast(self, msg: dict):
         """Send a message to every subscriber, dropping ones that have gone away."""
@@ -2096,9 +2320,17 @@ class SessionManager:
         with self.lock:
             self.sessions[s.id] = s
         s.paused = True
-        s.start()
+        # its models answer no chat until it is resumed (P3.5.3: resume, set_paused(False)), whatever acts in it first
+        # (a bot's answer, a person's move), since a loaded game is paused so that its model configuration can be
+        # checked before anything spends tokens
+        s.held_from_load = True
+        s.start()               # its chat clock is new: every open chat is timed afresh from here (ChatClock.start)
         self.track(s)
         s.mark_live()
+        # its bots answer the chats waiting on them now; a game opened only to be looked at answers nothing (its end
+        # state is what is looked at)
+        if leases:
+            s.dispatch_waiting([p for p, seat in enumerate(s.seats) if seat.type == "bot"])
 
     def _reopen(self, live: GameSession, paused: bool):
         """Bring back a game ``load`` stopped for a save that then did not load (its history, in the journal the game

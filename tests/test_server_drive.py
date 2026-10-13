@@ -19,7 +19,6 @@ from pathlib import Path
 from unittest import mock
 
 from citar import engine_api
-from citar.agents.bot_agent import BotAgent
 from citar.server import session as sess
 from tests import has_test_ops
 
@@ -170,9 +169,9 @@ class SideEffectTests(ServerCase):
         responders = []
         real = sess.GameSession._run_responder
 
-        def spy(self_, pid, nid, key):
+        def spy(self_, pid, nid, key, **kw):
             responders.append((pid, nid))
-            return real(self_, pid, nid, key)
+            return real(self_, pid, nid, key, **kw)
 
         with mock.patch.object(sess.GameSession, "_run_responder", spy):
             s.start()
@@ -193,25 +192,26 @@ class SideEffectTests(ServerCase):
 
     def test_a_bot_takes_up_each_answer_as_it_comes_within_one_wait_for_its_turn(self):
         """A chat that comes back to the bot is answered at once, not after its other chats have settled, and the
-        turn's waits share one budget (P2.7.1: the agent "drives again when woken")."""
-        s = self.game({"map_size": "small", "seed": 11, "barbarians": "off"},
+        silent seat is the chat clock's to time (P2.7.1: the agent "drives again when woken"; P3.5.2: the clock
+        declines for a model seat, an MCP client here, whose time ran out)."""
+        model_seconds = 3.0
+        s = self.game({"map_size": "small", "seed": 11, "barbarians": "off",
+                       "chat_model_reply_seconds": model_seconds},
                       [{"type": "bot"}, {"type": "llm", "llm": dict(DRY, dry_run_negotiation="counter")},
                        {"type": "mcp"}, {"type": "human"}], start=False)
         with s.lock:
             s.game.apply_ops([{"op": "meet", "a": 0, "b": 1}, {"op": "meet", "a": 0, "b": 2}])
         s.get_agent(0).bot = engine_api.bot_instance("basic", params=EAGER_FRIENDSHIP)
-        closed = []                      # (negotiation, status, how many entries the model seat's chat had by then)
-        real = sess.GameSession.close_negotiation
+        declined = []                    # (negotiation, how many entries the model seat's chat had by then)
+        real = sess.GameSession.decline_late
 
-        def spy(self_, nid, status, note, by=None):
+        def spy(self_, pid, nid, entries, cause="timeout"):
             with self_.lock:
                 theirs = [n for n in self_.game.negotiations() if n["initiator"] == 0 and n["responder"] == 1]
-                closed.append((nid, status, len(theirs[0]["history"]) if theirs else 0))
-            return real(self_, nid, status, note, by)
+                declined.append((nid, len(theirs[0]["history"]) if theirs else 0))
+            return real(self_, pid, nid, entries, cause)
 
-        budget = 3.0
-        with mock.patch.object(sess.GameSession, "close_negotiation", spy), \
-                mock.patch.object(BotAgent, "REPLY_WAIT_SECONDS", budget):
+        with mock.patch.object(sess.GameSession, "decline_late", spy):
             t0 = time.perf_counter()
             s.start()
             self.assertTrue(wait(lambda: s.game.current != 0 or s.game.turn > 1, 60), s.errors)
@@ -220,11 +220,12 @@ class SideEffectTests(ServerCase):
         chats = {n["responder"]: n for n in s.game.negotiations() if n["initiator"] == 0}
         self.assertEqual(sorted(chats), [1, 2], "the bot offered its friendship to both seats")
         silent = chats[2]
-        self.assertEqual(silent["status"], "expired", silent)
-        expiry = next(c for c in closed if c[0] == silent["id"])
-        self.assertGreaterEqual(expiry[2], 3, "the model seat's counter was answered before the silent seat's chat "
-                                              f"expired: {closed}, {chats[1]['history']}")
-        self.assertLess(took, budget + 2.5, "the turn's waits share one budget")
+        self.assertEqual((silent["status"], silent["history"][-1]["message"]), ("rejected", "(no reply in time)"),
+                         silent)
+        expiry = next(c for c in declined if c[0] == silent["id"])
+        self.assertGreaterEqual(expiry[1], 3, "the model seat's counter was answered before the silent seat's chat "
+                                              f"was declined: {declined}, {chats[1]['history']}")
+        self.assertLess(took, model_seconds + 2.5, "the turn ended once the clock declined for the silent seat")
         rec0 = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec0["end_reason"], "end_turn")
         self.assertEqual(s.errors, [])
@@ -453,9 +454,9 @@ class LongGameTests(ServerCase):
         dispatched = []
         real = sess.GameSession._dispatch_negotiation_interrupts
 
-        def dispatch(self_):
+        def dispatch(self_, *args, **kw):
             dispatched.append(1)
-            return real(self_)
+            return real(self_, *args, **kw)
 
         autosaves = []                  # each autosave's time under the lock: its snapshot (the writer does the rest)
         real_snapshot = s._snapshot

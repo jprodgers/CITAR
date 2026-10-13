@@ -26,6 +26,8 @@ The lobby lists running games and saved ones.
 - **If an AI's model server disconnects**: pause the game until it answers again, or skip that
   AI's turn. Either way the seat first keeps retrying for the reconnect wait (180 seconds by
   default), so a short drop costs nothing — see [AI_PLAYERS.md](AI-players#when-the-model-server-goes-away).
+- **Chat**: how long a chat waits for an answer, and how long it may grow (see
+  [Chat settings](#chat-settings)).
 - **Load** on a saved game with a human seat takes you straight in. Games with no LLM seats resume
   automatically; games with them start paused so you can check the model settings first.
 - **▶ Play** resumes a running game. **Watch** opens a game with no human seat with full vision.
@@ -111,8 +113,25 @@ mouse wheel scrolls the tree sideways.
 **Diplomacy** (`D`) is where you send messages, denounce, and open negotiations. The deal builder
 covers gold, gold per turn, resources, open borders, embassies, peace, declarations of friendship,
 research agreements, defensive pacts, war on a third party, cities, maps and technologies.
-One-click suggestions show what each side has that the other wants. AI players answer in seconds;
-humans get a popup. United Nations votes are cast here too.
+One-click suggestions show what each side has that the other wants. Bots answer at once, AI models in
+their own time; humans get a popup. United Nations votes are cast here too.
+
+### Chat settings
+
+A negotiation is a chat between two civilizations, one message each in turn. The lobby's **Chat** row
+sets how long a chat waits for the side whose move it is, and how long it may grow:
+
+| Setting | Default | When it runs out |
+|---|---|---|
+| **AI answers within** (minutes) | 10 | An AI model (an LLM or MCP seat) that has not answered is taken to have declined, "(no reply in time)". The time it spends waiting for its machine counts. |
+| **People within** (minutes) | 5 | The chat closes as expired, "(no reply in time)", whoever opened it: an AI waiting on you, or another person. |
+| **At most ... messages** | the rules' own (30) | The message that would pass it closes the chat instead. Left empty, the game keeps its ruleset's cap. |
+
+Bots answer at once and are never timed. The clock stands still while the game is paused, starts again
+each time the chat moves, and starts afresh for every open chat when a game is loaded or the server
+restarts. A game loaded from a save comes back paused: its bots answer what waits on them at once, its AI
+models once you resume it, so you can check their settings before they spend anything. Nobody can end their turn while a chat they opened is open: an AI's turn waits for your
+answer, as long as the setting allows.
 
 ## After the game
 

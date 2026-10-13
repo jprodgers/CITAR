@@ -126,10 +126,59 @@ A prompt that works:
 The bridge is `citar-mcp` (`citar_mcp.py` in a checkout). It exposes every game tool plus
 `wait_for_turn`, which blocks until it is that seat's turn or a negotiation needs an answer — so
 the agent waits rather than polling. On the seat's own turn, after it opens a negotiation, it waits
-for the other side's answer, since `end_turn` is refused until the negotiation is settled.
+for the other side's answer, since `end_turn` is refused until the negotiation is settled. Every
+answer of `wait_for_turn` lists the chats the seat is in, each with its deadline (`chats`: whose move,
+`deadline` in epoch seconds, `seconds_left`): an MCP seat is a model seat, so a chat it leaves
+unanswered past the game's time is declined for it ([Chats](#chats)).
 
 Any seat's controller can be switched mid-game from **Join / Seats**, including handing a human
 seat to a model or the reverse.
+
+---
+
+## Chats
+
+A negotiation is a chat: strictly turn-taking, each entry with a message, at most the game's message
+cap (30 by default). Whoever's move it is answers in it, on their turn or not, and the other side waits.
+The server keeps the time, by the side a chat waits on, from two lobby settings
+([Playing](Playing-in-the-browser#chat-settings)):
+
+| A chat waits on | For (default) | Then |
+|---|---|---|
+| A model (an LLM or MCP seat) | `chat_model_reply_seconds` (10 minutes), its time waiting for its machine included | the seat declines, "(no reply in time)" |
+| A person | `chat_person_reply_seconds` (5 minutes) | the chat closes as expired, "(no reply in time)", whoever opened it |
+| A bot | no limit | the bot answers at once |
+
+The clock stands still while the game is paused, starts again whenever the chat moves, and starts
+afresh for every open chat when a game is loaded or the server restarts. In a benchmark game, a chat
+whose answer waits behind another benchmark on its machine is not timed until the answer starts.
+
+**How a model answers.** A model seat answers each chat in a conversation of its own, kept for as long
+as the chat is open: a short, fixed system prompt about chats with the seat's persona, the chat's
+history and the proposal from its side the first time, and after that only what changed (the other
+side's new message, the proposal as it stands, the minutes left). It has a small set of tools (look up
+diplomacy, the empire, the players and the victories, notes, a message, and `respond_negotiation`), and
+up to `max_negotiation_calls` steps (20) per answer, on the seat's own machine. A seat answers one chat at
+a time, in the order they came. An answer that fails outright (the model could not be reached, or
+used its steps without answering) is declined, "(no response)", so the other side is not kept waiting;
+a slow one is the chat clock's. Pausing the game, quiet hours, a seat change or a server restart in
+the middle of an answer never declines the chat: the seat answers it when it comes back. A game
+loaded from a save comes back paused, and its models answer what waits on them when it resumes (a
+game opened only to be looked at, such as a probe case's end state, answers nothing). A chat that
+comes while the game is paused because of the model's machine (its quiet hours, a disconnect, a spent
+budget) waits for the resume; during a pause of yours, or while the game makes way for other work, the
+model still answers.
+
+**On its own turn.** When the model sends a message in a chat, the tool waits a minute for the answer
+(`negotiation_wait_seconds`, set per seat) and shows it if it comes. An answer that comes later is put
+in front of the model before its next step, worded by where the chat stands: "answered negotiation #n:
+...; the proposal from your side: ... Answer with respond_negotiation", or, for a chat that was
+accepted, declined, withdrawn or that expired, a note that asks for no answer. `end_turn` waits for
+every chat the seat opened to be settled, as the game's clock allows.
+
+What the stats screen shows for each seat's chats: how many answers it gave and how each ended
+(answered, declined late by the clock, a fallback, closed before it answered), with the model's time
+and the time it waited for its machine apart.
 
 ---
 

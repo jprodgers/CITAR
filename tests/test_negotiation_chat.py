@@ -1,5 +1,6 @@
-"""Negotiations as chats in a live session: the session's driver and the LLM agent close the chats that time out, so
-that a game never stalls on one, and an agent waiting for an answer hears it as news.
+"""Negotiations as chats in a live session: the chat clock closes the chats that time out (citar/server/chat.py), the
+session's driver and the LLM agent's safety caps close what is left, so that a game never stalls on one, and an agent
+waiting for an answer hears it as news. The chat clock's own rules are tested in fake time in tests/test_chat_clock.py.
 
 The engine's rules for chats (every entry carries a message and a number, action names are normalised, a message cap
 closes a chat that goes nowhere, no one ends a turn while a chat they are in is open) are tested in the rule scripts
@@ -61,7 +62,9 @@ class SessionTests(unittest.TestCase):
 
         ScriptedConversation.scripts = {"opener": [opener]}
         with mock.patch("citar.agents.llm_agent.make_conversation", ScriptedConversation):
-            s = self.manager.create({"map_size": "duel", "seed": 3, "barbarians": "off"},
+            # the tool waits half a second for the answer; the chat clock closes the chat at a second
+            s = self.manager.create({"map_size": "duel", "seed": 3, "barbarians": "off",
+                                     "chat_person_reply_seconds": 1},
                                     [{"type": "llm", "llm": {"provider": "mock", "script": "opener",
                                                              "negotiation_wait_seconds": 0.5}},
                                      {"type": "human"}], track=False, start=False)
@@ -72,13 +75,13 @@ class SessionTests(unittest.TestCase):
             s.start()
             self._wait(s, lambda: s.game.current == 1)
         self.assertEqual(s.game.current, 1, s.errors)
-        self.assertGreaterEqual(time.time() - t0, 0.5)     # the open waited...
+        self.assertGreaterEqual(time.time() - t0, 1.0)     # the open waited, then end_turn waited for the clock...
         n = s.game.negotiations()[0]
         self.assertEqual((n["status"], n["history"][-1]["note"]), ("expired", "(no reply in time)"))
         first = next(r for r in s.metrics.data["turns"] if r["player"] == 0)
         self.assertEqual(first["end_reason"], "end_turn")
-        # ...and end_turn, with nothing left of that wait, closed the chat and ended the turn in one call that the
-        # metrics do not hold against the model
+        # ...which closed the chat, and end_turn ended the turn in one call that the metrics do not hold against the
+        # model
         self.assertEqual((first["errors"], first["by_tool"]["end_turn"]["count"]), (0, 1))
         self.assertEqual(s.errors, [])
 
@@ -114,7 +117,8 @@ class SessionTests(unittest.TestCase):
 
 class LLMEndTurnTests(unittest.TestCase):
     """LLMAgent._end_turn: the wait at end_turn for chats the model opened, driven directly (the model's own
-    open_negotiation wait is covered above), with the other side answering from another thread."""
+    open_negotiation wait is covered above), with the other side answering from another thread and the chat clock
+    closing what nobody answers in time."""
     def setUp(self):
         self.manager = SessionManager()
 
@@ -126,13 +130,16 @@ class LLMEndTurnTests(unittest.TestCase):
             shutil.rmtree(SAVE_DIR / sid, ignore_errors=True)
 
     def _session(self, wait: float, others: int = 1):
-        seats = [{"type": "llm", "llm": {"provider": "mock", "negotiation_wait_seconds": wait}}]
+        """A model seat and ``others`` people, all met, whose chats wait ``wait`` seconds on a person: the chat clock
+        runs (the driver does not, so the test plays the model's end of turn itself)."""
+        seats = [{"type": "llm", "llm": {"provider": "mock"}}]
         seats += [{"type": "human"} for _ in range(others)]
-        s = self.manager.create({"map_size": "duel" if others == 1 else "small", "seed": 3, "barbarians": "off"},
-                                seats, track=False, start=False)
+        s = self.manager.create({"map_size": "duel" if others == 1 else "small", "seed": 3, "barbarians": "off",
+                                 "chat_person_reply_seconds": wait}, seats, track=False, start=False)
         with s.lock:
             for q in range(1, others + 1):
                 s.game.meet(0, q)
+        s.chat.start()
         self.session = s
         return s, s.get_agent(0)
 
@@ -174,16 +181,15 @@ class LLMEndTurnTests(unittest.TestCase):
         self.assertTrue(res["ok"], res)
         self.assertEqual((s.game.current, s.game.negotiation(nid)["status"]), (1, "accepted"))
 
-    def test_each_chat_gets_what_is_left_of_its_own_wait(self):
-        s, agent = self._session(wait=10, others=2)
+    def test_each_chat_ends_at_its_own_deadline(self):
+        s, agent = self._session(wait=1.5, others=2)
         slow, quick = self._open(s, 1), self._open(s, 2)
-        agent._chat_left[(slow, 1)] = 0.3             # most of its wait was spent inside open_negotiation
-        self._later(0.8, 2, quick, "reject", "No, thank you.")
+        self._later(0.5, 2, quick, "reject", "No, thank you.")
         t0 = time.time()
         res = agent._end_turn(s, 0)
         took = time.time() - t0
         self.assertTrue(res["ok"], res)
-        self.assertTrue(0.7 <= took < 5, took)         # it waited for the answer, not for the rest of the ten seconds
+        self.assertTrue(1.2 <= took < 5, took)         # one answered at once, the other closed by the clock
         a, b = s.game.negotiation(slow), s.game.negotiation(quick)
         self.assertEqual((a["status"], a["history"][-1]["note"]), ("expired", "(no reply in time)"))
         self.assertEqual(b["status"], "rejected")

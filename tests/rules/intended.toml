@@ -337,6 +337,10 @@ id = "gift-unit-described-as-ruled"
 reason = "The city_state_action tool told models that a unit next to a city-state's territory could be gifted, which the rule refused; its description now says the unit must stand in the territory with movement left"
 
 [[differences]]
+id = "respond-negotiation-message-required"
+reason = "The respond_negotiation tool's schema listed only the negotiation and the action as required, although every answer needs a message and the engine refused one without; the schema now requires the message too, so a model is told before it calls and a call without one is refused by the schema check"
+
+[[differences]]
 id = "tool-arguments-of-the-wrong-type-refused"
 reason = "A tool given something other than text where it reads a name failed with a Python exception (unit_order's order, get_rules' topic) or read a number as the name '5' (promote_unit's promotion, build_improvement's improvement, unit_action's action); Rust refuses it with a sentence naming the parameter and what it takes"
 

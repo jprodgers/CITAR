@@ -920,7 +920,8 @@ class Probes(_ProbeScenario):
     def _interrupting(self, seat, times: int):
         """The dry run's answer in two steps (text first, then its tool call), the lobby seat's turn beginning between
         them the first ``times`` times it is asked: the seat asks for the slot the answer borrowed, so the answer's
-        second step is refused (``yielded``); the seat plays its turn's one request and goes idle again."""
+        second step is refused (``yielded``); the seat plays its turn's one request and goes idle again. The chat keeps
+        one conversation across the tries (package 3-11), so the interruptions are counted over the case."""
         from citar.agents.providers import dryrun
         from citar.agents.providers.base import StepResult
         original = dryrun.DryRunConversation._negotiate
@@ -934,7 +935,7 @@ class Probes(_ProbeScenario):
             seat.idle()
 
         def two_steps(conv):
-            if conv._step == 1 and left["n"] > 0:
+            if left["n"] > 0:
                 left["n"] -= 1
                 threading.Thread(target=seat_turn, daemon=True).start()
                 self.assertTrue(until(lambda: S.get().machine("sv_gpu").view()["lease_requests"], 5))
@@ -972,6 +973,31 @@ class Probes(_ProbeScenario):
                                   run_id="r-yield", run_name="yield run")
         self.assertEqual((rec["outcome"], rec["passed"]), ("error", None), rec)
         self.assertIn("cut off 2 times", rec["error"] or "")
+
+    def test_a_benchmark_that_takes_the_machine_mid_answer_has_the_answer_asked_again(self):
+        """A benchmark takes the machine while the answer's first step runs: the scheduler cancels the ticket and
+        closes the conversation on it. The answer is asked again on a fresh ticket, in a new conversation (the closed
+        one refuses every step), and the case is the model's own answer (accept, passed), not a non-answer."""
+        from citar.agents.providers import dryrun
+        from citar.agents.providers.base import StepResult
+        original = dryrun.DryRunConversation._negotiate
+        held = {}
+
+        def first_cut(conv):
+            if not held:
+                held["bench"] = S.get().lease("sv_gpu", "dry-run", kind="benchmark", label="benchmark run “b”",
+                                              ref=("benchmark", "b"))
+                threading.Timer(1.0, held["bench"].release).start()
+                return StepResult(text="Let me think about this offer.", tool_calls=[])
+            conv._step = 1
+            return original(conv)
+        with mock.patch.object(dryrun.DryRunConversation, "_negotiate", first_cut), \
+                mock.patch.object(self.P, "PROBE_RETRY_SECONDS", 0.2):
+            rec = self.P.run_case(self.manager, self.P.engine_api.load_scenario("pooled-scn"), self.probe,
+                                  self.probe["cases"][0], {"server_id": "sv_gpu", "model": "dry-run"},
+                                  run_id="r-bench-mid")
+        self.assertEqual((rec["outcome"], rec["passed"], rec["error"]), ("accept", True, None), rec)
+        self.assertEqual([c["tool"] for c in rec["tool_calls"]], ["respond_negotiation"])
 
     def test_a_benchmark_that_takes_the_machine_between_cases_is_waited_for(self):
         """A benchmark takes the machine after the run's first case: the run waits for it at the job level, saying so

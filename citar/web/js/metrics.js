@@ -38,6 +38,21 @@ const HELP = {
   "Turn ends": "How turns ended: end_turn (clean), stalled, step_limit, time_limit, tool_limit, no_tool_calls, error, cancelled, ended_by_server. Turns interrupted by a server restart are excluded from all stats.",
 };
 
+// How a seat's chat answers ended (design/phase3-features.md P3.5.7): answered by its model, declined by the chat
+// clock when its time ran out, a fallback (a full model seat declines when its model could not answer; a hybrid seat's
+// bot answers), or closed before an answer; the causes of fallbacks and late declines apart.
+const CHAT_OUTCOMES = { answered: "answered", declined_late: "declined late", fallback: "fallback", closed: "closed first" };
+
+function chatAnswersText(s) {
+  const answers = s.chat_answers || {};
+  const parts = Object.entries(CHAT_OUTCOMES).filter(([k]) => answers[k]).map(([k, label]) => `${answers[k]} ${label}`);
+  const causes = Object.entries(s.chat_fallback_causes || {}).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`);
+  let text = `Chat answers: ${s.negotiation_replies}${parts.length ? ` (${parts.join(", ")})` : ""}, average ${secs(s.avg_negotiation_s)}`;
+  if (s.avg_chat_gen_s != null) text += `; model ${secs(s.avg_chat_gen_s)}, waited for the machine ${secs(s.avg_chat_queue_s)}`;
+  if (causes.length) text += `; causes: ${causes.join(", ")}`;
+  return text;
+}
+
 function th(label) {
   return el("th", { title: HELP[label] || "" }, label, HELP[label] ? el("span", { class: "muted" }, " ⓘ") : null);
 }
@@ -129,7 +144,7 @@ export async function openMetrics(gid) {
           el("div", {}, el("h4", {}, "Tool usage"), tools),
           el("div", {}, el("h4", {}, "Most repeated identical calls"), repeats, el("h4", { class: "section" }, "Most common errors"), errors)),
         el("h4", { class: "section" }, "Recent turns"), el("div", { style: { overflowX: "auto" } }, turnsTable));
-      if (s.negotiation_replies) content.appendChild(el("div", { class: "muted" }, `Negotiation replies: ${s.negotiation_replies}, average ${secs(s.avg_negotiation_s)}`));
+      if (s.negotiation_replies) content.appendChild(el("div", { class: "muted" }, chatAnswersText(s)));
     }
     if (content.parentElement) content.parentElement.scrollTop = scroll;
   }

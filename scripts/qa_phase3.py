@@ -41,8 +41,11 @@ pooled prompts behind a lobby game's seat mid-turn, their Queue pages, and the o
 seat is mid-turn; ``--hold-line`` keeps them waiting for the browser checklist), ``ledger`` (3-10: bob's helper
 machine serving alice's lobby game and her report's analysis, his given and her used read through ``/api/ledger/me``
 against the compute ledger's events in the instance's database, her own machine's work on neither side, the ratio
-following its visibility; with ``--keep`` the server stays up for the browser checklist's B1), and later ``chat``,
-``hybrid``, ``minimap``, ``machines``; ``all`` runs every part written so far. It needs the
+following its visibility; with ``--keep`` the server stays up for the browser checklist's B1), ``chat`` (3-11, the
+server half: a person, two dry-run model seats on a one-slot machine and a bot chatting in a short game played to its
+end, both chat timeouts 20 s: a model's answer, one queued and then declined for by the chat clock, a person's chat
+closed as expired, the models' trades on their turns waiting for her; every ``negotiation_status`` her socket heard,
+none on a spectator's), and later ``hybrid``, ``minimap``, ``machines``; ``all`` runs every part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
 from __future__ import annotations
@@ -78,7 +81,7 @@ DEV_SERVER_PORT = 8799
 #: The owner's dev server's directory: never a harness's, whatever is in it.
 OWNER_PLAY_DIR = Path("C:/dev/citar-play")
 #: Parts a later package writes (P3.9.4): asked for now, the harness says so and refuses.
-LATER = {"chat": "3-11 to 3-13", "hybrid": "3-14 to 3-16", "minimap": "3-17", "machines": "3-18"}
+LATER = {"hybrid": "3-14 to 3-16", "minimap": "3-17", "machines": "3-18"}
 
 
 def _dev_server():
@@ -2143,8 +2146,217 @@ def part_ledger(h: Harness) -> None:
         scripted.close()
 
 
+class Socket:
+    """A game socket read on a thread of its own: every message it receives, kept with when it came."""
+
+    def __init__(self, h: "Harness", gid: str, token: str):
+        from websockets.sync.client import connect
+        self.messages: list = []
+        self._connection = connect(f"ws://127.0.0.1:{h.server.port}/ws/games/{gid}?token={token}", open_timeout=15,
+                                   proxy=None, max_size=None)
+        self._ws = self._connection.__enter__()
+        self._thread = threading.Thread(target=self._read, daemon=True, name=f"qa-socket-{token[:4]}")
+        self._thread.start()
+
+    def _read(self) -> None:
+        try:
+            while True:
+                self.messages.append((time.time(), json.loads(self._ws.recv())))
+        except Exception:
+            pass
+
+    def statuses(self, nid: Optional[int] = None) -> list:
+        """The ``negotiation_status`` messages it received (of chat ``nid``)."""
+        return [m for _, m in self.messages if m.get("type") == "negotiation_status"
+                and (nid is None or m.get("negotiation") == nid)]
+
+    def close(self) -> None:
+        try:
+            self._connection.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
+def part_chat(h: Harness) -> None:
+    """3-11's checks, the server half of chat (design/phase3-features.md P3.5.2-P3.5.5): alice plays a person seat,
+    through the API and her seat's socket, in a short game (8 turns) with two dry-run model seats on a one-slot
+    machine of hers and a bot, both chat timeouts set to 20 s. She opens a chat with each model and the bot: model A
+    takes 3 s to answer and is answered back; model B, asked while A holds the machine, queues, then takes longer
+    than its time and is declined for by the chat clock, "(no reply in time)"; the bot answers at once and alice lets
+    that chat run out, so it closes as expired. On turn 3 both models open a trade with her: she accepts A's and lets
+    B's expire, and each model's turn ends when its chat is settled. The game is played to its end. Her socket gets
+    every status of her chats (queued with a place, thinking, waiting with a deadline, closed); the bot seat's socket
+    gets only those of chats it is in, and a spectator's none while she plays. The metrics count the models' answers
+    and the clock's declines; the chat route reads a chat with its clock."""
+    r = h.report
+    alice = h.accounts["alice"]
+    data = r.data.setdefault("chat", {})
+    sockets: list = []
+    gid = ""
+    timeout = 20
+    try:
+        made = alice.post("/api/servers", json={"name": f"QA chat machine {h.tag}", "kind": "test",
+                                                "connection": {"provider": "dryrun", "dry_run_delay": 0.3,
+                                                               "max_parallel": 1},
+                                                "models": [{"key": "dry-run"}]})
+        mid = made.json().get("id", "") if made.status_code == 200 else ""
+        model = {"server_id": mid, "model": "dry-run", "dry_run_propose_every": 3}
+        g = alice.post("/api/games", json={
+            "name": f"QA chat game {h.tag}",
+            "config": {"map_size": "small", "map_type": "pangaea", "seed": 3311, "barbarians": "off",
+                       "city_states": 0, "turn_limit": 8, "chat_model_reply_seconds": timeout,
+                       "chat_person_reply_seconds": timeout},
+            "seats": [{"type": "human"}, {"type": "llm", "llm": dict(model)}, {"type": "llm", "llm": dict(model)},
+                      {"type": "bot"}]})
+        info = g.json() if g.status_code == 200 else {}
+        gid = info.get("id", "")
+        tokens = [seat["token"] for seat in info.get("seats") or []]
+        cfg = info.get("config") or {}
+        r.check("alice's game with two dry-run model seats on her one-slot machine and a bot, both chat timeouts "
+                "20 s (the lobby's keys, read back from the game)",
+                bool(gid) and made.status_code == 200 and cfg.get("chat_model_reply_seconds") == timeout
+                and cfg.get("chat_person_reply_seconds") == timeout and cfg.get("max_chat_messages") == 30,
+                f"machine {made.status_code}, game {g.status_code}; config {json.dumps({k: cfg.get(k) for k in ('chat_model_reply_seconds', 'chat_person_reply_seconds', 'max_chat_messages')})}")
+        if not gid:
+            return
+        data.update({"game": gid, "machine": mid})
+        met = alice.post(f"/api/games/{gid}/debug/meet_all")
+        mine, bots, spectator = (Socket(h, gid, tokens[0]), Socket(h, gid, tokens[3]),
+                                 Socket(h, gid, info.get("spectator_token", "")))
+        sockets += [mine, bots, spectator]
+
+        def tool(name: str, args: dict) -> dict:
+            got = alice.post(f"/api/games/{gid}/tool", params={"token": tokens[0]}, json={"tool": name, "args": args})
+            return got.json() if got.status_code == 200 else {"ok": False, "error": got.text}
+
+        def head(nid: int) -> dict:
+            got = alice.get(f"/api/games/{gid}/negotiations/{nid}", params={"token": tokens[0]})
+            return got.json() if got.status_code == 200 else {}
+
+        def game() -> dict:
+            got = alice.get(f"/api/games/{gid}")
+            return got.json() if got.status_code == 200 else {}
+
+        # ---- turn 1: alice opens a chat with each model and the bot
+        t0 = time.time()
+        a = tool("open_negotiation", {"to": 1, "message": "[dry run: wait 3 s] QA-A: shall we talk?"})
+        a_id = (a.get("result") or {}).get("negotiation_id")
+        wait_until(lambda: any(s["state"] == "thinking" for s in mine.statuses(a_id)), 15, 0.1)
+        b = tool("open_negotiation", {"to": 2, "message": "[dry run: wait 45 s] QA-B: shall we talk?"})
+        b_id = (b.get("result") or {}).get("negotiation_id")
+        b_opened = time.time()
+        c = tool("open_negotiation", {"to": 3, "message": "QA-BOT: shall we talk?"})
+        c_id = (c.get("result") or {}).get("negotiation_id")
+        r.check("alice opened a chat with each model and the bot (meet_all first)",
+                met.status_code == 200 and all(x.get("ok") for x in (a, b, c)),
+                f"meet_all {met.status_code}; {[x.get('ok') or x.get('error') for x in (a, b, c)]}")
+        answered = wait_until(lambda: (head(a_id).get("clock") or {}).get("waiting_on") == 0, 30, 0.25)
+        a_view = head(a_id)
+        theirs = [e for e in a_view.get("history") or [] if not e.get("you")]
+        reply = tool("respond_negotiation", {"negotiation_id": a_id, "action": "reject", "message": "QA: good talk."})
+        r.check("model A answered in its chat (after its 3 s), its status waiting on alice with her deadline; she "
+                "answered back and the chat closed",
+                bool(answered) and bool(theirs) and reply.get("ok") is True
+                and (a_view.get("clock") or {}).get("kind") == "person",
+                f"history {[(e.get('by'), e.get('action'), e.get('message')) for e in a_view.get('history') or []]}")
+        b_closed = wait_until(lambda: head(b_id).get("status") == "rejected", 40, 0.25)
+        b_took = time.time() - b_opened
+        b_view = head(b_id)
+        b_last = (b_view.get("history") or [{}])[-1]
+        queued = [s for s in mine.statuses(b_id) if s["state"] == "queued"]
+        r.check("model B's answer queued behind A's on the one-slot machine (queued, with its place), then took longer "
+                "than its 20 s, queue time included: the chat clock declined for it, '(no reply in time)'",
+                bool(b_closed) and b_last.get("message") == "(no reply in time)" and not b_last.get("you")
+                and bool(queued) and queued[0].get("position") == 1 and 18 <= b_took <= 30,
+                f"after {b_took:.1f} s; last entry {b_last}; queued {queued[:1]}", seconds=round(b_took, 1))
+        c_closed = wait_until(lambda: head(c_id).get("status") == "expired", 40, 0.25)
+        c_view = head(c_id)
+        r.check("the bot answered at once; alice let it wait, and her chat closed as expired at 20 s, "
+                "'(no reply in time)'",
+                bool(c_closed) and any(not e.get("you") and e.get("action") == "reply" for e in c_view.get("history") or [])
+                and (c_view.get("history") or [{}])[-1].get("note") == "(no reply in time)",
+                f"history {[(e.get('by'), e.get('action'), e.get('note')) for e in c_view.get('history') or []]}",
+                seconds=round(time.time() - t0, 1))
+        ended = tool("end_turn", {})
+        r.check("with every chat settled, alice's turn ended", ended.get("ok") is True, json.dumps(ended)[:300])
+
+        # ---- the rest of the game: alice ends her turns, and answers the models' trades on turn 3
+        decided: dict = {}
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            gi = game()
+            if gi.get("phase") != "playing":
+                break
+            waiting = [s for s in mine.statuses() if s["state"] == "waiting" and s.get("waiting_on") == 0
+                       and s["negotiation"] not in decided and s["negotiation"] not in (a_id, b_id, c_id)]
+            for s in waiting:
+                nid = s["negotiation"]
+                view = head(nid)
+                if view.get("status") != "open" or not (view.get("clock") or {}).get("waiting_on") == 0:
+                    continue
+                if view.get("with") == 1:
+                    decided[nid] = ("accept", tool("respond_negotiation", {"negotiation_id": nid, "action": "accept",
+                                                                           "message": "QA: agreed."}), time.time())
+                else:
+                    decided[nid] = ("ignore", {"ok": True}, time.time())
+            if gi.get("current_player") == 0:
+                view = alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]}).json()
+                if not (view.get("diplomacy") or {}).get("open_negotiations"):
+                    tool("end_turn", {})
+            time.sleep(0.4)
+        gi = game()
+        r.check("the game was played to its end (turn limit 8)", gi.get("phase") != "playing",
+                f"phase {gi.get('phase')}, turn {gi.get('turn')}", seconds=round(time.time() - t0, 1))
+        trades = {nid: head(nid) for nid in decided}
+        accepted = [v for v in trades.values() if v.get("status") == "accepted" and v.get("with") == 1]
+        expired = [v for v in trades.values() if v.get("status") == "expired" and v.get("with") == 2]
+        r.check("on turn 3 both models opened a trade with alice and waited: she accepted A's, B's expired after 20 s "
+                "('(no reply in time)'), and each model's turn then ended",
+                len(accepted) >= 1 and len(expired) >= 1
+                and all((v.get("history") or [{}])[-1].get("note") == "(no reply in time)" for v in expired),
+                json.dumps({nid: [d[0], v.get("status"), v.get("turn")] for nid, (d, v) in
+                            {n: (decided[n], trades[n]) for n in trades}.items()}))
+        # ---- what each socket heard
+        states = {s["state"] for s in mine.statuses()}
+        waiting = [s for s in mine.statuses() if s["state"] == "waiting" and s.get("deadline")]
+        kinds = {s.get("kind") for s in waiting}
+        r.check("alice's socket got every status of her chats: queued (with a place), thinking, waiting (with a "
+                "deadline, on a model and on her), closed",
+                {"queued", "thinking", "waiting", "closed"} <= states and {"model", "person"} <= kinds,
+                f"states {sorted(states)}; waiting kinds {sorted(k for k in kinds if k)}",
+                statuses=len(mine.statuses()))
+        theirs = bots.statuses()
+        r.check("the bot seat's socket got only the statuses of chats it is in",
+                bool(theirs) and all(3 in (s.get("players") or []) for s in theirs),
+                f"{len(theirs)} statuses, players {sorted({tuple(s.get('players') or []) for s in theirs})}")
+        r.check("a spectator's socket got none while a person plays", spectator.statuses() == [],
+                f"{len(spectator.statuses())} statuses; {len(spectator.messages)} messages in all")
+        metrics = alice.get(f"/api/games/{gid}/metrics").json().get("summary") or {}
+        m1, m2 = metrics.get("1") or {}, metrics.get("2") or {}
+        r.check("the metrics count model A's answers and the clock's decline for B, with its cause",
+                (m1.get("chat_answers") or {}).get("answered", 0) >= 1
+                and (m2.get("chat_answers") or {}).get("declined_late", 0) >= 1
+                and (m2.get("chat_fallback_causes") or {}).get("timeout", 0) >= 1,
+                json.dumps({"1": m1.get("chat_answers"), "2": m2.get("chat_answers"),
+                            "2_causes": m2.get("chat_fallback_causes")}))
+        data.update({"chats": {"a": a_id, "b": b_id, "bot": c_id}, "b_declined_after_s": round(b_took, 1),
+                     "turn3_trades": {str(k): v[0] for k, v in decided.items()},
+                     "statuses_seen": sorted(states), "statuses": mine.statuses()[:200],
+                     "bot_socket_statuses": len(theirs), "spectator_statuses": len(spectator.statuses()),
+                     "metrics": {"1": m1.get("chat_answers"), "2": m2.get("chat_answers")}})
+    finally:
+        for s in sockets:
+            s.close()
+        if gid and not h.keep:
+            try:
+                alice.delete(f"/api/games/{gid}")
+            except httpx.HTTPError:
+                pass
+
+
 #: The parts written so far, in the order ``all`` runs them.
-PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue, "ledger": part_ledger}
+PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue, "ledger": part_ledger,
+                                               "chat": part_chat}
 
 
 # ---------------------------------------------------------------------------- the run

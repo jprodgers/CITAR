@@ -1,7 +1,9 @@
 about = """
 Every entry in a negotiation carries a message. A negotiation opened with only spaces is refused, and
-so is each answer that has none, whichever it is (accept, reject, counter or reply): the refusal names
-the negotiation and the missing message, and nothing is written, so the negotiation stays open.
+so is each answer that has none, whichever it is (accept, reject, counter or reply): an answer with no
+message at all is refused by the tool's schema, which requires one, and one whose message is only
+spaces by the engine, whose refusal names the negotiation and the missing message. Nothing is written,
+so the negotiation stays open.
 """
 from = "tests/test_negotiation_chat.py::MessageTests::test_every_entry_needs_a_message_and_the_refusal_names_the_negotiation"
 
@@ -30,19 +32,28 @@ eq = { negotiation_id = 1, status = "open", awaiting = "Civilization 2" }
 tool = "respond_negotiation"
 player = 1
 args = { negotiation_id = 1, action = "accept", receive = [{ type = "gold", amount = 5 }] }
-error = "Every response in a negotiation carries a message, and your accept in negotiation #1 has none: add message='...' (a short line will do)."
+error = "Missing required parameter(s): message."
+intended = "respond-negotiation-message-required"
 
 [[step]]
 tool = "respond_negotiation"
 player = 1
 args = { negotiation_id = 1, action = "reject", receive = [{ type = "gold", amount = 5 }] }
-error = "your reject in negotiation #1 has none"
+error = "Missing required parameter(s): message."
+intended = "respond-negotiation-message-required"
 
 [[step]]
 tool = "respond_negotiation"
 player = 1
 args = { negotiation_id = 1, action = "counter", receive = [{ type = "gold", amount = 5 }] }
-error = "your counter in negotiation #1 has none"
+error = "Missing required parameter(s): message."
+intended = "respond-negotiation-message-required"
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "accept", message = " ", receive = [{ type = "gold", amount = 5 }] }
+error = "Every response in a negotiation carries a message, and your accept in negotiation #1 has none: add message='...' (a short line will do)."
 
 [[step]]
 tool = "respond_negotiation"

@@ -316,7 +316,7 @@ class _Slot:
 class _Request:
     """One wait for a slot: a lease's call, or a ticket's start."""
     __slots__ = ("binding", "seq", "arrived", "state", "error", "slot", "conv", "position", "eta", "queued_s",
-                 "reported_s", "pass_through")
+                 "reported_s", "pass_through", "behind")
 
     def __init__(self, binding, seq: int, arrived: float, conv=None):
         self.binding = binding
@@ -331,6 +331,7 @@ class _Request:
         self.queued_s = 0.0          # every wait of it, a ``busy`` requeue's included
         self.reported_s = 0.0        # what of it the grants handed out already
         self.pass_through = False
+        self.behind = False          # a ticket's start waiting behind a benchmark, as last published
 
 
 @dataclass
@@ -802,14 +803,20 @@ class Machine:
             del self.late[rid]
 
     def _positions(self, now: float, force: bool = False) -> None:
-        """Work out each waiting request's position and ETA and publish them to its status callback, when they changed
-        (``force``: work them out even when no callback wants them, for a caller about to wait). Lock held."""
-        if not force and not any(r.binding.on_status for r in self.waiting):
+        """Work out each waiting request's position and ETA and publish them to its status callbacks (its binding's,
+        and its conversation's: a chat's answer tells the chat), when they changed (``force``: work them out even when
+        no callback wants them, for a caller about to wait). A ticket waiting while a benchmark holds the machine says
+        so (``benchmark``): in a benchmark game the chat clock does not count that wait (P3.5.2). Lock held."""
+        if not force and not any(r.binding.on_status or getattr(r.conv, "on_status", None) for r in self.waiting):
             return
+        bench = self._bench_live()
         for r, i, eta in self._line(now):
-            if (r.position, r.eta) != (i, eta):
-                r.position, r.eta = i, eta
-                self._status(r.binding, {"state": "queued", "position": i, "eta_s": eta})
+            behind = bench and not r.binding.is_lease
+            if (r.position, r.eta, r.behind) != (i, eta, behind):
+                r.position, r.eta, r.behind = i, eta, behind
+                payload = {"state": "queued", "position": i, "eta_s": eta, "benchmark": behind}
+                self._status(r.binding, payload)
+                self._conv_status(r, payload)
 
     def _line(self, now: float) -> list:
         """The waiting requests in the order the rules serve them (lease requests by arrival, then tickets by priority,
@@ -833,6 +840,15 @@ class Machine:
     def _status(self, b: Binding, payload: dict) -> None:
         if b.on_status is not None:
             self.sched._notify(b.on_status, {"binding": b.id, "machine": self.id, **payload})
+
+    def _conv_status(self, r: _Request, payload: dict) -> None:
+        """Tell the conversation a waiting request is of (``ScheduledConversation.heard``) its place in the line, on the
+        notifier thread: a lease's requests serve its turn and its chat answers alike, and a chat's answer tells its
+        chat (``negotiation_status``). Its start the conversation tells itself, on the stepping thread. Lock held."""
+        fn = getattr(r.conv, "heard", None) if r.conv is not None else None
+        if fn is not None and getattr(r.conv, "on_status", None) is not None:
+            self.sched._notify(fn, {"binding": r.binding.id, "machine": self.id,
+                                    "machine_name": self.settings.name or self.id, **payload})
 
     # -------------------------------------------------------------- the non-blocking core (tests drive it directly)
     def submit(self, binding: Binding, conv=None) -> _Request:
@@ -1195,6 +1211,14 @@ class Machine:
             if len(self.overreports) >= OVERREPORT_COUNT:
                 return self.counters["overreports"]
             return None
+
+    def line_info(self) -> dict:
+        """What waits on the machine now, for work lined up outside it (the chat responders' parked answers,
+        ``citar.agents.responders``): ``waiting`` (its requests waiting for a slot), ``benchmark`` (a benchmark holds
+        it) and its ``name``."""
+        with self.lock:
+            return {"waiting": len(self.waiting), "benchmark": self._bench_live(),
+                    "name": self.settings.name or self.id}
 
     def status(self) -> dict:
         """The machine as an administrator's status listing shows it."""
@@ -1642,6 +1666,12 @@ class ScheduledConversation(Conversation):
         #: machine (its ``position``, ``eta_s`` and the ``machine``'s name) and when that wait is over (None): the
         #: agent shows its seat as waiting for the machine (``Machine.acquire``).
         self.on_wait: Optional[Callable[[Optional[dict]], None]] = None
+        #: ``on_status(payload)``: told where this conversation's step stands: ``queued`` (its place in its machine's
+        #: line, ``position``, ``eta_s`` and ``benchmark``; on the notifier thread, never once the step has started) and
+        #: ``thinking`` (its slot granted, on the stepping thread, before the provider is asked): a chat's answer passes
+        #: it on to the chat (``ChatClock.answer_status``).
+        self.on_status: Optional[Callable[[dict], None]] = None
+        self._started = False             # the step under way has its slot: a late ``queued`` is not told
         self.last_queue_s = 0.0
         self.last_gen_s = 0.0
         self.last_event: Optional[StepEvent] = None
@@ -1656,6 +1686,12 @@ class ScheduledConversation(Conversation):
     @property
     def usage(self) -> dict:
         return self.inner.usage
+
+    @property
+    def closed(self) -> bool:
+        """Whether it was closed (``close``: by its caller, or by the scheduler cancelling its ticket): every step
+        after raises ``Cancelled``, so a caller that goes on talking starts a new conversation."""
+        return self._closed
 
     @property
     def request_timeout(self):
@@ -1676,6 +1712,33 @@ class ScheduledConversation(Conversation):
 
     def add_tool_results(self, results):
         self.inner.add_tool_results(results)
+
+    def heard(self, payload: dict) -> None:
+        """The machine's word on a waiting request of this conversation (``Machine._conv_status``, the notifier
+        thread): passed on, unless the step has started meanwhile (the notifier is behind)."""
+        if payload.get("state") == "queued" and self._started:
+            return
+        self._tell(payload)
+
+    def _tell(self, payload: dict) -> None:
+        fn = self.on_status
+        if fn is not None:
+            try:
+                fn(payload)
+            except Exception:
+                log.exception("a conversation's status hook failed")
+
+    def rebind(self, binding: Binding) -> None:
+        """Run the next steps on another binding (a chat's conversation answering on a fresh ticket each time, as a
+        probe asks it): the conversation and what it has said are kept. Not while a step runs."""
+        old = self.binding
+        if isinstance(old, Ticket):
+            old.convs.discard(self)
+        self.binding = binding
+        if isinstance(binding, Ticket):
+            binding.convs.add(self)
+            if isinstance(getattr(self.inner, "cfg", None), dict):
+                self.inner.cfg = dict(self.inner.cfg)
 
     def close(self):
         """Cancel (non-blocking, allowed under a session lock): a waiting request leaves the queue; a running one is
@@ -1701,7 +1764,10 @@ class ScheduledConversation(Conversation):
         inner = self.inner
         queued = 0.0
         self.last_queue_s = self.last_gen_s = 0.0
+        self._started = False
         grant = b.acquire(self, self.halted, self.on_wait)
+        self._started = True
+        self._tell({"state": "thinking"})
         hold = None
         while True:
             queued += grant.queue_s
@@ -1730,8 +1796,10 @@ class ScheduledConversation(Conversation):
                 if t0 is not None and _is_busy(e) and not self._closed and grant.request is not None:
                     # the helper had no slot after all: no sleep, nothing metered; wait like any other request
                     queued += sched.clock() - t0
+                    self._started = False
                     b.busy(grant)
                     grant = b.wait(grant.request, self, self.halted)
+                    self._started = True
                     continue
                 # a request the provider abandoned (cancelled, timed out) may still be generating on its helper
                 b.finish(grant, unfinished=getattr(inner, "unfinished", None) if t0 is not None else None)

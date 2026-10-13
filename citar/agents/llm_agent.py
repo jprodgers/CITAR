@@ -9,6 +9,14 @@ scheduler gives it a slot on its machine, so a busy machine queues it rather tha
 lease when its seat is blocked on something other than the machine (a chat reply, a pause), so the slot is lent
 meanwhile. Time spent queueing for the machine and waiting on chats is the agent's ``_waited``: it never counts against
 the turn's ``max_turn_seconds`` (P3.3.4), and the request's timeout is set only once the slot is granted.
+
+**Chats** (design/phase3-features.md P3.5.2, P3.5.3). A chat the seat answers out of its turn has a conversation of its
+own (``ChatThread``), kept by the agent for as long as the chat is open: each exchange tells the model what changed
+since its last answer, and runs on the seat's lease until the chat moves. The chat clock (``citar.server.chat``) is the
+chat timer: the agent's waits for the other side (``_await_answer``, the tool's own wait; ``_end_turn``, until every
+chat it is in has moved or closed) end when the clock closes a chat, with a safety cap of twice the game's longest chat
+timeout. An answer the other side gives after the tool's wait is put in front of the model before its next step
+(``_chat_news``), worded by where the chat stands.
 """
 from __future__ import annotations
 
@@ -16,15 +24,21 @@ import json
 import threading
 import time
 import traceback
+from typing import Optional
 
 from .. import engine_api
 from ..server.metrics import call_signature, ACTION_REPEAT_EXEMPT
-from .prompts import system_prompt, TURN_START, FIRST_TURN_NOTE, NEGOTIATION_PROMPT
+from .prompts import (system_prompt, TURN_START, FIRST_TURN_NOTE, chat_system_prompt, CHAT_PROMPT, CHAT_UPDATE,
+                      entry_text, late_note, proposal_text, time_left_text)
 from .providers import make_conversation
 
-NEGOTIATION_TOOLS = {"get_diplomacy", "get_empire", "get_players", "get_map", "get_tile", "get_tech_tree", "get_rules",
-                     "read_notes", "write_notes", "log_thought", "send_message", "respond_negotiation",
-                     "get_victory_status", "get_cities", "get_units"}
+#: The tools of a chat's conversation (P3.5.3): enough to look up what an answer needs and to answer.
+CHAT_TOOLS = {"get_diplomacy", "get_empire", "get_players", "get_victory_status", "read_notes", "write_notes",
+              "log_thought", "respond_negotiation", "send_message"}
+#: How long a message the model sends in a chat waits for the answer inside the tool call, by default, before the turn
+#: goes on (``negotiation_wait_seconds``): the answer then reaches the model as a NEGOTIATION UPDATE before its next
+#: step, and end_turn waits for it.
+DEFAULT_REPLY_WAIT_SECONDS = 60.0
 MAX_RESULT_CHARS = 14000
 
 
@@ -132,16 +146,23 @@ class LLMAgent:
         self.max_turn_seconds = float(self.cfg.get("max_turn_seconds") if self.cfg.get("max_turn_seconds") is not None else 1800)
         self.stall_steps = int(self.cfg.get("stall_steps") or 10)
         self.max_negotiation_calls = int(self.cfg.get("max_negotiation_calls") or 20)
-        self.negotiation_wait = float(self.cfg.get("negotiation_wait_seconds") or 240)
+        #: the tool's own wait for an answer (``_await_answer``)
+        self.reply_wait = float(self.cfg.get("negotiation_wait_seconds") or DEFAULT_REPLY_WAIT_SECONDS)
+        #: the safety cap on the turn's waits for chats, None for the game's (``_wait_cap``)
+        self.wait_cap: float | None = None
         self.usage_total: dict = {}
         self.last_error: str | None = None
         self.cancelled = False
         self._active: set = set()
         self._waited = 0.0          # seconds this turn spent waiting for the server to come back (not counted against it)
-        self._chat_left: dict = {}  # (negotiation id, entries) -> seconds still allowed for the answer (see _wait_left)
         # this seat's model calls waiting for their machine now (its turn's and its chat answers'), for its status
         self._machine_waits = 0
         self._waits_lock = threading.Lock()
+        #: the chats the seat answers, one conversation each (``ChatThread``), by negotiation id
+        self._threads: dict[int, ChatThread] = {}
+        self._threads_lock = threading.Lock()
+        #: the chats the turn's model knows of and where each stood when it last heard (``_chat_news``)
+        self._marks: dict = {}
 
     # ------------------------------------------------------------------
     def cancel(self):
@@ -152,6 +173,33 @@ class LLMAgent:
                 conv.close()
             except Exception:
                 pass
+        with self._threads_lock:
+            threads = list(self._threads.values())
+        for t in threads:
+            t.cancel()
+
+    def cancel_chat(self, nid: int) -> None:
+        """Stop the answer in progress for chat ``nid`` (the chat clock, at its deadline; non-blocking, allowed under
+        the session's lock): its conversation's request is cancelled, and the exchange returns without answering."""
+        with self._threads_lock:
+            t = self._threads.get(nid)
+        if t is not None:
+            t.cancel()
+
+    def chat_closed(self, nid: int) -> None:
+        """Chat ``nid`` closed: its conversation is let go (non-blocking)."""
+        with self._threads_lock:
+            t = self._threads.pop(nid, None)
+        if t is not None:
+            t.close()
+
+    def chat_thread(self, nid: int) -> "ChatThread":
+        """The conversation of chat ``nid``, made on first use (``ChatThread``)."""
+        with self._threads_lock:
+            t = self._threads.get(nid)
+            if t is None or t.closed:
+                t = self._threads[nid] = ChatThread(self, nid)
+            return t
 
     def _halted(self, session) -> bool:
         """Whether the game has stopped and this turn should be abandoned."""
@@ -200,7 +248,7 @@ class LLMAgent:
                 return
         session._broadcast(note)
 
-    def _step(self, session, pid: int, conv, deadline: float | None = None):
+    def _step(self, session, pid: int, conv, deadline: float | None = None, chat: bool = False):
         """One model call (timed and metered), riding out connection problems.
 
         On a scheduled machine the call first waits for its lease's slot (``ScheduledConversation``): a machine busy
@@ -215,7 +263,8 @@ class LLMAgent:
 
         With a deadline (end of the turn's time budget) the request may only use the time left, and running out
         of time raises _TimeUp instead of an error. The step's metrics carry its generation time and, apart, the time
-        it waited for the machine; the usage ledger is metered by the scheduler's listener."""
+        it waited for the machine; the usage ledger is metered by the scheduler's listener. A ``chat`` step (an answer
+        out of the turn's loop) adds nothing to the turn's ``_waited``."""
         delays = [2, 3, 5, 10, 15, 20, 30]
         first_failure = None
         attempt = 0
@@ -242,7 +291,8 @@ class LLMAgent:
                 d = {k: usage.get(k, 0) - before.get(k, 0) for k in usage}
                 queue_s = float(getattr(conv, "last_queue_s", 0.0) or 0.0) if scheduled else 0.0
                 gen_s = float(conv.last_gen_s) if scheduled else time.perf_counter() - t0
-                self._waited += queue_s
+                if not chat:
+                    self._waited += queue_s
                 session.metrics.model_step(
                     pid, gen_s, queue_s=queue_s, input_tokens=d.get("input_tokens", 0),
                     output_tokens=d.get("output_tokens", 0), reasoning_tokens=d.get("reasoning_tokens", 0),
@@ -252,11 +302,13 @@ class LLMAgent:
                     self._status(session, pid, "thinking")
                 return step
             except _TimeUp:
-                self._waited += float(getattr(conv, "last_queue_s", 0.0) or 0.0) if scheduled else 0.0
+                if not chat:
+                    self._waited += float(getattr(conv, "last_queue_s", 0.0) or 0.0) if scheduled else 0.0
                 raise
             except Exception as e:
                 queued = float(getattr(conv, "last_queue_s", 0.0) or 0.0) if scheduled else 0.0
-                self._waited += queued
+                if not chat:
+                    self._waited += queued
                 if self._halted(session):
                     raise _Halted()
                 name = type(e).__name__
@@ -289,7 +341,7 @@ class LLMAgent:
                         break
                     time.sleep(0.5)
                     slept += 0.5
-                if unreachable:
+                if unreachable and not chat:
                     self._waited += time.time() - now
                     if self.cfg.get("provider") != "worker" or reachable(self.cfg):
                         # back to "thinking" as the retry goes out: a reply can take minutes, and the game
@@ -445,15 +497,15 @@ class LLMAgent:
         conv.add_tool_results(results)
         return ended, len(calls), progress
 
-    # Waiting for the other side of a negotiation. Each message this seat sends gets negotiation_wait_seconds for its
-    # answer, spent across every wait for it - the one inside open/respond_negotiation and the one at end_turn - so a
-    # counterpart who never answers costs the turn one wait, not two. Time the game spends paused does not count.
-    def _wait_left(self, n: dict) -> float:
-        """Seconds still allowed for the answer to this seat's latest message in a negotiation (``n`` its head)."""
-        return self._chat_left.get((n["id"], n["entries"]), self.negotiation_wait)
-
+    # Waiting for the other side of a chat. The chat clock (citar.server.chat) times every chat by the side it waits
+    # on and closes it, or declines for a silent model, at its deadline: these waits end when the chat moves or closes.
+    # Each keeps a safety cap of twice the game's longest chat timeout (ChatClock.safety_cap) of unpaused time, in case
+    # the clock is not running, after which _end_turn closes the chats itself. Time the game spends paused does not
+    # count, and none of it is the model's (_waited).
     def _await_answer(self, session, pid: int, args: dict, result: dict) -> dict:
-        """After the model spoke in a negotiation: wait for the other side's answer and add it to the result."""
+        """After the model spoke in a chat: wait for the other side's answer, for the tool's own wait at most
+        (``reply_wait``; the chat clock may close the chat sooner), and add it to the result. An answer that comes
+        later reaches the model before its next step (``_chat_news``)."""
         nid = result.get("negotiation_id") if isinstance(result, dict) else None
         try:
             nid = int(nid or args.get("negotiation_id"))
@@ -461,33 +513,51 @@ class LLMAgent:
             return result
         with session.lock:
             n = session.game.negotiation_head(nid)
-            key, left = (nid, n["entries"]), self._wait_left(n)
             if n["status"] == "open" and n["awaiting"] != pid:
                 # waiting on the other side: the seat's slot is lent meanwhile (the counterpart may need it to answer),
                 # and the wait is not the model's time (P3.3.4)
                 self._idle()
                 t = self._clock()
                 try:
-                    self._chat_left[key] = left - session._await_reply(pid, nid, left,
-                                                                       halted=lambda: self._halted(session),
-                                                                       hold_paused=True)
+                    session._await_reply(pid, nid, min(self.reply_wait, self._wait_cap(session)),
+                                         halted=lambda: self._halted(session), hold_paused=True)
                 finally:
                     self._waited += max(0.0, self._clock() - t)
                     self._activate()
             result = session._reply_result(pid, nid, result)
+            # what the result told the model, of this chat only: any other chat that moved meanwhile (while the model
+            # generated this step, or during the wait) is still news for its next step (``_chat_news``)
+            self._heard(session, pid, nid)
         if self._halted(session):
             raise _Halted()
         return result
 
-    def _end_turn(self, session, pid: int) -> dict:
-        """End the turn, once this seat's negotiations let it.
+    def _heard(self, session, pid: int, nid: int) -> None:
+        """The model has been told where chat ``nid`` stands now: its mark is brought up to date (forgotten once the
+        chat is closed). Session's lock held."""
+        try:
+            n = session.game.negotiation_head(nid)
+        except engine_api.ActionError:
+            n = None
+        if n is not None and n["status"] == "open":
+            self._marks[nid] = (n["status"], n["awaiting"], n["entries"], n["initiator"])
+        else:
+            self._marks.pop(nid, None)
 
-        The end_turn tool refuses while a negotiation the seat is in is open. When they all wait on the other side,
-        that is the harness's wait rather than the model's mistake, so it happens here, before the single end_turn
-        call: each chat gets what is left of its wait, and one still unanswered then is closed "(no reply in time)".
-        A negotiation waiting on this seat goes back to the model as the refusal, since it must answer that itself:
-        one it left unanswered through the tool (a mistake the metrics count), one answered during the wait with
-        what they said (news, which they do not).
+    def _wait_cap(self, session) -> float:
+        """The safety cap on the turn's waits for chats: ``wait_cap`` when set (a probe's turn case, whose other seats
+        never answer: 0), else the game's (``ChatClock.safety_cap``)."""
+        return float(self.wait_cap) if self.wait_cap is not None else session.chat.safety_cap()
+
+    def _end_turn(self, session, pid: int) -> dict:
+        """End the turn, once this seat's chats let it.
+
+        The end_turn tool refuses while a chat the seat is in is open. When they all wait on the other side, that is
+        the harness's wait rather than the model's mistake, so it happens here, before the single end_turn call: it
+        lasts until every chat has moved or closed (the chat clock closes one whose time ran out), and past the safety
+        cap the chats still open are closed "(no reply in time)" here. A chat waiting on this seat goes back to the
+        model as the refusal, since it must answer that itself: one it left unanswered through the tool (a mistake the
+        metrics count), one answered during the wait with what they said (news, which they do not).
         """
         def mark(nid):
             """Where a negotiation stands now: what an answer changes."""
@@ -496,6 +566,8 @@ class LLMAgent:
 
         heard = []
         g = session.game
+        cap = self._wait_cap(session)
+        spent = 0.0
         while True:
             with session.lock:
                 if g.current != pid or g.phase != "playing":
@@ -509,31 +581,69 @@ class LLMAgent:
                     error = g.end_turn_refusal(pid) + f" While you waited, they answered: {_serialize(heard)}"
                     session.metrics.tool_call(pid, "end_turn", {}, "action", False, 0.0, error, expected=True)
                     return {"ok": False, "error": error}
-                for n in mine:
-                    if self._wait_left(n) <= 0:
+                if spent >= cap:
+                    # the chat clock should have closed them long since: the safety net (P3.5.2)
+                    for n in mine:
                         session.close_negotiation(n["id"], "expired", "(no reply in time)")
-                mine = g.open_negotiation_heads(pid)
-                if not mine:
                     continue
-                before = {n["id"]: (mark(n["id"]), self._wait_left(n)) for n in mine}
+                before = {n["id"]: mark(n["id"]) for n in mine}
                 self._idle()
                 t = self._clock()
                 try:
-                    spent = session._await(lambda was=before: any(mark(nid) != then for nid, (then, _) in was.items()),
-                                           min(left for _, left in before.values()), lambda: self._halted(session),
-                                           hold_paused=True)
+                    spent += session._await(lambda was=before: any(mark(nid) != then for nid, then in was.items()),
+                                            cap - spent, lambda: self._halted(session), hold_paused=True)
                 finally:
                     self._waited += max(0.0, self._clock() - t)
                     self._activate()
-                for nid, (was, left) in before.items():
-                    self._chat_left[(nid, was[2])] = left - spent
+                for nid, was in before.items():
                     if mark(nid) != was:
                         news = session._reply_result(pid, nid, {}).get("negotiation")
                         if news:
                             heard.append(news)
+                            # told in the refusal, as it stands now: that chat's mark only (a chat this wait did not
+                            # watch keeps its own, and is news before the next step)
+                            self._heard(session, pid, nid)
             if self._halted(session):
                 raise _Halted()
         return session.call_tool(pid, "end_turn", {})
+
+    # ------------------------------------------------------------------ late replies (P3.5.3)
+    @staticmethod
+    def _chat_marks(session, pid: int, known=()) -> dict:
+        """The chats seat ``pid`` is in that are open, and those of ``known`` (closed since), each as (status, awaiting,
+        entries, initiator): what an answer changes, and who opened it. Session's lock held."""
+        g = session.game
+        out = {n["id"]: (n["status"], n["awaiting"], n["entries"], n["initiator"])
+               for n in g.open_negotiation_heads(pid)}
+        for nid in known:
+            if nid not in out:
+                try:
+                    n = g.negotiation_head(nid)
+                except engine_api.ActionError:
+                    continue
+                out[nid] = (n["status"], n["awaiting"], n["entries"], n["initiator"])
+        return out
+
+    def _chat_news(self, session, pid: int) -> list[str]:
+        """Before a step of the turn: a note for each chat the seat is in that changed since the model last heard
+        (an answer after the tool's wait, a close by the chat clock), worded by where it stands, so the model is never
+        asked to answer a chat that is closed (``prompts.late_note``). Chats that closed are then forgotten. A chat
+        somebody else opened that waits on the seat is its responder's to answer (``GameSession._dispatch_negotiation_
+        interrupts``), so the turn is told only when it closes."""
+        with session.lock:
+            now = self._chat_marks(session, pid, self._marks)
+            notes = []
+            for nid, mark in sorted(now.items()):
+                if self._marks.get(nid) == mark:
+                    continue
+                if mark[0] == "open" and (mark[1] != pid or mark[3] != pid):
+                    continue            # waiting on the other side, or the responder's to answer: nothing to say
+                try:
+                    notes.append(late_note(session.game.negotiation_view(nid, pid)))
+                except engine_api.ActionError:
+                    continue
+            self._marks = {nid: mark for nid, mark in now.items() if mark[0] == "open"}
+        return notes
 
     def _progress_note(self, session, pid: int) -> str:
         """What is still unhandled this turn, told to the model after each batch of actions.
@@ -555,6 +665,7 @@ class LLMAgent:
             turn = g.turn
             text = TURN_START.format(briefing=g.briefing(pid), turn=turn,
                                      first_turn_note=FIRST_TURN_NOTE if not g.player(pid)["founded_city"] and turn <= 2 else "")
+            self._marks = self._chat_marks(session, pid)        # the briefing lists the chats as they stand now
         conv = self._conversation()
         self._active.add(conv)
         conv.add_user_text(text)
@@ -563,7 +674,6 @@ class LLMAgent:
         calls_made = steps = nudges = 0
         started = self._clock()
         self._waited = 0.0
-        self._chat_left = {}
         self._activate()                        # the driver did already; a probe's turn case calls this directly
         try:
             while True:
@@ -595,6 +705,10 @@ class LLMAgent:
                 if self.max_turn_seconds and self._clock() - started - self._waited > self.max_turn_seconds:
                     self._limit(session, pid, "time_limit", f"exceeded {int(self.max_turn_seconds)}s")
                     return
+                news = self._chat_news(session, pid)
+                if news:
+                    # answers that came after the tool's wait, and chats the chat clock closed: before the next step
+                    conv.add_user_text("\n\n".join(news))
                 step = self._step(session, pid, conv,
                                   deadline=started + self.max_turn_seconds if self.max_turn_seconds else None)
                 steps += 1
@@ -711,64 +825,247 @@ class LLMAgent:
         self._thought(session, pid, f"(turn ended by the game: {detail})", "system")
 
     # ------------------------------------------------------------------
-    def respond_negotiation(self, session, pid: int, nid: int):
-        """Answer a negotiation with the model, out of turn."""
-        with session.lock:
-            g = session.game
-            n = g.negotiation_head(nid)
-            if n["status"] != "open" or n["awaiting"] != pid:
-                return
-            view = g.negotiation_view(nid, pid)
+    def respond_negotiation(self, session, pid: int, nid: int) -> str:
+        """Answer chat ``nid`` out of turn (the seat's responder): one exchange of the chat's own conversation
+        (``ChatThread.exchange``), whose outcome it returns."""
+        return self.chat_thread(nid).exchange(session, pid)
+
+
+class ChatThread:
+    """One chat's conversation for a model seat (design/phase3-features.md P3.5.3), held by its agent while the chat is
+    open (``LLMAgent.chat_thread``), dropped when it closes (``chat_closed``), and rebuilt from the chat's history after
+    a restart (the agent is new then, and its first message carries the whole history).
+
+    Before it, every answer opened a fresh conversation with the turn's full system prompt and fifteen tools, so a
+    model re-read its whole situation for every message and forgot what it had said. Here the system prompt is the
+    chat's own (``chat_system_prompt``, static so the provider caches it) and each exchange adds only what changed:
+    the other side's entries since the model's last answer, the proposal from the seat's side and the minutes left.
+
+    An exchange runs up to ``max_negotiation_calls`` steps on the seat's binding (its lease; a probe's ticket), with the
+    tools of ``CHAT_TOOLS``, and stops when the chat moves. Its outcome (``exchange``): ``answered`` (the model answered
+    it), ``moved`` (it no longer waits on the seat: answered or closed by somebody else), ``unanswered`` (the model
+    used its steps without answering), ``failed`` (the model could not be asked: an error, a machine's refusal),
+    ``cancelled`` (the seat halted, or the chat clock's deadline came: ``cancel``) or ``paused`` (the game paused for
+    its machine, or loaded and not yet resumed, before the model was asked, ``GameSession.answers_held``: it answers
+    when the game resumes). The session declines only ``unanswered`` and ``failed`` ones ("(no response)"); a slow
+    answer is the chat clock's to decline."""
+
+    def __init__(self, agent: LLMAgent, nid: int):
+        self.agent = agent
+        self.nid = nid
+        self.conv = None
+        self.binding = None          # the binding its conversation's steps run on
+        self.seen = 0                # the chat's entries the model has been told of
+        self.cancels = 0             # moves on each cancel: an exchange in progress stops at its next look
+        self.closed = False
+        self._unanswered = False     # the last message has no step after it (one was cut off): a retry asks again
+        self.last_outcome: Optional[str] = None
+        self.last_cause: Optional[str] = None
+        self._dead = False           # its conversation was closed by a cancel: the next exchange starts a new one
+        self.exchanges = 0
+        self.conversations = 0
+
+    def cancel(self) -> None:
+        """Stop the exchange in progress (non-blocking): its request is cancelled, and it returns ``cancelled``."""
+        self.cancels += 1
+        conv = self.conv
+        if conv is not None:
+            self._dead = True
+            try:
+                conv.close()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """The chat closed: nothing more is asked in it."""
+        self.closed = True
+        self.cancel()
+
+    def _conversation(self, session, pid: int, fresh: bool):
+        """The chat's conversation on the agent's binding now: made on the first exchange (or after a cancel closed
+        it), else the one it has, moved onto a new binding when the agent has one (a probe's ticket per answer)."""
+        a = self.agent
+        binding = a.binding
+        if not fresh and self.conv is not None:
+            if binding is not self.binding and hasattr(self.conv, "rebind") and binding is not None:
+                self.conv.rebind(binding)
+                self.binding = binding
+            if binding is self.binding:
+                return self.conv
+        inner = make_conversation(a.cfg, chat_system_prompt(a.cfg.get("persona")), _tool_defs(CHAT_TOOLS))
+        if binding is not None:
+            from ..pool.scheduler import ScheduledConversation
+            conv = ScheduledConversation(inner, binding, a.cfg)
+            # its place in the machine's queue and its start, to both sides of the chat (negotiation_status)
+            conv.on_status = lambda payload, nid=self.nid: session.chat.answer_status(nid, pid, payload)
+        else:
+            conv = inner
+        self.conv, self.binding, self._dead = conv, binding, False
+        self.conversations += 1
+        return conv
+
+    def _message(self, session, pid: int, fresh: bool) -> Optional[tuple]:
+        """What the model is told now, and the chat's entries then; None when the chat no longer waits on the seat.
+        Session's lock held."""
+        g = session.game
+        try:
+            n = g.negotiation_head(self.nid)
+        except engine_api.ActionError:
+            return None
+        if n["status"] != "open" or n["awaiting"] != pid:
+            return None
+        view = g.negotiation_view(self.nid, pid)
+        timing = session.chat.deadline_of(self.nid)
+        left = time_left_text(timing.get("left_s"), bool(timing.get("paused")))
+        theirs = [e for e in view.get("history") or [] if not e.get("you") and (fresh or e.get("seq", 0) > self.seen)]
+        said = "; then ".join(entry_text(e) for e in theirs) or "nothing new"
+        if fresh:
             emp = g.empire_summary(pid)
             summary = {k: emp[k] for k in ("gold", "per_turn", "era", "happiness", "score", "strategic_resources",
                                            "luxuries", "policies", "cities", "at_war_with")}
             summary["notebook"] = emp["notes"][-2000:]
-            text = NEGOTIATION_PROMPT.format(other=view["with_name"], nid=nid, negotiation=json.dumps(view, indent=1),
-                                             summary=json.dumps(summary, default=str))
-            history_len = n["entries"]
-        conv = self._conversation(NEGOTIATION_TOOLS)
-        self._active.add(conv)
-        conv.add_user_text(text)
-        calls = steps = 0
-        t0 = time.time()
+            last = entry_text(theirs[-1]) if theirs else "nothing yet"
+            text = CHAT_PROMPT.format(other=view["with_name"], nid=self.nid, time_left=left, said=last,
+                                      proposal=proposal_text(view), negotiation=json.dumps(view, indent=1),
+                                      summary=json.dumps(summary, default=str))
+        else:
+            text = CHAT_UPDATE.format(other=view["with_name"], nid=self.nid, said=said, proposal=proposal_text(view),
+                                      current=json.dumps({"current_proposal": view.get("current_proposal")}),
+                                      time_left=left)
+        return text, n["entries"]
+
+    def exchange(self, session, pid: int) -> str:
+        """Tell the model what changed in the chat and run its steps until it answers or the chat moves (the class's
+        docstring names the outcomes). Its row goes on the game's metrics (``Metrics.negotiation``), except for an
+        exchange that was cancelled or paused."""
+        a = self.agent
+        start = self.cancels
+        if session.answers_held():
+            return "paused"
+        # a conversation closed behind the thread's back (the scheduler cancelling the ticket it ran on: a benchmark
+        # took the machine) refuses every step: the chat starts a new one, told the whole chat again. ``is True``: a
+        # provider's own ``closed`` may be anything (an Event), and only the scheduler's wrapper says it so
+        fresh = self.conv is None or self._dead or getattr(self.conv, "closed", False) is True
+        with session.lock:
+            told = self._message(session, pid, fresh)
+        if told is None:
+            return "moved"
+        text, entries = told
+        conv = self._conversation(session, pid, fresh)
+        if fresh or not self._unanswered or entries != self.seen:
+            conv.add_user_text(text)
+        # else: the same message, which a step cut off (a machine that took its slot back) never answered, is asked
+        # again as it stands, rather than told "nothing new"
+        self.seen = entries
+        self._unanswered = True
+        self.exchanges += 1
+        if not hasattr(conv, "heard"):
+            # a conversation on no binding hears nothing from a machine: the model is asked now (a scheduled one says
+            # so itself when each step has its slot)
+            session.chat.answer_status(self.nid, pid, {"state": "thinking"})
+        a._active.add(conv)
+        steps = calls = 0
+        gen_s = queue_s = 0.0
+        t0 = time.perf_counter()
+        before = dict(getattr(conv, "usage", {}) or {})
+        answered = False
+        outcome: Optional[str] = None
+        cause: Optional[str] = None
         try:
-            while calls < self.max_negotiation_calls and steps < self.max_negotiation_calls:
-                if self._halted(session):
-                    return
+            while steps < a.max_negotiation_calls and calls < a.max_negotiation_calls:
                 with session.lock:
-                    n = session.game.negotiation_head(nid)
-                    if n["status"] != "open" or n["awaiting"] != pid or n["entries"] != history_len:
-                        return
-                step = self._step(session, pid, conv)
+                    n = session.game.negotiation_head(self.nid)
+                moved = n["status"] != "open" or n["awaiting"] != pid or n["entries"] != entries
+                if moved and answered:
+                    # the model's own answer (an accept or a reject closes the chat, and so its conversation)
+                    outcome = "answered"
+                    break
+                if a._halted(session) or self.cancels != start:
+                    outcome = "cancelled"
+                    break
+                if moved:
+                    outcome = "moved"
+                    break
+                if session.answers_held():
+                    outcome = "paused"
+                    break
+                step = a._step(session, pid, conv, chat=True)
+                self._unanswered = False
                 steps += 1
-                self._thought(session, pid, step.thinking, "thinking")
-                self._thought(session, pid, step.text, "diplomacy")
+                gen_s += float(getattr(conv, "last_gen_s", 0.0) or 0.0)
+                queue_s += float(getattr(conv, "last_queue_s", 0.0) or 0.0)
+                a._thought(session, pid, step.thinking, "thinking")
+                a._thought(session, pid, step.text, "diplomacy")
                 if not step.tool_calls:
-                    conv.add_user_text("Respond with respond_negotiation (accept, reject, counter, or reply), "
-                                       "with a message.")
+                    conv.add_user_text("Answer with respond_negotiation (accept, reject, counter or reply), with a "
+                                       "message.")
+                    self._unanswered = True
                     continue
-                # never block waiting for replies inside an interrupt
                 results = []
                 for c in step.tool_calls:
-                    if c.name not in NEGOTIATION_TOOLS:
-                        results.append((c.id, f"Tool '{c.name}' is not available during a diplomatic interrupt.", True))
+                    if c.name not in CHAT_TOOLS:
+                        results.append((c.id, f"Tool '{c.name}' is not available in a chat: answer with "
+                                              "respond_negotiation.", True))
                         continue
                     res = session.call_tool(pid, c.name, c.args)
-                    results.append((c.id, _serialize(res["result"]) if res["ok"] else "Error: " + res["error"], not res["ok"]))
+                    if c.name == "respond_negotiation" and res["ok"] and _same_nid(c.args, self.nid):
+                        answered = True
+                    results.append((c.id, _serialize(res["result"]) if res["ok"] else "Error: " + res["error"],
+                                    not res["ok"]))
                 conv.add_tool_results(results)
                 calls += len(step.tool_calls)
         except _Halted:
-            return
+            outcome = "cancelled"
         except Exception as e:
-            if self._halted(session):
-                return
-            self.last_error = f"{type(e).__name__}: {e}"
-            session.errors.append({"t": time.time(), "player": pid, "where": "llm negotiation", "trace": traceback.format_exc()})
+            if a._halted(session) or self.cancels != start:
+                outcome = "cancelled"
+            else:
+                a.last_error = f"{type(e).__name__}: {e}"
+                outcome, cause = "failed", _cause(e)
+                session.errors.append({"t": time.time(), "player": pid, "where": "llm negotiation",
+                                       "negotiation": self.nid, "trace": traceback.format_exc()})
         finally:
-            self._active.discard(conv)
-            self._record_usage(conv)
-            usage = getattr(conv, "usage", {})
-            session.metrics.negotiation(pid, time.time() - t0, steps, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
+            a._active.discard(conv)
+            usage = dict(getattr(conv, "usage", {}) or {})
+            for k, v in usage.items():
+                a.usage_total[k] = a.usage_total.get(k, 0) + v - (before.get(k, 0) or 0)
+            if outcome is None:
+                with session.lock:
+                    n = session.game.negotiation_head(self.nid)
+                still = n["status"] == "open" and n["awaiting"] == pid and n["entries"] == entries
+                outcome = "unanswered" if still else ("answered" if answered else "moved")
+            if outcome == "unanswered":
+                cause = "failed"
+            if outcome not in ("cancelled", "paused"):
+                session.metrics.negotiation(
+                    pid, time.perf_counter() - t0, steps, usage.get("input_tokens", 0) - before.get("input_tokens", 0),
+                    usage.get("output_tokens", 0) - before.get("output_tokens", 0), nid=self.nid,
+                    gen_s=gen_s, queue_s=queue_s,
+                    outcome={"answered": "answered", "moved": "closed"}.get(outcome, "fallback"), cause=cause)
+            session.chat.answer_status(self.nid, pid, {"state": "done"})
+        self.last_outcome, self.last_cause = outcome, cause
+        return outcome
+
+
+def _same_nid(args: dict, nid: int) -> bool:
+    """Whether a tool call's ``negotiation_id`` names chat ``nid``."""
+    try:
+        return int((args or {}).get("negotiation_id")) == nid
+    except (TypeError, ValueError):
+        return False
+
+
+def _cause(e: BaseException) -> str:
+    """Why a model's answer was not given (P3.5.2's causes): ``queued_behind_benchmark`` when a benchmark took or held
+    its machine, ``refused`` for any other refusal of the machine (a budget, a disabled machine, quiet hours, a
+    model not loaded), ``failed`` for an error of the model or its connection."""
+    code = getattr(e, "code", "") or ""
+    if code == "benchmark":
+        return "queued_behind_benchmark"
+    from ..pool.scheduler import SchedulerError
+    if isinstance(e, SchedulerError) or code:
+        return "refused"
+    return "failed"
 
 
 class NoMachineAgent:
@@ -805,6 +1102,6 @@ class NoMachineAgent:
                 g.emit("agent_error", f"{g.player_name(pid)}'s AI has no machine to play on, so its turns are "
                                       f"skipped: {self.reason[:300]}", None, player=pid)
 
-    def respond_negotiation(self, session, pid: int, nid: int):
-        """No answer: the responder declines it."""
-        return None
+    def respond_negotiation(self, session, pid: int, nid: int) -> str:
+        """No answer: the responder declines it ("(no response)")."""
+        return "unanswered"

@@ -31,7 +31,9 @@ HOW TO PLAY THROUGH THESE TOOLS
 3. If a negotiation needs you (even outside your turn), inspect it with get_diplomacy and answer with
    respond_negotiation, always with a message. end_turn is refused while a negotiation you are in is open: answer
    it, or call wait_for_turn to wait for the other side's reply (on your turn it waits for that), or withdraw it
-   with action reject.
+   with action reject. A chat waits only as long as the game allows: wait_for_turn lists every chat you are in with
+   its deadline (chats: seconds_left). One waiting on you that runs out of time is declined for you; one waiting on
+   a person closes.
 4. Keep long-term plans in your notebook (write_notes); it is shown in every briefing. Use log_thought to record your
    reasoning for the replay.
 5. Repeat until the game is over. If wait_for_turn returns 'crashed', the game engine has stopped this game after an
@@ -48,8 +50,10 @@ EXTRA_TOOLS = [
      "description": "Block until it is your turn, a negotiation awaits your reply, or the game ends (returns 'waiting' "
                     "after timeout_seconds; just call again). On your own turn, while a negotiation you are in waits "
                     "on the other side, it waits for their answer instead: 'negotiation_update' when one comes, "
-                    "'waiting_for_reply' when none has by the timeout. 'crashed' means the game engine stopped the "
-                    "game for good: stop playing.",
+                    "'waiting_for_reply' when none has by the timeout. Every answer lists the chats you are in "
+                    "('chats': negotiation_id, waiting_on you or them, deadline in epoch seconds, seconds_left): "
+                    "answer the ones waiting on you before their time runs out. 'crashed' means the game engine "
+                    "stopped the game for good: stop playing.",
      "input_schema": {"type": "object", "properties": {"timeout_seconds": {"type": "number", "description": "default 50"}},
                       "additionalProperties": False}},
 ]
