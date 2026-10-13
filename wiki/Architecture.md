@@ -287,6 +287,36 @@ wakes the seats a chat now waits on, broadcasts the turn and autosaves at a new 
 games (`citar sim`, `citar balance`, the lab) run whole games through `engine_api.run_game`, the
 runner of `crates/citar-sim`, with the GIL released, so a lab runner plays one game a core.
 
+### Hybrid seats: the bot's turn, the model's diplomacy
+
+A hybrid seat (`design/phase3-features.md` P3.6) is the engine's `hybrid` controller: its bot plays
+the turn with the model's kinds of diplomacy switched off (`citar_bot::Owners`, set on the handle
+from the seat's `hybrid.owners`), and the engine's drive stops at `hybrid_diplomat` once the bot has
+played. `HybridAgent` (`citar/agents/hybrid_agent.py`) is the seat's agent, on the driver thread:
+
+1. under the lock, `drive_bots` (every seat with a bot, bot and hybrid seats alike), which stops at
+   `hybrid_diplomat`;
+2. off the lock, when a trigger fired and no phase ran this turn, the **diplomat phase**: one
+   `diplomat` ticket on the model's machine (30 s to start, `phase_seconds` once started, eight steps),
+   the static diplomat prompt (`prompts.DIPLOMAT_SYSTEM`), and the tools of the model's kinds, each
+   call through `GameSession.diplomat_call`: a tool none of its kinds gives it is refused, and a deal
+   it offers, counters with or accepts that includes anything the bot decides goes through only when
+   `EngineGame.bot_evaluate` (`citar_bot::evaluate_offer`) values it at zero or more from the seat's
+   side;
+3. under the lock, the drive again: the turn ends, or the drive stops at `awaiting_reply` for chats
+   that wait on another seat or on this seat's model, waited for as a bot seat waits.
+
+A chat that waits on a hybrid seat goes to its line twice: its bot's pass on the bot pool
+(`EngineGame.answer`, which answers what the bot owns and defers the rest), then, for what was
+deferred, its model on the model pool, in a `ChatThread` on a `chat` ticket whose start deadline is
+the chat clock's. When the ticket is refused or expires, or the model fails, the **fallback bot** (the
+same profile with every kind its own, on the seat's one memory) answers (`GameSession.fallback_answer`);
+the chat clock's deadline does the same (`chat_fallback`). While a phase runs the seat's model answers
+no chat on its own ticket: what comes to it is told to the phase, and the line is dispatched again
+when the phase ends. The seat holds no lease: its prompts are tickets, admitted for `pooled`, so it
+never occupies its machine and quiet hours or a make-way pause never pause its game. The phases are
+`metrics.data["diplomat"]`, the refused calls `metrics.data["diplomat_refusals"]`.
+
 ### How the bots are checked
 
 `basic-1` is a port, so it was first checked decision by decision against what the Python bot
@@ -479,6 +509,7 @@ reason. Run it after adding a route; CI runs it with `--strict`.
 | `llm_agent.py` | The loop: briefing, tool calls, guard rails, limits, metrics |
 | `prompts.py` | What the model is told |
 | `bot_agent.py` | Plays a bot seat: a drive of the engine's bots on its turn, and their answers to chats ([Bots and the bindings](#bots-in-the-server-and-without-one)) |
+| `hybrid.py`, `hybrid_agent.py` | A hybrid seat's settings, and its agent: the bot's drive, the diplomat's phases, its chats and its fallback ([Hybrid seats](#hybrid-seats-the-bots-turn-the-models-diplomacy)) |
 | `mcp_server.py` | The MCP bridge |
 | `providers/anthropic_provider.py` | Thinking, prompt caching, refusal fallbacks |
 | `providers/openai_provider.py` | Native and JSON tool modes, for every OpenAI-compatible endpoint |
