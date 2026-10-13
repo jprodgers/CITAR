@@ -811,7 +811,9 @@ class Wrapper(unittest.TestCase):
                     conv.step()
                 except S.Cancelled as e:
                     out["e"] = e
-            t = threading.Thread(target=run, name="late-queued-step")
+            # a failed assertion must not leave the step waiting for ever: it is closed at the test's end
+            self.addCleanup(conv.close)
+            t = threading.Thread(target=run, name="late-queued-step", daemon=True)
             t.start()
             deadline = time.monotonic() + 5
             while not any(r.conv is conv for r in m.waiting) and time.monotonic() < deadline:
