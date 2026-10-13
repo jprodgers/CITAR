@@ -386,13 +386,23 @@ impl Game {
     /// move, so a host that also takes chunks ([`Game::take_journal_chunk`]) misses none. A
     /// session saves through [`Game::save_snapshot`] instead (DESIGN.md P2.5.3).
     ///
+    /// The chunk is a new journal's first, so the saved state's history heads are recounted from
+    /// the history it holds, as [`Game::restart_journal`] recounts them. For a game that kept its
+    /// whole history they come out as they were; a game made from a state alone (a scenario's
+    /// start) counts the history of the game the state was taken from, which it does not have,
+    /// and its copy counts its own, so that it loads whole (its digest, which covers the
+    /// engine's heads, moves with them).
+    ///
     /// # Errors
     /// A state that does not write, which the engine's checks rule out.
     pub fn save_whole(&self) -> Result<WholeSave, SaveError> {
         let mut st = self.state().clone();
+        let (heads, counted) =
+            journal::recount(self.chronicle(), &st.host().0).map_err(SaveError::NonFinite)?;
+        let (h, host) = st.heads_mut();
+        *h = heads;
+        *host = counted;
         let mut cursor = JournalCursor::default();
-        let host = &mut st.heads_mut().1;
-        host.journal_seq = 0;
         let chunk = journal::take_chunk(self.rules(), self.chronicle(), &mut cursor, host)?;
         let state = to_json(self.rules(), &st)?;
         Ok(WholeSave { state, history: chunk.map(|c| c.json) })

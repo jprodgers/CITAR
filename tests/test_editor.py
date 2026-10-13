@@ -1,7 +1,10 @@
 """Map editor files, scenarios (operations, save/load, launch) and probes (with the dry-run model), through the facade
 (``citar.engine_api``), so they run on whichever engine is behind it."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from citar import engine_api as E
@@ -209,6 +212,35 @@ class ProbeTests(unittest.TestCase):
         self.assertIs(rec["passed"], False)
         self.assertIn("The engine stopped", rec["error"])
         self.assertIn("panic: in the bot", rec["error"])
+
+    def test_a_cases_saved_copy_holds_its_whole_history(self):
+        """A case's copy (``save_path``) loads whole, with no warning that its history came back short, and its replay
+        covers the turns the case played. The scenario's state counts the history of the game it was taken from, which
+        the case's game never had: a case that saved no autosave of its own (a message) warned at every copy."""
+        folder = Path(tempfile.mkdtemp(prefix="citar-probe-copies-"))
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        start = EngineGame.from_state(self.scn["state"]).turn
+        for cid in ("hello", "turn"):
+            with self.subTest(cid):
+                case = next(c for c in self.probe["cases"] if c["id"] == cid)
+                path = folder / f"{cid}.citar"
+                with self.assertNoLogs("citar.engine", level="WARNING"):
+                    rec = P.run_case(self.mgr, self.scn, self.probe, case, DRY, save_path=path)
+                    copy = EngineGame.from_save(E.read_save(path))
+                self.assertEqual(rec["save"], str(path))
+                replay = copy.replay_data()
+                played = list(range(start, copy.turn))
+                self.assertEqual([f["turn"] for f in replay["frames"]], played, "a frame for each round the case ended")
+                self.assertEqual([s["turn"] for s in replay["stats"]], played)
+                self.assertTrue(replay["events"], "the case's events")
+                self.assertTrue(all(start <= e["turn"] <= copy.turn for e in replay["events"]))
+                if cid == "hello":
+                    self.assertEqual(copy.turn, start, "a message plays no turn")
+                    self.assertEqual([(m["from"], m["text"]) for m in replay["messages"]][0], (0, "Greetings."))
+                    self.assertIn(1, [m["from"] for m in replay["messages"]], "the subject's reply")
+                    self.assertEqual(len(replay["negotiations"]), 1)
+                else:
+                    self.assertEqual(copy.turn, start + 1, "the subject's turn ended the round")
 
     def test_each_case_starts_fresh(self):
         def gold(state):
