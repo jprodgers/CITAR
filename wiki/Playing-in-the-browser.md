@@ -125,11 +125,12 @@ sets how long a chat waits for the side whose move it is, and how long it may gr
 |---|---|---|
 | **AI answers within** (minutes) | 10 | An AI model (an LLM or MCP seat) that has not answered is taken to have declined, "(no reply in time)". The time it spends waiting for its machine counts. |
 | **People within** (minutes) | 5 | The chat closes as expired, "(no reply in time)", whoever opened it: an AI waiting on you, or another person. |
-| **At most ... messages** | 30 | The message that would pass it closes the chat instead. |
+| **At most ... messages** | the rules' own (30) | The message that would pass it closes the chat instead. Left empty, the game keeps its ruleset's cap. |
 
 Bots answer at once and are never timed. The clock stands still while the game is paused, starts again
 each time the chat moves, and starts afresh for every open chat when a game is loaded or the server
-restarts. Nobody can end their turn while a chat they opened is open: an AI's turn waits for your
+restarts. A game loaded from a save comes back paused: its bots answer what waits on them at once, its AI
+models once you resume it, so you can check their settings before they spend anything. Nobody can end their turn while a chat they opened is open: an AI's turn waits for your
 answer, as long as the setting allows.
 
 ## After the game

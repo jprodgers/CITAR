@@ -328,14 +328,21 @@ A negotiation is a chat (`design/phase3-features.md` P3.5). Three pieces of the 
   its entries or awaited seat change (the session's event hook, `note`), starts afresh in a loaded session, and, in a
   benchmark game, holds a chat whose answer is a prompt queued behind a benchmark (`answer_status`: the ticket's or the
   conversation's status says so) until that prompt starts. Its thread wakes on the session's condition and at least
-  once a second, records and survives every exception, and the driver starts it again if it dies (`ensure`). Its time
-  is the session's `clock`, which tests replace with a fake one (`tests/chatfake.py`).
+  once a second, records and survives every exception, and the driver starts it again if it dies (`ensure`); an
+  action that failed on a chat that has not moved is tried again after 1 s, doubling up to a minute (a chat between
+  two people has no agent's safety cap). Its time is the session's `clock`, which tests replace with a fake one
+  (`tests/chatfake.py`).
 - **The responders** (`citar/agents/responders.py`): a chat that comes to wait on a bot or a model seat is handed to that
   seat's line, which answers one chat at a time in order, on a pool of `CITAR_RESPONDERS` (16) threads for model answers
-  and one of `CITAR_BOT_RESPONDERS` (2) for bot answers, so a bot is never behind models waiting for a busy GPU. A halt
-  (`cancel_agent`: a suspension, a seat change, a crash, a stop) never declines: the chat waits for the seat's next
-  responder, dispatched again on resume, load, `restore_live` and a seat change (`dispatch_waiting`). Only an answer
-  that ran and failed outright is declined, "(no response)".
+  and one of `CITAR_BOT_RESPONDERS` (2) for bot answers, so a bot is never behind models waiting for a busy GPU; each
+  answer names its pool, so a line whose next answer is the other kind's moves there. A machine's answers take no
+  more model threads than it has slots (and at most half the pool): a line whose machine has that many in flight is
+  parked, holding no thread, its chat told its place (`queued`, as the machine tells its own line), and takes the
+  place of the next of its answers to end, so a queue on one busy machine never starves another machine's seats. A
+  halt (`cancel_agent`: a suspension, a seat change, a crash, a stop) never declines: the chat waits for the seat's
+  next responder (a parked line leaves its machine's queue), dispatched again on resume, `restore_live` and a seat
+  change (`dispatch_waiting`); a loaded game's models answer nothing until it is first resumed (`held_from_load`),
+  its bots at once. Only an answer that ran and failed outright is declined, "(no response)".
 - **The model seat's conversations.** `LLMAgent` keeps one `ChatThread` per open chat: a slim fixed system prompt
   (`prompts.chat_system_prompt`), the chat's history once, then only what changed, on the seat's lease, stopping when
   the chat moves. On its own turn the agent's waits for the other side (`_await_answer`, the tool's own minute;

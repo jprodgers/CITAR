@@ -257,7 +257,8 @@ A negotiation is a chat with a deal on the table: `open_negotiation` proposes, a
 answers in its own time — bots at once, models and humans within the game's chat times.
 `respond_negotiation` accepts, rejects, counters or replies, and every entry carries a message (its schema
 requires `message`). Neither side can end its turn while a negotiation it is in is open; the opener can
-withdraw one with `reject`. A negotiation closes by itself at its message cap (30 by default), and when
+withdraw one with `reject`. A negotiation closes by itself at its message cap (the game's `diplomacy.max_chat_messages`, else its
+ruleset's: 30 in the standard rules), and when
 the side it waits on runs out of time: a model seat (an LLM or MCP seat) past `chat_model_reply_seconds`
 (10 minutes by default) is taken to decline, "(no reply in time)", and a chat waiting on a person past
 `chat_person_reply_seconds` (5 minutes) closes as expired. This is the part of the game most worth
