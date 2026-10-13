@@ -237,7 +237,9 @@ one door), through `citar/_facade_rust.py`.
 - **A view is built only when it changed.** Every view answers with an `ETag` made from everything
   its body is made of: the game object (`EngineGame.instance`, random, since another object, a loaded
   game, counts again from 0), how many commands it has taken (`EngineGame.writes`, counted by the
-  extension under the game's lock on every call that may change the game or its history), the
+  extension under the game's lock on every call that may change the game or its history; a query
+  tool is a read and never counts, or the selected unit's details, which the browser asks for after
+  every refresh, would make the next refresh a full view), the
   perspective, and the keys the server splices in (the seat, `info()` with its pause, agent
   statuses and seats, the session's version, `can_manage`), hashed as they are written. The browser
   sends it back on every refresh (`If-None-Match`), and an unchanged view is a 304 with nothing
