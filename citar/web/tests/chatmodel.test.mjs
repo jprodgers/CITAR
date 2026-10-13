@@ -126,6 +126,9 @@ test("statuses: a late one is dropped, one ahead of the entries asks for the cha
   // nothing after it opens it again
   m.applyStatus(status(4, "waiting", { entries: 9, waitingOn: YOU }), 600);
   assert.equal(m.chats.get(4).status, "expired");
+  // a status naming two other civilizations makes no chat of the seat's
+  assert.equal(m.applyStatus({ ...status(12, "thinking", { entries: 1 }), players: [1, 2] }, 700), null);
+  assert.equal(m.chats.has(12), false);
 });
 
 function deepFreeze(x) {

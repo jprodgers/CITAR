@@ -208,6 +208,8 @@ export class ChatModel {
    * older than what the client knows (it names fewer entries) is dropped. */
   applyStatus(msg, now) {
     if (!msg || !Number.isInteger(msg.negotiation)) return null;
+    // a seat's socket hears only its own chats (P3.5.5); one naming two others is none of its windows' business
+    if (this.you != null && Array.isArray(msg.players) && !msg.players.includes(this.you)) return null;
     let chat = this.chats.get(msg.negotiation);
     const created = !chat;
     if (!chat) {
