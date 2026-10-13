@@ -8,7 +8,8 @@
 //!   ways, each checked against the view's own tiles: the explored tiles of the home continent,
 //!   covered the short way round;
 //! - a tile explored on another continent left out;
-//! - a seat with no capital (its first city, else its settler) and with no city and no settler;
+//! - a seat with no capital (its first city, else its settler) and with no city and no settler; a
+//!   capital before an earlier city on another continent;
 //! - who has a block: a major's own view, never the god view nor a city-state's;
 //! - its cost: at most 5% of the seat view's on the late fixtures (P3.9.7).
 
@@ -400,6 +401,28 @@ fn without_a_capital_the_first_city_then_a_settler_anchors_the_home() {
         view(&g, Some(P0))["minimap"],
         json!({"stage": "early", "capital": null, "home": null})
     );
+}
+
+#[test]
+fn the_capital_anchors_the_home_before_an_earlier_city() {
+    let shape = Shape {
+        w: 30,
+        h: 14,
+        edges: (false, false),
+        a: |x| (2..=12).contains(&x),
+        b: |x| (17..=27).contains(&x),
+        rows: |y| (1..=12).contains(&y),
+    };
+    let mut g = shape.game([(6, 6), (21, 7)]);
+    let (a, b) = (g.continent(tile_at(&g, 6, 6)), g.continent(tile_at(&g, 21, 7)));
+    // the seat's first city on the other continent, then its capital moved home
+    ops(&mut g, json!([{"op": "found_city", "player": 0, "x": 24, "y": 3}]));
+    assert_eq!(block(&g, P0, b).capital, Some([24, 3]), "the first city is the capital at first");
+    ops(&mut g, json!([{"op": "found_city", "player": 0, "x": 8, "y": 9, "capital": true}]));
+    let m = block(&g, P0, a);
+    assert_eq!(m.capital, Some([8, 9]));
+    let v = view(&g, Some(P0));
+    assert_ne!(m.home, expected_home(&g, &v, b.expect("land")), "not the first city's continent");
 }
 
 #[test]
