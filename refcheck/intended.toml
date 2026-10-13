@@ -426,3 +426,11 @@ cases = [
   "standard-inland_sea-normal-s1013/t200",
   "standard-pangaea-normal-s1031/t25",
 ]
+
+# Package 3-13 (design/phase3-features.md P3.5.8): the client's payloads.
+
+[[differences]]
+id = "client-view-trade-options-on-demand"
+reason = "Python's client view carried, for every civilization a player had met, what the two could trade (gold, spare luxuries and strategic resources, technologies, the agreements possible now), built again on every refresh though only the deal builder reads it; Rust's view leaves it out, the chat window's deal builder fetches it while it is open (GET /api/games/{gid}/trade-options/{other}), and the get_diplomacy tool keeps it"
+where = [{ group = "views", path = "civs[*].view.diplomacy.players[*].trade_options" }]
+rust = { is = "absent" }

@@ -366,10 +366,12 @@ class GameTests(unittest.TestCase):
             E.Game.load(b'{"format": "nonsense"}')
         self.assertEqual(json.loads(g.state_json())["format"], json.loads(state)["format"])
         replay = json.loads(g.replay_data())
-        self.assertEqual(replay["format"], "full")
-        self.assertEqual(json.loads(g.replay_data("delta"))["format"], "delta")
-        with self.assertRaises(ValueError):
-            g.replay_data("mpeg")
+        self.assertEqual(replay["format"], "delta")
+        self.assertEqual(json.loads(g.replay_data("delta")), replay)
+        self.assertEqual(json.loads(h.replay_data())["frames"], replay["frames"], "a reload sends the same records")
+        for retired in ("full", "mpeg"):
+            with self.assertRaises(ValueError):
+                g.replay_data(retired)
         served = json.loads(g.replay_json(dumps({"id": "g1", "name": "Duel", "seats": [{"type": "human"}]})))
         self.assertEqual(list(served)[:2], ["id", "name"])
         self.assertEqual((served["players"][0]["seat"], served["players"][1]["seat"]), ({"type": "human"}, None))

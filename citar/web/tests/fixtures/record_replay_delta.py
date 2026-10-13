@@ -6,15 +6,18 @@ The game: three bot civilizations, a city-state and barbarians on a 22 by 14 map
 turn limit of 100, and reloaded in place at turn 70 (the `reload` test operation: the whole history saved and loaded
 again), so its frames hold a keyframe at the first round, one 64 rounds later and one after the reload, with deltas
 between. The engine's `Full` format, which expanded every frame on the server, was retired by the same package once
-the client decoded `Delta` itself, so this script ran once, on the build just before (`replay_data("full")` and
-`replay_data("delta")` of one game, in one process). It needs the `test-ops` build (`cargo xtask develop`).
+the client decoded `Delta` itself, so this script ran once, on the build just before (the tree at `bce8d36` with this
+script, 2026-10-13: `replay_data("full")` and `replay_data("delta")` of one game, in one process, through the
+extension's own game, as the tests may). It needs the `test-ops` build (`cargo xtask develop`); a later build refuses
+`replay_data("full")`, so it records nothing again: a change to the frames' layout records a new fixture with a
+decoder of its own to compare with.
 
     python citar/web/tests/fixtures/record_replay_delta.py [--out PATH]
 
 The output is gzip (mtime 0) of compact JSON, so the same build writes the same bytes: {"format", "recorded",
 "width", "height", "improvement_ids", "feature_ids", "unit_ids", "delta": [{turn, keyframe, bytes}], "full": [frame in
 Python's shape]}. Gzip because the full frames, the point of the comparison, are large (each repeats every layer) and
-compress about ten to one.
+compress about twenty to one (417 KB of JSON, 19 KB stored).
 """
 from __future__ import annotations
 

@@ -27,6 +27,8 @@ export class GameScreen {
     this.agentStatus = {};
     this.agentWait = {};    // player -> where its model call waits for its machine ({machine, position, eta_s})
     this._refreshTimer = null;
+    this._viewTag = null;   // the ETag of the view in hand, sent with every refresh (a 304 keeps the view)
+    this.viewSeq = 0;       // how many refreshes have come back: a view fetched after a moment is one counted after it
     this._inflight = false;
     this._pending = false;
     this._lastTurnKey = null;
@@ -35,7 +37,8 @@ export class GameScreen {
     // the docked chat windows, left of End Turn (design/phase3-features.md P3.5.6), clear of the panels when there is room
     this.chat = new ChatDock(this, { host: this.main, turnBox: this.turnBox,
                                      obstacles: [this.unitPanel, this.cityPanel, this.sidePanel, this.minimap],
-                                     fetchChat: (nid) => api.negotiation(this.gid, this.token, nid) });
+                                     fetchChat: (nid) => api.negotiation(this.gid, this.token, nid),
+                                     fetchOptions: (civ) => api.tradeOptions(this.gid, this.token, civ) });
     this.refresh();
     this.ws = connectWS(gid, token, (m) => this.onWS(m));
     this._keyHandler = (e) => this.onKey(e);
@@ -190,13 +193,23 @@ export class GameScreen {
     this._inflight = true;
     try {
       const started = Date.now();
-      const v = await api.view(this.gid, this.token, this.asPlayer);
+      // with the ETag of the view in hand: a 304 says it is still the view, and nothing was built or sent
+      const r = await api.view(this.gid, this.token, this.asPlayer, this.view ? this._viewTag : null);
+      if (r.notModified && !this.view) throw new Error("The game's view did not come.");
+      const same = r.notModified;
       this._viewStartedAt = started;
-      this.view = v;
+      this.viewSeq++;
+      const v = same ? this.view : r.data;
+      if (!same) {
+        this._viewTag = r.etag || null;
+        this.view = v;
+      }
       if (!this.feed.length) this.feed = (v.events || []).slice(-150);
       if (v.thoughts && !this.thoughts.length) this.thoughts = v.thoughts.slice(-80);
-      this.model = modelFromView(v);
-      this.renderer.setModel(this.model);
+      if (!same) {
+        this.model = modelFromView(v);
+        this.renderer.setModel(this.model);
+      }
       if (!this._centered) { this.centerHome(); this._centered = true; }
       if (this.selectedUnit != null && !v.units.some((u) => u.id === this.selectedUnit && u.owner === this.you)) this.deselect();
       if (this.selectedCity != null && !v.cities.some((c) => c.id === this.selectedCity && c.owner === this.you)) this.deselect();
@@ -393,7 +406,8 @@ export class GameScreen {
     return true;
   }
 
-  // wait for any in-flight refresh, then fetch a fresh view
+  // wait for any in-flight refresh, then fetch a fresh view (or hear that the one in hand still is: `viewSeq` moves
+  // either way, and not when the fetch failed)
   async syncView() {
     while (this._inflight) await new Promise((r) => setTimeout(r, 25));
     if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = null; }

@@ -74,6 +74,7 @@ pub(super) fn answer(
             g,
             pid,
             int(args, "message_limit").unwrap_or(MESSAGES_SHOWN),
+            true,
         )),
         Query::CityStates => Ok(Value::Array(players::city_states_info(g, pid))),
         Query::TechTree => Ok(tech_tree(g, pid, args.get("filter"))),

@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 import traceback
 from contextlib import contextmanager
@@ -730,6 +732,36 @@ def control(gid: str, body: Control, request: Request, p: Principal = Depends(pr
     return {"paused": s.paused, "ai_delay": s.ai_delay}
 
 
+#: How a view may be kept: by the browser that asked only (``private``), and checked again before every use
+#: (``no-cache``), which its ETag makes cheap (design/phase3-features.md P3.5.8).
+VIEW_CACHE = "private, no-cache"
+
+
+def view_etag(game: EngineGame, writes: int, pid: Optional[int], extra: dict) -> str:
+    """A view's ETag: a hash of everything its body is made of. The engine's part is the game object
+    (``EngineGame.instance``: another object, a loaded game, counts from 0 again), how many commands it had taken
+    (``writes``, which moves on every change to the game or its history, where the engine's revision moves on its
+    state alone) and the perspective (``pid``); the server's part is the keys it splices in (``extra``: the seat or the
+    spectator flag, ``session``, which is ``info()`` with its pause, agent statuses and seats, ``version`` and
+    ``can_manage``), hashed as the view is written with them, so two answers with one tag have the same bytes."""
+    h = hashlib.blake2b(digest_size=12)
+    h.update(f"{game.instance}|{writes}|{pid}|".encode())
+    h.update(json.dumps(extra, separators=(",", ":")).encode())
+    return f'"v{h.hexdigest()}"'
+
+
+def etag_matches(header: Optional[str], tag: str) -> bool:
+    """Whether an ``If-None-Match`` header names ``tag`` (or is ``*``); a weak tag (``W/"..."``) matches its strong
+    form, as RFC 9110 has ``If-None-Match`` compare them."""
+    for part in (header or "").split(","):
+        t = part.strip()
+        if t.startswith("W/"):
+            t = t[2:]
+        if t == "*" or (t and t == tag):
+            return True
+    return False
+
+
 @app.get("/api/games/{gid}/view")
 def view(gid: str, request: Request, token: Optional[str] = None, as_player: Optional[int] = None,
          p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
@@ -741,6 +773,11 @@ def view(gid: str, request: Request, token: Optional[str] = None, as_player: Opt
     The engine writes the view as JSON with the server's keys (``seat`` or ``spectator``, ``session``,
     ``version``) spliced in (``EngineGame.view_json``), and the route returns those bytes as they are: a
     gargantuan god view would otherwise cost a parse and a re-dump of megabytes on every refresh.
+
+    Every answer carries an ``ETag`` (``view_etag``), and a request whose ``If-None-Match`` names the current one gets
+    ``304 Not Modified`` without the view being built: the client sends it on every refresh, most of which find
+    nothing changed (design/phase3-features.md P3.5.8). A view built while a command came in carries no tag, since
+    its body may already be the game after the command.
     """
     s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
     tok = _token(request, token)
@@ -763,8 +800,15 @@ def view(gid: str, request: Request, token: Optional[str] = None, as_player: Opt
         extra["version"] = s.version
         # which controls the game screen offers (pause, the AI delay, a named save): the routes check it again
         extra["can_manage"] = access.MANAGE in perms
+        writes = s.game.writes
+        tag = view_etag(s.game, writes, pid, extra)
+        headers = {"ETag": tag, "Cache-Control": VIEW_CACHE}
+        if etag_matches(request.headers.get("if-none-match"), tag):
+            return Response(status_code=304, headers=headers)
         body = s.game.view_json(pid, extra)
-    return Response(body, media_type="application/json")
+        if s.game.writes != writes:
+            del headers["ETag"]        # a command came in meanwhile: the body may be the game after it
+    return Response(body, media_type="application/json", headers=headers)
 
 
 class ToolCallBody(BaseModel):
@@ -817,6 +861,33 @@ def negotiation_view(gid: str, nid: int, request: Request, token: Optional[str] 
             return s.chat_view(nid, side)
         except ActionError:
             raise HTTPException(404, "No such negotiation.") from None
+
+
+@app.get("/api/games/{gid}/trade-options/{other}")
+def trade_options(gid: str, other: int, request: Request, token: Optional[str] = None,
+                  as_player: Optional[int] = None, p: Principal = Depends(principal),
+                  sdb: DbSession = Depends(get_db)):
+    """What a civilization and ``other`` could trade, as the chat window's deal builder offers it (one-click chips:
+    what each could give, ``other``'s gold, the agreements both could sign now): the view no longer carries them for
+    every civilization met, so the builder fetches them while it is open (design/phase3-features.md P3.5.8).
+
+    A seat token reads its own seat's. A spectator of a game whose god view is allowed (no person plays, or it is over)
+    reads any civilization's through ``as_player``. ``other`` must be a living major civilization that side has met, as
+    its diplomacy would list it; anything else, and anyone else, gets 404, so a civilization not met is not told of."""
+    s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
+    tok = _token(request, token)
+    with s.lock, _crash_guard(s):
+        seat = s.seat_for_token(tok)
+        if seat is not None:
+            side = seat.player
+        elif (s.is_spectator(tok) or access.VIEW in perms) and s.god_view_allowed() and as_player is not None:
+            side = as_player
+        else:
+            raise HTTPException(404, "No such trade.")
+        found = s.game.trade_options(side, other) if 0 <= side < len(s.seats) and 0 <= other < 256 else None
+    if found is None:
+        raise HTTPException(404, "No such trade.")
+    return {"player": side, "with": other, "trade_options": found}
 
 
 @app.get("/api/games/{gid}/path")

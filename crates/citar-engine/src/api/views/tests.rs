@@ -289,3 +289,47 @@ fn a_views_own_keys_are_the_ones_it_names_before_the_rest() {
         assert!(keys[ClientView::FIELDS.len()..].iter().all(|k| !ClientView::FIELDS.contains(k)));
     }
 }
+
+/// Package 3-13 (design/phase3-features.md P3.5.8): the client view's diplomacy lists the
+/// civilizations met without what could be traded with each; `get_diplomacy`, which a model reads
+/// them from, keeps them; and `trade_options_with` gives them on demand, for a civilization the
+/// diplomacy would list and for no other.
+#[test]
+fn trade_options_leave_the_client_view_and_come_on_demand() {
+    use super::players::{trade_options, trade_options_with, trades_with};
+    use crate::state::{Phase, TurnClock};
+    let mut g = game();
+    for (a, b) in [(ROME, GREECE), (ROME, PERSIA), (ROME, GENEVA), (GREECE, PERSIA)] {
+        g.meet(a, b).expect("they meet");
+    }
+    for p in [ROME, GREECE, PERSIA] {
+        let v: Value = serde_json::from_slice(&g.view_json(Some(p), 10)).expect("json");
+        let listed = v["diplomacy"]["players"].as_array().expect("players");
+        assert_eq!(listed.len(), 2, "{p:?} lists the two others");
+        assert!(listed.iter().all(|q| q.get("trade_options").is_none()), "{p:?}: {listed:?}");
+        let tool = g.execute_query(p, "get_diplomacy", &json!({})).expect("an answer");
+        for q in tool["players"].as_array().expect("players") {
+            let other = PlayerId(u8::try_from(q["id"].as_u64().expect("an id")).expect("an id"));
+            assert_eq!(q["trade_options"], trade_options(&g, p, other), "the tool keeps them");
+            assert_eq!(trade_options_with(&g, p, other), Some(trade_options(&g, p, other)));
+        }
+    }
+    // Itself, a city-state, a player the game lacks: nothing.
+    for (p, q) in [(ROME, ROME), (ROME, GENEVA), (ROME, PlayerId(60)), (PlayerId(60), ROME)] {
+        assert_eq!(trade_options_with(&g, p, q), None, "{p:?} with {q:?}");
+    }
+    // A civilization not met tells nothing; an eliminated one has nothing to trade.
+    let mut h = game();
+    h.meet(ROME, GREECE).expect("they meet");
+    assert!(trades_with(&h, ROME, GREECE) && !trades_with(&h, ROME, PERSIA));
+    assert_eq!(trade_options_with(&h, ROME, PERSIA), None, "not met");
+    h.kill_player(GREECE).expect("Greece holds no cities");
+    h.settle();
+    assert_eq!(trade_options_with(&h, ROME, GREECE), None, "eliminated");
+    // Once the game is over everyone is named, and the living can be asked about.
+    let clock = TurnClock { phase: Phase::Over, winner: Some(ROME), ..*h.state().clock() };
+    h.set_clock(clock);
+    h.settle();
+    assert!(trade_options_with(&h, ROME, PERSIA).is_some(), "over: met or not");
+    assert_eq!(trade_options_with(&h, ROME, GREECE), None, "still eliminated");
+}

@@ -8,7 +8,6 @@
 //! and a third on another thread, must play alike and read alike, which a hash map whose order
 //! decides something would break, since every hash map of a process is seeded apart.
 
-use citar_engine::api::views::ReplayFormat;
 use citar_engine::base::ids::PlayerId;
 use citar_engine::game::{DebugOptions, Game};
 use citar_engine::save::canon;
@@ -167,7 +166,7 @@ fn reads(g: &Game) -> Vec<(String, Vec<u8>)> {
         ("save".to_owned(), g.snapshot().to_json().expect("a save")),
         ("spectator's view".to_owned(), g.view_json(None, 50)),
         ("standings".to_owned(), format!("{:?}", g.standings()).into_bytes()),
-        ("replay".to_owned(), g.replay_data(ReplayFormat::Delta)),
+        ("replay".to_owned(), g.replay_data()),
     ];
     let majors: Vec<PlayerId> =
         g.state().players().iter().filter(|(_, p)| p.is_major()).map(|(id, _)| id).collect();

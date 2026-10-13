@@ -36,6 +36,7 @@ import json
 import logging
 import random
 import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -692,6 +693,9 @@ class EngineGame:
     def __init__(self, game):
         self._g = game
         self._subscribers: list[Callable[[dict], None]] = []
+        # a random name for this game object: its :attr:`writes` count from 0 again in another (a load), so a count is
+        # compared only with the same name (the server's view ETag, design/phase3-features.md P3.5.8)
+        self.instance = secrets.token_hex(8)
 
     def _fan(self, events: Optional[bytes]):
         """Hands a call's events to every subscriber, in order, after the call: the game's lock is free by now, so a
@@ -808,6 +812,13 @@ class EngineGame:
         return self._g.turn_limit
 
     @property
+    def writes(self) -> int:
+        """How many commands this game object has taken, refused or not: it moves on every call that may change the
+        game or its history (a message, a thought, a host's event included) and never on a read. With :attr:`instance`,
+        what the server's view ETag is made of (design/phase3-features.md P3.5.8)."""
+        return self._g.writes
+
+    @property
     def config(self) -> dict:
         """The game's configuration, as Python's Game.new normalised it (a copy)."""
         return json.loads(self._g.config())
@@ -911,6 +922,15 @@ class EngineGame:
     def negotiation_view(self, nid: int, pid: int) -> dict:
         """A negotiation as one side sees it, in its own terms. Raises ActionError."""
         return json.loads(self._g.negotiation_view(nid, pid))
+
+    def trade_options(self, pid: int, other: int) -> Optional[dict]:
+        """What ``pid`` and ``other`` could trade, as the deal builder offers it: what each could give (luxuries,
+        strategic resources, technologies), ``other``'s gold and the agreements both could sign now. None unless
+        ``other`` is a living major civilization ``pid`` has met (as its diplomacy would list it), or when either is no
+        player of the game. The client view no longer carries them (design/phase3-features.md P3.5.8); the
+        ``get_diplomacy`` tool still does."""
+        raw = self._g.trade_options(pid, other)
+        return None if raw is None else json.loads(raw)
 
     def end_turn_refusal(self, pid: int) -> Optional[str]:
         """Why the end_turn tool would refuse this player because of an open negotiation, or None."""
@@ -1166,13 +1186,12 @@ class EngineGame:
 
     # ------------------------------------------------------------------ replay
     def replay_data(self) -> dict:
-        """Everything the recap needs: the map, the players, and the whole game's frames, stats, events, messages,
-        thoughts, negotiations and deals, and the game's ``config`` as :attr:`config` gives it. (The engine's own
-        replay, which replay_json serves, carries the settings the client reads, its ``format`` and the unit palette
-        a client of its delta frames needs.)"""
-        data = json.loads(self._g.replay_data("full"))
-        data.pop("format", None)
-        data.pop("unit_ids", None)
+        """Everything the recap needs: the map, the players, the whole game's frames (``format`` "delta": keyframes
+        and deltas, each record's bytes in base64, as the journal stores them; ``citar/web/js/replaydecode.js`` reads
+        them), stats, events, messages, thoughts, negotiations and deals, and the game's ``config`` as :attr:`config`
+        gives it (the engine's own replay, which replay_json serves, carries the settings the client reads). Python's
+        "full" frames, each expanded on the server, were retired in 0.1.6."""
+        data = json.loads(self._g.replay_data("delta"))
         data["config"] = self.config
         return data
 

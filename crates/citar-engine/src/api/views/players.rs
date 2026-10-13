@@ -151,6 +151,27 @@ fn agreements(g: &Game, me: PlayerId, other: PlayerId, m: &mut Map<String, Value
     }
 }
 
+/// Whether `pid`'s diplomacy lists what it could trade with `other`: a living major civilization
+/// other than itself that it has met (or any, once the game is over, when everyone is named).
+#[must_use]
+pub fn trades_with(g: &Game, pid: PlayerId, other: PlayerId) -> bool {
+    let over = g.state().clock().phase != Phase::Playing;
+    other != pid
+        && g.player(pid).is_some()
+        && g.player(other).is_some_and(|p| p.is_major() && p.alive())
+        && (over || g.has_met(pid, other))
+}
+
+/// [`trade_options`] between `pid` and `other` when `pid`'s diplomacy would list them
+/// ([`trades_with`]), else `None`: what the chat window's deal builder fetches on its own
+/// (`EngineGame.trade_options`, `GET /api/games/{gid}/trade-options/{other}`), since the client
+/// view no longer carries them (design/phase3-features.md P3.5.8). A civilization it has not met
+/// tells nothing, not even that it is there.
+#[must_use]
+pub fn trade_options_with(g: &Game, pid: PlayerId, other: PlayerId) -> Option<Value> {
+    trades_with(g, pid, other).then(|| trade_options(g, pid, other))
+}
+
 /// What each side has that the other might want, for the deal builder's suggestions
 /// (`views.trade_options`, `views.py:408-437`): gold, spare luxuries the other lacks, strategic
 /// resources to spare, techs the other could research, and the agreements both sides could sign
@@ -282,12 +303,22 @@ pub(crate) fn un_result(
 }
 
 /// Relations, negotiations, deals and recent messages, from `pid`'s side
-/// (`views.diplomacy_info`, `views.py:440-471`): the majors it has met with what could be traded
-/// with each, its open and latest settled negotiations as it sees them, the deals in force, its
-/// last `message_limit` messages (a recipient it has not met named `unknown`), and the United
-/// Nations' next vote.
+/// (`views.diplomacy_info`, `views.py:440-471`): the majors it has met, with what could be traded
+/// with each when `with_trade_options` (the `get_diplomacy` tool, which a model reads them from),
+/// its open and latest settled negotiations as it sees them, the deals in force, its last
+/// `message_limit` messages (a recipient it has not met named `unknown`), and the United Nations'
+/// next vote.
+///
+/// The client view leaves the trade options out: it built them for every civilization met on
+/// every refresh, a deal check per agreement each, and only an open deal builder reads them,
+/// which fetches its own ([`trade_options_with`]; design/phase3-features.md P3.5.8).
 #[must_use]
-pub fn diplomacy_info(g: &Game, pid: PlayerId, message_limit: i64) -> Value {
+pub fn diplomacy_info(
+    g: &Game,
+    pid: PlayerId,
+    message_limit: i64,
+    with_trade_options: bool,
+) -> Value {
     let r = g.rules();
     let mine: Vec<_> =
         g.negotiations().iter().filter(|n| n.initiator == pid || n.responder == pid).collect();
@@ -363,11 +394,14 @@ pub fn diplomacy_info(g: &Game, pid: PlayerId, message_limit: i64) -> Value {
             p["id"] != json!(pid.0) && p["kind"] == json!("major") && p["met"] == json!(true)
         })
         .collect();
-    for p in &mut players {
-        let alive = p["alive"] == json!(true);
-        let id = p["id"].as_u64().and_then(|n| u8::try_from(n).ok()).map(PlayerId);
-        if let (true, Some(other), Some(m)) = (alive, id, p.as_object_mut()) {
-            m.insert("trade_options".into(), trade_options(g, pid, other));
+    // refcheck: client-view-trade-options-on-demand
+    if with_trade_options {
+        for p in &mut players {
+            let alive = p["alive"] == json!(true);
+            let id = p["id"].as_u64().and_then(|n| u8::try_from(n).ok()).map(PlayerId);
+            if let (true, Some(other), Some(m)) = (alive, id, p.as_object_mut()) {
+                m.insert("trade_options".into(), trade_options(g, pid, other));
+            }
         }
     }
     let mut out = Map::new();
