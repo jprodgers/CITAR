@@ -7,9 +7,7 @@ import { renderUnitPanel, renderCityPanel, openTechTree, openDiplomacy, openEmpi
          openReligion, openGreatPeople, openCityStates, openVictory, chooseBeliefs } from "./panels.js";
 import { openMetrics } from "./metrics.js";
 import { ChatDock } from "./chat.js";
-import { agentState, isModelSeat, queuedText, seatLabel } from "./seats.js";
-
-export { queuedText };
+import { agentState, isModelSeat, seatLabel } from "./seats.js";
 
 export class GameScreen {
   constructor(root, rules, gid, token, asPlayer) {
