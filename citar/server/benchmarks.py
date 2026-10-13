@@ -1185,7 +1185,12 @@ class BenchmarkScheduler:
         self._record_progress(run, job, s)
         job["result"] = job["progress"]
         if job.get("mode") == "hybrid":
-            job["result"] = dict(job["result"], **self._hybrid_result(s))
+            try:
+                job["result"] = dict(job["result"], **self._hybrid_result(s))
+            except Exception as e:
+                # the job is done whatever its record says: a record that could not be read leaves it with no pair
+                # line, rather than a tick that fails on it for ever
+                self._log(f"{job['label']}: its diplomacy record could not be read: {e}", run["id"])
         job.update({"status": "done", "finished": _now(), "pause_reason": None})
         self._pair(job)
         try:

@@ -1692,7 +1692,12 @@ class GameSession:
         if kind in DIPLOMACY_EVENTS:
             for seat in self.seats:
                 if seat.type == "hybrid":
-                    self._recorder(seat.player).on_event(ev)
+                    try:
+                        self._recorder(seat.player).on_event(ev)
+                    except Exception:
+                        # the record's failure is the server's news; the event's own effects below still happen
+                        self.errors.append({"t": time.time(), "player": seat.player, "where": "diplomacy record",
+                                            "trace": traceback.format_exc()})
         if kind == "negotiation":
             self._chat_moved(ev)
         elif kind == "eliminated":

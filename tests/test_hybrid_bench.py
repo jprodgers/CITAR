@@ -197,6 +197,20 @@ class Suite(Case):
         gid = run["jobs"][0]["game_id"]
         self.assertIsNone(_reports(self.manager, {gid}).get(gid, {}).get("benchmark"))
 
+    def test_a_record_that_cannot_be_read_leaves_the_job_done_without_a_pair(self):
+        sv = machine("unread")
+        sch = self.scheduler()
+        with mock.patch.object(BenchmarkScheduler, "_hybrid_result", side_effect=RuntimeError("record lost")):
+            run = sch.create_run(suite(sv, "m_unread_a", [scenario(turn_limit=6)]))
+            self.assertTrue(until(lambda: run["status"] == "done", 60, 0.05, sch=sch), run["jobs"][0])
+        job = run["jobs"][0]
+        self.assertEqual(job["status"], "done")
+        self.assertNotIn("pair", job["result"])
+        self.assertTrue(any("record lost" in x["msg"] for x in sch.log), sch.log[-3:])
+        for _ in range(3):
+            sch.tick()              # no tick fails on it again
+        self.assertNotIn("pair", job["result"])
+
     def test_a_restart_asks_for_a_control_that_was_not_played(self):
         sv = machine("restart")
         sch = self.scheduler()
@@ -402,6 +416,17 @@ class Recorder(Case):
         self.assertEqual((line["deal_value_total"], line["deal_value_mean"], line["deals"]),
                          (line["control"]["deal_value_total"], line["control"]["deal_value_mean"],
                           line["control"]["deals"]))
+
+    def test_a_failing_record_never_stops_an_events_own_effects(self):
+        s = self._bots_game(turn_limit=10)
+        with mock.patch.object(DiplomacyRecorder, "on_event", side_effect=RuntimeError("record broke")), \
+                mock.patch.object(DiplomacyRecorder, "observe", side_effect=RuntimeError("record broke")):
+            with s.lock:
+                s.game.emit("eliminated", "a test elimination", player=2)
+                before = (s.game.turn, s.game.current)
+                s._after_action(*before)
+        self.assertIn(2, s._seats_out, "the elimination still let the seat's lease go")
+        self.assertEqual({e["where"] for e in s.errors}, {"diplomacy record"})
 
     def test_a_hybrid_seats_rows_survive_a_save_and_a_load(self):
         s = self._bots_game(turn_limit=40)
