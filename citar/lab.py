@@ -792,7 +792,12 @@ def overview() -> dict:
                         "attempt": crashes.get((r["exp"], r["i"]), 0) + 1})
 
     experiments = []
-    specs = [(json.loads(_fs_read(p)), "queued") for p in sorted(QUEUE.glob("*.json"))]
+    specs = []
+    for p in sorted(QUEUE.glob("*.json")):
+        try:
+            specs.append((json.loads(_fs_read(p)), "queued"))
+        except FileNotFoundError:
+            continue        # finished since the listing: the runner moved it to done/, which is listed next
     specs += [(json.loads(p.read_text(encoding="utf-8")), "complete")
               for p in sorted(DONE.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
     remaining_minutes = 0.0

@@ -121,7 +121,7 @@ class ProbeFiles(unittest.TestCase):
 class LabFiles(Refused):
     """The runner replaces ``status.json`` every pass while the Lab page (``overview``) and ``lab status`` read it; the
     server replaces a queued experiment's file when its priority changes (``set_priority``) while the runner, the Lab
-    and Bots pages and the ratings read it."""
+    and Bots pages and the ratings read it; and the runner moves it to done/ when it finishes."""
 
     def setUp(self):
         super().setUp()
@@ -155,6 +155,22 @@ class LabFiles(Refused):
         self.assertEqual([spec["name"] for spec, _ in self.read_refused_once(name, ratings._lab_files)], ["fsutil-exp"])
         self.assertEqual(self.read_refused_once(name, lambda: lab.set_priority("fsutil-exp", 7)), 7)
         self.assertEqual(json.loads((lab.QUEUE / name).read_text(encoding="utf-8"))["priority"], 7)
+
+    def test_an_experiment_finished_between_the_listing_and_its_read(self):
+        """Not a replace but a rename: the runner moves a finished experiment's file to done/ whenever it finishes.
+        Listed in the queue and gone when read, it is shown from done/, not a failed page."""
+        name = "fsutil-exp.json"
+        fsutil.write_text(lab.QUEUE / name, json.dumps({
+            "name": "fsutil-exp", "games": 2, "submitted": "2026-10-12T00:00:00", "seats": []}))
+        real = Path.read_text
+
+        def read_text(path, *args, **kwargs):
+            if path.parent == lab.QUEUE and path.name == name:
+                shutil.move(str(path), str(lab.DONE / name))       # the runner, finishing it
+            return real(path, *args, **kwargs)
+        with mock.patch.object(Path, "read_text", read_text):
+            got = lab.overview()["experiments"]
+        self.assertEqual([(e["name"], e["state"]) for e in got], [("fsutil-exp", "complete")])
 
 
 class BotProfileFiles(Refused):
