@@ -1243,7 +1243,11 @@ class WriteVolume(World):
         print(f"\nledger: 10,000 events from 8 threads written in {took:.2f} s; slowest hand-off "
               f"{max(slowest) * 1000:.1f} ms")
         self.assertEqual(n, 10_000)
-        self.assertLess(took, 2.0)
+        # 2 s is the laptop's budget; CI's shared runners get three times it, as the other timing tests do (windows /
+        # Python 3.12 took 2.44 s once, in a run whose whole suite took twice its usual time). A writer that waited on
+        # the session lock held above would not finish at all (flush's 10 s), and the hand-off bound below holds
+        # everywhere.
+        self.assertLess(took, 6.0 if os.environ.get("CI") else 2.0)
         self.assertLess(max(slowest), 0.5, "a producer never waits on the database")
 
     def test_the_writer_drains_on_shutdown_and_survives_a_failed_batch(self):
