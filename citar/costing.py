@@ -117,8 +117,12 @@ def fixed_rates(server: dict, reg: dict, when: datetime, lifespan_override: Opti
 
 
 def _threads(server: dict) -> int:
-    """How many threads a machine has, for dividing its cost between concurrent work."""
-    return int(((server.get("hardware") or {}).get("cpu") or {}).get("threads") or 8)
+    """How many threads a machine has, for dividing its cost between concurrent work: at least one (its hardware
+    details are typed in or reported, so a text, a fraction or a nonsense figure must not divide by zero), 8 when
+    they do not say."""
+    cpu = (server.get("hardware") or {}).get("cpu")
+    threads = S.hardware_figure(cpu.get("threads")) if isinstance(cpu, dict) else None
+    return max(1, int(threads)) if threads else 8
 
 
 def _new_cost() -> dict:

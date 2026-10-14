@@ -37,6 +37,7 @@ import hashlib
 import itertools
 import json
 import logging
+import math
 import re
 import secrets
 import threading
@@ -252,13 +253,17 @@ def _num(v, default=None, lo=None, hi=None):
     """Coerce a value to a number within bounds, falling back to a default.
 
     Everything in the registry arrives from a browser or a JSON file, so every field is validated on
-    the way in rather than trusted and crashed on later.
+    the way in rather than trusted and crashed on later. Python's JSON reader takes ``NaN``, ``Infinity`` and an
+    integer of hundreds of digits (which ``float`` cannot hold): each is the default too, never a figure no JSON answer
+    can carry.
     """
     if v in (None, ""):
         return default
     try:
         x = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(x):
         return default
     if lo is not None:
         x = max(lo, x)
@@ -362,8 +367,7 @@ def _normalize_server(d: dict) -> dict:
     c["key"] = {"backend": backend, "env": str(key.get("env") or "").strip()}
     c["dry_run_delay"] = _num(conn_in.get("dry_run_delay"), 1.0, 0, DRY_RUN_MAX_DELAY)
     c["timeout"] = _num(conn_in.get("timeout"), None, 5, 7200)
-    hw = d.get("hardware") if isinstance(d.get("hardware"), dict) else {}
-    sv["hardware"] = hw or {"source": "none"}
+    sv["hardware"] = clean_hardware(d.get("hardware")) or {"source": "none"}
     pw_in = _obj(d.get("power"), "power")
     pw = default_power()
     for k in ("idle_w", "cpu_max_w", "gpu_max_w"):
@@ -1789,12 +1793,95 @@ def unload_models(server: dict, keys: Optional[list] = None):
 
 
 # ----------------------------------------------------------------------------- hardware
+#: The largest figure a machine's hardware details hold: past it a float no longer holds every whole number, and an
+#: integer of hundreds of digits (which Python's JSON reader takes) overflows every ``float()`` that reads it.
+HARDWARE_FIGURE_MAX = 2 ** 53
+#: How deep hardware details nest: ``hwinfo.collect``'s go four levels down; anything deeper is dropped.
+HARDWARE_DEPTH = 12
+#: The parts of hardware details that are objects, and those that are lists of objects (``hwinfo.collect``'s shape).
+_HW_PARTS = ("os", "system", "cpu", "memory", "power")
+_HW_LISTS = ("gpus", "physical_disks", "volumes", "runtimes")
+#: The figures the readers compute with (the Servers page's summary, the hardware classes, costing, the dialog).
+_HW_FIGURES = {"cpu": ("cores", "threads"), "memory": ("ram_gb",)}
+_HW_ITEM_FIGURES = {"gpus": ("vram_gb",), "physical_disks": ("size_gb",)}
+_HW_POWER_FIGURES = ("idle_w", "cpu_max_w", "gpu_max_w")
+
+
+def hardware_figure(v):
+    """A figure of a machine's hardware as a number a page can show and a reader can compute with: an int or a float,
+    finite and within ``HARDWARE_FIGURE_MAX`` (a numeric text read as a float); None for anything else."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, str):
+        try:
+            v = float(v)
+        except ValueError:
+            return None
+    if isinstance(v, int):
+        return v if -HARDWARE_FIGURE_MAX <= v <= HARDWARE_FIGURE_MAX else None
+    if isinstance(v, float):
+        return v if math.isfinite(v) and abs(v) <= HARDWARE_FIGURE_MAX else None
+    return None
+
+
+def _clean_value(v, depth: int):
+    """``clean_hardware``'s walk: JSON values only, numbers that every reader can hold, no deeper than
+    ``HARDWARE_DEPTH``."""
+    if v is None or isinstance(v, (bool, str)):
+        return v
+    if isinstance(v, (int, float)):
+        return hardware_figure(v)
+    if isinstance(v, dict):
+        return {str(k): _clean_value(x, depth + 1) for k, x in v.items()} if depth < HARDWARE_DEPTH else None
+    if isinstance(v, (list, tuple)):
+        return [_clean_value(x, depth + 1) for x in v] if depth < HARDWARE_DEPTH else None
+    return str(v)
+
+
+def clean_hardware(hw) -> dict:
+    """Hardware details as they may be kept and shown: a helper's scan, a collector's file or what an owner typed in
+    arrive as any JSON, and Python's reader takes ``NaN``, ``Infinity`` and integers no float holds, which no JSON
+    answer can carry (Starlette refuses to encode them: every listing of the machine would fail) and which overflow
+    the readers' ``float()``. So: every number is finite and within ``HARDWARE_FIGURE_MAX`` (else None); the figures
+    the readers compute with (cores, threads, RAM, a GPU's memory, a disk's size, the suggested power figures) are
+    numbers or None; ``os``, ``system``, ``cpu``, ``memory``, ``power`` and ``power.suggested`` are objects and
+    ``gpus``, ``physical_disks``, ``volumes`` and ``runtimes`` lists of objects, where present (a part of another
+    shape is emptied, an entry that is not an object dropped). Nothing else changes; {} for what is not an object."""
+    if not isinstance(hw, dict):
+        return {}
+    out = _clean_value(hw, 0)
+    for key in _HW_PARTS:
+        if key in out and not isinstance(out[key], dict):
+            out[key] = {}
+    for key in _HW_LISTS:
+        if key in out:
+            out[key] = [x for x in out[key] if isinstance(x, dict)] if isinstance(out[key], list) else []
+    for part, fields in _HW_FIGURES.items():
+        for f in fields:
+            if f in out.get(part, {}):
+                out[part][f] = hardware_figure(out[part][f])
+    for key, fields in _HW_ITEM_FIGURES.items():
+        for item in out.get(key, []):
+            for f in fields:
+                if f in item:
+                    item[f] = hardware_figure(item[f])
+    power = out.get("power", {})
+    if "suggested" in power:
+        if not isinstance(power["suggested"], dict):
+            power["suggested"] = {}
+        for f in _HW_POWER_FIGURES:
+            if f in power["suggested"]:
+                power["suggested"][f] = hardware_figure(power["suggested"][f])
+    return out
+
+
 def apply_hardware(server: dict, hw: dict, source: str = "collected", set_power: bool = True) -> dict:
-    """Store collected hardware on a server config; fills power figures that are still unset from the guess."""
+    """Store collected hardware on a server config (``clean_hardware``'s); fills power figures that are still unset
+    from the guess."""
     if not isinstance(hw, dict) or hw.get("format") != "citar-hardware":
         raise ServerError("That isn't a CITAR hardware file (run collect_hardware.py or collect_hardware.ps1).")
     sv = copy.deepcopy(server)
-    hw = dict(hw)
+    hw = clean_hardware(hw)
     hw["source"] = source
     sv["hardware"] = hw
     power = hw.get("power") if isinstance(hw.get("power"), dict) else {}
