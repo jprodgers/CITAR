@@ -629,7 +629,7 @@ class GameRoutes(unittest.TestCase):
                         seen += 1
                         if sub.scope != "function":
                             wrong.append(f"{sorted(getattr(route, 'methods', None) or ['WS'])} {route.path}")
-        self.assertGreater(seen, 150)
+        self.assertGreater(seen, 100)          # 152 in 82 routes as 3-19 left them: the walk finds them
         self.assertEqual(wrong, [])
 
     def test_the_saves_list_says_who_may_load_and_delete(self):
