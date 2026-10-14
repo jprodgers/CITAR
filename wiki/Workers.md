@@ -53,6 +53,8 @@ the action touches:
 |---|---|
 | See a machine and seat it | Its owner and administrators; anyone else through a grant on a server group it is in. No listing names a machine to anyone else (the lobby's availability, the machines in their quiet hours): it is 404 to them |
 | Change its configuration (name, models, hardware, power and costs, quiet hours), remove it | Its owner and administrators; another member gets 404 |
+| Its machine settings: LLM slots, model swaps, CPU sharing, what its helper's reports may change, applying the last one | Its owner and administrators; a member a group lends it to gets 403, any other member 404 |
+| Set its trust tier, pin the hardware classes it is priced by | Administrators; anyone else gets 404 |
 | Store or delete its API key | Its owner and administrators, on a machine the server dials; a helper machine has no key on the server (404) |
 | Add a machine the server dials itself, or switch one to that | Administrators, unless its provider is the dry run (it dials nothing): a member gets 403 with the reason |
 | Price a machine with an electricity plan | Administrators: the plans are the household's bill. A member gets 403, and on a machine an administrator gave a plan, sees no price per kWh |
@@ -87,6 +89,7 @@ and the members'. Each machine is a card, and the card of a machine you manage c
 | Quiet hours | When nothing runs on it, for anyone | Its owner and administrators |
 | API key | Where the server keeps the key of a machine it dials (an environment variable: administrators) | Its owner and administrators, on a machine the server dials |
 | Helper | Its worker tokens (issue, revoke) and how to run the helper | Its owner and administrators, on a helper machine |
+| Machine settings… | Capabilities (LLM on or off, slots, model swaps for pooled prompts, CPU sharing), what its helper's reports may change (hardware, models and power, each auto or manual) with the last report and Apply, its hardware class and trust tier ([below](#machine-settings-and-what-a-helpers-report-changes)) | Its owner and administrators (pinning the class and the trust tier: administrators) |
 | Sharing | The server group that shares it | Its owner and administrators |
 | Disable, Enable, Remove | Disabling and removing drop its helper at once (below) | Its owner and administrators |
 
@@ -99,6 +102,45 @@ before 0.1.6 still works: `#/servers` opens it and `#/servers/<id>` opens that m
 address is `#/pool/groups/<id>`, which highlights it for whoever it is shared with. A group shares its machines
 through its grants alone (a grant to everyone shares them with every member): a group whose visibility is `link`
 admits nobody by its key yet, so there is no link to hand out.
+
+## Machine settings, and what a helper's report changes
+
+**Machine settings…** on a machine's card is a dialog in three tabs (`citar/web/js/machine_settings.js`; the routes are
+in [API](HTTP-and-tool-API#a-machines-settings)).
+
+**Capabilities.** Whether the machine takes model work at all (LLM off refuses every seat, test and pooled prompt on
+it, saying why), its **LLM slots** (how many requests it takes at once, the site's one number for it; its helper's own
+`--max-concurrent` still caps it), and whether pooled prompts may make it **swap models** (off by default: a report's
+analysis, a probe's answer, a test or a hybrid seat's diplomacy runs only on a model it has loaded, or one a game is
+using there). These take effect at once: the dialog shows what the prompt scheduler has in effect. **CPU sharing**
+(threads, CPU %, memory and the kinds of CPU work: lab games, ranking games, reference games) is kept for the 0.1.6
+helper, which runs CPU work; the helper of this version (worker protocol 1) is sent none of these settings. Its limits
+are hard where the operating system allows, and the helper's own local settings always win.
+
+**What the helper's report changes.** Each time it connects, the helper reports the machine's hardware (its scan, the
+file given with `--hardware FILE`, or nothing with `--no-hardware`) and the models its model server lists, with which
+are loaded. The server **keeps the last report whatever the settings**, with its time, and the dialog shows how it differs from the machine's configuration. What it does with it
+is the machine's choice, per section:
+
+| Section | `auto` | `manual` | Default |
+|---|---|---|---|
+| Hardware | The scan becomes the hardware details, and the machine's hardware class follows them | The details are yours: nothing changes | auto |
+| Models | The catalogue is updated: a new model is added, loaded ones are marked, one no longer reported is kept, marked "not reported", until you remove it | The catalogue is yours: only which of its models are loaded is marked; nothing is added or removed | auto |
+| Power | The scan's suggested figures (rough guesses from the hardware) become the power figures | The figures are yours: nothing changes | manual |
+
+**Apply** copies the last report in, one section or all of it, whatever the modes. A report never changes the
+machine's name, slots, quiet hours, costs, components or key, nor a model's display name (unless the helper gives the
+model a name of its own), inference settings, load profiles, prices or whether it is offered. So a machine whose
+hardware you typed in keeps it through every reconnect once Hardware is manual, and its last scan is there to compare
+and apply.
+
+**Class and trust.** The machine's **hardware class** prices its work in the compute ledger
+([Configuration](Configuration#credits-and-hardware-classes)): it follows the hardware details unless an
+administrator **pins** it, here. Its **trust tier** (new, provisional, trusted, quarantined) is set by administrators;
+today it is a label, which a later version sets by itself and acts on. Both are shown to the machine's owner. An
+administrator also sees, here and on the card, when its helper has **over-reported** its generation time (more than the
+server observed, by over 10% and a second, three times within an hour): its work is credited the time the server
+observed whatever it reports.
 
 ## Revocation
 

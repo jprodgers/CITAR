@@ -153,6 +153,15 @@ administrator is sampled without a restart.
 `citar setup --local` writes its machines into the database when there is one, else into `servers.json` for the
 first start to import.
 
+A machine's **settings** live on its row too, edited in the Servers page's **Machine settings…** dialog
+([Workers](server/WORKERS.md#machine-settings-and-what-a-helpers-report-changes)): its LLM slots (`max_concurrent`,
+the site's one number for it), its capabilities (`capabilities`: whether it takes model work, whether pooled prompts
+may make it swap models, and its CPU sharing for the 0.1.6 helper), and what its helper's reports may change
+(`hardware_mode`, `models_mode`, `power_mode`, each `auto` or `manual`; by default the hardware and the models
+follow the helper and the power figures are yours). Its helper's last report is kept on the row
+(`hardware_detected`, `detected_at`) whatever those say. Its `trust_tier` and pinned hardware classes are an
+administrator's to set there.
+
 ### API keys for models
 
 Not environment variables by default — they go to the OS credential store through the Servers page.
@@ -194,9 +203,11 @@ machine's hardware, else the kind's default:
 | `cpu_name` | a regular expression matches its CPU's model |
 | `cores_min` | its CPU has at least that many cores (else threads) |
 
-The class follows the hardware: a helper's hello, the hardware dialog or a scan that changes it classifies the machine
-again, unless an administrator pinned its classes (`class_override`; the machine settings dialog's). Each kind keeps
-one default class, which cannot be removed.
+The class follows the hardware: whatever changes a machine's hardware details (its helper's scan with the machine's
+hardware mode `auto`, the hardware dialog, an Apply of the last scan, Collect on the host) classifies it again, unless
+an administrator pinned its classes (`class_override`: Machine settings…, Class and trust, or
+`PUT /api/admin/machines/{id}/class`; [API](API.md#a-machines-settings)). Each kind keeps one default class, which
+cannot be removed.
 
 Administrators edit the classes over HTTP (`GET`/`POST /api/admin/hardware-classes`,
 `PUT`/`DELETE /api/admin/hardware-classes/{id}`; [API](API.md#the-compute-ledger)). A new rate applies to the events
@@ -222,7 +233,8 @@ Budgets on grants are counted in the same credits ([Accounts](server/ACCOUNTS.md
 | `CITAR_WORKER_PING_SECONDS` | `20` | Keep-alive on the worker WebSocket |
 
 On the worker side: `CITAR_WORKER_SERVER`, `CITAR_WORKER_TOKEN`, `CITAR_WORKER_BASE_URL`,
-`CITAR_WORKER_PROVIDER`, `CITAR_WORKER_MAX_CONCURRENT`, `CITAR_WORKER_NAME`. Prefer the config file
+`CITAR_WORKER_PROVIDER`, `CITAR_WORKER_MAX_CONCURRENT`, `CITAR_WORKER_NAME`, and `CITAR_WORKER_HARDWARE_FILE` (the
+hardware to report instead of a scan: a collector's file, as `--hardware`). Prefer the config file
 that `citar setup --worker` writes: a token on a command line ends up in the shell history and the
 process list.
 
