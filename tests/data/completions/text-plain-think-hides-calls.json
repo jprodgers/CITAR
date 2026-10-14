@@ -1,0 +1,51 @@
+{
+ "name": "text-plain-think-hides-calls",
+ "note": "a tool line inside a think block is not a call; the one after it is",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "<think>\nend_turn{} would be too early.\n</think>\nset_research {\"tech\": \"pottery\"}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "<think>\nend_turn{} would be too early.\n</think>\nset_research {\"tech\": \"pottery\"}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "set_research",
+     "args": {
+      "tech": "pottery"
+     }
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "<think>\nend_turn{} would be too early.\n</think>\nset_research {\"tech\": \"pottery\"}",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "set_research",
+      "arguments": "{\"tech\": \"pottery\"}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

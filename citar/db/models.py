@@ -498,6 +498,17 @@ class Server(Base):
     #: server observed.
     flags: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    # The helper and proof of work (design/phase4-helper.md P4.5.1, P4.5.8; revision 0016c_helper_jobs).
+    #: The machine key its helper registered with its first protocol 2 hello (base64 of 32 bytes): trust on first use,
+    #: so a hello with another key is refused until the owner or an admin resets it (null again).
+    public_key: Mapped[Optional[str]] = mapped_column(String(64))
+    key_at: Mapped[Optional[datetime]] = _ts(nullable=True)
+    #: The last hello's helper block, with the limits it acknowledged and its update state; null before any.
+    helper: Mapped[Optional[dict]] = mapped_column(JSON)
+    #: Proof of work's counters (P4.5.8): {verified, streak, mismatches, last_verified_at, last_mismatch, abandons,
+    #: since, verifier, speed}; empty until the machine's first CPU job. A key reset never changes it.
+    trust: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+
     created_at: Mapped[datetime] = _ts(default=now)
     updated_at: Mapped[datetime] = _ts(default=now, onupdate=now)
 
@@ -717,7 +728,9 @@ class AclEntry(Base):
 COMPUTE_KINDS = ("gpu", "cpu", "api")
 TASK_CLASSES = ("full", "partial", "cpu")
 ACTIVITY_KINDS = ("game", "benchmark", "probe", "report", "lab", "test")
-VERIFICATION = ("unverified", "verified", "pending")
+#: `pending` until a CPU job settles; `rejected` for a run whose result was refused or withdrawn (P4.5.7): its
+#: credits are 0 and any budget settlement it made is reversed.
+VERIFICATION = ("unverified", "verified", "pending", "rejected")
 
 
 class ComputeEvent(Base):
@@ -784,6 +797,115 @@ class ComputeRollup(Base):
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     events: Mapped[int] = mapped_column(Integer, default=0)
+
+
+# ============================================================================ CPU jobs (Phase 4)
+
+#: The kinds of CPU job (design/phase4-helper.md P4.4.1): bot-only work, a closed vocabulary. The same kinds a machine
+#: may lend its CPU to (`machine_settings.CPU_WORK`; tests/test_migrations.py holds the two equal).
+CPU_JOB_KINDS = ("lab_game", "ranking_game", "reference_game")
+#: A job's states (P4.5.4): `settling` while its replicas run, shown only to administrators (P4.5.8 rule 2); a crash
+#: outcome is a result (P4.4.2), accepted once verified like any other.
+CPU_JOB_STATES = ("queued", "running", "settling", "accepted", "crashed", "failed", "withdrawn", "cancelled")
+#: Who ran a run: the server's own job host, or a connected helper (P4.5.6).
+CPU_RUN_EXECUTORS = ("local", "remote")
+#: Why a run exists: the job's first run, a sampled or required check of it, or the local executor deciding between
+#: two that disagree (P4.5.8).
+CPU_RUN_ROLES = ("primary", "replica", "tiebreak")
+CPU_RUN_STATES = ("offered", "running", "done", "failed", "aborted", "expired")
+#: What verification made of a finished run: the local executor's own (`reference`), equal to its replica's, not
+#: equal, accepted without a replica, or refused (a bad signature, claim or chain; P4.5.8 rule 5).
+CPU_RUN_VERDICTS = ("reference", "match", "mismatch", "unchecked", "rejected")
+
+
+class CpuJob(Base):
+    """One game of a lab, ranking or reference experiment to be played by an executor (P4.5.4): the job the dispatcher
+    (package 4-09, its only writer) makes from the lab's queue, offers, and settles from its runs. `spec` is the typed
+    spec as data (no path, URL or code; P4.4.1) and `spec_hash` the hash every executor recomputes; `ref` is the
+    ledger's activity id (`lab:<exp>:<i>`), `item_kind`/`item_ref` the owned experiment its access follows, and
+    `owner_id` the consumer (null for the server's own `collection` experiments). `mem_mb` starts from the cost table
+    and is raised to the peak a run reached when memory ended it."""
+    __tablename__ = "cpu_jobs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("cj_"))
+    kind: Mapped[str] = mapped_column(String(16))                       # CPU_JOB_KINDS
+    ref: Mapped[str] = mapped_column(String(160), index=True)
+    item_kind: Mapped[Optional[str]] = mapped_column(String(24))
+    item_ref: Mapped[Optional[str]] = mapped_column(String(120))
+    owner_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)
+    spec_hash: Mapped[str] = mapped_column(String(64))
+    #: The jobs build the job is for (P4.4.5): offered only to executors of that build, compared only within it.
+    jobs_build: Mapped[str] = mapped_column(String(16))
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    mem_mb: Mapped[int] = mapped_column(Integer, default=0)
+    state: Mapped[str] = mapped_column(String(16), default="queued")   # CPU_JOB_STATES
+    #: The run whose result the lab took, and that result's hash, once the job settles.
+    accepted_run: Mapped[Optional[str]] = mapped_column(String(40))
+    result_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = _ts(default=now)
+    updated_at: Mapped[datetime] = _ts(default=now, onupdate=now)
+
+
+#: The dispatcher's queue order: queued jobs by priority, then age.
+Index("ix_cpu_jobs_state_priority_created", CpuJob.state, CpuJob.priority, CpuJob.created_at)
+
+
+class CpuJobRun(Base):
+    """One run of a job on one executor (P4.5.4): offered, played, and settled with its verdict. The machine is kept by
+    id rather than by a foreign key, as the ledger keeps it, so a run stays the evidence of what a machine returned
+    after the machine is gone. `result` is pruned once the job settles and `digests` once matched (kept as evidence
+    on a mismatch); `claim` and `signature` are the helper's signed claim (P4.4.4), absent for the local executor's
+    runs; `error` holds a failure's `{code, message}`, or a mismatch's evidence."""
+    __tablename__ = "cpu_job_runs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("cr_"))
+    job_id: Mapped[str] = mapped_column(ForeignKey("cpu_jobs.id", ondelete="CASCADE"), index=True)
+    machine_id: Mapped[str] = mapped_column(String(40), index=True)
+    executor: Mapped[str] = mapped_column(String(8), default="remote")     # CPU_RUN_EXECUTORS
+    role: Mapped[str] = mapped_column(String(16), default="primary")       # CPU_RUN_ROLES
+    state: Mapped[str] = mapped_column(String(16), default="offered", index=True)   # CPU_RUN_STATES
+    offered_at: Mapped[datetime] = _ts(default=now)
+    started_at: Mapped[Optional[datetime]] = _ts(nullable=True)
+    #: The run's heartbeat: a running run silent for 5 minutes while its helper is connected expires (P4.2.5).
+    last_progress_at: Mapped[Optional[datetime]] = _ts(nullable=True)
+    ended_at: Mapped[Optional[datetime]] = _ts(nullable=True)
+    deadline_at: Mapped[Optional[datetime]] = _ts(nullable=True)
+    #: The executor's own figures: CPU and wall seconds, seconds paused (which extend the deadline), counted peak MB.
+    cpu_s: Mapped[float] = mapped_column(Float, default=0.0)
+    wall_s: Mapped[float] = mapped_column(Float, default=0.0)
+    paused_s: Mapped[float] = mapped_column(Float, default=0.0)
+    peak_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    result: Mapped[Optional[dict]] = mapped_column(JSON)
+    result_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    chain_head: Mapped[Optional[str]] = mapped_column(String(64))
+    rounds: Mapped[Optional[int]] = mapped_column(Integer)
+    digests: Mapped[Optional[list]] = mapped_column(JSON)
+    claim: Mapped[Optional[dict]] = mapped_column(JSON)
+    signature: Mapped[Optional[str]] = mapped_column(String(128))
+    #: When the server acknowledged the result (`job_result_ack`), so a second copy of it is acknowledged again.
+    acked_at: Mapped[Optional[datetime]] = _ts(nullable=True)
+    verdict: Mapped[Optional[str]] = mapped_column(String(16))           # CPU_RUN_VERDICTS
+    error: Mapped[Optional[dict]] = mapped_column(JSON)
+
+
+class JobCost(Base):
+    """What a kind of job costs (P4.5.4), per kind, map size, seat count and bucket of 50 rounds (`rounds` is the
+    bucket's first round): `cpu_s` the median CPU seconds of the local executor's and the verifiers' runs (the
+    reference cost every credit is bounded by, P4.5.7) and `peak_mb` the 95th percentile of every run's counted peak
+    (the memory a job is offered with). Seeded from a committed table measured on the golden and benchmark jobs
+    (package 4-09), so the first jobs already have an estimate."""
+    __tablename__ = "job_costs"
+
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)     # CPU_JOB_KINDS
+    size: Mapped[str] = mapped_column(String(24), primary_key=True)
+    seats: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rounds: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cpu_s: Mapped[float] = mapped_column(Float, default=0.0)
+    peak_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    samples: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = _ts(default=now, onupdate=now)
 
 
 # ============================================================================ operations

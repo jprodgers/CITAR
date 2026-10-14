@@ -1,0 +1,66 @@
+{
+ "name": "native-calls-with-reasoning",
+ "note": "reasoning beside native calls becomes the step's thinking",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "",
+   "reasoning": "The warrior should scout east first.",
+   "tool_calls": [
+    {
+     "id": "c9",
+     "type": "function",
+     "function": {
+      "name": "unit_order",
+      "arguments": "{\"unit_id\": 3, \"order\": \"explore\"}"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": {
+   "prompt_tokens": 900,
+   "completion_tokens": 120,
+   "reasoning_tokens": 80,
+   "cached_tokens": null
+  }
+ },
+ "expect": {
+  "step": {
+   "text": "",
+   "thinking": "The warrior should scout east first.",
+   "tool_calls": [
+    {
+     "id": "c9",
+     "name": "unit_order",
+     "args": {
+      "unit_id": 3,
+      "order": "explore"
+     }
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "c9",
+     "type": "function",
+     "function": {
+      "name": "unit_order",
+      "arguments": "{\"unit_id\": 3, \"order\": \"explore\"}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 900,
+   "output_tokens": 120,
+   "reasoning_tokens": 80
+  }
+ }
+}

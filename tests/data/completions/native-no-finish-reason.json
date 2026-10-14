@@ -1,0 +1,33 @@
+{
+ "name": "native-no-finish-reason",
+ "note": "an endpoint that gives no finish reason",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "Done.",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": null,
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "Done.",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "Done."
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

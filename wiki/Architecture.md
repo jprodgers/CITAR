@@ -558,11 +558,30 @@ reason. Run it after adding a route; CI runs it with `--strict`.
 | `mcp_server.py` | The MCP bridge |
 | `providers/anthropic_provider.py` | Thinking, prompt caching, refusal fallbacks |
 | `providers/openai_provider.py` | Native and JSON tool modes, for every OpenAI-compatible endpoint |
+| `providers/completion.py` | The one parser of a model's reply: tool calls native or written as text, repairs, the JSON protocol ([One parser](#one-parser-for-every-completion)) |
 | `providers/worker_provider.py` | Sends the request down a worker's WebSocket instead |
 | `providers/dryrun.py` | Answers plausibly without a model, for testing everything else |
 
 A provider's only job is turning a request into a completion. The turn loop, the guard rails and
 the metrics are provider-independent, which is what makes a comparison across providers meaningful.
+
+### One parser for every completion
+
+Every OpenAI-format reply the server receives goes through one function, `parse_completion` in
+`providers/completion.py`: native tool calls, arguments that are not JSON, XML calls a local server
+merged into one call's arguments, calls a model wrote as text (Qwen/Hermes XML, GLM tags, plain tool
+names, Gemma 4's own syntax), and the JSON protocol of tool mode `json`. `OpenAIConversation` calls it
+on what an endpoint the server reaches itself returned; from protocol 2 on, a helper sends the
+completion exactly as its endpoint returned it and the server calls the same function, so a model's
+quirk fixed once is fixed for every machine, and nothing about parsing ever ships to a helper. The
+JSON protocol's prompt is built here too (`system_prompt`), so it reaches a model however the request
+goes out. `tests/data/completions/` holds raw completions with what the parser makes of each.
+
+Whoever runs a helper chooses what its completions say, so the parser treats a reply as hostile input:
+it takes time linear in the reply's length (no pattern rescans the rest of the text from each place it
+might start), never raises on a message protocol 2 accepts (JSON that Python will not decode is JSON
+that is not read), and yields at most 512 calls, protocol 2's own bound on native ones, with arguments
+that are always objects nested at most 64 levels deep.
 
 ---
 

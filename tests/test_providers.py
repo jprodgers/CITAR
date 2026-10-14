@@ -5,7 +5,8 @@ from types import SimpleNamespace as NS
 from unittest import mock
 
 from citar.agents.providers.anthropic_provider import AnthropicConversation
-from citar.agents.providers.openai_provider import OpenAIConversation, parse_json_calls
+from citar.agents.providers.completion import parse_json_calls
+from citar.agents.providers.openai_provider import OpenAIConversation
 
 TOOLS = [{"name": "end_turn", "description": "End turn", "input_schema": {"type": "object", "properties": {}}},
          {"name": "get_tile", "description": "Tile", "input_schema": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}}}]
@@ -116,7 +117,7 @@ class OpenAITests(unittest.TestCase):
         self.assertNotIn("tools", calls[0])
 
     def test_repairs_leaked_xml_tool_calls(self):
-        from citar.agents.providers.openai_provider import repair_tool_calls
+        from citar.agents.providers.completion import repair_tool_calls
         from citar.agents.providers.base import ToolCall
         calls, n = repair_tool_calls([
             ToolCall("a", "set_research", {"tech": "pottery</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=unit_order>\n<parameter=unit_id>\n9</parameter>\n<parameter=order>\nexplore"}),
@@ -139,7 +140,7 @@ class OpenAITests(unittest.TestCase):
         self.assertEqual(conv.messages[-1]["tool_calls"][0]["id"], s.tool_calls[0].id)
 
     def test_plain_text_tool_calls(self):
-        from citar.agents.providers.openai_provider import parse_plain_calls
+        from citar.agents.providers.completion import parse_plain_calls
         from citar.engine_api import tool_list
         tools = [{"type": "function", "function": {"name": t["name"], "parameters": t["input_schema"]}} for t in tool_list()]
 

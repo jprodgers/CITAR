@@ -1,0 +1,33 @@
+{
+ "name": "json-reply-nested-too-deep",
+ "note": "a reply nested deeper than MAX_DEPTH (64) is not read as the protocol: here 65 levels, the reply, its calls, a call, its args and 61 arrays",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "{\"thoughts\": \"deep\", \"calls\": [{\"tool\": \"get_tile\", \"args\": {\"x\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}]}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "{\"thoughts\": \"deep\", \"calls\": [{\"tool\": \"get_tile\", \"args\": {\"x\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}]}",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "{\"thoughts\": \"deep\", \"calls\": [{\"tool\": \"get_tile\", \"args\": {\"x\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}]}"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

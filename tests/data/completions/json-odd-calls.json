@@ -1,0 +1,39 @@
+{
+ "name": "json-odd-calls",
+ "note": "calls that are not objects, or name no tool, are skipped; null args are none",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "{\"thoughts\": \"\", \"calls\": [\"end_turn\", {\"tool\": 5}, {\"args\": {}}, {\"tool\": \"end_turn\", \"args\": null}]}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "{\"thoughts\": \"\", \"calls\": [\"end_turn\", {\"tool\": 5}, {\"args\": {}}, {\"tool\": \"end_turn\", \"args\": null}]}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "{\"thoughts\": \"\", \"calls\": [\"end_turn\", {\"tool\": 5}, {\"args\": {}}, {\"tool\": \"end_turn\", \"args\": null}]}"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

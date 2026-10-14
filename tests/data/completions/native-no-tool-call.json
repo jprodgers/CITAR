@@ -1,0 +1,38 @@
+{
+ "name": "native-no-tool-call",
+ "note": "plain text and no call: a text answer",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "The capital should grow before it builds settlers.",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": {
+   "prompt_tokens": 400,
+   "completion_tokens": 12,
+   "reasoning_tokens": null,
+   "cached_tokens": null
+  }
+ },
+ "expect": {
+  "step": {
+   "text": "The capital should grow before it builds settlers.",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "The capital should grow before it builds settlers."
+  },
+  "usage": {
+   "input_tokens": 400,
+   "output_tokens": 12,
+   "reasoning_tokens": 0
+  }
+ }
+}

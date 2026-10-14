@@ -1,0 +1,41 @@
+{
+ "name": "json-xml-fallback",
+ "note": "the JSON protocol ignored for an XML call",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "I'll do it.\n<tool_call>\n<function=found_city>\n<parameter=unit_id>\n7\n</parameter>\n</function>\n</tool_call>",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "I'll do it.\n<tool_call>\n<function=found_city>\n<parameter=unit_id>\n7\n</parameter>\n</function>\n</tool_call>",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "found_city",
+     "args": {
+      "unit_id": 7
+     }
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "I'll do it.\n<tool_call>\n<function=found_city>\n<parameter=unit_id>\n7\n</parameter>\n</function>\n</tool_call>"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}
