@@ -98,7 +98,7 @@ def _liveness(server_id: str) -> Optional[bool]:
 
 @router.get("/servers")
 def list_servers(request: Request, purpose: str = "game", p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Every server this account can see, each with whether it may be used right now and why not.
 
     Refused servers are included with their reason rather than hidden: somebody should be able to
@@ -130,7 +130,7 @@ class ServerBody(BaseModel):
 @router.post("/servers")
 def create_server(body: ServerBody, request: Request,
                   me: User = Depends(require_cap("register_servers")),
-                  s: Session = Depends(get_db)):
+                  s: Session = Depends(get_db, scope="function")):
     """Register a machine, and issue its first worker token."""
     try:
         server = pool.create_server(s, me, body.config, group_id=body.group_id, reach=body.reach)
@@ -142,7 +142,7 @@ def create_server(body: ServerBody, request: Request,
 
 @router.get("/servers/{server_id}")
 def get_server(server_id: str, request: Request, p: Principal = Depends(principal),
-               s: Session = Depends(get_db)):
+               s: Session = Depends(get_db, scope="function")):
     """One machine's details. Cost configuration is included only for its owner."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.VIEW)
@@ -161,7 +161,7 @@ class ServerUpdate(BaseModel):
 
 @router.put("/servers/{server_id}")
 def update_server(server_id: str, body: ServerUpdate, request: Request,
-                  p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                  p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a machine's details."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
@@ -196,7 +196,7 @@ class Costing(BaseModel):
 
 @router.put("/servers/{server_id}/costing")
 def set_costing(server_id: str, body: Costing, request: Request,
-                p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change what a machine costs to run: watts, hardware prices and the electricity plan."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
@@ -209,7 +209,7 @@ def set_costing(server_id: str, body: Costing, request: Request,
 
 
 @router.get("/servers/{server_id}/rates")
-def machine_rates(server_id: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def machine_rates(server_id: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """What an hour on this machine costs, idle and with the model busy."""
     from .. import servers as registry
     me = require_user(request, p)
@@ -228,7 +228,7 @@ class QuietHours(BaseModel):
 
 @router.put("/servers/{server_id}/quiet-hours")
 def set_quiet_hours(server_id: str, body: QuietHours, request: Request,
-                    p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                    p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a machine's quiet hours, in its owner's time zone."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
@@ -242,7 +242,7 @@ def set_quiet_hours(server_id: str, body: QuietHours, request: Request,
 
 @router.delete("/servers/{server_id}")
 def delete_server(server_id: str, request: Request, p: Principal = Depends(principal),
-                  s: Session = Depends(get_db)):
+                  s: Session = Depends(get_db, scope="function")):
     """Remove a machine from the pool: its row, then (once that is committed) its helper's connection and the key its
     stored configuration keeps."""
     from .. import servers as registry
@@ -257,7 +257,7 @@ def delete_server(server_id: str, request: Request, p: Principal = Depends(princ
 # ---------------------------------------------------------------------------- groups
 
 @router.get("/groups")
-def list_groups(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def list_groups(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """The server groups the viewer can see."""
     me = require_user(request, p)
     out = []
@@ -294,7 +294,7 @@ class GroupBody(BaseModel):
 @router.post("/groups")
 def create_group(body: GroupBody, request: Request,
                  me: User = Depends(require_cap("register_servers")),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Create a server group."""
     try:
         group = pool.create_group(s, me, name=body.name, description=body.description,
@@ -307,7 +307,7 @@ def create_group(body: GroupBody, request: Request,
 
 @router.put("/groups/{group_id}")
 def update_group(group_id: str, body: GroupBody, request: Request,
-                 p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                 p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a group."""
     me = require_user(request, p)
     group = _group(s, group_id, me, access.MANAGE)
@@ -321,7 +321,7 @@ def update_group(group_id: str, body: GroupBody, request: Request,
 
 @router.delete("/groups/{group_id}")
 def delete_group(group_id: str, request: Request, p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Delete a group."""
     me = require_user(request, p)
     group = _group(s, group_id, me, access.MANAGE)
@@ -371,7 +371,7 @@ class GrantBody(BaseModel):
 
 @router.post("/groups/{group_id}/grants")
 def create_grant(group_id: str, body: GrantBody, request: Request,
-                 p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                 p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Grant access to a group."""
     me = require_user(request, p)
     group = _group(s, group_id, me, access.MANAGE)
@@ -390,7 +390,7 @@ def create_grant(group_id: str, body: GrantBody, request: Request,
 
 @router.put("/grants/{grant_id}")
 def update_grant(grant_id: str, body: GrantBody, request: Request,
-                 p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                 p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a grant's terms."""
     me = require_user(request, p)
     grant = s.get(AccessGrant, grant_id)
@@ -421,7 +421,7 @@ def update_grant(grant_id: str, body: GrantBody, request: Request,
 
 @router.delete("/grants/{grant_id}")
 def revoke_grant(grant_id: str, request: Request, p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Revoke a grant."""
     me = require_user(request, p)
     grant = s.get(AccessGrant, grant_id)
@@ -442,7 +442,7 @@ def revoke_grant(grant_id: str, request: Request, p: Principal = Depends(princip
 
 @router.get("/servers/{server_id}/workers")
 def worker_status(server_id: str, request: Request, p: Principal = Depends(principal),
-                  s: Session = Depends(get_db)):
+                  s: Session = Depends(get_db, scope="function")):
     """Whether a worker is connected for this server, and which tokens exist."""
     from ..db.models import WorkerToken
     from .workers import hub
@@ -481,7 +481,7 @@ class TokenBody(BaseModel):
 
 @router.post("/servers/{server_id}/workers/tokens")
 def create_worker_token(server_id: str, body: TokenBody, request: Request,
-                        p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                        p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Issue a worker token. The value is returned ONCE and only its hash is stored."""
     from ..auth import tokens as token_util
     from ..db.models import WorkerToken
@@ -507,7 +507,7 @@ def create_worker_token(server_id: str, body: TokenBody, request: Request,
 
 @router.delete("/servers/{server_id}/workers/tokens/{token_id}")
 def revoke_worker_token(server_id: str, token_id: str, request: Request,
-                        p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                        p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Revoke a worker token, disconnecting anything using it."""
     from datetime import datetime, timezone
 
@@ -555,7 +555,7 @@ def _test_ends(user_id: str) -> None:
 @router.post("/servers/{server_id}/test")
 def test_server(server_id: str, request: Request, model: str = "",
                 wait: float = Query(120.0, ge=1.0, le=120.0), p: Principal = Depends(principal),
-                s: Session = Depends(get_db)):
+                s: Session = Depends(get_db, scope="function")):
     """Send a trivial completion to a server and report what came back.
 
     The "is this thing actually working" button. Checking that a worker is *connected* is not the
@@ -678,7 +678,7 @@ def test_server(server_id: str, request: Request, model: str = "",
 
 @router.get("/availability")
 def availability(request: Request, purpose: str = "game", p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """What this account could run right now, and when the rest becomes available.
 
     This is what the lobby asks before offering model seats. Only machines the account may see are named, usable or

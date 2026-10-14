@@ -159,11 +159,17 @@ as the chat is open: a short, fixed system prompt about chats with the seat's pe
 history and the proposal from its side the first time, and after that only what changed (the other
 side's new message, the proposal as it stands, the minutes left). It has a small set of tools (look up
 diplomacy, the empire, the players and the victories, notes, a message, and `respond_negotiation`), and
-up to `max_negotiation_calls` steps (20) per answer, on the seat's own machine. A seat answers one chat at
-a time, in the order they came. An answer that fails outright (the model could not be reached, or
-used its steps without answering) is declined, "(no response)", so the other side is not kept waiting;
+up to `max_negotiation_calls` steps (20) per answer, on the seat's own machine. Every message asks for
+the answer as a call of `respond_negotiation` (a small model told "answer with respond_negotiation:
+accept ..." writes that out as text). A seat answers one chat at
+a time, in the order they came. An answer that fails outright (the model could not be reached, used
+its steps without answering, or answered three times running without calling a tool, which a model
+that writes its answer as text keeps doing; a step cut off at its token limit does not count) is
+declined, "(no response)", so the other side is not kept waiting;
 a slow one is the chat clock's. Pausing the game, quiet hours, a seat change or a server restart in
-the middle of an answer never declines the chat: the seat answers it when it comes back. A game
+the middle of an answer never declines the chat: the seat answers it when it comes back. (A restart
+brings a game back from its last save, which is taken as each round begins and at a seat change, so
+a chat opened later in the round is gone with the rest of that round's moves.) A game
 loaded from a save comes back paused, and its models answer what waits on them when it resumes (a
 game opened only to be looked at, such as a probe case's end state, answers nothing). A chat that
 comes while the game is paused because of the model's machine (its quiet hours, a disconnect, a spent

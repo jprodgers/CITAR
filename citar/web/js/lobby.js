@@ -266,7 +266,9 @@ function renderSaves(card, saves, refresh) {
       el("td", { style: { fontSize: "12px" } }, (s.players || []).map((p) =>
         el("div", { class: p.alive === false ? "muted" : "" }, `${p.name}${p.seat ? " · " + p.seat : ""}${p.alive === false ? " (eliminated)" : ""}`))),
       el("td", {}, new Date(s.modified * 1000).toLocaleString()),
-      el("td", {}, el("div", { class: "row" }, list.length > 1 ? pick : null,
+      // Load and Delete need the game's manage permission (the server refuses them otherwise): a game shared with
+      // you to watch lists its saves without them
+      el("td", {}, !s.can_manage ? null : el("div", { class: "row" }, list.length > 1 ? pick : null,
         el("button", { class: "primary", onclick: async () => {
           try {
             const info = await api.loadSave(list.length > 1 ? pick.value : s.path);

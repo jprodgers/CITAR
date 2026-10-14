@@ -127,7 +127,7 @@ def _backends_for(me: User) -> dict:
 
 # ----------------------------------------------------------------------------- servers
 @router.get("/api/servers")
-def servers_list(me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_list(me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """The machines the caller manages (every one for an administrator), with the electricity plans and the key
     backends they may choose."""
     reg = S.load()
@@ -169,13 +169,13 @@ def servers_new(kind: str = "owned", provider: str = "lmstudio", me: User = Depe
 
 
 @router.get("/api/servers/restricted")
-def servers_restricted(me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_restricted(me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Which of the machines the caller may see are inside a restricted window right now."""
     return {"restricted": pool.visible_restrictions(s, me)}
 
 
 @router.post("/api/servers")
-def servers_save(body: dict = Body(...), me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_save(body: dict = Body(...), me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Create or save a machine. Saving one needs MANAGE on it (404 otherwise); creating one needs
     ``register_servers``. Only an administrator makes a machine the server dials (``reach``, by default ``direct`` for
     a new one, as the registry's always were) unless its provider is the dry run, chooses the host, names an
@@ -208,7 +208,7 @@ def servers_save(body: dict = Body(...), me: User = Depends(require_user), s: Se
 
 
 @router.delete("/api/servers/{sid}")
-def servers_delete(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_delete(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Remove a machine its caller manages: its row, then (once that is committed) its helper's connection and the key
     its stored configuration keeps (``servers.forget_key``: from what the row stores, which the registry's view of a
     helper machine does not show)."""
@@ -231,13 +231,13 @@ def servers_settings(body: dict = Body(...), me: User = Depends(require_admin_hi
 
 
 @router.post("/api/servers/{sid}/detect")
-def servers_detect(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_detect(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Ask a server what models it has, and fill in its catalogue."""
     return S.detect_models(_dialled(s, sid, me))
 
 
 @router.get("/api/servers/{sid}/state")
-def servers_state(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_state(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """What a server is doing now: which models are loaded, and how busy it is."""
     sv = _dialled(s, sid, me)
     if sv["connection"]["provider"] != "lmstudio":
@@ -259,7 +259,7 @@ _loading: dict = {}
 
 
 @router.post("/api/servers/{sid}/load")
-def servers_load(sid: str, body: ModelAction, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_load(sid: str, body: ModelAction, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Load a model with a profile now (in the background; poll /state)."""
     sv = _dialled(s, sid, me)
     m = S.model_entry(sv, body.model_id)
@@ -283,7 +283,7 @@ def servers_load(sid: str, body: ModelAction, me: User = Depends(require_user), 
 
 @router.post("/api/servers/{sid}/unload")
 def servers_unload(sid: str, body: Optional[ModelAction] = None, me: User = Depends(require_user),
-                   s: Session = Depends(get_db)):
+                   s: Session = Depends(get_db, scope="function")):
     """Unload a model, or every model on a server."""
     sv = _dialled(s, sid, me)
     keys = None
@@ -295,7 +295,7 @@ def servers_unload(sid: str, body: Optional[ModelAction] = None, me: User = Depe
 
 
 @router.get("/api/servers/{sid}/loading")
-def servers_loading(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_loading(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Progress of a load in flight."""
     _dialled(s, sid, me)
     return {k[1]: v for k, v in _loading.items() if k[0] == sid}
@@ -303,7 +303,7 @@ def servers_loading(sid: str, me: User = Depends(require_user), s: Session = Dep
 
 @router.post("/api/servers/{sid}/loaded-config")
 def servers_loaded_config(sid: str, body: ModelAction, me: User = Depends(require_user),
-                          s: Session = Depends(get_db)):
+                          s: Session = Depends(get_db, scope="function")):
     """The settings the model is loaded with right now, as a load profile (to copy an LM Studio preset into CITAR)."""
     sv = _dialled(s, sid, me)
     m = S.model_entry(sv, body.model_id)
@@ -317,7 +317,7 @@ def servers_loaded_config(sid: str, body: ModelAction, me: User = Depends(requir
 
 
 @router.post("/api/servers/{sid}/estimate")
-def servers_estimate(sid: str, body: ModelAction, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_estimate(sid: str, body: ModelAction, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """How much memory a model would need with a given profile, before trying it."""
     sv = _dialled(s, sid, me)
     m = S.model_entry(sv, body.model_id)
@@ -327,7 +327,7 @@ def servers_estimate(sid: str, body: ModelAction, me: User = Depends(require_use
 
 
 @router.post("/api/servers/{sid}/collect")
-def servers_collect(sid: str, me: User = Depends(require_admin_hidden), s: Session = Depends(get_db)):
+def servers_collect(sid: str, me: User = Depends(require_admin_hidden), s: Session = Depends(get_db, scope="function")):
     """Collect the CITAR host's hardware into its row: only the host's, since it reads the computer CITAR runs on."""
     row = _row(s, sid, me)
     if not row.is_host:
@@ -340,7 +340,7 @@ def servers_collect(sid: str, me: User = Depends(require_admin_hidden), s: Sessi
 
 @router.post("/api/servers/{sid}/hardware")
 def servers_import_hardware(sid: str, body: dict = Body(...), me: User = Depends(require_user),
-                            s: Session = Depends(get_db)):
+                            s: Session = Depends(get_db, scope="function")):
     """Import hardware collected on another machine (the collector script's file) into a machine's configuration."""
     sv = _server(s, sid, me)
     saved = _call(S.upsert, _call(S.apply_hardware, sv, body, "imported"), actor=me)
@@ -348,7 +348,7 @@ def servers_import_hardware(sid: str, body: dict = Body(...), me: User = Depends
 
 
 @router.get("/api/servers/{sid}/rates")
-def servers_rates(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_rates(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """What this server costs per hour, idle and busy."""
     sv = _server(s, sid, me)
     return pool.machine_rates(sv, S.load(), me)
@@ -378,7 +378,7 @@ class KeyBody(BaseModel):
 
 
 @router.post("/api/servers/{sid}/key")
-def servers_key(sid: str, body: KeyBody, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_key(sid: str, body: KeyBody, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Store (or point to) the API key of a machine the server dials. The key is never returned; only its status. The
     ``env`` backend names one of the server's own environment variables, so only an administrator may choose it. A
     helper machine has no key on the server (its helper holds whatever its model server needs): 404."""
@@ -409,7 +409,7 @@ def servers_key(sid: str, body: KeyBody, me: User = Depends(require_user), s: Se
 
 
 @router.delete("/api/servers/{sid}/key")
-def servers_key_delete(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
+def servers_key_delete(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Delete the stored API key of a machine the server dials (the backend its row stores names where it is). A
     helper machine has none on the server: 404."""
     row = _row(s, sid, me)

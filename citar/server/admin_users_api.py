@@ -49,13 +49,13 @@ def _call(fn, *args, **kwargs):
 @router.get("/api/admin/users")
 def list_users(q: str = "", role: Optional[str] = None, status: Optional[str] = None,
                offset: int = Query(0, ge=0, le=user_admin.OFFSET_MAX),
-               me: User = Depends(require_admin_hidden), s: Session = Depends(get_db)):
+               me: User = Depends(require_admin_hidden), s: Session = Depends(get_db, scope="function")):
     """Every account, newest first, filtered and paged (``user_admin.search``)."""
     return _call(user_admin.search, s, text=q, role=role or None, status=status or None, offset=offset)
 
 
 @router.get("/api/admin/users/{uid}")
-def get_user(uid: str, me: User = Depends(require_admin_hidden), s: Session = Depends(get_db)):
+def get_user(uid: str, me: User = Depends(require_admin_hidden), s: Session = Depends(get_db, scope="function")):
     """One account for the edit drawer: everything about it, the role defaults its capabilities fall back to, and
     its audit rows."""
     user = _user(s, uid)
@@ -68,7 +68,7 @@ def get_user(uid: str, me: User = Depends(require_admin_hidden), s: Session = De
 
 @router.patch("/api/admin/users/{uid}")
 def patch_user(uid: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
-               s: Session = Depends(get_db)):
+               s: Session = Depends(get_db, scope="function")):
     """Change an account (``user_admin.apply``): the body's fields other than ``reason``, all checked before any
     changes; one audit row names what changed."""
     body = dict(body)
@@ -92,7 +92,7 @@ def patch_user(uid: str, request: Request, body: dict = Body(...), me: User = De
 def audit_log(actor: Optional[str] = None, action: Optional[str] = None, object_type: Optional[str] = None,
               object_id: Optional[str] = None, before: Optional[int] = Query(None, ge=1, le=user_admin.ID_MAX),
               limit: int = user_admin.AUDIT_PAGE,
-              me: User = Depends(require_admin_hidden), s: Session = Depends(get_db)):
+              me: User = Depends(require_admin_hidden), s: Session = Depends(get_db, scope="function")):
     """A page of the audit log (``user_admin.audit_page``)."""
     return user_admin.audit_page(s, actor=actor or None, action=action or None, object_type=object_type or None,
                                  object_id=object_id or None, before=before, limit=limit)

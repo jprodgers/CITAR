@@ -98,8 +98,8 @@ MARKER = ".qa-phase3"
 DEV_SERVER_PORT = 8799
 #: The owner's dev server's directory: never a harness's, whatever is in it.
 OWNER_PLAY_DIR = Path("C:/dev/citar-play")
-#: Parts a later package writes (P3.9.4): asked for now, the harness says so and refuses.
-LATER = {"real": "3-19"}
+#: Parts a later package writes (P3.9.4): asked for now, the harness says so and refuses. None is left.
+LATER: dict = {}
 
 
 def _dev_server():
@@ -202,21 +202,37 @@ def free_port() -> int:
 # ---------------------------------------------------------------------------- evidence
 
 class Report:
-    """The checks and their outcomes, printed as they come and kept for ``qa-<part>.json``."""
+    """The checks and their outcomes, printed as they come and kept for ``qa-<part>.json``: each check under the
+    part that made it (``current``; the harness's own checks under none), and each part's time (``parts``)."""
 
     def __init__(self, part: str):
         self.part = part
         self.started = time.perf_counter()
         self.checks: list[dict] = []
         self.data: dict = {}
+        #: The part running now, whose name each check carries.
+        self.current: Optional[str] = None
+        #: Each part that ran: {"seconds": its time}.
+        self.parts: dict = {}
 
     def check(self, name: str, ok: bool, detail: str = "", **numbers) -> bool:
         """Record one check; returns whether it passed."""
         t = time.perf_counter() - self.started
         print(f"[{t:7.1f} s] [{'ok' if ok else 'FAIL'}] {name}{': ' + detail if detail else ''}", flush=True)
         self.checks.append({"check": name, "ok": bool(ok), "at_s": round(t, 2), "detail": detail[:500],
+                            **({"part": self.current} if self.current else {}),
                             **({"numbers": numbers} if numbers else {})})
         return bool(ok)
+
+    def of(self, part: str) -> list:
+        """The checks ``part`` made."""
+        return [c for c in self.checks if c.get("part") == part]
+
+    def summary(self) -> dict:
+        """Each part's checks, passed and failed, and its time: what a run of several parts says at its top."""
+        return {name: {"checks": len(self.of(name)), "passed": sum(1 for c in self.of(name) if c["ok"]),
+                       "failed": [c["check"] for c in self.of(name) if not c["ok"]], **info}
+                for name, info in self.parts.items()}
 
     def note(self, text: str) -> None:
         """Print a line that is no check."""
@@ -252,8 +268,12 @@ class FakeEndpoint:
         self.connections: list[tuple[float, str]] = []
         self.requests: list[dict] = []
         self.delay = delay
-        #: Slower completions for some prompts: {text in the last user message: seconds} (``delay_for``).
+        #: Slower completions for some prompts: {text in the last user message: seconds} (``delay_for``), for the
+        #: kinds of completion in ``slow_kinds`` (``describe``'s), or any kind when it is None.
         self.slow: dict = {}
+        self.slow_kinds: Optional[set] = None
+        #: Seconds a completion for a model takes, whatever its prompt: {model: seconds} (``delay_for``).
+        self.model_delay: dict = {}
         self.max_trades = max_trades
         self.trades_opened = 0
         #: What ``/models`` names: (key, loaded) each. A part changes it to have a helper report other models at its
@@ -333,19 +353,35 @@ class FakeEndpoint:
     @staticmethod
     def describe(body: dict) -> dict:
         """What a completion was, for the log: ``kind`` (``turn``: a game's turn, with ``end_turn`` among its tools;
-        ``chat``: an answer to a negotiation; ``plain``: no tools, a report's narrative), its last user message's first
-        line (``head``) and a ``QA-...`` marker in it (``marker``)."""
+        ``diplomat``: a hybrid seat's diplomat phase; ``chat``: an answer to a negotiation; ``plain``: no tools, a
+        report's narrative), the ``model`` it named, its last user message's first line (``head``) and a ``QA-...``
+        marker in it (``marker``)."""
         tools = {(t.get("function") or {}).get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
-        last = next((str(m.get("content") or "") for m in reversed(body.get("messages") or [])
-                     if isinstance(m, dict) and m.get("role") == "user"), "")
+        messages = [m for m in body.get("messages") or [] if isinstance(m, dict)]
+        last = next((str(m.get("content") or "") for m in reversed(messages) if m.get("role") == "user"), "")
         found = re.search(r"QA-[A-Za-z0-9-]+", last)
-        return {"kind": "turn" if "end_turn" in tools else "chat" if "respond_negotiation" in tools
-                else "plain" if not tools else "other",
-                "head": last.splitlines()[0][:120] if last else "", "marker": found.group(0) if found else None}
+        phase = FakeEndpoint._phase_start(messages) is not None
+        system = next((str(m.get("content") or "") for m in messages if m.get("role") == "system"), "")
+        return {"kind": "turn" if "end_turn" in tools else "diplomat" if phase
+                else "chat" if "respond_negotiation" in tools else "plain" if not tools else "other",
+                "model": body.get("model"), "head": last.splitlines()[0][:120] if last else "",
+                "system": system.splitlines()[0][:60] if system else "", "marker": found.group(0) if found else None}
+
+    @staticmethod
+    def _phase_start(messages: list) -> Optional[int]:
+        """Where a hybrid seat's diplomat phase begins in a conversation (its first message, ``DIPLOMAT PHASE``), or
+        None for a conversation that is no diplomat phase."""
+        return next((i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == "user"
+                     and str(m.get("content") or "").startswith("DIPLOMAT PHASE")), None)
 
     def delay_for(self, body: dict) -> float:
         """How long a completion takes: ``slow``'s seconds for a prompt whose last user message holds one of its
-        texts, else ``delay``."""
+        texts (and whose kind is one of ``slow_kinds``, when they are named), else ``model_delay``'s for its model,
+        else ``delay``."""
+        if body.get("model") in self.model_delay:
+            return self.model_delay[body.get("model")]
+        if self.slow_kinds is not None and self.describe(body)["kind"] not in self.slow_kinds:
+            return self.delay
         last = next((str(m.get("content") or "") for m in reversed(body.get("messages") or [])
                      if isinstance(m, dict) and m.get("role") == "user"), "")
         return next((seconds for text, seconds in self.slow.items() if text in last), self.delay)
@@ -365,7 +401,10 @@ class FakeEndpoint:
                 calls.append({"id": f"qa_{len(self.requests)}_{len(calls)}", "type": "function",
                               "function": {"name": name, "arguments": json.dumps(args or {})}})
 
-        if "respond_negotiation" in tools and "end_turn" not in tools:
+        if "end_turn" not in tools and self._phase_start(messages) is not None:
+            for name, args in self._diplomat(messages, tools):
+                call(name, args)
+        elif "respond_negotiation" in tools and "end_turn" not in tools:
             found = re.search(r"negotiation #(\d+)", prompt)
             if found and steps == 0:
                 gives = prompt.split('"you_receive"')[0].count('"type"') if '"you_receive"' in prompt else 0
@@ -374,6 +413,11 @@ class FakeEndpoint:
                 call("respond_negotiation", {"negotiation_id": int(found.group(1)), "action": action,
                                              "message": f"(qa endpoint) {action}"})
         elif steps == 0:
+            # a chat that came back to it during its turn (``prompts.LATE_ANSWERED``): closed with a word, as the
+            # dry run's turn would leave it to its chat thread
+            for nid in dict.fromkeys(re.findall(r"answered negotiation #(\d+)", prompt)):
+                call("respond_negotiation", {"negotiation_id": int(nid), "action": "reject",
+                                             "message": "(qa endpoint) thank you, that is all for now"})
             for name in ("get_units", "get_cities", "get_empire", "get_players"):
                 call(name)
             if not calls:
@@ -452,6 +496,46 @@ class FakeEndpoint:
             call("open_negotiation", {"to": met[0]["id"], "message": "(qa endpoint) shall we share our maps?",
                                       "give": [{"type": "share_map"}], "receive": [{"type": "share_map"}]})
         return calls
+
+    def _diplomat(self, messages: list, tools: set) -> list:
+        """A hybrid seat's diplomat phase, played as the dry-run diplomat plays it (``DryRunConversation._diplomat``,
+        P3.9.4), as ``(tool, args)`` pairs: first it looks (its diplomacy, its empire, its cities); then it proposes
+        maps for maps to a civilization it has met, is not at war with and is not talking to, abstains when a United
+        Nations vote is open and its vote is not cast, annexes a puppet it holds, and answers each chat the phase was
+        told of (``prompts.DIPLOMAT_CHAT``: accepted when a deal is on the table, else a reply); after that it answers
+        only the chats the phase is told of later, and stops by answering without a tool call."""
+        start = self._phase_start(messages)
+        after = messages[start + 1:]
+        steps = [i for i, m in enumerate(after) if m.get("role") == "assistant"]
+        if not steps:
+            return [(name, {}) for name in ("get_diplomacy", "get_empire", "get_cities") if name in tools]
+        out: list = []
+        # what the phase was told since its last step: its first message on the second step, and the chats' news
+        told = [m for m in after[steps[-1] + 1:] if m.get("role") == "user"]
+        if len(steps) == 1:
+            told.insert(0, messages[start])
+            seen = self._results(after)
+            dip = seen.get("get_diplomacy") if isinstance(seen.get("get_diplomacy"), dict) else {}
+            cities = seen.get("get_cities") if isinstance(seen.get("get_cities"), list) else []
+            met = [p for p in dip.get("players") or [] if isinstance(p, dict) and p.get("alive") is not False]
+            talking = {n.get("with") for n in dip.get("open_negotiations") or [] if isinstance(n, dict)}
+            free = next((p for p in met if p.get("id") not in talking and not p.get("at_war")), None)
+            if "open_negotiation" in tools and free is not None:
+                out.append(("open_negotiation", {"to": free["id"], "message": "(qa endpoint) shall we share our maps?",
+                                                 "give": [{"type": "share_map"}], "receive": [{"type": "share_map"}]}))
+            un = dip.get("united_nations") or {}
+            if "un_vote" in tools and un.get("voting_open") and un.get("your_vote") == "not cast":
+                out.append(("un_vote", {"candidate": "abstain"}))
+            puppet = next((c for c in cities if isinstance(c, dict) and c.get("puppet")), None)
+            if "city_status" in tools and puppet is not None:
+                out.append(("city_status", {"city_id": puppet.get("id"), "status": "annex"}))
+        text = "\n".join(str(m.get("content") or "") for m in told)
+        if "respond_negotiation" in tools:
+            for found in re.finditer(r"CHAT: .*? negotiation #(\d+): (.*)", text):
+                action = "reply" if "none (no deal on the table)" in found.group(2) else "accept"
+                out.append(("respond_negotiation", {"negotiation_id": int(found.group(1)), "action": action,
+                                                    "message": f"(qa endpoint) {action}"}))
+        return out
 
     def close(self) -> None:
         """Stop serving."""
@@ -997,10 +1081,11 @@ class Helper:
     """A real CITAR helper (``python -m citar.worker``) as a child, connected to the instance with a worker token and
     serving from a fake endpoint; its log in the harness's directory."""
 
-    def __init__(self, h: "Harness", token: str, endpoint: FakeEndpoint, name: str, *,
+    def __init__(self, h: "Harness", token: str, endpoint, name: str, *,
                  hardware: Optional[Path] = None, max_concurrent: int = 0):
-        """``hardware``: the hardware file it reports (``--hardware``), instead of none (``--no-hardware``);
-        ``max_concurrent``: its own slot count (``--max-concurrent``), else the helper's default, one."""
+        """``endpoint``: a fake endpoint, or the address of a real one (the ``real`` part's LM Studio); ``hardware``:
+        the hardware file it reports (``--hardware``), instead of none (``--no-hardware``); ``max_concurrent``: its
+        own slot count (``--max-concurrent``), else the helper's default, one."""
         state = h.server.state
         n = len(list(state.glob("helper-*.log"))) + 1
         self.log = state / f"helper-{n}.log"
@@ -1013,7 +1098,8 @@ class Helper:
             extra += ["--max-concurrent", str(max_concurrent)]
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "citar.worker", "--server", h.server.base, f"--token={token}",
-             "--base-url", endpoint.url, "--provider", "openai_compatible", "--name", name, *extra,
+             "--base-url", endpoint if isinstance(endpoint, str) else endpoint.url, "--provider", "openai_compatible",
+             "--name", name, *extra,
              "--config", str(empty)],
             cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             env={**env, "PYTHONUNBUFFERED": "1"})
@@ -2107,7 +2193,11 @@ def part_ledger(h: Harness) -> None:
                                        "WHERE consumer_id = ? AND self_use = 0", (a_id,))[0]
             mine = _ledger_rows(state, "SELECT coalesce(sum(credits), 0) FROM compute_events "
                                        "WHERE consumer_id = ? AND self_use = 1", (a_id,))[0][0]
-            return given, used, mine
+            # what she gave others: nothing in this part (her own machine is self-use), but an earlier part of
+            # ``all`` on the same server may have had her machine serve someone
+            hers_given = _ledger_rows(state, "SELECT coalesce(sum(credits), 0) FROM compute_events "
+                                             "WHERE provider_id = ? AND self_use = 0", (a_id,))[0][0]
+            return given, used, mine, hers_given
         seen: dict = {}
 
         def agrees():
@@ -2118,7 +2208,7 @@ def part_ledger(h: Harness) -> None:
             seen.update(before=before, his=his, hers=hers)
             return before == after and abs(his["given"]["credits"] - before[0][0]) < 1e-3 \
                 and his["given"]["events"] == before[0][1] and abs(hers["used"]["credits"] - before[1][0]) < 1e-3 \
-                and hers["used"]["events"] == before[1][1] and hers["given"]["credits"] == 0 \
+                and hers["used"]["events"] == before[1][1] and abs(hers["given"]["credits"] - before[3]) < 1e-3 \
                 and abs(hers["own_use"]["credits"] - before[2]) < 1e-3
         matched = wait_until(agrees, 90, 2.0)
         his, hers = seen.get("his") or {}, seen.get("hers") or {}
@@ -2132,9 +2222,13 @@ def part_ledger(h: Harness) -> None:
                             "events": seen.get("before"), "alice_own": hers.get("own_use")}, default=str)[:700],
                 bob_given=(his.get("given") or {}).get("credits"), alice_used=(hers.get("used") or {}).get("credits"))
         kinds = {k["kind"]: k for k in hers.get("by_activity") or []}
+        given_, used_ = (hers.get("given") or {}).get("credits", 0.0), (hers.get("used") or {}).get("credits", 0.0)
+        told = hers.get("ratio") or {}
         r.check("alice's use is told by kind of work (her games, her report) and her ratio is given over used",
-                {"game", "report"} <= set(kinds) and (hers.get("ratio") or {}).get("text") == "0.00",
-                json.dumps({"kinds": sorted(kinds), "ratio": hers.get("ratio")}))
+                {"game", "report"} <= set(kinds) and used_ > 0 and told.get("value") is not None
+                and abs(told["value"] - given_ / used_) < 1e-3
+                and abs(float(told.get("text") or "nan") - told["value"]) <= 0.0051,
+                json.dumps({"kinds": sorted(kinds), "ratio": told, "given": given_, "used": used_}))
 
         # ---- the ratio's visibility (P3.2.6, P3.4.4): private by default, then members
         path = f"/api/users/{alice.handle}/ratio"
@@ -2178,11 +2272,16 @@ def part_ledger(h: Harness) -> None:
 class Socket:
     """A game socket read on a thread of its own: every message it receives, kept with when it came."""
 
-    def __init__(self, h: "Harness", gid: str, token: str):
+    def __init__(self, h: "Harness", gid: str, token: str, *, account: Optional["Account"] = None):
+        """A seat's or a spectator's socket by its ``token``, or (``account``, no token) a member's, by the session
+        cookie the game screen's socket carries."""
         from websockets.sync.client import connect
         self.messages: list = []
+        headers = None
+        if account is not None:
+            headers = {"Cookie": "; ".join(f"{k}={v}" for k, v in account.http.cookies.items())}
         self._connection = connect(f"ws://127.0.0.1:{h.server.port}/ws/games/{gid}?token={token}", open_timeout=15,
-                                   proxy=None, max_size=None)
+                                   proxy=None, max_size=None, additional_headers=headers)
         self._ws = self._connection.__enter__()
         self._thread = threading.Thread(target=self._read, daemon=True, name=f"qa-socket-{token[:4]}")
         self._thread.start()
@@ -3437,18 +3536,1133 @@ def part_machines(h: Harness) -> None:
         scripted.close()
 
 
+# ---------------------------------------------------------------------------- the exit part (3-19)
+
+#: The ``exit`` part's game (design/phase3-features.md 3-19): a standard map that wraps east-west, forty rounds, and
+#: chat timeouts short enough to watch them run out (a model's 45 s, a person's 20 s: the lobby's keys).
+EXIT_CONFIG = {"map_size": "standard", "map_type": "continents", "map_edges": "wrap_x", "seed": 3419,
+               "barbarians": "off", "city_states": 0, "turn_limit": 40, "chat_model_reply_seconds": 45,
+               "chat_person_reply_seconds": 20}
+#: How long the ``exit`` part's endpoint takes over a completion whose prompt carries ``QA-SLOW``: longer than a
+#: model's chat timeout, so the chat clock decides that chat.
+EXIT_SLOW_S = 55.0
+#: The model the administrator's benchmark plays on the ``exit`` part's helper machine, listed and loaded beside the
+#: game's: the endpoint's log tells the benchmark's requests from everyone else's by it.
+BENCH_MODEL = "qa-bench-model"
+
+
+class SeatDriver:
+    """One seat played over HTTP as a person at the game screen or an MCP client plays it: it long-polls
+    ``GET /api/games/{gid}/wait`` with the seat's token (the MCP server's ``wait_for_turn``), answers each chat that
+    waits on it, and ends its turn when nothing does, unless ``hold`` is set (the script acts on the turn first). Its
+    first turn founds its city where its settler stands, sets its research and sends its other units exploring.
+
+    A chat whose messages from this seat carry ``QA-LEAVE`` is left to run out; any other that waits on it is accepted
+    when a deal is on the table and closed with a word when none is. It keeps every answer of the wait route (with the
+    ``chats`` and their deadlines), each chat it answered and each turn it ended, and rides out a server restart (the
+    route answers nothing, then 404 until the game is back)."""
+
+    def __init__(self, h: "Harness", gid: str, token: str, pid: int, label: str):
+        self.gid, self.token, self.pid, self.label = gid, token, pid, label
+        self.http = httpx.Client(base_url=h.server.base, timeout=60.0)
+        #: set: the seat ends no turn (the script acts on it first); answering chats goes on
+        self.hold = threading.Event()
+        self.finished = threading.Event()
+        self._stop = threading.Event()
+        self.waits: list = []
+        self.answered: dict = {}
+        self.ended: list = []
+        self.left: set = set()
+        self.first: Optional[dict] = None
+        self.errors = 0
+        self.thread = threading.Thread(target=self._run, daemon=True, name=f"qa-seat-{label}")
+        self.thread.start()
+
+    def tool(self, name: str, args: Optional[dict] = None) -> dict:
+        """One of the seat's tools through ``POST /api/games/{gid}/tool`` with its token."""
+        try:
+            got = self.http.post(f"/api/games/{self.gid}/tool", params={"token": self.token},
+                                 json={"tool": name, "args": args or {}})
+        except httpx.HTTPError as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return got.json() if got.status_code == 200 else {"ok": False, "error": f"HTTP {got.status_code} {got.text[:200]}"}
+
+    def chat(self, nid: int) -> dict:
+        """Chat ``nid`` as the seat sees it, with its clock (``GET /api/games/{gid}/negotiations/{nid}``)."""
+        try:
+            got = self.http.get(f"/api/games/{self.gid}/negotiations/{nid}", params={"token": self.token})
+        except httpx.HTTPError:
+            return {}
+        return got.json() if got.status_code == 200 else {}
+
+    def _first_turn(self) -> None:
+        units = [u for u in self.tool("get_units").get("result") or [] if isinstance(u, dict)]
+        settler = next((u for u in units if str(u.get("type") or "").lower() == "settler"), None)
+        founded = self.tool("found_city", {"unit_id": settler["id"]}) if settler else {"ok": False}
+        research = self.tool("set_research", {"tech": "Pottery"})
+        # the others explore (a standing order), so the seat's explored land, and its minimap's home box, grows
+        explore = [self.tool("unit_order", {"unit_id": u["id"], "order": "explore"}) for u in units
+                   if u is not settler and str(u.get("type") or "").lower() not in ("worker", "work boat")]
+        self.first = {"founded": bool(founded.get("ok")), "research": bool(research.get("ok")),
+                      "exploring": sum(1 for x in explore if x.get("ok"))}
+
+    def _answer(self, nid: int) -> bool:
+        """Answer chat ``nid`` as the policy says; whether it did."""
+        if nid in self.left:
+            return False
+        view = self.chat(nid)
+        if view.get("status") != "open" or (view.get("clock") or {}).get("waiting_on") != self.pid:
+            return False
+        if any("QA-LEAVE" in str(e.get("message") or "") for e in view.get("history") or [] if e.get("you")):
+            self.left.add(nid)
+            return False
+        action = "accept" if view.get("current_proposal") else "reject"
+        said = self.tool("respond_negotiation", {"negotiation_id": nid, "action": action,
+                                                 "message": "QA: agreed." if action == "accept" else "QA: thank you."})
+        self.answered[nid] = {"action": action, "ok": bool(said.get("ok")), "t": time.time(),
+                              "error": None if said.get("ok") else str(said.get("error"))[:200]}
+        return True
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                got = self.http.get(f"/api/games/{self.gid}/wait", params={"token": self.token, "timeout": 5})
+            except httpx.HTTPError:
+                self.errors += 1
+                time.sleep(0.5)
+                continue
+            if got.status_code != 200:
+                self.errors += 1
+                time.sleep(0.5)
+                continue
+            answer = got.json()
+            if len(self.waits) < 20000:
+                self.waits.append({"t": time.time(), **answer})
+            status = answer.get("status")
+            if status in ("game_over", "eliminated", "crashed"):
+                self.finished.set()
+                return
+            acted = False
+            if status == "negotiation":
+                for nid in answer.get("negotiation_ids") or []:
+                    acted = self._answer(nid) or acted
+                if not acted:
+                    time.sleep(0.5)         # only chats it leaves to run out wait on it
+            elif status == "your_turn":
+                if self.first is None:
+                    self._first_turn()
+                if self.hold.is_set():
+                    time.sleep(0.2)
+                    continue
+                ended = self.tool("end_turn")
+                if ended.get("ok"):
+                    self.ended.append({"turn": answer.get("turn"), "t": time.time()})
+                else:
+                    time.sleep(0.25)
+            elif status == "waiting_for_reply":
+                time.sleep(0.1)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.thread.join(15)
+        self.http.close()
+
+
+def _game_info(who: "Account", gid: str) -> dict:
+    """A game as its lobby entry reads (``GET /api/games/{gid}``), or {} while the server cannot say."""
+    try:
+        got = who.get(f"/api/games/{gid}")
+    except httpx.HTTPError:
+        return {}
+    return got.json() if got.status_code == 200 else {}
+
+
+def _spans_overlap(spans: list, others: list, slack: float = 0.05) -> list:
+    """The pairs of ``(start, end, label)`` spans, one from each list, that overlap by more than ``slack`` seconds."""
+    return [(a[2], b[2]) for a in spans for b in others if a[0] < b[1] - slack and b[0] < a[1] - slack]
+
+
+def _event_spans(state: Path, machine: str, where: str) -> list:
+    """The compute ledger's model steps on ``machine`` that match ``where`` (SQL), each as ``(start, end, activity)``
+    in epoch seconds: the scheduler's listener writes a step when it ends (``at``), with the time the server observed
+    it take (``observed_s``)."""
+    from datetime import datetime, timezone
+    out = []
+    for at, observed, activity in _ledger_rows(state, "SELECT at, observed_s, activity FROM compute_events WHERE "
+                                                      f"machine_id = ? AND kind = 'gpu' AND ({where})", (machine,)):
+        end = datetime.fromisoformat(str(at)).replace(tzinfo=timezone.utc).timestamp()
+        out.append((end - float(observed or 0.0), end, activity))
+    return out
+
+
+def _ledger_agrees(h: Harness, sides: dict, limit: float = 90.0) -> tuple:
+    """Each account's given, used and own use as ``/api/ledger/me`` tells it, against the sums of the compute ledger's
+    events in the instance's database (``sides``: account key -> the sides to compare), read until two reads of the
+    events around the route's answer agree (CPU lands each minute). Returns (agreed, what was compared)."""
+    state = h.server.state
+    ids = dict(_ledger_rows(state, "SELECT handle, id FROM users"))
+    seen: dict = {}
+
+    def sums():
+        out = {}
+        for key in sides:
+            uid = ids.get(h.accounts[key].handle)
+            given = _ledger_rows(state, "SELECT coalesce(sum(credits), 0), count(*) FROM compute_events "
+                                        "WHERE provider_id = ? AND self_use = 0", (uid,))[0]
+            used = _ledger_rows(state, "SELECT coalesce(sum(credits), 0), count(*) FROM compute_events "
+                                       "WHERE consumer_id = ? AND self_use = 0", (uid,))[0]
+            own = _ledger_rows(state, "SELECT coalesce(sum(credits), 0), count(*) FROM compute_events "
+                                      "WHERE consumer_id = ? AND self_use = 1", (uid,))[0]
+            out[key] = {"given": tuple(given), "used": tuple(used), "own_use": tuple(own)}
+        return out
+
+    def agrees() -> bool:
+        before = sums()
+        told = {key: h.accounts[key].get("/api/ledger/me?range=all").json() for key in sides}
+        after = sums()
+        seen.update(events=before, told={k: {s: (v.get(s) or {}) for s in ("given", "used", "own_use")}
+                                         for k, v in told.items()}, breakdown=told)
+        if before != after:
+            return False
+        for key, wanted in sides.items():
+            for side in wanted:
+                credits, n = before[key][side]
+                got = told[key].get(side) or {}
+                if abs(float(got.get("credits", -1)) - float(credits)) > 1e-3 or int(got.get("events", -1)) != n:
+                    return False
+        return True
+    ok = bool(wait_until(agrees, limit, 2.0))
+    return ok, seen
+
+
+def part_exit(h: Harness) -> None:
+    """3-19's end-to-end checks on one dev server (design/phase3-features.md, Appendix D's 3-19): bob's helper machine
+    (a real Python helper behind the scripted endpoint, two slots) and his direct dry-run machine, shared with alice for
+    games and pooled prompts and with the administrator for benchmarks. Alice's game, shared with members, on a
+    standard map that wraps east-west: her person seat (played by the script through the API, the wait route and her
+    seat's socket), a hybrid seat (the standard bot and the helper machine's model, all but war, prompted every 3
+    turns), a full LLM seat on the same machine, an MCP seat (played by the script through the wait route with its seat
+    token) and two bots, 40 rounds, both chat timeouts short (a model's 45 s, a person's 20 s).
+
+    On her first turn alice opens chats with the hybrid seat (its model answers), the LLM seat (it answers, she closes
+    the chat), a bot (she lets its answer run out: expired), the MCP seat (it accepts) and then two the models are too
+    slow for (the hybrid's bot answers at the clock's deadline, cause timeout; the LLM seat is declined for). The
+    models' own offers are answered as they come. Meanwhile bob's report analysis and alice's probe run on the helper
+    machine, and alice's report analysis on the dry run, between the game's prompts. On a later turn the administrator
+    starts a one-job benchmark on the helper machine's second slot, beside the game's lease: a trade for the hybrid's
+    model is refused there and its bot answers (cause: the benchmark), and no pooled request overlaps a benchmark step,
+    by the endpoint's log and by the compute ledger (the scheduler's listener). Bob types the machine's hardware in by
+    hand and its helper restarts with other hardware: the hand-set entry stays, the new scan is kept beside it. The
+    server is then killed with a chat waiting on the LLM seat (its answer held at the endpoint; a seat change's save
+    holds the chat), brought back (``restore_live``), and the chat is answered by the model well inside its timeout;
+    the game plays on to its end. Carol's socket (a member who may watch) and a spectator's get no ``negotiation_status``
+    while alice's does; the MCP seat's waits list its chats with their deadlines; a seat naming a base URL is refused
+    with nothing dialled; alice's minimap moves through the eras by the debug ops route, its home box never shrinking;
+    bob's given, alice's and the administrator's used and bob's own use match the ledger's events."""
+    r = h.report
+    admin, alice, bob, carol = (h.accounts[k] for k in ("admin", "alice", "bob", "carol"))
+    data = r.data.setdefault("exit", {})
+    state = h.server.state
+    endpoint = FakeEndpoint(delay=0.25, max_trades=4)
+    endpoint.models = [(endpoint.MODEL, True), (BENCH_MODEL, True)]
+    # a chat's answer only: a turn's briefing that lists the chat (or a note of how it ended) is no slower
+    endpoint.slow, endpoint.slow_kinds = {"QA-SLOW": EXIT_SLOW_S}, {"chat"}
+    # the benchmark's steps take a while, so the lobby game plays beside them and its pooled prompts meet them
+    endpoint.model_delay = {BENCH_MODEL: 1.0}
+    trap = FakeEndpoint(delay=0.0)
+    files = state / "exit-hardware"
+    files.mkdir(exist_ok=True)
+    helpers: list = []
+    sockets: list = []
+    drivers: list = []
+    gid, run_id = "", ""
+    counters_before: dict = {}
+    t_start = time.time()
+    try:
+        # ---- bob's two machines, shared with alice (games, pooled prompts) and the administrator (benchmarks)
+        made = bob.post("/api/pool/servers", json={"config": {"name": f"QA exit helper {h.tag}", "kind": "owned",
+                                                              "connection": {"provider": "openai_compatible",
+                                                                             "max_parallel": 2}},
+                                                   "reach": "worker"})
+        hid = made.json().get("id", "") if made.status_code == 200 else ""
+        issued = bob.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa exit"}) if hid else None
+        token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
+        first_scan = files / "scan-1.json"
+        first_scan.write_text(json.dumps(_qa_scan(cpu="QA exit CPU", gpu="QA exit GPU 16 GB", vram=16, idle=30,
+                                                  cpu_w=80, gpu_w=200, host="qa-exit-box"), indent=1), encoding="utf-8")
+        if token:
+            helpers.append(Helper(h, token, endpoint, "qa-exit-helper", hardware=first_scan, max_concurrent=2))
+        dry = bob.post("/api/servers", json={"name": f"QA exit dry run {h.tag}", "kind": "test",
+                                             "connection": {"provider": "dryrun", "dry_run_delay": 0.1,
+                                                            "max_parallel": 2},
+                                             "models": [{"key": "dry-run"}]})
+        dry_id = dry.json().get("id", "") if dry.status_code == 200 else ""
+        group = bob.post("/api/pool/groups", json={"name": f"QA exit group {h.tag}", "visibility": "private"})
+        group_id = group.json().get("id", "") if group.status_code == 200 else ""
+        put = [bob.put(f"/api/pool/servers/{sid}", json={"group_id": group_id}).status_code for sid in (hid, dry_id)]
+        grants = [bob.post(f"/api/pool/groups/{group_id}/grants",
+                           json={"subject_type": "user", "handle": who.handle, "purposes": purposes}).status_code
+                  for who, purposes in ((alice, ["game", "pooled"]), (admin, ["benchmark"]))]
+        online = bool(helpers) and bool(wait_until(lambda: _online(bob, hid), 60, 0.25))
+        slots = (bob.get(f"/api/pool/servers/{hid}").json() if hid else {}).get("max_concurrent")
+        r.check("bob's helper machine (its real helper connected behind the scripted endpoint, two slots) and his "
+                "direct dry-run machine, shared with alice for games and pooled prompts and with the administrator "
+                "for benchmarks",
+                online and slots == 2 and dry.status_code == 200 and put == [200, 200] and grants == [200, 200],
+                f"helper {made.status_code}, online {online}, slots {slots}; dry run {dry.status_code}; group "
+                f"{group.status_code}, put {put}, grants {grants}")
+        data["machines"] = {"helper": hid, "dry_run": dry_id, "group": group_id}
+        if not (online and dry_id):
+            return
+
+        # ---- alice's game: her person seat, a hybrid seat and a full LLM seat on bob's helper machine, an MCP seat,
+        # two bots; shared with members
+        model = {"server_id": hid, "model": endpoint.MODEL}
+        seats = [{"type": "human"},
+                 {"type": "hybrid", "llm": dict(model), "bot": {"profile": "standard"},
+                  "hybrid": {"owners": "all_but_war", "prompt_every": 3}},
+                 {"type": "llm", "llm": dict(model)}, {"type": "mcp"}, {"type": "bot"}, {"type": "bot"}]
+        g = alice.post("/api/games", json={"name": f"QA exit game {h.tag}", "config": dict(EXIT_CONFIG),
+                                           "seats": seats})
+        info = g.json() if g.status_code == 200 else {}
+        gid = info.get("id", "")
+        tokens = [s.get("token", "") for s in info.get("seats") or []]
+        shared = alice.put(f"/api/games/{gid}/sharing", json={"visibility": "server"}) if gid else None
+        cfg = info.get("config") or {}
+        kinds = [s.get("type") for s in info.get("seats") or []]
+        with h.anonymous() as anon:
+            visitor = anon.get(f"/api/games/{gid}").status_code if gid else None
+        r.check("alice's game: her person seat, a hybrid seat (all but war, prompted every 3 turns) and a full LLM "
+                "seat on bob's helper machine, an MCP seat and two bots, on a standard map that wraps east-west, 40 "
+                "rounds, both chat timeouts short; shared with members (carol opens it, a visitor gets 404)",
+                bool(gid) and kinds == ["human", "hybrid", "llm", "mcp", "bot", "bot"]
+                and ((info.get("seats") or [{}, {}])[1].get("hybrid") or {}).get("preset") == "all_but_war"
+                and cfg.get("chat_model_reply_seconds") == 45 and cfg.get("chat_person_reply_seconds") == 20
+                and shared is not None and shared.status_code == 200
+                and carol.get(f"/api/games/{gid}").status_code == 200 and visitor == 404,
+                f"game {g.status_code} {g.text[:160] if g.status_code != 200 else ''}; seats {kinds}; sharing "
+                f"{getattr(shared, 'status_code', None)}; visitor {visitor}")
+        if not gid:
+            return
+        data["game"] = gid
+        met = alice.post(f"/api/games/{gid}/debug/meet_all").status_code
+        rich = alice.post(f"/api/games/{gid}/debug/gold").status_code
+
+        # ---- a member's seat that names an address: refused, nothing dialled
+        block = {"provider": "openai_compatible", "base_url": trap.url, "api_key_env": "PATH", "model": "x"}
+        seat_try = alice.post(f"/api/games/{gid}/seats/5", json={"type": "llm", "llm": block})
+        new_try = carol.post("/api/games", json={"name": f"QA exit dial {h.tag}", "config": CONFIG,
+                                                 "seats": [{"type": "llm", "llm": block}, {"type": "bot"}]})
+        time.sleep(1.0)
+        still = (_game_info(alice, gid).get("seats") or [{}] * 6)[5].get("type")
+        r.check("a member's seat naming a base URL and a key variable is refused (400): alice's seat change and "
+                "carol's new game; the seat stays a bot and nothing connected to the address",
+                seat_try.status_code == 400 and new_try.status_code == 400 and still == "bot"
+                and not trap.connections, f"seat {seat_try.status_code}, game {new_try.status_code}, seat 5 "
+                f"{still}, {len(trap.connections)} connection(s)", connections=len(trap.connections))
+
+        # ---- the sockets: alice's seat, carol's account (a member who may watch), a spectator's token
+        mine = Socket(h, gid, tokens[0])
+        carols = Socket(h, gid, "", account=carol)
+        spectator = Socket(h, gid, info.get("spectator_token", ""))
+        sockets += [mine, carols, spectator]
+        hello = [next((m for _, m in s.messages if m.get("type") == "hello"), None)
+                 for s in (carols, spectator)] if wait_until(lambda: carols.messages and spectator.messages, 15, 0.1) \
+            else [None, None]
+
+        # ---- the players: alice and the MCP seat, by the wait route with their tokens
+        a = SeatDriver(h, gid, tokens[0], 0, "alice")
+        a.hold.set()
+        m = SeatDriver(h, gid, tokens[3], 3, "mcp")
+        drivers += [a, m]
+
+        def turn_of() -> tuple:
+            gi = _game_info(alice, gid)
+            return gi.get("phase"), gi.get("current_player"), gi.get("turn")
+
+        def at_alices_turn(limit: float = 240.0) -> Optional[int]:
+            """Hold alice's next turn and wait until it is hers (her driver ends none while held); its number."""
+            a.hold.set()
+            deadline = time.perf_counter() + limit
+            while time.perf_counter() < deadline:
+                phase, current, turn = turn_of()
+                if phase != "playing":
+                    return None
+                if current == 0:
+                    time.sleep(0.6)             # her driver may have been ending it as the hold came
+                    if turn_of() == (phase, current, turn):
+                        return turn
+                time.sleep(0.25)
+            return None
+
+        def head(nid: int) -> dict:
+            return a.chat(nid)
+
+        def opened(res: dict) -> Optional[int]:
+            return (res.get("result") or {}).get("negotiation_id") if res.get("ok") else None
+
+        def metric_rows(nid: int) -> list:
+            got = alice.get(f"/api/games/{gid}/metrics")
+            rows = got.json().get("negotiations") or [] if got.status_code == 200 else []
+            return [(x.get("outcome"), x.get("cause")) for x in rows if x.get("nid") == nid]
+
+        t1 = at_alices_turn(60)
+        block0 = (alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]}).json().get("minimap") or {})
+        minimap = [{"step": "the start", "stage": block0.get("stage"), "home": block0.get("home")}]
+
+        # ---- her first turn: a chat with each kind of seat
+        h1 = opened(a.tool("open_negotiation", {"to": 1, "message": "QA-H1: maps for gold?",
+                                                "give": [{"type": "gold", "amount": 25}],
+                                                "receive": [{"type": "share_map"}]}))
+        l1 = opened(a.tool("open_negotiation", {"to": 2, "message": "QA-L1: shall we talk?"}))
+        b1 = opened(a.tool("open_negotiation", {"to": 4, "message": "QA-LEAVE: shall we talk?"}))
+        m1 = opened(a.tool("open_negotiation", {"to": 3, "message": "QA-M1: shall we share our maps?",
+                                                "give": [{"type": "share_map"}], "receive": [{"type": "share_map"}]}))
+        r.check("on her first turn (after meet_all) alice opened a chat with the hybrid seat, the LLM seat, a bot and "
+                "the MCP seat", all(x is not None for x in (h1, l1, b1, m1)) and met == 200 and rich == 200,
+                f"turn {t1}; chats {[h1, l1, b1, m1]}; meet_all {met}, gold {rich}")
+        settled = wait_until(lambda: head(h1).get("status") not in (None, "open")
+                             and head(l1).get("status") not in (None, "open"), 60, 0.25)
+        hv, lv = head(h1), head(l1)
+        r.check("the hybrid seat's model answered her trade (trades are its model's) and the LLM seat's model "
+                "replied to her word, which she closed",
+                bool(settled) and hv.get("status") == "accepted" and metric_rows(h1) == [("answered", None)]
+                and any(not e.get("you") and e.get("message") == "(qa endpoint) reply" for e in lv.get("history") or [])
+                and lv.get("status") == "rejected",
+                f"hybrid {hv.get('status')} {metric_rows(h1)}; llm {lv.get('status')} "
+                f"{[(e.get('by'), e.get('action'), e.get('message')) for e in lv.get('history') or []]}")
+        # two the models are too slow for: the clock decides each at 45 s
+        h2 = opened(a.tool("open_negotiation", {"to": 1, "message": "QA-SLOW-H: gold for maps?",
+                                                "give": [{"type": "gold", "amount": 20}],
+                                                "receive": [{"type": "share_map"}]}))
+        l2 = opened(a.tool("open_negotiation", {"to": 2, "message": "QA-SLOW-L: one more question?"}))
+        t_slow = time.time()
+        timed = wait_until(lambda: (head(h2).get("clock") or {}).get("waiting_on") != 1
+                           and head(l2).get("status") not in (None, "open"), 75, 0.25)
+        took = round(time.time() - t_slow, 1)
+        h2v, l2v = head(h2), head(l2)
+        r.check("too slow for both models (55 s against their 45 s): at the deadline the hybrid seat's bot answered "
+                "its trade (fallback, cause timeout) and the chat clock declined for the LLM seat, '(no reply in "
+                "time)'",
+                bool(timed) and ("fallback", "timeout") in metric_rows(h2)
+                and (l2v.get("history") or [{}])[-1].get("message") == "(no reply in time)"
+                and ("declined_late", "timeout") in metric_rows(l2) and 40 <= took <= 60,
+                f"after {took} s; hybrid {metric_rows(h2)} {h2v.get('status')}; llm {metric_rows(l2)} "
+                f"{(l2v.get('history') or [{}])[-1]}", seconds=took)
+        gone = wait_until(lambda: all(head(n).get("status") not in (None, "open") for n in (h1, l1, b1, m1, h2, l2)),
+                          40, 0.25)
+        bv, mv = head(b1), head(m1)
+        r.check("the bot answered her at once and she let it wait: closed as expired at 20 s, '(no reply in time)'; "
+                "the MCP seat accepted her maps through the wait route",
+                bool(gone) and bv.get("status") == "expired"
+                and (bv.get("history") or [{}])[-1].get("note") == "(no reply in time)"
+                and mv.get("status") == "accepted" and (m.answered.get(m1) or {}).get("action") == "accept",
+                f"bot {bv.get('status')} {(bv.get('history') or [{}])[-1]}; mcp {mv.get('status')} "
+                f"{m.answered.get(m1)}")
+        mcp_saw = next((w for w in m.waits if w.get("status") == "negotiation" and m1 in (w.get("negotiation_ids") or [])),
+                       {})
+        entry = next((c for c in mcp_saw.get("chats") or [] if c.get("negotiation_id") == m1), {})
+        r.check("the MCP seat's wait for its turn returned for her chat, listing it waiting on it with its deadline and "
+                "the seconds left (wait_for_turn's chats)",
+                entry.get("waiting_on") == "you" and (entry.get("deadline") or 0) > mcp_saw.get("t", 0)
+                and 0 < (entry.get("seconds_left") or 0) <= EXIT_CONFIG["chat_model_reply_seconds"], json.dumps({"wait": {k: mcp_saw.get(k) for k in (
+                    "status", "negotiation_ids")}, "chat": entry})[:400])
+        data["first_turn"] = {"chats": {"hybrid": h1, "llm": l1, "bot": b1, "mcp": m1, "hybrid_slow": h2,
+                                        "llm_slow": l2}, "slow_settled_s": took, "mcp_wait": entry}
+        a.hold.clear()
+
+        # ---- bob's report and alice's probe on the helper machine, her report on the dry run: pooled prompts
+        # between the game's own
+        def report(who: "Account", title: str, sid: str, model_id: str) -> str:
+            got = who.post("/api/reports", json={"title": title, "sections": ["summary"], "narrative": {
+                "enabled": True, "server_id": sid, "model_id": model_id}})
+            return got.json().get("id", "") if got.status_code == 200 else ""
+
+        def game_prompts(since: float) -> list:
+            return [q for q in endpoint.completions() if q["t"] >= since and q.get("model") == endpoint.MODEL
+                    and q.get("kind") in ("turn", "diplomat")]
+        # the game plays on (the slow answers' slots drain first): its prompts come, then the pooled work's between them
+        t_go = time.time()
+        wait_until(lambda: len(game_prompts(t_go)) >= 2, 120, 0.25)
+        t_pooled = time.time()
+        b_rep = report(bob, f"QA exit bob report {h.tag}", hid, endpoint.MODEL)
+        a_rep = report(alice, f"QA exit alice report {h.tag}", dry_id, "dry-run")
+        ed = alice.post("/api/scenario-editor", json={"source": "generate", "config": {**CONFIG, "seed": 3423},
+                                                      "players": [{"type": "bot"}, {"type": "bot"}]})
+        eid = ed.json().get("editor_id", "") if ed.status_code == 200 else ""
+        saved = alice.post(f"/api/scenario-editor/{eid}/save", json={"name": f"QA exit probe {h.tag}"})
+        scn = saved.json().get("id", "") if saved.status_code == 200 else ""
+        if eid:
+            alice.delete(f"/api/scenario-editor/{eid}")
+        pid_ = f"qa-exit-{h.tag}"
+        alice.put(f"/api/probes/{pid_}", json={"name": "QA exit probe", "scenario": scn, "subject": 1,
+                                                "counterparty": 0, "cases": [
+                                                    {"id": f"m{i}", "kind": "message",
+                                                     "message": f"QA-PROBE-exit-{i}-{h.tag} hello"} for i in (1, 2)]})
+        prun = alice.post(f"/api/probes/{pid_}/run", json={"llm": dict(model)})
+        p_run = prun.json().get("id", "") if prun.status_code == 200 else ""
+
+        def pooled_done() -> bool:
+            reps = [(who.get(f"/api/reports/{rid}").json().get("meta") or {}).get("status") for who, rid in
+                    ((bob, b_rep), (alice, a_rep)) if rid]
+            run = (alice.get(f"/api/probe-runs/{p_run}").json().get("run") or {}).get("status") if p_run else None
+            return len(reps) == 2 and all(s in ("done", "failed") for s in reps) and run in ("finished", "failed",
+                                                                                             "stopped")
+        finished = wait_until(pooled_done, 300, 1.0)
+        metas = {k: (who.get(f"/api/reports/{rid}").json().get("meta") or {}) if rid else {}
+                 for k, who, rid in (("bob", bob, b_rep), ("alice", alice, a_rep))}
+        probe = alice.get(f"/api/probe-runs/{p_run}").json() if p_run else {}
+        pooled = [(q.get("kind"), q.get("marker") or q.get("head", "")[:40], round(q["t"] - t_pooled, 2))
+                  for q in endpoint.completions() if q["t"] >= t_pooled - 1 and (
+                      q.get("kind") == "plain" or (q.get("marker") or "").startswith("QA-PROBE-exit"))]
+        last = t_pooled + max((p[2] for p in pooled), default=0.0)
+        wait_until(lambda: len(game_prompts(last + 0.01)) >= 2, 120, 0.25)
+        game_ts = sorted(q["t"] for q in game_prompts(t_go))
+        between = [p for p in pooled if game_ts and game_ts[0] < t_pooled + p[2] < game_ts[-1]]
+        r.check("bob's report analysis and alice's probe ran as pooled prompts on the helper machine while the game "
+                "played, served between the game's own prompts, and her report's analysis on the dry run",
+                bool(finished) and metas["bob"].get("status") == "done" and metas["bob"].get("narrative_written")
+                and metas["alice"].get("status") == "done" and metas["alice"].get("narrative_written")
+                and (probe.get("run") or {}).get("status") == "finished" and len(pooled) >= 3
+                and len(between) == len(pooled),
+                json.dumps({"bob": {k: metas["bob"].get(k) for k in ("status", "narrative_written")},
+                            "alice": {k: metas["alice"].get(k) for k in ("status", "narrative_written")},
+                            "probe": (probe.get("run") or {}).get("status"), "pooled": pooled,
+                            "game_prompts": len(game_ts)})[:700], prompts=len(pooled))
+        data["pooled"] = {"reports": {"bob": b_rep, "alice": a_rep}, "probe_run": p_run, "served": pooled}
+
+        # ---- the administrator's benchmark on the helper machine's second slot, beside the game's lease
+        t_b = at_alices_turn()
+        suite = {"name": f"QA exit bench {h.tag}", "mode": "sequential", "repeats": 1,
+                 "servers": [{"server_id": hid, "models": [{"model": BENCH_MODEL}]}],
+                 "scenarios": [{"name": "QA exit duel", "map_size": "duel", "map_type": "pangaea", "seed": 3421,
+                                "opponents": 1, "turn_limit": 5, "barbarians": "off", "max_turn_minutes": 5}]}
+        bench_t0 = time.time()
+        started = admin.post("/api/benchmarks/runs", json={"suite": suite, "name": f"QA exit bench {h.tag}"})
+        run_id = started.json().get("id", "") if started.status_code == 200 else ""
+        live = wait_until(lambda: {"benchmark", "game"} <= {x.get("kind") for x in
+                                                            _machine_status(admin, hid).get("leases") or []}, 120, 0.25)
+        leases = [(x.get("kind"), x.get("active")) for x in _machine_status(admin, hid).get("leases") or []]
+        r.check("on alice's turn the administrator's one-job benchmark starts on the helper machine's second slot, "
+                "its lease beside the game's (the job rule: one lease of others' on a two-slot machine)",
+                started.status_code == 200 and bool(live), f"turn {t_b}; HTTP {started.status_code}; leases {leases}")
+        hb = opened(a.tool("open_negotiation", {"to": 1, "message": "QA-BENCH: maps for gold?",
+                                                "give": [{"type": "gold", "amount": 15}],
+                                                "receive": [{"type": "share_map"}]}))
+        fell = wait_until(lambda: (head(hb).get("clock") or {}).get("waiting_on") != 1, 30, 0.25) if hb else False
+        r.check("a trade for the hybrid seat's model while the benchmark holds the machine: its pooled prompt is "
+                "refused and the seat's bot answers it in the lobby game (fallback, cause queued_behind_benchmark)",
+                bool(fell) and ("fallback", "queued_behind_benchmark") in metric_rows(hb),
+                f"chat {hb}; {head(hb).get('status')}; rows {metric_rows(hb)}")
+        a.hold.clear()          # the game plays beside the benchmark: its LLM seat on its lease, its pooled prompts not
+        done = wait_until(lambda: _runs_job(admin, run_id).get("status") in ("done", "failed", "cancelled"), 300, 1.0) \
+            if run_id else False
+        job = _runs_job(admin, run_id) if run_id else {}
+        bench_t1 = time.time()
+        r.check("the benchmark job ran to its end beside the lobby game", bool(done) and job.get("status") == "done",
+                json.dumps({k: job.get(k) for k in ("status", "error")} | {"result": {
+                    k: (job.get("result") or {}).get(k) for k in ("drain_s", "contaminated", "turns")}})[:400],
+                seconds=round(bench_t1 - bench_t0, 1))
+        time.sleep(4.0)                     # the ledger's writer inserts what it has every 2 s
+        window = [q for q in endpoint.completions() if bench_t0 - 1 <= q["t"] <= bench_t1 + 1]
+        bench_steps = [(q["t"], q["t"] + q["seconds"], "bench") for q in window if q.get("model") == BENCH_MODEL]
+        pooled_steps = [(q["t"], q["t"] + q["seconds"], f"{q.get('kind')} {q.get('marker') or ''}".strip())
+                        for q in window if q.get("model") == endpoint.MODEL
+                        and (q.get("kind") in ("diplomat", "plain") or q.get("system", "").startswith("You are the diplomat")
+                             or (q.get("marker") or "").startswith("QA-PROBE"))]
+        lease_steps = [q for q in window if q.get("model") == endpoint.MODEL and q.get("kind") == "turn"]
+        overlap = _spans_overlap(pooled_steps, bench_steps)
+        ev_bench = _event_spans(state, hid, "activity_kind = 'benchmark'")
+        ev_pooled = _event_spans(state, hid, "task_class = 'partial'")
+        ev_overlap = _spans_overlap(ev_pooled, ev_bench)
+        r.check("no pooled request overlapped a benchmark step, by the endpoint's log and by the compute ledger's "
+                "events (the scheduler's listener); the game's LLM seat played on its lease beside the benchmark",
+                len(bench_steps) >= 3 and not overlap and len(ev_bench) == len(bench_steps) and not ev_overlap,
+                f"{len(bench_steps)} benchmark steps, {len(pooled_steps)} pooled and {len(lease_steps)} lease "
+                f"steps at the endpoint meanwhile; ledger: {len(ev_bench)} benchmark and {len(ev_pooled)} pooled "
+                f"events; overlaps {overlap[:3]} / {ev_overlap[:3]}", bench_steps=len(bench_steps),
+                pooled_steps=len(pooled_steps), lease_steps=len(lease_steps))
+        data["benchmark"] = {"run": run_id, "job": {k: job.get(k) for k in ("status", "error", "result")},
+                             "steps": len(bench_steps), "pooled_meanwhile": [p[2] for p in pooled_steps],
+                             "lease_steps_meanwhile": len(lease_steps)}
+
+        # ---- a manual hardware entry survives the helper's restart; the Renaissance for alice's minimap
+        t_hw = at_alices_turn()
+        listing = bob.get("/api/servers").json().get("servers", [])
+        view = next((sv for sv in listing if sv.get("id") == hid), None) or {}
+        view["hardware"] = json.loads(json.dumps(QA_HAND_SET))
+        saved_hw = bob.post("/api/servers", json=view).status_code
+        manual = bob.put(f"/api/machines/{hid}/settings", json={"modes": {"hardware": "manual"}})
+        before = (bob.get(f"/api/machines/{hid}/settings").json().get("report") or {}).get("at")
+        for helper in helpers:
+            helper.stop()
+        wait_until(lambda: not _online(bob, hid), 15, 0.1)
+        second_scan = files / "scan-2.json"
+        second_scan.write_text(json.dumps(_qa_scan(cpu="QA exit CPU 2", gpu="QA exit GPU 24 GB", vram=24, idle=40,
+                                                   cpu_w=90, gpu_w=250, host="qa-exit-box"), indent=1),
+                               encoding="utf-8")
+        helpers.append(Helper(h, token, endpoint, "qa-exit-helper", hardware=second_scan, max_concurrent=2))
+        fresh = wait_until(lambda: (lambda s: s if (s.get("report") or {}).get("at") not in (None, before)
+                                    and _online(bob, hid) else None)(
+            bob.get(f"/api/machines/{hid}/settings").json()), 60, 0.25) or {}
+        summary = (fresh.get("configured") or {}).get("hardware_summary", "")
+        scanned = (fresh.get("report") or {}).get("hardware") or {}
+        r.check("bob types the helper machine's hardware in by hand (hardware manual); its helper restarts with other "
+                "hardware: the hand-set entry stays, and the new scan is kept beside it as the last report",
+                saved_hw == 200 and manual.status_code == 200 and "QA hand-set GPU" in summary
+                and scanned.get("gpus") == [{"name": "QA exit GPU 24 GB", "vram_gb": 24}],
+                f"turn {t_hw}; save {saved_hw}, manual {manual.status_code}; configured {summary!r}; scan "
+                f"{scanned.get('gpus')}")
+        renaissance = alice.post(f"/api/games/{gid}/debug/ops", json=[{"op": "grant_era", "player": 0,
+                                                                       "era": "Renaissance era"}])
+        block = alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]}).json().get("minimap") or {}
+        minimap.append({"step": "the Renaissance's techs", "status": renaissance.status_code,
+                        "stage": block.get("stage"), "home": block.get("home")})
+        a.hold.clear()
+        played_on = wait_until(lambda: (turn_of()[2] or 0) > (t_hw or 0), 120, 0.5)
+        r.check("the game played on after the helper came back", bool(played_on), f"turn {turn_of()[2]}")
+
+        # ---- the server killed with a chat waiting on the LLM seat, and brought back
+        t_k = at_alices_turn()
+        block = alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]}).json().get("minimap") or {}
+        information = alice.post(f"/api/games/{gid}/debug/ops", json=[{"op": "grant_era", "player": 0,
+                                                                        "era": "Information era"}])
+        block = alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]}).json().get("minimap") or {}
+        minimap.append({"step": "the Information era's techs", "status": information.status_code,
+                        "stage": block.get("stage"), "home": block.get("home")})
+        marker = f"QA-RESTART-{h.tag}"
+        # the LLM seat's answer to that chat is held (not its turn's prompt, whose briefing may list the chat)
+        endpoint.hold = lambda body: (lambda d: d["kind"] == "chat" and d["marker"] == marker)(
+            FakeEndpoint.describe(body))
+        endpoint.gate.clear()
+        kr = opened(a.tool("open_negotiation", {"to": 2, "message": f"{marker}: are you still there?"}))
+        held = wait_until(lambda: endpoint.held >= 1, 30, 0.1)
+        saves = state / "saves" / gid / "autosave.citar"
+        mtime = saves.stat().st_mtime_ns if saves.exists() else 0
+        renamed = alice.post(f"/api/games/{gid}/seats/4", json={"name": "QA renamed bot"})
+        written = wait_until(lambda: saves.exists() and saves.stat().st_mtime_ns != mtime, 15, 0.1)
+        time.sleep(1.0)
+        endpoint.hold = None                 # what comes after the restart is answered; the held answer stays held
+        # the scheduler's counters live in the server's memory: the restart starts them again
+        counters_before.update(_machine_status(admin, hid).get("counters") or {})
+        t_kill = time.perf_counter()
+        h.server.restart()
+        t_up = time.perf_counter()
+        for who in h.accounts.values():
+            who.reconnect()
+        back = _game_info(alice, gid)
+        answered = wait_until(lambda: head(kr).get("status") != "open"
+                              or (head(kr).get("clock") or {}).get("waiting_on") == 0, 90, 0.25)
+        t_answer = time.perf_counter()
+        endpoint.gate.set()
+        kv = head(kr)
+        theirs = [e for e in kv.get("history") or [] if not e.get("you")]
+        # the exchange writes its row once its loop sees the chat move, just after the answer
+        kr_rows = wait_until(lambda: (lambda rows: rows if ("answered", None) in rows else None)(metric_rows(kr)),
+                             10, 0.25) or metric_rows(kr)
+        # the model's own answer: the endpoint's reply (a chat with no proposal), and its metrics row answered; a
+        # decline after a failed exchange ("(no response)", fallback) or the clock's would be neither
+        r.check("the server, killed with alice's chat waiting on the LLM seat (its answer held at the endpoint; the "
+                "seat change's save holds the chat), brought the game back (restore_live) and the model answered the "
+                "chat well inside its 45 s, not the chat clock",
+                bool(kr and held and renamed.status_code == 200 and written) and back.get("turn") == t_k
+                and bool(answered) and bool(theirs)
+                and (theirs[-1].get("action"), theirs[-1].get("message")) == ("reply", "(qa endpoint) reply")
+                and ("answered", None) in kr_rows and t_answer - t_up < 40,
+                f"chat {kr}, held {held}, rename {renamed.status_code}, saved {bool(written)}; back at turn "
+                f"{back.get('turn')} (was {t_k}); answered {round(t_answer - t_up, 1)} s after the server was up "
+                f"({round(t_up - t_kill, 1)} s down); last entry {(kv.get('history') or [{}])[-1]}; rows {kr_rows}",
+                restart_s=round(t_up - t_kill, 1), answered_after_s=round(t_answer - t_up, 1))
+        data["restart"] = {"chat": kr, "turn": t_k, "down_s": round(t_up - t_kill, 1),
+                           "answered_after_s": round(t_answer - t_up, 1), "history": kv.get("history")}
+        # the sockets died with the server: alice's, carol's and the spectator's again
+        mine2, carols2, spectator2 = (Socket(h, gid, tokens[0]), Socket(h, gid, "", account=carol),
+                                      Socket(h, gid, info.get("spectator_token", "")))
+        sockets += [mine2, carols2, spectator2]
+        a.hold.clear()
+
+        # ---- the rest of the game
+        over = wait_until(lambda: turn_of()[0] not in ("playing", None), 900, 1.0)
+        gi = _game_info(alice, gid)
+        r.check("the game played on to its end (turn limit 40)", bool(over) and gi.get("phase") != "playing",
+                f"phase {gi.get('phase')}, turn {gi.get('turn')}", seconds=round(time.time() - t_start, 1))
+        got = alice.get(f"/api/games/{gid}/metrics")
+        metrics = got.json() if got.status_code == 200 else {}
+        summary = metrics.get("summary") or {}
+        llm_turns = [x for x in metrics.get("turns") or [] if x.get("player") == 2 and x.get("ended")
+                     and not x.get("interrupted")]
+        phases = [x for x in metrics.get("diplomat") or [] if x.get("player") == 1]
+        turns = [x["turn"] for x in phases]
+        hyb = summary.get("1") or {}
+        r.check("the LLM seat played its turns on the helper machine through the scripted endpoint, each ended by "
+                "its own end_turn",
+                len(llm_turns) >= 35 and all(x.get("end_reason") == "end_turn" for x in llm_turns)
+                and all(x.get("model_steps", 0) >= 1 for x in llm_turns),
+                f"{len(llm_turns)} turns; end reasons {sorted({x.get('end_reason') for x in llm_turns})}",
+                turns=len(llm_turns))
+        r.check("the hybrid seat: its bot played every turn, its diplomat at most once a turn (at least every three "
+                "turns while its machine was free), its model and its bot answering chats",
+                len(phases) >= 8 and len(turns) == len(set(turns))
+                and any(x.get("outcome") == "done" for x in phases)
+                and (hyb.get("chat_answers") or {}).get("answered", 0) >= 1
+                and (hyb.get("chat_answers") or {}).get("fallback", 0) >= 2
+                and hyb.get("avg_bot_actions", 0) > 0,
+                json.dumps({"phases": len(phases), "outcomes": sorted({f"{x.get('outcome')}/{x.get('cause')}"
+                                                                        for x in phases}),
+                            "chat_answers": hyb.get("chat_answers"), "causes": hyb.get("chat_fallback_causes")}))
+        waits_with_chats = [w for w in m.waits if w.get("chats")]
+        r.check("the MCP seat was played through the wait route to the end: its turns ended, and every wait answer "
+                "that listed chats gave each its deadline and seconds left",
+                len(m.ended) >= 35 and m.finished.is_set() and bool(waits_with_chats)
+                and all(c.get("deadline") and c.get("seconds_left") is not None
+                        for w in waits_with_chats for c in w["chats"]),
+                f"{len(m.ended)} turns ended; {len(m.waits)} waits, {len(waits_with_chats)} with chats; answered "
+                f"{len(m.answered)} chats; {m.errors} errors (the restart)", turns=len(m.ended))
+        statuses = mine.statuses() + mine2.statuses()
+        states = {s.get("state") for s in statuses}
+        others = carols.statuses() + carols2.statuses() + spectator.statuses() + spectator2.statuses()
+        heard = [len(x.messages) for x in (carols, carols2, spectator, spectator2)]
+        r.check("alice's socket heard her chats' statuses (thinking, waiting with a deadline, closed); carol's (a "
+                "member who may watch) and a spectator's heard none, though they heard the game",
+                {"thinking", "waiting", "closed"} <= states and not others and all(n > 1 for n in heard)
+                and all(x and x.get("spectator") for x in hello),
+                f"alice {len(statuses)} statuses {sorted(s for s in states if s)}; carol and the spectator "
+                f"{len(others)}; their messages {heard}; hello {hello}", statuses=len(statuses))
+        homes = [x.get("home") for x in minimap]
+        map_w, map_h = (lambda v: (v.get("width", 0), v.get("height", 0)))(
+            alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]}).json())
+        grew = [i + 1 for i, (p, q) in enumerate(zip(homes, homes[1:])) if p and q and p != q]
+        r.check("alice's minimap moved from early to renaissance to information by the debug ops route, its home box "
+                "growing as her units explored and never shrinking",
+                [x.get("stage") for x in minimap] == ["early", "renaissance", "information"]
+                and all(x.get("status", 200) == 200 for x in minimap)
+                and all(p and q and _box_covers(q, p, map_w, map_h) for p, q in zip(homes, homes[1:]))
+                and bool(grew), json.dumps({"steps": minimap, "grew_at": grew,
+                                            "exploring": (a.first or {}).get("exploring")})[:600])
+        data["minimap"] = minimap
+        status = _machine_status(admin, hid)
+        after = status.get("counters") or {}
+        # the whole game's: the readings before the restart and since (the scheduler's counters start again with it)
+        counters = {k: int(counters_before.get(k, 0) or 0) + int(after.get(k, 0) or 0)
+                    for k in sorted(set(counters_before) | set(after))}
+        busy_lines = [line for helper in helpers for line in helper.text().splitlines() if "(busy)" in line]
+        r.check("the helper machine refused nothing as busy over the whole game (the scheduler's counters before the "
+                "restart and after it, and its helpers' logs) and holds no lease once the game is over",
+                counters.get("busy_refusals", 0) == 0 and counters.get("granted", 0) > 0 and not busy_lines
+                and not status.get("leases"),
+                json.dumps({"counters": counters, "before_restart": counters_before, "after_restart": after,
+                            "leases": status.get("leases")})[:600])
+        data["counters"] = {"whole_game": counters, "before_restart": counters_before, "after_restart": after}
+
+        # ---- the ledger: given and used, per member, against its events
+        time.sleep(4.0)
+        agreed, seen = _ledger_agrees(h, {"bob": ("given", "own_use"), "alice": ("used",), "admin": ("used",)})
+        ids = dict(_ledger_rows(state, "SELECT handle, id FROM users"))
+        by_act = _ledger_rows(state, "SELECT activity_kind, task_class, consumer_id, provider_id, self_use, count(*), "
+                                     "sum(credits) FROM compute_events WHERE machine_id IN (?, ?) AND kind = 'gpu' "
+                                     "GROUP BY 1, 2, 3, 4, 5", (hid, dry_id))
+        names = {v: k for k, v in ids.items()}
+        rows = sorted((kind, cls, names.get(c), names.get(p), bool(s), n) for kind, cls, c, p, s, n, _ in by_act)
+        his = ((seen.get("breakdown") or {}).get("bob") or {})
+        his_machines = {x.get("id"): x for x in his.get("by_machine") or []}
+        machine_given = _ledger_rows(state, "SELECT coalesce(sum(credits), 0) FROM compute_events WHERE machine_id = ? "
+                                            "AND provider_id = ? AND self_use = 0", (hid, ids.get(bob.handle)))[0][0]
+        expected = {("game", "full", alice.handle, bob.handle, False), ("game", "partial", alice.handle, bob.handle,
+                                                                          False),
+                    ("probe", "partial", alice.handle, bob.handle, False),
+                    ("report", "partial", alice.handle, bob.handle, False),
+                    ("report", "partial", bob.handle, bob.handle, True),
+                    ("benchmark", "full", admin.handle, bob.handle, False)}
+        got_kinds = {row[:5] for row in rows}
+        r.check("the ledger's events on bob's machines: alice's game (its full and its pooled seat), probe and report "
+                "and the administrator's benchmark given by bob; bob's own report his own use; bob's given, alice's "
+                "and the administrator's used and bob's own use, as /api/ledger/me tells each, equal the events' sums",
+                agreed and expected <= got_kinds
+                and abs((his_machines.get(hid) or {}).get("given", -1) - machine_given) < 1e-3,
+                json.dumps({"rows": rows, "told": seen.get("told"), "events": seen.get("events"),
+                            "helper_given": [machine_given, (his_machines.get(hid) or {}).get("given")]},
+                           default=str)[:900])
+        data["ledger"] = {"rows": rows, "told": seen.get("told"), "events": seen.get("events")}
+        data["seats"] = {"llm_turns": len(llm_turns), "diplomat_phases": [
+            {k: x.get(k) for k in ("turn", "outcome", "cause", "steps", "tools")} for x in phases],
+            "hybrid_summary": {k: hyb.get(k) for k in ("chat_answers", "chat_fallback_causes", "diplomat_phases",
+                                                       "diplomat_outcomes", "avg_bot_actions")},
+            "mcp": {"turns": len(m.ended), "chats_answered": len(m.answered), "waits": len(m.waits),
+                    "first": m.first}, "alice": {"turns": len(a.ended), "chats_answered": len(a.answered),
+                                                "left": sorted(a.left), "first": a.first}}
+        data["endpoint"] = {"completions": len(endpoint.completions()), "trades": endpoint.trades_opened,
+                            "by_kind": {k: sum(1 for q in endpoint.completions() if q.get("kind") == k)
+                                        for k in ("turn", "diplomat", "chat", "plain")}}
+    finally:
+        endpoint.hold = None
+        endpoint.gate.set()
+        for d in drivers:
+            d.stop()
+        for s in sockets:
+            s.close()
+        if run_id:
+            try:
+                admin.post(f"/api/benchmarks/runs/{run_id}/control", json={"action": "cancel"})
+            except httpx.HTTPError:
+                pass
+        if gid and not h.keep:
+            try:
+                alice.delete(f"/api/games/{gid}")
+            except httpx.HTTPError:
+                pass
+        for helper in helpers:
+            helper.stop()
+        endpoint.close()
+        trap.close()
+
+
+# ---------------------------------------------------------------------------- the real part (3-19)
+
+#: The ``real`` part's model server (the owner's decision, 2026-10-11): the laptop's LM Studio, OpenAI-compatible, and
+#: the model the owner keeps loaded there. The part only reads LM Studio's model list: it never loads, unloads or swaps
+#: a model, changes LM Studio's settings or names another model.
+REAL_URL = "http://localhost:1234/v1"
+REAL_MODEL = "google/gemma-4-e2b"
+#: The ``real`` part's game: a small map, 20 rounds; the chat timeouts long enough for a small model on a laptop.
+REAL_CONFIG = {"map_size": "small", "map_type": "pangaea", "seed": 3431, "barbarians": "off", "city_states": 0,
+               "turn_limit": 20, "chat_model_reply_seconds": 300, "chat_person_reply_seconds": 120}
+#: How long the ``real`` part waits for its game to end, and for a turn that does not move: longer than the LLM seat's
+#: own limit on its turn (``REAL_TURN_S``, its model's time; its waits for chats come on top) and a hybrid seat's
+#: diplomat phase (three minutes), so only a hang is taken for one.
+REAL_LIMIT_S = 7200.0
+REAL_STALL_S = 1800.0
+REAL_TURN_S = 600
+
+
+def lmstudio_model(base: str = REAL_URL, model: str = REAL_MODEL, timeout: float = 10.0) -> tuple:
+    """Whether LM Studio at ``base`` lists ``model`` and has it loaded (``GET /api/v0/models``, ``state ==
+    "loaded"``): ``(ready, what it said)``, the words saying what to do when it is not. Only reads."""
+    root = base.rstrip("/")
+    root = root[:-3] if root.endswith("/v1") else root
+    try:
+        got = httpx.get(f"{root}/api/v0/models", timeout=timeout)
+    except httpx.HTTPError as e:
+        return False, (f"LM Studio does not answer at {root} ({type(e).__name__}): start it and its server, with "
+                       f"{model} loaded")
+    try:
+        rows = got.json().get("data") if got.status_code == 200 else None
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        return False, f"LM Studio at {root} gave no model list (HTTP {got.status_code})"
+    row = next((x for x in rows if isinstance(x, dict) and x.get("id") == model), None)
+    if row is None:
+        listed = ", ".join(str(x.get("id")) for x in rows if isinstance(x, dict)) or "none"
+        return False, f"{model} is not among LM Studio's models ({listed}): the part never fetches or loads a model"
+    if row.get("state") != "loaded":
+        return False, (f"{model} is in LM Studio but {row.get('state') or 'not loaded'}: load it there first (the part "
+                       "never loads, unloads or swaps a model)")
+    context = row.get("loaded_context_length") or row.get("max_context_length")
+    return True, f"{model} is loaded in LM Studio at {root} (context {context})"
+
+
+def part_real(h: Harness) -> None:
+    """3-19's ``real`` part (design/phase3-features.md Appendix D, 3-19; the owner's decision of 2026-10-11): the
+    plumbing against a real model. Bob's helper machine (a real Python helper, one slot) has the laptop's LM Studio as
+    its upstream, serving ``REAL_MODEL``, which the owner keeps loaded; the part first checks that LM Studio lists it
+    loaded and fails with what to do otherwise, and it never loads, unloads or swaps a model, changes LM Studio's
+    settings or uses another model. Bob shares the machine with alice for games and pooled prompts. Alice's game seats
+    her person seat (played by the script through the wait route), a hybrid seat (the standard bot and the model, all
+    but war, prompted every 3 turns) and a full LLM seat on the machine, and two bots, 20 rounds. On her first turn she
+    opens a chat with each model seat; their offers are answered as they come; her report's analysis runs on the
+    machine as a pooled prompt. The model is small, so this tests the plumbing, not the play. The evidence: the turns
+    each model seat played and how they ended, the tool calls made and refused, the chats with their replies, causes
+    and times, every fallback to the bot with its cause, and the generation seconds the scheduler metered against the
+    compute ledger's events for the machine."""
+    r = h.report
+    alice, bob = h.accounts["alice"], h.accounts["bob"]
+    data = r.data.setdefault("real", {})
+    ready, said = lmstudio_model(REAL_URL, REAL_MODEL)
+    data["lmstudio"] = {"url": REAL_URL, "model": REAL_MODEL, "before": said}
+    if not r.check(f"LM Studio at {REAL_URL} lists {REAL_MODEL}, loaded (read only: GET /api/v0/models)", ready, said):
+        return
+    state = h.server.state
+    helper: Optional[Helper] = None
+    drivers: list = []
+    gid = ""
+    t0 = time.time()
+    try:
+        made = bob.post("/api/pool/servers", json={"config": {"name": f"QA real LM Studio {h.tag}", "kind": "owned",
+                                                              "connection": {"provider": "openai_compatible",
+                                                                             "max_parallel": 1}},
+                                                   "reach": "worker"})
+        hid = made.json().get("id", "") if made.status_code == 200 else ""
+        issued = bob.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa real"}) if hid else None
+        token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
+        if token:
+            helper = Helper(h, token, REAL_URL, "qa-real-helper")
+        group = bob.post("/api/pool/groups", json={"name": f"QA real group {h.tag}", "visibility": "private"})
+        group_id = group.json().get("id", "") if group.status_code == 200 else ""
+        put = bob.put(f"/api/pool/servers/{hid}", json={"group_id": group_id})
+        grant = bob.post(f"/api/pool/groups/{group_id}/grants",
+                         json={"subject_type": "user", "handle": alice.handle, "purposes": ["game", "pooled"]})
+        online = bool(helper) and bool(wait_until(lambda: _online(bob, hid), 60, 0.25))
+        card = next((s for s in bob.get("/api/pool/servers").json().get("servers", []) if s.get("id") == hid), {})
+        live = {m.get("key"): m.get("loaded") for m in card.get("live_models") or []}
+        r.check("bob's helper machine, its real helper in front of LM Studio (one slot), reports the model loaded; "
+                "shared with alice for games and pooled prompts",
+                online and live.get(REAL_MODEL) is True and (put.status_code, grant.status_code) == (200, 200),
+                f"machine {made.status_code}, online {online}, live models {live}; put {put.status_code}, grant "
+                f"{grant.status_code}")
+        data["machine"] = hid
+        if not online:
+            return
+        model = {"server_id": hid, "model": REAL_MODEL}
+        seats = [{"type": "human"},
+                 {"type": "hybrid", "llm": dict(model), "bot": {"profile": "standard"},
+                  "hybrid": {"owners": "all_but_war", "prompt_every": 3}},
+                 {"type": "llm", "llm": {**model, "max_turn_seconds": REAL_TURN_S}}, {"type": "bot"}, {"type": "bot"}]
+        g = alice.post("/api/games", json={"name": f"QA real game {h.tag}", "config": dict(REAL_CONFIG),
+                                           "seats": seats})
+        info = g.json() if g.status_code == 200 else {}
+        gid = info.get("id", "")
+        tokens = [s.get("token", "") for s in info.get("seats") or []]
+        r.check(f"alice's game: her person seat, a hybrid seat (all but war, prompted every 3 turns) and a full LLM "
+                f"seat on {REAL_MODEL}, two bots, 20 rounds",
+                bool(gid) and [s.get("type") for s in info.get("seats") or []] == ["human", "hybrid", "llm", "bot", "bot"],
+                f"HTTP {g.status_code} {g.text[:200] if g.status_code != 200 else ''}")
+        if not gid:
+            return
+        data["game"] = gid
+        alice.post(f"/api/games/{gid}/debug/meet_all")
+        alice.post(f"/api/games/{gid}/debug/gold")
+        a = SeatDriver(h, gid, tokens[0], 0, "alice")
+        drivers.append(a)
+        a.hold.set()
+        wait_until(lambda: a.first is not None, 120, 0.5)
+
+        def opened(res: dict) -> Optional[int]:
+            return (res.get("result") or {}).get("negotiation_id") if res.get("ok") else None
+        chats = {"hybrid": opened(a.tool("open_negotiation", {
+                     "to": 1, "message": "Hello neighbour. Would you trade your map for some of my gold?",
+                     "give": [{"type": "gold", "amount": 30}], "receive": [{"type": "share_map"}]})),
+                 "llm": opened(a.tool("open_negotiation", {
+                     "to": 2, "message": "Hello neighbour. Shall we share our maps?",
+                     "give": [{"type": "share_map"}], "receive": [{"type": "share_map"}]}))}
+        t_chats = time.time()
+        r.check("on her first turn alice opened a chat with each model seat", all(chats.values()), json.dumps(chats))
+        a.hold.clear()
+        rep = alice.post("/api/reports", json={"title": f"QA real report {h.tag}", "sections": ["summary"],
+                                               "narrative": {"enabled": True, "server_id": hid,
+                                                             "model_id": REAL_MODEL}})
+        rid = rep.json().get("id", "") if rep.status_code == 200 else ""
+
+        # ---- the game, to its end: a turn that does not move for REAL_STALL_S is a hang
+        last, moved, progress = None, time.perf_counter(), []
+        deadline = time.perf_counter() + REAL_LIMIT_S
+        while time.perf_counter() < deadline:
+            gi = _game_info(alice, gid)
+            mark = (gi.get("turn"), gi.get("current_player"))
+            if gi.get("phase") not in ("playing", None):
+                break
+            if mark != last:
+                if last is None or mark[0] != last[0]:
+                    r.note(f"real: turn {mark[0]} ({round(time.time() - t0)} s)")
+                last, moved = mark, time.perf_counter()
+                progress.append({"at_s": round(time.time() - t0, 1), "turn": mark[0], "player": mark[1]})
+            elif time.perf_counter() - moved > REAL_STALL_S:
+                break
+            time.sleep(2.0)
+        gi = _game_info(alice, gid)
+        stalled = gi.get("phase") == "playing"
+        r.check("the game was played to its end (20 rounds), no turn hanging", not stalled,
+                f"phase {gi.get('phase')}, turn {gi.get('turn')}, player {gi.get('current_player')}; "
+                f"{round(time.time() - t0)} s", seconds=round(time.time() - t0, 1), turn=gi.get("turn"))
+        if rid:
+            wait_until(lambda: ((alice.get(f"/api/reports/{rid}").json().get("meta") or {}).get("status")
+                                in ("done", "failed")), 900, 2.0)
+        meta = (alice.get(f"/api/reports/{rid}").json().get("meta") or {}) if rid else {}
+        time.sleep(4.0)                 # the ledger's writer inserts what it has every 2 s
+        got = alice.get(f"/api/games/{gid}/metrics")
+        metrics = got.json() if got.status_code == 200 else {}
+        rows = metrics.get("turns") or []
+        llm_turns = [x for x in rows if x.get("player") == 2]
+        hyb_turns = [x for x in rows if x.get("player") == 1]
+        phases = [x for x in metrics.get("diplomat") or [] if x.get("player") == 1]
+        refusals = [x for x in metrics.get("diplomat_refusals") or [] if x.get("player") == 1]
+        negotiations = metrics.get("negotiations") or []
+        ended = [x for x in llm_turns if x.get("ended")]
+        acted = [x for x in llm_turns if (x.get("actions_ok") or 0) >= 1]
+        phase_tools = [t for x in phases for t in x.get("tools") or []]
+        r.check("every model turn ended, played by its model or ended with its cause recorded, none hung: the LLM "
+                "seat's turns each have an end reason, the hybrid seat's turns are its bot's",
+                not stalled and len(llm_turns) >= 19 and len(ended) == len(llm_turns)
+                and all(x.get("end_reason") for x in ended) and len(hyb_turns) >= 19,
+                json.dumps({"llm_turns": len(llm_turns), "end_reasons": _counts(x.get("end_reason") for x in ended),
+                            "hybrid_turns": len(hyb_turns)}))
+        r.check("each model seat played through its own tool calls: the LLM seat's actions on its turns, the hybrid "
+                "seat's model's in its diplomat phases",
+                bool(acted) and any(t.get("ok") for t in phase_tools),
+                json.dumps({"llm_turns_with_actions": len(acted), "phases": len(phases),
+                            "phase_tools": _counts(f"{t.get('tool')} {'ok' if t.get('ok') else 'refused'}"
+                                                   for t in phase_tools)})[:500])
+        mine = {k: a.chat(nid) for k, nid in chats.items() if nid is not None}
+        rows_of = {k: [(x.get("outcome"), x.get("cause")) for x in negotiations if x.get("nid") == nid]
+                   for k, nid in chats.items()}
+        decided = all(v.get("status") not in (None, "open") for v in mine.values()) and all(rows_of.values())
+        # the model answered, or the chat's rules ended it: the clock (its decline, or a hybrid's bot at the deadline or
+        # when the ticket could not start in the time left), the machine (a refusal; behind a benchmark), or the chat
+        # closing before the answer. A model that failed to answer (its steps used, text in place of the call, an
+        # error: ``fallback``/``failed``) is not one of these
+        wrong = [x for x in negotiations if not _chat_ended_by_rule(x)]
+        by_model = {seat: sum(1 for x in negotiations if x.get("player") == p and x.get("outcome") == "answered")
+                    for seat, p in (("hybrid", 1), ("llm", 2))}
+        r.check("every chat was answered by the model or ended by the chat clock's rule, its cause recorded (none "
+                "failed by the model): alice's two, and every chat answer of the model seats; each model seat's model "
+                "answered at least one by calling its tool",
+                decided and bool(negotiations) and not wrong and all(by_model.values()),
+                json.dumps({"alice": {k: [v.get("status"), rows_of[k]] for k, v in mine.items()},
+                            "answered_by_model": by_model,
+                            "not_by_rule": [{k: x.get(k) for k in ("player", "nid", "outcome", "cause", "steps")}
+                                            for x in wrong],
+                            "outcomes": _counts(f"{x.get('player')} {x.get('outcome')}/{x.get('cause')}"
+                                                for x in negotiations)})[:800])
+        # the generation seconds the scheduler metered (the game's metrics: the LLM seat's turns, the chat answers, the
+        # diplomat phases) against the compute ledger's events for the game on the machine
+        metered = (sum(float(x.get("model_s") or 0.0) for x in llm_turns)
+                   + sum(float(x.get("gen_s") or 0.0) for x in negotiations)
+                   + sum(float(x.get("gen_s") or 0.0) for x in phases))
+        pieces = len(llm_turns) + len(negotiations) + len(phases)
+        # the metrics keep each record's seconds to the millisecond, a turn's summed step by step
+        steps = (sum(int(x.get("model_steps") or 0) for x in llm_turns)
+                 + sum(int(x.get("steps") or 0) for x in negotiations) + sum(int(x.get("steps") or 0) for x in phases))
+        slack = 0.001 * (steps + pieces) + 0.01
+        events = _ledger_rows(state, "SELECT count(*), coalesce(sum(gen_s), 0), coalesce(sum(observed_s), 0), "
+                                     "coalesce(sum(credits), 0) FROM compute_events WHERE machine_id = ? AND "
+                                     "kind = 'gpu' AND activity = ?", (hid, f"game:{gid}"))[0]
+        report_events = _ledger_rows(state, "SELECT count(*), coalesce(sum(gen_s), 0) FROM compute_events WHERE "
+                                            "machine_id = ? AND activity = ?", (hid, f"report:{rid}"))[0]
+        r.check("the ledger's events for the game on the machine add up to the generation seconds the scheduler "
+                "metered in its metrics, and her report's analysis has its events",
+                events[0] > 0 and abs(events[1] - metered) <= slack and report_events[0] >= 1
+                and meta.get("status") == "done" and meta.get("narrative_written") is True,
+                f"metered {metered:.3f} s over {pieces} records ({steps} steps, within {slack:.3f} s); ledger "
+                f"{events[1]:.3f} s over {events[0]} events "
+                f"(observed {events[2]:.1f} s, {events[3]:.2f} credits); report {meta.get('status')}, written "
+                f"{meta.get('narrative_written')}, {report_events[0]} events, {report_events[1]:.2f} s",
+                metered_s=round(metered, 3), ledger_s=round(events[1], 3))
+        after, said_after = lmstudio_model(REAL_URL, REAL_MODEL)
+        r.check("LM Studio still lists the model loaded, as before the part", after, said_after)
+        fallbacks = [{"where": "chat", "nid": x.get("nid"), "player": x.get("player"), "outcome": x.get("outcome"),
+                      "cause": x.get("cause")} for x in negotiations if x.get("outcome") != "answered"]
+        fallbacks += [{"where": "diplomat phase", "turn": x.get("turn"), "outcome": x.get("outcome"),
+                       "cause": x.get("cause")} for x in phases if x.get("outcome") not in ("done",)]
+        # the tool calls the LLM seat made on its turns, and those the game refused (its metrics' turn rows: each
+        # turn's counts and its most used tools)
+        calls_made = {k: sum(int(x.get(k) or 0) for x in llm_turns)
+                      for k in ("tool_calls", "actions_ok", "queries", "errors", "repeats", "malformed")}
+        data.update({
+            "lmstudio": {**data["lmstudio"], "after": said_after}, "seconds": round(time.time() - t0, 1),
+            "progress": progress[-60:],
+            "llm_seat": {"turns": len(llm_turns), "end_reasons": _counts(x.get("end_reason") for x in llm_turns),
+                         "model_s": round(sum(float(x.get("model_s") or 0) for x in llm_turns), 2),
+                         "queue_s": round(sum(float(x.get("queue_s") or 0) for x in llm_turns), 2),
+                         "steps": sum(int(x.get("model_steps") or 0) for x in llm_turns),
+                         "tool_calls": calls_made,
+                         "turn_rows": [{k: x.get(k) for k in ("turn", "wall_s", "model_steps", "model_s", "queue_s",
+                                                              "tool_calls", "actions_ok", "queries", "errors",
+                                                              "top_tools", "end_reason")}
+                                       for x in llm_turns]},
+            "hybrid_seat": {"turns": len(hyb_turns),
+                            "bot_actions": sum(sum(v[0] for v in (x.get("bot_actions") or {}).values())
+                                               for x in hyb_turns),
+                            "phases": [{k: x.get(k) for k in ("turn", "triggers", "steps", "gen_s", "queue_s", "tools",
+                                                              "outcome", "cause", "seconds")} for x in phases],
+                            "refused_calls": refusals},
+            "chats": {"alice": {k: {"id": chats[k], "status": v.get("status"), "rows": rows_of[k],
+                                    "history": [(e.get("by"), e.get("action"), str(e.get("message") or "")[:160],
+                                                 e.get("note")) for e in v.get("history") or []]}
+                                for k, v in mine.items()},
+                      "opened_at": t_chats,
+                      "answers": [{k: x.get(k) for k in ("player", "nid", "outcome", "cause", "seconds", "gen_s",
+                                                         "queue_s", "steps")} for x in negotiations]},
+            "fallbacks": fallbacks,
+            "metered_gen_s": round(metered, 3),
+            "ledger": {"events": events[0], "gen_s": round(events[1], 3), "observed_s": round(events[2], 3),
+                       "credits": round(events[3], 4), "report_events": report_events[0],
+                       "report_gen_s": round(report_events[1], 3)},
+            "report": {"id": rid, "status": meta.get("status"), "written": meta.get("narrative_written"),
+                       "note": meta.get("narrative_note")},
+            "alice": {"turns": len(a.ended), "answered": {str(k): v for k, v in a.answered.items()}}})
+    finally:
+        for d in drivers:
+            d.stop()
+        if gid and not h.keep:
+            try:
+                alice.post(f"/api/games/{gid}/control", json={"paused": True})
+                alice.delete(f"/api/games/{gid}")
+            except httpx.HTTPError:
+                pass
+        if helper is not None:
+            helper.stop()
+
+
+#: How a model seat's chat answer may end other than by its model's answer (the game's metrics, ``outcome`` and
+#: ``cause``; citar/server/chat.py's CAUSES): by the chat clock (declined late; a hybrid seat's bot at the deadline, or
+#: when its model's ticket could not start in the time left), by the machine (a refusal, a benchmark holding it), or
+#: by the chat closing before the answer (``closed``, no cause). ``fallback`` with ``failed`` is the model's failure.
+RULED_ENDINGS = {"declined_late": {"timeout"},
+                 "fallback": {"timeout", "not_started", "queued_behind_benchmark", "refused"}}
+
+
+def _chat_ended_by_rule(row: dict) -> bool:
+    """Whether a chat answer's metrics row was the model's answer or an ending by the chat's rules (``RULED_ENDINGS``)."""
+    outcome, cause = row.get("outcome"), row.get("cause")
+    if outcome in ("answered", "closed"):
+        return cause is None
+    return cause in RULED_ENDINGS.get(outcome, ())
+
+
+def _counts(items) -> dict:
+    """How many of each item (a tally, sorted by item)."""
+    out: dict = {}
+    for x in items:
+        out[str(x)] = out.get(str(x), 0) + 1
+    return dict(sorted(out.items()))
+
+
 #: The parts written so far, in the order ``all`` runs them.
 PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue, "ledger": part_ledger,
                                                "chat": part_chat, "hybrid": part_hybrid, "minimap": part_minimap,
-                                               "machines": part_machines}
+                                               "machines": part_machines, "exit": part_exit, "real": part_real}
 
 
 # ---------------------------------------------------------------------------- the run
 
+#: The runs that make a third member (carol): ``all``, and its ``exit`` part on its own.
+EVERYONE = ("all", "exit")
+#: The game limit ``all`` gives its members: its parts run one after another on one server, and each leaves its games
+#: open (paused, finished, or kept for the browser checklist) where a part on its own server would have gone with it.
+ALL_GAME_LIMIT = 20
+
+
+def raise_game_limits(accounts: dict, report: Report) -> None:
+    """For a run of several parts: alice's and carol's game limit raised to ``ALL_GAME_LIMIT`` by the administrator
+    (bob's is left as it is: the ``accounts`` part sets and checks it, and his games stay under the default)."""
+    admin = accounts["admin"]
+    done = {}
+    for key in ("alice", "carol"):
+        if key not in accounts:
+            continue
+        me = accounts[key].get("/api/auth/me").json().get("user") or {}
+        got = admin.patch(f"/api/admin/users/{me.get('id')}", json={"max_concurrent_games": ALL_GAME_LIMIT})
+        if got.status_code != 200:
+            raise HarnessError(f"could not raise {accounts[key].handle}'s game limit: HTTP {got.status_code} "
+                               f"{got.text[:200]}")
+        done[accounts[key].handle] = ALL_GAME_LIMIT
+    report.note(f"game limits raised for the run of several parts: {done}")
+    report.data.setdefault("server", {})["game_limits"] = done
+
+
 def make_accounts(server: Server, report: Report, everyone: bool) -> dict:
-    """The administrator, two members and a moderator (and a third member for ``all``), made with ``admin_cli
-    create-user`` and signed in. Raises HarnessError when one cannot be made or sign in: no check means anything
-    without them."""
+    """The administrator, two members and a moderator (and a third member for ``all`` and ``exit``), made with
+    ``admin_cli create-user`` and signed in. Raises HarnessError when one cannot be made or sign in: no check means
+    anything without them."""
     password = "qa-" + secrets.token_hex(10)
     wanted = [("admin", "qa-admin", "admin"), ("alice", "qa-alice", "user"), ("bob", "qa-bob", "user"),
               ("mod", "qa-mod", "moderator")] + ([("carol", "qa-carol", "user")] if everyone else [])
@@ -3477,11 +4691,22 @@ def _trace_tail(lines: int = 6) -> str:
     return " | ".join(traceback.format_exc().strip().splitlines()[-lines:])
 
 
+def write_part(folder: Path, run_of: str, name: str, report: Report) -> None:
+    """A part's own evidence in a run of several (``qa-<part>.json``, as a run of that part alone writes it: the
+    browser checklist's scripts read them): its checks only, beside the run's data so far. Written as each part ends,
+    so the checklist can begin on a part while the run goes on, and again with the rest at the end."""
+    mine = report.of(name)
+    (folder / f"qa-{name}.json").write_text(json.dumps(
+        {"part": name, "of": run_of, "ok": bool(mine) and all(c["ok"] for c in mine), "checks": mine, **report.data},
+        indent=2, default=str) + "\n", encoding="utf-8")
+
+
 def run(args) -> tuple:
     """Refuse (Refused, nothing touched), or claim, start, check and stop. Returns the exit code and the report,
     whose evidence ``main`` writes. Once the directory is claimed nothing raises out of here: a harness failure
     (``HarnessError``) or a part that raises is a failed check, and the checks made before it stand."""
-    parts = list(PARTS) if args.part == "all" else [args.part]
+    skip = set(getattr(args, "skip", None) or ())
+    parts = [name for name in PARTS if name not in skip] if args.part == "all" else [args.part]
     state = Path(args.dir).expanduser()
     report = Report(args.part)
     if args.part in LATER:
@@ -3492,6 +4717,8 @@ def run(args) -> tuple:
     # from here on the directory is the harness's: no refusal, every failure a check with its evidence (exit 1)
     state = state.resolve()
     report.data["server"] = {"dir": str(state), "port": port}
+    if args.part == "all" and len(parts) < len(PARTS):
+        report.data["skipped"] = [name for name in PARTS if name not in parts]
     try:
         claim(state)
     except HarnessError as e:
@@ -3509,16 +4736,30 @@ def run(args) -> tuple:
         server.start()
         report.note(f"the server is up at {server.public} (dir {state})")
         report.data["server"]["start_s"] = round(time.perf_counter() - t0, 1)
-        accounts = make_accounts(server, report, args.part == "all")
+        accounts = make_accounts(server, report, args.part in EVERYONE)
+        if len(parts) > 1:
+            raise_game_limits(accounts, report)
         harness = Harness(report, server, accounts, endpoint, keep=args.keep,
                           hold_line=getattr(args, "hold_line", 0.0))
         for name in parts:
             report.note(f"part: {name}")
+            report.current = name
+            began = time.perf_counter()
             try:
                 PARTS[name](harness)
             except Exception:
                 # the checks already made stand; the rest of this part never ran
                 report.check(f"the {name} part ran to its end", False, _trace_tail())
+            report.parts[name] = {"seconds": round(time.perf_counter() - began, 1)}
+            report.current = None
+            if len(parts) > 1:
+                if args.keep and server.proc is not None:
+                    # where the kept server is, for the checklist's scripts that start on this part's file now
+                    report.data["kept"] = {"pid": server.proc.pid, "url": server.public}
+                try:
+                    write_part(state, args.part, name, report)
+                except OSError as e:          # written again at the end; the run goes on
+                    report.note(f"qa-{name}.json could not be written yet ({e})")
         tracebacks = server.tracebacks()
         report.check("no traceback in the server's log", tracebacks == 0, f"{tracebacks} in {server.log}")
     except HarnessError as e:
@@ -3547,6 +4788,9 @@ def main(argv=None) -> int:
     ap.add_argument("--dir", default=str(Path(os.environ.get("TEMP") or "/tmp") / "citar-qa-phase3"),
                     help="the state directory: new, empty, or an earlier run's (it is emptied first)")
     ap.add_argument("--keep", action="store_true", help="leave the server running afterwards (the browser checklist)")
+    ap.add_argument("--skip", action="append", choices=sorted(PARTS), default=[], metavar="PART",
+                    help="all: leave this part out (repeatable; say so when quoting the run, which is then not "
+                         "the whole of all)")
     ap.add_argument("--hold-line", type=float, default=0.0, metavar="SECONDS",
                     help="queue: keep the pooled prompts waiting this long before they are served (the browser "
                          "checklist's C1; the accounts are written to <dir>/qa-hold.json)")
@@ -3556,11 +4800,15 @@ def main(argv=None) -> int:
     except Refused as e:
         print(f"refused: {e}", flush=True)
         return 2
-    summary = {"part": args.part, "ok": code == 0, "checks": report.checks, **report.data}
-    out = Path(report.data["server"]["dir"]) / f"qa-{args.part}.json"
+    summary = {"part": args.part, "ok": code == 0, "parts": report.summary(), "checks": report.checks, **report.data}
+    folder = Path(report.data["server"]["dir"])
+    out = folder / f"qa-{args.part}.json"
     try:
         out.write_text(json.dumps(summary, indent=2, default=str) + "\n", encoding="utf-8")
         where = f"evidence in {out}"
+        if len(report.parts) > 1:
+            for name in report.parts:
+                write_part(folder, args.part, name, report)
     except OSError as e:          # a directory that could not be emptied may not take the file either
         where = f"the evidence could not be written to {out} ({e})"
         code = 1

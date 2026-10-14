@@ -83,7 +83,7 @@ def _fail(exc: M.SettingsError) -> HTTPException:
 
 
 @router.get("/api/machines/{sid}/settings")
-def settings_read(sid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def settings_read(sid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """The machine settings dialog's read of a machine its caller manages."""
     me = require_user(request, p)
     row = _server(s, sid, me, access.MANAGE)
@@ -92,7 +92,7 @@ def settings_read(sid: str, request: Request, p: Principal = Depends(principal),
 
 @router.put("/api/machines/{sid}/settings")
 def settings_change(sid: str, request: Request, body: dict = Body(...), p: Principal = Depends(principal),
-                    s: Session = Depends(get_db)):
+                    s: Session = Depends(get_db, scope="function")):
     """Change a machine's slots, capabilities or modes (any of them; the rest stay)."""
     me = require_user(request, p)
     row = _server(s, sid, me, access.MANAGE)
@@ -110,7 +110,7 @@ def settings_change(sid: str, request: Request, body: dict = Body(...), p: Princ
 
 @router.post("/api/machines/{sid}/hardware/apply")
 def settings_apply(sid: str, request: Request, body: Optional[dict] = Body(None), p: Principal = Depends(principal),
-                   s: Session = Depends(get_db)):
+                   s: Session = Depends(get_db, scope="function")):
     """Copy the machine's last report (its helper's scan, its suggested power figures, its models), whole or by
     section, into its configuration, whatever its modes."""
     me = require_user(request, p)
@@ -130,7 +130,7 @@ def settings_apply(sid: str, request: Request, body: Optional[dict] = Body(None)
 
 @router.put("/api/admin/machines/{sid}/trust")
 def machine_trust(sid: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
-                  s: Session = Depends(get_db)):
+                  s: Session = Depends(get_db, scope="function")):
     """Set a machine's trust tier (administrators; Phase 4 sets it automatically and acts on it)."""
     row = _server(s, sid, me, access.MANAGE)
     if not isinstance(body, dict) or set(body) != {"trust_tier"} or body["trust_tier"] not in TRUST_TIERS:
@@ -154,7 +154,7 @@ def _class(s: Session, class_id, kinds: tuple, what: str) -> str:
 
 @router.put("/api/admin/machines/{sid}/class")
 def machine_class(sid: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
-                  s: Session = Depends(get_db)):
+                  s: Session = Depends(get_db, scope="function")):
     """Pin the hardware classes a machine is priced by, or let them follow its hardware again (administrators). A
     pin names a GPU class and a CPU class (an online API: its API class alone); a class it leaves out is the one the
     machine has now. The compute ledger prices by them from the next event on (``citar admin reprice`` recomputes a

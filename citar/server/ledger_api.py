@@ -47,14 +47,14 @@ def _range(range_: str) -> str:
 
 @router.get("/api/ledger/me")
 def ledger_me(range_: str = Query("30d", alias="range"), me: User = Depends(require_user),
-              s: Session = Depends(get_db)):
+              s: Session = Depends(get_db, scope="function")):
     """The caller's compute (``ledger.breakdown``): given and used, the ratio, where they came from."""
     return ledger.breakdown(s, me, _range(range_))
 
 
 @router.get("/api/users/{handle}/ratio")
 def user_ratio(handle: str, range_: str = Query("30d", alias="range"), p: Principal = Depends(principal),
-               s: Session = Depends(get_db)):
+               s: Session = Depends(get_db, scope="function")):
     """An account's given, used and ratio (``ledger.summary``) when its `ratio` field shows to the caller (P3.2.6:
     `private` by default, so the account itself and administrators; `server` members; `global` anyone); else 404."""
     user = profiles.require_visible(s, handle, p.user, field="ratio")
@@ -143,7 +143,7 @@ def _client(c: HardwareClass, machines: list) -> dict:
 
 
 @router.get("/api/admin/hardware-classes")
-def list_classes(me: User = Depends(require_admin_hidden), s: Session = Depends(get_db)):
+def list_classes(me: User = Depends(require_admin_hidden), s: Session = Depends(get_db, scope="function")):
     """Every class with the machines it prices now (``ledger.class_of``: a pinned class, else the hardware's)."""
     from .. import servers
     rows = list(s.scalars(select(HardwareClass)))
@@ -178,7 +178,7 @@ def _set_default(s: Session, row: HardwareClass) -> None:
 
 @router.post("/api/admin/hardware-classes")
 def create_class(request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """A new class; one marked the default replaces its kind's default."""
     fields = _clean(body)
     row = HardwareClass(**fields, updated_by=me.id)
@@ -195,7 +195,7 @@ def create_class(request: Request, body: dict = Body(...), me: User = Depends(re
 
 @router.put("/api/admin/hardware-classes/{class_id}")
 def update_class(class_id: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Change a class (its kind stays). Its kind always keeps one default: unmarking the default is refused (409);
     mark another class the default instead."""
     row = _one(s, class_id)
@@ -219,7 +219,7 @@ def update_class(class_id: str, request: Request, body: dict = Body(...), me: Us
 
 @router.delete("/api/admin/hardware-classes/{class_id}")
 def delete_class(class_id: str, request: Request, me: User = Depends(require_admin_hidden),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Remove a class that is not its kind's default (409 for the default); the machines it priced fall to the next
     class that fits them, and a machine pinned to it is no longer pinned."""
     row = _one(s, class_id)

@@ -349,6 +349,48 @@ returns the whole registry with schemas (`engine_api.tool_list`).
 
 ---
 
+## Phase 3: people, machines and shared work
+
+0.1.6's server side (`design/phase3-features.md`) in one place; each part has its own section or page.
+
+- **Who may see and do what.** Every game and every kind of job (benchmark suites and runs, probes and probe runs,
+  lab experiments, scenarios, maps, bot profiles, reports) has an owner and a visibility, `private | allowlist | link
+  | server | global` (`citar/auth/access.py`, `citar/items.py`, `owned_items`); [Authorisation](#authorisation)
+  answers every question of it, a caller who may not see a thing gets 404, and a moderator may only unpublish.
+  Profiles have a visibility per field, a members-only directory and an avatar checked by its header; administrators
+  have a users page and an audit log ([ACCOUNTS.md](Design-accounts-and-sharing)). The schema is one fresh Alembic baseline:
+  a database of 0.1.5 is renamed aside at the first start, never changed. A request has one database session
+  (`citar/auth/deps.py`'s `get_db`, taken function-scoped), committed when its route returns and before its answer
+  is sent, so the caller's next request reads what this one changed.
+- **Machines are rows.** The old `config/servers.json` is imported once into the `servers` table under its own ids
+  and renamed; every machine, the server's own, one it dials directly or one a member's helper connects from, is a
+  row on one Servers page. A member's seat names a machine and never describes one (no base URL, key or key
+  variable from a member reaches a provider), the routes that touch the host (its hardware scan, LM Studio, its
+  environment) are an administrator's, and a revoked token, a disabled or a deleted machine drops its helper at once
+  ([WORKERS.md](Workers)). Each machine has its settings (slots, model swaps, LLM on or off, CPU limits for
+  the next helper; hardware, models and power each `auto` or `manual`, the helper's last report always kept), a
+  hardware class and a trust tier (`citar/machine_settings.py`).
+- **Every model call is scheduled.** [The prompt scheduler](#the-prompt-scheduler) gives each machine one queue:
+  leases for seats that play every turn, tickets for pooled prompts (chat answers, a hybrid seat's diplomat, probe
+  answers, report narratives, a machine's test), never more requests than slots, no busy-waiting, a benchmark kept
+  apart, and generation time measured apart from queue time. Admission decides who may use a machine, by task class
+  and purpose (`citar/pool/admission.py`); the scheduler decides when; the Queue page shows it.
+- **The compute ledger** (`citar/ledger.py`) records each model step and each unit of host CPU as an event with a
+  consumer and a provider, priced in credits by the machine's hardware class; a member's given and used, self-use on
+  neither side, roll up by the hour; budgets reserve and settle in credits; costing reads its work from it.
+- **Chat and hybrid seats.** A negotiation is a chat timed by [the chat clock](#chats-the-clock-and-the-responders) and
+  answered by the responders; a [hybrid seat](#hybrid-seats-the-bots-turn-the-models-diplomacy) is a bot that hands the
+  diplomacy categories its seat names to a model, with the bot's veto and fallback. The client docks a chat window
+  per civilization left of End Turn.
+- **The client's payloads.** The recap plays from the journal's `Delta` frames ([The recap's
+  frames](#the-recaps-frames)), a view answers with an ETag (304 when it has not moved), and trade options are fetched
+  when the deal builder opens; a seat's view carries the minimap's block (explored land only, by era).
+- **Checked end to end.** `scripts/qa_phase3.py` runs each feature on a dev server of its own, with real helpers in
+  front of a scripted endpoint, and its `exit` part plays all of it at once (one game of a person, a hybrid seat, an
+  LLM seat, an MCP seat and bots on a shared helper machine, with pooled work, a benchmark beside it and a server
+  killed mid-chat); its `real` part does the same against a real model in LM Studio
+  ([CONTRIBUTING.md](https://github.com/jprodgers/CITAR/blob/main/CONTRIBUTING.md)).
+
 ## The server
 
 | Module | |

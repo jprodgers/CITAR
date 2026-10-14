@@ -479,7 +479,7 @@ class CreateGame(BaseModel):
 
 
 @app.get("/api/games")
-def list_games(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def list_games(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Only the games this caller may see.
 
     Filtered per session rather than by a single query because the live sessions are the source of
@@ -501,7 +501,7 @@ def list_games(request: Request, p: Principal = Depends(principal), sdb: DbSessi
 
 
 @app.get("/api/status")
-def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """A check-in on the whole server, for the phone site's overview.
 
     Everyone signed in sees the games they may see and what the benchmark queue is doing; an
@@ -562,7 +562,7 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
 
 
 @app.get("/api/games/{gid}/summary")
-def game_summary(gid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def game_summary(gid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """One game at a glance, for the phone site: standings, whose turn, what each AI is doing, recent news.
 
     Standings are shown to whoever manages the game, or to anyone once the game is over or has no
@@ -619,7 +619,7 @@ def _seat_label(seat, model: Optional[str]) -> str:
 
 @app.post("/api/games")
 def create_game(body: CreateGame, request: Request,
-                me=Depends(require_cap("create_games")), sdb: DbSession = Depends(get_db)):
+                me=Depends(require_cap("create_games")), sdb: DbSession = Depends(get_db, scope="function")):
     """Create a game and return it, with a seat token for each seat."""
     top = engine_api.max_players()
     if not 1 <= len(body.seats) <= top:
@@ -660,7 +660,7 @@ def create_game(body: CreateGame, request: Request,
 
 @app.get("/api/games/{gid}")
 def game_info(gid: str, request: Request, p: Principal = Depends(principal),
-              sdb: DbSession = Depends(get_db)):
+              sdb: DbSession = Depends(get_db, scope="function")):
     """Seat tokens go only to somebody who may manage the game.
 
     Handing them to every viewer — which is what this did when the server was a single-user LAN
@@ -674,7 +674,7 @@ def game_info(gid: str, request: Request, p: Principal = Depends(principal),
 
 @app.delete("/api/games/{gid}")
 def delete_game(gid: str, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
+                sdb: DbSession = Depends(get_db, scope="function")):
     """Close a game (the lobby's "End game"): its session stops and leaves the list, its saves stay on disk, and its
     row in the games index is `closed` (P3.2.5), or `finished` if it was over, so it no longer counts against its
     owner's game limit and its saves load again. Deleting the saves (``/api/saves/delete`` of the whole game) is what
@@ -700,7 +700,7 @@ class SeatUpdate(BaseModel):
 
 @app.post("/api/games/{gid}/seats/{pid}")
 def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
-                p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+                p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Change who controls a seat (e.g. hand a bot seat to an MCP client, make it a hybrid seat, or take over as human).
 
     A new model block, or a seat made a model seat (an LLM or a hybrid seat), goes through the same gates as a new
@@ -742,7 +742,7 @@ class Control(BaseModel):
 
 @app.post("/api/games/{gid}/control")
 def control(gid: str, body: Control, request: Request, p: Principal = Depends(principal),
-            sdb: DbSession = Depends(get_db)):
+            sdb: DbSession = Depends(get_db, scope="function")):
     """Pause, resume or slow down a game. Chiefly for watching AI players."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     with s.lock:
@@ -789,7 +789,7 @@ def etag_matches(header: Optional[str], tag: str) -> bool:
 
 @app.get("/api/games/{gid}/view")
 def view(gid: str, request: Request, token: Optional[str] = None, as_player: Optional[int] = None,
-         p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+         p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The game as one seat sees it, honouring fog of war.
 
     ``as_player`` is for spectators of AI-only games, who may look through any civilization's eyes -
@@ -846,7 +846,7 @@ class ToolCallBody(BaseModel):
 
 @app.post("/api/games/{gid}/tool")
 def call_tool(gid: str, body: ToolCallBody, request: Request, token: Optional[str] = None,
-              p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+              p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Execute a player tool. The single entry point for every action in the game."""
     s, _row, _perms = _gate(sdb, gid, p, access.PLAY, request, token)
     pid = _seat_pid(s, _token(request, token))
@@ -859,7 +859,7 @@ def call_tool(gid: str, body: ToolCallBody, request: Request, token: Optional[st
 @app.get("/api/games/{gid}/negotiations/{nid}")
 def negotiation_view(gid: str, nid: int, request: Request, token: Optional[str] = None,
                      as_player: Optional[int] = None, p: Principal = Depends(principal),
-                     sdb: DbSession = Depends(get_db)):
+                     sdb: DbSession = Depends(get_db, scope="function")):
     """One chat as a side of it sees it, with where its clock stands (``clock``: whose move, the kind of side,
     ``deadline`` in epoch seconds, ``left_s``, ``paused``): what the chat window opens from the socket's event,
     without waiting for a view refresh (design/phase3-features.md P3.5.6).
@@ -892,7 +892,7 @@ def negotiation_view(gid: str, nid: int, request: Request, token: Optional[str] 
 @app.get("/api/games/{gid}/trade-options/{other}")
 def trade_options(gid: str, other: int, request: Request, token: Optional[str] = None,
                   as_player: Optional[int] = None, p: Principal = Depends(principal),
-                  sdb: DbSession = Depends(get_db)):
+                  sdb: DbSession = Depends(get_db, scope="function")):
     """What a civilization and ``other`` could trade, as the chat window's deal builder offers it (one-click chips:
     what each could give, ``other``'s gold, the agreements both could sign now): the view no longer carries them for
     every civilization met, so the builder fetches them while it is open (design/phase3-features.md P3.5.8).
@@ -919,7 +919,7 @@ def trade_options(gid: str, other: int, request: Request, token: Optional[str] =
 @app.get("/api/games/{gid}/path")
 def path_preview(gid: str, request: Request, unit_id: int, x: int, y: int,
                  token: Optional[str] = None, p: Principal = Depends(principal),
-                 sdb: DbSession = Depends(get_db)):
+                 sdb: DbSession = Depends(get_db, scope="function")):
     """Route preview for the browser: the path a move order would take and how many turns it needs.
     Read-only and not part of the AI tool set."""
     s, _row, _perms = _gate(sdb, gid, p, access.PLAY, request, token)
@@ -930,7 +930,7 @@ def path_preview(gid: str, request: Request, unit_id: int, x: int, y: int,
 
 @app.get("/api/games/{gid}/wait")
 def wait_for_turn(gid: str, request: Request, token: Optional[str] = None, timeout: float = 50.0,
-                  p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+                  p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Long-poll until it is this seat's turn, or a negotiation needs an answer; on its own turn, until
     the other side answers a negotiation it is in (see GameSession.wait_for_turn).
 
@@ -961,7 +961,7 @@ def _debug_enabled() -> None:
 
 @app.post("/api/games/{gid}/debug/ops", dependencies=[Depends(_debug_enabled)])
 def debug_ops(gid: str, request: Request, ops: Any = Body(None), p: Principal = Depends(principal),
-              sdb: DbSession = Depends(get_db)):
+              sdb: DbSession = Depends(get_db, scope="function")):
     """Apply scenario operations to a live game, as the scenario editor applies them to a scenario
     (``EngineGame.apply_ops``: all or nothing; ``GET /api/scenario-ops`` lists them): what a script that talks to a dev
     server over HTTP moves a game on with, such as the QA script giving a seat each era's techs
@@ -993,7 +993,7 @@ def debug_ops(gid: str, request: Request, ops: Any = Body(None), p: Principal = 
 
 @app.post("/api/games/{gid}/debug/{action}", dependencies=[Depends(_debug_enabled)])
 def debug_action(gid: str, action: str, request: Request, p: Principal = Depends(principal),
-                 sdb: DbSession = Depends(get_db)):
+                 sdb: DbSession = Depends(get_db, scope="function")):
     """Developer helpers, only available when the server runs with --debug (``_debug_enabled``, a route dependency).
 
     These hand out gold and reveal the map, so they are gated on managing the game as well as on
@@ -1012,7 +1012,7 @@ def debug_action(gid: str, action: str, request: Request, p: Principal = Depends
 
 @app.get("/api/games/{gid}/metrics")
 def game_metrics(gid: str, request: Request, p: Principal = Depends(principal),
-                 sdb: DbSession = Depends(get_db)):
+                 sdb: DbSession = Depends(get_db, scope="function")):
     """Per-seat, per-turn metrics for a game."""
     s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request)
     with s.lock:
@@ -1021,7 +1021,7 @@ def game_metrics(gid: str, request: Request, p: Principal = Depends(principal),
 
 @app.get("/api/games/{gid}/metrics.csv")
 def game_metrics_csv(gid: str, request: Request, p: Principal = Depends(principal),
-                     sdb: DbSession = Depends(get_db)):
+                     sdb: DbSession = Depends(get_db, scope="function")):
     """The same metrics as CSV, for analysis outside CITAR."""
     import csv
     import io
@@ -1044,7 +1044,7 @@ def game_metrics_csv(gid: str, request: Request, p: Principal = Depends(principa
 
 
 @app.get("/api/metrics/compare")
-def compare_models(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def compare_models(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Aggregate AI metrics per model across running and saved games (latest save per game): an administrator's over
     every game, a member's over their own and the pooled ones (``scoring.viewer_scope``, P3.2.4)."""
     from .scoring import compare_models as compare, viewer_scope
@@ -1053,7 +1053,7 @@ def compare_models(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
 
 @app.get("/api/games/{gid}/debug/errors")
 def errors(gid: str, request: Request, p: Principal = Depends(principal),
-           sdb: DbSession = Depends(get_db)):
+           sdb: DbSession = Depends(get_db, scope="function")):
     """Recent errors from AI seats. The first place to look when a model does nothing.
 
     Gated on managing the game, not just viewing it: these are server tracebacks and the tool
@@ -1193,7 +1193,7 @@ items.VISIBILITY_HOOKS["benchmark_run"] = _run_games_follow
 
 
 @app.get("/api/benchmarks/status")
-def bench_status(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def bench_status(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """What the benchmark scheduler is doing: running jobs, queues, restricted servers. A member's counts and log
     cover the runs they may see, and the machines in their quiet hours those the member may see."""
     return _scheduler().status(items.listed(sdb, "benchmark_run", me), pool.visible_restrictions(sdb, me))
@@ -1212,7 +1212,7 @@ def bench_update_settings(body: dict):
 
 
 @app.get("/api/benchmarks/suites")
-def bench_suites(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def bench_suites(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The saved benchmark suites the caller may see (and the one a share key opens), each with what they may do to
     it."""
     key = _share_key(request)
@@ -1222,7 +1222,7 @@ def bench_suites(request: Request, p: Principal = Depends(principal), sdb: DbSes
 
 
 @app.get("/api/benchmarks/suites/new")
-def bench_new_suite(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def bench_new_suite(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """A blank suite with sensible defaults, for the editor to start from: on the host when its caller may use it,
     else the first machine with models they may (every machine is a row, P3.2.8; a member's suite names only those)."""
     from .benchmarks import normalize_suite
@@ -1239,14 +1239,14 @@ def bench_new_suite(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
 
 
 @app.get("/api/benchmarks/suites/{suite_id}")
-def bench_suite(suite_id: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def bench_suite(suite_id: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """One suite, for whoever may see it."""
     items.require(sdb, "benchmark_suite", suite_id, p.user, access.VIEW, slug=_share_key(request))
     return _bench_call(_scheduler().get_suite, suite_id)
 
 
 @app.post("/api/benchmarks/suites")
-def bench_save_suite(body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def bench_save_suite(body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Create a suite (``run_benchmarks``; it is the caller's) or replace one they manage. Its model entries name
     machines (P3.2.9)."""
     from .benchmarks import normalize_suite
@@ -1266,7 +1266,7 @@ def bench_save_suite(body: dict, me=Depends(require_user), sdb: DbSession = Depe
 
 
 @app.delete("/api/benchmarks/suites/{suite_id}")
-def bench_delete_suite(suite_id: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def bench_delete_suite(suite_id: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Delete a suite the caller manages. Its finished runs are kept."""
     items.require(sdb, "benchmark_suite", suite_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().delete_suite, suite_id)
@@ -1283,7 +1283,7 @@ class RunBody(BaseModel):
 
 @app.post("/api/benchmarks/runs")
 def bench_start_run(body: RunBody, request: Request, me=Depends(require_cap("run_benchmarks")),
-                    sdb: DbSession = Depends(get_db)):
+                    sdb: DbSession = Depends(get_db, scope="function")):
     """Start a benchmark run, the caller's: of a suite they may see, or of one given inline. Every model entry
     passes the members' gate for the caller (P3.2.9), whoever saved the suite, and the caller must be admitted to
     each pooled machine for benchmarks."""
@@ -1307,7 +1307,7 @@ def bench_start_run(body: RunBody, request: Request, me=Depends(require_cap("run
 
 
 @app.get("/api/benchmarks/runs")
-def bench_runs(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def bench_runs(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """The runs the caller may see (and the one a share key opens), with per-game progress and what they may do to
     each."""
     key = _share_key(request)
@@ -1330,7 +1330,7 @@ class RunControl(BaseModel):
 
 @app.post("/api/benchmarks/runs/{run_id}/control")
 def bench_run_control(run_id: str, body: RunControl, request: Request, me=Depends(require_user),
-                      sdb: DbSession = Depends(get_db)):
+                      sdb: DbSession = Depends(get_db, scope="function")):
     """Pause, resume, cancel or remove a whole run the caller manages."""
     items.require(sdb, "benchmark_run", run_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().control_run, run_id, body.action)
@@ -1341,7 +1341,7 @@ def bench_run_control(run_id: str, body: RunControl, request: Request, me=Depend
 
 @app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/control")
 def bench_job_control(run_id: str, job_id: str, body: RunControl, request: Request, me=Depends(require_user),
-                      sdb: DbSession = Depends(get_db)):
+                      sdb: DbSession = Depends(get_db, scope="function")):
     """Pause, resume, skip or retry one game in a run the caller manages."""
     items.require(sdb, "benchmark_run", run_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().control_job, run_id, job_id, body.action)
@@ -1350,7 +1350,7 @@ def bench_job_control(run_id: str, job_id: str, body: RunControl, request: Reque
 
 @app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/watch")
 def bench_job_watch(run_id: str, job_id: str, request: Request, me=Depends(require_user),
-                    sdb: DbSession = Depends(get_db)):
+                    sdb: DbSession = Depends(get_db, scope="function")):
     """Open a benchmark game so it can be watched live, for whoever may see its run. Opening one that is not
     running loads it on the server, which is why this needs an account as well as the run's VIEW."""
     items.require(sdb, "benchmark_run", run_id, me, access.VIEW, slug=_share_key(request))
@@ -1377,7 +1377,7 @@ def _with_perms(sdb: DbSession, kind: str, user, entries: list, key: str = "id",
 
 
 @app.get("/api/maps")
-def maps_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def maps_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The saved maps the caller may see (and the one a share key opens)."""
     key = _share_key(request)
     seen = items.listed(sdb, "map", p.user, slug=key)
@@ -1386,14 +1386,14 @@ def maps_list(request: Request, p: Principal = Depends(principal), sdb: DbSessio
 
 
 @app.get("/api/maps/{map_id}")
-def maps_get(map_id: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def maps_get(map_id: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """One saved map, for whoever may see it."""
     items.require(sdb, "map", map_id, p.user, access.VIEW, slug=_share_key(request))
     return _map_call(engine_api.load_map, map_id)
 
 
 @app.put("/api/maps/{map_id}")
-def maps_put(map_id: str, body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def maps_put(map_id: str, body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Create a map (``create_games``; it is the caller's) or replace one the caller manages. The id it is saved under
     is checked before anything is written."""
     ref = engine_api.map_ref(map_id)
@@ -1408,7 +1408,7 @@ def maps_put(map_id: str, body: dict, me=Depends(require_user), sdb: DbSession =
 
 
 @app.delete("/api/maps/{map_id}")
-def maps_delete(map_id: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def maps_delete(map_id: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Delete a saved map the caller manages."""
     items.require(sdb, "map", map_id, me, access.MANAGE, slug=_share_key(request))
     _map_call(engine_api.delete_map, map_id)
@@ -1457,7 +1457,7 @@ def maps_generate(body: MapGenBody):
 
 @app.post("/api/games/{gid}/export_map")
 def maps_from_game(gid: str, request: Request, p: Principal = Depends(principal),
-                   sdb: DbSession = Depends(get_db)):
+                   sdb: DbSession = Depends(get_db, scope="function")):
     """Extract the terrain of a game as a reusable map.
 
     Gated on VIEW: the map is the shape of somebody's game world, and handing it to a stranger
@@ -1528,7 +1528,7 @@ class EditorOpen(BaseModel):
 
 @app.post("/api/scenario-editor")
 def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
+                sdb: DbSession = Depends(get_db, scope="function")):
     """Open a scenario editor and return its id: the caller's (``create_games``), on a map or a scenario they may
     see. An editor opened on a live game or a save holds that game's whole state, every civilization's included, so
     it needs what the game's god view does not: managing the game."""
@@ -1692,7 +1692,7 @@ def _scenario_seat(seat: dict, i: int, sent=None) -> dict:
 
 
 @app.post("/api/scenario-editor/{eid}/save")
-def editor_save(eid: str, body: EditorMeta, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def editor_save(eid: str, body: EditorMeta, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Save the scenario being edited: a new scenario is the caller's (``create_games``), and one already saved under
     that id needs MANAGE on it, both checked before anything is written. Every seat's model block passes the members'
     gate (P3.2.9), the ones it was opened with included: a scenario saved by an administrator with a seat that
@@ -1739,7 +1739,7 @@ def scenario_ops_help():
 
 
 @app.get("/api/scenarios")
-def scenarios_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def scenarios_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The saved scenarios the caller may see (and the one a share key opens)."""
     key = _share_key(request)
     seen = items.listed(sdb, "scenario", p.user, slug=key)
@@ -1748,7 +1748,7 @@ def scenarios_list(request: Request, p: Principal = Depends(principal), sdb: DbS
 
 
 @app.get("/api/scenarios/{sid}")
-def scenarios_get(sid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def scenarios_get(sid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """One scenario, for whoever may see it."""
     items.require(sdb, "scenario", sid, p.user, access.VIEW, slug=_share_key(request))
     try:
@@ -1758,7 +1758,7 @@ def scenarios_get(sid: str, request: Request, p: Principal = Depends(principal),
 
 
 @app.delete("/api/scenarios/{sid}")
-def scenarios_delete(sid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def scenarios_delete(sid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Delete a scenario the caller manages."""
     items.require(sdb, "scenario", sid, me, access.MANAGE, slug=_share_key(request))
     try:
@@ -1777,7 +1777,7 @@ class LaunchBody(BaseModel):
 
 @app.post("/api/scenarios/{sid}/launch")
 def scenarios_launch(sid: str, body: LaunchBody, request: Request, me=Depends(require_cap("create_games")),
-                     sdb: DbSession = Depends(get_db)):
+                     sdb: DbSession = Depends(get_db, scope="function")):
     """Start a playable game from a saved scenario the caller may see, as the caller's lobby game: it counts against
     their game limit, it has its row in the games index with them as its owner, and every seat's model block, the
     scenario's own included, passes the members' gate (P3.2.9) and admission before anything starts."""
@@ -1848,7 +1848,7 @@ def _probe_scenario(sdb: DbSession, user, data) -> None:
 
 
 @app.get("/api/probes")
-def probes_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def probes_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The saved probes the caller may see (and the one a share key opens)."""
     from .. import probes as P
     key = _share_key(request)
@@ -1865,7 +1865,7 @@ def probes_example(scenario: str, subject: int = 1, counterparty: int = 0):
 
 
 @app.get("/api/probes/{pid}")
-def probes_get(pid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def probes_get(pid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """One probe, for whoever may see it."""
     from .. import probes as P
     items.require(sdb, "probe", pid, p.user, access.VIEW, slug=_share_key(request))
@@ -1873,7 +1873,7 @@ def probes_get(pid: str, request: Request, p: Principal = Depends(principal), sd
 
 
 @app.put("/api/probes/{pid}")
-def probes_put(pid: str, body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def probes_put(pid: str, body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Create a probe (``run_probes``; it is the caller's) or replace one the caller manages, on a scenario they may
     see. The id it is saved under is checked before anything is written."""
     from .. import probes as P
@@ -1888,7 +1888,7 @@ def probes_put(pid: str, body: dict, me=Depends(require_user), sdb: DbSession = 
 
 
 @app.post("/api/probes/validate")
-def probes_validate(body: dict, me=Depends(require_cap("run_probes")), sdb: DbSession = Depends(get_db)):
+def probes_validate(body: dict, me=Depends(require_cap("run_probes")), sdb: DbSession = Depends(get_db, scope="function")):
     """Check a probe's cases against its scenario, one the caller may see, without running them."""
     from .. import probes as P
     _probe_scenario(sdb, me, body)
@@ -1896,7 +1896,7 @@ def probes_validate(body: dict, me=Depends(require_cap("run_probes")), sdb: DbSe
 
 
 @app.delete("/api/probes/{pid}")
-def probes_delete(pid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def probes_delete(pid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Delete a probe the caller manages."""
     from .. import probes as P
     items.require(sdb, "probe", pid, me, access.MANAGE, slug=_share_key(request))
@@ -1943,7 +1943,7 @@ def _probe_subject(sdb: DbSession, user, llm, purposes=("probe",)) -> dict:
 
 @app.post("/api/probes/{pid}/run")
 def probes_run(pid: str, body: ProbeRunBody, request: Request, me=Depends(require_cap("run_probes")),
-               sdb: DbSession = Depends(get_db)):
+               sdb: DbSession = Depends(get_db, scope="function")):
     """Run a probe the caller may see: every case, from the same starting state, against one model. The run is the
     caller's, and its subject passes the members' gate."""
     from .. import probes as P
@@ -1976,7 +1976,7 @@ def _probe_status(sdb: DbSession, user, runner) -> dict:
 
 
 @app.get("/api/probe-runs")
-def probe_runs(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def probe_runs(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The probe runs the caller may see (and the one a share key opens)."""
     runner = _probes()
     key = _share_key(request)
@@ -1993,7 +1993,7 @@ def probe_runs(request: Request, p: Principal = Depends(principal), sdb: DbSessi
 
 
 @app.get("/api/probe-runs/{rid}")
-def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """One probe run, with per-case results, for whoever may see it."""
     runner = _probes()
     _row, perms = items.require(sdb, "probe_run", rid, p.user, access.VIEW, slug=_share_key(request))
@@ -2009,14 +2009,14 @@ def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb
 
 
 @app.post("/api/probe-runs/{rid}/stop")
-def probe_run_stop(rid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def probe_run_stop(rid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Stop a probe run in progress that the caller manages."""
     items.require(sdb, "probe_run", rid, me, access.MANAGE, slug=_share_key(request))
     return _probe_call(_probes().stop, rid)
 
 
 @app.delete("/api/probe-runs/{rid}")
-def probe_run_delete(rid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def probe_run_delete(rid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Delete a probe run the caller manages."""
     items.require(sdb, "probe_run", rid, me, access.MANAGE, slug=_share_key(request))
     _probe_call(_probes().delete, rid)
@@ -2026,7 +2026,7 @@ def probe_run_delete(rid: str, request: Request, me=Depends(require_user), sdb: 
 
 @app.post("/api/probe-runs/{rid}/open/{case}/{rep}")
 def probe_run_open(rid: str, case: str, rep: int, request: Request, me=Depends(require_user),
-                   sdb: DbSession = Depends(get_db)):
+                   sdb: DbSession = Depends(get_db, scope="function")):
     """Opens the saved end state of one case as a (paused) game for inspection, for whoever may see the run: the
     game is the run's owner's, at the run's visibility. Opening it loads it on the server, which is why this needs an
     account as well as the run's VIEW."""
@@ -2047,7 +2047,7 @@ def probe_run_open(rid: str, case: str, rep: int, request: Request, me=Depends(r
 # the lab and the work queue
 # ----------------------------------------------------------------------------
 @app.get("/api/lab")
-def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """What the bot lab is doing: runner health, experiments, per-game progress and the log. A member sees the
     experiments they may see; the log and the side runs, which name every experiment and the server's own jobs,
     are an administrator's."""
@@ -2090,7 +2090,7 @@ def _queue_entry(sdb: DbSession, user, it: dict, cache: dict, name=None) -> dict
 
 
 @app.get("/api/queue")
-def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Everything waiting to run, in the order it will run (P3.3.8).
 
     Only the machines the caller may view (their own, those their grants reach, every one for an administrator), each
@@ -2192,7 +2192,7 @@ class PriorityBody(BaseModel):
 
 
 @app.post("/api/queue/priority")
-def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Move work up or down the queue: the caller's own work, or work they manage (P3.2.4). A game is managed
     through its row in the games index. The work's pooled prompts follow it (P3.3.3: a ticket's priority is its
     class's base plus its work's)."""
@@ -2223,7 +2223,7 @@ def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSes
 
 
 @app.post("/api/queue/tickets/{tid}/cancel")
-def work_queue_cancel(tid: str, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def work_queue_cancel(tid: str, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Cancel a pooled prompt (P3.3.8): its work's owner (MANAGE on it; for a prompt of no work, the member it is
     for), the machine's owner and administrators. Somebody who may see the prompt but none of those gets 403; anybody
     else 404, as for a prompt that is not there. A queued prompt leaves the queue; a running one is abandoned, its
@@ -2248,7 +2248,7 @@ def work_queue_cancel(tid: str, me=Depends(require_user), sdb: DbSession = Depen
 
 
 @app.get("/api/lab/report/{name}")
-def lab_report(name: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def lab_report(name: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The results of one lab experiment, for whoever may see it."""
     from .. import lab
     items.require(sdb, "lab_experiment", name, p.user, access.VIEW, slug=_share_key(request))
@@ -2258,7 +2258,7 @@ def lab_report(name: str, request: Request, p: Principal = Depends(principal), s
 
 
 @app.get("/api/models/scores")
-def models_scores(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def models_scores(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """Every model's overall score and its components, over the games the caller's figures may use (as
     ``/api/metrics/compare``)."""
     from .scoring import model_scores, viewer_scope
@@ -2266,7 +2266,7 @@ def models_scores(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
 
 
 @app.get("/api/models/diplomacy")
-def models_diplomacy(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def models_diplomacy(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """The diplomacy leaderboard (design/phase3-features.md P3.6.10): per model and owners preset, the pairs of hybrid
     benchmark jobs and their control games, from the runs the caller may see, a member's under the pooling rules
     (``diplomacy_stats.board``): their own pairs and the pooled ones, another member's part of a line only when enough
@@ -2282,7 +2282,7 @@ def models_diplomacy(me=Depends(require_user), sdb: DbSession = Depends(get_db))
 # ----------------------------------------------------------------------------
 @app.get("/api/games/{gid}/replay")
 def replay(gid: str, request: Request, token: Optional[str] = None,
-           p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+           p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The whole game, turn by turn, for the recap.
 
     Gated on viewing the game, like everything else about it: a finished private game is still
@@ -2316,7 +2316,7 @@ class SaveBody(BaseModel):
 
 @app.post("/api/games/{gid}/save")
 def save_game(gid: str, body: SaveBody, request: Request, p: Principal = Depends(principal),
-              sdb: DbSession = Depends(get_db)):
+              sdb: DbSession = Depends(get_db, scope="function")):
     """Write a named save beside the autosaves."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     path = s.save(body.name)
@@ -2324,17 +2324,22 @@ def save_game(gid: str, body: SaveBody, request: Request, p: Principal = Depends
 
 
 @app.get("/api/saves")
-def list_saves(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def list_saves(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Saves belonging to games this caller may see.
 
     A save on disk has no owner of its own; it inherits the visibility of the game it came from.
-    A save whose game has no index row is shown only to administrators.
+    A save whose game has no index row is shown only to administrators. Each entry says whether the caller may load
+    or delete it (``can_manage``: both routes require ``MANAGE`` on its game, ``_require_save_access``), so the lobby
+    offers those buttons only on the caller's own games and those shared with them to manage.
     """
     allowed = ownership.visible_ids(sdb, p.user)
     saves = manager.list_saves()
     if allowed is None:
-        return saves
-    return [entry for entry in saves if (entry.get("game_id") or entry.get("id")) in allowed]
+        # an administrator, who manages every game, those without an index row included
+        return [{**entry, "can_manage": True} for entry in saves]
+    shown = [entry for entry in saves if (entry.get("game_id") or entry.get("id")) in allowed]
+    managed = ownership.manageable_ids(sdb, p.user, {entry.get("game_id") or entry.get("id") for entry in shown})
+    return [{**entry, "can_manage": (entry.get("game_id") or entry.get("id")) in managed} for entry in shown]
 
 
 class LoadBody(BaseModel):
@@ -2350,7 +2355,7 @@ class DeleteSaveBody(BaseModel):
 
 @app.post("/api/saves/delete")
 def delete_save(body: DeleteSaveBody, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
+                sdb: DbSession = Depends(get_db, scope="function")):
     """Delete a save, or every save of its game. A game none of whose saves are left, and that is not open, is
     deleted from the games index too."""
     _csrf(request, p)
@@ -2367,7 +2372,7 @@ def delete_save(body: DeleteSaveBody, request: Request, p: Principal = Depends(p
 
 @app.post("/api/saves/load")
 def load_save(body: LoadBody, request: Request, p: Principal = Depends(principal),
-              sdb: DbSession = Depends(get_db)):
+              sdb: DbSession = Depends(get_db, scope="function")):
     """Load a save into a live session.
 
     Games with AI seats start paused, so their model configuration can be checked before anything
@@ -2427,7 +2432,7 @@ class ShareBody(BaseModel):
 
 @app.get("/api/games/{gid}/sharing")
 def get_sharing(gid: str, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
+                sdb: DbSession = Depends(get_db, scope="function")):
     """Who can see this game, and by what link; for whoever manages it, also who it is shared with and the last
     unpublish (who took it down, when and why)."""
     s, row, perms = _gate(sdb, gid, p, access.VIEW, request)
@@ -2445,7 +2450,7 @@ class UnpublishBody(BaseModel):
 
 @app.post("/api/games/{gid}/unpublish")
 def unpublish_game(gid: str, body: UnpublishBody, request: Request, p: Principal = Depends(principal),
-                   sdb: DbSession = Depends(get_db)):
+                   sdb: DbSession = Depends(get_db, scope="function")):
     """Take a game down (P3.2.3): it becomes private, its share link is rotated so every copy of it dies, and the
     audit log keeps who did it and why, which its owner sees. For a moderator on a game published to the internet
     (or a link they were given), and for whoever manages it; nothing else of the game is a moderator's to touch."""
@@ -2461,7 +2466,7 @@ def unpublish_game(gid: str, body: UnpublishBody, request: Request, p: Principal
 
 @app.put("/api/games/{gid}/sharing")
 def set_sharing(gid: str, body: ShareBody, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
+                sdb: DbSession = Depends(get_db, scope="function")):
     """Change a game's visibility."""
     s, row, perms = _gate(sdb, gid, p, access.MANAGE, request)
     if row is None:
@@ -2487,7 +2492,7 @@ class ShareWithBody(BaseModel):
 
 @app.post("/api/games/{gid}/sharing/users")
 def share_with_user(gid: str, body: ShareWithBody, request: Request,
-                    p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+                    p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Share a game with one account."""
     from ..auth import accounts as _accounts
     s, row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
@@ -2502,7 +2507,7 @@ def share_with_user(gid: str, body: ShareWithBody, request: Request,
 
 @app.delete("/api/games/{gid}/sharing/users/{handle}")
 def unshare_with_user(gid: str, handle: str, request: Request,
-                      p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+                      p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Stop sharing a game with an account."""
     from ..auth import accounts as _accounts
     s, row, _perms = _gate(sdb, gid, p, access.MANAGE, request)

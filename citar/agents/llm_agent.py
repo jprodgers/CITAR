@@ -28,8 +28,8 @@ from typing import Optional
 
 from .. import engine_api
 from ..server.metrics import call_signature, ACTION_REPEAT_EXEMPT
-from .prompts import (system_prompt, TURN_START, FIRST_TURN_NOTE, chat_system_prompt, CHAT_PROMPT, CHAT_UPDATE,
-                      entry_text, late_note, proposal_text, time_left_text)
+from .prompts import (system_prompt, TURN_START, FIRST_TURN_NOTE, chat_system_prompt, CHAT_ANSWER, CHAT_PROMPT,
+                      CHAT_UPDATE, entry_text, late_note, proposal_text, time_left_text)
 from .providers import make_conversation
 
 #: The tools of a chat's conversation (P3.5.3): enough to look up what an answer needs and to answer.
@@ -865,11 +865,17 @@ class ChatThread:
     An exchange runs up to ``max_negotiation_calls`` steps on the seat's binding (its lease; a probe's ticket), with the
     tools of ``CHAT_TOOLS``, and stops when the chat moves. Its outcome (``exchange``): ``answered`` (the model answered
     it), ``moved`` (it no longer waits on the seat: answered or closed by somebody else), ``unanswered`` (the model
-    used its steps without answering), ``failed`` (the model could not be asked: an error, a machine's refusal),
+    used its steps without answering, or took ``SILENT_STEPS`` in a row without calling a tool, a step cut off at its
+    token limit not counted), ``failed`` (the model could not be asked: an error, a machine's refusal),
     ``cancelled`` (the seat halted, or the chat clock's deadline came: ``cancel``) or ``paused`` (the game paused for
     its machine, or loaded and not yet resumed, before the model was asked, ``GameSession.answers_held``: it answers
     when the game resumes). The session declines only ``unanswered`` and ``failed`` ones ("(no response)"); a slow
     answer is the chat clock's to decline."""
+
+    #: Steps in a row without a tool call after which an exchange stops, unanswered, as a turn does after its third
+    #: nudge (``play_turn``): a model that writes its answer as text keeps doing so (the exit QA's small model did for
+    #: all twenty steps of three answers, holding its machine some two minutes each), and every step holds the machine.
+    SILENT_STEPS = 3
 
     def __init__(self, agent: LLMAgent, nid: int):
         self.agent = agent
@@ -988,7 +994,7 @@ class ChatThread:
             # so itself when each step has its slot)
             session.chat.answer_status(self.nid, pid, {"state": "thinking"})
         a._active.add(conv)
-        steps = calls = 0
+        steps = calls = silent = 0
         gen_s = queue_s = 0.0
         t0 = time.perf_counter()
         before = dict(getattr(conv, "usage", {}) or {})
@@ -1021,10 +1027,17 @@ class ChatThread:
                 a._thought(session, pid, step.thinking, "thinking")
                 a._thought(session, pid, step.text, "diplomacy")
                 if not step.tool_calls:
-                    conv.add_user_text("Answer with respond_negotiation (accept, reject, counter or reply), with a "
-                                       "message.")
+                    if step.stop_reason == "max_tokens":
+                        # cut off mid-thought, as a turn's step may be: not a silent answer (the turn's rule); such
+                        # steps stay bounded by max_negotiation_calls
+                        continue
+                    silent += 1
+                    if silent >= self.SILENT_STEPS:
+                        break               # unanswered: declined "(no response)" (below, and the session)
+                    conv.add_user_text(CHAT_ANSWER)
                     self._unanswered = True
                     continue
+                silent = 0
                 results = []
                 for c in step.tool_calls:
                     res = a.chat_call(session, pid, c.name, c.args)

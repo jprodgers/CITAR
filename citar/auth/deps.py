@@ -34,7 +34,14 @@ log = logging.getLogger("citar.deps")
 
 
 def get_db() -> Iterator[Session]:
-    """A database session for the request, shared by every dependency in it."""
+    """A database session for the request, shared by every dependency in it.
+
+    Always taken as ``Depends(get_db, scope="function")``: its commit then runs when the route returns, before the
+    answer is sent. FastAPI's default for a dependency with ``yield`` (``scope="request"``) runs it after the response
+    has gone, so a caller's next request could read what the last one changed as it stood before (3-19's QA: a share
+    link just rotated still opened the game), and a commit that failed did so after a 200. One scope everywhere also
+    keeps one session per request: FastAPI caches a dependency per scope. ``test_access.test_every_route_commits_
+    before_it_answers`` holds every route to it."""
     with db.session() as s:
         yield s
 
@@ -71,7 +78,7 @@ class Principal:
         }
 
 
-def principal(request: Request, response: Response, s: Session = Depends(get_db)) -> Principal:
+def principal(request: Request, response: Response, s: Session = Depends(get_db, scope="function")) -> Principal:
     """Resolve the caller. Never raises — routes that need an account ask for `require_user`."""
     ip = ratelimit.client_ip(request)
     # Nothing is flushed while the caller is resolved, so what it changes (a sign-in's last_seen_at,

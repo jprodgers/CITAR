@@ -1,6 +1,6 @@
 # Known issues and limitations
 
-What is broken, missing or misleading in 0.1.5. Written plainly, because finding this out after
+What is broken, missing or misleading in 0.1.6. Written plainly, because finding this out after
 installing something is worse than reading it first.
 
 ---
@@ -86,6 +86,46 @@ billing anywhere in CITAR and none is planned.
 
 **Self-hosted mail is not covered.** CITAR sends through an SMTP relay you provide. Running your
 own mail server is out of scope.
+
+**A restart costs the round in progress.** A game's autosave is taken as each round begins, so a
+game the server brings back after a crash, a kill or a power cut resumes at the start of the round
+it was in: that round's moves, chats and deals are gone, unless a save was taken during it (a seat
+change saves at once). A chat that was in the save is answered again after the restart, with its
+time counted afresh.
+
+---
+
+## Shared machines (new in 0.1.6)
+
+**A cancelled request still runs on a helper.** The 0.1.5 helper does not stop a request the server
+cancels (a chat whose time ran out, a test given up, a benchmark taking the machine), so its slot
+stays taken until the helper's late answer, and the machine's next request waits for it (the Queue
+page calls it draining). The helper of the next release stops it.
+
+**CPU sharing waits for the next helper.** The machine settings dialog keeps a machine's CPU limits
+(threads, CPU share, memory, the kinds of work), but nothing runs CPU work on members' machines yet.
+
+**A group's visibility shares nothing yet.** A group's machines are listed and lent through its
+grants only; making a group visible to members or published lists nothing more.
+
+**A machine in its quiet hours still says "available to you now"** on the Servers page: that line
+is about grants, and the quiet hours pause work separately.
+
+**An administrator who makes a pending account active does not mark its email verified.**
+
+**What a game's watchers can read.** Anyone who may watch a game reads each model seat's provider
+settings in its metrics (a member's seat names a machine, so for them that is a machine id and a
+model; an administrator's inline block shows its address) and the seats' last errors in the game's
+details.
+
+**A probe run shared more widely than its scenario** lets those it is shared with open its cases'
+end states, which show the scenario's map.
+
+**A plain bot seat in a scenario saved from a running game** keeps no bot profile: it plays the
+default bot.
+
+**The full site's top navigation does not fit a phone-sized window** (phones get the check-in
+site, which is unaffected).
 
 ---
 

@@ -47,7 +47,7 @@ def public_report_row(s: Session, key: str):
 
 
 @router.get("/r/{slug}", response_class=HTMLResponse)
-def public_report(slug: str, s: Session = Depends(get_db)):
+def public_report(slug: str, s: Session = Depends(get_db, scope="function")):
     """A published report, readable without an account: a `global` one by its id or share key, a `link` one by its
     share key (P3.2.4); 404 for anything else.
 
@@ -95,7 +95,7 @@ def public_report(slug: str, s: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------- pooling
 
 @router.get("/api/shared/pooling")
-def pooling(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def pooling(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """What the pool contains, and what this account contributes to it."""
     me = require_user(request, p)
     summary = aggregate.summarize_sharing(s)
@@ -123,7 +123,7 @@ class PoolingBody(BaseModel):
 
 @router.put("/api/shared/pooling")
 def set_pooling(body: PoolingBody, request: Request, p: Principal = Depends(principal),
-                s: Session = Depends(get_db)):
+                s: Session = Depends(get_db, scope="function")):
     """Opt this account's data in or out of pooling.
 
     Opting out is retroactive: the account's history leaves everybody else's averages too, which is
@@ -151,7 +151,7 @@ class ApplyAllBody(BaseModel):
 
 @router.post("/api/shared/pooling/apply-to-all")
 def apply_to_all(body: ApplyAllBody, request: Request, p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Set every one of this account's games to the same sharing mode.
 
     Separate from changing the default on purpose: "from now on" and "everything I have ever done"
