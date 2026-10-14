@@ -222,6 +222,35 @@ class Responders(Case):
         self.assertEqual([(x["player"], x["outcome"], x["cause"]) for x in rows], [(1, "answered", None)])
         self.assertNotIn(nid, s.agents[1]._threads, "the closed chat's conversation was let go")
 
+    def test_a_model_that_answers_in_text_three_times_running_is_declined_for_then(self):
+        """A model that writes its answer as text, never calling a tool, is asked three times (the turn's own rule
+        for nudges), not its twenty steps, and the chat is declined "(no response)" with the exchange's row: the exit
+        QA's small model held its machine two minutes an answer this way. A step with a tool call starts the count
+        again."""
+        class Silent(Recording):
+            steps = 0
+            looked = 0
+
+            def step(self):
+                type(self).steps += 1
+                # one look up between the second and third silent steps: the count starts again after it
+                if type(self).steps == 3:
+                    type(self).looked += 1
+                    return StepResult(text="looking", tool_calls=[ToolCall("g", "get_empire", {})])
+                return StepResult(text="I accept your offer, friend.")
+        with mock.patch("citar.agents.llm_agent.make_conversation", Silent):
+            s = self.game([{"type": "human"}, self.model(1)])
+            nid = self.open(s, 0, 1, "Maps?")
+            s.dispatch_waiting()
+            self.assertTrue(until(lambda: s.game.negotiation_head(nid)["status"] != "open", 15),
+                            s.game.negotiation(nid))
+        n = s.game.negotiation(nid)
+        self.assertEqual(n["history"][-1]["message"], "(no response)")
+        self.assertEqual((Silent.steps, Silent.looked), (2 + 1 + 3, 1),
+                         "two silent steps, a look up, then three more: the third in a row ends it")
+        rows = [(x["outcome"], x["cause"], x["steps"]) for x in s.metrics.data["negotiations"] if x["nid"] == nid]
+        self.assertEqual(rows, [("fallback", "failed", 6)])
+
     def test_a_bot_answers_at_once_while_sixteen_model_answers_wait_for_a_one_slot_machine(self):
         responders.reset()
         self.addCleanup(responders.reset)
