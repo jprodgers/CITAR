@@ -4496,6 +4496,10 @@ def part_real(h: Harness) -> None:
                    + sum(float(x.get("gen_s") or 0.0) for x in negotiations)
                    + sum(float(x.get("gen_s") or 0.0) for x in phases))
         pieces = len(llm_turns) + len(negotiations) + len(phases)
+        # the metrics keep each record's seconds to the millisecond, a turn's summed step by step
+        steps = (sum(int(x.get("model_steps") or 0) for x in llm_turns)
+                 + sum(int(x.get("steps") or 0) for x in negotiations) + sum(int(x.get("steps") or 0) for x in phases))
+        slack = 0.001 * (steps + pieces) + 0.01
         events = _ledger_rows(state, "SELECT count(*), coalesce(sum(gen_s), 0), coalesce(sum(observed_s), 0), "
                                      "coalesce(sum(credits), 0) FROM compute_events WHERE machine_id = ? AND "
                                      "kind = 'gpu' AND activity = ?", (hid, f"game:{gid}"))[0]
@@ -4503,9 +4507,10 @@ def part_real(h: Harness) -> None:
                                             "machine_id = ? AND activity = ?", (hid, f"report:{rid}"))[0]
         r.check("the ledger's events for the game on the machine add up to the generation seconds the scheduler "
                 "metered in its metrics, and her report's analysis has its events",
-                events[0] > 0 and abs(events[1] - metered) <= 0.002 * pieces + 0.01 and report_events[0] >= 1
+                events[0] > 0 and abs(events[1] - metered) <= slack and report_events[0] >= 1
                 and meta.get("status") == "done" and meta.get("narrative_written") is True,
-                f"metered {metered:.3f} s over {pieces} records; ledger {events[1]:.3f} s over {events[0]} events "
+                f"metered {metered:.3f} s over {pieces} records ({steps} steps, within {slack:.3f} s); ledger "
+                f"{events[1]:.3f} s over {events[0]} events "
                 f"(observed {events[2]:.1f} s, {events[3]:.2f} credits); report {meta.get('status')}, written "
                 f"{meta.get('narrative_written')}, {report_events[0]} events, {report_events[1]:.2f} s",
                 metered_s=round(metered, 3), ledger_s=round(events[1], 3))
@@ -4653,7 +4658,8 @@ def run(args) -> tuple:
     """Refuse (Refused, nothing touched), or claim, start, check and stop. Returns the exit code and the report,
     whose evidence ``main`` writes. Once the directory is claimed nothing raises out of here: a harness failure
     (``HarnessError``) or a part that raises is a failed check, and the checks made before it stand."""
-    parts = list(PARTS) if args.part == "all" else [args.part]
+    skip = set(getattr(args, "skip", None) or ())
+    parts = [name for name in PARTS if name not in skip] if args.part == "all" else [args.part]
     state = Path(args.dir).expanduser()
     report = Report(args.part)
     if args.part in LATER:
@@ -4664,6 +4670,8 @@ def run(args) -> tuple:
     # from here on the directory is the harness's: no refusal, every failure a check with its evidence (exit 1)
     state = state.resolve()
     report.data["server"] = {"dir": str(state), "port": port}
+    if args.part == "all" and len(parts) < len(PARTS):
+        report.data["skipped"] = [name for name in PARTS if name not in parts]
     try:
         claim(state)
     except HarnessError as e:
@@ -4730,6 +4738,9 @@ def main(argv=None) -> int:
     ap.add_argument("--dir", default=str(Path(os.environ.get("TEMP") or "/tmp") / "citar-qa-phase3"),
                     help="the state directory: new, empty, or an earlier run's (it is emptied first)")
     ap.add_argument("--keep", action="store_true", help="leave the server running afterwards (the browser checklist)")
+    ap.add_argument("--skip", action="append", choices=sorted(PARTS), default=[], metavar="PART",
+                    help="all: leave this part out (repeatable; say so when quoting the run, which is then not "
+                         "the whole of all)")
     ap.add_argument("--hold-line", type=float, default=0.0, metavar="SECONDS",
                     help="queue: keep the pooled prompts waiting this long before they are served (the browser "
                          "checklist's C1; the accounts are written to <dir>/qa-hold.json)")
