@@ -265,6 +265,25 @@ def visible_ids(session, viewer: Optional[User]) -> Optional[set]:
     return set(rows)
 
 
+#: How many ids go in one ``IN (...)`` (SQLite's older builds allow 999 parameters in a statement).
+_CHUNK = 500
+
+
+def manageable_ids(session, viewer: Optional[User], ids) -> set:
+    """Which of the games ``ids`` this viewer may manage (load, delete their saves: ``access.MANAGE``), as
+    ``access.on`` decides for each: an administrator every one with a row, an owner theirs, an ACL entry its own.
+    Two queries per few hundred games rather than two per game, for a listing (the lobby's Saved games)."""
+    ids = list(dict.fromkeys(str(i) for i in ids if i))
+    if viewer is None or not ids:
+        return set()
+    rows: list = []
+    acl: dict = {}
+    for i in range(0, len(ids), _CHUNK):
+        rows += session.scalars(select(GameRow).where(GameRow.id.in_(ids[i:i + _CHUNK])))
+        acl.update(access.acl_permissions_for(session, "game", ids[i:i + _CHUNK], viewer.id))
+    return {row.id for row in rows if access.on(session, viewer, row, acl=acl.get(row.id, set())).can(access.MANAGE)}
+
+
 def delete(session, gid: str, *, actor: Optional[User]) -> None:
     """Mark the index row deleted. The save files are handled by the caller."""
     row = session.get(GameRow, gid)

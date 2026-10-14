@@ -568,6 +568,44 @@ class GameRoutes(unittest.TestCase):
                     row = sdb.get(GameRow, gid)
                     self.assertEqual((row.owner_id, row.status), (owner_id, "playing"))
 
+    def test_the_saves_list_says_who_may_load_and_delete(self):
+        """``GET /api/saves`` lists a game's saves to whoever may see the game, each with ``can_manage``, which the
+        lobby's Load and Delete follow (3-19 found both offered on another member's game shared with members, which
+        the routes refuse). A private game: another member and an anonymous caller do not see it; an ACL viewer sees it
+        without them; the owner and an administrator with them. Shared with members, another member and a moderator
+        see it without them; an ACL entry for manage gives them. Each answer agrees with the load route's."""
+        gid = self.game.id
+        self.game.save("kept")
+
+        def listed(who):
+            r = self.client.get("/api/saves", headers=self.headers.get(who, {}))
+            if r.status_code != 200:
+                return r.status_code
+            mine = [x for x in r.json() if x.get("game_id") == gid]
+            return sorted({x.get("can_manage") for x in mine}) if mine else None
+
+        def loads(who):
+            return self.client.post("/api/saves/load", json={"path": f"{gid}/kept.citar"},
+                                    headers=self.headers.get(who, {})).status_code
+
+        expect = {None: (None, 401), "other": None, "maggie": None, "reader": [False], "owner": [True],
+                  "zara": [True]}
+        for who, want in expect.items():
+            with self.subTest(private=who or "anonymous"):
+                got = listed(who)
+                self.assertIn(got, want if isinstance(want, tuple) else (want,))
+        self._set_visibility("server")
+        expect = {"other": [False], "maggie": [False], "reader": [False], "owner": [True], "zara": [True]}
+        for who, want in expect.items():
+            with self.subTest(server=who):
+                self.assertEqual(listed(who), want)
+                self.assertEqual(loads(who) == 200, want == [True], who)
+        with db.session() as s:
+            access.grant(s, s.get(GameRow, gid), accounts.by_handle(s, "other"), access.MANAGE,
+                         actor=accounts.by_handle(s, "owner"))
+        self.assertEqual(listed("other"), [True])
+        self.assertEqual(loads("other"), 200)
+
     def test_launching_a_scenario_by_anonymous_member_owner_and_admin(self):
         """``/api/scenarios/{sid}/launch`` (3-01 made it a lobby game): anonymous 401; a member 200, owning the game it
         made, and 429 over their game limit; an administrator 200. The scenario is the administrator's (3-02), shared

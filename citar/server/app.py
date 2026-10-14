@@ -2328,13 +2328,18 @@ def list_saves(p: Principal = Depends(principal), sdb: DbSession = Depends(get_d
     """Saves belonging to games this caller may see.
 
     A save on disk has no owner of its own; it inherits the visibility of the game it came from.
-    A save whose game has no index row is shown only to administrators.
+    A save whose game has no index row is shown only to administrators. Each entry says whether the caller may load
+    or delete it (``can_manage``: both routes require ``MANAGE`` on its game, ``_require_save_access``), so the lobby
+    offers those buttons only on the caller's own games and those shared with them to manage.
     """
     allowed = ownership.visible_ids(sdb, p.user)
     saves = manager.list_saves()
     if allowed is None:
-        return saves
-    return [entry for entry in saves if (entry.get("game_id") or entry.get("id")) in allowed]
+        # an administrator, who manages every game, those without an index row included
+        return [{**entry, "can_manage": True} for entry in saves]
+    shown = [entry for entry in saves if (entry.get("game_id") or entry.get("id")) in allowed]
+    managed = ownership.manageable_ids(sdb, p.user, {entry.get("game_id") or entry.get("id") for entry in shown})
+    return [{**entry, "can_manage": (entry.get("game_id") or entry.get("id")) in managed} for entry in shown]
 
 
 class LoadBody(BaseModel):
