@@ -4520,12 +4520,10 @@ def part_real(h: Harness) -> None:
                       "cause": x.get("cause")} for x in negotiations if x.get("outcome") != "answered"]
         fallbacks += [{"where": "diplomat phase", "turn": x.get("turn"), "outcome": x.get("outcome"),
                        "cause": x.get("cause")} for x in phases if x.get("outcome") not in ("done",)]
-        by_tool: dict = {}
-        for x in llm_turns:
-            for tool, t in (x.get("by_tool") or {}).items():
-                agg = by_tool.setdefault(tool, {"count": 0, "errors": 0})
-                agg["count"] += t.get("count", 0)
-                agg["errors"] += t.get("errors", 0)
+        # the tool calls the LLM seat made on its turns, and those the game refused (its metrics' turn rows: each
+        # turn's counts and its most used tools)
+        calls_made = {k: sum(int(x.get(k) or 0) for x in llm_turns)
+                      for k in ("tool_calls", "actions_ok", "queries", "errors", "repeats", "malformed")}
         data.update({
             "lmstudio": {**data["lmstudio"], "after": said_after}, "seconds": round(time.time() - t0, 1),
             "progress": progress[-60:],
@@ -4533,9 +4531,10 @@ def part_real(h: Harness) -> None:
                          "model_s": round(sum(float(x.get("model_s") or 0) for x in llm_turns), 2),
                          "queue_s": round(sum(float(x.get("queue_s") or 0) for x in llm_turns), 2),
                          "steps": sum(int(x.get("model_steps") or 0) for x in llm_turns),
-                         "tool_calls": by_tool,
+                         "tool_calls": calls_made,
                          "turn_rows": [{k: x.get(k) for k in ("turn", "wall_s", "model_steps", "model_s", "queue_s",
-                                                              "tool_calls", "actions_ok", "errors", "end_reason")}
+                                                              "tool_calls", "actions_ok", "queries", "errors",
+                                                              "top_tools", "end_reason")}
                                        for x in llm_turns]},
             "hybrid_seat": {"turns": len(hyb_turns),
                             "bot_actions": sum(sum(v[0] for v in (x.get("bot_actions") or {}).values())
