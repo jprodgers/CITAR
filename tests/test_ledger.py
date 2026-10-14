@@ -1165,9 +1165,18 @@ class Routes(World):
                      {"kind": "gpu", "name": "x", "rate": 1, "match": {"gpu_name": "("}},
                      {"kind": "gpu", "name": "x", "rate": 1, "match": {"ram": 3}},
                      {"kind": "gpu", "name": "x", "rate": 1, "priority": 5000},
-                     {"kind": "gpu", "name": "x", "rate": True}, {"kind": "gpu", "name": "x", "rate": 1, "x": 1}):
-            with self.subTest(body=body):
+                     {"kind": "gpu", "name": "x", "rate": True}, {"kind": "gpu", "name": "x", "rate": 1, "x": 1},
+                     # what the JSON reader takes and no float holds: a 400, not math.isfinite's overflow (a 500)
+                     {"kind": "gpu", "name": "x", "rate": 10 ** 400},
+                     {"kind": "gpu", "name": "x", "rate": 1, "match": {"vram_gb_min": 10 ** 400}}):
+            with self.subTest(body=str(body)[:80]):
                 self.assertEqual(self.call("zara", "POST", base, body).status_code, 400)
+        for body in ({"kind": "gpu", "name": "x", "rate": float("nan")},
+                     {"kind": "gpu", "name": "x", "rate": 1, "match": {"cores_min": float("inf")}}):
+            with self.subTest(body=body):       # sent as Python's JSON writer sends them (the test client's refuses)
+                r = self.client.request("POST", base, content=json.dumps(body).encode(),
+                                        headers={**self.headers["zara"], "content-type": "application/json"})
+                self.assertEqual(r.status_code, 400)
         made = self.call("zara", "POST", base, {"kind": "gpu", "name": "Big GPU", "rate": 2.5, "priority": 3,
                                                 "match": {"vram_gb_min": 20}})
         self.assertEqual(made.status_code, 200, made.text)

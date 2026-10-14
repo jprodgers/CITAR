@@ -44,7 +44,7 @@ from sqlalchemy import event, select
 
 from citar import db, ledger, machine_settings as M, pool, servers, settings
 from citar.auth import accounts, policy, sessions, tokens
-from citar.db.models import AuditLog, Base, HardwareClass, Server, User, WorkerToken
+from citar.db.models import AuditLog, Base, HardwareClass, Server, ServerGroup, User, WorkerToken
 from citar.pool import admission, scheduler
 from citar.server import workers as W
 
@@ -77,6 +77,73 @@ def scan(*, gpu="Test GPU", vram=8, cpu="Test CPU", cores=8, ram=32, idle=40, cp
                                                            "source": "guess", "note": "a guess"}}}
 
 
+def odd_scans() -> dict:
+    """Scans no page could show as they came, one fault each (so one cannot hide another): figures no JSON answer
+    carries (NaN, Infinity: Starlette refuses to encode them) or no float holds (an integer of 400 digits: ``float()``
+    and ``math.isfinite`` overflow on it), each where a reader computes with it, and parts of other shapes. Python's
+    JSON reader takes all of them from a helper's hello."""
+    out = {}
+
+    def odd(name, change):
+        s = scan()
+        change(s)
+        out[name] = s
+    odd("a GPU's memory NaN", lambda s: s["gpus"][0].update(vram_gb=float("nan")))
+    odd("the RAM infinite", lambda s: s["memory"].update(ram_gb=float("inf")))
+    odd("a GPU's memory of 400 digits", lambda s: s["gpus"][0].update(vram_gb=10 ** 400))
+    odd("the RAM of 400 digits", lambda s: s["memory"].update(ram_gb=10 ** 400))
+    odd("a disk of 400 digits", lambda s: s["physical_disks"][0].update(size_gb=10 ** 400))
+    odd("the cores of 400 digits", lambda s: s["cpu"].update(cores=10 ** 400))
+    odd("a suggested figure of 400 digits", lambda s: s["power"]["suggested"].update(idle_w=10 ** 400))
+    odd("a suggested figure NaN", lambda s: s["power"]["suggested"].update(gpu_max_w=float("nan")))
+    odd("a figure no reader computes with, -Infinity", lambda s: s.update(extra={"temps": [float("-inf")]}))
+    odd("the memory a text", lambda s: s.update(memory="lots"))
+    odd("a GPU a text", lambda s: s.update(gpus=["a GPU", *s["gpus"]]))
+    odd("the GPUs a text", lambda s: s.update(gpus="one"))
+    odd("the CPU a list", lambda s: s.update(cpu=["x"]))
+    odd("the suggestion a list", lambda s: s["power"].update(suggested=[1, 2]))
+    return out
+
+
+def odd_scan() -> dict:
+    """Every fault of ``odd_scans`` in one scan."""
+    s = scan()
+    s["gpus"] = [{"name": "Odd GPU", "vram_gb": float("nan")}, "not a GPU", {"name": "Huge GPU", "vram_gb": 10 ** 400}]
+    s["memory"] = "lots"
+    s["cpu"].update(threads=float("inf"), cores="twelve")
+    s["physical_disks"] = [{"name": "SSD", "size_gb": 10 ** 400, "type": "SSD"}]
+    s["runtimes"] = "none"
+    s["power"]["suggested"].update(idle_w=float("nan"), cpu_max_w=10 ** 400)
+    s["extra"] = {"temps": [float("-inf"), 1.5, 10 ** 400], "deep": nest("abcdefghijkl", 1)}
+    return s
+
+
+def nest(keys: str, leaf) -> dict:
+    """``{keys[0]: {keys[1]: ... leaf}}``."""
+    for key in reversed(keys):
+        leaf = {key: leaf}
+    return leaf
+
+
+#: ``odd_scan`` as it is kept: the figures that do not read dropped (None), the wrong shapes emptied, the rest as sent.
+ODD_CLEAN = dict(scan(), gpus=[{"name": "Odd GPU", "vram_gb": None}, {"name": "Huge GPU", "vram_gb": None}], memory={},
+                 cpu={"model": "Test CPU", "cores": None, "threads": None},
+                 physical_disks=[{"name": "SSD", "size_gb": None, "type": "SSD"}], runtimes=[],
+                 power={"gpu_sampling": False, "suggested": {"idle_w": None, "cpu_max_w": None, "gpu_max_w": 150,
+                                                             "source": "guess", "note": "a guess"}},
+                 # extra is at depth 1 and deep at 2, so its tenth key's value (at 12) is past HARDWARE_DEPTH
+                 extra={"temps": [None, 1.5, None], "deep": nest("abcdefghij", None)})
+
+
+def encodes(value) -> bool:
+    """Whether ``value`` encodes as the JSON an answer carries (no NaN, no Infinity)."""
+    try:
+        json.dumps(value, allow_nan=False)
+        return True
+    except ValueError:
+        return False
+
+
 HAND_SET = {"source": "manual", "cpu": {"model": "Hand-set CPU", "cores": 4, "threads": 4},
             "memory": {"ram_gb": 16, "unified": False}, "gpus": [{"name": "Hand-set GPU", "vram_gb": 12}],
             "physical_disks": [], "system": {"form": "desktop"}}
@@ -93,6 +160,59 @@ def model(key, *, loaded=False, label=None, context=None) -> dict:
 def catalogue(row) -> dict:
     """A machine's catalogue as its row stores it: {key: entry}."""
     return {m["key"]: m for m in (row.config or {}).get("models") or []}
+
+
+# ---------------------------------------------------------------------------- hardware details, cleaned
+
+class Cleaning(unittest.TestCase):
+    """``servers.clean_hardware``: what every way hardware details come in (a helper's scan, a collector's file, the
+    owner's save) is kept as, so no page that shows the machine fails on them."""
+
+    def test_a_good_scan_is_kept_as_it_came(self):
+        good = scan()
+        self.assertEqual(servers.clean_hardware(good), good)
+        self.assertEqual(servers.clean_hardware(HAND_SET), HAND_SET)
+        self.assertIsNot(servers.clean_hardware(good)["gpus"], good["gpus"], "a copy: the caller's dict is not changed")
+
+    def test_figures_that_do_not_read_are_dropped_and_wrong_shapes_emptied(self):
+        odd = odd_scan()
+        self.assertEqual(servers.clean_hardware(odd), ODD_CLEAN)
+        self.assertEqual(odd["memory"], "lots", "the caller's dict is not changed")
+        for name, s in odd_scans().items():
+            with self.subTest(name):
+                self.assertTrue(encodes(servers.clean_hardware(s)))
+        self.assertEqual(servers.clean_hardware({"memory": {"ram_gb": "32"}, "cpu": {"threads": " 16 "}}),
+                         {"memory": {"ram_gb": 32.0}, "cpu": {"threads": 16.0}}, "a figure in text is read")
+        self.assertEqual(servers.clean_hardware({"memory": {"ram_gb": True}, "gpus": [{"vram_gb": "a lot"}]}),
+                         {"memory": {"ram_gb": None}, "gpus": [{"vram_gb": None}]})
+        self.assertEqual(servers.clean_hardware({"n": 2 ** 53, "m": -(2 ** 53) - 1, "f": 1e300}),
+                         {"n": 2 ** 53, "m": None, "f": None}, "within HARDWARE_FIGURE_MAX only")
+        for not_hardware in (None, "x", [1], 3):
+            self.assertEqual(servers.clean_hardware(not_hardware), {})
+
+    def test_every_way_in_keeps_it_clean(self):
+        """The registry's save of a machine (``normalize_server``) and a collector's file (``apply_hardware``)."""
+        sv = servers.normalize_server({"name": "x", "hardware": odd_scan()})
+        self.assertEqual(sv["hardware"], ODD_CLEAN)
+        self.assertEqual(servers.normalize_server({"name": "x", "hardware": "lots"})["hardware"], {"source": "none"})
+        applied = servers.apply_hardware(servers.normalize_server({"name": "x"}), odd_scan(), "imported")
+        self.assertEqual(applied["hardware"], dict(ODD_CLEAN, source="imported"))
+        self.assertEqual({k: applied["power"][k] for k in ("idle_w", "cpu_max_w", "gpu_max_w")},
+                         {"idle_w": None, "cpu_max_w": None, "gpu_max_w": 150}, "only a suggestion that reads")
+        self.assertTrue(encodes(servers.normalize_server(applied)))
+        for v, want in ((10 ** 400, 7), (float("nan"), 7), (float("inf"), 7), ("1e999", 7), ("5", 5.0)):
+            self.assertEqual(servers._num(v, 7), want, v if not isinstance(v, int) else "10**400")
+
+    def test_the_readers_take_what_a_row_written_before_holds(self):
+        """Costing's thread count (it divides by it) and the stored capabilities, from what a row may hold."""
+        from citar import costing
+        for threads, want in ((16, 16), ("16", 16), (0.5, 1), (-4, 1), (0, 8), (None, 8), ("many", 8),
+                              (float("nan"), 8), (10 ** 400, 8), (True, 8)):
+            with self.subTest(threads=str(threads)[:20]):
+                self.assertEqual(costing._threads({"hardware": {"cpu": {"threads": threads}}}), want)
+        self.assertEqual(costing._threads({"hardware": {"cpu": "x"}}), 8)
+        cpu = M.capabilities({"cpu": {"threads": 10 ** 400, "memory_mb": float("nan"), "cpu_percent": "50"}})["cpu"]
+        self.assertEqual((cpu["threads"], cpu["memory_mb"], cpu["cpu_percent"]), (0, 0, 50))
 
 
 # ---------------------------------------------------------------------------- the report, on a row
@@ -183,6 +303,48 @@ class Report(unittest.TestCase):
             out = self.report(hardware=big)
         self.assertEqual(out, {"kept": [], "applied": []})
         self.assertIsNone(self.row().hardware_detected)
+
+    def test_a_scan_is_kept_clean_of_figures_no_answer_can_carry(self):
+        """A scan with NaN, Infinity, integers of 400 digits and parts of other shapes is kept (the rest of it is a
+        good report) without them, applied so (hardware auto), and its suggested figures that do not read are no power
+        figures (power auto takes the one that does)."""
+        self.set_modes(power="auto")
+        out = self.report(hardware=odd_scan())
+        row = self.row()
+        self.assertEqual(out, {"kept": ["hardware"], "applied": ["hardware", "power"]})
+        self.assertEqual(row.hardware_detected["hardware"], ODD_CLEAN)
+        self.assertEqual(row.config["hardware"], dict(ODD_CLEAN, source="helper"))
+        self.assertEqual(row.config["power"], {"idle_w": 11, "cpu_max_w": 22, "gpu_max_w": 150, "source": "guess"})
+        self.assertTrue(encodes(row.hardware_detected) and encodes(row.config))
+        self.assertEqual(M.suggested_power(odd_scan()), {"gpu_max_w": 150}, "read from a scan as sent, too")
+        with db.session() as s:
+            read = M.client(s, s.get(Server, self.sid), None)
+        self.assertTrue(encodes(read), "the dialog's read encodes")
+        self.assertEqual(M.hardware_facts(odd_scan())["GPUs"], "Odd GPU; Huge GPU",
+                         "the dialog's comparison reads a scan as sent without overflowing")
+
+    def test_apply_of_everything_takes_the_sections_the_report_has(self):
+        """Apply with no section named copies each section the last report has something for: a report of models
+        alone (a helper started with --no-hardware), a scan that suggests no power figures. A section named with
+        nothing to copy is still refused, and nothing changes."""
+        self.set_modes(models="manual")
+        self.report(models=[model("m", loaded=True)])
+        with db.session() as s:
+            self.assertEqual(M.apply_scan(s.get(Server, self.sid)), ["models"])
+        self.assertTrue(catalogue(self.row())["m"]["loaded"])
+        self.set_modes(hardware="manual")
+        no_power = scan(gpu="Scanned GPU")
+        del no_power["power"]["suggested"]
+        self.report(hardware=no_power)
+        with db.session() as s:
+            self.assertEqual(M.apply_scan(s.get(Server, self.sid), []), ["hardware", "models"])
+        row = self.row()
+        self.assertEqual(row.config["hardware"]["gpus"], [{"name": "Scanned GPU", "vram_gb": 8}])
+        self.assertEqual(row.config["power"]["source"], "measured", "no power figures to copy: left alone")
+        with db.session() as s:
+            with self.assertRaises(M.SettingsError) as caught:
+                M.apply_scan(s.get(Server, self.sid), ["power"])
+        self.assertEqual(caught.exception.status, 409)
 
     def test_models_auto_merge_keep_unreported_ones_and_their_owners_settings(self):
         self.report(models=[model("a", loaded=True, context=8192), model("b")])
@@ -291,11 +453,15 @@ class Report(unittest.TestCase):
                {"capabilities": {"llm": {"allow_swaps": 1}}}, {"capabilities": {"cpu": {"threads": -1}}},
                {"capabilities": {"cpu": {"cpu_percent": 101}}}, {"capabilities": {"cpu": {"work": ["mining"]}}},
                {"capabilities": {"cpu": {"work": "lab_game"}}}, {"modes": {"hardware": "sometimes"}},
-               {"modes": {"cpu": "auto"}}, {"slots": 2, "modes": {"power": "on"}}]
+               {"modes": {"cpu": "auto"}}, {"slots": 2, "modes": {"power": "on"}},
+               # what the JSON reader takes and no float holds, and the floats that are no number
+               {"slots": 10 ** 400}, {"capabilities": {"cpu": {"threads": 10 ** 400}}},
+               {"capabilities": {"cpu": {"memory_mb": 10 ** 400}}}, {"slots": float("nan")}, {"slots": float("inf")},
+               {"capabilities": {"cpu": {"cpu_percent": float("-inf")}}}]
         with db.session() as s:
             row = s.get(Server, self.sid)
             for body in bad:
-                with self.subTest(body=body), self.assertRaises(M.SettingsError):
+                with self.subTest(body=str(body)[:80]), self.assertRaises(M.SettingsError):
                     M.update(row, body)
             self.assertEqual((row.max_concurrent, row.capabilities, M.modes(row)),
                              (1, {}, M.DEFAULT_MODES), "a refused change leaves everything as it was")
@@ -569,7 +735,7 @@ class EndToEnd(unittest.TestCase):
 
 class _Routes(unittest.TestCase):
     """The app through FastAPI's test client: alice's helper machine, lent through her group to gus; bob, another
-    member; zara, an administrator."""
+    member; mona, a moderator; zara, an administrator."""
 
     def setUp(self):
         from fastapi.testclient import TestClient
@@ -582,7 +748,8 @@ class _Routes(unittest.TestCase):
         self.addCleanup(self.client.close)
         self.headers, self.ids = {}, {}
         with db.session() as s:
-            for handle, role in (("alice", "user"), ("bob", "user"), ("gus", "user"), ("zara", "admin")):
+            for handle, role in (("alice", "user"), ("bob", "user"), ("gus", "user"), ("mona", "moderator"),
+                                 ("zara", "admin")):
                 user = accounts.create_user(s, handle=handle, email=f"{handle}@example.com",
                                             password="a long enough phrase", role=role, status="active",
                                             email_verified=True)
@@ -612,7 +779,13 @@ class _Routes(unittest.TestCase):
 
     def call(self, who, method, path, body=None):
         self.pending.clear()
-        return self.client.request(method, path, json=body, headers=self.headers.get(who, {"origin": "https://citar.test"}))
+        headers = self.headers.get(who, {"origin": "https://citar.test"})
+        if body is not None and not encodes(body):
+            # what a browser cannot send and a script can: Python's JSON writer emits NaN and Infinity (the test
+            # client's refuses to), and the server's reader takes them
+            return self.client.request(method, path, content=json.dumps(body).encode(),
+                                       headers={**headers, "content-type": "application/json"})
+        return self.client.request(method, path, json=body, headers=headers)
 
     def row(self, sid=None) -> Server:
         with db.session() as s:
@@ -672,11 +845,40 @@ class Routes(_Routes):
         self.assertEqual(actions.count("server.trust"), 1)
         self.assertEqual(actions.count("server.class"), 1)
 
+    def test_a_moderator_is_a_member_like_any_other_here(self):
+        """P3.9.1's moderator (a machine is not something a moderator takes down: on a server object they are a member
+        like any other). In alice's private group mona gets 404 on all five routes, as bob does; once the group is
+        visible to members, or published, she may see the machine but not manage it: the
+        dialog's routes 403, the administrators' still 404 (its read, ``GET /api/pool/servers/{id}``, 404 and then 200).
+        Nothing she sends changes it."""
+        self.report(hardware=scan(), models=[model("m")])
+        routes = [("GET", f"/api/machines/{self.helper}/settings", None),
+                  ("PUT", f"/api/machines/{self.helper}/settings", {"slots": 2}),
+                  ("POST", f"/api/machines/{self.helper}/hardware/apply", {"sections": ["hardware"]}),
+                  ("PUT", f"/api/admin/machines/{self.helper}/trust", {"trust_tier": "trusted"}),
+                  ("PUT", f"/api/admin/machines/{self.helper}/class", {"pinned": True})]
+        before = self.row()
+        self.assertEqual([self.call("mona", m, p, b).status_code for m, p, b in routes], [404] * 5)
+        self.assertEqual(self.call("mona", "GET", f"/api/pool/servers/{self.helper}").status_code, 404)
+        for visibility in ("server", "global"):
+            with db.session() as s:
+                s.get(ServerGroup, s.get(Server, self.helper).group_id).visibility = visibility
+            with self.subTest(visibility=visibility):
+                self.assertEqual([self.call("mona", m, p, b).status_code for m, p, b in routes],
+                                 [403, 403, 403, 404, 404])
+                self.assertEqual(self.call("mona", "GET", f"/api/pool/servers/{self.helper}").status_code, 200,
+                                 "she may see it")
+        after = self.row()
+        for column in ("max_concurrent", "config", "trust_tier", "class_override", "gpu_class_id", "hardware_mode"):
+            self.assertEqual(getattr(after, column), getattr(before, column), column)
+
     def test_bad_bodies_are_refused_and_change_nothing(self):
         cases = [("PUT", f"/api/machines/{self.helper}/settings", {"slots": 0}, 400),
                  ("PUT", f"/api/machines/{self.helper}/settings", {"modes": {"hardware": "always"}}, 400),
                  ("PUT", f"/api/machines/{self.helper}/settings", {"capabilities": {"cpu": {"work": ["mine"]}}}, 400),
                  ("PUT", f"/api/machines/{self.helper}/settings", {"nonsense": True}, 400),
+                 ("PUT", f"/api/machines/{self.helper}/settings", {"slots": 10 ** 400}, 400),
+                 ("PUT", f"/api/machines/{self.helper}/settings", {"capabilities": {"cpu": {"threads": 10 ** 400}}}, 400),
                  ("PUT", f"/api/machines/{self.helper}/settings", [1, 2], 422),
                  ("POST", f"/api/machines/{self.helper}/hardware/apply", {"sections": ["all"]}, 400),
                  ("POST", f"/api/machines/{self.helper}/hardware/apply", {"what": 1}, 400),
@@ -689,7 +891,7 @@ class Routes(_Routes):
                  ("PUT", f"/api/admin/machines/{self.helper}/class", {"pinned": False, "gpu_class_id": "hc_gpu"}, 400)]
         before = self.row()
         for method, path, body, code in cases:
-            with self.subTest(route=f"{method} {path}", body=body):
+            with self.subTest(route=f"{method} {path}", body=str(body)[:80]):
                 self.assertEqual(self.call("zara", method, path, body).status_code, code)
         after = self.row()
         for column in ("max_concurrent", "capabilities", "hardware_mode", "models_mode", "power_mode", "config",
@@ -805,6 +1007,81 @@ class Routes(_Routes):
         ticket = scheduler.get().ticket(self.helper, "m", cls="test", consumer=self.ids["alice"])
         self.assertEqual((ticket.state, ticket.error.code), ("refused", "disabled"))
         self.assertIn("takes no model work", str(ticket.error))
+
+    def pages(self) -> dict:
+        """Every page that shows the machine, and the status each answers (or the exception it raised): alice's and
+        zara's Servers page (``GET /api/servers``: an administrator's lists every machine), the pool's listing for
+        gus (whom it is lent to) and zara, the dialog's three routes and the trust route."""
+        settings, apply = f"/api/machines/{self.helper}/settings", f"/api/machines/{self.helper}/hardware/apply"
+        out = {}
+        for who, method, path, body in (
+                ("alice", "GET", "/api/servers", None), ("zara", "GET", "/api/servers", None),
+                ("gus", "GET", "/api/pool/servers", None), ("zara", "GET", "/api/pool/servers", None),
+                ("alice", "GET", settings, None), ("alice", "PUT", settings, {"slots": 2}),
+                ("alice", "POST", apply, {"sections": ["hardware"]}),
+                ("zara", "PUT", f"/api/admin/machines/{self.helper}/trust", {"trust_tier": "trusted"})):
+            try:
+                r = self.call(who, method, path, body)
+                out[f"{who} {method} {path}"] = r.status_code if r.status_code != 200 or encodes(r.json()) else "NaN"
+            except Exception as exc:        # the test client raises what the app raised: a 500
+                out[f"{who} {method} {path}"] = f"{type(exc).__name__}: {exc}"[:120]
+        return out
+
+    def test_odd_hardware_never_fails_a_page_that_shows_the_machine(self):
+        """A helper's scan with figures no JSON answer carries or no float holds, or parts of other shapes (reachable by
+        any member who runs a helper for their own machine): kept clean (``servers.clean_hardware``), and every page
+        that shows the machine still answers, the administrators' whole Servers page among them. So do they for a row
+        written before the cleaning (the old hello's raw copy), whose odd hardware no longer stops the classification
+        of every machine when an administrator adds a class; and the owner's own save of such details is kept clean."""
+        def failing() -> dict:
+            return {page: status for page, status in self.pages().items() if status != 200}
+        for name, odd in odd_scans().items():
+            with self.subTest(name):
+                with db.session() as s:
+                    row = s.get(Server, self.helper)
+                    row.config, row.hardware_detected = {}, None
+                out = W.record_connection(self.helper, hardware=odd, models=[model("m")])
+                self.assertEqual(out["kept"], ["hardware", "models"])
+                row = self.row()
+                self.assertTrue(encodes(row.hardware_detected) and encodes(row.config))
+                self.assertEqual(failing(), {})
+        # a row as the old hello's raw copy left it: an administrator's new class classifies every machine again
+        raw = odd_scan()
+        raw["gpus"].append({"name": "Text GPU", "vram_gb": "24 GB"})
+        with db.session() as s:
+            s.get(Server, self.helper).config = {"hardware": dict(raw, source="helper"), "models": ["m", {"x": 1}]}
+        r = self.call("zara", "POST", "/api/admin/hardware-classes", {
+            "kind": "gpu", "name": "24 GB GPUs", "rate": 2.0, "match": {"vram_gb_min": 24}, "priority": 10})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.row().gpu_class_id, "hc_gpu",
+                         "memory figures that do not read (NaN, 400 digits, '24 GB') are none: the default class")
+        self.assertEqual(failing(), {})
+        # her own save of such details (the Hardware & power dialog posts the registry's view back whole)
+        view = next(sv for sv in self.call("alice", "GET", "/api/servers").json()["servers"] if sv["id"] == self.helper)
+        view["hardware"] = odd_scan()
+        r = self.call("alice", "POST", "/api/servers", view)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.row().config["hardware"], ODD_CLEAN)
+        self.assertEqual(failing(), {})
+
+    def test_apply_of_everything_takes_what_the_report_has(self):
+        """"Apply all of the last report" (no sections named) on a report of models alone (a helper started with
+        --no-hardware) while models are manual: the button shows (the models differ), the models come in, the sections
+        with nothing to copy are passed over and the audit row names what was applied; a section named with nothing to
+        copy is still a 409."""
+        settings, apply = f"/api/machines/{self.helper}/settings", f"/api/machines/{self.helper}/hardware/apply"
+        self.call("alice", "PUT", settings, {"modes": {"models": "manual"}})
+        self.report(models=[model("m", loaded=True)])
+        self.assertTrue(self.call("alice", "GET", settings).json()["differences"]["models"])
+        r = self.call("alice", "POST", apply, {})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(catalogue(self.row())["m"]["loaded"])
+        self.assertEqual(r.json()["differences"]["models"], [])
+        self.assertEqual(self.call("alice", "POST", apply, {"sections": ["hardware"]}).status_code, 409)
+        with db.session() as s:
+            applied = [a.detail.get("sections") for a in s.scalars(select(AuditLog).where(
+                AuditLog.action == "server.scan_applied"))]
+        self.assertEqual(applied, [["models"]])
 
 
 # ---------------------------------------------------------------------------- the prompt scheduler
