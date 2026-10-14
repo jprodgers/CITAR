@@ -4439,10 +4439,10 @@ def part_real(h: Harness) -> None:
             if gi.get("phase") not in ("playing", None):
                 break
             if mark != last:
+                if last is None or mark[0] != last[0]:
+                    r.note(f"real: turn {mark[0]} ({round(time.time() - t0)} s)")
                 last, moved = mark, time.perf_counter()
                 progress.append({"at_s": round(time.time() - t0, 1), "turn": mark[0], "player": mark[1]})
-                if mark[1] == 0:
-                    r.note(f"real: turn {mark[0]} ({round(time.time() - t0)} s)")
             elif time.perf_counter() - moved > REAL_STALL_S:
                 break
             time.sleep(2.0)
@@ -4639,6 +4639,16 @@ def _trace_tail(lines: int = 6) -> str:
     return " | ".join(traceback.format_exc().strip().splitlines()[-lines:])
 
 
+def write_part(folder: Path, run_of: str, name: str, report: Report) -> None:
+    """A part's own evidence in a run of several (``qa-<part>.json``, as a run of that part alone writes it: the
+    browser checklist's scripts read them): its checks only, beside the run's data so far. Written as each part ends,
+    so the checklist can begin on a part while the run goes on, and again with the rest at the end."""
+    mine = report.of(name)
+    (folder / f"qa-{name}.json").write_text(json.dumps(
+        {"part": name, "of": run_of, "ok": bool(mine) and all(c["ok"] for c in mine), "checks": mine, **report.data},
+        indent=2, default=str) + "\n", encoding="utf-8")
+
+
 def run(args) -> tuple:
     """Refuse (Refused, nothing touched), or claim, start, check and stop. Returns the exit code and the report,
     whose evidence ``main`` writes. Once the directory is claimed nothing raises out of here: a harness failure
@@ -4687,6 +4697,11 @@ def run(args) -> tuple:
                 report.check(f"the {name} part ran to its end", False, _trace_tail())
             report.parts[name] = {"seconds": round(time.perf_counter() - began, 1)}
             report.current = None
+            if len(parts) > 1:
+                try:
+                    write_part(state, args.part, name, report)
+                except OSError as e:          # written again at the end; the run goes on
+                    report.note(f"qa-{name}.json could not be written yet ({e})")
         tracebacks = server.tracebacks()
         report.check("no traceback in the server's log", tracebacks == 0, f"{tracebacks} in {server.log}")
     except HarnessError as e:
@@ -4731,13 +4746,8 @@ def main(argv=None) -> int:
         out.write_text(json.dumps(summary, indent=2, default=str) + "\n", encoding="utf-8")
         where = f"evidence in {out}"
         if len(report.parts) > 1:
-            # each part's own file too, as a run of that part alone writes it (the browser checklist's scripts read
-            # them), its checks only, beside the whole run's data
             for name in report.parts:
-                mine = report.of(name)
-                (folder / f"qa-{name}.json").write_text(json.dumps(
-                    {"part": name, "of": args.part, "ok": bool(mine) and all(c["ok"] for c in mine), "checks": mine,
-                     **report.data}, indent=2, default=str) + "\n", encoding="utf-8")
+                write_part(folder, args.part, name, report)
     except OSError as e:          # a directory that could not be emptied may not take the file either
         where = f"the evidence could not be written to {out} ({e})"
         code = 1

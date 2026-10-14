@@ -196,6 +196,48 @@ class Failures(unittest.TestCase):
         self.assertIn("KeyError", check["detail"])
 
 
+class AllRun(unittest.TestCase):
+    """``all`` (3-19, gate 1): every part on one server, each check under the part that made it, each part's count
+    and time at the top of ``qa-all.json``, and each part's own file beside it (written as it ends), as a run of that
+    part alone writes it (in-process, the server, the accounts and the parts stubbed)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="citar-qa-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.dir = self.tmp / "qa"
+
+    def test_every_check_under_its_part_and_each_parts_file(self):
+        seen = {}
+
+        def first(h):
+            h.report.data["first"] = {"id": 1}
+            h.report.check("one of the first part's", True)
+
+        def second(h):
+            seen["first_file"] = json.loads((self.dir / "qa-first.json").read_text(encoding="utf-8"))
+            h.report.check("one of the second part's", True)
+            h.report.check("another of the second part's", False, "it failed")
+        parts = {"first": first, "second": second}
+        with mock.patch.object(qa.Server, "start", return_value=None), \
+                mock.patch.object(qa, "make_accounts", return_value={}), \
+                mock.patch.object(qa, "raise_game_limits", return_value=None) as limits, \
+                mock.patch.object(qa.Server, "tracebacks", return_value=0), \
+                mock.patch.dict(qa.PARTS, parts, clear=True), redirect_stdout(io.StringIO()):
+            code = qa.main(["all", "--dir", str(self.dir)])
+        self.assertEqual(code, 1)
+        limits.assert_called_once()
+        whole = json.loads((self.dir / "qa-all.json").read_text(encoding="utf-8"))
+        self.assertEqual([c.get("part") for c in whole["checks"]], ["first", "second", "second", None],
+                         "the harness's own last check is under no part")
+        self.assertEqual({k: (v["checks"], v["passed"], v["failed"]) for k, v in whole["parts"].items()},
+                         {"first": (1, 1, []), "second": (2, 1, ["another of the second part's"])})
+        self.assertEqual(seen["first_file"]["checks"][0]["check"], "one of the first part's",
+                         "the first part's file was there while the second ran")
+        second_file = json.loads((self.dir / "qa-second.json").read_text(encoding="utf-8"))
+        self.assertEqual((second_file["of"], second_file["ok"], len(second_file["checks"])), ("all", False, 2))
+        self.assertEqual(second_file["first"], {"id": 1}, "beside the run's data")
+
+
 class Directories(unittest.TestCase):
     """``check_dir`` and ``claim`` on their own."""
 
