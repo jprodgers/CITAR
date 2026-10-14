@@ -199,6 +199,76 @@ citar-worker --config ~/.local/share/citar/config/worker.json
 On Linux, the wizard can install a systemd unit so it starts with the machine. `Restart=always`,
 because a dropped home connection should reconnect rather than stay down.
 
+### The helper's settings (CITAR 0.1.6)
+
+CITAR 0.1.6 replaces the Python worker with a Rust helper, `citar-helper`, under the same download
+names. It reads every setting the 0.1.5 helper read, with the same meaning, so a `helper.json`, a
+`worker.json` or a command line written for 0.1.5 keeps working. Each setting comes from the first
+place that has it: a flag, then the settings file (`--config FILE`, or else `helper.json` in the
+helper's home), then an environment variable, then its default. A flag given as `0` or empty counts
+as not given, and so does an empty value in the file.
+
+| Setting | Flag | `helper.json` key | Variable | Default |
+|---|---|---|---|---|
+| The CITAR server | `--server URL` | `server_url` | `CITAR_WORKER_SERVER` | none: required |
+| The worker token | `--token` | `token` | `CITAR_WORKER_TOKEN` | none: required |
+| The model endpoint | `--base-url` | `base_url` | `CITAR_WORKER_BASE_URL` | `http://localhost:1234/v1` |
+| What serves the models | `--provider` | `provider` | `CITAR_WORKER_PROVIDER` | `lmstudio` (or `ollama`, `openai_compatible`, `openai`) |
+| The API key's variable | `--api-key-env` | `api_key_env` | `CITAR_WORKER_API_KEY_ENV` | none (`openai` reads `OPENAI_API_KEY`) |
+| Requests at once | `--max-concurrent` | `max_concurrent` | `CITAR_WORKER_MAX_CONCURRENT` | 1 (at most 16) |
+| The machine's name | `--name` | `name` | `CITAR_WORKER_NAME` | none: the server's name for it |
+| Only these models | `--model` (repeat) | `models` | | every model the endpoint lists |
+| Quiet hours | `--quiet` (repeat) | `quiet_hours` | | none |
+| A hardware file to report | `--hardware FILE` | `hardware_file` | `CITAR_WORKER_HARDWARE_FILE` | none |
+| Report no hardware | `--no-hardware` | | | |
+| Skip TLS checks | `--insecure` | `insecure` | | off, and only for a server on this machine or a private network |
+| The helper's home | `--home DIR` | | `CITAR_DATA_DIR` | the per-user CITAR folder |
+| Also trust this CA (PEM) | `--ca-file FILE` | `ca_file` | | the system's certificates only |
+| Serve no models (lend CPU only) | `--no-llm` | `no_llm` | | |
+| Lend spare CPU | `--cpu` (this run) | `cpu.enabled` | | **off** |
+| The CPU ceiling | | `cpu.threads`, `cpu.cpu_percent`, `cpu.memory_mb`, `cpu.work` | | half the logical CPUs, 50%, a quarter of the memory, every kind of work |
+| Updates | `--updates` | `updates` | | `auto` (or `notify`, `off`) |
+| Stream from the endpoint | | `stream` | | `true` |
+| Send no power samples | `--no-power` | `no_power` | | |
+| Run as a service | `--service` | | | |
+
+**The first run.** Started with nothing configured, at a terminal, the helper asks for the server's
+address, a token, and whether to lend this machine's spare CPU (the default is no), and offers to
+remember them in `helper.json`. `citar-helper setup` asks the same at any time, to give the helper a
+new token for instance, and keeps the file's other settings. A double-clicked helper that cannot
+start says why and waits for Enter before its window closes.
+
+**The home** is the per-user CITAR folder (`%LOCALAPPDATA%\CITAR` on Windows,
+`~/Library/Application Support/CITAR` on macOS, `~/.local/share/citar` on Linux), unless `--home`
+or `CITAR_DATA_DIR` names another. `helper.json` sits at its root, as in 0.1.5; the helper keeps its
+own files under `helper/` there: `machine-key.json`, and `logs/helper.log` (rotated at 5 MB, three
+old logs kept; the token never appears in it). It writes nothing outside its home.
+
+**CPU lending is off unless you turn it on, on the machine itself.** The server's machine settings
+can ask for CPU work, but the helper does none unless this machine's own switch is on: `setup`'s
+question, `"cpu": {"enabled": true}` in `helper.json`, or `--cpu` for one run. A 0.1.5
+`helper.json` has no `cpu` section, so a helper moved over from 0.1.5 lends no CPU until you say so,
+and the server's machine dialog shows "not lent by this machine's owner". The `cpu` figures are a
+ceiling: the helper takes the smaller of each of the server's figures and yours, and tells the
+server what it will actually do.
+
+**The machine key.** On its first run the helper makes a key for the machine (`helper/machine-key.json`).
+The server registers it at the first connection and refuses a later connection that presents
+another one, until the machine's owner resets the key on the Servers page; `citar-helper --version
+--home DIR` prints its fingerprint, which the Servers page shows too, so you can check the machine
+is yours. The file must be readable by you alone: the helper writes it so (mode 0600; on Windows,
+access for you, SYSTEM and Administrators only) and refuses to start when anyone else can read it,
+printing the command that fixes it (`chmod 600 …`, or an `icacls …` line on Windows). It warns, with
+the same kind of command, about a `helper.json` others can read, since that holds the token.
+
+**When the server says no.** A refused token or key, or a machine taken away (revoked, disabled,
+deleted, suspended, or replaced by another helper with the same token), is permanent: run from a
+console the helper says why and exits with code 78; as a service (`--service`) it waits an hour
+before trying again, so no service manager restarts it in a loop. A server that does not speak the
+helper's protocol (a 0.1.5 server, say) is tried again every 10 minutes, and the helper connects by
+itself once the server is upgraded. Anything else (a restart, a dropped connection) is retried after
+2 s, then backing off to a minute.
+
 ### Quiet hours
 
 If the GPU is in a room somebody sleeps in:
