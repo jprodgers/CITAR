@@ -313,11 +313,10 @@ impl TcpDialer {
                     tcp = Some(s);
                     break;
                 }
-                Err(e) => last = format!("{a}: {e}"),
+                Err(e) => last = e.to_string(),
             }
         }
-        let tcp =
-            tcp.ok_or_else(|| format!("could not connect to {}:{} ({last})", t.host, t.port))?;
+        let tcp = tcp.ok_or_else(|| format!("{}:{}: {last}", t.host, t.port))?;
         let _nodelay = tcp.set_nodelay(true);
         let io: Box<dyn Io> = match &self.tls {
             None => Box::new(tcp),

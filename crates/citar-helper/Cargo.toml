@@ -64,9 +64,15 @@ chrono.workspace = true
 [dev-dependencies]
 # The transcripts run on tokio's paused clock (the fake clock, `setup.helper.clock`), and the
 # binary's tests serve a fake hub and a fake endpoint on loopback.
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "process"] }
 # The parser's robustness gate: mutated frames never panic it (tests/robustness.rs).
 proptest.workspace = true
+# The transcripts' fake server speaks the WebSocket's server half; the tests read the engine's
+# ruleset id and the bots' versions as the binary does.
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+citar-engine = { workspace = true, features = ["embedded-ruleset"] }
+citar-bot.workspace = true
 # This crate again, with its conformance support, for the integration tests in tests/ (a
 # dev-dependency never reaches a shipped build; cargo xtask check allows only this self-reference).
 citar-helper = { path = ".", features = ["conformance"] }

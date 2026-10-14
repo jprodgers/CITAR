@@ -172,6 +172,13 @@ impl Backoff {
     }
 }
 
+/// Resolves when the helper must stop; never, once nobody can tell it to (the sender is gone).
+async fn stop_signal(mut stop: watch::Receiver<bool>) {
+    if stop.wait_for(|s| *s).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// A random number in `[0, 1)` from the OS, for jitter (0 when it has none to give).
 fn random_fraction() -> f64 {
     let mut b = [0u8; 4];
@@ -277,7 +284,9 @@ impl Helper {
             },
             llm: LlmInfo {
                 enabled: llm_on,
-                provider: llm_on.then_some(self.config.provider),
+                // The endpoint's kind whenever the helper has one: `null` with `--no-llm` only,
+                // so the server knows what the machine fronts before its proxy is on (4-04).
+                provider: (!self.config.no_llm).then_some(self.config.provider),
                 slots: if self.config.no_llm { 0 } else { self.config.max_concurrent },
                 stream: self.config.stream,
                 models,
@@ -305,13 +314,12 @@ impl Helper {
 
     /// Waits `d`, or until the helper is stopped (then `false`).
     async fn pause(&self, d: Duration) -> bool {
-        let mut stop = self.stop.clone();
-        if *stop.borrow() {
+        if self.stopped() {
             return false;
         }
         tokio::select! {
             () = tokio::time::sleep(d) => true,
-            _ = stop.wait_for(|s| *s) => false,
+            () = stop_signal(self.stop.clone()) => false,
         }
     }
 
@@ -323,16 +331,23 @@ impl Helper {
     pub async fn run(&self) -> Exit {
         let mut backoff = Backoff::default();
         let mut idle_logged = false;
+        let mut first = true;
         loop {
             if self.stopped() {
                 return Exit::Stopped;
             }
             let models = self.models().await;
             let report = self.report().await;
-            let mut stop = self.stop.clone();
+            let line = format!("connecting to {}", self.config.server_url);
+            if first {
+                self.log.info(line);
+            } else {
+                self.log.debug(line);
+            }
+            first = false;
             let dialled = tokio::select! {
                 r = self.dialer.dial() => r,
-                _ = stop.wait_for(|s| *s) => return Exit::Stopped,
+                () = stop_signal(self.stop.clone()) => return Exit::Stopped,
             };
             let end = match dialled {
                 Ok(ws) => self.connection(ws, models, report).await,
@@ -466,11 +481,10 @@ impl Helper {
     /// The server's answer to the hello: its `welcome`, or how the connection ends.
     async fn answer(&self, tx: &mut Sink, rx: &mut Stream) -> Result<protocol::Welcome, End> {
         let deadline = Instant::now() + HELLO_ANSWER;
-        let mut stop = self.stop.clone();
         loop {
             let msg = tokio::select! {
                 m = tokio::time::timeout_at(deadline, rx.next()) => m,
-                _ = stop.wait_for(|s| *s) => {
+                () = stop_signal(self.stop.clone()) => {
                     let _closed = tx.send(Message::Close(None)).await;
                     return Err(End::Stopped);
                 }
@@ -749,7 +763,6 @@ impl<'h> Steady<'h> {
     }
 
     async fn run(mut self, tx: &mut Sink, rx: &mut Stream) -> End {
-        let mut stop = self.h.stop.clone();
         let mut status_due: Option<Instant> = None;
         loop {
             let ping_at = (!self.pinged).then(|| self.last_rx + PING_AFTER);
@@ -804,7 +817,7 @@ impl<'h> Steady<'h> {
                         self.models = models;
                     }
                 }
-                _ = stop.wait_for(|s| *s) => {
+                () = stop_signal(self.h.stop.clone()) => {
                     let close = CloseFrame { code: CloseCode::Normal, reason: "the helper is stopping".into() };
                     let _closed = tokio::time::timeout(Duration::from_secs(2), tx.send(Message::Close(Some(close)))).await;
                     return End::Stopped;

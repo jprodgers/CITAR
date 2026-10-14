@@ -458,7 +458,7 @@ without jobs, which is never offered one); `target` `string 1..64` (the Rust tar
 `base64:32` (the machine key's ed25519 public key).
 
 **Llm:** `enabled` `bool` (false for `--no-llm`); `provider` `"lmstudio" | "ollama" |
-"openai_compatible" | "openai" | null` (`null` when not enabled); `slots` `int 0..16` (its local
+"openai_compatible" | "openai" | null` (the endpoint's kind; `null` with `--no-llm`, which has none); `slots` `int 0..16` (its local
 ceiling of concurrent requests, the configured `max_concurrent`; 0 with `--no-llm`); `stream`
 `bool` (whether it streams from its endpoint); `models` `[Model] ≤500` (at most 500, chosen as
 [What the helper caps](#values-and-checks) says).
