@@ -577,6 +577,12 @@ quirk fixed once is fixed for every machine, and nothing about parsing ever ship
 JSON protocol's prompt is built here too (`system_prompt`), so it reaches a model however the request
 goes out. `tests/data/completions/` holds raw completions with what the parser makes of each.
 
+Whoever runs a helper chooses what its completions say, so the parser treats a reply as hostile input:
+it takes time linear in the reply's length (no pattern rescans the rest of the text from each place it
+might start), never raises on a message protocol 2 accepts (JSON that Python will not decode is JSON
+that is not read), and yields at most 512 calls, protocol 2's own bound on native ones, with arguments
+that are always objects nested at most 64 levels deep.
+
 ---
 
 ## The browser client
