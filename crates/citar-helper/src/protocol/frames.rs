@@ -1,7 +1,7 @@
 //! Every frame of protocol 2 as a serde type, with its fields described for the checks
-//! (PROTOCOL.md, "Frames, field by field"). Each object is written once, by [`object!`], which
+//! (PROTOCOL.md, "Frames, field by field"). Each object is written once, by `object!`, which
 //! makes both the struct and its [`Field`] list, so the two cannot drift apart; a closed set of
-//! strings is written once by [`wire_enum!`].
+//! strings is written once by `wire_enum!`.
 //!
 //! Replaces `citar/worker/protocol.py`'s dataclasses (protocol 1), which 4-05 deletes.
 
