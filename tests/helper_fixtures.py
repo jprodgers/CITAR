@@ -10,7 +10,6 @@ the fake helper plays the transcripts against the real hub with this module.
 from __future__ import annotations
 
 import base64
-import binascii
 import json
 import re
 from dataclasses import dataclass, field
@@ -158,10 +157,10 @@ class Matcher:
         if self.kind == "bool":
             return isinstance(v, bool)
         if self.kind == "int":
-            n = HP._integer(v)
+            n = HP.as_integer(v)
             return n is not None and (self.lo is None or n >= self.lo) and (self.hi is None or n <= self.hi)
         if self.kind == "number":
-            x = HP._number(v)
+            x = HP.as_number(v)
             return x is not None and (self.lo is None or x >= self.lo) and (self.hi is None or x <= self.hi)
         if self.kind == "string":
             return isinstance(v, str)
@@ -545,7 +544,7 @@ def transcript_from(data) -> Transcript:
 def load_transcript(path: Path) -> Transcript:
     try:
         t = transcript_from(json.loads(path.read_text(encoding="utf-8")))
-    except (ValueError, binascii.Error) as exc:
+    except ValueError as exc:
         raise ValueError(f"{path}: {exc}") from None
     if t.name != path.stem:
         raise ValueError(f"{path}: the file is not named after the transcript, {t.name!r}")

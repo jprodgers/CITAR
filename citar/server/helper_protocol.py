@@ -218,14 +218,15 @@ def _kind(v) -> str:
     return "an object" if isinstance(v, dict) else type(v).__name__
 
 
-def _integer(v) -> Optional[int]:
+def as_integer(v) -> Optional[int]:
     """The integer a value is, if it is one the protocol can carry (not a boolean, not beyond 64 bits)."""
     if type(v) is int and _I64_MIN <= v <= _U64_MAX:
         return v
     return None
 
 
-def _number(v) -> Optional[float]:
+def as_number(v) -> Optional[float]:
+    """The finite number a value is, as a float, if it is one (not a boolean)."""
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
     try:
@@ -247,7 +248,7 @@ class Int(Ty):
         self.lo, self.hi = lo, hi
 
     def read(self, v, path):
-        n = _integer(v)
+        n = as_integer(v)
         if n is None:
             _fail("type", path, f"expected an int, found {_kind(v)}")
         if not self.lo <= n <= self.hi:
@@ -260,7 +261,7 @@ class Num(Ty):
         self.lo, self.hi = lo, hi
 
     def read(self, v, path):
-        x = _number(v)
+        x = as_number(v)
         if x is None:
             _fail("type", path, f"expected a number, found {_kind(v)}")
         if not self.lo <= x <= self.hi:
@@ -356,8 +357,8 @@ class Exactly(Ty):
         self.k = k
 
     def read(self, v, path):
-        if _integer(v) != self.k:
-            _fail("value" if _number(v) is not None else "type", path, f"expected exactly {self.k}")
+        if as_integer(v) != self.k:
+            _fail("value" if as_number(v) is not None else "type", path, f"expected exactly {self.k}")
         return v
 
 
@@ -624,7 +625,7 @@ def parse(raw: str, sender: str):
     spec = FRAMES[sender].get(t)
     if spec is None:
         return Ignored(t)
-    if sender == HELPER and t == "hello" and _integer(data.get("protocol")) != PROTOCOL:
+    if sender == HELPER and t == "hello" and as_integer(data.get("protocol")) != PROTOCOL:
         raise ProtocolError("protocol", "protocol", "a hello that is not protocol 2: answered with the v1 refusal")
     out = {"t": t}
     if "ts" in data:
