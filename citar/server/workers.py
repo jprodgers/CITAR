@@ -552,35 +552,23 @@ def authenticate(token: str) -> Optional[tuple]:
 
 
 def record_connection(server_id: str, *, ip: str = "", hardware: Optional[dict] = None,
-                      models: Optional[list] = None):
-    """Persist what a worker reported, so the Servers page is accurate after a restart."""
+                      models: Optional[list] = None, hostname: str = "", worker_version: str = "") -> dict:
+    """Keep what a machine's helper reported (its hello's hardware scan and models, or a catalog frame's models) as
+    the machine's last report, and apply it as the machine's modes say (``citar.machine_settings.record_report``,
+    design/phase3-features.md P3.8.3): hardware and models ``auto`` by default, power ``manual``; a section its owner
+    set to ``manual`` keeps what they typed in. Off the event loop (the caller's ``asyncio.to_thread``); never raises.
+    Returns what was kept and applied (``{"kept", "applied"}``)."""
     from .. import db
     from ..db.models import Server
-    from datetime import datetime, timezone
+    from ..machine_settings import record_report
 
     try:
         with db.session() as s:
             server = s.get(Server, server_id)
             if server is None:
-                return
-            config = dict(server.config or {})
-            if hardware:
-                # The worker collected this on the machine itself, which beats anything typed in.
-                config["hardware"] = hardware
-            if models:
-                existing = {m.get("key"): m for m in (config.get("models") or [])}
-                merged = []
-                for model in models:
-                    key = model.get("key")
-                    if not key:
-                        continue
-                    entry = dict(existing.get(key) or {})
-                    entry.update({"key": key, "label": model.get("label") or entry.get("label") or key})
-                    if model.get("context"):
-                        entry["context"] = model["context"]
-                    merged.append(entry)
-                config["models"] = merged
-            server.config = config
-            server.updated_at = datetime.now(timezone.utc)
+                return {"kept": [], "applied": []}
+            helper = {"hostname": hostname, "worker_version": worker_version} if hostname or worker_version else None
+            return record_report(server, hardware=hardware, models=models, helper=helper)
     except Exception:
         log.exception("could not record worker connection for %s", server_id)
+        return {"kept": [], "applied": []}

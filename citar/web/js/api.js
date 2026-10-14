@@ -176,6 +176,12 @@ export const api = {
   savePlan: (p) => request("POST", "/api/electricity-plans", p),
   deletePlan: (id) => request("DELETE", `/api/electricity-plans/${id}`),
   restricted: () => request("GET", "/api/servers/restricted"),
+  // the machine settings dialog (design/phase3-features.md P3.8)
+  machineSettings: (id) => request("GET", `/api/machines/${encodeURIComponent(id)}/settings`),
+  saveMachineSettings: (id, body) => request("PUT", `/api/machines/${encodeURIComponent(id)}/settings`, body),
+  applyScan: (id, sections) => request("POST", `/api/machines/${encodeURIComponent(id)}/hardware/apply`, { sections }),
+  setMachineTrust: (id, trust_tier) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/trust`, { trust_tier }),
+  setMachineClass: (id, body) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/class`, body),
   // reports
   reports: () => request("GET", "/api/reports"),
   reportOptions: () => request("GET", "/api/reports/options"),

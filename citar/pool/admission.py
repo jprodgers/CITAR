@@ -144,6 +144,11 @@ def check(session, user: Optional[User], server: Server, purpose: str = "game", 
     if not server.enabled:
         return _deny("disabled", f"“{server.name}” has been switched off by its owner.",
                      server=server)
+    if purpose != "lab" and not _takes_model_work(server):
+        # its machine settings turned its LLM capability off (design/phase3-features.md P3.8): the prompt scheduler
+        # would refuse every request, so the work is refused here, with the reason, before anything is made
+        return _deny("disabled", f"“{server.name}” takes no model work: its owner turned it off in its machine "
+                                 "settings.", server=server)
 
     # The owner may always use their own hardware, and administrators are not gated by grants. Both
     # still respect the server being switched off, above. The site's machines (the host, its online
@@ -178,6 +183,12 @@ def check(session, user: Optional[User], server: Server, purpose: str = "game", 
             best_denial = decision
     return best_denial or _deny("no_grant", "You do not have permission to use that server.",
                                 server=server)
+
+
+def _takes_model_work(server: Server) -> bool:
+    """Whether a machine's capabilities let it take model work (``capabilities.llm.enabled``, on by default)."""
+    from ..machine_settings import capabilities
+    return capabilities(server.capabilities)["llm"]["enabled"]
 
 
 #: How informative each refusal is. A higher-ranked reason is shown in preference to a lower one,

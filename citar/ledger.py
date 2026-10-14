@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import queue as _queue
 import re
 import threading
@@ -145,6 +146,19 @@ def _regex(pattern: str, text: str) -> bool:
         return False
 
 
+def _figure(v) -> Optional[float]:
+    """A hardware figure as a float, None when it is none: what a row holds may be text, or a number no float holds
+    (``servers.clean_hardware`` keeps them out of what is written now; a row written before must not stop the
+    classification of every machine)."""
+    if isinstance(v, bool):
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return x if math.isfinite(x) else None
+
+
 def matches(match: Optional[dict], hardware: Optional[dict]) -> bool:
     """Whether a class's ``match`` fits a machine's hardware (``config.hardware``: ``gpus`` with ``name`` and
     ``vram_gb``, ``cpu`` with ``model``, ``cores`` and ``threads``). An empty match fits every machine; each key given
@@ -157,17 +171,15 @@ def matches(match: Optional[dict], hardware: Optional[dict]) -> bool:
     if match.get("gpu_name") and not any(_regex(str(match["gpu_name"]), str(g.get("name") or "")) for g in gpus):
         return False
     if match.get("vram_gb_min") is not None:
-        vram = max((float(g.get("vram_gb") or 0) for g in gpus), default=0.0)
-        if vram < float(match["vram_gb_min"]):
+        vram = max((_figure(g.get("vram_gb")) or 0.0 for g in gpus), default=0.0)
+        if vram < (_figure(match["vram_gb_min"]) or 0.0):
             return False
     if match.get("cpu_name") and not _regex(str(match["cpu_name"]), str(cpu.get("model") or cpu.get("name") or "")):
         return False
     if match.get("cores_min") is not None:
-        cores = cpu.get("cores") or cpu.get("threads") or 0
-        try:
-            if float(cores) < float(match["cores_min"]):
-                return False
-        except (TypeError, ValueError):
+        cores = _figure(cpu.get("cores") or cpu.get("threads") or 0)
+        wanted = _figure(match["cores_min"])
+        if cores is None or wanted is None or cores < wanted:
             return False
     return True
 

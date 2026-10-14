@@ -39,6 +39,11 @@ export const GATES = {
   createGrant: "manage",
   updateGrant: "manage",
   revokeGrant: "manage",
+  machineSettings: "manage",
+  saveMachineSettings: "manage",
+  applyScan: "manage",
+  setMachineTrust: "admin",
+  setMachineClass: "admin",
   storeKey: "direct",
   deleteKey: "direct",
   detectModels: "dialled",
@@ -117,4 +122,80 @@ export function poolTarget(hash) {
 /** The page's address for a machine (`#/pool/<id>`), or for a group with `group` set. */
 export function poolLink(id, { group = false } = {}) {
   return `#/pool/${group ? "groups/" : ""}${encodeURIComponent(id)}`;
+}
+
+// ---------------------------------------------------------------------------- the machine settings dialog (P3.8)
+
+/** The sections a helper's report may change, and what it does to each in each mode (the dialog's words; the
+ *  server's rule is citar/machine_settings.py's). */
+export const SECTIONS = ["hardware", "models", "power"];
+export const MODE_TEXT = {
+  hardware: {
+    auto: "Each scan its helper sends replaces the hardware details (and the hardware class follows them).",
+    manual: "The hardware details are yours: a scan is kept as the last scan and changes nothing until you apply it.",
+  },
+  models: {
+    auto: "Each report updates the catalogue: new models are added, loaded ones marked, and a model no longer "
+      + "reported is kept, marked as not reported. Your names and settings for a model stay.",
+    manual: "The catalogue is yours: a report only marks which of its models are loaded; nothing is added or removed.",
+  },
+  power: {
+    auto: "Each scan's suggested power figures replace yours (they are rough guesses from the hardware).",
+    manual: "The power figures are yours: a scan's suggestion changes nothing until you apply it.",
+  },
+};
+
+/** Whether a kind of machine shares CPU (an online API or a test machine has none of its own to share). */
+export function sharesCpu(kind) {
+  return kind === "owned" || kind === "leased";
+}
+
+/** A whole number from the dialog's input within `lo`..`hi`, or null. */
+export function wholeIn(text, lo, hi) {
+  if (text === "" || text == null) return null;
+  const n = Number(text);
+  return Number.isInteger(n) && n >= lo && n <= hi ? n : null;
+}
+
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/** The settings route's body for what the dialog changed (`edited`, a copy of the route's read `current` with its
+ *  `slots`, `capabilities` and `modes` changed): only the fields that differ, or null when nothing does. */
+export function settingsBody(current, edited) {
+  const body = {};
+  if (edited.slots !== current.slots) body.slots = edited.slots;
+  const caps = {};
+  for (const part of ["llm", "cpu"]) {
+    const changed = {};
+    for (const [key, value] of Object.entries((edited.capabilities || {})[part] || {})) {
+      if (!same(value, ((current.capabilities || {})[part] || {})[key])) changed[key] = value;
+    }
+    if (Object.keys(changed).length) caps[part] = changed;
+  }
+  if (Object.keys(caps).length) body.capabilities = caps;
+  const modes = {};
+  for (const section of SECTIONS) {
+    if ((edited.modes || {})[section] !== (current.modes || {})[section]) modes[section] = edited.modes[section];
+  }
+  if (Object.keys(modes).length) body.modes = modes;
+  return Object.keys(body).length ? body : null;
+}
+
+/** What the prompt scheduler has in effect for a machine (the route's `in_effect`), in a line. */
+export function inEffectText(ie) {
+  if (!ie || !ie.known) return "The prompt scheduler has not read this machine yet.";
+  if (!ie.llm) return "In effect now: no model work.";
+  const capacity = ie.capacity == null ? "no requests until its helper connects"
+    : `${ie.capacity} request${ie.capacity === 1 ? "" : "s"} at once`;
+  const ceiling = ie.helper_slots != null && ie.helper_slots < ie.slots
+    ? ` (its helper takes at most ${ie.helper_slots})` : "";
+  return `In effect now: ${capacity}${ceiling}; pooled prompts ${ie.allow_swaps ? "may" : "may not"} make it swap models.`;
+}
+
+/** A hardware class in a line: its name and rate (credits per generation-second for a GPU, per core-second for a CPU,
+ *  per unit of token cost for an online API). */
+export function classText(c) {
+  if (!c) return "none";
+  const per = { gpu: "per generation-second", cpu: "per core-second", api: "per unit of token cost" }[c.kind] || "";
+  return `${c.name} (${c.rate} credits ${per})`.replace(" )", ")");
 }

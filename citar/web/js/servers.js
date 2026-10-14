@@ -324,8 +324,7 @@ function models(S, draw) {
   const manual = el("input", { placeholder: "model id / key", style: { flex: 1 } });
   box.append(
     canDetect ? el("div", { class: "row" }, el("button", { class: "small", onclick: detect }, "Detect models"), status) : null,
-    helper ? el("p", { class: "muted small" }, "The helper reports this machine's models each time it connects: a model it no longer reports leaves ",
-      "the list. Here you choose which to offer, their names and how they are prompted.") : null,
+    helper ? el("p", { class: "muted small" }, helperNote(S, "models")) : null,
     detected,
     el("h3", { class: "section" }, "Catalog"),
     el("p", { class: "muted small" }, "Models listed here can be picked for seats, suites and probes. " +
@@ -349,11 +348,16 @@ function modelEditor(S, m, loadState, redraw) {
   const row = el("div", { class: `model-edit ${m.enabled ? "" : "disabled"}` });
   row.appendChild(el("div", { class: "row" },
     el("input", { type: "checkbox", checked: m.enabled, title: "Offer this model", onchange: (e) => { m.enabled = e.target.checked; redraw(); } }),
-    el("code", {}, m.key), loadState[m.key] ? el("span", { class: "pill live" }, "loaded") : null,
+    el("code", {}, m.key), loadState[m.key] || (S.reach === "worker" && m.loaded) ? el("span", { class: "pill live" }, "loaded") : null,
+    S.reach === "worker" && m.reported === false ? el("span", { class: "pill muted", title: "Its helper's last report did not "
+      + "name it: kept in the catalogue until you remove it" }, "not reported") : null,
     el("span", { class: "muted small" }, modelInfo(m)), el("span", { class: "grow" }),
     el("input", { value: m.label || "", placeholder: "display name", style: { width: "180px" }, oninput: (e) => { m.label = e.target.value; } }),
     el("button", { class: "small", onclick: () => { expanded ? open.delete(m.id) : open.add(m.id); redraw(); } }, expanded ? "▾ Settings" : "▸ Settings"),
-    S.reach === "worker" ? null : el("button", { class: "small danger", title: "Remove from catalog", onclick: () => { S.models.splice(S.models.indexOf(m), 1); redraw(); } }, "✕")));
+    // a model its helper reports comes back with its next report while models are auto: removable once it is not
+    // reported, or when the catalogue is its owner's (models manual)
+    S.reach === "worker" && m.reported !== false && (S.modes || {}).models !== "manual" ? null
+      : el("button", { class: "small danger", title: "Remove from catalog", onclick: () => { S.models.splice(S.models.indexOf(m), 1); redraw(); } }, "✕")));
   if (!expanded) return row;
   const inf = m.inference = m.inference || {};
   const inner = el("div", { class: "col", style: { paddingLeft: "22px" } });
@@ -464,6 +468,26 @@ async function pollLoad(S, key) {
   }
 }
 
+// What a helper machine's helper does to a part of its configuration, by the part's mode (Machine settings…, on its
+// card; citar/machine_settings.py): hardware and models auto and power manual unless its owner changed them.
+function helperNote(S, section) {
+  const mode = (S.modes || {})[section] || (section === "power" ? "manual" : "auto");
+  const what = { hardware: "hardware details", models: "models", power: "power figures" }[section];
+  if (section === "models") {
+    return mode === "auto"
+      ? "Its helper reports this machine's models each time it connects: new ones are added, loaded ones marked, and one "
+        + "it no longer reports stays, marked as not reported, until you remove it. Here you choose which to offer, "
+        + "their names and how they are prompted. (Models: auto, in Machine settings…)"
+      : "Models: manual, in Machine settings…: its helper's reports only mark which models are loaded; nothing is added "
+        + "or removed. Here you choose which to offer, their names and how they are prompted.";
+  }
+  return mode === "auto"
+    ? `Its helper's scan replaces the ${what} here each time it connects (${section === "hardware" ? "Hardware" : "Power"}: `
+      + "auto, in Machine settings…): set it to manual there to keep what you enter."
+    : `${section === "hardware" ? "Hardware" : "Power"}: manual, in Machine settings…: the ${what} here are yours. Its `
+      + "helper's scan is kept beside them as the last scan, to compare and apply there.";
+}
+
 // ---------------------------------------------------------------------------- hardware and power
 
 /** The machine's hardware (collected, imported or entered) and its power figures. */
@@ -496,8 +520,7 @@ function hardware(S, draw) {
   box.append(
     el("div", { class: "row" }, el("b", {}, S.hardware_summary || "No hardware details yet"), el("span", { class: "pill" }, hw.source || "manual"),
       hw.collected_at ? el("span", { class: "muted small" }, `collected ${hw.collected_at} on ${hw.hostname}`) : null),
-    S.reach === "worker" ? el("p", { class: "muted small" }, "The helper scans this machine when it connects (unless it was started with ",
-      el("code", {}, "--no-hardware"), "), and its scan replaces the details here.") : null,
+    S.reach === "worker" ? el("p", { class: "muted small" }, helperNote(S, "hardware")) : null,
     el("div", { class: "card inner" },
       el("h3", {}, "Collect automatically"),
       may("collectHardware", S) ? el("div", { class: "row" }, el("button", { class: "primary small", onclick: async () => {
@@ -549,6 +572,7 @@ function power(S, draw) {
   const p = S.power;
   const sug = ((S.hardware || {}).power || {}).suggested;
   return el("div", { class: "col" },
+    S.reach === "worker" ? el("p", { class: "muted small" }, helperNote(S, "power")) : null,
     el("p", { class: "muted" }, "Wall-socket watts. Energy is estimated from these whenever CITAR can't measure it: idle + CPU watts × CPU load + GPU watts × " +
       "the share of time the model was generating." + (S.is_host ? " On this machine, the one running CITAR, GPU power (nvidia-smi) and CPU load are also sampled live every few seconds." : "")),
     el("div", { class: "grid2" },

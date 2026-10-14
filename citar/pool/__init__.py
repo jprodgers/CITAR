@@ -273,15 +273,28 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
         "is_mine": bool(viewer and server.owner_id == viewer.id),
         "can_manage": access.MANAGE in perms,
     }
+    if viewer is not None and viewer.role == "admin":
+        # what the prompt scheduler noticed of its helper (``overreports``: more generation time reported than the
+        # server observed, P3.3.4), for an administrator's card; Phase 4's trust tiers read it too
+        base["flags"] = dict(server.flags or {})
+        base["trust_tier"] = server.trust_tier or "new"
     config = server.config or {}
-    # Safe for anyone who can see the server at all: what it can run, and roughly what it is.
-    base["models"] = [{"key": m.get("key"), "label": m.get("label") or m.get("key")}
-                      for m in (config.get("models") or [])]
-    hardware = config.get("hardware") or {}
+    # Safe for anyone who can see the server at all: what it can run, and roughly what it is. Read from the row as
+    # stored, so read as text and figures whatever shape a helper's report or an old write left there: one machine's
+    # odd hardware must not fail the listing of every machine its viewer can see.
+    base["models"] = [{"key": str(m.get("key")), "label": str(m.get("label") or m.get("key"))}
+                      for m in (config.get("models") if isinstance(config.get("models"), list) else [])
+                      if isinstance(m, dict) and m.get("key")]
+
+    def part(v) -> dict:
+        return v if isinstance(v, dict) else {}
+    hardware = part(config.get("hardware"))
+    cpu_model = part(hardware.get("cpu")).get("model")
+    gpus = hardware.get("gpus") if isinstance(hardware.get("gpus"), list) else []
     base["hardware_summary"] = {
-        "cpu": (hardware.get("cpu") or {}).get("model"),
-        "gpus": [g.get("name") for g in (hardware.get("gpus") or [])],
-        "ram_gb": (hardware.get("memory") or {}).get("ram_gb"),
+        "cpu": cpu_model if isinstance(cpu_model, str) else None,
+        "gpus": [g["name"] for g in gpus if isinstance(g, dict) and isinstance(g.get("name"), str)],
+        "ram_gb": registry.hardware_figure(part(hardware.get("memory")).get("ram_gb")),
     }
     # quiet hours are public: anyone who may use the machine needs to know when it is off limits. They are read on
     # the clock that pauses its work (servers.restricted_at): a helper machine's owner's wall clock, this computer's

@@ -56,7 +56,14 @@ which side answered each case; with ``--keep`` the server stays up for the brows
 capital, scouts at the edges of what it explored, each era's techs, the whole map revealed; its view's minimap block
 moving from early to renaissance to information, its home box only growing, over the seam, and at every step the
 box of the land the seat explored joined to its home through land it explored; the route's gate; with ``--keep`` the
-server stays up for the browser checklist's F1), and later ``machines``; ``all`` runs every part written so far.
+server stays up for the browser checklist's F1), ``machines`` (3-18: a helper machine whose real helper reconnects
+with other hardware, models and power figures from a file, ``--hardware``: the last report kept and applied by mode,
+a manual hardware entry surviving the reconnect, models merged or only marked, Apply by section with the hardware
+class following it, a scan of figures no JSON answer carries kept clean with every page still reading and "Apply all"
+taking what the report has, an administrator's pin and the trust tier, the routes' gates (a moderator's too), slots
+and model swaps taking effect at once, LLM off; with ``--keep`` its helper stays connected for the browser
+checklist's G1), and later ``real``
+(3-19); ``all`` runs every part written so far.
 It needs the extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
 from __future__ import annotations
@@ -92,7 +99,7 @@ DEV_SERVER_PORT = 8799
 #: The owner's dev server's directory: never a harness's, whatever is in it.
 OWNER_PLAY_DIR = Path("C:/dev/citar-play")
 #: Parts a later package writes (P3.9.4): asked for now, the harness says so and refuses.
-LATER = {"machines": "3-18"}
+LATER = {"real": "3-19"}
 
 
 def _dev_server():
@@ -234,7 +241,8 @@ class FakeEndpoint:
     researches, builds), opens a trade with a met civilization (``share_map`` both ways, which needs no technology;
     at most ``max_trades`` times), votes when a vote is open, and ends the turn. ``delay`` seconds pass before each
     completion, so queues, drains and cancels can be seen. ``/models`` (and LM Studio's ``/api/v0/models``) name
-    ``MODEL``, loaded. So a real CITAR helper pointed at it exercises the hub, the hello, the requests and
+    ``MODEL``, loaded (``models`` says otherwise once a part sets it). So a real CITAR helper pointed at it exercises
+    the hub, the hello, the requests and
     ``Done.duration`` without a GPU."""
 
     MODEL = "qa-fake-model"
@@ -248,6 +256,9 @@ class FakeEndpoint:
         self.slow: dict = {}
         self.max_trades = max_trades
         self.trades_opened = 0
+        #: What ``/models`` names: (key, loaded) each. A part changes it to have a helper report other models at its
+        #: next connection.
+        self.models: list = [(self.MODEL, True)]
         self._lock = threading.Lock()
         #: Completions ``hold(body)`` picks wait for ``gate`` (set: open) before they are answered; ``held`` counts
         #: those waiting now. A part holds a game's turn so the work behind it queues on its machine.
@@ -269,7 +280,8 @@ class FakeEndpoint:
                 outer.requests.append({"t": time.time(), "method": "GET", "path": self.path})
                 if self.path.rstrip("/").endswith("/models"):
                     return self._send(200, {"object": "list", "data": [
-                        {"id": outer.MODEL, "object": "model", "state": "loaded", "max_context_length": 32768}]})
+                        {"id": key, "object": "model", "state": "loaded" if loaded else "not-loaded",
+                         "max_context_length": 32768} for key, loaded in list(outer.models)]})
                 self._send(404, {"error": "not found"})
 
             def do_POST(self):
@@ -985,7 +997,10 @@ class Helper:
     """A real CITAR helper (``python -m citar.worker``) as a child, connected to the instance with a worker token and
     serving from a fake endpoint; its log in the harness's directory."""
 
-    def __init__(self, h: "Harness", token: str, endpoint: FakeEndpoint, name: str):
+    def __init__(self, h: "Harness", token: str, endpoint: FakeEndpoint, name: str, *,
+                 hardware: Optional[Path] = None, max_concurrent: int = 0):
+        """``hardware``: the hardware file it reports (``--hardware``), instead of none (``--no-hardware``);
+        ``max_concurrent``: its own slot count (``--max-concurrent``), else the helper's default, one."""
         state = h.server.state
         n = len(list(state.glob("helper-*.log"))) + 1
         self.log = state / f"helper-{n}.log"
@@ -993,9 +1008,12 @@ class Helper:
         empty.write_text("{}", encoding="utf-8")      # the helper reads this, never a saved helper configuration
         out = open(self.log, "w", encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if not k.startswith("CITAR_WORKER_")}
+        extra = ["--hardware", str(hardware)] if hardware is not None else ["--no-hardware"]
+        if max_concurrent:
+            extra += ["--max-concurrent", str(max_concurrent)]
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "citar.worker", "--server", h.server.base, f"--token={token}",
-             "--base-url", endpoint.url, "--provider", "openai_compatible", "--name", name, "--no-hardware",
+             "--base-url", endpoint.url, "--provider", "openai_compatible", "--name", name, *extra,
              "--config", str(empty)],
             cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             env={**env, "PYTHONUNBUFFERED": "1"})
@@ -3116,9 +3134,313 @@ def part_minimap(h: Harness) -> None:
                 pass
 
 
+def _qa_scan(*, cpu: str, gpu: str, vram: float, idle: int, cpu_w: int, gpu_w: int, host: str = "qa-settings-box") -> dict:
+    """A hardware file as the collectors write one (``hwinfo.collect``'s shape), for a helper's ``--hardware``."""
+    return {"format": "citar-hardware", "collector_version": 1, "collected_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "hostname": host, "os": {"system": "Linux", "release": "6.8", "arch": "x86_64"},
+            "system": {"form": "desktop"}, "cpu": {"model": cpu, "cores": 8, "threads": 16},
+            "memory": {"ram_gb": 64, "unified": False}, "gpus": [{"name": gpu, "vram_gb": vram}],
+            "physical_disks": [{"name": "QA SSD", "size_gb": 2000, "type": "SSD"}], "volumes": [], "runtimes": [],
+            "power": {"gpu_sampling": False, "suggested": {"idle_w": idle, "cpu_max_w": cpu_w, "gpu_max_w": gpu_w,
+                                                           "source": "guess", "note": "a QA guess"}}}
+
+
+#: Her hand-set hardware: what she types into the Hardware & power dialog.
+QA_HAND_SET = {"source": "manual", "cpu": {"model": "QA hand-set CPU", "cores": 4, "threads": 4},
+               "memory": {"ram_gb": 16, "unified": False}, "gpus": [{"name": "QA hand-set GPU", "vram_gb": 12}],
+               "physical_disks": [], "system": {"form": "desktop"}}
+
+
+def part_machines(h: Harness) -> None:
+    """3-18's checks (design/phase3-features.md P3.8): alice's helper machine with a real CITAR helper (``python -m
+    citar.worker``) behind the scripted endpoint, reporting its hardware from a file (``--hardware``) that the part
+    changes between reconnects, and the models the endpoint lists. Through the dialog's routes: the first hello kept as
+    the last report and applied by the default modes (hardware and models auto, power manual); her hand-set hardware
+    with hardware manual surviving the helper's reconnect with other hardware, the new scan kept beside it; models
+    merged in auto (the unreported kept), only their loaded flags in manual; Apply per section, the hardware class
+    following the hardware it copied; a hardware file of figures no JSON answer carries (NaN, Infinity), an integer no
+    float holds and parts of other shapes, reported by the real helper: kept without them, every page that shows the
+    machine still answering (hers, the administrator's whole Servers page, the pool's listing), and "Apply all"
+    taking the sections the report has (it suggests no power figures); an administrator's pin holding the class
+    against the next scan, and its release; the trust tier set by an administrator and shown to her; the routes' gates
+    (another member and a moderator 404, a visitor 401, the administrators' routes 404 to her and the moderator);
+    slots and model swaps taking effect at once (the scheduler's capacity, and a
+    test of a model not loaded refused, then taken with swaps allowed); LLM off refusing the test. With ``--keep`` her
+    helper stays connected (its pid and hardware file in the evidence) for the browser checklist's G1."""
+    r = h.report
+    alice, bob, admin, mod = h.accounts["alice"], h.accounts["bob"], h.accounts["admin"], h.accounts["mod"]
+    data = r.data.setdefault("machines", {})
+    files = h.server.state / "hardware"
+    files.mkdir(exist_ok=True)
+    scripted = FakeEndpoint(delay=0.05)
+    cold, third = "qa-cold-model", "qa-third-model"
+    helpers: list = []
+    try:
+        cls = admin.post("/api/admin/hardware-classes", json={
+            "kind": "gpu", "name": f"QA 24 GB GPUs {h.tag}", "rate": 2.0, "match": {"vram_gb_min": 24}, "priority": 10})
+        big = cls.json().get("id", "") if cls.status_code == 200 else ""
+        made = alice.post("/api/pool/servers", json={"config": {"name": f"QA alice settings box {h.tag}",
+                                                                "kind": "owned",
+                                                                "connection": {"provider": "openai_compatible"}},
+                                                     "reach": "worker"})
+        hid = made.json().get("id", "") if made.status_code == 200 else ""
+        issued = alice.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa machines"}) if hid else None
+        token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
+        r.check("an administrator's hardware class for 24 GB GPUs, and alice's helper machine with a worker token",
+                bool(big and hid and token), f"class {cls.status_code}, machine {made.status_code}")
+        if not (big and hid and token):
+            return
+        data.update(machine=hid, big_class=big)
+
+        def read(who: "Account" = alice) -> dict:
+            got = who.get(f"/api/machines/{hid}/settings")
+            return got.json() if got.status_code == 200 else {}
+
+        def connect(label: str, hardware: dict, models: list) -> dict:
+            """(Re)start her helper reporting ``hardware`` (its file, written now) and ``models`` (what the endpoint
+            lists); returns the dialog's read once the server has recorded the new report."""
+            for helper in helpers:
+                helper.stop()
+            wait_until(lambda: not _online(alice, hid), 15, 0.1)
+            path = files / f"hardware-{len(helpers) + 1}.json"
+            path.write_text(json.dumps(hardware, indent=1), encoding="utf-8")
+            scripted.models = list(models)
+            before = (read().get("report") or {}).get("at")
+            helpers.append(Helper(h, token, scripted, "qa-settings-box", hardware=path, max_concurrent=4))
+            fresh = wait_until(lambda: (lambda s: s if (s.get("report") or {}).get("at") not in (None, before)
+                                        and _online(alice, hid) else None)(read()), 60, 0.25)
+            steps.append({"step": label, "hardware_file": str(path), "reported_models": [list(m) for m in models],
+                          "read": fresh})
+            return fresh or {}
+
+        def save_hardware(hardware: dict) -> int:
+            """Her Hardware & power dialog's save: the registry's view of the machine, its hardware replaced, posted
+            back whole."""
+            listing = alice.get("/api/servers").json().get("servers", [])
+            view = next((sv for sv in listing if sv.get("id") == hid), None)
+            if view is None:
+                return 404
+            view["hardware"] = json.loads(json.dumps(hardware))
+            return alice.post("/api/servers", json=view).status_code
+
+        def put(body: dict, who: "Account" = alice) -> dict:
+            got = who.put(f"/api/machines/{hid}/settings", json=body)
+            return got.json() if got.status_code == 200 else {"status": got.status_code, "text": got.text[:200]}
+
+        def apply(sections: Optional[list]) -> dict:
+            got = alice.post(f"/api/machines/{hid}/hardware/apply", json={"sections": sections})
+            return got.json() if got.status_code == 200 else {"status": got.status_code, "text": got.text[:200]}
+
+        def models_of(s: dict) -> dict:
+            return {m["key"]: m for m in (s.get("configured") or {}).get("models") or []}
+
+        steps: list = []
+        data["steps"] = steps
+        a = _qa_scan(cpu="QA CPU A", gpu="QA GPU 8 GB", vram=8, idle=40, cpu_w=90, gpu_w=150)
+        s1 = connect("first hello: 8 GB GPU, one model loaded", a, [(scripted.MODEL, True)])
+        cfg = s1.get("configured") or {}
+        r.check("her helper's hello is kept as the machine's last report, with its time, and applied by the default "
+                "modes: the scan is her hardware (from the helper), the model is in the catalogue (loaded), the power "
+                "figures are left alone (power manual), the class is the default GPU class",
+                s1.get("modes") == {"hardware": "auto", "models": "auto", "power": "manual"}
+                and ((s1.get("report") or {}).get("hardware") or {}).get("cpu", {}).get("model") == "QA CPU A"
+                and bool((s1.get("report") or {}).get("hardware_at"))
+                and cfg.get("hardware_source") == "helper" and cfg.get("hardware_summary", "").startswith("QA CPU A")
+                and (cfg.get("power") or {}).get("idle_w") is None
+                and models_of(s1).get(scripted.MODEL, {}).get("loaded") is True
+                and ((s1.get("class") or {}).get("gpu") or {}).get("id") == "hc_gpu",
+                json.dumps({k: s1.get(k) for k in ("modes", "configured", "class")})[:600])
+
+        # her own hardware, kept: hardware manual
+        saved = save_hardware(QA_HAND_SET)
+        manual = put({"modes": {"hardware": "manual"}})
+        r.check("she types her own hardware in (the Hardware & power dialog's save) and sets hardware to manual",
+                saved == 200 and (manual.get("modes") or {}).get("hardware") == "manual"
+                and "QA hand-set GPU" in (manual.get("configured") or {}).get("hardware_summary", ""),
+                f"save HTTP {saved}; {json.dumps(manual.get('configured'))[:300]}")
+        b = _qa_scan(cpu="QA CPU B", gpu="QA GPU 24 GB", vram=24, idle=60, cpu_w=120, gpu_w=300)
+        s2 = connect("reconnect: 24 GB GPU, a second model not loaded", b,
+                     [(scripted.MODEL, True), (cold, False)])
+        cfg, rep2 = s2.get("configured") or {}, s2.get("report") or {}
+        diffs = {d["what"]: d for d in (s2.get("differences") or {}).get("hardware") or []}
+        r.check("her manual hardware entry survives the helper's reconnect with other hardware: the hand-set details "
+                "stay, the new scan is kept beside them with a later time, and the differences name the GPU",
+                "QA hand-set GPU" in cfg.get("hardware_summary", "")
+                and (rep2.get("hardware") or {}).get("gpus") == [{"name": "QA GPU 24 GB", "vram_gb": 24}]
+                and rep2.get("hardware_at", "") > (s1.get("report") or {}).get("hardware_at", "")
+                and (diffs.get("GPUs") or {}).get("detected") == "QA GPU 24 GB (24 GB)",
+                json.dumps({"configured": cfg.get("hardware_summary"), "scan": rep2.get("hardware_summary"),
+                            "differences": list(diffs.values())}))
+        got = models_of(s2)
+        r.check("models auto merged the new report (the second model added, reported and not loaded) and the class "
+                "still follows her hand-set hardware (12 GB: the default class); power manual left the figures unset, "
+                "the scan's suggestion listed among the differences",
+                set(got) == {scripted.MODEL, cold} and got[cold].get("reported") is True
+                and got[cold].get("loaded") is False and ((s2.get("class") or {}).get("gpu") or {}).get("id") == "hc_gpu"
+                and (cfg.get("power") or {}).get("idle_w") is None
+                and len((s2.get("differences") or {}).get("power") or []) == 3,
+                json.dumps({"models": got, "class": s2.get("class"), "power": s2.get("differences", {}).get("power")})[:600])
+
+        # Apply, by section: the class follows the hardware it copies
+        hw = apply(["hardware"])
+        pw = apply(["power"])
+        r.check("Apply copies the last scan's hardware in (from the helper) and the class follows it to the 24 GB "
+                "class; Apply of the power section copies the scan's suggested figures, as a guess",
+                (hw.get("configured") or {}).get("hardware_summary", "").startswith("QA CPU B")
+                and ((hw.get("class") or {}).get("gpu") or {}).get("id") == big
+                and (pw.get("configured") or {}).get("power") == {"idle_w": 60, "cpu_max_w": 120, "gpu_max_w": 300,
+                                                                  "source": "guess"}
+                and (pw.get("differences") or {}).get("hardware") == [] and (pw.get("differences") or {}).get("power") == [],
+                json.dumps({"hardware": hw.get("configured"), "class": hw.get("class"), "power": pw.get("configured")})[:600])
+
+        # models manual: the catalogue is hers
+        put({"modes": {"models": "manual"}})
+        s3 = connect("reconnect with models manual: only a third model, loaded", b, [(third, True)])
+        got = models_of(s3)
+        r.check("with models manual a report only marks what is loaded: the catalogue keeps her two models (neither "
+                "loaded now), the third is not added, and the report is kept",
+                set(got) == {scripted.MODEL, cold} and not got[scripted.MODEL].get("loaded")
+                and not got[cold].get("loaded")
+                and [m["key"] for m in (s3.get("report") or {}).get("models") or []] == [third]
+                and any(d["what"] == third for d in (s3.get("differences") or {}).get("models") or []),
+                json.dumps({"models": got, "report": (s3.get("report") or {}).get("models")})[:600])
+        merged = apply(["models"])
+        got = models_of(merged)
+        r.check("Apply of the models section merges the report in: the third model added, the two others kept and "
+                "marked as no longer reported",
+                set(got) == {scripted.MODEL, cold, third} and got[third].get("loaded") is True
+                and got[scripted.MODEL].get("reported") is False and got[cold].get("reported") is False
+                and (merged.get("differences") or {}).get("models") == [],
+                json.dumps(got)[:600])
+
+        # a hardware file no page could show as it came: NaN and Infinity (Python writes and reads them; no JSON answer
+        # carries them), a figure of 400 digits (no float holds it), parts of other shapes, and no power suggestion
+        odd = _qa_scan(cpu="QA CPU odd", gpu="QA GPU odd", vram=8, idle=1, cpu_w=1, gpu_w=1)
+        odd["gpus"] = [{"name": "QA GPU odd", "vram_gb": float("nan")}, "not a GPU"]
+        odd["memory"] = "lots"
+        odd["cpu"]["threads"] = 10 ** 400
+        odd["physical_disks"][0]["size_gb"] = float("inf")
+        del odd["power"]["suggested"]
+        s5 = connect("reconnect: a hardware file of odd figures and shapes, suggesting no power figures", odd,
+                     [(third, True)])
+        kept = (s5.get("report") or {}).get("hardware") or {}
+
+        def pages() -> dict:
+            return {"her servers": alice.get("/api/servers").status_code,
+                    "admin servers": admin.get("/api/servers").status_code,
+                    "her pool": alice.get("/api/pool/servers").status_code,
+                    "admin pool": admin.get("/api/pool/servers").status_code,
+                    "admin dialog": admin.get(f"/api/machines/{hid}/settings").status_code}
+        before_apply = pages()
+        everything = alice.post(f"/api/machines/{hid}/hardware/apply", json={})
+        after_apply = pages()
+        applied_all = everything.json() if everything.status_code == 200 else {}
+        audit = admin.get("/api/admin/audit", params={"object_id": hid, "action": "server.scan_applied"}).json()
+        sections = [(e.get("detail") or {}).get("sections") for e in audit.get("entries", [])]
+        data["odd_scan"] = {"kept": kept, "pages_before_apply": before_apply, "apply_all": everything.status_code,
+                            "pages_after_apply": after_apply, "applied_sections": sections}
+        r.check("a hardware file of NaN, Infinity, a 400-digit figure and parts of other shapes is kept without them "
+                "(the rest of the report as sent), every page that shows the machine still answers, and \"Apply all\" "
+                "takes the sections the report has (hardware and models; it suggests no power figures)",
+                kept.get("gpus") == [{"name": "QA GPU odd", "vram_gb": None}] and kept.get("memory") == {}
+                and (kept.get("cpu") or {}).get("threads") is None
+                and kept.get("physical_disks") == [{"name": "QA SSD", "size_gb": None, "type": "SSD"}]
+                and set(before_apply.values()) == {200} and everything.status_code == 200
+                and set(after_apply.values()) == {200} and ["hardware", "models"] in sections
+                and (applied_all.get("configured") or {}).get("hardware_summary", "").startswith("QA CPU odd")
+                and (applied_all.get("differences") or {}).get("models") == [],
+                json.dumps(data["odd_scan"])[:800])
+
+        # an administrator's pin holds the class against the next scan
+        pin = admin.put(f"/api/admin/machines/{hid}/class", json={"pinned": True, "gpu_class_id": "hc_gpu"})
+        put({"modes": {"hardware": "auto", "models": "auto"}})
+        c = _qa_scan(cpu="QA CPU C", gpu="QA GPU 32 GB", vram=32, idle=61, cpu_w=121, gpu_w=301)
+        s4 = connect("reconnect with hardware auto, the class pinned: 32 GB GPU", c,
+                     [(scripted.MODEL, True), (cold, False)])
+        unpin = admin.put(f"/api/admin/machines/{hid}/class", json={"pinned": False})
+        after = read()
+        r.check("pinned by an administrator, the class holds against a new scan applied by hardware auto; unpinned, "
+                "it follows the hardware again at once",
+                pin.status_code == 200 and (s4.get("configured") or {}).get("hardware_summary", "").startswith("QA CPU C")
+                and (s4.get("class") or {}).get("pinned") is True and ((s4.get("class") or {}).get("gpu") or {}).get("id") == "hc_gpu"
+                and unpin.status_code == 200 and ((after.get("class") or {}).get("gpu") or {}).get("id") == big
+                and (after.get("class") or {}).get("pinned") is False,
+                json.dumps({"pinned": s4.get("class"), "unpinned": after.get("class")}))
+
+        # trust, and the routes' gates
+        trust = admin.put(f"/api/admin/machines/{hid}/trust", json={"trust_tier": "trusted"})
+        mine = read()
+        with h.anonymous() as anon:
+            visitor = (anon.get(f"/api/machines/{hid}/settings").status_code,
+                       anon.put(f"/api/machines/{hid}/settings", json={"slots": 2}).status_code)
+        gates = {"bob read": bob.get(f"/api/machines/{hid}/settings").status_code,
+                 "bob change": bob.put(f"/api/machines/{hid}/settings", json={"slots": 2}).status_code,
+                 "bob apply": bob.post(f"/api/machines/{hid}/hardware/apply", json={}).status_code,
+                 "alice trust": alice.put(f"/api/admin/machines/{hid}/trust", json={"trust_tier": "trusted"}).status_code,
+                 "alice class": alice.put(f"/api/admin/machines/{hid}/class", json={"pinned": False}).status_code,
+                 "mod": [mod.get(f"/api/machines/{hid}/settings").status_code,
+                         mod.put(f"/api/machines/{hid}/settings", json={"slots": 2}).status_code,
+                         mod.post(f"/api/machines/{hid}/hardware/apply", json={}).status_code,
+                         mod.put(f"/api/admin/machines/{hid}/trust", json={"trust_tier": "new"}).status_code,
+                         mod.put(f"/api/admin/machines/{hid}/class", json={"pinned": False}).status_code],
+                 "visitor": list(visitor)}
+        r.check("an administrator sets the trust tier and she is shown it (not the classes to pin, nor the flags); "
+                "another member and a moderator get 404 on the dialog's routes, she and the moderator 404 on the "
+                "administrators' and a visitor 401",
+                trust.status_code == 200 and mine.get("trust_tier") == "trusted" and mine.get("can_admin") is False
+                and "classes" not in mine and "flags" not in mine
+                and gates == {"bob read": 404, "bob change": 404, "bob apply": 404, "alice trust": 404,
+                              "alice class": 404, "mod": [404] * 5, "visitor": [401, 401]},
+                json.dumps(gates))
+
+        # slots and swaps, at once
+        def test_of(model: str) -> dict:
+            got = alice.post(f"/api/pool/servers/{hid}/test", params={"model": model, "wait": 30})
+            return got.json() if got.status_code == 200 else {"status": got.status_code}
+        before = test_of(cold)
+        three = put({"slots": 3})
+        swaps = put({"capabilities": {"llm": {"allow_swaps": True}}})
+        taken = test_of(cold)
+        back = put({"capabilities": {"llm": {"allow_swaps": False}}})
+        again = test_of(cold)
+        data["slots_and_swaps"] = {"before": before, "slots_3": three.get("in_effect"), "swaps_on": swaps.get("in_effect"),
+                                   "taken": taken, "swaps_off": back.get("in_effect"), "again": again}
+        r.check("slots and model swaps set in the dialog take effect at once: 3 slots in effect (her helper takes 4); "
+                "a test of a model her helper has not loaded is refused, taken once swaps are allowed, refused again "
+                "once they are not",
+                before.get("ok") is False and before.get("code") == "not_loaded"
+                and (three.get("in_effect") or {}).get("capacity") == 3
+                and (swaps.get("in_effect") or {}).get("allow_swaps") is True
+                and taken.get("ok") is True and taken.get("model") == cold
+                and again.get("ok") is False and again.get("code") == "not_loaded",
+                json.dumps(data["slots_and_swaps"])[:800])
+        off = put({"capabilities": {"llm": {"enabled": False}}})
+        refused = test_of(scripted.MODEL)
+        on = put({"capabilities": {"llm": {"enabled": True}}})
+        r.check("with its LLM turned off the machine takes no model work (her test is refused, saying why); on again, "
+                "it does", (off.get("in_effect") or {}).get("llm") is False and refused.get("ok") is False
+                and "takes no model work" in (refused.get("reason") or "")
+                and (on.get("in_effect") or {}).get("llm") is True,
+                json.dumps({"refused": refused, "in_effect": on.get("in_effect")})[:400])
+        audit = admin.get("/api/admin/audit", params={"object_id": hid}).json().get("entries", [])
+        actions = sorted({e.get("action") for e in audit})
+        r.check("every change has its audit row (settings, apply, class, trust)",
+                {"server.settings", "server.scan_applied", "server.class", "server.trust"} <= set(actions),
+                json.dumps(actions))
+        if h.keep and helpers:
+            data["kept_helper"] = {"pid": helpers[-1].proc.pid, "hardware_file": steps[-1]["hardware_file"],
+                                   "token": token, "machine": hid}
+    finally:
+        if not h.keep:
+            for helper in helpers:
+                helper.stop()
+        scripted.close()
+
+
 #: The parts written so far, in the order ``all`` runs them.
 PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue, "ledger": part_ledger,
-                                               "chat": part_chat, "hybrid": part_hybrid, "minimap": part_minimap}
+                                               "chat": part_chat, "hybrid": part_hybrid, "minimap": part_minimap,
+                                               "machines": part_machines}
 
 
 # ---------------------------------------------------------------------------- the run

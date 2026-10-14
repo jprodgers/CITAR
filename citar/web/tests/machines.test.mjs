@@ -4,7 +4,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { GATES, legacyServersTarget, mayCall, poolLink, poolTarget } from "../js/machines.js";
+import {
+  GATES, MODE_TEXT, SECTIONS, classText, inEffectText, legacyServersTarget, mayCall, poolLink, poolTarget, settingsBody,
+  sharesCpu, wholeIn,
+} from "../js/machines.js";
 
 test("the old Servers page's addresses lead to the Servers page", () => {
   const cases = [
@@ -157,4 +160,90 @@ test("nobody signed in may call anything, and a name not in the table is never a
   for (const name of ["deleteServer", "machineRates", "setMachineCosting", "probeModels", "setupScan", "constructor", "toString"]) {
     assert.equal(mayCall(name, ADMIN, MACHINES.host), false, name);
   }
+});
+
+// ---------------------------------------------------------------------------- the machine settings dialog (3-18)
+
+test("the machine settings dialog: its owner and administrators; class and trust administrators' alone", () => {
+  for (const name of ["machineSettings", "saveMachineSettings", "applyScan"]) {
+    assert.equal(GATES[name], "manage", name);
+    for (const [what, machine] of Object.entries(MACHINES)) {
+      assert.equal(mayCall(name, MEMBER, machine), machine.can_manage, `${name} on ${what}`);
+      assert.equal(mayCall(name, ADMIN, machine), true, `${name} on ${what}`);
+    }
+    assert.equal(mayCall(name, MEMBER, { isNew: true }), false, `${name}: not saved yet`);
+  }
+  for (const name of ["setMachineTrust", "setMachineClass"]) {
+    assert.equal(GATES[name], "admin", name);
+    for (const machine of Object.values(MACHINES)) {
+      assert.equal(mayCall(name, MEMBER, machine), false, name);
+      assert.equal(mayCall(name, ADMIN, machine), true, name);
+    }
+  }
+});
+
+const READ = {
+  slots: 1,
+  capabilities: { llm: { enabled: true, allow_swaps: false },
+                  cpu: { enabled: false, threads: 0, cpu_percent: 0, memory_mb: 0, work: [] } },
+  modes: { hardware: "auto", models: "auto", power: "manual" },
+};
+
+test("the dialog sends only what changed, or nothing", () => {
+  const copy = () => JSON.parse(JSON.stringify(READ));
+  assert.equal(settingsBody(READ, copy()), null);
+  const e = copy();
+  e.slots = 3;
+  e.capabilities.llm.allow_swaps = true;
+  e.capabilities.cpu.work = ["lab_game"];
+  e.modes.hardware = "manual";
+  assert.deepEqual(settingsBody(READ, e), {
+    slots: 3, capabilities: { llm: { allow_swaps: true }, cpu: { work: ["lab_game"] } }, modes: { hardware: "manual" },
+  });
+  const back = copy();
+  back.capabilities.cpu.work = [];                     // a list equal to the read one is no change
+  back.modes.power = "manual";
+  assert.equal(settingsBody(READ, back), null);
+  const off = copy();
+  off.capabilities.llm.enabled = false;
+  assert.deepEqual(settingsBody(READ, off), { capabilities: { llm: { enabled: false } } });
+});
+
+test("whole numbers within bounds, and nothing else", () => {
+  assert.equal(wholeIn("3", 1, 16), 3);
+  assert.equal(wholeIn("16", 1, 16), 16);
+  for (const bad of ["0", "17", "1.5", "", "two", null, undefined, "-1"]) assert.equal(wholeIn(bad, 1, 16), null, String(bad));
+  assert.equal(wholeIn("0", 0, 100), 0);
+});
+
+test("CPU sharing is for machines with a CPU of their own", () => {
+  assert.equal(sharesCpu("owned"), true);
+  assert.equal(sharesCpu("leased"), true);
+  assert.equal(sharesCpu("api"), false);
+  assert.equal(sharesCpu("test"), false);
+});
+
+test("every section has both modes' words", () => {
+  assert.deepEqual(SECTIONS, ["hardware", "models", "power"]);
+  for (const section of SECTIONS) {
+    for (const mode of ["auto", "manual"]) assert.ok(MODE_TEXT[section][mode].length > 20, `${section} ${mode}`);
+  }
+});
+
+test("what is in effect, in a line", () => {
+  assert.match(inEffectText(null), /not read this machine yet/);
+  assert.match(inEffectText({ known: true, llm: false }), /no model work/);
+  assert.equal(inEffectText({ known: true, llm: true, capacity: 2, slots: 3, helper_slots: 2, allow_swaps: false }),
+    "In effect now: 2 requests at once (its helper takes at most 2); pooled prompts may not make it swap models.");
+  assert.equal(inEffectText({ known: true, llm: true, capacity: 1, slots: 1, helper_slots: 4, allow_swaps: true }),
+    "In effect now: 1 request at once; pooled prompts may make it swap models.");
+  assert.match(inEffectText({ known: true, llm: true, capacity: null, slots: 2, helper_slots: null }),
+    /no requests until its helper connects/);
+});
+
+test("a class in a line", () => {
+  assert.equal(classText(null), "none");
+  assert.equal(classText({ name: "GPU (unclassified)", kind: "gpu", rate: 1 }),
+    "GPU (unclassified) (1 credits per generation-second)");
+  assert.equal(classText({ name: "Online API", kind: "api", rate: 1000 }), "Online API (1000 credits per unit of token cost)");
 });

@@ -269,6 +269,26 @@ dialog saves) sees it.
 are an administrator's, and so are `POST /api/setup/dismiss` and `POST /api/setup/reopen` (a site-wide setting); a
 member's `GET /api/setup/state` has no `paths`.
 
+### A machine's settings
+
+The machine settings dialog's routes ([Workers](server/WORKERS.md#machine-settings-and-what-a-helpers-report-changes)).
+The first three are the machine's owner's and administrators' (the site's machines, the host and its online APIs,
+administrators' alone): a member a group lends it to gets 403, any other member 404, a visitor 401. The last two are
+administrators': anyone else signed in gets 404. Every change writes one audit row (`server.settings`,
+`server.scan_applied`, `server.trust`, `server.class`) and is committed before the answer, which is the dialog's read
+again.
+
+| Method and path | |
+|---|---|
+| `GET /api/machines/{id}/settings` | The dialog's read: `slots` (its `max_concurrent`), `capabilities` (`llm`: `enabled`, `allow_swaps`; `cpu`: `enabled`, `threads`, `cpu_percent`, `memory_mb`, `work`, a list of `lab_game`, `ranking_game`, `reference_game`), `modes` (`hardware`, `models`, `power`: `auto` or `manual`), `in_effect` (what the prompt scheduler has in effect now: `capacity`, `slots`, `helper_slots`, `llm`, `allow_swaps`, `online`), `report` (its helper's last report: `at`, `helper`, the scan as `hardware` with `hardware_at` and `hardware_summary`, its suggested `power` figures, the `models` it reported with `models_at`), `configured` (its hardware summary and source, power figures and catalogue), `differences` (per section, `[{what, configured, detected}]`), `class` (its `gpu` and `cpu` classes, or its `api` class, and whether they are `pinned`) and `trust_tier`. An administrator also gets `classes` (every class, to pin) and `flags` (`overreports`: its helper reported more generation time than the server observed, with its `count` and `last` time) |
+| `PUT /api/machines/{id}/settings` | Change any of `slots` (1 to 16), `capabilities` (`llm` and `cpu`, each in part) and `modes`; the rest stay. A value of the wrong type or out of range, an unknown key, CPU sharing on an online API or a test machine: 400, and nothing changes. Slots, swaps and LLM on or off reach the prompt scheduler at once |
+| `POST /api/machines/{id}/hardware/apply` | `{"sections": ["hardware", "models", "power"]}` (any of them): copy its helper's last report into the configuration, whatever the modes. A section named with nothing to copy is a 409, and nothing changes. With none or an empty list, every section the report has something for is copied (a report of models alone, a scan that suggests no power figures) and the others are passed over; a 409 only when the report has nothing at all |
+| `PUT /api/admin/machines/{id}/trust` | `{"trust_tier": "new"|"provisional"|"trusted"|"quarantined"}` |
+| `PUT /api/admin/machines/{id}/class` | `{"pinned": true, "gpu_class_id", "cpu_class_id"}` pins the classes it is priced by (an online API: its `api` class as `gpu_class_id`, no CPU class; a class left out is the one it has now; a class of the wrong kind: 400); `{"pinned": false}` lets them follow its hardware again, at once. The ledger prices by them from the next event |
+
+The pool's listing (`GET /api/pool/servers`) gives an administrator each machine's `flags` and `trust_tier`;
+`GET /api/servers` gives each machine its `modes`.
+
 ---
 
 ## The tools
