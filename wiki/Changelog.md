@@ -322,6 +322,9 @@ files.
   a hybrid job's pair line and keep hybrid seats out of the model's game figures.
 - A model's tool call that the hybrid seat's bot vetoes is read as the engine reads it, so no spelling
   slips a deal past the veto; pausing a game holds a hybrid seat's diplomat and frees its machine.
+- A model that answers a chat in text without calling a tool is asked three times running, as on its
+  turn, not twenty, before the chat is declined "(no response)": a small model that does it held its
+  machine about two minutes an answer.
 
 ## [0.1.5] - 2026-09-22
 
