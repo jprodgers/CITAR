@@ -737,9 +737,10 @@ pub async fn loopback_routes_shared(
 /// What [`FakeEndpoint`] does with one completion request.
 #[derive(Clone, Debug)]
 pub enum Behaviour {
-    /// A `text/event-stream` answer: each value a `data:` event, `delay` apart (the first at once),
-    /// then `data: [DONE]`. It stops the moment its client goes.
-    Stream { events: Vec<Value>, delay: Duration },
+    /// A `text/event-stream` answer: its head at once, the first event after `first` (a model
+    /// thinking before its first token), the others `delay` apart, then `data: [DONE]`. It stops
+    /// the moment its client goes.
+    Stream { events: Vec<Value>, delay: Duration, first: Duration },
     /// A JSON answer.
     Json(Value),
     /// An HTTP error with this body.
@@ -754,7 +755,7 @@ impl Behaviour {
         if let Some(events) = r.get("stream").and_then(Value::as_array) {
             let delay =
                 Duration::from_millis(r.get("delay_ms").and_then(Value::as_u64).unwrap_or(0));
-            return Ok(Behaviour::Stream { events: events.clone(), delay });
+            return Ok(Behaviour::Stream { events: events.clone(), delay, first: Duration::ZERO });
         }
         if let Some(body) = r.get("json") {
             return Ok(Behaviour::Json(body.clone()));
@@ -962,7 +963,7 @@ impl FakeEndpoint {
             Behaviour::Hang => {
                 let _gone = self.gone(k, far).await;
             }
-            Behaviour::Stream { events, delay } => {
+            Behaviour::Stream { events, delay, first } => {
                 let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
                 if wr.write_all(head.as_bytes()).await.is_err() {
                     return;
@@ -974,9 +975,10 @@ impl FakeEndpoint {
                     .collect();
                 let last = datas.len() - 1;
                 for (n, data) in datas.into_iter().enumerate() {
-                    if n > 0 && !delay.is_zero() {
+                    let wait = if n == 0 { first } else { delay };
+                    if !wait.is_zero() {
                         // A wait the client's going ends at once, as a model stops.
-                        let until = Instant::now() + delay;
+                        let until = Instant::now() + wait;
                         if self.gone(k, until).await.is_some() {
                             return;
                         }
