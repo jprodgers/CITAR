@@ -211,7 +211,7 @@ class HelperConfigCases(unittest.TestCase):
 
 if __name__ == "__main__":
     if "--record" in sys.argv:
-        DATA.write_text(json.dumps(record(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        DATA.write_text(json.dumps(record(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
         print(f"wrote {DATA} ({len(CASES)} cases)")
     else:
         unittest.main()
