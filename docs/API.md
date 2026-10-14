@@ -377,8 +377,10 @@ Worth knowing:
   own turn, after you open one, `wait` waits for the other side's answer (`negotiation_update`, or
   `waiting_for_reply` at the timeout): `end_turn` is refused until the negotiation is settled or
   withdrawn, and the game's chat clock settles it when the other side's time runs out.
-- **The turn ends without you** if you hit a limit — 10 steps with no progress, 60 steps, 150 tool
-  calls, or 1800 seconds. All four are per-seat settings, and which one you hit is recorded.
+- **Your turn waits for you.** An MCP or HTTP seat's turn ends when it calls `end_turn`, however long
+  that takes; the chats it is in are what the clock times. The built-in adapter, by contrast, ends a
+  model's turn when it hits a limit — 10 steps with no progress, 60 steps, 150 tool calls, or 1800
+  seconds; all four are per-seat settings, and which one it hit is recorded.
 - **Errors are information.** A refusal explains the rule. Retrying an identical call unchanged is
   the single most common failure of weak agents, and CITAR counts it.
 

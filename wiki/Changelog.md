@@ -37,6 +37,128 @@ that means for an existing install:
   `EngineGame.python_game` are gone, and `check_ruleset` is new. A bot has no seed of its own: its
   draws are keyed by its game's seed, and `bot_instance` and `profiles.make_bot` no longer take a
   `seed`.
+- **The database starts afresh.** 0.1.6's schema is one new baseline. On the first start a SQLite
+  database of 0.1.5 (or of an earlier 0.1.6 build) is renamed aside, with its `-wal` and `-shm`, to
+  `citar-0.1.5-<date>-<time>.db` in the same folder, and a new one is made: nothing is changed or
+  deleted, and a rename that fails (another program has the file open) refuses the start, naming the
+  file. A PostgreSQL database of an older version, or a database of a newer one, refuses the start.
+  Accounts, sessions, machines, groups, grants, budgets and sharing start empty: make the first
+  administrator again (`citar admin create-user`, or the setup page). Saved games stay on disk and get
+  their place in the games list back as they are loaded.
+  [docs/server/ACCOUNTS.md](Design-accounts-and-sharing).
+- **`config/servers.json` is imported once.** The machines, electricity plans and keys it lists
+  become rows of the database, under their own ids, when the first administrator exists; the file is
+  then renamed `servers.json.imported-<date>-<time>` and never read again. Every machine, the server's
+  own, one it dials and a member's helper machine alike, is on the one Servers page; `#/servers` opens
+  it. `POST /api/pool/import-registry` is gone. [docs/CONFIGURATION.md](Configuration).
+- **Visibility is `private | allowlist | link | server | global`.** `public` is now `global` (the
+  public web: anyone, signed in or not), and its capability `publish_public` is `publish_global`;
+  `server` is new (every member of this server). A moderator may unpublish what is global or shared by
+  link, and nothing else.
+- **A member's model seat names a machine.** A seat, a scenario's seat, a suite's model or a probe's
+  subject from a member that carries a base URL, a key or a key variable is refused (400); an
+  administrator's, and the dry run, may still describe one. `POST /api/llm/models` with a base URL is
+  an administrator's. Machine routes that act on the server's own computer (its hardware scan, LM
+  Studio's control, a key held in its environment, host-wide settings) are administrators' alone.
+- **Grants name what they cover.** A grant for "Ordinary games" covers a model seat that plays every
+  turn and nothing pooled: a report's narrative, a hybrid seat's diplomacy, a probe's offer or message
+  case and a machine's test need "Pooled prompts". Budgets are in credits, not money.
+- **API changes.** The report sharing routes under `/api/shared/reports` moved to the owned items'
+  routes (`/api/items/report/{id}/sharing`) and `/r/{slug}`; `replay_data("full")` and a replay asked
+  for in it are refused (the recap reads the `delta` frames); a seat's view no longer carries
+  `trade_options` (`GET /api/games/{id}/trade-options/{other}` does); `respond_negotiation` requires a
+  `message`; an LLM seat's wait for a chat's answer inside its turn is 60 s (it was 240 s), the chat's
+  own time being the lobby's.
+
+### Added
+
+**Accounts, sharing and administration** ([docs/server/ACCOUNTS.md](Design-accounts-and-sharing)):
+
+- Every kind of job has an owner and a visibility: benchmark suites and runs, probes and probe runs,
+  lab experiments, scenarios, maps, bot profiles and reports, as games had. Listings show what the
+  caller may see; only the owner, those they share it with to manage it, and administrators control
+  it. One sharing dialog for all of them (members, by link, by account, published), with Unpublish
+  for moderators; a published report has a public page at `/r/{slug}`.
+- What a member's report gathers is what they may see, and model scores and comparisons honour each
+  owner's pooling choice.
+- Profiles: a bio, links and a 256 KB avatar (PNG, JPEG or WebP, checked by its header and served
+  without its metadata), each field visible to whom its owner chooses; a members-only directory with
+  a way out of it; public profiles at `#/u/<handle>`.
+- An administrators' users page (roles, status, capabilities, limits, trust) and an audit log of
+  every change, also from `citar admin` (`set-caps`, `set-limits`, `set-trust`, `audit`).
+
+**Machines** ([docs/server/WORKERS.md](Workers)):
+
+- One Servers page for every machine the viewer owns or may use, with its editors as dialogs.
+- A machine settings dialog: LLM on or off, slots, model swaps for pooled prompts, CPU sharing limits
+  for the next helper; hardware, models and power each `auto` (a helper's report applied when it
+  connects) or `manual` (kept as typed), with the last report always kept and its differences shown,
+  "Apply" per section or all; the hardware class and, for administrators, a pin and the trust tier.
+  Power is manual by default, so a helper's guess no longer replaces measured figures, and a model a
+  helper stops reporting is kept, marked. The helper takes `--hardware FILE` (a collector's file).
+- Revoking a helper's token, disabling or deleting its machine disconnects the helper at once.
+
+**Shared compute** ([docs/server/WORKERS.md](Workers),
+[docs/CONFIGURATION.md](Configuration)):
+
+- The prompt scheduler: every model call of a machine waits its turn on that machine, so no machine
+  is sent more requests than it has slots, and a busy one queues instead of failing or being
+  retried in a loop. A seat that plays every turn holds a lease; pooled prompts (chat answers, a
+  hybrid seat's diplomacy, probe answers, report narratives, a machine's test) take tickets, by
+  priority, then in turn between members, then in order, on loaded models only unless the owner
+  allows swaps, and never while a benchmark holds the machine. A cancelled request on a helper keeps
+  its slot until the helper's late answer. Speed figures use generation time, never time spent
+  queued.
+- The Queue page lists each machine's leases and pooled prompts with their places, naming only what
+  the viewer may see, with priority and cancel controls for one's own work.
+- The compute ledger: every model step and unit of host CPU is an event with who used it and whose
+  machine gave it, priced in credits by the machine's hardware class (administrators set the
+  classes and their rates); use of one's own machine counts on neither side. The Account page's
+  Compute card, a ratio of given to used on the profile (private unless its owner shows it), and the
+  administrators' users page's 30 days of compute. Budgets are in credits, reserved and settled per
+  request, and a hard budget stops at its limit, an online API's too (a model with no price is
+  refused under one).
+
+**Chat** ([docs/PLAYING.md](Playing-in-the-browser), [docs/AI_PLAYERS.md](AI-players)):
+
+- A docked chat window per civilization, left of End Turn, opening as a chat comes; the deal builder
+  is inside it, and a draft or an open builder survives every update. It shows whose move it is, a
+  model "queued" (with its place) or "thinking", the time left, and the number of messages. End Turn
+  says who you wait for and, armed, ends the turn when the last answer comes. At 700 px and below one
+  window shows at a time, with tabs.
+- The lobby's Chat row: how long a model (10 minutes) and a person (5 minutes) have to answer, and
+  the cap on messages. The session keeps the time: a model that runs out declines, "(no reply in
+  time)", and a chat waiting on a person closes as expired. A pause stops the clock; a suspension, a
+  seat change or a restart never declines a chat.
+- One conversation per chat for a model seat, and an answer that comes after the tool's wait is put
+  in front of the model before its next step.
+
+**Hybrid seats** ([docs/AI_PLAYERS.md](AI-players#hybrid-seats)):
+
+- A seat played by a bot that hands the diplomacy categories you choose (trades, agreements, peace,
+  war, denunciations, the United Nations vote, city-states, spies, captured cities, talk) to a model,
+  with presets ("Trade only", "All but war", ...), the bot's handicap, an advisor, and how often the
+  diplomat is called. The bot vetoes a deal that mixes its categories with the model's when it values
+  it below zero; whatever the model cannot answer in time, its bot answers. In the lobby, the
+  Join/Seats dialog and scenarios; the game screen shows "bot playing", "diplomat thinking" and
+  "queued #n", and the stats screen the diplomat's phases and answers.
+- Hybrid benchmark suites, each job paired with a bot-only control game of the same seed (cached and
+  shared between models), the Models page's Diplomacy tab (`GET /api/models/diplomacy`) and hybrid
+  probe runs that record which side answered each case.
+
+**The game screen** ([docs/PLAYING.md](Playing-in-the-browser)):
+
+- A person's minimap shows what their civilization explored, opening out to the home continent at
+  the Renaissance and to the whole map at the Information era, never shrinking, remembered per game
+  and seat; it is hex-correct and letterboxed for everyone, with click and drag to move the map.
+- The recap plays from the game's journal frames (`delta`) and shows the chats as threads. A view
+  answers with an ETag and a refresh that has nothing new gets 304; trade options are fetched when the
+  deal builder opens.
+
+**Development:** `POST /api/games/{id}/debug/ops` (scenario operations on a live game, on debug
+servers only); `scripts/qa_phase3.py`, which checks each feature end to end on a dev server of its
+own, and all of them at once in one game, with a real model in LM Studio last
+([CONTRIBUTING.md](Contributing)).
 
 ### Fixed
 
@@ -154,6 +276,52 @@ files.
 - A civilization's great people were born at the start of its turn for as long as its points covered the threshold, all at once, and for ever on points no game earns (a save's 1e300, which paying a threshold leaves where it was), hanging the game; Rust makes one great person of each kind a turn from its points, and one from its combat points, and the rest wait for the turns after (`one-great-person-of-a-kind-a-turn`)
 - A scenario kept only a seat's model and bot settings, so a hybrid seat saved in one lost the kinds of diplomacy its model decides; Rust keeps the seat's hybrid settings too (`scenario-seats-keep-hybrid`)
 <!-- rule fixes: end -->
+
+**Fixed in the server and the browser client:**
+
+- A member's seat could make the server dial any address with any of its environment variables as the
+  key, or spend the site's own API key; a member's machine could make it scan its own hardware or
+  drive its LM Studio. Members now name machines (see Compatibility), and those routes are
+  administrators'.
+- Revoking a helper's token left the helper connected until it reconnected; so did disabling or
+  deleting its machine.
+- A busy helper made a model seat sleep and retry for ever, metering a request each time; a request
+  that timed out freed its slot while the helper was still generating it.
+- A finished game kept counting against its owner's game limit, and benchmark and probe games counted
+  as lobby games.
+- Moderators could control members' published games; now they may only unpublish.
+- A chat a model was answering was declined, "(no response)", when the game was suspended or a seat
+  changed; a bot waited at most 90 s for a person's answer; a model's answer after the tool's wait
+  reached it only when it tried to end its turn.
+- Report narratives bypassed the machine's queue and polled a busy helper every 5 s for half an hour;
+  a narrative waiting for its machine held up every other member's report.
+- A probe answer cut off by the machine was scored as the model's; a benchmark that took the machine
+  mid-run failed the rest of a probe run.
+- Reading a probe or a run while it was being saved could fail on Windows (the file is briefly
+  locked as it is replaced); it is read again.
+- Hardware details with figures no JSON answer carries (NaN, infinities, integers of hundreds of
+  digits) or parts of other shapes broke the Servers page and the pool's listing; they are dropped as
+  the details are kept. A body with such a number is a 400.
+- A scenario seat the engine cannot read, or a seat's bot that is not an object or whose aggression is
+  not a number, is a 400 (it was a 500, or taken); the scenario editor refuses seat blocks that are
+  not objects instead of saving defaults; a scenario's hybrid seat launched as a bot no longer keeps
+  the hybrid handicap.
+- "Best bot" is pinned when a seat is set, and its "(best)" mark is kept only while the seat plays the
+  profile it was pinned to.
+- The seat forms, the probe run dialog and the report's narrator show a machine's refusal for the work
+  they ask for; the game screen's refreshes get 304s while a unit or city is selected; a closed chat
+  window comes back with the other side's news; chat windows keep clear of the unit, city and side
+  panels.
+- Debug routes are 404 on servers that are not in debug mode, whatever the body.
+- A person's minimap counts far land as home only once land they explored joins it.
+- In hybrid benchmarks: a chat whose model never started falls back as `not_started` and is not
+  counted against the model; a control game whose record does not read is played again, and one no
+  job can pair with is not played; a control plays the bots pinned at its job's launch; a hybrid job
+  loads its model beside the machine's other work; a diplomacy record that fails stops once and its
+  job pairs nothing; a hybrid probe case whose model never ran says "answered by nobody"; reports show
+  a hybrid job's pair line and keep hybrid seats out of the model's game figures.
+- A model's tool call that the hybrid seat's bot vetoes is read as the engine reads it, so no spelling
+  slips a deal past the veto; pausing a game holds a hybrid seat's diplomat and frees its machine.
 
 ## [0.1.5] - 2026-09-22
 
