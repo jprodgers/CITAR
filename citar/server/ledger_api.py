@@ -17,7 +17,6 @@ class's new rate applies to events written from then on; ``citar admin reprice``
 """
 from __future__ import annotations
 
-import math
 import re
 from typing import Optional
 
@@ -85,8 +84,9 @@ def _clean(body: dict, *, current: Optional[HardwareClass] = None) -> dict:
         out["name"] = name.strip()
     if "rate" in body or current is None:
         rate = body.get("rate")
-        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) \
-                or rate < 0 or rate > RATE_MAX:
+        # the range compared first: NaN and infinity fall outside it, and ``math.isfinite`` of an integer of hundreds
+        # of digits (which the JSON reader takes) would overflow rather than answer
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not 0 <= rate <= RATE_MAX:
             raise HTTPException(400, "A rate is a number of credits from 0 to 1,000,000,000.")
         out["rate"] = float(rate)
     if "match" in body:
@@ -108,7 +108,7 @@ def _clean(body: dict, *, current: Optional[HardwareClass] = None) -> dict:
                     raise HTTPException(400, f"{k} is not a regular expression: {e}.") from None
                 clean[k] = v
             else:
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 or v > 1e6:
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1e6:
                     raise HTTPException(400, f"{k} is a number from 0 up.")
                 clean[k] = float(v)
         out["match"] = clean
