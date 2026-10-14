@@ -124,9 +124,6 @@ end states, which show the scenario's map.
 **A plain bot seat in a scenario saved from a running game** keeps no bot profile: it plays the
 default bot.
 
-**The Saved games list offers Load and Delete on another member's game shared with you.** The
-server refuses both (only those who manage a game may), with an error.
-
 **The full site's top navigation does not fit a phone-sized window** (phones get the check-in
 site, which is unaffected).
 

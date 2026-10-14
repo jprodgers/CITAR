@@ -359,7 +359,9 @@ returns the whole registry with schemas (`engine_api.tool_list`).
   answers every question of it, a caller who may not see a thing gets 404, and a moderator may only unpublish.
   Profiles have a visibility per field, a members-only directory and an avatar checked by its header; administrators
   have a users page and an audit log ([ACCOUNTS.md](Design-accounts-and-sharing)). The schema is one fresh Alembic baseline:
-  a database of 0.1.5 is renamed aside at the first start, never changed.
+  a database of 0.1.5 is renamed aside at the first start, never changed. A request has one database session
+  (`citar/auth/deps.py`'s `get_db`, taken function-scoped), committed when its route returns and before its answer
+  is sent, so the caller's next request reads what this one changed.
 - **Machines are rows.** The old `config/servers.json` is imported once into the `servers` table under its own ids
   and renamed; every machine, the server's own, one it dials directly or one a member's helper connects from, is a
   row on one Servers page. A member's seat names a machine and never describes one (no base URL, key or key

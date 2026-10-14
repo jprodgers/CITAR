@@ -313,6 +313,12 @@ files.
   window comes back with the other side's news; chat windows keep clear of the unit, city and side
   panels.
 - Debug routes are 404 on servers that are not in debug mode, whatever the body.
+- A route's changes were committed after its answer was sent, so a request made at once after it could
+  read things as they were before (a share link just rotated still opened the game), and a commit that
+  failed did so after a success. Every route now commits before it answers.
+- The lobby's Saved games list offered Load and Delete on another member's game shared with you,
+  which the server refuses; it lists them without those buttons (`GET /api/saves` says `can_manage`
+  for each save).
 - A person's minimap counts far land as home only once land they explored joins it.
 - In hybrid benchmarks: a chat whose model never started falls back as `not_started` and is not
   counted against the model; a control game whose record does not read is played again, and one no
@@ -322,9 +328,17 @@ files.
   a hybrid job's pair line and keep hybrid seats out of the model's game figures.
 - A model's tool call that the hybrid seat's bot vetoes is read as the engine reads it, so no spelling
   slips a deal past the veto; pausing a game holds a hybrid seat's diplomat and frees its machine.
+- A model seat's chats asked for the answer as "Answer with respond_negotiation: accept ...", which a
+  small model (gemma-4-e2b in the exit QA) copied as text in every chat instead of calling the tool, so
+  every chat with it was declined "(no response)"; every chat message now asks for a call of the tool,
+  and it answers by calling it.
+- A tool call a Gemma 4 model wrote in its own syntax (`call:name{key:<|"|>text<|"|>}`), which LM
+  Studio sometimes leaves in the reply's text, is read as the call, as other formats written as text
+  already were.
 - A model that answers a chat in text without calling a tool is asked three times running, as on its
   turn, not twenty, before the chat is declined "(no response)": a small model that does it held its
-  machine about two minutes an answer.
+  machine about two minutes an answer. A step cut off at its token limit does not count, as on its
+  turn.
 
 ## [0.1.5] - 2026-09-22
 
