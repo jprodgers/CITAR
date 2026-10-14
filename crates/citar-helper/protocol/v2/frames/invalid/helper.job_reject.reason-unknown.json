@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "job_reject", "ts": 1760000000.0, "run": "cr_0123456789abcdef", "reason": "tired"},
+  "code": "value",
+  "path": "reason",
+  "why": "a reason the protocol does not name"
+}

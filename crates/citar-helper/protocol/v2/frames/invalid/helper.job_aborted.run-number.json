@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "job_aborted", "ts": 1760000000.0, "run": 7},
+  "code": "type",
+  "path": "run",
+  "why": "a run id is a string"
+}

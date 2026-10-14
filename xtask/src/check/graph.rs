@@ -3,9 +3,14 @@
 //!
 //! The engine depends on no workspace crate; the bot on the engine; the store on none, so the
 //! helper and the bindings can link it; the runner on the engine and the bot; the bindings on all
-//! four. The tools and tests (testkit, refcheck, bench) may add the bot, and bench the runner and
-//! the store, whose save and load its io suite times (package 2-02). A crate that joins the
-//! workspace gets a row here, deliberately.
+//! four, and from Phase 4 on the jobs crate. The tools and tests (testkit, refcheck, bench) may
+//! add the bot, and bench the runner and the store, whose save and load its io suite times
+//! (package 2-02). A crate that joins the workspace gets a row here, deliberately.
+//!
+//! Phase 4 (design/phase4-helper.md P4.3.1): the helper links the engine, the bot, the runner and
+//! the jobs crate; the jobs crate (created in 4-03, filled in 4-07) the engine, the bot and the
+//! runner. Neither needs the store: jobs keep no saves. citar-jobs's row is reserved before the
+//! crate exists, so the package that creates it finds its place already decided.
 
 use std::collections::BTreeSet;
 
@@ -20,7 +25,9 @@ pub const GRAPH: &[(&str, &[&str])] = &[
     ("citar-bot", &["citar-engine"]),
     ("citar-store", &[]),
     ("citar-sim", &["citar-engine", "citar-bot"]),
-    ("citar-py", &["citar-engine", "citar-bot", "citar-sim", "citar-store"]),
+    ("citar-py", &["citar-engine", "citar-bot", "citar-sim", "citar-store", "citar-jobs"]),
+    ("citar-jobs", &["citar-engine", "citar-bot", "citar-sim"]),
+    ("citar-helper", &["citar-engine", "citar-bot", "citar-sim", "citar-jobs"]),
     ("citar-testkit", &["citar-engine", "citar-bot"]),
     ("citar-refcheck", &["citar-engine", "citar-bot"]),
     ("citar-bench", &["citar-engine", "citar-testkit", "citar-bot", "citar-sim", "citar-store"]),
@@ -120,9 +127,39 @@ mod tests {
             ("citar-testkit", &[("citar-engine", N), ("citar-bot", N)]),
             ("citar-refcheck", &[("citar-engine", N), ("citar-bot", N)]),
             ("citar-bench", &[("citar-engine", N), ("citar-testkit", N), ("citar-sim", N)]),
+            ("citar-helper", &[("citar-engine", N), ("citar-bot", N)]),
             ("xtask", &[]),
         ]);
         assert_eq!(check(&m), []);
+    }
+
+    /// Phase 4's rows (P4.3.1): the helper links the engine, the bot, the runner and the jobs
+    /// crate, never the store, the bindings or a test crate; the jobs crate the engine, the bot
+    /// and the runner; the bindings may add the jobs crate.
+    #[test]
+    fn the_helper_and_the_jobs_crate_keep_to_their_rows() {
+        let designed = meta(&[
+            ("citar-jobs", &[("citar-engine", N), ("citar-bot", N), ("citar-sim", N)]),
+            (
+                "citar-helper",
+                &[("citar-engine", N), ("citar-bot", N), ("citar-sim", N), ("citar-jobs", N)],
+            ),
+            ("citar-py", &[("citar-engine", N), ("citar-jobs", N)]),
+        ]);
+        assert_eq!(check(&designed), []);
+        for (krate, dep) in [
+            ("citar-helper", "citar-store"),
+            ("citar-helper", "citar-py"),
+            ("citar-helper", "citar-testkit"),
+            ("citar-jobs", "citar-store"),
+            ("citar-jobs", "citar-helper"),
+            ("citar-sim", "citar-jobs"),
+        ] {
+            let m = meta(&[(krate, &[(dep, N)]), (dep, &[])]);
+            let found = check(&m);
+            assert_eq!(found.len(), 1, "{krate} -> {dep}: {found:?}");
+            assert!(found[0].message.contains(&format!("{krate} depends on {dep}")), "{found:?}");
+        }
     }
 
     /// Gate 2 of package 2-00a: citar-sim depending on citar-py fails, naming the manifest.

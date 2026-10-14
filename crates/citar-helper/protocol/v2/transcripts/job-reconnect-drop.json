@@ -1,0 +1,141 @@
+{
+  "name": "job-reconnect-drop",
+  "about": "After a reconnect the welcome drops a run the server gave elsewhere: the helper aborts it and sends nothing for it.",
+  "refs": ["P4.2.5", "P4.3.6"],
+  "plays": {"helper": "4-10", "hub": "4-10"},
+  "values": {
+    "job": "cj_0123456789abcdef",
+    "jobs_build": "0f1e2d3c4b5a",
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "machine": "sv_0123456789abcdef",
+    "run": "cr_0123456789abcdef",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {
+    "helper": {
+      "config": {"cpu": {"enabled": true, "threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]}}
+    },
+    "hub": {
+      "machine": {
+        "settings": {
+          "llm": {"enabled": true, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "trust": "trusted"
+      }
+    }
+  },
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "welcome",
+        "protocol": 2,
+        "machine": {"id": "<id:machine>", "name": "<string>"},
+        "settings": "<any>",
+        "ping_s": "<int:5..300>",
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "update": null,
+        "jobs": {"keep": [], "drop": [], "resend": []}
+      },
+      "within_s": 5
+    },
+    {"h2s": {"t": "settings_ack", "effective": "<any>", "capped": "<any>", "limits": "<any>"}},
+    {
+      "s2h": {
+        "t": "job_offer",
+        "job": "<id:job>",
+        "run": "<id:run>",
+        "kind": "lab_game",
+        "spec": "<golden:jobs/duel-a/spec>",
+        "spec_hash": "<golden:jobs/duel-a/spec_hash>",
+        "jobs_build": "<id:jobs_build>",
+        "deadline_s": "<number>",
+        "mem_mb": "<int>",
+        "priority": "<int:-100..100>",
+        "offer_ttl_s": 30
+      }
+    },
+    {"h2s": {"t": "job_accept", "run": "<id:run>"}},
+    {"drop": {"by": "server"}},
+    {"act": {"side": "hub", "do": "expire_run"}},
+    {"connect": {}, "within_s": 5},
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": ["<id:run>"],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "welcome",
+        "protocol": 2,
+        "machine": {"id": "<id:machine>", "name": "<string>"},
+        "settings": "<any>",
+        "ping_s": "<int:5..300>",
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "update": null,
+        "jobs": {"keep": [], "drop": ["<id:run>"], "resend": []}
+      }
+    },
+    {"h2s": {"t": "settings_ack", "effective": "<any>", "capped": "<any>", "limits": "<any>"}},
+    {"state": {"side": "helper", "expect": {"running": []}}},
+    {"wait": {"s": 15, "quiet": true}}
+  ]
+}

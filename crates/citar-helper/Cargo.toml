@@ -1,0 +1,48 @@
+[package]
+name = "citar-helper"
+description = "The CITAR helper: lends a machine's model endpoint and spare CPU to a CITAR server over protocol 2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Test and development features (design/phase4-helper.md P4.3.1). cargo xtask check refuses them in
+# every shipped build: in citar-py's dependencies, pyproject.toml's maturin features, release.yml
+# and helper.yml's artifact job. Their code arrives with the packages that need them.
+# The development build's guard: loopback addresses only, an explicit --home (4-03).
+dev-guard = []
+# --test-fault MODE, a helper that cheats on purpose for the verification gates (4-11).
+test-faults = []
+# --update-key FILE and CITAR_HELPER_VERSION at compile time, for the update gates (4-13).
+test-update-key = []
+
+# cargo xtask check: the engine, the bot, the runner and the jobs crate (P4.3.1), the engine with
+# no test-only feature, since the helper ships.
+[dependencies]
+# The build id `--version` prints and the hello carries (citar_bot::build_id over the ruleset
+# compiled in).
+citar-engine = { workspace = true, features = ["embedded-ruleset"] }
+citar-bot.workspace = true
+# Every frame of protocol 2 as a serde type (src/protocol).
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The keys and signatures of the frames are standard base64.
+base64.workspace = true
+
+[dev-dependencies]
+# The parser's robustness gate: mutated frames never panic it (tests/robustness.rs).
+proptest.workspace = true
+
+[lib]
+name = "citar_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "citar-helper"
+path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "cancelled", "ts": 1760000000.0, "id": "0123456789abcdef", "gen_s": 1.0, "tokens_out": 3.5},
+  "code": "type",
+  "path": "tokens_out",
+  "why": "a fraction of a token"
+}

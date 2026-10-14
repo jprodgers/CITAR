@@ -1,0 +1,13 @@
+{
+  "frame": {
+    "t": "status",
+    "ts": 1760000000.0,
+    "quiet_until": null,
+    "llm_in_flight": 1,
+    "jobs_running": true,
+    "jobs_paused": 0
+  },
+  "code": "type",
+  "path": "jobs_running",
+  "why": "a boolean is not an int"
+}

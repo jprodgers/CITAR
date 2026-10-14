@@ -248,6 +248,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "citar-helper"
+version = "0.1.5"
+dependencies = [
+ "base64",
+ "citar-bot",
+ "citar-engine",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "citar-py"
 version = "0.1.5"
 dependencies = [

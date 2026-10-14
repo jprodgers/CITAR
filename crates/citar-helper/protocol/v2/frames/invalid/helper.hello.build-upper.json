@@ -1,0 +1,71 @@
+{
+  "frame": {
+    "t": "hello",
+    "ts": 1760000000.0,
+    "protocol": 2,
+    "token": "cwt_example_0123456789abcdef0123456789abcdef",
+    "helper": {
+      "version": "0.1.6",
+      "build": "A1B2C3D4E5F6",
+      "jobs_build": "0f1e2d3c4b5a",
+      "target": "x86_64-pc-windows-msvc",
+      "label": "v0.1.6-12-gabcdef0"
+    },
+    "machine": {
+      "hostname": "framework",
+      "name": "Framework Desktop",
+      "os": "windows",
+      "arch": "x86_64",
+      "public_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    },
+    "llm": {
+      "enabled": true,
+      "provider": "lmstudio",
+      "slots": 2,
+      "stream": true,
+      "models": [
+        {"key": "google/gemma-4-e2b", "label": "Gemma 4 E2B", "context": 131072, "loaded": true},
+        {"key": "qwen3-8b", "label": "Qwen3 8B", "context": null, "loaded": false}
+      ]
+    },
+    "cpu": {
+      "enabled": true,
+      "ceiling": {
+        "threads": 4,
+        "cpu_percent": 50,
+        "memory_mb": 4096,
+        "work": ["lab_game", "ranking_game", "reference_game"]
+      },
+      "limits": {"cpu": "hard", "memory": "hard"},
+      "verifiable": true,
+      "bots": ["basic1"],
+      "ruleset": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+    },
+    "report": {
+      "hardware": {
+        "format": "citar-hardware",
+        "collector_version": 2,
+        "collector": "citar-helper",
+        "collected_at": "2026-10-14T05:00:00",
+        "hostname": "framework",
+        "os": {"system": "Windows", "release": "11", "arch": "AMD64"},
+        "system": {"form": "desktop"},
+        "cpu": {"model": "AMD Ryzen AI Max+ 395", "cores": 16, "threads": 32},
+        "memory": {"ram_gb": 128, "unified": true},
+        "gpus": [],
+        "physical_disks": [],
+        "volumes": [],
+        "runtimes": [{"name": "LM Studio", "running": true}],
+        "power": {"gpu_sampling": false, "suggested": {"idle_w": 20, "cpu_max_w": 120, "gpu_max_w": 0}}
+      },
+      "hardware_source": "scan"
+    },
+    "running": [],
+    "results": [],
+    "updates": "auto",
+    "quiet_until": null
+  },
+  "code": "value",
+  "path": "helper.build",
+  "why": "hex digits are lowercase"
+}

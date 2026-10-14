@@ -1,0 +1,123 @@
+{
+  "name": "settings-pushed",
+  "about": "A change of the machine's settings on the site is pushed as a settings frame and acknowledged.",
+  "refs": ["P4.2.3", "P4.5.1"],
+  "plays": {"helper": "4-03", "hub": "4-05"},
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "machine": "sv_0123456789abcdef",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {
+    "helper": {
+      "config": {
+        "max_concurrent": 2,
+        "cpu": {
+          "enabled": true,
+          "threads": 4,
+          "cpu_percent": 50,
+          "memory_mb": 2048,
+          "work": ["lab_game", "reference_game"]
+        }
+      }
+    },
+    "hub": {}
+  },
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "welcome",
+        "protocol": 2,
+        "machine": {"id": "<id:machine>", "name": "<string>"},
+        "settings": "<any>",
+        "ping_s": "<int:5..300>",
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "update": null,
+        "jobs": {"keep": [], "drop": [], "resend": []}
+      },
+      "within_s": 5
+    },
+    {"h2s": {"t": "settings_ack", "effective": "<any>", "capped": "<any>", "limits": "<any>"}},
+    {
+      "act": {
+        "side": "hub",
+        "do": {
+          "set_settings": {
+            "llm": {"enabled": true, "slots": 1, "allow_swaps": true},
+            "cpu": {
+              "enabled": false,
+              "threads": 2,
+              "cpu_percent": 10,
+              "memory_mb": 512,
+              "work": ["lab_game"],
+              "yield_to_llm": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "s2h": {
+        "t": "settings",
+        "llm": {"enabled": true, "slots": 1, "allow_swaps": true},
+        "cpu": {
+          "enabled": false,
+          "threads": 2,
+          "cpu_percent": 10,
+          "memory_mb": 512,
+          "work": ["lab_game"],
+          "yield_to_llm": false
+        }
+      },
+      "within_s": 2
+    },
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": true, "slots": 1},
+          "cpu": {
+            "enabled": false,
+            "threads": 2,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": false
+          }
+        },
+        "capped": [],
+        "limits": "<any>"
+      },
+      "within_s": 2
+    },
+    {"state": {"side": "hub", "expect": {"capacity": 1}}}
+  ]
+}

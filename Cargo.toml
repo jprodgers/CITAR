@@ -9,6 +9,7 @@ members = [
     "crates/citar-store",
     "crates/citar-sim",
     "crates/citar-py",
+    "crates/citar-helper",
     "crates/citar-testkit",
     "crates/citar-refcheck",
     "crates/citar-bench",

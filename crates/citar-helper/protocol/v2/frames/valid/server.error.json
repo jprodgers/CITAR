@@ -1,0 +1,8 @@
+{
+  "frame": {
+    "t": "error",
+    "ts": 1760000000.0,
+    "id": "",
+    "message": "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2). Download it from the Servers page of this server, or from https://github.com/jprodgers/CITAR/releases/latest, and run it with a token issued there."
+  }
+}

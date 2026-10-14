@@ -1,0 +1,12 @@
+{
+  "frame": {
+    "t": "request",
+    "ts": 1760000000.0,
+    "id": "fedcba9876543210",
+    "model": "qwen3-8b",
+    "messages": [{"role": "system", "content": "Reply with one JSON object."}, {"role": "user", "content": "Your turn."}],
+    "tools": null,
+    "params": {"seed": 7, "top_p": 0.9, "reasoning_effort": "low", "frequency_penalty": 0.5},
+    "timeout_s": 900
+  }
+}

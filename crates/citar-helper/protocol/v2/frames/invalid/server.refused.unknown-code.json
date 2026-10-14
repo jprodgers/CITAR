@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "refused", "ts": 1760000000.0, "code": "banned", "message": "no"},
+  "code": "value",
+  "path": "code",
+  "why": "a code the protocol does not name"
+}

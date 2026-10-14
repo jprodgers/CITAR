@@ -1,0 +1,53 @@
+{
+  "name": "handshake-v1-refusal-protocol-3",
+  "about": "The hub refuses a hello for protocol 3 with the v1 refusal and close 4426: no token lookup, no audit row, no rate-limit count.",
+  "refs": ["P4.2.8", "P4.5.1"],
+  "plays": {"helper": null, "hub": "4-05"},
+  "one_side": "scripts a helper that is not a protocol 2 helper",
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {"helper": {}, "hub": {}},
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 3,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      },
+      "invalid": "protocol"
+    },
+    {
+      "s2h": {
+        "t": "error",
+        "id": "",
+        "message": "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2). Download it from the Servers page of this server, or from https://github.com/jprodgers/CITAR/releases/latest, and run it with a token issued there."
+      },
+      "within_s": 5
+    },
+    {"close": {"by": "server", "code": 4426}},
+    {"state": {"side": "hub", "expect": {"token_lookups": 0, "audit_rows": 0, "rate_count": 0}}}
+  ]
+}

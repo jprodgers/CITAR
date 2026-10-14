@@ -1,0 +1,13 @@
+{
+  "frame": {
+    "t": "done",
+    "ts": 1760000000.0,
+    "id": "fedcba9876543210",
+    "message": {"content": "{\"tool\": \"end_turn\", \"args\": {}}", "reasoning": null, "tool_calls": []},
+    "finish_reason": "stop",
+    "usage": null,
+    "gen_s": 0.9,
+    "ttft_s": null,
+    "streamed": false
+  }
+}

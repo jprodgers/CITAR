@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "job_accept", "ts": 1760000000.0, "run": "run_0123456789abcdef"},
+  "code": "value",
+  "path": "run",
+  "why": "a run id starts with cr_"
+}
