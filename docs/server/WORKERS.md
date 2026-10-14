@@ -128,8 +128,12 @@ is the machine's choice, per section:
 | Models | The catalogue is updated: a new model is added, loaded ones are marked, one no longer reported is kept, marked "not reported", until you remove it | The catalogue is yours: only which of its models are loaded is marked; nothing is added or removed | auto |
 | Power | The scan's suggested figures (rough guesses from the hardware) become the power figures | The figures are yours: nothing changes | manual |
 
-**Apply** copies the last report in, one section or all of it, whatever the modes. A report never changes the
-machine's name, slots, quiet hours, costs, components or key, nor a model's display name (unless the helper gives the
+**Apply** copies the last report in, one section or all of it, whatever the modes ("Apply all of the last report"
+copies each section the report has something for: a helper started with `--no-hardware` reports models alone, and a
+collector's file may suggest no power figures). A figure in a scan that is not a usable number (not a number at all,
+infinite, or too large for any machine) is dropped as the scan is kept, as are parts of a shape no collector writes,
+whichever way the hardware details come in (the helper, a hardware file, the Hardware & power dialog): the rest of the
+report is kept and applied as usual. A report never changes the machine's name, slots, quiet hours, costs, components or key, nor a model's display name (unless the helper gives the
 model a name of its own), inference settings, load profiles, prices or whether it is offered. So a machine whose
 hardware you typed in keeps it through every reconnect once Hardware is manual, and its last scan is there to compare
 and apply.
