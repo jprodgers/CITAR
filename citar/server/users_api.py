@@ -38,14 +38,14 @@ AVATAR_MAX_AGE = 3600
 
 @router.get("/api/users")
 def directory(q: str = "", offset: int = Query(0, ge=0, le=profiles.OFFSET_MAX), me=Depends(require_user),
-              s: Session = Depends(get_db)):
+              s: Session = Depends(get_db, scope="function")):
     """The members' directory (``profiles.directory``); an offset outside 0..``OFFSET_MAX`` is a 422."""
     return profiles.directory(s, me, q=q, offset=offset)
 
 
 @router.get("/api/users/{handle}")
 def profile(handle: str, as_: Optional[str] = Query(None, alias="as"), p: Principal = Depends(principal),
-            s: Session = Depends(get_db)):
+            s: Session = Depends(get_db, scope="function")):
     """A profile as the caller may see it (``profiles.to_client``), or 404 when its `profile` field does not show to
     them. ``?as=member`` or ``?as=visitor`` shows it as a member or a visitor would see it, never wider than the
     caller may."""
@@ -58,7 +58,7 @@ def profile(handle: str, as_: Optional[str] = Query(None, alias="as"), p: Princi
 
 
 @router.get("/api/users/{handle}/avatar")
-def avatar(handle: str, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def avatar(handle: str, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """The account's uploaded avatar, when its `avatar` field shows to the caller; 404 otherwise, and for an account
     with no upload (its sign-in picture, if any, is its provider's address, not this route). Served with the type
     its header proved, never sniffed, and a policy that lets it load and run nothing."""
@@ -78,7 +78,7 @@ def avatar(handle: str, p: Principal = Depends(principal), s: Session = Depends(
 
 
 @router.post("/api/auth/me/avatar")
-async def upload_avatar(request: Request, me=Depends(require_user), s: Session = Depends(get_db)):
+async def upload_avatar(request: Request, me=Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Upload the caller's avatar: a multipart form with one file (any field name), at most ``images.MAX_BYTES``. The
     body is read only up to the limit, so an oversized upload costs the server no more than that; the file is
     checked (``images.inspect``) before anything is written, and written without its metadata (Exif, XMP, text,
@@ -116,7 +116,7 @@ def _save_avatar(s: Session, me, data: bytes) -> dict:
 
 
 @router.delete("/api/auth/me/avatar")
-def delete_avatar(request: Request, me=Depends(require_user), s: Session = Depends(get_db)):
+def delete_avatar(request: Request, me=Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Remove the caller's uploaded avatar (the sign-in provider's picture, if any, shows again)."""
     previous = me.avatar_path
     me.avatar_path = None

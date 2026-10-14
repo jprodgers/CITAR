@@ -568,6 +568,70 @@ class GameRoutes(unittest.TestCase):
                     row = sdb.get(GameRow, gid)
                     self.assertEqual((row.owner_id, row.status), (owner_id, "playing"))
 
+    def test_a_change_is_committed_before_its_answer_is_sent(self):
+        """3-19's QA rotated a game's share link and at once opened the game with the old key: it opened, now and then,
+        because the request's session committed after the answer had gone (FastAPI runs a ``yield`` dependency's exit
+        after the response unless it is function-scoped). The commit now comes first: the rotation's commit, then the
+        answer's first byte, and the old key opens nothing for the next request."""
+        from fastapi.testclient import TestClient
+        from sqlalchemy import event
+
+        from citar.auth.deps import get_db
+        from citar.server.app import app
+        order: list = []
+
+        def recording_db():
+            with db.session() as s:
+                event.listen(s, "after_commit", lambda *_: order.append("commit"))
+                yield s
+
+        async def answered(scope, receive, send):
+            async def watch(message):
+                if message["type"] == "http.response.start":
+                    order.append("answer")
+                await send(message)
+            await app(scope, receive, watch)
+
+        app.dependency_overrides[get_db] = recording_db
+        self.addCleanup(app.dependency_overrides.pop, get_db, None)
+        client = TestClient(answered, base_url="https://citar.test")
+        self.addCleanup(client.close)
+        gid = self.game.id
+        r = client.put(f"/api/games/{gid}/sharing", json={"visibility": "link"}, headers=self.headers["owner"])
+        self.assertEqual(r.status_code, 200, r.text)
+        old = r.json()["share_url"].split("k=")[1]
+        order.clear()
+        r = client.put(f"/api/games/{gid}/sharing", json={"rotate_slug": True}, headers=self.headers["owner"])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(order[:2], ["commit", "answer"], order)
+        self.assertEqual(client.get(f"/api/games/{gid}", headers={"x-citar-share-key": old}).status_code, 404)
+        self.assertEqual(client.get(f"/api/games/{gid}", headers={
+            "x-citar-share-key": r.json()["share_url"].split("k=")[1]}).status_code, 200)
+
+    def test_every_route_commits_before_it_answers(self):
+        """Every route's database session (``get_db``) is function-scoped, so it commits before the answer is sent, and
+        one session serves the route and the dependencies it shares (``principal``): FastAPI caches a dependency per
+        scope, so a route taking it at another scope would have two."""
+        from fastapi.routing import APIRoute, APIWebSocketRoute
+
+        from citar.auth.deps import get_db
+        from citar.server.app import app
+
+        def walk(dependant):
+            for sub in dependant.dependencies:
+                yield sub
+                yield from walk(sub)
+        seen, wrong = 0, []
+        for route in app.routes:
+            if isinstance(route, (APIRoute, APIWebSocketRoute)):
+                for sub in walk(route.dependant):
+                    if sub.call is get_db:
+                        seen += 1
+                        if sub.scope != "function":
+                            wrong.append(f"{sorted(getattr(route, 'methods', None) or ['WS'])} {route.path}")
+        self.assertGreater(seen, 150)
+        self.assertEqual(wrong, [])
+
     def test_the_saves_list_says_who_may_load_and_delete(self):
         """``GET /api/saves`` lists a game's saves to whoever may see the game, each with ``can_manage``, which the
         lobby's Load and Delete follow (3-19 found both offered on another member's game shared with members, which

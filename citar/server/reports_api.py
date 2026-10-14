@@ -83,7 +83,7 @@ def _narrative_gate(s: Session, spec: dict, user) -> None:
 
 
 @router.get("/api/reports")
-def reports_list(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def reports_list(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """The reports the caller may see (and the one a share key opens), newest first, each with what they may do to
     it."""
     key = _key(request)
@@ -118,7 +118,7 @@ def reports_options(me=Depends(require_user)):
 
 
 @router.post("/api/reports")
-def reports_start(body: dict, me=Depends(require_cap("run_reports")), s: Session = Depends(get_db)):
+def reports_start(body: dict, me=Depends(require_cap("run_reports")), s: Session = Depends(get_db, scope="function")):
     """Start building a report: the caller's."""
     from ..reports import normalize_spec
     spec = _call(normalize_spec, body)
@@ -186,7 +186,7 @@ def _scope_machines(s: Session, chosen: list, viewer) -> list:
 
 
 @router.get("/api/reports/{rid}")
-def reports_get(rid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def reports_get(rid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """One report's metadata, progress and specification, for whoever may see it: what of them belongs to its
     managers (``_meta_for``, ``_spec_for``) only to them."""
     _row, perms = items.require(s, "report", rid, p.user, access.VIEW, slug=_key(request))
@@ -199,7 +199,7 @@ def reports_get(rid: str, request: Request, p: Principal = Depends(principal), s
 
 
 @router.post("/api/reports/{rid}/rerun")
-def reports_rerun(rid: str, request: Request, me=Depends(require_cap("run_reports")), s: Session = Depends(get_db)):
+def reports_rerun(rid: str, request: Request, me=Depends(require_cap("run_reports")), s: Session = Depends(get_db, scope="function")):
     """Build a fresh report from the same specification, with current data: for whoever manages the report, and
     the new one is theirs."""
     from ..reports import normalize_spec
@@ -211,7 +211,7 @@ def reports_rerun(rid: str, request: Request, me=Depends(require_cap("run_report
 
 
 @router.get("/api/reports/{rid}/html")
-def reports_html(rid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def reports_html(rid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """A report's HTML, for viewing in place, for whoever may see it."""
     items.require(s, "report", rid, p.user, access.VIEW, slug=_key(request))
     path = _call(reports_runner().html_path, rid)
@@ -224,7 +224,7 @@ def reports_html(rid: str, request: Request, p: Principal = Depends(principal), 
 
 
 @router.get("/api/reports/{rid}/download")
-def reports_download(rid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def reports_download(rid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """A report as a self-contained file, for whoever may see it."""
     items.require(s, "report", rid, p.user, access.VIEW, slug=_key(request))
     r = reports_runner()
@@ -235,7 +235,7 @@ def reports_download(rid: str, request: Request, p: Principal = Depends(principa
 
 
 @router.delete("/api/reports/{rid}")
-def reports_delete(rid: str, request: Request, me=Depends(require_user), s: Session = Depends(get_db)):
+def reports_delete(rid: str, request: Request, me=Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Delete a report the caller manages."""
     items.require(s, "report", rid, me, access.MANAGE, slug=_key(request))
     _call(reports_runner().delete, rid)

@@ -37,7 +37,7 @@ def _key(request: Request) -> Optional[str]:
 
 
 @router.get("/api/items/{kind}/{ref}/sharing")
-def get_sharing(kind: str, ref: str, request: Request, me=Depends(require_user), s: Session = Depends(get_db)):
+def get_sharing(kind: str, ref: str, request: Request, me=Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """An item's sharing, for whoever manages it."""
     row, perms = items.require(s, kind, ref, me, access.MANAGE, slug=_key(request))
     return items.client(s, row, perms, me)
@@ -50,7 +50,7 @@ class VisibilityBody(BaseModel):
 
 @router.put("/api/items/{kind}/{ref}/sharing")
 def set_sharing(kind: str, ref: str, body: VisibilityBody, request: Request, me=Depends(require_user),
-                s: Session = Depends(get_db)):
+                s: Session = Depends(get_db, scope="function")):
     """Change who can see an item (``access.set_visibility``: on the ladder, `global` needs `publish_global`)."""
     row, perms = items.require(s, kind, ref, me, access.MANAGE, slug=_key(request))
     before = row.visibility
@@ -68,7 +68,7 @@ class ShareWithBody(BaseModel):
 
 @router.post("/api/items/{kind}/{ref}/sharing/users")
 def share_with(kind: str, ref: str, body: ShareWithBody, request: Request, me=Depends(require_user),
-               s: Session = Depends(get_db)):
+               s: Session = Depends(get_db, scope="function")):
     """Share an item with one account."""
     row, _perms = items.require(s, kind, ref, me, access.MANAGE, slug=_key(request))
     target = accounts.by_handle(s, body.handle)
@@ -80,7 +80,7 @@ def share_with(kind: str, ref: str, body: ShareWithBody, request: Request, me=De
 
 @router.delete("/api/items/{kind}/{ref}/sharing/users/{handle}")
 def unshare_with(kind: str, ref: str, handle: str, request: Request, me=Depends(require_user),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Stop sharing an item with an account."""
     row, _perms = items.require(s, kind, ref, me, access.MANAGE, slug=_key(request))
     target = accounts.by_handle(s, handle)
@@ -91,7 +91,7 @@ def unshare_with(kind: str, ref: str, handle: str, request: Request, me=Depends(
 
 
 @router.post("/api/items/{kind}/{ref}/sharing/rotate")
-def rotate(kind: str, ref: str, request: Request, me=Depends(require_user), s: Session = Depends(get_db)):
+def rotate(kind: str, ref: str, request: Request, me=Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Give an item a new share link; every copy of the old one stops working."""
     row, perms = items.require(s, kind, ref, me, access.MANAGE, slug=_key(request))
     access.rotate_slug(s, row, actor=me)
@@ -105,7 +105,7 @@ class UnpublishBody(BaseModel):
 
 @router.post("/api/items/{kind}/{ref}/unpublish")
 def unpublish(kind: str, ref: str, body: UnpublishBody, request: Request, me=Depends(require_user),
-              s: Session = Depends(get_db)):
+              s: Session = Depends(get_db, scope="function")):
     """Take an item down (P3.2.3): it becomes private, its share link is rotated so every copy of it dies, and the
     audit log keeps who did it and why, which its owner sees. For a moderator on an item published to the internet
     (or a link they were given), and for whoever manages it; nothing else of the item is a moderator's to touch."""

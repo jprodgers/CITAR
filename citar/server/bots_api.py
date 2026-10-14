@@ -62,7 +62,7 @@ def _filter_board(board: list, seen: Optional[set]) -> list:
 
 
 @router.get("/profiles")
-def list_profiles(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def list_profiles(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """The profiles the caller may see (and the one a share key opens) with their ratings, best first, and which one
     "Best bot" currently stands for. Each says what the caller may do to it."""
     key = _key(request)
@@ -75,7 +75,7 @@ def list_profiles(request: Request, p: Principal = Depends(principal), s: Sessio
 
 
 @router.get("/profiles/{pid}")
-def get_profile(pid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def get_profile(pid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """One profile the caller may see, with every rating entry it has had and the experiments it played in (those
     the caller may see)."""
     _row, perms = items.require(s, "bot_profile", pid, p.user, access.VIEW, slug=_key(request))
@@ -111,7 +111,7 @@ def _parent(s: Session, user: User, parent: Optional[str]) -> None:
 
 
 @router.post("/profiles")
-def create_profile(body: ProfileBody, user: User = Depends(require_cap("edit_bots")), s: Session = Depends(get_db)):
+def create_profile(body: ProfileBody, user: User = Depends(require_cap("edit_bots")), s: Session = Depends(get_db, scope="function")):
     """Save a new profile: the caller's."""
     _parent(s, user, body.parent)
     try:
@@ -125,7 +125,7 @@ def create_profile(body: ProfileBody, user: User = Depends(require_cap("edit_bot
 
 @router.put("/profiles/{pid}")
 def update_profile(pid: str, body: ProfileBody, request: Request, user: User = Depends(require_user),
-                   s: Session = Depends(get_db)):
+                   s: Session = Depends(get_db, scope="function")):
     """Save changes to a profile the caller manages (a new revision when what plays changes). The shipped ones
     cannot be changed, by anyone: fork one instead."""
     items.require(s, "bot_profile", pid, user, access.MANAGE, slug=_key(request))
@@ -146,7 +146,7 @@ class ForkBody(BaseModel):
 
 @router.post("/profiles/{pid}/fork")
 def fork_profile(pid: str, body: ForkBody, request: Request, user: User = Depends(require_user),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Copy a profile the caller may see (built-in or saved) into a new, editable one: the caller's (``edit_bots``,
     asked after the profile, so a stranger learns nothing of a private one from the refusal)."""
     items.require(s, "bot_profile", pid, user, access.VIEW, slug=_key(request))
@@ -162,7 +162,7 @@ def fork_profile(pid: str, body: ForkBody, request: Request, user: User = Depend
 
 
 @router.delete("/profiles/{pid}")
-def delete_profile(pid: str, request: Request, user: User = Depends(require_user), s: Session = Depends(get_db)):
+def delete_profile(pid: str, request: Request, user: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """Delete a saved profile the caller manages. Its games stay in the rankings, under its fingerprint."""
     items.require(s, "bot_profile", pid, user, access.MANAGE, slug=_key(request))
     try:
@@ -191,7 +191,7 @@ def param_schema(engine: str = "basic"):
 
 
 @router.get("/rankings")
-def get_rankings(factorial: bool = False, user: User = Depends(require_user), s: Session = Depends(get_db)):
+def get_rankings(factorial: bool = False, user: User = Depends(require_user), s: Session = Depends(get_db, scope="function")):
     """The leaderboard, rating history and head-to-head records, of the profiles the caller may see (a private
     profile's parameters and results are its owner's)."""
     r = ratings.rankings(include_factorial=factorial)
@@ -223,7 +223,7 @@ class ExperimentBody(BaseModel):
 
 @router.post("/experiments")
 def queue_experiment(body: ExperimentBody, user: User = Depends(require_cap("run_lab")),
-                     s: Session = Depends(get_db)):
+                     s: Session = Depends(get_db, scope="function")):
     """Queue a lab experiment (``run_lab``: it uses the server's own CPU), the caller's: the chosen profiles, which
     the caller must be able to see, fill the seats in turn (A, B, A, B...) and rotate through the start positions, so
     each plays every position on the same maps and seeds."""
