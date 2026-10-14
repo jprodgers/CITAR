@@ -228,25 +228,47 @@ python scripts/server_soak.py C:/dev/server-soak --json server-soak.json    # a 
 
 **The Phase 3 QA script** checks each feature of the accounts, queue, ledger, chat, hybrid, minimap
 and machine work end to end, over HTTP and the game socket, on a server-mode dev server of its own
-(design/phase3-features.md P3.9.4). It makes an administrator, two members and a moderator with
-`citar admin create-user`, signs them in as a browser would (a cookie and the CSRF token), serves a
-fake OpenAI-compatible endpoint that records every connection it gets, runs the part's checks, and
-writes each check and its numbers to `<dir>/qa-<part>.json` (with the throwaway accounts' password, for
-the browser checklist). It exits 2, touching nothing, for the dev server's port 8799, a port in use,
-a directory holding anything without its `.qa-phase3` marker, the owner's `C:/dev/citar-play`,
-CITAR's own data directory or a source checkout. Once it has taken the directory it never refuses: it
-exits 0 when every check passed and 1 when one failed, a directory it could not empty, a server that
-did not start, an account it could not make and a part that stopped on an error each counting as a
-failed check, with the evidence written all the same.
-Each package adds its part; `all` runs every part written so far:
+(design/phase3-features.md P3.9.4). It makes an administrator, two members and a moderator (and a
+third member for `all` and `exit`) with `citar admin create-user`, signs them in as a browser would
+(a cookie and the CSRF token), serves fake OpenAI-compatible endpoints that record every connection
+they get and answer from a scripted policy that plays (tool calls read from the request: a turn's
+orders, a chat's answer, a hybrid seat's diplomat phase), starts real helpers
+(`python -m citar.worker`) in front of them for helper machines, runs the part's checks, and writes
+each check and its numbers to `<dir>/qa-<part>.json` (with the throwaway accounts' password, for the
+browser checklist). It exits 2, touching nothing, for the dev server's port 8799, a port in use, a
+directory holding anything without its `.qa-phase3` marker, the owner's `C:/dev/citar-play`, CITAR's
+own data directory or a source checkout. Once it has taken the directory it never refuses: it exits 0
+when every check passed and 1 when one failed, a directory it could not empty, a server that did not
+start, an account it could not make and a part that stopped on an error each counting as a failed
+check, with the evidence written all the same.
+
+The parts: `accounts`, `queue`, `ledger`, `chat`, `hybrid`, `minimap` and `machines` (one per
+feature), `exit` (Phase 3 end to end: one game of six kinds of seat for 40 rounds on a helper
+machine shared between three members, with pooled work, a benchmark beside it, a helper restart
+and a server killed mid-chat) and `real` (the same plumbing against a real model, below). `all`
+runs every part in that order on one server, raising the members' game limit since each part leaves
+its games open; its `qa-all.json` lists every check under the part that made it, with each part's
+count and time at its top (`parts`), and it writes each part's own `qa-<part>.json` beside it, as a
+run of that part alone would, for the browser checklist's scripts.
 
 ```bash
 python scripts/qa_phase3.py accounts --dir C:/dev/qa-phase3          # about a minute; a free port
 python scripts/qa_phase3.py accounts --dir C:/dev/qa-phase3 --keep   # leave the server up for the browser
+python scripts/qa_phase3.py all --dir C:/dev/qa-phase3               # everything, the real model last
 ```
 
 `--keep` leaves the server running at the address it prints (the public origin, `localhost`), for the
 browser checklist of P3.9.5; stop it when you are done.
+
+**The `real` part** plays a hybrid seat and a full LLM seat on a real model for 20 rounds beside a
+person seat and two bots, with a member's report analysis on the same machine: a helper machine
+whose real helper's upstream is LM Studio at `http://localhost:1234/v1` serving
+`google/gemma-4-e2b`. Load that model in LM Studio first: the part checks that LM Studio lists it
+loaded (`GET /api/v0/models`) and fails with what to do otherwise, and it never loads, unloads or
+swaps a model, changes LM Studio's settings or names another model. A small model on a laptop takes
+tens of minutes for the 20 rounds; the part tests the plumbing, not the play, and records each model
+turn and how it ended, the tool calls made and refused, each chat's answer and its time, every
+fallback to the bot with its cause, and the generation seconds metered against the compute ledger.
 
 **Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
 fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of
