@@ -315,16 +315,22 @@ fn text_of(v: &Value) -> Option<String> {
     }
 }
 
-/// The error an endpoint put in its body or stream, quoted.
+/// The error an endpoint put in its body or stream, whole (its caller quotes it).
 fn error_text(e: &Value) -> String {
-    let msg = match e {
+    match e {
         Value::String(s) => s.clone(),
         Value::Object(m) => {
             m.get("message").and_then(Value::as_str).map_or_else(|| e.to_string(), str::to_owned)
         }
         other => other.to_string(),
-    };
-    clip(&msg, BODY_SHOWN)
+    }
+}
+
+/// The endpoint's own words as the server may read them: the helper's secrets (its API key)
+/// replaced before they are cut, so no part of one can show, and cut to [`BODY_SHOWN`] characters
+/// after `prefix` (a few words of the helper's own).
+fn quote(log: &Log, prefix: &str, text: &str) -> String {
+    format!("{prefix}{}", clip(&log.redact(text), BODY_SHOWN))
 }
 
 /// The endpoint's token counts, when it gave both the prompt's and the completion's.
@@ -357,10 +363,10 @@ impl Assembly {
     /// One streamed chunk; true when it carried text (a token).
     ///
     /// # Errors
-    /// The chunk is the endpoint's report of an error.
+    /// The chunk is the endpoint's report of an error: its message, whole.
     pub fn chunk(&mut self, v: &Value) -> Result<bool, String> {
         if let Some(e) = v.get("error").filter(|e| !e.is_null()) {
-            return Err(format!("the endpoint reported an error: {}", error_text(e)));
+            return Err(error_text(e));
         }
         if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
             self.usage = usage_of(u);
@@ -437,15 +443,16 @@ impl Assembly {
     /// An unstreamed answer's body.
     ///
     /// # Errors
-    /// The body reports an error, or has no choice.
+    /// The body reports an error (`reported an error: ` and its message, whole), or has no
+    /// choice.
     pub fn message(&mut self, v: &Value) -> Result<(), String> {
         if let Some(e) = v.get("error").filter(|e| !e.is_null()) {
-            return Err(format!("the endpoint reported an error: {}", error_text(e)));
+            return Err(format!("reported an error: {}", error_text(e)));
         }
         if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
             self.usage = usage_of(u);
         }
-        let choice = first_choice(v).ok_or("the endpoint's answer has no choice")?;
+        let choice = first_choice(v).ok_or("has no choice")?;
         self.finish_reason = choice.get("finish_reason").and_then(Value::as_str).map(str::to_owned);
         let empty = Map::new();
         let m = choice.get("message").and_then(Value::as_object).unwrap_or(&empty);
@@ -578,6 +585,7 @@ async fn complete(
                 Err(e) => format!("({e})"),
             };
             drop(resp);
+            let text = log.redact(&text);
             if stream && has_tools && refuses_streaming_tools(status, &text) {
                 quirks.no_stream_with_tools.store(true, Ordering::Relaxed);
                 log.warn(format!(
@@ -600,7 +608,7 @@ async fn complete(
         let mut ttft = None;
         if streamed {
             if let Err((message, retryable)) =
-                read_stream(&mut resp, &mut asm, &mut ttft, started, &progress).await
+                read_stream(&mut resp, &mut asm, &mut ttft, started, &progress, &log).await
             {
                 return failed(RequestErrorCode::Endpoint, message, retryable);
             }
@@ -618,18 +626,17 @@ async fn complete(
             let v: Value = match serde_json::from_slice(&raw) {
                 Ok(v) => v,
                 Err(e) => {
+                    let said = String::from_utf8_lossy(&raw);
                     return failed(
                         RequestErrorCode::Endpoint,
-                        format!(
-                            "the endpoint's answer is not JSON ({e}): {}",
-                            clip(&String::from_utf8_lossy(&raw), BODY_SHOWN)
-                        ),
+                        quote(&log, &format!("the endpoint's answer is not JSON ({e}): "), &said),
                         false,
                     );
                 }
             };
             if let Err(e) = asm.message(&v) {
-                return failed(RequestErrorCode::Endpoint, e, false);
+                let message = quote(&log, "the endpoint's answer ", &e);
+                return failed(RequestErrorCode::Endpoint, message, false);
             }
             if asm.bytes() > MAX_ASSEMBLED {
                 return failed(RequestErrorCode::Endpoint, too_large(), false);
@@ -662,6 +669,7 @@ async fn read_stream(
     ttft: &mut Option<Duration>,
     started: Instant,
     progress: &Progress,
+    log: &Log,
 ) -> Result<(), (String, bool)> {
     let mut sse = Sse::default();
     loop {
@@ -674,17 +682,19 @@ async fn read_stream(
             match ev {
                 Event::Done => return Ok(()),
                 Event::Error(e) => {
-                    return Err((
-                        format!("the endpoint reported an error: {}", clip(&e, BODY_SHOWN)),
-                        false,
-                    ));
+                    return Err((quote(log, "the endpoint reported an error: ", &e), false));
                 }
                 Event::Data(text) => {
                     let v: Value = serde_json::from_str(&text).map_err(|e| {
-                        let shown = clip(&text, BODY_SHOWN);
-                        (format!("the endpoint's stream holds an event that is not JSON ({e}): {shown}"), false)
+                        let prefix = format!(
+                            "the endpoint's stream holds an event that is not JSON ({e}): "
+                        );
+                        (quote(log, &prefix, &text), false)
                     })?;
-                    if asm.chunk(&v).map_err(|e| (e, false))? {
+                    let token = asm
+                        .chunk(&v)
+                        .map_err(|e| (quote(log, "the endpoint reported an error: ", &e), false))?;
+                    if token {
                         progress.token();
                         ttft.get_or_insert_with(|| started.elapsed());
                     }

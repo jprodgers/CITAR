@@ -774,6 +774,8 @@ impl Behaviour {
 /// One completion request [`FakeEndpoint`] saw.
 #[derive(Clone, Debug)]
 pub struct Seen {
+    /// The request's line and headers.
+    pub head: String,
     pub body: Value,
     pub at: Instant,
     /// When each streamed event went out (taken while the client was still there).
@@ -922,7 +924,7 @@ impl FakeEndpoint {
             serde_json::from_slice(&buf[head_end..head_end + length]).unwrap_or(Value::Null);
         let k = {
             let mut s = self.lock();
-            s.seen.push(Seen { body, at: Instant::now(), tokens: Vec::new(), gone: None });
+            s.seen.push(Seen { head, body, at: Instant::now(), tokens: Vec::new(), gone: None });
             s.seen.len() - 1
         };
         self.changed.notify_waiters();

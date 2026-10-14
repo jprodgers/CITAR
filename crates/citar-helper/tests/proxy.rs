@@ -96,6 +96,11 @@ fn text(m: &Message) -> Option<Value> {
 }
 
 async fn start(tweak: impl FnOnce(&mut Config)) -> Run {
+    start_keyed(tweak, None).await
+}
+
+/// [`start`], with an API key for the endpoint (a secret of the log's, as `app.rs` makes it).
+async fn start_keyed(tweak: impl FnOnce(&mut Config), key: Option<&str>) -> Run {
     let models = Models::default();
     models.set(vec![Listed {
         key: "model-a".into(),
@@ -108,10 +113,14 @@ async fn start(tweak: impl FnOnce(&mut Config)) -> Run {
     cfg.base_url = ep.base_url();
     tweak(&mut cfg);
     let tls = citar_helper::net::verified_tls(None).expect("tls");
-    let http = HttpEndpoint::new(cfg.provider, &cfg.base_url, None, tls).expect("a client");
+    let http = HttpEndpoint::new(cfg.provider, &cfg.base_url, key.map(str::to_owned), tls)
+        .expect("a client");
     let (tx, mut conns) = mpsc::unbounded_channel();
-    let key = MachineKey::generate().expect("a key");
     let log = Log::memory();
+    if let Some(k) = key {
+        log.add_secret(k);
+    }
+    let key = MachineKey::generate().expect("a key");
     let (stop, stop_rx) = watch::channel(false);
     let in_flight = InFlight::default();
     let slots = cfg.max_concurrent;
@@ -647,4 +656,36 @@ async fn a_timeout_above_fifteen_minutes_is_held_to_fifteen() {
     let Outcome::Failed { code, retryable, .. } = out else { panic!("{out:?}") };
     assert_eq!((code, retryable), (RequestErrorCode::Timeout, false));
     assert_eq!(started.elapsed().as_secs(), 900);
+}
+
+/// The API key goes to the configured endpoint only, as a bearer token; an endpoint that echoes
+/// it in an error has it replaced before the error goes to the server.
+#[test]
+fn the_api_key_reaches_the_endpoint_and_never_the_server() {
+    rt().block_on(async {
+        const KEY: &str = "sk-test-0123456789abcdef";
+        let mut run = start_keyed(|_| {}, Some(KEY)).await;
+        run.send(request("r1", json!({}))).await;
+        run.at_endpoint(0).await;
+        let head = run.ep.seen(0).expect("seen").head.to_ascii_lowercase();
+        assert!(
+            head.contains(&format!("authorization: bearer {}", KEY.to_ascii_lowercase())),
+            "{head}"
+        );
+        run.ep.respond(Behaviour::Status(401, format!("invalid key {KEY} for this model")));
+        let e = run.next(5.0).await;
+        let message = e["message"].as_str().expect("a message");
+        assert!(!message.contains(KEY) && message.contains("[redacted]"), "{message}");
+        // In a stream's error too.
+        run.send(request("r2", json!({}))).await;
+        run.at_endpoint(1).await;
+        run.ep.respond(Behaviour::Stream {
+            events: vec![json!({"error": {"message": format!("bad key {KEY}")}})],
+            delay: Duration::ZERO,
+            first: Duration::ZERO,
+        });
+        let e = run.next(5.0).await;
+        assert!(!e.to_string().contains(KEY), "{e}");
+        run.end();
+    });
 }

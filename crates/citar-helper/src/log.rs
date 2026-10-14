@@ -175,6 +175,20 @@ impl Log {
         }
     }
 
+    /// `text` with every secret replaced, as a line would have it: for text that leaves the
+    /// machine (an endpoint's error, quoted to the server, could echo the API key it was sent).
+    #[must_use]
+    pub fn redact(&self, text: &str) -> String {
+        let g = self.lock();
+        let mut out = text.to_owned();
+        for s in &g.secrets {
+            if out.contains(s.as_str()) {
+                out = out.replace(s.as_str(), REDACTED);
+            }
+        }
+        out
+    }
+
     /// Writes a line at `level`, its message cut at [`MAX_LINE`] characters.
     pub fn line(&self, level: Level, msg: impl AsRef<str>) {
         let mut g = self.lock();
