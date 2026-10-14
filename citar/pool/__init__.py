@@ -273,6 +273,11 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
         "is_mine": bool(viewer and server.owner_id == viewer.id),
         "can_manage": access.MANAGE in perms,
     }
+    if viewer is not None and viewer.role == "admin":
+        # what the prompt scheduler noticed of its helper (``overreports``: more generation time reported than the
+        # server observed, P3.3.4), for an administrator's card; Phase 4's trust tiers read it too
+        base["flags"] = dict(server.flags or {})
+        base["trust_tier"] = server.trust_tier or "new"
     config = server.config or {}
     # Safe for anyone who can see the server at all: what it can run, and roughly what it is.
     base["models"] = [{"key": m.get("key"), "label": m.get("label") or m.get("key")}

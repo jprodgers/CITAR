@@ -34,6 +34,7 @@ from .bots_api import router as bots_router
 from .users_api import router as users_router
 from .admin_users_api import router as admin_users_router
 from .ledger_api import router as ledger_router
+from .machines_api import router as machines_router
 from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
@@ -55,6 +56,7 @@ app.include_router(setup_router)
 app.include_router(users_router)
 app.include_router(admin_users_router)
 app.include_router(ledger_router)
+app.include_router(machines_router)
 manager = SessionManager()
 scheduler: Optional[BenchmarkScheduler] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -2599,7 +2601,9 @@ async def worker_socket(websocket: WebSocket):
             server_id=server_id, server_name=server_name,
             ping_seconds=citar_settings.get().worker_ping_seconds)))
         await asyncio.to_thread(record_connection, server_id, ip=ip,
-                                hardware=hello.get("hardware"), models=hello.get("models"))
+                                hardware=hello.get("hardware"), models=hello.get("models"),
+                                hostname=str(hello.get("hostname") or ""),
+                                worker_version=str(hello.get("worker_version") or ""))
         print(f"worker connected: {server_name} ({hello.get('hostname')}, "
               f"{len(hello.get('models') or [])} models)", flush=True)
 

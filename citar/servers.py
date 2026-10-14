@@ -461,6 +461,14 @@ def _normalize_server(d: dict) -> dict:
         ids = [p["id"] for p in profiles]
         mm["default_profile"] = m.get("default_profile") if m.get("default_profile") in ids else (ids[0] if ids else None)
         mm["price"] = _price(m.get("price"))
+        # what a helper machine's helper last said of the model (citar.machine_settings.merge_models): kept only where
+        # a report put it, so a catalogue no helper reports to reads as it always did
+        for flag in ("loaded", "reported"):
+            if isinstance(m.get(flag), bool):
+                mm[flag] = m[flag]
+        context = _num(m.get("context"), None, 1, 100_000_000)
+        if context is not None:
+            mm["context"] = int(context)
         models.append(mm)
     sv["models"] = models
     sv["updated"] = time.time()
@@ -650,7 +658,11 @@ def _read() -> tuple:
                             "capabilities": dict(row.capabilities or {}), "config": cfg,
                             # the compute ledger's pricing (P3.4.3): the machine's classes and what they are read from
                             "gpu_class_id": row.gpu_class_id, "cpu_class_id": row.cpu_class_id,
-                            "class_override": bool(row.class_override), "hardware": sv.get("hardware") or {}}
+                            "class_override": bool(row.class_override), "hardware": sv.get("hardware") or {},
+                            # what a helper's report may change of it (citar.machine_settings), and its trust tier
+                            "modes": {"hardware": row.hardware_mode, "models": row.models_mode,
+                                      "power": row.power_mode},
+                            "trust_tier": row.trust_tier or "new"}
     known = {sv["id"] for sv in reg["servers"]}
     reg["aliases"] = {old: new for old, new in reg["aliases"].items() if old not in known}
     return reg, meta
@@ -755,23 +767,25 @@ def machine_facts(server_id: Optional[str]) -> Optional[dict]:
 
 
 def machine_settings(server_id: Optional[str]) -> Optional[dict]:
-    """What the prompt scheduler reads of a machine, from the registry's cache (design/phase3-features.md P3.3.10): its
-    LLM ``slots`` (``max_concurrent``, the one site number of P3.2.8), whether it takes model work at all (``llm``,
-    ``capabilities.llm.enabled``, default on) and whether pooled prompts may make it swap models (``allow_swaps``,
-    ``capabilities.llm.allow_swaps``, default off), with the row's ``enabled``, ``reach``, ``provider``, ``kind`` and
-    ``name``. None for no such machine. Phase 4's settings frame will carry the same; package 3-18 adds the CPU
-    limits."""
+    """What a machine's settings say, from the registry's cache (design/phase3-features.md P3.3.10, P3.8.2): its LLM
+    ``slots`` (``max_concurrent``, the one site number of P3.2.8), whether it takes model work at all (``llm``,
+    ``capabilities.llm.enabled``, default on), whether pooled prompts may make it swap models (``allow_swaps``,
+    ``capabilities.llm.allow_swaps``, default off) and its CPU sharing (``cpu``: ``enabled``, ``threads``,
+    ``cpu_percent``, ``memory_mb``, ``work``; ``citar.machine_settings.capabilities``), with the row's ``enabled``,
+    ``reach``, ``provider``, ``kind`` and ``name``. None for no such machine. The prompt scheduler reads its slots and
+    swaps here; Phase 4's welcome and settings frames will carry the slots, the swaps and the CPU limits."""
+    from .machine_settings import capabilities
     m = _state()[1].get(server_id or "")
     if not m:
         return None
-    llm = (m.get("capabilities") or {}).get("llm") or {}
+    caps = capabilities(m.get("capabilities"))
     try:
         slots = max(1, int(m.get("max_concurrent") or 1))
     except (TypeError, ValueError):
         slots = 1
     return {"id": m["id"], "name": m["name"], "kind": m["kind"], "provider": m["provider"], "reach": m["reach"],
-            "enabled": m["enabled"], "slots": slots, "llm": bool(llm.get("enabled", True)),
-            "allow_swaps": bool(llm.get("allow_swaps", False))}
+            "enabled": m["enabled"], "slots": slots, "llm": caps["llm"]["enabled"],
+            "allow_swaps": caps["llm"]["allow_swaps"], "cpu": caps["cpu"]}
 
 
 def is_helper(server_id: Optional[str]) -> bool:
@@ -1971,7 +1985,8 @@ def public(server: dict, reg: Optional[dict] = None) -> dict:
     d["is_host"] = bool(row["is_host"]) if row else reg.get("host_server_id") == server.get("id")
     if row:
         d.update(reach=row["reach"], enabled=row["enabled"], server_resource=row["server_resource"],
-                 owner_id=row["owner_id"], group_id=row["group_id"], max_concurrent=row["max_concurrent"])
+                 owner_id=row["owner_id"], group_id=row["group_id"], max_concurrent=row["max_concurrent"],
+                 modes=dict(row.get("modes") or {}))
     d["key_status"] = keystore.status(server)
     end = restricted_at(server["id"]) if row else restricted(server)
     d["restricted_until"] = (restricted_text(server["id"], end) or None) if row else (end.strftime("%H:%M") if end else None)

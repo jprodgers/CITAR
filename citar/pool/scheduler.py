@@ -159,6 +159,16 @@ class Cancelled(SchedulerError):
     its session stopped)."""
 
 
+def _off(st: "MachineSettings", server_id: str) -> MachineRefused:
+    """The refusal of a machine that takes no model work: disabled, or its LLM capability turned off in its machine
+    settings (P3.8). Both are ``code`` ``disabled`` to their callers; the message says which."""
+    name = st.name or server_id
+    if st.enabled and not st.llm:
+        return MachineRefused(f"{name} takes no model work: its owner turned it off in its machine settings.",
+                              code="disabled")
+    return MachineRefused(f"{name} is disabled.", code="disabled")
+
+
 # ---------------------------------------------------------------------------- test mode: no session lock in acquire
 
 #: Sessions whose lock ``acquire`` checks in test mode (``CITAR_TEST_LOCKS``); weak, so a session leaves by itself.
@@ -647,7 +657,7 @@ class Machine:
         row, an offline helper, its deadline)."""
         st = self.settings
         if not st.enabled or not st.llm:
-            return MachineRefused(f"{st.name or self.id} is disabled.", code="disabled")
+            return _off(st, self.id)
         if st.reach == "worker" and not st.online:
             return MachineRefused(f"{st.name or self.id} is offline: its helper is not connected.", code="offline")
         if self._bench_live() and not ticket.wait_for_benchmark:
@@ -877,7 +887,7 @@ class Machine:
         """A request refused before it queues: a disabled machine, a released lease, a ticket that cannot start."""
         st = self.settings
         if st.known and (not st.enabled or not st.llm):
-            return MachineRefused(f"{st.name or self.id} is disabled.", code="disabled")
+            return _off(st, self.id)
         if b.is_lease:
             if b.released or b not in self.leases:
                 return Cancelled("This seat's lease was released.", code="released")
@@ -1219,6 +1229,17 @@ class Machine:
         with self.lock:
             return {"waiting": len(self.waiting), "benchmark": self._bench_live(),
                     "name": self.settings.name or self.id}
+
+    def settings_view(self) -> dict:
+        """What the rules read of the machine now (the machine settings dialog's "in effect", P3.8): its capacity
+        (None while unknown: no row, or a helper machine whose helper is offline), the row's slots, the helper's own
+        ceiling, whether it takes model work and lets pooled prompts swap models, and whether its helper is
+        connected."""
+        with self.lock:
+            st = self.settings
+            return {"capacity": self.capacity(), "slots": st.slots, "helper_slots": st.helper_slots,
+                    "llm": st.llm and st.enabled, "allow_swaps": st.allow_swaps, "online": st.online,
+                    "known": st.known}
 
     def status(self) -> dict:
         """The machine as an administrator's status listing shows it."""
