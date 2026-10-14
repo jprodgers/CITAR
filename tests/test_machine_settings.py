@@ -209,6 +209,17 @@ class Report(unittest.TestCase):
         self.assertEqual((listed["b"]["reported"], listed["c"]["loaded"], listed["a"]["context"]), (False, True, 16384),
                          "the registry's view carries what the helper said")
 
+    def test_the_registry_keeps_what_a_helper_said_of_a_model_and_nothing_else(self):
+        """``normalize_server`` keeps a model's ``loaded``, ``reported`` and ``context`` where a report put them, of
+        the right type; a catalogue no helper reported to reads as it always did."""
+        sv = servers.normalize_server({"name": "x", "models": [
+            {"key": "good", "loaded": True, "reported": False, "context": 32768},
+            {"key": "bad", "loaded": "yes", "reported": 1, "context": 0},
+            {"key": "worse", "context": True}, {"key": "plain"}]})
+        got = {m["key"]: {k: m[k] for k in ("loaded", "reported", "context") if k in m} for m in sv["models"]}
+        self.assertEqual(got, {"good": {"loaded": True, "reported": False, "context": 32768}, "bad": {}, "worse": {},
+                               "plain": {}})
+
     def test_models_manual_update_only_the_loaded_flags_of_those_listed(self):
         self.report(models=[model("a"), model("b", loaded=True)])
         self.set_modes(models="manual")
@@ -701,6 +712,10 @@ class Routes(_Routes):
             "kind": "gpu", "name": "24 GB GPUs", "rate": 2.0, "match": {"vram_gb_min": 24}, "priority": 10})
         self.assertEqual(r.status_code, 200, r.text)
         big = r.json()["id"]
+        r = self.call("zara", "POST", "/api/admin/hardware-classes", {
+            "kind": "cpu", "name": "Test CPUs", "rate": 0.1, "match": {"cpu_name": "^Test CPU$"}, "priority": 10})
+        self.assertEqual(r.status_code, 200, r.text)
+        test_cpus = r.json()["id"]
 
         def gpu_class() -> tuple:
             row = self.row()
@@ -729,9 +744,11 @@ class Routes(_Routes):
         r = self.call("zara", "PUT", f"/api/admin/machines/{self.helper}/class", {"pinned": True, "gpu_class_id": big})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual((r.json()["class"]["gpu"]["id"], r.json()["class"]["pinned"]), (big, True))
-        self.assertEqual(r.json()["class"]["cpu"]["id"], "hc_cpu", "the class it leaves out is the one it had")
-        self.report(hardware=scan(vram=4))
+        self.assertEqual(r.json()["class"]["cpu"]["id"], test_cpus, "the class it leaves out is the one it had")
+        self.report(hardware=scan(vram=4, cpu="Another CPU"))
         self.assertEqual(gpu_class(), (big, big, True))
+        self.assertEqual(self.call("alice", "GET", f"/api/machines/{self.helper}/settings").json()["class"]["cpu"]["id"],
+                         test_cpus, "pinned, its CPU class holds against a scan of another CPU too")
         # unpinned: it follows the hardware again at once
         r = self.call("zara", "PUT", f"/api/admin/machines/{self.helper}/class", {"pinned": False})
         self.assertEqual(r.status_code, 200, r.text)
@@ -822,6 +839,11 @@ class Scheduler(_Routes):
         self.call("zara", "PUT", f"/api/machines/{self.helper}/settings", {"capabilities": {"llm": {"enabled": False}}})
         off = self.ticket("warm")
         self.assertEqual((off.state, off.error.code), ("refused", "disabled"))
+        lease = scheduler.get().lease(self.helper, "warm", kind="game", consumer=self.ids["alice"])
+        self.addCleanup(lease.release)
+        with self.assertRaises(scheduler.MachineRefused) as caught:
+            m.take(m.submit(lease))
+        self.assertIn("takes no model work", str(caught.exception), "a seat's request is refused too")
         self.assertFalse(self.call("alice", "GET", f"/api/machines/{self.helper}/settings").json()["in_effect"]["llm"])
 
     def test_without_the_dialogs_refresh_the_change_would_wait_for_the_reread(self):

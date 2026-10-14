@@ -466,9 +466,9 @@ def _normalize_server(d: dict) -> dict:
         for flag in ("loaded", "reported"):
             if isinstance(m.get(flag), bool):
                 mm[flag] = m[flag]
-        context = _num(m.get("context"), None, 1, 100_000_000)
-        if context is not None:
-            mm["context"] = int(context)
+        context = m.get("context")
+        if isinstance(context, int) and not isinstance(context, bool) and 0 < context <= 100_000_000:
+            mm["context"] = context
         models.append(mm)
     sv["models"] = models
     sv["updated"] = time.time()
