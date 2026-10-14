@@ -8,6 +8,7 @@ is most likely to deadlock.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import tempfile
@@ -537,6 +538,70 @@ class LocalSettings(unittest.TestCase):
                                               collect_hardware=False),
                                  {"api_key_env": "AWS_SECRET_ACCESS_KEY"})
         self.assertNotIn("api_key_env", seen)
+
+
+class ClosedConnection(unittest.TestCase):
+    """A server that goes away while the helper is answering (qa_phase3's exit part kills it with a chat held at the
+    endpoint): the request ends quietly, its slot comes back, and its task holds no exception for asyncio to report as
+    never retrieved."""
+
+    class Socket:
+        """A connection whose every send fails as websockets' does once the server has gone."""
+        def __init__(self, close_code=None):
+            self.close_code = close_code
+            self.sends = 0
+
+        async def send(self, message):
+            from websockets.exceptions import ConnectionClosedError
+            self.sends += 1
+            raise ConnectionClosedError(None, None)
+
+    def _handle(self, socket, *, complete=None, model="test-model"):
+        """Run one request the way the session does, as a task of its own; return the task's exception (None if it
+        ended cleanly), the worker, and the citar.worker log."""
+        from citar.worker.agent import Worker, WorkerConfig
+        worker = Worker(WorkerConfig(server_url="https://citar.test", token="t", models=["test-model"],
+                                     collect_hardware=False))
+        worker._complete = complete or (lambda data: {
+            "text": "an answer", "thinking": "", "stop_reason": "stop", "malformed": 0,
+            "tool_calls": [], "usage": {}})
+
+        async def run():
+            task = asyncio.create_task(worker.handle_request(socket, {"t": P.REQUEST, "id": "r1", "model": model,
+                                                                      "messages": []}))
+            await asyncio.wait({task})
+            return task.exception()
+
+        with self.assertLogs("citar.worker", level="INFO") as logs:
+            escaped = asyncio.run(run())
+        return escaped, worker, logs
+
+    def test_an_answer_with_nowhere_to_go_ends_the_request_quietly(self):
+        socket = self.Socket()
+        escaped, worker, logs = self._handle(socket)
+        self.assertIsNone(escaped)
+        self.assertEqual(worker.in_flight, 0)
+        self.assertEqual(socket.sends, 1, "the answer is tried once, and no refusal follows it")
+        self.assertIn("connection closed before request r1's answer was sent", "\n".join(logs.output))
+        self.assertEqual([r.getMessage() for r in logs.records if r.levelno > logging.INFO], [])
+
+    def test_a_failure_after_the_server_left_is_not_refused(self):
+        def fail(data):
+            raise RuntimeError("the endpoint went too")
+        socket = self.Socket(close_code=1006)
+        escaped, worker, logs = self._handle(socket, complete=fail)
+        self.assertIsNone(escaped)
+        self.assertEqual(worker.in_flight, 0)
+        self.assertEqual(socket.sends, 0)
+        self.assertIn("connection closed before request r1's answer was sent", "\n".join(logs.output))
+        self.assertEqual([r.getMessage() for r in logs.records if r.levelno > logging.INFO], [])
+
+    def test_a_refusal_with_nowhere_to_go_raises_nothing(self):
+        socket = self.Socket()
+        escaped, worker, logs = self._handle(socket, model="another-model")
+        self.assertIsNone(escaped)
+        self.assertEqual(socket.sends, 1)
+        self.assertIn("connection closed before request r1's refusal was sent", "\n".join(logs.output))
 
 
 class Authentication(unittest.TestCase):

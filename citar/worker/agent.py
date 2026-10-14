@@ -34,6 +34,13 @@ from typing import Optional
 
 from . import protocol as P
 
+try:
+    from websockets.exceptions import ConnectionClosed
+except ImportError:
+    class ConnectionClosed(Exception):
+        """Stands in for websockets' own, which nothing raises without the package: the module still imports, and
+        __main__ says the worker extra is missing before anything connects."""
+
 log = logging.getLogger("citar.worker")
 
 WORKER_VERSION = "1.0"
@@ -78,6 +85,12 @@ def tls_context():
             except (OSError, ssl.SSLError):
                 pass
     return ctx
+
+
+def _closed(websocket) -> bool:
+    """Whether the connection has closed. Both websockets APIs set ``close_code`` once it has (1006 when the server
+    vanished without a close frame), and leave it None while it is open."""
+    return getattr(websocket, "close_code", None) is not None
 
 
 class Rejected(Exception):
@@ -263,16 +276,27 @@ class Worker:
             finally:
                 async with self._lock:
                     self.in_flight -= 1
+        except ConnectionClosed:
+            # The server went away while the model was answering (a restart, a dropped link). Its side already failed
+            # the request; a refusal down the same socket would only raise again, out of a task nobody awaits.
+            log.info("connection closed before request %s's answer was sent", request_id)
         except Exception as exc:
+            if _closed(websocket):
+                log.info("connection closed before request %s's answer was sent (it had failed: %s)",
+                         request_id, exc)
+                return
             log.exception("request %s failed", request_id)
             await self._refuse(websocket, request_id, "", str(exc), retryable=False)
 
     async def _refuse(self, websocket, request_id: str, refusal: str, message: str,
                       retryable: bool = True):
-        """Refuse a request, telling the server why."""
+        """Refuse a request, telling the server why; a server that has gone meanwhile hears nothing."""
         log.info("refusing %s (%s): %s", request_id, refusal or "error", message)
-        await websocket.send(P.error_frame(P.Failure(id=request_id, message=message,
-                                                     refusal=refusal, retryable=retryable)))
+        try:
+            await websocket.send(P.error_frame(P.Failure(id=request_id, message=message,
+                                                         refusal=refusal, retryable=retryable)))
+        except ConnectionClosed:
+            log.info("connection closed before request %s's refusal was sent", request_id)
 
     def _complete(self, data: dict) -> dict:
         """One completion against the local endpoint. Runs on a worker thread.
