@@ -232,7 +232,7 @@ export async function openMachineSettings(m, onSaved) {
         el("button", { class: "small", onclick: pin }, "Pin these classes"),
         cls.pinned ? el("button", { class: "small", onclick: () => act("setMachineClass", { pinned: false }) },
           "Follow its hardware again") : null),
-      el("p", { class: "muted small" }, "The ledger prices its work by the new class from now on; `citar admin reprice` "
+      el("p", { class: "muted small" }, "The ledger prices its work by the new class from now on; citar admin reprice "
         + "recomputes a past period."),
       el("div", { class: "row wrap gap" }, tier,
         el("button", { class: "small", onclick: () => act("setMachineTrust", tier.value) }, "Set the trust tier")));
@@ -240,7 +240,7 @@ export async function openMachineSettings(m, onSaved) {
 
   // ------------------------------------------------------------------ small form parts
   function check(obj, key, label, hint) {
-    return el("div", { class: "field" },
+    return el("div", { class: "col", style: { gap: "2px" } },
       el("label", { class: "checkrow" }, el("input", { type: "checkbox", checked: !!obj[key],
         onchange: (e) => { obj[key] = e.target.checked; } }), label),
       hint ? el("span", { class: "muted small" }, hint) : null);

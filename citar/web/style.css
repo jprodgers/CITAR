@@ -694,3 +694,7 @@ td.nowrap { white-space: nowrap; }
 .pill.status-suspended, .pill.status-deleted { border-color: #a33; }
 .pill.status-probation, .pill.status-pending { border-color: #a88a2a; }
 .admin-drawer h3 { margin: 6px 0 0; font-size: 14px; }
+
+/* A checkbox in a form field keeps its own size: `.field input` widens inputs to the field, which pushed a checkbox's
+   label to the far side of the dialog (the machine settings dialog, the grant dialog's purposes, the hardware editor). */
+.field input[type=checkbox], .field input[type=radio] { width: auto; }
