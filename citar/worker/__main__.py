@@ -147,6 +147,7 @@ def build_config(args) -> WorkerConfig:
         models=args.model or data.get("models") or None,
         insecure=bool(args.insecure or data.get("insecure")),
         collect_hardware=not args.no_hardware,
+        hardware_file=pick("hardware_file", "CITAR_WORKER_HARDWARE_FILE", "") or "",
     )
 
 
@@ -179,6 +180,9 @@ def main(argv=None) -> int:
                         help="skip TLS verification (test servers only)")
     parser.add_argument("--no-hardware", action="store_true",
                         help="do not report this machine's hardware to the server")
+    parser.add_argument("--hardware", dest="hardware_file", metavar="FILE",
+                        help="report the hardware in FILE (a collector's output: collect_hardware.py, .sh or "
+                             ".ps1) instead of scanning this machine; read again at every connection")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 

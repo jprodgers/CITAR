@@ -104,6 +104,9 @@ class WorkerConfig:
     models: Optional[list] = None
     insecure: bool = False
     collect_hardware: bool = True
+    #: A hardware file to report instead of scanning this machine (a collector's output: collect_hardware.py, .sh or
+    #: .ps1), read again at every connection; ``collect_hardware`` false still reports nothing.
+    hardware_file: str = ""
 
     @property
     def ws_url(self) -> str:
@@ -174,9 +177,28 @@ class Worker:
             return []
 
     def _hardware(self) -> Optional[dict]:
-        """Collect this machine's hardware to send with the hello frame."""
+        """Collect this machine's hardware to send with the hello frame: its scan, or the hardware file it was given
+        (``hardware_file``: where the scan cannot read the machine well, or to report the details the owner wants
+        reported). The server keeps it as the machine's last scan, and applies it only as the machine's settings say
+        (its hardware and power modes)."""
         if not self.cfg.collect_hardware:
             return None
+        if self.cfg.hardware_file:
+            import json
+            from pathlib import Path
+            try:
+                raw = Path(self.cfg.hardware_file).read_bytes()
+                # Windows PowerShell 5's `>` writes UTF-16 with a byte order mark; everything else writes UTF-8
+                text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+                data = json.loads(text)
+            except (OSError, ValueError) as exc:
+                log.warning("could not read the hardware file %s: %s", self.cfg.hardware_file, exc)
+                return None
+            if not isinstance(data, dict) or data.get("format") != "citar-hardware":
+                log.warning("%s is not a CITAR hardware file (run a collector: collect_hardware.py, .sh or .ps1)",
+                            self.cfg.hardware_file)
+                return None
+            return data
         try:
             from .. import hwinfo
             return hwinfo.collect()
