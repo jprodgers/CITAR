@@ -28,8 +28,9 @@ whole every time in ``hardware_detected`` (``{"hardware": the scan, "hardware_at
 - **power** ``auto``: the scan's suggested figures (``hardware.power.suggested``) become the power figures, as a
   guess; ``manual`` (the default): left alone.
 
-**Apply** (``apply_scan``) copies the last scan, or one section of it, into the configuration whatever the modes, and
-``differences`` says how the configuration and the last scan differ, section by section, for the dialog.
+**Apply** (``apply_scan``) copies the last scan, or one section of it, into the configuration whatever the modes (all of
+it: each section it has something for), and ``differences`` says how the configuration and the last scan differ,
+section by section, for the dialog.
 
 Replaces: ``workers.record_connection``'s overwrite of a machine's hardware with each hello and its replacement of
 the model list (before 3-18), which lost whatever its owner had typed in.
@@ -85,7 +86,7 @@ def _whole(v, lo: int, hi: int) -> int:
     """A stored number as a whole number within bounds (0 when it does not read)."""
     try:
         x = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return lo
     if not math.isfinite(x):
         return lo
@@ -122,8 +123,12 @@ def _bool(v, what: str) -> bool:
 
 
 def _int(v, what: str, lo: int, hi: int) -> int:
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v != int(v) \
-            or not lo <= v <= hi:
+    """A whole number from the dialog's body within bounds (a float with nothing after the point counts). The bounds
+    are compared directly: the JSON reader takes an integer of hundreds of digits, which ``math.isfinite`` and
+    ``float`` would overflow on (a 500 rather than this 400), while a comparison of an int never does."""
+    whole = (isinstance(v, int) and not isinstance(v, bool)) or (isinstance(v, float) and math.isfinite(v)
+                                                                  and v == int(v))
+    if not whole or not lo <= v <= hi:
         raise SettingsError(f"{what} is a whole number from {lo:,} to {hi:,}.")
     return int(v)
 
@@ -196,18 +201,24 @@ def update(row, body) -> dict:
 # ---------------------------------------------------------------------------- what a helper reports
 
 def valid_scan(hardware) -> Optional[dict]:
-    """A helper's hardware scan as kept: a CITAR hardware dict (``hwinfo.collect``'s, ``format`` ``citar-hardware``)
-    of at most ``SCAN_BYTES_MAX`` as JSON; None for anything else (none sent, or not a scan)."""
+    """A helper's hardware scan as kept: a CITAR hardware dict (``hwinfo.collect``'s, ``format`` ``citar-hardware``),
+    cleaned (``servers.clean_hardware``: a figure that is not finite or that no float holds dropped, its parts of the
+    shapes the readers take), of at most ``SCAN_BYTES_MAX`` as JSON; None for anything else (none sent, or not a
+    scan). A scan is stored, applied and shown to its owner, administrators and whoever may see the machine, so what
+    a helper sends must never be what fails those pages."""
     if not isinstance(hardware, dict) or hardware.get("format") != "citar-hardware":
         return None
+    from . import servers
+    scan = servers.clean_hardware(hardware)
     try:
-        size = len(json.dumps(hardware, separators=(",", ":"), default=str))
-    except (TypeError, ValueError):
+        size = len(json.dumps(scan, separators=(",", ":"), allow_nan=False))
+    except (TypeError, ValueError):     # the cleaning leaves nothing that would not encode: a guard, logged
+        log.warning("a helper's hardware scan that does not encode as JSON was not kept", exc_info=True)
         return None
     if size > SCAN_BYTES_MAX:
         log.warning("a helper's hardware scan of %d bytes was not kept (at most %d)", size, SCAN_BYTES_MAX)
         return None
-    return copy.deepcopy(hardware)
+    return scan
 
 
 def valid_models(models) -> Optional[list]:
@@ -299,7 +310,8 @@ def suggested_power(scan) -> dict:
     out = {}
     for k, _label in POWER_FIELDS:
         v = sug.get(k)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and 0 <= v <= 20000:
+        # the range first: it leaves out NaN and infinity, and never overflows on an integer no float holds
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 20000:
             out[k] = v
     return out
 
@@ -371,11 +383,13 @@ def record_report(row, *, hardware=None, models=None, helper: Optional[dict] = N
 
 
 def apply_scan(row, sections=None) -> list:
-    """Copy the last report into the configuration, whatever the modes: every section (``sections`` None or empty) or
-    the ones named (``hardware``: the scan; ``power``: its suggested figures; ``models``: the reported models merged
-    as ``auto`` would). A section with nothing to copy is a ``SettingsError`` (409), and nothing is changed. Returns
-    the sections applied."""
-    if sections is None or sections == []:
+    """Copy the last report into the configuration, whatever the modes: the sections named (``hardware``: the scan;
+    ``power``: its suggested figures; ``models``: the reported models merged as ``auto`` would), or with ``sections``
+    None or empty every section the report has something for (a helper started with ``--no-hardware`` reports models
+    alone; a collector's file may suggest no power figures). A section named with nothing to copy, or a report with
+    nothing at all, is a ``SettingsError`` (409), and nothing is changed. Returns the sections applied."""
+    every = sections is None or sections == []
+    if every:
         sections = list(SECTIONS)
     if not isinstance(sections, list) or any(s not in SECTIONS for s in sections):
         raise SettingsError(f"sections is a list of {', '.join(SECTIONS)}.")
@@ -384,22 +398,32 @@ def apply_scan(row, sections=None) -> list:
     scan = detected.get("hardware") if isinstance(detected.get("hardware"), dict) else None
     reported = detected.get("models") if isinstance(detected.get("models"), list) else None
     config = copy.deepcopy(dict(row.config or {}))
+    applied = []
     for section in sections:
+        missing = None
         if section == "hardware":
             if scan is None:
-                raise SettingsError("No hardware scan from its helper yet: nothing to apply.", 409)
-            config["hardware"] = _hardware_of(scan)
+                missing = "No hardware scan from its helper yet"
+            else:
+                config["hardware"] = _hardware_of(scan)
         elif section == "power":
             if scan is None or not _apply_power(config, scan):
-                raise SettingsError("Its helper's scan suggested no power figures: nothing to apply.", 409)
+                missing = "Its helper's scan suggested no power figures"
         else:
             if reported is None:
-                raise SettingsError("No models reported by its helper yet: nothing to apply.", 409)
-            config["models"] = merge_models(config.get("models"), valid_models(reported) or [], full=True)
+                missing = "No models reported by its helper yet"
+            else:
+                config["models"] = merge_models(config.get("models"), valid_models(reported) or [], full=True)
+        if missing is None:
+            applied.append(section)
+        elif not every:
+            raise SettingsError(f"{missing}: nothing to apply.", 409)
+    if not applied:
+        raise SettingsError("Nothing reported by its helper yet: nothing to apply.", 409)
     if not _reads(row, config):
         raise SettingsError("The last scan does not read as a machine's configuration; nothing was applied.", 409)
     row.config = config
-    return sections
+    return applied
 
 
 # ---------------------------------------------------------------------------- the configuration against the scan
@@ -415,12 +439,12 @@ def _many(d, key) -> list:
 
 
 def _num(v) -> Optional[float]:
-    """A number a scan or a configuration holds (text included), or None."""
+    """A number a scan or a configuration holds (text included), or None (an integer no float holds included)."""
     if isinstance(v, bool):
         return None
     try:
         x = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return x if math.isfinite(x) else None
 

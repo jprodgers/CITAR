@@ -6,7 +6,8 @@
     PUT  /api/machines/{sid}/settings          change any of ``slots``, ``capabilities`` (``llm``, ``cpu``) and
                                                ``modes`` (``hardware``, ``models``, ``power``: ``auto`` | ``manual``)
     POST /api/machines/{sid}/hardware/apply    copy the last report into the configuration: ``{"sections": [...]}``
-                                               (``hardware``, ``models``, ``power``; none or empty: all of them)
+                                               (``hardware``, ``models``, ``power``; none or empty: each one the
+                                               report has something for)
     PUT  /api/admin/machines/{sid}/trust       ``{"trust_tier": "new" | "provisional" | "trusted" | "quarantined"}``
     PUT  /api/admin/machines/{sid}/class       ``{"pinned": true, "gpu_class_id"?, "cpu_class_id"?}`` pins the
                                                classes it is priced by; ``{"pinned": false}`` lets them follow its
