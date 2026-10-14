@@ -298,7 +298,7 @@ python -m unittest discover -s tests                      # imports the extensio
 installs the project's dependencies into the venv whenever `pyproject.toml` has changed, builds
 `citar-py` into `$CARGO_TARGET_DIR/develop` with the build label from `git describe` (of the nearest
 `v*` tag), copies the
-library to `$CARGO_TARGET_DIR/citar-ext/`, and writes `citar-dev.pth` into the venv: the checkout
+library to `$CARGO_TARGET_DIR/citar-ext/` (and the helper beside it, below), and writes `citar-dev.pth` into the venv: the checkout
 on `sys.path` and `CITAR_EXT_DIR`, which `citar/__init__.py` puts first on the package's path. It
 writes nothing under the checkout. Rebuild after every Rust change you want Python to see. On
 Windows, stop the dev server and the lab before a rebuild: a library a running process holds is
@@ -330,9 +330,37 @@ python -m unittest discover -s tests
 The unpacked library is ignored by git. Delete it before going back to the dev loop, whose tests
 check that nothing was built into the checkout.
 
+**The helper.** `citar-helper` (`crates/citar-helper`) is the program a lender runs; its protocol
+is `crates/citar-helper/PROTOCOL.md`, and `design/phase4-helper.md` P4.3 the design. Every build a
+contributor makes for running should have the development guard:
+
+```bash
+cargo build -p citar-helper --features dev-guard          # or cargo xtask develop, which puts it in citar-ext/
+"$CARGO_TARGET_DIR/debug/citar-helper" --home C:/dev/scratch/helper-1 --server http://127.0.0.1:8000 --token ...
+cargo nextest run -p citar-helper -p citar-jobs --features citar-helper/dev-guard
+```
+
+A `dev-guard` build dials loopback servers only and refuses to start without an explicit `--home`
+outside the per-user CITAR folder, so a forgotten flag never writes a real installation's
+`helper.json` or machine key. `cargo xtask develop` always builds the helper that way, in its own
+profile, next to the extension, where the end-to-end tests and the QA scripts look for it. Give
+every helper you run its own `--home` (and the same in `CITAR_DATA_DIR`), and never point one at a
+server that is not your own. The crate's tests play the shared transcripts of
+`crates/citar-helper/protocol/v2/transcripts/` against the helper's own session on a paused clock
+(`tests/conformance.rs`), run the real binary against a fake hub and a fake LM Studio on loopback
+(`tests/real_binary.rs`, about 30 s), and check the machine key's file permissions
+(`tests/keys.rs`); `tests/config_cases.rs` holds its settings to the table recorded from the 0.1.5
+helper (`tests/data/helper_config_cases.json`). `citar-jobs` holds the one module of the helper
+crates allowed `unsafe` (`src/sys/`), the operating-system calls no safe wrapper makes; `cargo
+xtask check` refuses `unsafe` anywhere else in them, and their test features and `dev-guard` in
+anything that ships.
+
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
-benchmarks need valgrind, so they run there too.
+benchmarks need valgrind, so they run there too, and so do the helper's Linux checks (`cargo
+nextest run -p citar-helper -p citar-jobs`, which builds ring's C and assembly: the Linux side
+needs a C compiler, `CC` pointing at one when `cc` is not on the `PATH`). A clone made from a
+`git bundle` of your branch keeps the Windows checkout out of it entirely.
 
 **On a busy machine**, `CARGO_BUILD_JOBS=4` keeps a build from starving everything else, and
 wall-clock benchmark numbers are only indicative.
