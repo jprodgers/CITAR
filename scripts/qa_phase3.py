@@ -4705,6 +4705,9 @@ def run(args) -> tuple:
             report.parts[name] = {"seconds": round(time.perf_counter() - began, 1)}
             report.current = None
             if len(parts) > 1:
+                if args.keep and server.proc is not None:
+                    # where the kept server is, for the checklist's scripts that start on this part's file now
+                    report.data["kept"] = {"pid": server.proc.pid, "url": server.public}
                 try:
                     write_part(state, args.part, name, report)
                 except OSError as e:          # written again at the end; the run goes on
