@@ -1,8 +1,14 @@
 //! The transcript player of the helper's side (PROTOCOL.md "Transcripts", P4.2.9): a fake server
 //! that sends the transcript's server frames, checks every frame the helper sends against the
 //! transcript's patterns, and plays the fake model endpoint. It drives either the helper's own
-//! session in-process (`tests/conformance.rs`, on tokio's paused clock: the fake clock) or the
-//! real binary over loopback (`tests/real_binary.rs`, in real time).
+//! session in-process (`tests/conformance.rs`: on tokio's paused clock, the fake clock, when no
+//! completion runs; in real time against [`FakeEndpoint`] when one does) or the real binary over
+//! loopback (`tests/real_binary.rs`, in real time).
+//!
+//! [`FakeEndpoint`] is the fake model endpoint over real HTTP on loopback (4-04): it lists models
+//! as LM Studio does, answers each completion with the behaviour the transcript scripts for it
+//! (an SSE stream with delays between its events, a JSON body, an HTTP error, or no answer), and
+//! records each request's body, when each streamed event went out and when its client went.
 //!
 //! The rules it keeps: background frames (`ping`, `pong`, `status`, `power`) are skipped unless
 //! the next step expects their type, and the helper's own unscripted pings are answered; a
@@ -16,6 +22,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use citar_helper::conformance::matcher::{Bindings, NoGolden, matches, realize};
 use citar_helper::conformance::transcript::{Action, BACKGROUND, Side, Step, Transcript};
@@ -126,6 +134,10 @@ pub trait UnderTest {
     fn exited(&mut self, within: Duration) -> BoxFuture<'_, Option<i32>>;
     /// Whether the helper's log holds `text`.
     fn logged(&self, text: &str) -> bool;
+    /// The completions in flight on the helper, when the player can see them.
+    fn in_flight(&self) -> Option<usize> {
+        None
+    }
     /// Something happens around the helper (an `act` with side `helper`).
     fn act(&mut self, what: &Value);
 }
@@ -163,6 +175,12 @@ pub struct Player<'t> {
     /// What the current connection saw and no step has taken yet.
     inbox: VecDeque<Event>,
     pub models: Models,
+    /// The fake model endpoint over HTTP, for the transcripts that run completions.
+    pub endpoint: Option<FakeEndpoint>,
+    /// The next completion request an `expect_request` step looks at.
+    expect_cursor: usize,
+    /// `respond` steps played: the last one answers request `responds - 1`.
+    responds: usize,
     last: Instant,
 }
 
@@ -186,6 +204,9 @@ impl<'t> Player<'t> {
             cur: None,
             inbox: VecDeque::new(),
             models,
+            endpoint: None,
+            expect_cursor: 0,
+            responds: 0,
             last: Instant::now(),
         }
     }
@@ -428,16 +449,7 @@ impl<'t> Player<'t> {
                     self.inbox.clear();
                 }
                 Action::Wait { s: secs, quiet } => self.wait(i, *secs, *quiet).await?,
-                Action::Endpoint(e) => {
-                    let keys: Vec<&String> = e.keys().filter(|k| *k != "models").collect();
-                    if !keys.is_empty() {
-                        return Err(self.fail(
-                            i,
-                            format!("this player cannot yet play endpoint {keys:?} (4-04)"),
-                        ));
-                    }
-                    self.models.set(listed(&e["models"]));
-                }
+                Action::Endpoint(e) => self.endpoint_step(i, s, e).await?,
                 Action::Host(_) => {
                     return Err(self.fail(i, "this player has no job host yet (4-10)"));
                 }
@@ -448,6 +460,79 @@ impl<'t> Player<'t> {
                 }
             }
             self.last = Instant::now();
+        }
+        Ok(())
+    }
+
+    /// An `endpoint` step: the fake endpoint's next behaviour, or an expectation of it.
+    async fn endpoint_step(
+        &mut self,
+        i: usize,
+        s: &Step,
+        e: &Map<String, Value>,
+    ) -> Result<(), String> {
+        if let Some(m) = e.get("models") {
+            self.models.set(listed(m));
+        }
+        let rest: Vec<&String> = e.keys().filter(|k| *k != "models").collect();
+        if rest.is_empty() {
+            return Ok(());
+        }
+        let Some(ep) = self.endpoint.clone() else {
+            return Err(self.fail(i, format!("this player has no endpoint to play {rest:?} with")));
+        };
+        let until = self.last + s.within_s.map_or(DEFAULT_WAIT, Duration::from_secs_f64);
+        if let Some(pattern) = e.get("expect_request") {
+            let k = self.expect_cursor;
+            self.expect_cursor += 1;
+            let body = ep.request_body(k, until).await.ok_or_else(|| {
+                self.fail(i, format!("the endpoint saw no request {k} within the step's time"))
+            })?;
+            matches(pattern, &body, &mut self.bindings, &NoGolden).map_err(|m| {
+                self.fail(i, format!("the endpoint's request: {m}\n  body    {body}"))
+            })?;
+            for key in e.get("absent").and_then(Value::as_array).into_iter().flatten() {
+                let key = key.as_str().unwrap_or_default();
+                if body.get(key).is_some() {
+                    return Err(self.fail(i, format!("the endpoint's request has {key:?}: {body}")));
+                }
+            }
+        }
+        if let Some(r) = e.get("respond") {
+            let behaviour = Behaviour::from_step(r).map_err(|m| self.fail(i, m))?;
+            // The endpoint answers a request it has: the step waits for it to come.
+            let k = self.responds;
+            if ep.request_body(k, until).await.is_none() {
+                return Err(
+                    self.fail(i, format!("no request {k} came to answer within the step's time"))
+                );
+            }
+            ep.respond(behaviour);
+            self.responds += 1;
+        }
+        let current = self.responds.checked_sub(1);
+        if let Some(ms) = e.get("expect_disconnect_within_ms").and_then(Value::as_f64) {
+            let k = current.ok_or_else(|| self.fail(i, "no completion was answered yet"))?;
+            let by = self.last + Duration::from_secs_f64(ms / 1000.0);
+            if ep.gone(k, by).await.is_none() {
+                return Err(self.fail(
+                    i,
+                    format!(
+                        "the endpoint's client {k} did not go within {ms} ms of the step before"
+                    ),
+                ));
+            }
+        }
+        if let Some(after) = e.get("expect_no_tokens_after") {
+            if after != "disconnect" {
+                return Err(self.fail(i, format!("expect_no_tokens_after {after} is not known")));
+            }
+            let k = current.ok_or_else(|| self.fail(i, "no completion was answered yet"))?;
+            let seen = ep.seen(k).ok_or_else(|| self.fail(i, "no such request"))?;
+            let gone = seen.gone.ok_or_else(|| self.fail(i, "the client has not gone"))?;
+            if let Some(late) = seen.tokens.iter().position(|t| *t > gone) {
+                return Err(self.fail(i, format!("token {late} went out after the client went")));
+            }
         }
         Ok(())
     }
@@ -474,6 +559,26 @@ impl<'t> Player<'t> {
                     if let Ok(c) = self.conns.try_recv() {
                         drop(c);
                         return Err(self.fail(i, "the helper reconnected before it exited"));
+                    }
+                }
+                "in_flight" => {
+                    let want = v.as_u64().and_then(|n| usize::try_from(n).ok());
+                    // A dropped completion leaves the count when its task is gone: give it a
+                    // moment, as `logged` does.
+                    let until = Instant::now() + Duration::from_secs(2);
+                    let mut got = helper.in_flight();
+                    while got.is_some() && got != want && Instant::now() < until {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        got = helper.in_flight();
+                    }
+                    if got.is_none() {
+                        return Err(self.fail(i, "this player cannot see the helper's in_flight"));
+                    }
+                    if got != want {
+                        return Err(self.fail(
+                            i,
+                            format!("the helper has {got:?} completions in flight, not {want:?}"),
+                        ));
                     }
                 }
                 "logged" => {
@@ -523,7 +628,6 @@ pub async fn loopback_hub() -> (u16, mpsc::UnboundedReceiver<ServerWs>) {
 /// A fake LM Studio on loopback: `/api/v0/models` lists `models` as they are when asked; any
 /// other path is 404. Returns the port.
 pub async fn loopback_lmstudio(models: Models) -> u16 {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
     let port = listener.local_addr().expect("its address").port();
     tokio::spawn(async move {
@@ -591,7 +695,6 @@ pub async fn loopback_routes_shared(
     routes: Arc<Mutex<BTreeMap<String, (u16, String)>>>,
     heads: Arc<Mutex<Vec<String>>>,
 ) -> u16 {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
     let port = listener.local_addr().expect("its address").port();
     tokio::spawn(async move {
@@ -629,4 +732,291 @@ pub async fn loopback_routes_shared(
         }
     });
     port
+}
+
+/// What [`FakeEndpoint`] does with one completion request.
+#[derive(Clone, Debug)]
+pub enum Behaviour {
+    /// A `text/event-stream` answer: each value a `data:` event, `delay` apart (the first at once),
+    /// then `data: [DONE]`. It stops the moment its client goes.
+    Stream { events: Vec<Value>, delay: Duration },
+    /// A JSON answer.
+    Json(Value),
+    /// An HTTP error with this body.
+    Status(u16, String),
+    /// No answer at all, until the client goes.
+    Hang,
+}
+
+impl Behaviour {
+    /// A transcript's `respond` value.
+    pub fn from_step(r: &Value) -> Result<Behaviour, String> {
+        if let Some(events) = r.get("stream").and_then(Value::as_array) {
+            let delay =
+                Duration::from_millis(r.get("delay_ms").and_then(Value::as_u64).unwrap_or(0));
+            return Ok(Behaviour::Stream { events: events.clone(), delay });
+        }
+        if let Some(body) = r.get("json") {
+            return Ok(Behaviour::Json(body.clone()));
+        }
+        if let Some(status) = r.get("status").and_then(Value::as_u64) {
+            let body = r.get("body").and_then(Value::as_str).unwrap_or_default().to_owned();
+            return Ok(Behaviour::Status(u16::try_from(status).unwrap_or(500), body));
+        }
+        if r.get("hang").and_then(Value::as_bool) == Some(true) {
+            return Ok(Behaviour::Hang);
+        }
+        Err(format!("a respond the fake endpoint cannot play: {r}"))
+    }
+}
+
+/// One completion request [`FakeEndpoint`] saw.
+#[derive(Clone, Debug)]
+pub struct Seen {
+    pub body: Value,
+    pub at: Instant,
+    /// When each streamed event went out (taken while the client was still there).
+    pub tokens: Vec<Instant>,
+    /// When the client went, once it has.
+    pub gone: Option<Instant>,
+}
+
+#[derive(Default)]
+struct FakeState {
+    seen: Vec<Seen>,
+    /// The behaviour for each request, in the order they came.
+    behaviours: Vec<Behaviour>,
+}
+
+/// The fake model endpoint over HTTP on loopback (see the module's doc).
+#[derive(Clone)]
+pub struct FakeEndpoint {
+    pub port: u16,
+    pub models: Models,
+    state: Arc<Mutex<FakeState>>,
+    changed: Arc<tokio::sync::Notify>,
+}
+
+impl FakeEndpoint {
+    /// Listening on a loopback port, listing `models`.
+    pub async fn start(models: Models) -> FakeEndpoint {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
+        let port = listener.local_addr().expect("its address").port();
+        let ep = FakeEndpoint {
+            port,
+            models,
+            state: Arc::new(Mutex::new(FakeState::default())),
+            changed: Arc::new(tokio::sync::Notify::new()),
+        };
+        let server = ep.clone();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let ep = server.clone();
+                tokio::spawn(async move { ep.serve(tcp).await });
+            }
+        });
+        ep
+    }
+
+    /// The base URL a helper is given.
+    pub fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}/v1", self.port)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, FakeState> {
+        self.state.lock().expect("the fake endpoint's state")
+    }
+
+    /// The behaviour for the next completion request without one.
+    pub fn respond(&self, b: Behaviour) {
+        self.lock().behaviours.push(b);
+        self.changed.notify_waiters();
+    }
+
+    /// Request `k` as it is now.
+    pub fn seen(&self, k: usize) -> Option<Seen> {
+        self.lock().seen.get(k).cloned()
+    }
+
+    /// The completion requests seen so far.
+    pub fn requests(&self) -> usize {
+        self.lock().seen.len()
+    }
+
+    /// Waits until `f` of the state gives a value, or `until`.
+    async fn wait_for<T>(&self, until: Instant, f: impl Fn(&FakeState) -> Option<T>) -> Option<T> {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(v) = f(&self.lock()) {
+                return Some(v);
+            }
+            if tokio::time::timeout_at(until, notified).await.is_err() {
+                return f(&self.lock());
+            }
+        }
+    }
+
+    /// Request `k`'s body, once it has come (by `until`).
+    pub async fn request_body(&self, k: usize, until: Instant) -> Option<Value> {
+        self.wait_for(until, |s| s.seen.get(k).map(|r| r.body.clone())).await
+    }
+
+    /// When request `k`'s client went, once it has (by `until`).
+    pub async fn gone(&self, k: usize, until: Instant) -> Option<Instant> {
+        self.wait_for(until, |s| s.seen.get(k).and_then(|r| r.gone)).await
+    }
+
+    async fn serve(&self, mut tcp: tokio::net::TcpStream) {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let head_end = loop {
+            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break p + 4;
+            }
+            if buf.len() > 65_536 {
+                return;
+            }
+            match tcp.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+        let line = head.lines().next().unwrap_or_default().to_owned();
+        if line.starts_with("GET ") && line.contains("/models") {
+            let data: Vec<Value> = self
+                .models
+                .get()
+                .iter()
+                .map(|m| {
+                    serde_json::json!({"id": m.key, "object": "model", "type": "llm",
+                        "state": if m.loaded { "loaded" } else { "not-loaded" },
+                        "max_context_length": m.context})
+                })
+                .collect();
+            let body = serde_json::json!({"object": "list", "data": data}).to_string();
+            let _sent = write_whole(&mut tcp, 200, "application/json", &body).await;
+            return;
+        }
+        if !(line.starts_with("POST ") && line.contains("/chat/completions")) {
+            let _sent = write_whole(&mut tcp, 404, "application/json", "{}").await;
+            return;
+        }
+        let length = head
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        while buf.len() < head_end + length {
+            match tcp.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let body: Value =
+            serde_json::from_slice(&buf[head_end..head_end + length]).unwrap_or(Value::Null);
+        let k = {
+            let mut s = self.lock();
+            s.seen.push(Seen { body, at: Instant::now(), tokens: Vec::new(), gone: None });
+            s.seen.len() - 1
+        };
+        self.changed.notify_waiters();
+        let (mut rd, mut wr) = tcp.into_split();
+        // The client sends nothing more: a read that ends means it went.
+        let watcher = self.clone();
+        tokio::spawn(async move {
+            let mut b = [0u8; 1024];
+            loop {
+                match rd.read(&mut b).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            watcher.lock().seen[k].gone = Some(Instant::now());
+            watcher.changed.notify_waiters();
+        });
+        let far = Instant::now() + Duration::from_secs(3600);
+        let Some(behaviour) = self
+            .wait_for(far, |s| {
+                if s.seen[k].gone.is_some() {
+                    return Some(None);
+                }
+                s.behaviours.get(k).cloned().map(Some)
+            })
+            .await
+            .flatten()
+        else {
+            return;
+        };
+        match behaviour {
+            Behaviour::Json(v) => {
+                let _sent = write_whole(&mut wr, 200, "application/json", &v.to_string()).await;
+            }
+            Behaviour::Status(status, body) => {
+                let _sent = write_whole(&mut wr, status, "text/plain", &body).await;
+            }
+            Behaviour::Hang => {
+                let _gone = self.gone(k, far).await;
+            }
+            Behaviour::Stream { events, delay } => {
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+                if wr.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                let datas: Vec<String> = events
+                    .iter()
+                    .map(Value::to_string)
+                    .chain(std::iter::once("[DONE]".to_owned()))
+                    .collect();
+                let last = datas.len() - 1;
+                for (n, data) in datas.into_iter().enumerate() {
+                    if n > 0 && !delay.is_zero() {
+                        // A wait the client's going ends at once, as a model stops.
+                        let until = Instant::now() + delay;
+                        if self.gone(k, until).await.is_some() {
+                            return;
+                        }
+                    }
+                    {
+                        // The token's time is taken while the client is known to be there.
+                        let mut s = self.lock();
+                        if s.seen[k].gone.is_some() {
+                            return;
+                        }
+                        if n < last {
+                            s.seen[k].tokens.push(Instant::now());
+                        }
+                    }
+                    let event = format!("data: {data}\n\n");
+                    let framed = format!("{:x}\r\n{event}\r\n", event.len());
+                    if wr.write_all(framed.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+                let _end = wr.write_all(b"0\r\n\r\n").await;
+            }
+        }
+        let _flushed = wr.flush().await;
+        // Wait for the client to close its end before ours goes, so the client reads it all.
+        let _gone = self.gone(k, Instant::now() + Duration::from_secs(10)).await;
+    }
+}
+
+/// A whole response with a body.
+async fn write_whole<W: tokio::io::AsyncWrite + Unpin>(
+    w: &mut W,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    let resp = format!(
+        "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    w.write_all(resp.as_bytes()).await?;
+    w.flush().await
 }

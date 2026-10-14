@@ -1,8 +1,12 @@
-//! The transcripts from the helper's side (design/phase4-helper.md P4.2.9; package 4-03, gate 2):
-//! every transcript a package up to this one plays from the helper's side runs against the
-//! helper's own session code, in-process, on tokio's paused clock (the fake clock: an hour's idle
-//! takes no time), through an in-memory connection to the fake server of `common`. The hub's
-//! side plays the same files from 4-05 on (`tests/test_helper_conformance.py`).
+//! The transcripts from the helper's side (design/phase4-helper.md P4.2.9; packages 4-03, gate 2,
+//! and 4-04, gate 1): every transcript a package up to this one plays from the helper's side runs
+//! against the helper's own session code, in-process, through an in-memory connection to the fake
+//! server of `common`. Those with no completion run on tokio's paused clock (the fake clock: an
+//! hour's idle takes no time); those with one (4-04's) run in real time against `common`'s
+//! `FakeEndpoint` over HTTP on loopback, since a paused clock would fire the helper's timers while
+//! the endpoint's bytes are on their way, and since what they check is the real connection to the
+//! endpoint (its client gone within 1 s of a cancel). The hub's side plays the same files from 4-05
+//! on (`tests/test_helper_conformance.py`).
 
 mod common;
 
@@ -11,20 +15,22 @@ use std::time::Duration;
 
 use citar_helper::clock::Clock;
 use citar_helper::config::{Config, LocalCpu, Machine};
-use citar_helper::conformance::transcript::Transcript;
+use citar_helper::conformance::transcript::{Action, Transcript};
 use citar_helper::conformance::{canonical_examples, transcripts};
+use citar_helper::http1;
 use citar_helper::key::MachineKey;
-use citar_helper::llm::{BoxFuture, SharedEndpoint};
+use citar_helper::llm::{BoxFuture, Endpoint, HttpEndpoint, Listed, SharedEndpoint};
 use citar_helper::log::Log;
-use citar_helper::protocol::{Kind, Provider, UpdatePolicy};
+use citar_helper::protocol::{Kind, Provider, Sender, UpdatePolicy};
+use citar_helper::proxy::InFlight;
 use citar_helper::quiet::{self, Quiet};
 use citar_helper::session::{Exit, Facts, Helper};
-use common::{Models, Pipe, Player, UnderTest, listed};
+use common::{FakeEndpoint, Models, Pipe, Player, UnderTest, listed};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 /// The packages whose helper-side transcripts this crate plays (it refuses what it cannot do).
-const PLAYED_THROUGH: &str = "4-03";
+const PLAYED_THROUGH: &str = "4-04";
 
 /// The fake clock's start: Wednesday 2026-10-14, 12:00 UTC, outside any transcript's quiet hours.
 const START_UNIX: f64 = 1_791_979_200.0;
@@ -34,6 +40,7 @@ struct InProcess {
     log: Log,
     clock: Clock,
     quiet: Quiet,
+    in_flight: InFlight,
 }
 
 impl UnderTest for InProcess {
@@ -54,6 +61,10 @@ impl UnderTest for InProcess {
         self.log.contains(text)
     }
 
+    fn in_flight(&self) -> Option<usize> {
+        Some(self.in_flight.get())
+    }
+
     fn act(&mut self, what: &Value) {
         match what.as_str() {
             Some("quiet_begins") => {
@@ -65,6 +76,24 @@ impl UnderTest for InProcess {
             }
             other => panic!("this player cannot yet act {other:?} around the helper"),
         }
+    }
+}
+
+/// The live runs' endpoint: the transcript's model list as given (labels and all: LM Studio's own
+/// API has none, and the listings over HTTP are `tests/endpoint.rs`'s), and every completion over
+/// HTTP to the fake endpoint.
+struct Live {
+    models: Models,
+    http: HttpEndpoint,
+}
+
+impl Endpoint for Live {
+    fn list(&self) -> BoxFuture<'_, Result<Vec<Listed>, String>> {
+        self.models.list()
+    }
+
+    fn complete(&self, body: Vec<u8>) -> BoxFuture<'_, Result<http1::Response, http1::Failure>> {
+        self.http.complete(body)
     }
 }
 
@@ -169,6 +198,18 @@ fn play_with(
     play_bound(t, canonical, tweak, &[])
 }
 
+/// Whether a transcript runs a completion (a `request` sent, or an endpoint step beyond its model
+/// list): it then plays in real time against the fake endpoint over HTTP.
+fn runs_completions(t: &Transcript) -> bool {
+    t.steps.iter().any(|s| match &s.action {
+        Action::Frame { from: Sender::Server, pattern } => {
+            pattern.get("t").and_then(Value::as_str) == Some("request")
+        }
+        Action::Endpoint(e) => e.keys().any(|k| k != "models"),
+        _ => false,
+    })
+}
+
 /// Plays `t` with `binds` bound before the first step, so an `<id:…>` the transcript leaves open
 /// must be exactly that value.
 fn play_bound(
@@ -182,29 +223,45 @@ fn play_bound(
             return Err(format!("{}: this player cannot yet set up the helper's {key:?}", t.name));
         }
     }
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .start_paused(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let live = runs_completions(t);
+    let rt = if live {
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()
+    } else {
+        tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build()
+    }
+    .map_err(|e| e.to_string())?;
     let facts = facts();
     rt.block_on(async {
         let mut cfg = config(t);
-        tweak(&mut cfg);
         let models = Models::default();
         if let Some(m) = t.setup_helper.get("endpoint").and_then(|e| e.get("models")) {
             models.set(listed(m));
         }
+        let fake = if live { Some(FakeEndpoint::start(models.clone()).await) } else { None };
+        if let Some(f) = &fake {
+            cfg.base_url = f.base_url();
+        }
+        tweak(&mut cfg);
         let (conns_tx, conns_rx) = mpsc::unbounded_channel();
         let key = MachineKey::generate()?;
         let log = Log::memory();
+        // In real time too, the fake wall clock starts at START_UNIX and can jump.
         let clock = Clock::fake(START_UNIX);
         let (_stop_tx, stop_rx) = watch::channel(false);
-        let endpoint: Option<SharedEndpoint> =
-            if cfg.no_llm { None } else { Some(Arc::new(models.clone())) };
+        let endpoint: Option<SharedEndpoint> = match (&fake, cfg.no_llm) {
+            (_, true) => None,
+            (None, false) => Some(Arc::new(models.clone())),
+            (Some(_), false) => {
+                let tls = citar_helper::net::verified_tls(None)?;
+                let http = HttpEndpoint::new(cfg.provider, &cfg.base_url, None, tls)?;
+                Some(Arc::new(Live { models: models.clone(), http }))
+            }
+        };
         let ceiling = cfg.ceiling(Machine { logical_cpus: 8, memory_mb: 16_384 });
         let quiet = Quiet(cfg.quiet.clone());
+        let in_flight = InFlight::default();
         let mut player = Player::new(t, conns_rx, models, canonical.clone());
+        player.endpoint = fake;
         player.bindings.bind("token", Value::String(cfg.token.clone()));
         player.bindings.bind("key", Value::String(key.public_b64()));
         for (name, v) in binds {
@@ -221,9 +278,10 @@ fn play_bound(
             endpoint,
             service: t.setup_helper.get("service").and_then(Value::as_bool).unwrap_or(false),
             stop: stop_rx,
+            in_flight: in_flight.clone(),
         };
         let task = tokio::spawn(async move { helper.run().await });
-        let mut under = InProcess { task: Some(task), log: log.clone(), clock, quiet };
+        let mut under = InProcess { task: Some(task), log: log.clone(), clock, quiet, in_flight };
         let result = player.play(&mut under).await;
         if let Some(task) = under.task.take() {
             task.abort();
@@ -240,13 +298,27 @@ fn the_helper_plays_its_transcripts() {
         .iter()
         .filter(|t| t.plays.helper.as_deref().is_some_and(|p| p <= PLAYED_THROUGH))
         .collect();
-    assert_eq!(mine.len(), 31, "4-03 plays 31 transcripts from the helper's side");
+    assert_eq!(mine.len(), 45, "4-03 and 4-04 play 45 transcripts from the helper's side");
+    let (live, paused): (Vec<&Transcript>, Vec<&Transcript>) =
+        mine.iter().partition(|t| runs_completions(t));
+    assert_eq!(live.len(), 14, "4-04's 14 run completions");
+    assert!(live.iter().all(|t| t.plays.helper.as_deref() == Some("4-04")));
     let mut failures = Vec::new();
-    for t in &mine {
+    for t in &paused {
         if let Err(e) = play(t, &canonical) {
             failures.push(e);
         }
     }
+    // The live ones wait in real time (a second here, two there): side by side.
+    let canonical = &canonical;
+    std::thread::scope(|scope| {
+        let runs: Vec<_> = live.iter().map(|t| scope.spawn(move || play(t, canonical))).collect();
+        for r in runs {
+            if let Err(e) = r.join().expect("a transcript's thread") {
+                failures.push(e);
+            }
+        }
+    });
     assert!(
         failures.is_empty(),
         "{} of {} failed:\n\n{}",
@@ -351,7 +423,7 @@ fn a_hardware_file_is_reported_in_the_hello_and_again_on_rescan() {
 }
 
 #[test]
-fn until_its_proxy_and_jobs_exist_the_helper_refuses_requests_and_offers_as_the_protocol_says() {
+fn until_its_jobs_exist_the_helper_refuses_offers_and_bad_requests_as_the_protocol_says() {
     let canonical = canonical_examples().expect("the canonical examples read");
     let request = |id: &str, messages: Value| {
         serde_json::json!({"t": "request", "id": id, "model": "model-a", "messages": messages,
@@ -374,14 +446,11 @@ fn until_its_proxy_and_jobs_exist_the_helper_refuses_requests_and_offers_as_the_
         .expect("read"),
     )
     .expect("json");
-    v["name"] = Value::from("refusals-before-4-04");
+    v["name"] = Value::from("refusals-before-4-10");
     let steps = v["steps"].as_array_mut().expect("steps");
-    let user = serde_json::json!([{"role": "user", "content": "hello"}]);
     steps.extend([
-        // A request: no proxy yet, so the model is not served (4-04 serves it).
-        serde_json::json!({"s2h": request("r1", user)}),
-        serde_json::json!({"h2s": {"t": "error", "id": "r1", "code": "unknown_model", "retryable": false}, "within_s": 2}),
-        // A request whose id can be read but that fails its checks: bad_request.
+        // A request whose id can be read but that fails its checks: bad_request (the
+        // completions themselves are the transcripts' and tests/proxy.rs's).
         serde_json::json!({"s2h": request("r2", serde_json::json!([])), "invalid": "value"}),
         serde_json::json!({"h2s": {"t": "error", "id": "r2", "code": "bad_request", "retryable": false}, "within_s": 2}),
         // An offer: no jobs build yet, so none is this helper's build (4-10 runs jobs).

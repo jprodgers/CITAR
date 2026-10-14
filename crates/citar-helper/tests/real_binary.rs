@@ -95,7 +95,7 @@ fn scenario(before: &[Listed], after: &[Listed]) -> Transcript {
         "steps": [
             {"h2s": {"t": "hello", "protocol": 2, "token": "<id:token>",
                      "machine": {"public_key": "<id:key>"},
-                     "llm": {"enabled": false, "provider": "lmstudio", "slots": 2, "stream": true,
+                     "llm": {"enabled": true, "provider": "lmstudio", "slots": 2, "stream": true,
                              "models": models_json(before)},
                      "cpu": {"enabled": false,
                              "ceiling": {"threads": 2, "cpu_percent": 25, "memory_mb": 512, "work": ["lab_game"]}},

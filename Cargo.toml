@@ -82,9 +82,15 @@ rustls = { version = "0.23.43", default-features = false, features = ["std", "tl
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls-platform-verifier = "0.7"
 rustls-pki-types = { version = "1.15", features = ["std"] }
-# The model endpoint's HTTP (discovery in 4-03, the streaming proxy in 4-04), on the same rustls,
-# with no system proxy: the helper dials only its configured endpoint.
+# The model endpoint's HTTP for discovery (4-03), on the same rustls, with no system proxy: the
+# helper dials only its configured endpoint.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+# The proxy's completions (4-04): HTTP/1.1 on a connection the request's own task dials and
+# drives, so dropping the request closes the socket there and then (real cancel, P4.3.4); a pooled
+# client's connection lives in a task of its own and notices a dropped response only when the
+# endpoint next writes. Both are already in the lock through reqwest, with these features.
+hyper = { version = "1.12", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 # The machine key (P4.3.7): ed25519 from the OS's random source.
 ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.3"
