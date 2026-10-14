@@ -1,12 +1,14 @@
 """The Servers page's calls against the route table's gates (design/phase3-features.md P3.2.8; Appendix D, 3-06 gate 2).
 
-The page (``citar/web/js/pool.js``, with the editors of ``servers.js``) sends every request through servers.js's
+The page (``citar/web/js/pool.js``, with the editors of ``servers.js`` and the machine settings dialog of
+``machine_settings.js``, 3-18) sends every request through servers.js's
 ``call(name, target, ...)``, which asks ``machines.js``'s ``mayCall`` first, and shows a control only when ``may``
 says its route would take it. ``mayCall`` reads each route's gate from ``machines.js``'s ``GATES``; its semantics are
 tested in Node (``citar/web/tests/machines.test.mjs``: a member never may call an ``admin`` or ``host`` route, and
 dials only their own dry run). This module holds the other half, statically:
 
-- every request of servers.js and pool.js goes through ``call`` (no other use of ``api``, aliases included), and
+- every request of servers.js, pool.js and machine_settings.js goes through ``call`` (no other use of ``api``,
+  aliases included), and
   names a route in ``GATES``; every ``may`` names one too; nothing else in them, or in the other modules they import,
   reaches the network (what they import from api.js, ``fetch``, ``request``, sockets, dynamic imports);
 - every name in ``GATES`` is an ``api.js`` function whose method and path are a route of the app;
@@ -55,11 +57,13 @@ settings.reset()
 ROOT = Path(__file__).resolve().parent.parent
 JS = ROOT / "citar" / "web" / "js"
 
-#: The Servers page's own modules: every request they make goes through ``call``.
-PAGE_MODULES = ("pool.js", "servers.js")
+#: The Servers page's own modules: every request they make goes through ``call`` (the machine settings dialog,
+#: machine_settings.js, through servers.js's).
+PAGE_MODULES = ("pool.js", "servers.js", "machine_settings.js")
 
-#: What the page's modules may import from ``api.js``: servers.js the ``api`` object its ``call`` uses, pool.js nothing.
-API_IMPORTS = {"servers.js": "{ api }", "pool.js": None}
+#: What the page's modules may import from ``api.js``: servers.js the ``api`` object its ``call`` uses, the others
+#: nothing.
+API_IMPORTS = {"servers.js": "{ api }", "pool.js": None, "machine_settings.js": None}
 
 #: The modules the page imports that are held to it elsewhere: ``nav.js`` (the header, below) and ``auth.js`` (the
 #: session, and the sign-in wall a visitor gets instead of the page). Any other module it imports makes no request.
@@ -204,9 +208,9 @@ class ServersPageCalls(unittest.TestCase):
         self.assertIn(("POST", "/api/servers/{}/collect"), self.routes)
 
     def test_every_request_of_the_page_goes_through_its_gate(self):
-        """servers.js and pool.js use ``api`` only inside ``call`` (``api[name](...)``, after ``mayCall``), and every
-        ``call`` and ``may`` names a route of ``GATES``. Nothing else in them reaches the network: they import only
-        ``api`` from api.js (servers.js) or nothing of it (pool.js), and use no ``fetch``, ``request``, socket or
+        """servers.js, pool.js and machine_settings.js use ``api`` only inside ``call`` (``api[name](...)``, after
+        ``mayCall``), and every ``call`` and ``may`` names a route of ``GATES``. Nothing else in them reaches the
+        network: they import only ``api`` from api.js (servers.js) or nothing of it, and use no ``fetch``, ``request``, socket or
         dynamic import; the other modules they import make no request either."""
         for module in PAGE_MODULES:
             imports = _imports(module)

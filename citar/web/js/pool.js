@@ -13,6 +13,7 @@
 import { el, clear, toast, modal, confirmBox, keepPlace } from "./util.js";
 import { pageHeader } from "./nav.js";
 import { helperCard } from "./helper.js";
+import { openMachineSettings } from "./machine_settings.js";
 import { poolTarget } from "./machines.js";
 import {
   KIND, KEYED, PROVIDER, addDirectMachine, call, describeConn, describeQuiet, loadRegistry, may, money, openConnection,
@@ -428,6 +429,10 @@ function machineCard(m, data, reload) {
       statusPill(m),
       m.restricted_until ? el("span", { class: "pill quiet", title: "Quiet hours: all work on this machine is paused" }, `🌙 quiet until ${m.restricted_until}`) : null,
       group ? el("span", { class: "pill", title: "Shared through this group" }, `shared: ${group.name}`) : null,
+      // an administrator's card: what the prompt scheduler noticed of its helper (P3.3.4)
+      m.flags && m.flags.overreports ? el("span", { class: "pill warn", title: "Its helper reported more generation time "
+        + "than the server observed, by over 10% and a second; its work is credited the observed time. Machine settings…, "
+        + "Class and trust" }, `⚠ over-reports its time (${m.flags.overreports.count}×)`) : null,
       m.is_mine || !m.owner ? null : el("span", { class: "muted small" }, `owned by ${m.owner.display_name || m.owner.handle}`)),
     el("div", { class: "muted", style: { marginTop: "4px" } }, reg ? describeConn(reg) : `${PROVIDER[provider] || provider}${helper ? ", through its CITAR helper" : ""}`),
     hardwareLine(m),
@@ -498,6 +503,10 @@ function actions(m, data, reload) {
     out.push(button("Connection & models", () => openConnection(reg, reload), { class: "small primary" }));
     if (m.kind !== "api" && m.kind !== "test") out.push(button("Hardware & power", () => openHardware(reg, reload)));
     if (m.kind !== "test") out.push(button("Costs", () => openCosts(reg, reload)));
+  }
+  if (may("machineSettings", g)) {
+    out.push(button("Machine settings…", () => openMachineSettings(m, reload),
+      { title: "Slots, model swaps and CPU sharing; what its helper's reports may change; its class and trust tier" }));
   }
   if (may("setQuietHours", g)) out.push(button("Quiet hours", () => openQuietHours(m, reload)));
   if (reg && KEYED.includes(provider) && may("storeKey", g)) out.push(button("API key", () => openKey(reg, reload)));
