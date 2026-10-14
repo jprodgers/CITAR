@@ -519,15 +519,17 @@ referenced by a DB row that carries owner, visibility and ACL.
 Tables (`citar/db/models.py`): `users`, `identities`, `auth_sessions`, `invites`, `email_tokens`,
 `servers`, `server_groups`, `access_grants`, `availability_windows`, `budgets`, `budget_entries`,
 `worker_tokens`, `hardware_classes`, `games`, `owned_items`, `acl_entries`, `compute_events`,
-`compute_rollups`, `audit_log`, `rate_limits`, `settings_kv`. A report is an owned item of kind
-`report`; deleting an account leaves its machines and groups ownerless (managed by admins), never
-deletes them.
+`compute_rollups`, `cpu_jobs`, `cpu_job_runs`, `job_costs`, `audit_log`, `rate_limits`, `settings_kv`. A report
+is an owned item of kind `report`; deleting an account leaves its machines and groups ownerless (managed by
+admins), never deletes them.
 
 **The 0.1.6 baseline.** 0.1.6 starts the schema afresh: one revision, `0016a_baseline`, holds every
 table and column the 0.1.6 features need (profiles, owned items, the compute ledger, machine settings),
 so later changes add behaviour rather than migrations; a change that cannot is a revision on top of it
 (`0016b_compute_cache_tokens`: the ledger keeps a step's cached input tokens, which an online API prices
-apart). A database from 0.1.5 or an earlier 0.1.6 build
+apart; `0016c_helper_jobs`: the CPU job store, one row per game a helper or the server plays for the lab, per
+run of it and per kind of job's reference cost, and on each machine the key its helper registered and its
+proof-of-work counters). A database from 0.1.5 or an earlier 0.1.6 build
 (revisions `f064316a6b34` and `767c824c2fcb`) is **not migrated**:
 
 - on SQLite, the first start of 0.1.6 writes the database's log into its file, lets go of it, and
