@@ -402,10 +402,10 @@ impl Assembly {
     }
 
     /// One tool call's delta: by its `index`; one without starts a new call when it has an id
-    /// (or is the first), and adds to the last call otherwise. `at` is the index an unstreamed
-    /// message's position gives.
+    /// (or is the first), and adds to the last call otherwise. `at` is an unstreamed message's
+    /// position of the call, which decides there.
     fn call_delta(&mut self, c: &Value, at: Option<u64>) -> bool {
-        let given = c.get("index").and_then(Value::as_u64).or(at);
+        let given = at.or_else(|| c.get("index").and_then(Value::as_u64));
         let last = self.calls.keys().next_back().copied();
         let index = match (given, last) {
             (Some(i), _) => i,
@@ -490,16 +490,20 @@ impl Assembly {
     /// protocol's length (logged once when anything is).
     #[must_use]
     pub fn into_parts(self, log: &Log) -> (DoneMessage, Option<String>, Option<Usage>) {
-        let mut cuts = Vec::new();
+        // Each kind of cut is logged once, under its own key.
+        let mut cuts: Vec<(&str, String)> = Vec::new();
         if self.calls_left_out > 0 {
-            cuts.push(format!(
-                "{} tool calls past the protocol's {MAX_TOOL_CALLS} left out",
-                self.calls_left_out
+            cuts.push((
+                "calls",
+                format!(
+                    "{} tool calls past the protocol's {MAX_TOOL_CALLS} left out",
+                    self.calls_left_out
+                ),
             ));
         }
-        let mut fit = |s: String, n: usize, what: &str| {
+        let mut fit = |s: String, n: usize, what: &'static str| {
             if s.chars().count() > n {
-                cuts.push(format!("a tool call's {what} cut to {n} characters"));
+                cuts.push((what, format!("a tool call's {what} cut to {n} characters")));
                 cut(&s, n)
             } else {
                 s
@@ -525,14 +529,17 @@ impl Assembly {
             .collect();
         let finish = self.finish_reason.map(|f| {
             if f.chars().count() > FINISH_CHARS {
-                cuts.push(format!("the finish reason cut to {FINISH_CHARS} characters"));
+                cuts.push((
+                    "finish",
+                    format!("the finish reason cut to {FINISH_CHARS} characters"),
+                ));
                 cut(&f, FINISH_CHARS)
             } else {
                 f
             }
         });
-        for c in cuts {
-            log.once(&format!("cut: {c}"), Level::Warn, format!("the endpoint's answer: {c}"));
+        for (key, c) in cuts {
+            log.once(&format!("cut {key}"), Level::Warn, format!("the endpoint's answer: {c}"));
         }
         (
             DoneMessage { content: self.content, reasoning: self.reasoning, tool_calls },
