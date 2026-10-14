@@ -93,6 +93,8 @@ class Corpus(unittest.TestCase):
                        "native-calls-with-reasoning", "native-no-tool-call"):
             self.assertTrue(any(n.startswith(prefix) for n in names), prefix)
         self.assertGreaterEqual(len(CASES), 40)
+        # each file is named after its case, so a case is found by its name
+        self.assertEqual(sorted(names), sorted(p.stem for p in CORPUS.glob("*.json") if p.name != "tools.json"))
         for case in CASES:
             self.assertEqual(set(case), {"name", "note", "mode", "tools", "completion", "expect"}, case["name"])
             self.assertIn(case["mode"], ("native", "json"))
