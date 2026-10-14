@@ -368,6 +368,8 @@ impl Helper {
                 End::Reconnect { welcomed } => {
                     if welcomed {
                         backoff.reset();
+                        // Welcomed again: a later refusal is news, and is logged as such.
+                        idle_logged = false;
                     }
                     let d = backoff.delay();
                     self.log.info(format!("reconnecting in {:.1} s", d.as_secs_f64()));
