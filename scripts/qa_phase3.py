@@ -59,8 +59,10 @@ box of the land the seat explored joined to its home through land it explored; t
 server stays up for the browser checklist's F1), ``machines`` (3-18: a helper machine whose real helper reconnects
 with other hardware, models and power figures from a file, ``--hardware``: the last report kept and applied by mode,
 a manual hardware entry surviving the reconnect, models merged or only marked, Apply by section with the hardware
-class following it, an administrator's pin and the trust tier, the routes' gates, slots and model swaps taking effect
-at once, LLM off; with ``--keep`` its helper stays connected for the browser checklist's G1), and later ``real``
+class following it, a scan of figures no JSON answer carries kept clean with every page still reading and "Apply all"
+taking what the report has, an administrator's pin and the trust tier, the routes' gates (a moderator's too), slots
+and model swaps taking effect at once, LLM off; with ``--keep`` its helper stays connected for the browser
+checklist's G1), and later ``real``
 (3-19); ``all`` runs every part written so far.
 It needs the extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
@@ -3156,13 +3158,17 @@ def part_machines(h: Harness) -> None:
     the last report and applied by the default modes (hardware and models auto, power manual); her hand-set hardware
     with hardware manual surviving the helper's reconnect with other hardware, the new scan kept beside it; models
     merged in auto (the unreported kept), only their loaded flags in manual; Apply per section, the hardware class
-    following the hardware it copied; an administrator's pin holding the class against the next scan, and its release;
-    the trust tier set by an administrator and shown to her; the routes' gates (another member 404, a visitor 401, the
-    administrators' routes 404 to her); slots and model swaps taking effect at once (the scheduler's capacity, and a
+    following the hardware it copied; a hardware file of figures no JSON answer carries (NaN, Infinity), an integer no
+    float holds and parts of other shapes, reported by the real helper: kept without them, every page that shows the
+    machine still answering (hers, the administrator's whole Servers page, the pool's listing), and "Apply all"
+    taking the sections the report has (it suggests no power figures); an administrator's pin holding the class
+    against the next scan, and its release; the trust tier set by an administrator and shown to her; the routes' gates
+    (another member and a moderator 404, a visitor 401, the administrators' routes 404 to her and the moderator);
+    slots and model swaps taking effect at once (the scheduler's capacity, and a
     test of a model not loaded refused, then taken with swaps allowed); LLM off refusing the test. With ``--keep`` her
     helper stays connected (its pid and hardware file in the evidence) for the browser checklist's G1."""
     r = h.report
-    alice, bob, admin = h.accounts["alice"], h.accounts["bob"], h.accounts["admin"]
+    alice, bob, admin, mod = h.accounts["alice"], h.accounts["bob"], h.accounts["admin"], h.accounts["mod"]
     data = r.data.setdefault("machines", {})
     files = h.server.state / "hardware"
     files.mkdir(exist_ok=True)
@@ -3307,6 +3313,44 @@ def part_machines(h: Harness) -> None:
                 and (merged.get("differences") or {}).get("models") == [],
                 json.dumps(got)[:600])
 
+        # a hardware file no page could show as it came: NaN and Infinity (Python writes and reads them; no JSON answer
+        # carries them), a figure of 400 digits (no float holds it), parts of other shapes, and no power suggestion
+        odd = _qa_scan(cpu="QA CPU odd", gpu="QA GPU odd", vram=8, idle=1, cpu_w=1, gpu_w=1)
+        odd["gpus"] = [{"name": "QA GPU odd", "vram_gb": float("nan")}, "not a GPU"]
+        odd["memory"] = "lots"
+        odd["cpu"]["threads"] = 10 ** 400
+        odd["physical_disks"][0]["size_gb"] = float("inf")
+        del odd["power"]["suggested"]
+        s5 = connect("reconnect: a hardware file of odd figures and shapes, suggesting no power figures", odd,
+                     [(third, True)])
+        kept = (s5.get("report") or {}).get("hardware") or {}
+
+        def pages() -> dict:
+            return {"her servers": alice.get("/api/servers").status_code,
+                    "admin servers": admin.get("/api/servers").status_code,
+                    "her pool": alice.get("/api/pool/servers").status_code,
+                    "admin pool": admin.get("/api/pool/servers").status_code,
+                    "admin dialog": admin.get(f"/api/machines/{hid}/settings").status_code}
+        before_apply = pages()
+        everything = alice.post(f"/api/machines/{hid}/hardware/apply", json={})
+        after_apply = pages()
+        applied_all = everything.json() if everything.status_code == 200 else {}
+        audit = admin.get("/api/admin/audit", params={"object_id": hid, "action": "server.scan_applied"}).json()
+        sections = [(e.get("detail") or {}).get("sections") for e in audit.get("entries", [])]
+        data["odd_scan"] = {"kept": kept, "pages_before_apply": before_apply, "apply_all": everything.status_code,
+                            "pages_after_apply": after_apply, "applied_sections": sections}
+        r.check("a hardware file of NaN, Infinity, a 400-digit figure and parts of other shapes is kept without them "
+                "(the rest of the report as sent), every page that shows the machine still answers, and \"Apply all\" "
+                "takes the sections the report has (hardware and models; it suggests no power figures)",
+                kept.get("gpus") == [{"name": "QA GPU odd", "vram_gb": None}] and kept.get("memory") == {}
+                and (kept.get("cpu") or {}).get("threads") is None
+                and kept.get("physical_disks") == [{"name": "QA SSD", "size_gb": None, "type": "SSD"}]
+                and set(before_apply.values()) == {200} and everything.status_code == 200
+                and set(after_apply.values()) == {200} and ["hardware", "models"] in sections
+                and (applied_all.get("configured") or {}).get("hardware_summary", "").startswith("QA CPU odd")
+                and (applied_all.get("differences") or {}).get("models") == [],
+                json.dumps(data["odd_scan"])[:800])
+
         # an administrator's pin holds the class against the next scan
         pin = admin.put(f"/api/admin/machines/{hid}/class", json={"pinned": True, "gpu_class_id": "hc_gpu"})
         put({"modes": {"hardware": "auto", "models": "auto"}})
@@ -3334,13 +3378,19 @@ def part_machines(h: Harness) -> None:
                  "bob apply": bob.post(f"/api/machines/{hid}/hardware/apply", json={}).status_code,
                  "alice trust": alice.put(f"/api/admin/machines/{hid}/trust", json={"trust_tier": "trusted"}).status_code,
                  "alice class": alice.put(f"/api/admin/machines/{hid}/class", json={"pinned": False}).status_code,
+                 "mod": [mod.get(f"/api/machines/{hid}/settings").status_code,
+                         mod.put(f"/api/machines/{hid}/settings", json={"slots": 2}).status_code,
+                         mod.post(f"/api/machines/{hid}/hardware/apply", json={}).status_code,
+                         mod.put(f"/api/admin/machines/{hid}/trust", json={"trust_tier": "new"}).status_code,
+                         mod.put(f"/api/admin/machines/{hid}/class", json={"pinned": False}).status_code],
                  "visitor": list(visitor)}
         r.check("an administrator sets the trust tier and she is shown it (not the classes to pin, nor the flags); "
-                "another member gets 404 on the dialog's routes, she gets 404 on the administrators' and a visitor 401",
+                "another member and a moderator get 404 on the dialog's routes, she and the moderator 404 on the "
+                "administrators' and a visitor 401",
                 trust.status_code == 200 and mine.get("trust_tier") == "trusted" and mine.get("can_admin") is False
                 and "classes" not in mine and "flags" not in mine
                 and gates == {"bob read": 404, "bob change": 404, "bob apply": 404, "alice trust": 404,
-                              "alice class": 404, "visitor": [401, 401]},
+                              "alice class": 404, "mod": [404] * 5, "visitor": [401, 401]},
                 json.dumps(gates))
 
         # slots and swaps, at once
