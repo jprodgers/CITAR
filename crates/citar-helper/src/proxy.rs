@@ -17,11 +17,13 @@
 //! - **Real cancel:** the completion's connection belongs to its task ([`crate::http1`]), so
 //!   aborting the task closes it there and then, and [`Flights`] reports `cancelled` only once the
 //!   task is gone, with the tokens it had received ([`Progress`]).
-//! - **Bounds** (P4.6, threat B: a hostile or broken endpoint): at most [`MAX_ASSEMBLED`] bytes of
-//!   text (a `done` must fit the protocol's 8 MiB frame), a server-sent line or event at most as
-//!   long, at most [`MAX_TOOL_CALLS`] tool calls, and the fields of a call and the finish reason
-//!   cut to the protocol's lengths; an error body is read to [`ERROR_BODY_READ`] bytes and quoted
-//!   to [`crate::llm::BODY_SHOWN`] characters.
+//! - **Bounds**, so that a broken or odd endpoint makes the helper hold nothing unbounded and send
+//!   nothing the hub refuses: at most [`MAX_ASSEMBLED`] bytes of text (a `done` must fit the
+//!   protocol's 8 MiB frame), a server-sent line or event at most as long, at most
+//!   [`MAX_TOOL_CALLS`] tool calls, and the fields of a call and the finish reason cut to the
+//!   protocol's lengths; an error body is read to [`ERROR_BODY_READ`] bytes and quoted to
+//!   [`crate::llm::BODY_SHOWN`] characters, the helper's secrets (its API key) replaced in it
+//!   first: the key stays on the machine (P4.6, threat A; P4.3.4).
 //!
 //! Replaces `citar/worker/agent.py` `handle_request` and `_complete` (lines 245-341), which
 //! reused the server's own provider and parsed on the helper.
@@ -197,11 +199,14 @@ impl Sse {
     /// # Errors
     /// A line or an event longer than [`MAX_ASSEMBLED`], or text that is not UTF-8.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<Event>, String> {
+        // What is pending holds no newline (each line was taken as it ended): only the new bytes
+        // are searched, so a long line sent in many small pieces costs its length, not its square.
+        let mut search = self.pending.len();
         self.pending.extend_from_slice(bytes);
         let mut out = Vec::new();
         let mut start = 0;
-        while let Some(off) = self.pending[start..].iter().position(|b| *b == b'\n') {
-            let end = start + off;
+        while let Some(off) = self.pending[search..].iter().position(|b| *b == b'\n') {
+            let end = search + off;
             let mut line = &self.pending[start..end];
             if line.last() == Some(&b'\r') {
                 line = &line[..line.len() - 1];
@@ -211,6 +216,7 @@ impl Sse {
                 .to_owned();
             self.line(&text, &mut out)?;
             start = end + 1;
+            search = start;
         }
         self.pending.drain(..start);
         if self.pending.len() > MAX_ASSEMBLED {
@@ -580,10 +586,8 @@ async fn complete(
         };
         if !(200..300).contains(&resp.status) {
             let status = resp.status;
-            let text = match resp.read_all(ERROR_BODY_READ).await {
-                Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-                Err(e) => format!("({e})"),
-            };
+            let start = resp.read_start(ERROR_BODY_READ, crate::llm::LIST_TIMEOUT).await;
+            let text = String::from_utf8_lossy(&start).into_owned();
             drop(resp);
             let text = log.redact(&text);
             if stream && has_tools && refuses_streaming_tools(status, &text) {
@@ -928,6 +932,16 @@ mod tests {
         assert!(Sse::default().feed(&[b'd', 0xff, b'\n']).is_err(), "not UTF-8");
         let mut sse = Sse::default();
         assert!(sse.feed(&vec![b'x'; MAX_ASSEMBLED + 1]).is_err(), "a line without end");
+        // A long line in small pieces reads once, not once per piece.
+        let mut sse = Sse::default();
+        let long = format!("data: {}\n\n", "y".repeat(4 * 1024 * 1024));
+        let t0 = std::time::Instant::now();
+        let mut got = Vec::new();
+        for piece in long.as_bytes().chunks(512) {
+            got.extend(sse.feed(piece).expect("reads"));
+        }
+        assert_eq!(got.len(), 1);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2), "{:?}", t0.elapsed());
     }
 
     #[test]

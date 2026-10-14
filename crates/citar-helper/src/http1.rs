@@ -158,6 +158,22 @@ impl Response {
         }
         Ok(out)
     }
+
+    /// The body's first `max` bytes at most (the rest is not read), or what came of it within
+    /// `within`: for an error's body, which is only quoted.
+    pub async fn read_start(&mut self, max: usize, within: Duration) -> Vec<u8> {
+        let mut out = Vec::new();
+        let read = async {
+            while out.len() < max {
+                match self.chunk().await {
+                    Ok(Some(c)) => out.extend_from_slice(&c[..c.len().min(max - out.len())]),
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        };
+        let _in_time = tokio::time::timeout(within, read).await;
+        out
+    }
 }
 
 /// Connects to the origin, within `connect`.
