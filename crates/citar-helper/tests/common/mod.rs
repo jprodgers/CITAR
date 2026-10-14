@@ -34,24 +34,72 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 /// How long an `h2s` step without `within_s` waits for its frame.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(10);
 
-/// The fake model endpoint's list, shared with whatever serves it.
+/// The fake model endpoint's list, shared with whatever serves it; it can be told to fail its
+/// next listings.
 #[derive(Clone, Default)]
-pub struct Models(pub Arc<Mutex<Vec<Listed>>>);
+pub struct Models {
+    list: Arc<Mutex<Vec<Listed>>>,
+    failing: Arc<Mutex<u32>>,
+}
+
+/// What a listing of [`Models`] that fails says.
+pub const MODELS_FAIL: &str = "the fake endpoint refused the connection";
 
 impl Models {
     pub fn set(&self, models: Vec<Listed>) {
-        *self.0.lock().expect("models") = models;
+        *self.list.lock().expect("models") = models;
     }
 
     pub fn get(&self) -> Vec<Listed> {
-        self.0.lock().expect("models").clone()
+        self.list.lock().expect("models").clone()
+    }
+
+    /// The next `n` listings fail with [`MODELS_FAIL`].
+    pub fn fail_next(&self, n: u32) {
+        *self.failing.lock().expect("failing") = n;
     }
 }
 
 impl Endpoint for Models {
     fn list(&self) -> BoxFuture<'_, Result<Vec<Listed>, String>> {
+        let fail = {
+            let mut f = self.failing.lock().expect("failing");
+            let fail = *f > 0;
+            *f = f.saturating_sub(1);
+            fail
+        };
         let models = self.get();
-        Box::pin(async move { Ok(models) })
+        Box::pin(async move { if fail { Err(MODELS_FAIL.to_owned()) } else { Ok(models) } })
+    }
+}
+
+/// An in-memory connection per dial: the fake server's end of each goes down the channel, its
+/// WebSocket handshake done.
+pub struct Pipe(pub mpsc::UnboundedSender<ServerWs>);
+
+impl citar_helper::net::Dialer for Pipe {
+    fn dial(&self) -> BoxFuture<'_, Result<citar_helper::net::Ws, String>> {
+        Box::pin(async move {
+            let (client, server) = tokio::io::duplex(1 << 20);
+            let tx = self.0.clone();
+            // The server's half of the handshake runs beside the client's.
+            tokio::spawn(async move {
+                let server: Box<dyn Io> = Box::new(server);
+                let cfg = Some(citar_helper::net::ws_config());
+                if let Ok(ws) = tokio_tungstenite::accept_async_with_config(server, cfg).await {
+                    let _gone = tx.send(ws);
+                }
+            });
+            let client: Box<dyn Io> = Box::new(client);
+            let (ws, _) = tokio_tungstenite::client_async_with_config(
+                "ws://127.0.0.1/ws/worker",
+                client,
+                Some(citar_helper::net::ws_config()),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(ws)
+        })
     }
 }
 
@@ -534,10 +582,18 @@ pub async fn loopback_routes(
     routes: BTreeMap<String, (u16, String)>,
     heads: Arc<Mutex<Vec<String>>>,
 ) -> u16 {
+    loopback_routes_shared(Arc::new(Mutex::new(routes)), heads).await
+}
+
+/// [`loopback_routes`] with routes the test may change between requests. A 3xx route's "body" is
+/// the `location` it redirects to.
+pub async fn loopback_routes_shared(
+    routes: Arc<Mutex<BTreeMap<String, (u16, String)>>>,
+    heads: Arc<Mutex<Vec<String>>>,
+) -> u16 {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
     let port = listener.local_addr().expect("its address").port();
-    let routes = Arc::new(routes);
     tokio::spawn(async move {
         while let Ok((mut tcp, _)) = listener.accept().await {
             let routes = routes.clone();
@@ -555,11 +611,18 @@ pub async fn loopback_routes(
                 let line = text.lines().next().unwrap_or_default().to_owned();
                 heads.lock().expect("heads").push(text);
                 let key = line.rsplit_once(' ').map_or(line.as_str(), |(k, _)| k).to_owned();
-                let (status, body) = routes.get(&key).cloned().unwrap_or((404, "{}".to_owned()));
-                let resp = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
+                let route = routes.lock().expect("routes").get(&key).cloned();
+                let (status, body) = route.unwrap_or((404, "{}".to_owned()));
+                let resp = if (300..400).contains(&status) {
+                    format!(
+                        "HTTP/1.1 {status} X\r\nlocation: {body}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
                 let _sent = tcp.write_all(resp.as_bytes()).await;
                 let _closed = tcp.shutdown().await;
             });

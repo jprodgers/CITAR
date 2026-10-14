@@ -126,16 +126,28 @@ impl Quiet {
     }
 
     /// When the quiet stretch in force at `t` ends (local time), following windows that meet
-    /// across midnight; `None` when none is in force. Quiet all week long ends a week on, so the
-    /// server is told again rather than never.
+    /// across midnight; `None` when none is in force. The answer is a whole minute, the same for
+    /// every `t` in one stretch, so the session's `status` (sent when it changes) goes once.
+    ///
+    /// Quiet every minute of the week never ends: it is reported as ending at the start (Monday
+    /// 00:00) of the week after next, more than a week away and the same all week long, so the
+    /// server is told again once a week rather than never (and not every second).
     #[must_use]
     pub fn until(&self, t: NaiveDateTime) -> Option<NaiveDateTime> {
         if !self.in_force(t) {
             return None;
         }
+        // Any minute of the week that is not quiet comes round within a week of `t`, so a
+        // stretch that reaches a week on is the whole week.
         let limit = t + Duration::days(7);
         let mut cur = t;
-        while self.in_force(cur) && cur < limit {
+        while self.in_force(cur) {
+            if cur >= limit {
+                let monday = t.date()
+                    - Duration::days(i64::from(t.weekday().num_days_from_monday()))
+                    + Duration::days(14);
+                return Some(monday.and_time(NaiveTime::MIN));
+            }
             let day = u8::try_from(cur.weekday().num_days_from_monday()).unwrap_or(0);
             let minute = u16::try_from(cur.hour() * 60 + cur.minute()).unwrap_or(0);
             let end = self
@@ -147,7 +159,7 @@ impl Quiet {
                 .unwrap_or(minute + 1);
             cur = cur.date().and_time(NaiveTime::MIN) + Duration::minutes(i64::from(end));
         }
-        Some(cur.min(limit))
+        Some(cur)
     }
 
     /// The first moment at or after `t` when quiet hours hold, within a week: what the
@@ -235,8 +247,40 @@ mod tests {
         assert_eq!(q.until(at("2026-10-14 12:00")), None);
         assert_eq!(q.next_start(at("2026-10-14 12:00")), Some(at("2026-10-14 22:00")));
         assert_eq!(q.next_start(at("2026-10-14 23:00")), Some(at("2026-10-14 23:00")));
-        let all = Quiet(parse(&[json!("00:00-00:00")]).expect("reads"));
-        assert_eq!(all.until(at("2026-10-14 12:00")), Some(at("2026-10-21 12:00")));
         assert_eq!(Quiet::default().next_start(at("2026-10-14 12:00")), None);
+    }
+
+    fn at_s(s: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").expect("a time")
+    }
+
+    #[test]
+    fn until_is_the_same_all_through_a_stretch() {
+        // Seconds into the stretch do not move its end.
+        let q = Quiet(parse(&[json!("22:00-06:00")]).expect("reads"));
+        for t in ["2026-10-14 22:00:00", "2026-10-14 22:00:07", "2026-10-15 05:59:59"] {
+            assert_eq!(q.until(at_s(t)), Some(at("2026-10-15 06:00")), "{t}");
+        }
+        // Quiet all week never ends: the start of the week after next (for the week of Monday
+        // 2026-10-19, Monday 2026-11-02), the same every second of that week, more than a week
+        // away, and a week later once the week has turned.
+        let all = Quiet(parse(&[json!("00:00-00:00")]).expect("reads"));
+        let anchor = at("2026-11-02 00:00");
+        for t in [
+            "2026-10-19 00:00:00",
+            "2026-10-19 00:00:01",
+            "2026-10-21 12:00:05",
+            "2026-10-25 23:59:59",
+        ] {
+            assert_eq!(all.until(at_s(t)), Some(anchor), "{t}");
+            assert!(anchor > at_s(t) + Duration::days(7));
+        }
+        assert_eq!(all.until(at_s("2026-10-26 00:00:00")), Some(at("2026-11-09 00:00")));
+        // Every day but one hour on Wednesdays: a stretch of nearly a week, with its true end.
+        let mut almost = parse(&[json!("00:00-00:00")]).expect("reads");
+        almost.retain(|w| w.weekday != 2);
+        almost.extend([w(2, 0, 13 * 60), w(2, 14 * 60, 1440)]);
+        let almost = Quiet(almost);
+        assert_eq!(almost.until(at("2026-10-14 14:00")), Some(at("2026-10-21 13:00")));
     }
 }

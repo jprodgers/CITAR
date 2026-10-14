@@ -16,11 +16,10 @@ use citar_helper::conformance::{canonical_examples, transcripts};
 use citar_helper::key::MachineKey;
 use citar_helper::llm::{BoxFuture, SharedEndpoint};
 use citar_helper::log::Log;
-use citar_helper::net::{Dialer, Io, Ws, ws_config};
 use citar_helper::protocol::{Kind, Provider, UpdatePolicy};
 use citar_helper::quiet::{self, Quiet};
 use citar_helper::session::{Exit, Facts, Helper};
-use common::{Models, Player, ServerWs, UnderTest, listed};
+use common::{Models, Pipe, Player, UnderTest, listed};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
@@ -29,36 +28,6 @@ const PLAYED_THROUGH: &str = "4-03";
 
 /// The fake clock's start: Wednesday 2026-10-14, 12:00 UTC, outside any transcript's quiet hours.
 const START_UNIX: f64 = 1_791_979_200.0;
-
-/// An in-memory connection per dial, the fake server's end handed to the player.
-struct Pipe(mpsc::UnboundedSender<ServerWs>);
-
-impl Dialer for Pipe {
-    fn dial(&self) -> BoxFuture<'_, Result<Ws, String>> {
-        Box::pin(async move {
-            let (client, server) = tokio::io::duplex(1 << 20);
-            let tx = self.0.clone();
-            // The server's half of the handshake runs beside the client's.
-            tokio::spawn(async move {
-                let server: Box<dyn Io> = Box::new(server);
-                if let Ok(ws) =
-                    tokio_tungstenite::accept_async_with_config(server, Some(ws_config())).await
-                {
-                    let _gone = tx.send(ws);
-                }
-            });
-            let client: Box<dyn Io> = Box::new(client);
-            let (ws, _) = tokio_tungstenite::client_async_with_config(
-                "ws://127.0.0.1/ws/worker",
-                client,
-                Some(ws_config()),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            Ok(ws)
-        })
-    }
-}
 
 struct InProcess {
     task: Option<tokio::task::JoinHandle<Exit>>,
@@ -197,6 +166,17 @@ fn play_with(
     canonical: &Canonical,
     tweak: impl FnOnce(&mut Config),
 ) -> Result<(), String> {
+    play_bound(t, canonical, tweak, &[])
+}
+
+/// Plays `t` with `binds` bound before the first step, so an `<id:…>` the transcript leaves open
+/// must be exactly that value.
+fn play_bound(
+    t: &Transcript,
+    canonical: &Canonical,
+    tweak: impl FnOnce(&mut Config),
+    binds: &[(&str, Value)],
+) -> Result<(), String> {
     for key in t.setup_helper.keys() {
         if !["config", "clock", "service", "endpoint"].contains(&key.as_str()) {
             return Err(format!("{}: this player cannot yet set up the helper's {key:?}", t.name));
@@ -227,6 +207,9 @@ fn play_with(
         let mut player = Player::new(t, conns_rx, models, canonical.clone());
         player.bindings.bind("token", Value::String(cfg.token.clone()));
         player.bindings.bind("key", Value::String(key.public_b64()));
+        for (name, v) in binds {
+            player.bindings.bind(name, v.clone());
+        }
         let helper = Helper {
             config: cfg,
             public_key: key.public_b64(),
@@ -271,6 +254,22 @@ fn the_helper_plays_its_transcripts() {
         mine.len(),
         failures.join("\n\n")
     );
+}
+
+#[test]
+fn the_quiet_hours_status_says_when_they_end() {
+    // `status-quiet-hours` leaves `quiet_until` open; bound here, the status the helper sends when
+    // 22:00-06:00 begins (Wednesday 22:00 on the fake clock, which reads UTC) must carry
+    // Thursday 2026-10-15 06:00 UTC exactly.
+    let canonical = canonical_examples().expect("the canonical examples read");
+    let all = transcripts().expect("the transcripts load");
+    let t = all.iter().find(|t| t.name == "status-quiet-hours").expect("the transcript");
+    let thursday_six = START_UNIX + 18.0 * 3600.0;
+    play_bound(t, &canonical, |_| {}, &[("quiet_until", Value::from(thursday_six))])
+        .expect("the status carries the next 06:00");
+    let e = play_bound(t, &canonical, |_| {}, &[("quiet_until", Value::from(thursday_six + 60.0))])
+        .expect_err("a minute off is not it");
+    assert!(e.contains("quiet_until"), "{e}");
 }
 
 /// A transcript with one step's value changed, as a JSON edit.

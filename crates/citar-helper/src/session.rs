@@ -15,10 +15,16 @@
 //!   2 s doubling to 60 s, up to 30% jitter added, reset by a `welcome`.
 //! - **While connected:** a `pong` for every `ping`; the helper's own `ping` after 45 s without a
 //!   frame, and the connection dropped after 70 s; `settings_ack` for every `settings`; `catalog`
-//!   when the endpoint's models or loaded set change (polled every 30 s); `status` when the
-//!   local quiet hours begin or end (at most every 5 s). Local policy holds whatever the server
-//!   asks: until 4-04 the helper serves no completion (`error` `unknown_model`), and until 4-10
-//!   it takes no job (`job_reject` `build`: it has no jobs build).
+//!   when the endpoint's models or loaded set change (polled every 30 s; a listing that fails is
+//!   not a change until [`FAILED_LISTINGS`] fail in a row); `status` when the local quiet hours
+//!   begin or end (at most every 5 s); `hardware` after a `rescan`, read off the session's task.
+//!   Local policy holds whatever the server asks: until 4-04 the helper serves no completion
+//!   (`error` `unknown_model`), and until 4-10 it takes no job (`job_reject` `build`: it has no
+//!   jobs build).
+//! - **A hostile server** (P4.6, threat A) cannot make the helper hold more than it bounds: a
+//!   frame type it invents or a value it fills is quoted cut to a few hundred characters
+//!   ([`SERVER_TEXT`]), a bad frame's throttling key is one of the known types or `?`, and every
+//!   wait has a timeout or the stop signal (P4.7.4).
 //!
 //! Replaces `citar/worker/agent.py` `session` and `run` (lines 343-456).
 
@@ -36,13 +42,13 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::clock::Clock;
 use crate::config::{Ceiling, Config};
-use crate::llm::{self, SharedEndpoint};
-use crate::log::{Level, Log};
+use crate::llm::{self, Listed, SharedEndpoint};
+use crate::log::{Level, Log, clip};
 use crate::net::{Dialer, Ws};
 use crate::protocol::{
-    self, Ceiling as WireCeiling, CpuInfo, FrameSet as _, HelloHardwareSource, HelperFrame,
-    HelperInfo, JobReject, LlmInfo, MachineInfo, Model, Parsed, RefusedCode, RejectReason, Report,
-    RequestError, RequestErrorCode, ServerFrame, Settings, Status,
+    self, Ceiling as WireCeiling, CpuInfo, ErrorCode, FrameSet, HelloHardwareSource, HelperFrame,
+    HelperInfo, JobReject, LlmInfo, MachineInfo, Model, Parsed, ProtocolError, RefusedCode,
+    RejectReason, Report, RequestError, RequestErrorCode, ServerFrame, Settings, Status,
 };
 use crate::settings::{self, Local};
 
@@ -74,6 +80,20 @@ pub const STATUS_EVERY: Duration = Duration::from_secs(5);
 pub const QUIET_TICK: Duration = Duration::from_secs(1);
 /// How long one write may take before the connection counts as dead.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the helper's own close frame may take to go when it ends a connection.
+pub const CLOSE_SEND: Duration = Duration::from_secs(2);
+/// Listings in a row that must fail (or time out) before the helper reports its endpoint's
+/// models as none: one failed or slow listing is a hiccup, not an endpoint gone (90 s at the
+/// 30 s poll).
+pub const FAILED_LISTINGS: u32 = 3;
+/// How long reading the hardware file may take: a file on a share that does not answer must not
+/// hold up a connection.
+pub const HARDWARE_READ: Duration = Duration::from_secs(5);
+/// The most characters of the server's own text (a refusal's message, a bad frame's error, a
+/// list of runs) quoted in a log line.
+pub const SERVER_TEXT: usize = 300;
+/// The most characters of a frame type the helper does not know quoted in a log line.
+pub const TYPE_SHOWN: usize = 64;
 
 /// Until 4-04 the helper serves no completion: its hello says `llm.enabled` false, and its
 /// acknowledgement never turns model work on.
@@ -192,6 +212,116 @@ fn cut(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// One listing of the endpoint's models, within [`llm::LIST_TIMEOUT`].
+async fn list(ep: &SharedEndpoint) -> Result<Vec<Listed>, String> {
+    match tokio::time::timeout(llm::LIST_TIMEOUT, ep.list()).await {
+        Ok(listed) => listed,
+        Err(_) => Err(format!("no answer within {} s", llm::LIST_TIMEOUT.as_secs())),
+    }
+}
+
+/// What the helper has told the server of its endpoint's models (the hello's list, then each
+/// `catalog`), kept across connections. A listing that fails or times out is not a change of the
+/// list or the loaded set (P4.2.3): only an answer changes it, or [`FAILED_LISTINGS`] failures in
+/// a row, after which the endpoint counts as gone and the models as none (an allowlist's, not
+/// loaded), as when it was never reached.
+struct Catalog {
+    allow: Option<Vec<String>>,
+    models: Vec<Model>,
+    /// Listings in a row that failed.
+    failures: u32,
+}
+
+impl Catalog {
+    fn new(allow: Option<Vec<String>>) -> Catalog {
+        let models = llm::choose(&[], allow.as_deref());
+        Catalog { allow, models, failures: 0 }
+    }
+
+    /// Takes one listing; true when the models to report changed.
+    fn take(&mut self, listed: Result<Vec<Listed>, String>, h: &Helper) -> bool {
+        let next = match listed {
+            Ok(l) => {
+                self.failures = 0;
+                llm::choose(&l, self.allow.as_deref())
+            }
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                h.log.throttled(
+                    "models",
+                    Duration::from_secs(600),
+                    Level::Warn,
+                    format!(
+                        "could not list the models at {}: {}",
+                        h.config.base_url,
+                        clip(&e, 2 * SERVER_TEXT)
+                    ),
+                );
+                if self.failures < FAILED_LISTINGS {
+                    return false;
+                }
+                let none = llm::choose(&[], self.allow.as_deref());
+                if none != self.models {
+                    h.log.warn(format!(
+                        "{} could not be listed {} times in a row: reporting no model loaded \
+                         until it answers",
+                        h.config.base_url, self.failures
+                    ));
+                }
+                none
+            }
+        };
+        if next == self.models {
+            return false;
+        }
+        self.models = next;
+        true
+    }
+}
+
+/// The hardware report: the owner's file (read again each time, UTF-16 accepted), or nothing;
+/// the scan itself is 4-06's. The read runs on a blocking thread for at most
+/// [`HARDWARE_READ`]: a file that cannot be read in time reports nothing, logged.
+async fn read_report(collect: bool, file: String, log: Log) -> Report {
+    let none = Report { hardware: None, hardware_source: HelloHardwareSource::Nothing };
+    if !collect || file.is_empty() {
+        return none;
+    }
+    let path = std::path::PathBuf::from(&file);
+    let read = tokio::task::spawn_blocking(move || read_hardware_file(&path));
+    match tokio::time::timeout(HARDWARE_READ, read).await {
+        Ok(Ok(Ok(scan))) => {
+            Report { hardware: Some(scan), hardware_source: HelloHardwareSource::File }
+        }
+        Ok(Ok(Err(e))) => {
+            log.throttled("hardware", Duration::from_secs(3600), Level::Warn, e);
+            none
+        }
+        Ok(Err(e)) => {
+            log.warn(format!("reading the hardware file failed: {e}"));
+            none
+        }
+        Err(_) => {
+            log.throttled(
+                "hardware",
+                Duration::from_secs(3600),
+                Level::Warn,
+                format!(
+                    "the hardware file {file} could not be read within {} s: reporting none",
+                    HARDWARE_READ.as_secs()
+                ),
+            );
+            none
+        }
+    }
+}
+
+/// A protocol error for the log, with what came from the server cut.
+fn describe(e: &ProtocolError) -> String {
+    let at = if e.path.is_empty() { "the frame".to_owned() } else { clip(&e.path, TYPE_SHOWN) };
+    format!("{} at {at}: {}", e.code, clip(&e.message, SERVER_TEXT))
+}
+
 impl Helper {
     /// The model side as this helper allows it.
     fn local(&self) -> Local {
@@ -211,55 +341,22 @@ impl Helper {
         q.until(self.clock.now_local()).map(|t| self.clock.unix_of(t))
     }
 
-    /// The models to offer now: the endpoint's (empty when it cannot be listed).
-    async fn models(&self) -> Vec<Model> {
-        let Some(ep) = &self.endpoint else { return Vec::new() };
-        let listed = match tokio::time::timeout(llm::LIST_TIMEOUT, ep.list()).await {
-            Ok(Ok(l)) => l,
-            Ok(Err(e)) => {
-                self.log.throttled(
-                    "models",
-                    Duration::from_secs(600),
-                    Level::Warn,
-                    format!("could not list the models at {}: {e}", self.config.base_url),
-                );
-                Vec::new()
-            }
-            Err(_) => {
-                self.log.throttled(
-                    "models",
-                    Duration::from_secs(600),
-                    Level::Warn,
-                    format!("{} did not list its models within 10 s", self.config.base_url),
-                );
-                Vec::new()
-            }
-        };
-        llm::choose(&listed, self.config.models.as_deref())
+    /// Before each connection: list the endpoint's models into `catalog` and read the hardware
+    /// report, each within its timeout.
+    async fn prepare(&self, catalog: &mut Catalog) -> Report {
+        if let Some(ep) = &self.endpoint {
+            catalog.take(list(ep).await, self);
+        }
+        self.report().await
     }
 
-    /// The hardware report: the owner's file (read at each connection, UTF-16 accepted), or
-    /// nothing. The scan itself is 4-06's.
-    async fn report(&self) -> Report {
-        let none = Report { hardware: None, hardware_source: HelloHardwareSource::Nothing };
-        if !self.config.collect_hardware || self.config.hardware_file.is_empty() {
-            return none;
-        }
-        let path = std::path::PathBuf::from(&self.config.hardware_file);
-        let read = tokio::task::spawn_blocking(move || read_hardware_file(&path)).await;
-        match read {
-            Ok(Ok(scan)) => {
-                Report { hardware: Some(scan), hardware_source: HelloHardwareSource::File }
-            }
-            Ok(Err(e)) => {
-                self.log.throttled("hardware", Duration::from_secs(3600), Level::Warn, e);
-                none
-            }
-            Err(e) => {
-                self.log.warn(format!("reading the hardware file failed: {e}"));
-                none
-            }
-        }
+    /// The hardware report as this helper is set up to give it.
+    fn report(&self) -> impl std::future::Future<Output = Report> + Send + 'static {
+        read_report(
+            self.config.collect_hardware,
+            self.config.hardware_file.clone(),
+            self.log.clone(),
+        )
     }
 
     fn hello(&self, models: Vec<Model>, report: Report) -> protocol::Hello {
@@ -332,12 +429,15 @@ impl Helper {
         let mut backoff = Backoff::default();
         let mut idle_logged = false;
         let mut first = true;
+        let mut catalog = Catalog::new(self.config.models.clone());
         loop {
             if self.stopped() {
                 return Exit::Stopped;
             }
-            let models = self.models().await;
-            let report = self.report().await;
+            let report = tokio::select! {
+                r = self.prepare(&mut catalog) => r,
+                () = stop_signal(self.stop.clone()) => return Exit::Stopped,
+            };
             let line = format!("connecting to {}", self.config.server_url);
             if first {
                 self.log.info(line);
@@ -350,7 +450,7 @@ impl Helper {
                 () = stop_signal(self.stop.clone()) => return Exit::Stopped,
             };
             let end = match dialled {
-                Ok(ws) => self.connection(ws, models, report).await,
+                Ok(ws) => self.connection(ws, &mut catalog, report).await,
                 Err(e) => {
                     let d = backoff.delay();
                     self.log.warn(format!(
@@ -412,9 +512,10 @@ impl Helper {
     }
 
     /// One connection, from the hello to its end.
-    async fn connection(&self, ws: Ws, models: Vec<Model>, report: Report) -> End {
+    async fn connection(&self, ws: Ws, catalog: &mut Catalog, report: Report) -> End {
         let (mut tx, mut rx) = ws.split();
-        let hello = self.hello(models.clone(), report);
+        let n = catalog.models.len();
+        let hello = self.hello(catalog.models.clone(), report);
         let quiet_until = hello.quiet_until;
         if self.send(&mut tx, HelperFrame::Hello(hello)).await.is_err() {
             return End::Reconnect { welcomed: false };
@@ -424,11 +525,10 @@ impl Helper {
             Err(end) => return end,
         };
         self.log.info(format!(
-            "connected as \u{201c}{}\u{201d} ({}): {} model{} listed, {} slot{}",
-            welcome.machine.name,
+            "connected as \u{201c}{}\u{201d} ({}): {n} model{} listed, {} slot{}",
+            clip(&welcome.machine.name, 120),
             welcome.machine.id,
-            models.len(),
-            if models.len() == 1 { "" } else { "s" },
+            if n == 1 { "" } else { "s" },
             self.config.max_concurrent,
             if self.config.max_concurrent == 1 { "" } else { "s" }
         ));
@@ -440,14 +540,17 @@ impl Helper {
             if !runs.is_empty() {
                 // This helper plays no job before 4-10, so it holds none to keep or send.
                 self.log.warn(format!(
-                    "the welcome names runs to {what} that this helper does not hold: {runs:?}"
+                    "the welcome names {} run{} to {what} that this helper does not hold: {}",
+                    runs.len(),
+                    if runs.len() == 1 { "" } else { "s" },
+                    clip(&runs.join(" "), SERVER_TEXT)
                 ));
             }
         }
         if self.ack(&mut tx, &welcome.settings).await.is_err() {
             return End::Reconnect { welcomed: true };
         }
-        Steady::new(self, models, quiet_until).run(&mut tx, &mut rx).await
+        Steady::new(self, catalog, quiet_until).run(&mut tx, &mut rx).await
     }
 
     async fn ack(&self, tx: &mut Sink, site: &Settings) -> Result<(), ()> {
@@ -487,7 +590,7 @@ impl Helper {
             let msg = tokio::select! {
                 m = tokio::time::timeout_at(deadline, rx.next()) => m,
                 () = stop_signal(self.stop.clone()) => {
-                    let _closed = tx.send(Message::Close(None)).await;
+                    let _closed = tokio::time::timeout(CLOSE_SEND, tx.send(Message::Close(None))).await;
                     return Err(End::Stopped);
                 }
             };
@@ -526,18 +629,18 @@ impl Helper {
                 RefusedCode::Token => End::Permanent(format!(
                     "The server refused this helper's token: {} Issue a new token on the \
                      server's Servers page and run `citar-helper setup` to give it to this helper.",
-                    r.message
+                    clip(&r.message, SERVER_TEXT)
                 )),
                 RefusedCode::Key => End::Permanent(format!(
                     "The server refused this machine's key (fingerprint shown by `citar-helper \
                      --version`): {} The machine's owner must reset its key on the Servers page.",
-                    r.message
+                    clip(&r.message, SERVER_TEXT)
                 )),
                 RefusedCode::Protocol | RefusedCode::Build => End::Upgrade(format!(
                     "The server does not speak this helper's protocol ({}): {} Either the server \
                      must be upgraded or this helper's update applied; trying again every 10 minutes.",
                     r.code.as_str(),
-                    r.message
+                    clip(&r.message, SERVER_TEXT)
                 )),
                 RefusedCode::Rate => {
                     let s = r.retry_after_s.unwrap_or(RATE_RETRY.as_secs_f64()).clamp(1.0, 3600.0);
@@ -547,12 +650,12 @@ impl Helper {
             ServerFrame::V1Refusal(e) => Some(End::Upgrade(format!(
                 "The server answered in protocol 1: {} It must be upgraded to CITAR 0.1.6 or \
                  later; trying again every 10 minutes.",
-                e.message
+                clip(&e.message, SERVER_TEXT)
             ))),
             ServerFrame::Shutdown(s) => Some(End::Permanent(format!(
                 "The server took this machine away ({}): {}",
                 s.code.as_str(),
-                s.reason
+                clip(&s.reason, SERVER_TEXT)
             ))),
             _ => None,
         }
@@ -566,7 +669,8 @@ impl Helper {
                 Ok(Some(Ok(Message::Close(_)))) | Ok(None | Some(Err(_))) => return end,
                 Ok(Some(Ok(_))) => {}
                 Err(_) => {
-                    let _closed = tx.send(Message::Close(None)).await;
+                    let _closed =
+                        tokio::time::timeout(CLOSE_SEND, tx.send(Message::Close(None))).await;
                     return end;
                 }
             }
@@ -577,7 +681,9 @@ impl Helper {
     /// codes").
     fn closed(&self, code: Option<u16>, reason: &str, welcomed: bool) -> End {
         use protocol::close;
-        let said = if reason.is_empty() { String::new() } else { format!(": {reason}") };
+        // A close's reason is at most 123 bytes; its control characters are escaped all the same.
+        let said =
+            if reason.is_empty() { String::new() } else { format!(": {}", clip(reason, 123)) };
         match code {
             Some(close::BAD_HELLO) => {
                 self.log.warn(format!("the server refused the hello as invalid (4400{said})"));
@@ -614,30 +720,47 @@ impl Helper {
             Message::Text(t) => match protocol::parse_server_frame(t.as_str()) {
                 Ok(Parsed::Frame { frame, .. }) => Read::Frame(Box::new(frame)),
                 Ok(Parsed::Ignored { t }) => {
+                    // A type the server made up: quoted cut, and the log keeps a bounded number
+                    // of such keys (and none at all below debug level).
+                    let t = clip(&t, TYPE_SHOWN);
                     self.log.once(
                         &format!("ignored {t}"),
                         Level::Debug,
-                        format!("ignoring frames of type {t:?}"),
+                        format!("ignoring frames of type \u{201c}{t}\u{201d}"),
                     );
                     Read::Nothing
                 }
                 Err(e) => {
-                    let raw: Option<Map<String, Value>> =
-                        serde_json::from_str::<Value>(t.as_str()).ok().and_then(|v| match v {
+                    // Only a frame that passed the envelope (at most 8 MiB, a JSON object of a
+                    // type this side knows) and failed a field's check is read again, for the id
+                    // or run a bad request or offer is answered by. One too large, too deep or
+                    // not an object is not, and its type stays unknown.
+                    let raw: Option<Map<String, Value>> = match e.code {
+                        ErrorCode::TooLarge
+                        | ErrorCode::TooDeep
+                        | ErrorCode::NotJson
+                        | ErrorCode::NotObject
+                        | ErrorCode::NoType => None,
+                        _ => serde_json::from_str::<Value>(t.as_str()).ok().and_then(|v| match v {
                             Value::Object(m) => Some(m),
                             _ => None,
-                        });
-                    let t = raw
+                        }),
+                    };
+                    // The throttling key is one of the known types' own names, or `?`.
+                    let known: Option<&'static str> = raw
                         .as_ref()
                         .and_then(|m| m.get("t"))
                         .and_then(Value::as_str)
-                        .unwrap_or("?")
-                        .to_owned();
+                        .and_then(|t| ServerFrame::TYPES.iter().copied().find(|k| *k == t));
+                    let what = match known {
+                        Some(k) => format!("a bad {k} frame from the server"),
+                        None => "a bad frame from the server".to_owned(),
+                    };
                     self.log.throttled(
-                        &format!("bad {t}"),
+                        &format!("bad {}", known.unwrap_or("?")),
                         Duration::from_secs(60),
                         Level::Warn,
-                        format!("a bad {t} frame from the server: {e}"),
+                        format!("{what}: {}", describe(&e)),
                     );
                     Read::Bad(raw)
                 }
@@ -705,16 +828,19 @@ fn read_hardware_file(path: &std::path::Path) -> Result<Map<String, Value>, Stri
 }
 
 /// The connection after its welcome.
-struct Steady<'h> {
-    h: &'h Helper,
-    models: Vec<Model>,
+struct Steady<'a> {
+    h: &'a Helper,
+    catalog: &'a mut Catalog,
     last_rx: Instant,
     pinged: bool,
     status: Status,
     status_sent: Option<Instant>,
     next_quiet: Instant,
-    catalog: Option<mpsc::Receiver<Vec<Model>>>,
+    /// Each listing the poller makes, every [`CATALOG_EVERY`].
+    polls: Option<mpsc::Receiver<Result<Vec<Listed>, String>>>,
     poller: Option<tokio::task::JoinHandle<()>>,
+    /// A `rescan`'s read of the hardware report, off the session's task.
+    rescan: Option<tokio::task::JoinHandle<Report>>,
 }
 
 impl Drop for Steady<'_> {
@@ -722,27 +848,24 @@ impl Drop for Steady<'_> {
         if let Some(p) = self.poller.take() {
             p.abort();
         }
+        if let Some(r) = self.rescan.take() {
+            r.abort();
+        }
     }
 }
 
-impl<'h> Steady<'h> {
-    fn new(h: &'h Helper, models: Vec<Model>, quiet_until: Option<f64>) -> Steady<'h> {
+impl<'a> Steady<'a> {
+    fn new(h: &'a Helper, catalog: &'a mut Catalog, quiet_until: Option<f64>) -> Steady<'a> {
         let now = Instant::now();
-        let (catalog, poller) = match &h.endpoint {
+        let (polls, poller) = match &h.endpoint {
             None => (None, None),
             Some(ep) => {
                 let (tx, rx) = mpsc::channel(1);
                 let ep = ep.clone();
-                let allow = h.config.models.clone();
                 let task = tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(CATALOG_EVERY).await;
-                        let listed = match tokio::time::timeout(llm::LIST_TIMEOUT, ep.list()).await
-                        {
-                            Ok(Ok(l)) => l,
-                            _ => Vec::new(),
-                        };
-                        if tx.send(llm::choose(&listed, allow.as_deref())).await.is_err() {
+                        if tx.send(list(&ep).await).await.is_err() {
                             return;
                         }
                     }
@@ -752,15 +875,16 @@ impl<'h> Steady<'h> {
         };
         Steady {
             h,
-            models,
+            catalog,
             last_rx: now,
             pinged: false,
             // What the hello said: the first status goes when that changes.
             status: Status { quiet_until, llm_in_flight: 0, jobs_running: 0, jobs_paused: 0 },
             status_sent: None,
             next_quiet: now + QUIET_TICK,
-            catalog,
+            polls,
             poller,
+            rescan: None,
         }
     }
 
@@ -776,9 +900,17 @@ impl<'h> Steady<'h> {
             if let Some(s) = status_due {
                 wake = wake.min(s);
             }
-            let catalog = async {
-                match self.catalog.as_mut() {
+            let polls = &mut self.polls;
+            let poll = async {
+                match polls.as_mut() {
                     Some(c) => c.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let rescan = &mut self.rescan;
+            let rescanned = async {
+                match rescan.as_mut() {
+                    Some(r) => r.await,
                     None => std::future::pending().await,
                 }
             };
@@ -808,20 +940,29 @@ impl<'h> Steady<'h> {
                         Read::Nothing => {}
                     }
                 }
-                Some(models) = catalog => {
-                    if models != self.models {
+                Some(listed) = poll => {
+                    if self.catalog.take(listed, self.h) {
+                        let models = self.catalog.models.clone();
                         let n = models.len();
                         let loaded = models.iter().filter(|m| m.loaded).count();
-                        if self.h.send(tx, HelperFrame::Catalog(protocol::Catalog { models: models.clone() })).await.is_err() {
+                        if self.h.send(tx, HelperFrame::Catalog(protocol::Catalog { models })).await.is_err() {
                             return End::Reconnect { welcomed: true };
                         }
                         self.h.log.info(format!("the endpoint's models changed: {n} listed, {loaded} loaded"));
-                        self.models = models;
+                    }
+                }
+                report = rescanned => {
+                    self.rescan = None;
+                    if let Ok(Report { hardware: Some(scan), hardware_source: HelloHardwareSource::File }) = report {
+                        let frame = protocol::Hardware { scan, source: protocol::HardwareSource::File };
+                        if self.h.send(tx, HelperFrame::Hardware(frame)).await.is_err() {
+                            return End::Reconnect { welcomed: true };
+                        }
                     }
                 }
                 () = stop_signal(self.h.stop.clone()) => {
                     let close = CloseFrame { code: CloseCode::Normal, reason: "the helper is stopping".into() };
-                    let _closed = tokio::time::timeout(Duration::from_secs(2), tx.send(Message::Close(Some(close)))).await;
+                    let _closed = tokio::time::timeout(CLOSE_SEND, tx.send(Message::Close(Some(close)))).await;
                     return End::Stopped;
                 }
                 () = tokio::time::sleep_until(wake) => {
@@ -871,12 +1012,10 @@ impl<'h> Steady<'h> {
             ServerFrame::Ping(_) => self.h.send(tx, HelperFrame::Pong(protocol::Pong {})).await,
             ServerFrame::Settings(s) => self.h.ack(tx, &s).await,
             ServerFrame::Rescan(_) => {
-                let report = self.h.report().await;
-                if let (Some(scan), HelloHardwareSource::File) =
-                    (report.hardware, report.hardware_source)
-                {
-                    let frame = protocol::Hardware { scan, source: protocol::HardwareSource::File };
-                    return self.h.send(tx, HelperFrame::Hardware(frame)).await;
+                // Read off this task (it may take up to its timeout), and sent from the loop when
+                // it is done; a rescan while one is under way is that one's.
+                if self.rescan.is_none() {
+                    self.rescan = Some(tokio::spawn(self.h.report()));
                 }
                 Ok(())
             }
