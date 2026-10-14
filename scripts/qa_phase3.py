@@ -3555,7 +3555,7 @@ class SeatDriver:
     """One seat played over HTTP as a person at the game screen or an MCP client plays it: it long-polls
     ``GET /api/games/{gid}/wait`` with the seat's token (the MCP server's ``wait_for_turn``), answers each chat that
     waits on it, and ends its turn when nothing does, unless ``hold`` is set (the script acts on the turn first). Its
-    first turn founds its city where its settler stands and sets its research.
+    first turn founds its city where its settler stands, sets its research and sends its other units exploring.
 
     A chat whose messages from this seat carry ``QA-LEAVE`` is left to run out; any other that waits on it is accepted
     when a deal is on the table and closed with a word when none is. It keeps every answer of the wait route (with the
@@ -3596,11 +3596,15 @@ class SeatDriver:
         return got.json() if got.status_code == 200 else {}
 
     def _first_turn(self) -> None:
-        units = self.tool("get_units").get("result") or []
-        settler = next((u for u in units if isinstance(u, dict) and str(u.get("type") or "").lower() == "settler"), None)
+        units = [u for u in self.tool("get_units").get("result") or [] if isinstance(u, dict)]
+        settler = next((u for u in units if str(u.get("type") or "").lower() == "settler"), None)
         founded = self.tool("found_city", {"unit_id": settler["id"]}) if settler else {"ok": False}
         research = self.tool("set_research", {"tech": "Pottery"})
-        self.first = {"founded": bool(founded.get("ok")), "research": bool(research.get("ok"))}
+        # the others explore (a standing order), so the seat's explored land, and its minimap's home box, grows
+        explore = [self.tool("unit_order", {"unit_id": u["id"], "order": "explore"}) for u in units
+                   if u is not settler and str(u.get("type") or "").lower() not in ("worker", "work boat")]
+        self.first = {"founded": bool(founded.get("ok")), "research": bool(research.get("ok")),
+                      "exploring": sum(1 for x in explore if x.get("ok"))}
 
     def _answer(self, nid: int) -> bool:
         """Answer chat ``nid`` as the policy says; whether it did."""
@@ -3772,6 +3776,7 @@ def part_exit(h: Harness) -> None:
     sockets: list = []
     drivers: list = []
     gid, run_id = "", ""
+    counters_before: dict = {}
     t_start = time.time()
     try:
         # ---- bob's two machines, shared with alice (games, pooled prompts) and the administrator (benchmarks)
@@ -4138,6 +4143,8 @@ def part_exit(h: Harness) -> None:
         written = wait_until(lambda: saves.exists() and saves.stat().st_mtime_ns != mtime, 15, 0.1)
         time.sleep(1.0)
         endpoint.hold = None                 # what comes after the restart is answered; the held answer stays held
+        # the scheduler's counters live in the server's memory: the restart starts them again
+        counters_before.update(_machine_status(admin, hid).get("counters") or {})
         t_kill = time.perf_counter()
         h.server.restart()
         t_up = time.perf_counter()
@@ -4150,15 +4157,21 @@ def part_exit(h: Harness) -> None:
         endpoint.gate.set()
         kv = head(kr)
         theirs = [e for e in kv.get("history") or [] if not e.get("you")]
+        # the exchange writes its row once its loop sees the chat move, just after the answer
+        kr_rows = wait_until(lambda: (lambda rows: rows if ("answered", None) in rows else None)(metric_rows(kr)),
+                             10, 0.25) or metric_rows(kr)
+        # the model's own answer: the endpoint's reply (a chat with no proposal), and its metrics row answered; a
+        # decline after a failed exchange ("(no response)", fallback) or the clock's would be neither
         r.check("the server, killed with alice's chat waiting on the LLM seat (its answer held at the endpoint; the "
                 "seat change's save holds the chat), brought the game back (restore_live) and the model answered the "
                 "chat well inside its 45 s, not the chat clock",
                 bool(kr and held and renamed.status_code == 200 and written) and back.get("turn") == t_k
-                and bool(answered) and bool(theirs) and theirs[-1].get("message") != "(no reply in time)"
-                and t_answer - t_up < 40,
+                and bool(answered) and bool(theirs)
+                and (theirs[-1].get("action"), theirs[-1].get("message")) == ("reply", "(qa endpoint) reply")
+                and ("answered", None) in kr_rows and t_answer - t_up < 40,
                 f"chat {kr}, held {held}, rename {renamed.status_code}, saved {bool(written)}; back at turn "
                 f"{back.get('turn')} (was {t_k}); answered {round(t_answer - t_up, 1)} s after the server was up "
-                f"({round(t_up - t_kill, 1)} s down); last entry {(kv.get('history') or [{}])[-1]}",
+                f"({round(t_up - t_kill, 1)} s down); last entry {(kv.get('history') or [{}])[-1]}; rows {kr_rows}",
                 restart_s=round(t_up - t_kill, 1), answered_after_s=round(t_answer - t_up, 1))
         data["restart"] = {"chat": kr, "turn": t_k, "down_s": round(t_up - t_kill, 1),
                            "answered_after_s": round(t_answer - t_up, 1), "history": kv.get("history")}
@@ -4218,19 +4231,28 @@ def part_exit(h: Harness) -> None:
         homes = [x.get("home") for x in minimap]
         map_w, map_h = (lambda v: (v.get("width", 0), v.get("height", 0)))(
             alice.get(f"/api/games/{gid}/view", params={"token": tokens[0]}).json())
+        grew = [i + 1 for i, (p, q) in enumerate(zip(homes, homes[1:])) if p and q and p != q]
         r.check("alice's minimap moved from early to renaissance to information by the debug ops route, its home box "
-                "never shrinking",
+                "growing as her units explored and never shrinking",
                 [x.get("stage") for x in minimap] == ["early", "renaissance", "information"]
                 and all(x.get("status", 200) == 200 for x in minimap)
-                and all(p and q and _box_covers(q, p, map_w, map_h) for p, q in zip(homes, homes[1:])),
-                json.dumps(minimap)[:500])
+                and all(p and q and _box_covers(q, p, map_w, map_h) for p, q in zip(homes, homes[1:]))
+                and bool(grew), json.dumps({"steps": minimap, "grew_at": grew,
+                                            "exploring": (a.first or {}).get("exploring")})[:600])
         data["minimap"] = minimap
         status = _machine_status(admin, hid)
-        counters = status.get("counters") or {}
+        after = status.get("counters") or {}
+        # the whole game's: the readings before the restart and since (the scheduler's counters start again with it)
+        counters = {k: int(counters_before.get(k, 0) or 0) + int(after.get(k, 0) or 0)
+                    for k in sorted(set(counters_before) | set(after))}
         busy_lines = [line for helper in helpers for line in helper.text().splitlines() if "(busy)" in line]
-        r.check("the helper machine refused nothing as busy and holds no lease once the game is over",
-                counters.get("busy_refusals", 0) == 0 and not busy_lines and not status.get("leases"),
-                json.dumps({"counters": counters, "leases": status.get("leases")})[:400])
+        r.check("the helper machine refused nothing as busy over the whole game (the scheduler's counters before the "
+                "restart and after it, and its helpers' logs) and holds no lease once the game is over",
+                counters.get("busy_refusals", 0) == 0 and counters.get("granted", 0) > 0 and not busy_lines
+                and not status.get("leases"),
+                json.dumps({"counters": counters, "before_restart": counters_before, "after_restart": after,
+                            "leases": status.get("leases")})[:600])
+        data["counters"] = {"whole_game": counters, "before_restart": counters_before, "after_restart": after}
 
         # ---- the ledger: given and used, per member, against its events
         time.sleep(4.0)
@@ -4483,13 +4505,23 @@ def part_real(h: Harness) -> None:
         rows_of = {k: [(x.get("outcome"), x.get("cause")) for x in negotiations if x.get("nid") == nid]
                    for k, nid in chats.items()}
         decided = all(v.get("status") not in (None, "open") for v in mine.values()) and all(rows_of.values())
-        recorded = all(x.get("outcome") in ("answered", "declined_late", "fallback", "closed")
-                       and (x.get("outcome") == "answered" or x.get("cause")) for x in negotiations)
-        r.check("every chat was answered by the model or ended by the chat clock's rule, its cause recorded: alice's "
-                "two, and every chat answer of the model seats",
-                decided and recorded and bool(negotiations),
+        # the model answered, or the chat's rules ended it: the clock (its decline, or a hybrid's bot at the deadline or
+        # when the ticket could not start in the time left), the machine (a refusal; behind a benchmark), or the chat
+        # closing before the answer. A model that failed to answer (its steps used, text in place of the call, an
+        # error: ``fallback``/``failed``) is not one of these
+        wrong = [x for x in negotiations if not _chat_ended_by_rule(x)]
+        by_model = {seat: sum(1 for x in negotiations if x.get("player") == p and x.get("outcome") == "answered")
+                    for seat, p in (("hybrid", 1), ("llm", 2))}
+        r.check("every chat was answered by the model or ended by the chat clock's rule, its cause recorded (none "
+                "failed by the model): alice's two, and every chat answer of the model seats; each model seat's model "
+                "answered at least one by calling its tool",
+                decided and bool(negotiations) and not wrong and all(by_model.values()),
                 json.dumps({"alice": {k: [v.get("status"), rows_of[k]] for k, v in mine.items()},
-                            "outcomes": _counts(f"{x.get('outcome')}/{x.get('cause')}" for x in negotiations)})[:600])
+                            "answered_by_model": by_model,
+                            "not_by_rule": [{k: x.get(k) for k in ("player", "nid", "outcome", "cause", "steps")}
+                                            for x in wrong],
+                            "outcomes": _counts(f"{x.get('player')} {x.get('outcome')}/{x.get('cause')}"
+                                                for x in negotiations)})[:800])
         # the generation seconds the scheduler metered (the game's metrics: the LLM seat's turns, the chat answers, the
         # diplomat phases) against the compute ledger's events for the game on the machine
         metered = (sum(float(x.get("model_s") or 0.0) for x in llm_turns)
@@ -4568,6 +4600,22 @@ def part_real(h: Harness) -> None:
                 pass
         if helper is not None:
             helper.stop()
+
+
+#: How a model seat's chat answer may end other than by its model's answer (the game's metrics, ``outcome`` and
+#: ``cause``; citar/server/chat.py's CAUSES): by the chat clock (declined late; a hybrid seat's bot at the deadline, or
+#: when its model's ticket could not start in the time left), by the machine (a refusal, a benchmark holding it), or
+#: by the chat closing before the answer (``closed``, no cause). ``fallback`` with ``failed`` is the model's failure.
+RULED_ENDINGS = {"declined_late": {"timeout"},
+                 "fallback": {"timeout", "not_started", "queued_behind_benchmark", "refused"}}
+
+
+def _chat_ended_by_rule(row: dict) -> bool:
+    """Whether a chat answer's metrics row was the model's answer or an ending by the chat's rules (``RULED_ENDINGS``)."""
+    outcome, cause = row.get("outcome"), row.get("cause")
+    if outcome in ("answered", "closed"):
+        return cause is None
+    return cause in RULED_ENDINGS.get(outcome, ())
 
 
 def _counts(items) -> dict:

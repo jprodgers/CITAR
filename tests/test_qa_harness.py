@@ -532,6 +532,19 @@ class RealModelCheck(unittest.TestCase):
         self.assertIn("load it there first", report.checks[0]["detail"])
         h.accounts["bob"].post.assert_not_called()
 
+    def test_a_chat_the_model_failed_is_not_ended_by_the_chats_rules(self):
+        """Gate 6: every chat answered by the model or ended by the chat clock's rule. The first exit runs counted
+        the LLM seat's three declines after its model wrote its answers as text (``fallback``/``failed``) as
+        recorded; they are the model's failure."""
+        ok = [("answered", None), ("closed", None), ("declined_late", "timeout"), ("fallback", "timeout"),
+              ("fallback", "not_started"), ("fallback", "queued_behind_benchmark"), ("fallback", "refused")]
+        bad = [("fallback", "failed"), ("fallback", None), ("declined_late", "failed"), ("answered", "failed"),
+               ("unanswered", None), (None, None)]
+        for outcome, cause in ok:
+            self.assertTrue(qa._chat_ended_by_rule({"outcome": outcome, "cause": cause}), (outcome, cause))
+        for outcome, cause in bad:
+            self.assertFalse(qa._chat_ended_by_rule({"outcome": outcome, "cause": cause}), (outcome, cause))
+
 
 if __name__ == "__main__":
     unittest.main()
