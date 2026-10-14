@@ -242,7 +242,17 @@ start says why and waits for Enter before its window closes.
 `~/Library/Application Support/CITAR` on macOS, `~/.local/share/citar` on Linux), unless `--home`
 or `CITAR_DATA_DIR` names another. `helper.json` sits at its root, as in 0.1.5; the helper keeps its
 own files under `helper/` there: `machine-key.json`, and `logs/helper.log` (rotated at 5 MB, three
-old logs kept; the token never appears in it). It writes nothing outside its home.
+old logs kept; the token never appears in it). If another program holds the log open so that it
+cannot be rotated (an editor, or a window following it), the log grows to 10 MB at most; the helper
+then writes to its console only, and tries to rotate again every minute. It writes nothing outside
+its home.
+
+**The models it offers.** The helper lists the endpoint's models when it connects and every 30 s
+after, and tells the server whenever the list, or which of them are loaded, changes. A listing that
+fails or takes over 10 s is taken as a hiccup: only after three in a row (about 90 s) does it tell
+the server that no model is loaded, and the next answer puts them back. With `models` (or `--model`)
+it offers only those. It dials only the address you gave (`base_url`), and follows no redirect from
+it.
 
 **CPU lending is off unless you turn it on, on the machine itself.** The server's machine settings
 can ask for CPU work, but the helper does none unless this machine's own switch is on: `setup`'s

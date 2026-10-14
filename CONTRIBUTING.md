@@ -340,16 +340,18 @@ cargo build -p citar-helper --features dev-guard          # or cargo xtask devel
 cargo nextest run -p citar-helper -p citar-jobs --features citar-helper/dev-guard
 ```
 
-A `dev-guard` build dials loopback servers only and refuses to start without an explicit `--home`
-outside the per-user CITAR folder, so a forgotten flag never writes a real installation's
-`helper.json` or machine key. `cargo xtask develop` always builds the helper that way, in its own
+A `dev-guard` build, and any build with one of the helper's test features (`test-faults`,
+`test-update-key`) even without it, dials loopback servers only and refuses to start without an
+explicit `--home` outside the per-user CITAR folder, so a forgotten flag never writes a real
+installation's `helper.json` or machine key, and no test build can reach a real server. `cargo xtask develop` always builds the helper that way, in its own
 profile, next to the extension, where the end-to-end tests and the QA scripts look for it. Give
 every helper you run its own `--home` (and the same in `CITAR_DATA_DIR`), and never point one at a
 server that is not your own. The crate's tests play the shared transcripts of
 `crates/citar-helper/protocol/v2/transcripts/` against the helper's own session on a paused clock
-(`tests/conformance.rs`), run the real binary against a fake hub and a fake LM Studio on loopback
-(`tests/real_binary.rs`, about 30 s), and check the machine key's file permissions
-(`tests/keys.rs`); `tests/config_cases.rs` holds its settings to the table recorded from the 0.1.5
+(`tests/conformance.rs`), hold the session's own rules beyond them (`tests/session.rs`: a hostile
+server's frames, a flaky endpoint, quiet hours all week, a hardware file that never answers), run
+the real binary against a fake hub and a fake LM Studio on loopback (`tests/real_binary.rs`, about
+30 s), and check the machine key's file permissions (`tests/keys.rs`); `tests/config_cases.rs` holds its settings to the table recorded from the 0.1.5
 helper (`tests/data/helper_config_cases.json`). `citar-jobs` holds the one module of the helper
 crates allowed `unsafe` (`src/sys/`), the operating-system calls no safe wrapper makes; `cargo
 xtask check` refuses `unsafe` anywhere else in them, and their test features and `dev-guard` in
