@@ -3,21 +3,29 @@
 //! changes (polled every 30 s). The proxy that runs completions arrives in 4-04.
 //!
 //! - **lmstudio:** `/api/v0/models` (load state and context length; embedding models left out,
-//!   since they cannot chat), else the OpenAI `/v1/models`;
+//!   since they cannot chat), else the OpenAI `/v1/models`. That fallback is for an LM Studio
+//!   without its own API: while its own API answered within [`V0_FRESH`], a failure of it is a
+//!   hiccup, and the OpenAI list is read with the load states and contexts of that last answer
+//!   (its embedding models still left out) rather than as nothing loaded;
 //! - **ollama:** `/v1/models`, and `/api/ps` for what is loaded;
 //! - **openai_compatible**, **openai:** `/v1/models`, with the key from `api_key_env` for
 //!   `openai`; a model such a server lists is one it serves, so it counts as loaded.
 //!
-//! The configured base URL is the only address dialled, with no system proxy. A configured model
+//! The configured base URL is the only address dialled (P4.3.4, P4.3.10): no system proxy, and no
+//! redirect is followed (a 3xx is an endpoint error naming where it pointed). A configured model
 //! list is the owner's allowlist (protocol 1's rule, `agent.py:234-243`): only those models are
 //! offered, an allowlisted model the endpoint does not list still among them (not loaded).
 //! [`choose`] caps the list as PROTOCOL.md's "What the helper caps" says. Replaces
 //! `citar/worker/agent.py` `discover_models`.
+//!
+//! The client has a connect timeout only; each listing request has its own [`LIST_TIMEOUT`], so
+//! the proxy (4-04) can share the client and give a completion its own `timeout_s`.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -31,6 +39,11 @@ pub const MAX_KEY: usize = 200;
 pub const MAX_LABEL: usize = 200;
 /// How long one listing may take.
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long LM Studio's own API answering counts as recent: a failure of it within this is a
+/// hiccup, not an LM Studio without it.
+pub const V0_FRESH: Duration = Duration::from_secs(300);
+/// The most characters of an endpoint's error body (or a redirect's target) kept in its error.
+pub const BODY_SHOWN: usize = 300;
 
 /// A model as the endpoint listed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,12 +63,23 @@ pub trait Endpoint: Send + Sync {
     fn list(&self) -> BoxFuture<'_, Result<Vec<Listed>, String>>;
 }
 
+/// What LM Studio's own API last said of a model.
+#[derive(Clone, Copy, Debug)]
+struct V0Model {
+    loaded: bool,
+    context: Option<u64>,
+    /// An embedding model, left out of the list.
+    embeddings: bool,
+}
+
 /// The endpoint over HTTP.
 pub struct HttpEndpoint {
     client: reqwest::Client,
     provider: Provider,
     base: String,
     api_key: Option<String>,
+    /// LM Studio's last answer from its own API, and when it came.
+    last_v0: Mutex<Option<(Instant, BTreeMap<String, V0Model>)>>,
 }
 
 impl HttpEndpoint {
@@ -71,7 +95,9 @@ impl HttpEndpoint {
     ) -> Result<HttpEndpoint, String> {
         let client = reqwest::Client::builder()
             .no_proxy()
-            .timeout(LIST_TIMEOUT)
+            // The configured address is the only one dialled: a redirect is not followed.
+            .redirect(reqwest::redirect::Policy::none())
+            // Connecting only; each request sets its own limit (a listing's is LIST_TIMEOUT).
             .connect_timeout(LIST_TIMEOUT)
             .tls_backend_preconfigured(tls)
             .build()
@@ -81,6 +107,7 @@ impl HttpEndpoint {
             provider,
             base: base_url.trim_end_matches('/').to_owned(),
             api_key,
+            last_v0: Mutex::new(None),
         })
     }
 
@@ -90,18 +117,34 @@ impl HttpEndpoint {
     }
 
     async fn get(&self, url: &str) -> Result<Value, String> {
-        let mut req = self.client.get(url);
+        let mut req = self.client.get(url).timeout(LIST_TIMEOUT);
         if let Some(k) = &self.api_key {
             req = req.bearer_auth(k);
         }
         let resp = req.send().await.map_err(|e| format!("{url}: {e}"))?;
         let status = resp.status();
+        if status.is_redirection() {
+            let to = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .map(|l| String::from_utf8_lossy(l.as_bytes()).into_owned())
+                .unwrap_or_default();
+            return Err(format!(
+                "{url}: HTTP {status}, redirecting to {:?}: the helper dials only the configured \
+                 address, so give that address itself",
+                crate::log::clip(&to, BODY_SHOWN)
+            ));
+        }
         let body = resp.bytes().await.map_err(|e| format!("{url}: {e}"))?;
         if !status.is_success() {
-            let text: String = String::from_utf8_lossy(&body).chars().take(300).collect();
+            let text = crate::log::clip(&String::from_utf8_lossy(&body), BODY_SHOWN);
             return Err(format!("{url}: HTTP {status}: {text}"));
         }
         serde_json::from_slice(&body).map_err(|e| format!("{url}: not JSON ({e})"))
+    }
+
+    fn v0_lock(&self) -> std::sync::MutexGuard<'_, Option<(Instant, BTreeMap<String, V0Model>)>> {
+        self.last_v0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `/v1/models`' ids.
@@ -116,22 +159,50 @@ impl HttpEndpoint {
 
     async fn lmstudio(&self) -> Result<Vec<Listed>, String> {
         match self.get(&format!("{}/api/v0/models", self.root())).await {
-            Ok(doc) => Ok(data(&doc)
-                .iter()
-                .filter(|m| m.get("type").and_then(Value::as_str) != Some("embeddings"))
-                .filter_map(|m| {
-                    let id = m.get("id")?.as_str()?;
-                    Some(Listed {
-                        key: id.to_owned(),
-                        label: id.to_owned(),
-                        context: m.get("max_context_length").and_then(Value::as_u64),
+            Ok(doc) => {
+                let mut seen = BTreeMap::new();
+                let mut out = Vec::new();
+                for m in data(&doc) {
+                    let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
+                    let v0 = V0Model {
                         loaded: m.get("state").and_then(Value::as_str) == Some("loaded"),
-                    })
-                })
-                .collect()),
-            // An older LM Studio, or one behind something that only speaks OpenAI's API: the
-            // models are known, their load state is not.
-            Err(_) => self.openai_models(false).await,
+                        context: m.get("max_context_length").and_then(Value::as_u64),
+                        embeddings: m.get("type").and_then(Value::as_str) == Some("embeddings"),
+                    };
+                    seen.insert(id.to_owned(), v0);
+                    if !v0.embeddings {
+                        out.push(Listed {
+                            key: id.to_owned(),
+                            label: id.to_owned(),
+                            context: v0.context,
+                            loaded: v0.loaded,
+                        });
+                    }
+                }
+                *self.v0_lock() = Some((Instant::now(), seen));
+                Ok(out)
+            }
+            Err(_) => {
+                let mut models = self.openai_models(false).await?;
+                let last = self.v0_lock().clone();
+                match last {
+                    // Its own API answered lately: this is a hiccup of it, and the last answer
+                    // says what is loaded better than "nothing" would.
+                    Some((at, seen)) if at.elapsed() <= V0_FRESH => {
+                        models.retain(|m| !seen.get(&m.key).is_some_and(|s| s.embeddings));
+                        for m in &mut models {
+                            if let Some(s) = seen.get(&m.key) {
+                                m.loaded = s.loaded;
+                                m.context = s.context;
+                            }
+                        }
+                        Ok(models)
+                    }
+                    // An older LM Studio, or one behind something that only speaks OpenAI's
+                    // API: the models are known, their load state is not.
+                    _ => Ok(models),
+                }
+            }
         }
     }
 
