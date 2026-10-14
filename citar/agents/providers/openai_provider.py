@@ -209,10 +209,50 @@ def parse_text_calls(text: str, tools: list[dict]) -> list:
     return parse_plain_calls(text, tools)
 
 
+#: Gemma 4's string delimiter in its own tool-call syntax (``call:name{key:<|"|>text<|"|>,n:3}``).
+_GEMMA_QUOTE = '<|"|>'
+_GEMMA_WORD = re.compile(r"[A-Za-z_][\w.\-]*")
+
+
+def gemma_json(text: str) -> str | None:
+    """The object at the start of ``text`` in Gemma 4's own tool-call syntax, which LM Studio sometimes leaves in the
+    reply's text (``respond_negotiation{action:<|"|>reply<|"|>,message:<|"|>Agreed.<|"|>,negotiation_id:3}``), as
+    JSON text: its keys are bare words and its strings sit between ``<|"|>`` marks. None when it is not one."""
+    if text[:1] != "{":
+        return None
+    out, i, depth = [], 0, 0
+    while i < len(text):
+        if text.startswith(_GEMMA_QUOTE, i):
+            end = text.find(_GEMMA_QUOTE, i + len(_GEMMA_QUOTE))
+            if end < 0:
+                return None
+            out.append(json.dumps(text[i + len(_GEMMA_QUOTE):end]))
+            i = end + len(_GEMMA_QUOTE)
+            continue
+        word = _GEMMA_WORD.match(text, i)
+        if word:
+            after = text[word.end():].lstrip()
+            # a key (followed by its colon) is quoted; a bare value (true, false, null) is kept as it is
+            out.append(json.dumps(word.group(0)) if after[:1] == ":" else word.group(0))
+            i = word.end()
+            continue
+        ch = text[i]
+        out.append(ch)
+        i += 1
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                return "".join(out)
+    return None
+
+
 def parse_plain_calls(text: str, tools: list[dict]) -> list:
     """Parse tool calls a model wrote as plain text instead of using the tool-call channel (seen with Gemma), e.g.
-    `end_turn{}`, `set_research {"tech": "pottery"}` or `log_thought` followed by the note on the next lines.
-    Only lines that start with a known tool name count, so prose that merely mentions a tool is ignored."""
+    `end_turn{}`, `set_research {"tech": "pottery"}`, `log_thought` followed by the note on the next lines, or Gemma 4's
+    own syntax (``call:name{key:<|"|>text<|"|>}``, ``gemma_json``). Only lines that start with a known tool name count,
+    so prose that merely mentions a tool is ignored."""
     schemas = {t["function"]["name"]: t["function"].get("parameters") or {} for t in tools}
     t = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
     names = "|".join(re.escape(n) for n in sorted(schemas, key=len, reverse=True))
@@ -220,7 +260,7 @@ def parse_plain_calls(text: str, tools: list[dict]) -> list:
         return []
     calls = []
     decoder = json.JSONDecoder()
-    for m in re.finditer(rf"^[ \t>*`-]*({names})`?[ \t]*(?=[({{]|$)", t, flags=re.M):
+    for m in re.finditer(rf"^[ \t>*`-]*(?:<\|tool_call>)?(?:call:)?({names})`?[ \t]*(?=[({{]|$)", t, flags=re.M):
         name, rest = m.group(1), t[m.end():]
         if rest[:1] == "(":
             rest = rest[1:].lstrip()
@@ -228,7 +268,13 @@ def parse_plain_calls(text: str, tools: list[dict]) -> list:
             try:
                 args, _ = decoder.raw_decode(rest)
             except json.JSONDecodeError:
-                continue
+                converted = gemma_json(rest)
+                try:
+                    args = json.loads(converted) if converted is not None else None
+                except json.JSONDecodeError:
+                    args = None
+                if args is None:
+                    continue
             if isinstance(args, dict):
                 calls.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", name, args))
             continue

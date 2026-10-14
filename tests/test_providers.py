@@ -153,6 +153,22 @@ class OpenAITests(unittest.TestCase):
         self.assertEqual(parsed('set_research {"tech": "pottery"}\nunit_order({"unit_id": 3, "order": "explore"})\nend_turn'),
                          [("set_research", {"tech": "pottery"}), ("unit_order", {"unit_id": 3, "order": "explore"}),
                           ("end_turn", {})])
+        # Gemma 4's own syntax, which LM Studio left in the reply's text for a chat answer of the exit QA's
+        # gemma-4-e2b: bare keys, strings between <|"|> marks (commas, colons and braces inside them are text)
+        q = '<|"|>'
+        self.assertEqual(parsed(f"respond_negotiation{{action:{q}reply{q},message:{q}Peace, friend: {{always}}.{q},"
+                                f"negotiation_id:3}}"),
+                         [("respond_negotiation", {"action": "reply", "message": "Peace, friend: {always}.",
+                                                   "negotiation_id": 3})])
+        self.assertEqual(parsed(f"<|tool_call>call:respond_negotiation{{action:{q}counter{q},give:[{{type:{q}gold{q},"
+                                f"amount:20}}],receive:[{{type:{q}share_map{q}}}],message:{q}Less.{q},negotiation_id:7,"
+                                f"final:true}}<tool_call|>"),
+                         [("respond_negotiation", {"action": "counter", "give": [{"type": "gold", "amount": 20}],
+                                                   "receive": [{"type": "share_map"}], "message": "Less.",
+                                                   "negotiation_id": 7, "final": True})])
+        # cut off before its closing mark or brace: no call
+        self.assertEqual(parsed(f"respond_negotiation{{action:{q}reply"), [])
+        self.assertEqual(parsed(f"respond_negotiation{{action:{q}reply{q},message:{q}Hi{q}"), [])
         # prose that only mentions tools is not a call
         self.assertEqual(parsed("I will call end_turn once the city has production set."), [])
         self.assertEqual(parsed("set_research needs a tech name, so let me think."), [])
