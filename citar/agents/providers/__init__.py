@@ -12,6 +12,7 @@ implementations, and there would be no way to tell which you were measuring.
 :mod:`citar.agents.providers.base`               the shared conversation and step types
 :mod:`citar.agents.providers.anthropic_provider` the Anthropic API: thinking, prompt caching
 :mod:`citar.agents.providers.openai_provider`    anything OpenAI-compatible, native or JSON tools
+:mod:`citar.agents.providers.completion`         the one parser of OpenAI-format replies, whoever served them
 :mod:`citar.agents.providers.worker_provider`    sends the request down a worker's WebSocket
 :mod:`citar.agents.providers.dryrun`             answers plausibly with no model at all
 """

@@ -8,7 +8,9 @@ compared as ``<gen:N>``, numbered by first appearance across the step's calls an
 named other ids than its calls would not match. `tools.json` holds the tool lists the cases parse against, as they were
 when the corpus was recorded, so a new game tool cannot change what an old completion parses to.
 
-Package 4-05's parity gate plays the same corpus through `WorkerConversation` and a fake helper.
+Every case goes both ways and must come out the same: through `OpenAIConversation` with a fake SDK response, and
+straight through `completion.parse_completion` on the raw message. Package 4-05's parity gate plays the same corpus
+through `WorkerConversation` and a fake helper.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from unittest import mock
 
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 
-from citar.agents.providers import openai_provider
+from citar.agents.providers import completion, openai_provider
 
 CORPUS = Path(__file__).resolve().parent / "data" / "completions"
 TOOLSETS = json.loads((CORPUS / "tools.json").read_text(encoding="utf-8"))["sets"]
@@ -73,6 +75,14 @@ def sdk_response(completion: dict):
                                                   tool_calls=calls))])
 
 
+def fake_client(resp, sent: list):
+    """An OpenAI client whose one completion is ``resp``, recording each request's arguments in ``sent``."""
+    def create(**kw):
+        sent.append(kw)
+        return resp
+    return NS(chat=NS(completions=NS(create=create)), close=lambda: None)
+
+
 class Corpus(unittest.TestCase):
     def test_the_corpus_holds_every_shape_the_parser_reads(self):
         """The shapes P4.5.2 names, each by at least one case: native calls, invalid JSON arguments, merged XML
@@ -105,13 +115,8 @@ class Corpus(unittest.TestCase):
         stored entry and counted usage."""
         for case in CASES:
             with self.subTest(case=case["name"]):
-                resp = sdk_response(case["completion"])
-                sent = []
-
-                def create(**kw):
-                    sent.append(kw)
-                    return resp
-                client = NS(chat=NS(completions=NS(create=create)), close=lambda: None)
+                sent: list = []
+                client = fake_client(sdk_response(case["completion"]), sent)
                 cfg = {"model": "m", "base_url": "http://127.0.0.1:9/v1", "tool_mode": case["mode"]}
                 with mock.patch.object(openai_provider, "OpenAI", return_value=client):
                     conv = openai_provider.OpenAIConversation(cfg, "sys", TOOLSETS[case["tools"]])
@@ -125,6 +130,56 @@ class Corpus(unittest.TestCase):
                 self.assertEqual(conv.usage, case["expect"]["usage"])
                 # the request: tools only in native mode and only when there are any
                 self.assertEqual("tools" in sent[0], case["mode"] == "native" and bool(TOOLSETS[case["tools"]]))
+
+    def test_every_case_through_parse_completion(self):
+        """Each raw message, given straight to `parse_completion` (as the server will give it a helper's `done.message`
+        from 4-05), gives the same step and entry."""
+        for case in CASES:
+            with self.subTest(case=case["name"]):
+                c = case["completion"]
+                result, entry = completion.parse_completion(c["message"], c["finish_reason"], case["mode"],
+                                                            completion.openai_tools(TOOLSETS[case["tools"]]))
+                step, entry = normalized(step_dict(result), entry, given_ids(case))
+                self.assertEqual(step, case["expect"]["step"])
+                self.assertEqual(entry, case["expect"]["entry"])
+
+    def test_parse_completion_leaves_its_input_alone(self):
+        """The message is read, never changed: the hub keeps a `done` frame's message as it came."""
+        for case in CASES:
+            with self.subTest(case=case["name"]):
+                c = case["completion"]
+                message = json.loads(json.dumps(c["message"]))
+                tools = completion.openai_tools(TOOLSETS[case["tools"]])
+                before = json.dumps(tools)
+                completion.parse_completion(message, c["finish_reason"], case["mode"], tools)
+                self.assertEqual((message, json.dumps(tools)), (c["message"], before))
+
+
+class Prompts(unittest.TestCase):
+    """The request side the parser's JSON protocol relies on, moved with it."""
+
+    def test_json_mode_appends_the_protocol_and_the_listing(self):
+        tools = TOOLSETS["small"]
+        prompt = completion.system_prompt("You play Rome.", tools, "json")
+        self.assertTrue(prompt.startswith("You play Rome.\n" + completion.JSON_PROTOCOL))
+        self.assertIn('- get_tile: Tile params={"x": {"type": "integer"}, "y": {"type": "integer"}}', prompt)
+        self.assertEqual(prompt.count("\n- "), len(tools))
+        self.assertEqual(completion.system_prompt("You play Rome.", tools, "native"), "You play Rome.")
+
+    def test_openai_conversation_sends_what_the_helpers_will(self):
+        """`OpenAIConversation` builds its system prompt and tools with the same two functions WorkerConversation will
+        use (4-05), so a json-mode model gets the protocol whichever way its request goes."""
+        tools = TOOLSETS["game"]
+        for mode in ("native", "json"):
+            with self.subTest(mode=mode), mock.patch.object(openai_provider, "OpenAI"):
+                conv = openai_provider.OpenAIConversation({"model": "m", "base_url": "http://127.0.0.1:9/v1",
+                                                           "tool_mode": mode}, "sys", tools)
+                self.assertEqual(conv.messages, [{"role": "system",
+                                                  "content": completion.system_prompt("sys", tools, mode)}])
+                self.assertEqual(conv.tools, completion.openai_tools(tools))
+                self.assertEqual(conv.tools[0], {"type": "function", "function": {
+                    "name": tools[0]["name"], "description": tools[0]["description"],
+                    "parameters": tools[0]["input_schema"]}})
 
 
 if __name__ == "__main__":
