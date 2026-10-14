@@ -267,7 +267,7 @@ fn a_cancel_mid_stream_closes_the_endpoint_connection_within_a_second() {
         assert!(seen.tokens.iter().all(|t| *t <= gone), "an event went out after the client went");
         let sent = seen.tokens.len() as u64;
         let received = ack["tokens_out"].as_u64().expect("tokens_out");
-        assert!(sent >= 5 && sent < 50, "{sent} sent in about a second");
+        assert!((5..50).contains(&sent), "{sent} sent in about a second");
         assert!(received >= 1 && received <= sent && received + 2 >= sent, "{received} of {sent}");
         assert!(ack["gen_s"].as_f64().is_some_and(|g| (0.9..3.0).contains(&g)), "{ack}");
         // Nothing more is sent for it, and its slot is free.
