@@ -4304,9 +4304,12 @@ REAL_MODEL = "google/gemma-4-e2b"
 #: The ``real`` part's game: a small map, 20 rounds; the chat timeouts long enough for a small model on a laptop.
 REAL_CONFIG = {"map_size": "small", "map_type": "pangaea", "seed": 3431, "barbarians": "off", "city_states": 0,
                "turn_limit": 20, "chat_model_reply_seconds": 300, "chat_person_reply_seconds": 120}
-#: How long the ``real`` part waits for its game to end, and for a turn that does not move.
+#: How long the ``real`` part waits for its game to end, and for a turn that does not move: longer than the LLM seat's
+#: own limit on its turn (``REAL_TURN_S``, its model's time; its waits for chats come on top) and a hybrid seat's
+#: diplomat phase (three minutes), so only a hang is taken for one.
 REAL_LIMIT_S = 7200.0
-REAL_STALL_S = 1200.0
+REAL_STALL_S = 1800.0
+REAL_TURN_S = 600
 
 
 def lmstudio_model(base: str = REAL_URL, model: str = REAL_MODEL, timeout: float = 10.0) -> tuple:
@@ -4391,7 +4394,7 @@ def part_real(h: Harness) -> None:
         seats = [{"type": "human"},
                  {"type": "hybrid", "llm": dict(model), "bot": {"profile": "standard"},
                   "hybrid": {"owners": "all_but_war", "prompt_every": 3}},
-                 {"type": "llm", "llm": dict(model)}, {"type": "bot"}, {"type": "bot"}]
+                 {"type": "llm", "llm": {**model, "max_turn_seconds": REAL_TURN_S}}, {"type": "bot"}, {"type": "bot"}]
         g = alice.post("/api/games", json={"name": f"QA real game {h.tag}", "config": dict(REAL_CONFIG),
                                            "seats": seats})
         info = g.json() if g.status_code == 200 else {}
