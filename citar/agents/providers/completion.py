@@ -43,9 +43,10 @@ Use 1-8 calls per reply. Results come back in the next message. Available tools 
 #: `tool_calls` (PROTOCOL.md, `done`), so calls written as text, or repaired out of one call's arguments, cannot
 #: multiply what a reply costs the turn loop either. The JSON protocol asks for 1-8.
 MAX_CALLS = 512
-#: The deepest a call's arguments (or a JSON-protocol reply) may nest. Deeper JSON is not read: Python decodes far
-#: deeper than it encodes (about 3,000 levels on 3.12, 14,000 on 3.14, against about 9,000 for `json.dumps`), so such
-#: arguments would fail later, in the stored entry or the tool's signature, and differently on each version.
+#: The deepest a call's arguments (or a JSON-protocol reply) may nest. Deeper JSON is not read: Python may decode
+#: deeper than it encodes (3.14 decodes 14,000 levels and more, `json.dumps` fails past about 9,000; 3.12 stops near
+#: 3,000), so such arguments would fail later, in the stored entry or the tool's signature, and differently on each
+#: version. No tool's arguments come near 64.
 MAX_DEPTH = 64
 
 #: What `_loads` gives for text that is not read as JSON.
