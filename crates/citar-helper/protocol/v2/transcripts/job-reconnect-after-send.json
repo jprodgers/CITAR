@@ -1,24 +1,29 @@
 {
   "name": "job-reconnect-after-send",
-  "about": "The connection drops after a job_result and before its ack: the helper keeps the result, lists it in hello.results, sends it again for jobs.resend, and it is accepted once.",
+  "about": "The connection drops after a job_result and before the hub has it: the helper keeps the result, lists it in hello.results, sends it again for jobs.resend, and it is accepted once.",
   "refs": ["P4.2.5", "P4.3.6"],
   "plays": {"helper": "4-10", "hub": "4-10"},
   "values": {
+    "bots": ["basic1"],
     "job": "cj_0123456789abcdef",
     "jobs_build": "0f1e2d3c4b5a",
     "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     "machine": "sv_0123456789abcdef",
+    "ruleset": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
     "run": "cr_0123456789abcdef",
     "token": "cwt_example_0123456789abcdef0123456789abcdef"
   },
   "setup": {
     "helper": {
-      "config": {"cpu": {"enabled": true, "threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]}}
+      "config": {
+        "max_concurrent": 1,
+        "cpu": {"enabled": true, "threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]}
+      }
     },
     "hub": {
       "machine": {
         "settings": {
-          "llm": {"enabled": true, "slots": 1, "allow_swaps": false},
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
           "cpu": {
             "enabled": true,
             "threads": 1,
@@ -29,7 +34,9 @@
           }
         },
         "trust": "trusted"
-      }
+      },
+      "local_executor": false,
+      "verification": {"trusted_rate": 0}
     }
   },
   "steps": [
@@ -41,7 +48,7 @@
         "helper": {
           "version": "<string>",
           "build": "<hex12>",
-          "jobs_build": "<any>",
+          "jobs_build": "<id:jobs_build>",
           "target": "<string>",
           "label": "<string>"
         },
@@ -53,7 +60,14 @@
           "public_key": "<id:key>"
         },
         "llm": "<any>",
-        "cpu": "<any>",
+        "cpu": {
+          "enabled": true,
+          "ceiling": {"threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]},
+          "limits": "<any>",
+          "verifiable": true,
+          "bots": "<id:bots>",
+          "ruleset": "<id:ruleset>"
+        },
         "report": "<any>",
         "running": [],
         "results": [],
@@ -66,15 +80,43 @@
         "t": "welcome",
         "protocol": 2,
         "machine": {"id": "<id:machine>", "name": "<string>"},
-        "settings": "<any>",
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
         "ping_s": "<int:5..300>",
-        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<id:jobs_build>"},
         "update": null,
         "jobs": {"keep": [], "drop": [], "resend": []}
       },
       "within_s": 5
     },
-    {"h2s": {"t": "settings_ack", "effective": "<any>", "capped": "<any>", "limits": "<any>"}},
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": false, "slots": 1},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": [],
+        "limits": "<any>"
+      }
+    },
+    {"act": {"side": "hub", "do": "queue_job"}},
     {
       "s2h": {
         "t": "job_offer",
@@ -90,7 +132,7 @@
         "offer_ttl_s": 30
       }
     },
-    {"h2s": {"t": "job_accept", "run": "<id:run>"}},
+    {"h2s": {"t": "job_accept", "run": "<id:run>"}, "within_s": 2},
     {"host": {"finish": "<golden:jobs/duel-a>"}},
     {
       "h2s": {
@@ -124,8 +166,10 @@
           "key": "<id:key>"
         },
         "signature": "<base64>"
-      }
+      },
+      "lost": true
     },
+    {"act": {"side": "hub", "do": "drop_connection"}},
     {"drop": {"by": "server"}},
     {"connect": {}, "within_s": 5},
     {
@@ -136,7 +180,7 @@
         "helper": {
           "version": "<string>",
           "build": "<hex12>",
-          "jobs_build": "<any>",
+          "jobs_build": "<id:jobs_build>",
           "target": "<string>",
           "label": "<string>"
         },
@@ -148,7 +192,14 @@
           "public_key": "<id:key>"
         },
         "llm": "<any>",
-        "cpu": "<any>",
+        "cpu": {
+          "enabled": true,
+          "ceiling": {"threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]},
+          "limits": "<any>",
+          "verifiable": true,
+          "bots": "<id:bots>",
+          "ruleset": "<id:ruleset>"
+        },
         "report": "<any>",
         "running": [],
         "results": ["<id:run>"],
@@ -161,14 +212,42 @@
         "t": "welcome",
         "protocol": 2,
         "machine": {"id": "<id:machine>", "name": "<string>"},
-        "settings": "<any>",
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
         "ping_s": "<int:5..300>",
-        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<id:jobs_build>"},
         "update": null,
         "jobs": {"keep": [], "drop": [], "resend": ["<id:run>"]}
+      },
+      "within_s": 5
+    },
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": false, "slots": 1},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": [],
+        "limits": "<any>"
       }
     },
-    {"h2s": {"t": "settings_ack", "effective": "<any>", "capped": "<any>", "limits": "<any>"}},
     {
       "h2s": {
         "t": "job_result",

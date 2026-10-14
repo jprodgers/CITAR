@@ -1,20 +1,23 @@
 {
   "name": "job-reject-quiet",
-  "about": "In its local quiet hours the helper rejects an offer quiet.",
-  "refs": ["P4.2.5", "P4.3.3"],
-  "plays": {"helper": "4-10", "hub": null},
-  "one_side": "the dispatcher offers nothing to a machine whose helper reported quiet hours; the reject is the helper's net for an offer already on its way",
+  "about": "In its local quiet hours the helper rejects an offer quiet, and the dispatcher backs off until a status shows room. A correct dispatcher never makes this offer, so the hub's side sends it through its test hook, past its eligibility checks.",
+  "refs": ["P4.2.5", "P4.3.3", "P4.5.5"],
+  "plays": {"helper": "4-10", "hub": "4-10"},
   "values": {
+    "bots": ["basic1"],
     "job": "cj_0123456789abcdef",
     "jobs_build": "0f1e2d3c4b5a",
     "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     "machine": "sv_0123456789abcdef",
+    "quiet_until": 4102444800.0,
+    "ruleset": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
     "run": "cr_0123456789abcdef",
     "token": "cwt_example_0123456789abcdef0123456789abcdef"
   },
   "setup": {
     "helper": {
       "config": {
+        "max_concurrent": 1,
         "cpu": {"enabled": true, "threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]},
         "quiet": "22:00-06:00"
       },
@@ -23,7 +26,7 @@
     "hub": {
       "machine": {
         "settings": {
-          "llm": {"enabled": true, "slots": 1, "allow_swaps": false},
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
           "cpu": {
             "enabled": true,
             "threads": 1,
@@ -34,7 +37,10 @@
           }
         },
         "trust": "trusted"
-      }
+      },
+      "local_executor": false,
+      "verification": {"trusted_rate": 0},
+      "clock": "fake"
     }
   },
   "steps": [
@@ -46,7 +52,7 @@
         "helper": {
           "version": "<string>",
           "build": "<hex12>",
-          "jobs_build": "<any>",
+          "jobs_build": "<id:jobs_build>",
           "target": "<string>",
           "label": "<string>"
         },
@@ -58,7 +64,14 @@
           "public_key": "<id:key>"
         },
         "llm": "<any>",
-        "cpu": "<any>",
+        "cpu": {
+          "enabled": true,
+          "ceiling": {"threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]},
+          "limits": "<any>",
+          "verifiable": true,
+          "bots": "<id:bots>",
+          "ruleset": "<id:ruleset>"
+        },
         "report": "<any>",
         "running": [],
         "results": [],
@@ -71,19 +84,53 @@
         "t": "welcome",
         "protocol": 2,
         "machine": {"id": "<id:machine>", "name": "<string>"},
-        "settings": "<any>",
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
         "ping_s": "<int:5..300>",
-        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<id:jobs_build>"},
         "update": null,
         "jobs": {"keep": [], "drop": [], "resend": []}
       },
       "within_s": 5
     },
-    {"h2s": {"t": "settings_ack", "effective": "<any>", "capped": "<any>", "limits": "<any>"}},
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": false, "slots": 1},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": [],
+        "limits": "<any>"
+      }
+    },
     {"act": {"side": "helper", "do": "quiet_begins"}},
     {
-      "h2s": {"t": "status", "quiet_until": "<number>", "llm_in_flight": 0, "jobs_running": 0, "jobs_paused": 0}
+      "h2s": {
+        "t": "status",
+        "quiet_until": "<id:quiet_until>",
+        "llm_in_flight": 0,
+        "jobs_running": 0,
+        "jobs_paused": 0
+      }
     },
+    {"act": {"side": "hub", "do": "force_offer"}},
     {
       "s2h": {
         "t": "job_offer",
@@ -99,6 +146,7 @@
         "offer_ttl_s": 30
       }
     },
-    {"h2s": {"t": "job_reject", "run": "<id:run>", "reason": "quiet"}, "within_s": 2}
+    {"h2s": {"t": "job_reject", "run": "<id:run>", "reason": "quiet"}, "within_s": 2},
+    {"state": {"side": "hub", "expect": {"run": {"id": "<id:run>", "state": "failed"}, "backoff": "quiet"}}}
   ]
 }

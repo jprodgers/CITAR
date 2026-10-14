@@ -24,7 +24,7 @@
     "hub": {
       "machine": {
         "settings": {
-          "llm": {"enabled": true, "slots": 4, "allow_swaps": false},
+          "llm": {"enabled": false, "slots": 4, "allow_swaps": false},
           "cpu": {
             "enabled": true,
             "threads": 8,
@@ -72,7 +72,7 @@
         "protocol": 2,
         "machine": {"id": "<id:machine>", "name": "<string>"},
         "settings": {
-          "llm": {"enabled": true, "slots": 4, "allow_swaps": false},
+          "llm": {"enabled": false, "slots": 4, "allow_swaps": false},
           "cpu": {
             "enabled": true,
             "threads": 8,
@@ -93,7 +93,7 @@
       "h2s": {
         "t": "settings_ack",
         "effective": {
-          "llm": {"enabled": true, "slots": 2},
+          "llm": {"enabled": false, "slots": 2},
           "cpu": {
             "enabled": true,
             "threads": 4,
@@ -107,6 +107,6 @@
         "limits": "<any>"
       }
     },
-    {"state": {"side": "hub", "expect": {"capacity": 2, "cpu_threads": 4}}}
+    {"state": {"side": "hub", "expect": {"llm_slots": 2, "cpu_threads": 4, "work": ["lab_game"]}}}
   ]
 }

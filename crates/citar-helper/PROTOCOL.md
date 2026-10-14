@@ -111,14 +111,27 @@ field: a `ts` that is not a number is `type` at `ts`.
 **What a receiver does with a bad frame.** It logs the error (at most once a minute per frame type)
 and drops the frame. Then:
 - the hub, receiving a bad first frame (not a `hello`, or a `hello` that fails its checks other than
-  `protocol`), closes the connection with code 4400 and sends nothing; a `hello` failing `protocol`
-  gets [the v1 refusal](#the-v1-refusal);
+  `protocol`), closes the connection with code 4400 and sends no frame; the close's reason is the
+  protocol error's code, a space and its path (`missing machine`, `value llm.models`; the code
+  alone when the path is empty), cut to 123 bytes, and the helper logs it. A `hello` failing
+  `protocol` gets [the v1 refusal](#the-v1-refusal);
 - the helper, receiving a bad `request` whose `id` it can read, answers `error` code `bad_request`
   for that id; a bad `job_offer` whose `run` it can read, `job_reject` reason `bad_spec`;
 - the hub, receiving a bad `done`, `error` or `cancelled` whose `id` it can read, fails that request
-  as an `endpoint` error, not retryable; a bad job frame whose `run` it can read, fails that run as
-  `job_failed` `internal` would;
+  as an `endpoint` error, not retryable, and frees its slot; a bad job frame whose `run` it can
+  read, fails that run as a retryable `job_failed` `internal` would (the job is queued again);
 - anything else bad is only logged.
+
+**What the helper caps.** Values that come from the machine are cut to fit before they are sent,
+so a correct helper never sends a frame the hub refuses for them:
+- its models (`hello.llm.models`, `catalog.models`): at most 500, chosen in this order: the models
+  of its allowlist, then the loaded ones, then the others by key; a model whose key is longer than
+  200 characters is left out, and a label longer than 200 is cut;
+- `machine.name` (its `--name`) to 120 characters and `machine.hostname` to 255;
+- every `text` it sends (an `error`'s, a `job_failed`'s or an `update_status`'s `message`) to 4,000
+  characters.
+An endpoint that lists hundreds of models (an `openai_compatible` service such as OpenRouter) is
+therefore served as its first 500 by that order, not refused.
 
 ## Versioning
 
@@ -146,13 +159,13 @@ frame, the code alone decides.
 
 | Code | Sent when | The helper, when no frame said more |
 |---|---|---|
-| 4400 | the first frame was not a valid `hello` | reconnects with backoff |
+| 4400 | the first frame was not a valid `hello` (the reason names the protocol error) | logs the reason and reconnects with backoff |
 | 4401 | after `refused` `token` or `key` | a permanent refusal |
 | 4403 | after `shutdown` `revoked`, `disabled`, `deleted` or `suspended` | a permanent refusal |
 | 4408 | no `hello` within 30 s, or the connection went stale (70 s without a frame) | reconnects with backoff |
 | 4409 | after `shutdown` `replaced` | a permanent refusal |
 | 4426 | after the v1 refusal, or `refused` `protocol` or `build` | waits for an upgrade (10 minutes) |
-| 4429 | after `refused` `rate` | retries after 60 s |
+| 4429 | after `refused` `rate` | retries after 60 s (`retry_after_s` when the frame came) |
 | 1000, 1001 | the server stopped or restarted | reconnects with backoff |
 
 Any other code, and a connection lost without a close, is a reconnect with backoff.
@@ -220,7 +233,12 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
     `--no-llm`); `capped` names it when the site says on and the helper has none;
   - `cpu.yield_to_llm`: the site's choice, as given.
   The scheduler's capacity and the dispatcher's threads read `effective`, never the site's figures
-  alone.
+  alone, and **never more than the site's either**: the hub clamps each acknowledgement to what it
+  asked. It uses, for each number, the smaller of the site's figure and `effective`'s (a site `0`
+  takes `effective`'s); for `cpu.work`, the kinds both list; and model or CPU work on only when the
+  site and `effective` both say on. A correct helper's `effective` is never above the site's, so
+  the clamp changes nothing for it; an acknowledgement that claims more (a modified or broken
+  helper) is logged and flags the machine `settings_overclaim`, shown to administrators.
 - **`catalog`** (helper → server): the endpoint's models, whenever the list or the loaded set
   changes; the helper polls its endpoint every 30 s. The models of `hello.llm.models` are the first
   catalog.
@@ -434,14 +452,16 @@ marked *optional* is required.
 without jobs, which is never offered one); `target` `string 1..64` (the Rust target triple); `label`
 `string ≤200` (`git describe`, or `unknown`).
 
-**Machine:** `hostname` `string ≤255`; `name` `string ≤120` (the owner's `--name`); `os` `string
-1..32` and `arch` `string 1..32` (Rust's `std::env::consts` names: `windows`, `linux`, `macos`;
-`x86_64`, `aarch64`); `public_key` `base64:32` (the machine key's ed25519 public key).
+**Machine:** `hostname` `string ≤255` (cut by the helper); `name` `string ≤120` (the owner's
+`--name`, cut by the helper); `os` `string 1..32` and `arch` `string 1..32` (Rust's
+`std::env::consts` names: `windows`, `linux`, `macos`; `x86_64`, `aarch64`); `public_key`
+`base64:32` (the machine key's ed25519 public key).
 
 **Llm:** `enabled` `bool` (false for `--no-llm`); `provider` `"lmstudio" | "ollama" |
 "openai_compatible" | "openai" | null` (`null` when not enabled); `slots` `int 0..16` (its local
-ceiling of concurrent requests); `stream` `bool` (whether it streams from its endpoint); `models`
-`[Model] ≤500`.
+ceiling of concurrent requests, the configured `max_concurrent`; 0 with `--no-llm`); `stream`
+`bool` (whether it streams from its endpoint); `models` `[Model] ≤500` (at most 500, chosen as
+[What the helper caps](#values-and-checks) says).
 
 **Model:** `key` `string 1..200` (the helper drops a model whose key is longer); `label` `string
 ≤200` (truncated by the helper); `context` `int | null` (the context length, when the endpoint
@@ -774,9 +794,14 @@ A transcript is one behaviour, as the frames and events both sides see:
 - `plays` names the package from which each side plays it: the transcripts are written with the
   protocol and played by each side as its implementation arrives. A transcript whose behaviour only
   one side can show has `null` for the other side and says why in `one_side`: one that scripts a
-  server other than the 0.1.6 hub (a 0.1.5 server, a future one refusing protocol 2), which only the
-  helper's side can stand in for; one that scripts a helper misbehaving (a protocol 1 `hello`, a
-  missing hello, a lost offer, a silent run, a duplicate result), which only the hub's side can.
+  server other than the 0.1.6 hub (a 0.1.5 server, a future one refusing protocol 2, a close whose
+  frame was lost, a broken frame), which only the helper's side can stand in for; one that scripts
+  a helper misbehaving (a protocol 1 `hello`, a missing hello, a lost offer, a silent run, a
+  duplicate result, a broken frame, an acknowledgement claiming more than the site asked), which
+  only the hub's side can. A frame a correct peer never sends but the side under test must still
+  handle (a request past the helper's slots, an offer past the dispatcher's checks) is sent through
+  a test hook the transcript names with an act (`force_request`, `force_offer`), so both sides play
+  it.
 - `values` gives an example value for every `<id:NAME>` the transcript uses (the loader refuses a
   transcript that lacks one).
 - `setup` gives each side's starting state in that side's own terms (the helper's configuration and
@@ -784,24 +809,31 @@ A transcript is one behaviour, as the frames and events both sides see:
   refuses a key it does not know, so a typo is never a silent pass.
 
 **Steps** happen in order. Each step is an object with one action key, and optionally `within_s`
-(it must happen within that many seconds of the previous step, on the player's clock) and `note`:
+(it must happen within that many seconds of the previous step, on the player's clock), `note`,
+`invalid` (a frame sent broken on purpose, refused with that protocol error code) and `lost`:
 
 | Step | Helper side (the real helper, a fake server) | Hub side (the real hub, a fake helper) |
 |---|---|---|
 | `{"s2h": FRAME}` | the fake server sends FRAME, realized | the hub must send a frame matching FRAME next |
 | `{"h2s": FRAME}` | the helper must send a frame matching FRAME next | the fake helper sends FRAME, realized |
-| `{"close": {"by": "server" \| "helper", "code": C}}` | the fake server closes with C, or the helper must close with C | the hub must close with C, or the fake helper closes with C |
+| `{"close": {"by": "server" \| "helper", "code": C, "reason": R}}` | the fake server closes with C (and the reason R, when given), or the helper must close with C | the hub must close with C (and the reason R, when given), or the fake helper closes with C |
 | `{"drop": {"by": "server" \| "helper"}}` | the connection is lost without a close (by the fake server), or the helper must drop it | the hub must drop it, or the fake helper drops it |
 | `{"connect": {}}` | the helper must open a new connection | the fake helper opens a new connection |
 | `{"wait": {"s": N, "quiet": B}}` | N seconds pass on the player's clock (a fake clock where it has one); with `quiet` true, the helper must send nothing but background frames and open no connection meanwhile | the same, for the hub |
 | `{"endpoint": {…}}` | the fake model endpoint's next behaviour, or an expectation of it | skipped |
 | `{"host": {…}}` | the fake job host's next behaviour | skipped |
-| `{"act": {"side": S, "do": A}}` | when S is `helper`: something happens around the helper (its owner turns CPU lending off) | when S is `hub`: something happens on the server (an administrator revokes the token, the owner changes the machine's settings, a benchmark lease starts) |
+| `{"act": {"side": S, "do": A}}` | when S is `helper`: something happens around the helper (its quiet hours begin); skipped when S is `hub` | when S is `hub`: something happens on the server (a seat submits a completion, the dispatcher queues a job, an administrator revokes the token); skipped when S is `helper` |
 | `{"state": {"side": S, "expect": {…}}}` | checked when S is `helper` | checked when S is `hub` |
+
+**A lost frame** (`"lost": true` on a frame step) is one the connection takes with it: the side
+under test must still send it (the helper side checks the helper's `h2s` frame; the hub side, the
+hub's `s2h` frame), and the scripted side never sends it, since its receiver never gets it. It is
+how a transcript says "the connection dropped after the result was sent and before the hub had it".
 
 **Background frames.** `ping`, `pong`, `status` and `power` come on their own clocks (keep-alive,
 every change of the counts in flight, every minute), so a transcript cannot place each one:
-- a player answers an unscripted `ping` with `pong`;
+- a player answers an unscripted `ping` (one no step expects) with `pong`, unless its setup says
+  `answer_pings: false`;
 - while the next step expects a frame of another type, the side under test's background frames are
   skipped;
 - when the next step expects a background type, frames of that type that do not match are skipped
@@ -814,17 +846,29 @@ wait match it in order.
 
 **Setup keys**, the whole vocabulary (both loaders refuse any other):
 - helper side: `config` (the helper's own settings, with these keys only: `max_concurrent`,
-  `models`, `quiet`, `cpu`, `updates`, `no_llm`, `stream`, `no_power`), `clock` (`"fake"`: the
-  player drives time), `home` (`{"results": [run]}`, results held from a previous connection;
-  `{"running": [run]}`, runs still playing), `service` (true: run with `--service`), `endpoint`
-  (`{"models": [Model]}`, the fake endpoint's models), `update_key` (`"test"`: a build trusting the
-  run's throwaway update key, P4.3.8);
+  `models`, `quiet`, `cpu` (`{enabled, threads, cpu_percent, memory_mb, work}`: its own switch and
+  ceiling), `updates`, `no_llm`, `stream`, `no_power`), `clock` (`"fake"`: the player drives
+  time), `home` (`{"results": [run]}`, results held from a previous connection; `{"running": [run]}`,
+  runs still playing), `service` (true: run with `--service`), `endpoint` (`{"models": [Model]}`,
+  the fake endpoint's models), `update_key` (`"test"`: a build trusting the run's throwaway update
+  key, P4.3.8), `host` (the fake job host from the start, with these keys only: `verifiable`, false
+  when its canary or self-check fails; `start`, `"limits"` when it cannot be started under the
+  limits);
 - hub side: `machine` (with these keys only: `settings`, the site's settings of the machine; `key`,
   `"registered"` or `"other"`, a key already on its row; `trust`, its tier), `token` (`"valid"` or
   `"revoked"`), `rate` (`{"failures": N}`, distinct failing tokens already counted for the
   address), `jobs` (`[{"run": run, "state": …}]`, runs the dispatcher already holds), `update`
   (`{"manifest": …}`, a manifest the server relays), `clock` (`"fake"`), `ping_s` (the hub's ping
-  interval for the run).
+  interval for the run), `local_executor` (false: the host's own executor takes no job, so a job
+  queued again stays queued for the helper), `verification` (P4.5.8's settings for the run, over
+  the defaults: `{"trusted_rate": 0}` samples no trusted machine's result), `answer_pings` (false:
+  the fake helper answers no ping by itself).
+Every transcript that reaches a `welcome` gives the site's settings (`machine.settings`, and the
+same object in the welcome) and the helper's `max_concurrent` and `cpu`, and its `settings_ack` is
+what those make by the rules of [Settings](#settings-catalog-hardware-power-and-status): nothing
+depends on the machine a player runs on, and the hub side's fake helper acknowledges what a correct
+helper would. Those a helper plays before 4-04 keep the site's model work off, so the
+acknowledgement is the same whether the helper serves models yet or not.
 
 **Endpoint steps** (helper side): `{"models": [Model]}` (the model list from now on);
 `{"respond": {"stream": [delta, …], "delay_ms": N}}` (the next completion streams these
@@ -839,12 +883,45 @@ OpenAI-format deltas, N ms apart); `{"respond": {"json": body}}` (a non-streamin
 `{"finish": "<golden:jobs/NAME>"}` (the run ends with that golden job's outcome); `{"crash_host":
 "memory" | "other"}` (the job host dies); `{"hang": true}` (the run stops reporting).
 
-**Actions** (`act.do`) and **state expectations** (`state.expect`) are each side's own words, a
-string or an object: for example the hub's `"revoke_token"`, `{"set_settings": Settings}`,
-`"rescan"`, `"benchmark_start"`, and the helper's `"cpu_off"`; the helper's `{"in_flight": 0}`,
-`{"exit": 78}`, `{"held_results": []}`, and the hub's `{"slot_free": true, "draining": 0}`,
-`{"run": {"id": "<id:run>", "state": "expired"}}`, `{"result_lines": 1}`. As with `setup`, a player
-refuses a word it does not know.
+**Actions** (`act.do`: a word, or an object whose one key is the word and whose value is its
+argument), the whole vocabulary (both loaders refuse any other; a player refuses a word it cannot
+yet do rather than skip it):
+- helper side: `quiet_begins` (its local quiet hours begin, on its fake clock);
+- hub side: `submit_request` (a seat submits the completion the next `request` step shows, through
+  the scheduler), `force_request` (the next `request` step's request is sent past the scheduler's
+  own checks, slots, quiet hours and catalog, through a test hook: a request a correct scheduler
+  never sends, for the helper's refusal of it), `cancel_request` (the seat cancels the request in
+  flight, as closing its turn does), `drop_connection` (the hub's side of the socket is dropped
+  without a close, through a test hook), `queue_job` (the dispatcher gets the job the next
+  `job_offer` step shows, its cost table seeded so that the offer's figures are the step's, and
+  offers it as it would), `force_offer` (the next `job_offer` step's offer is sent past the
+  dispatcher's eligibility checks through a test hook: an offer a correct dispatcher never makes,
+  for the helper's reject of it), `lab_stop` (the dispatcher's offers stop, as `citar lab stop`:
+  running runs go on, nothing is offered), `abort_run` (the dispatcher aborts the run), `expire_run`
+  (the dispatcher expires the run, as its deadline would), `{"set_settings": Settings}` (the
+  machine's settings change on the site), `rescan` (the dialog's "Rescan now"), `reset_key` (the
+  owner resets the machine's key), `revoke_token`, `disable_machine`, `second_connection` (another
+  process presents the machine's token), `benchmark_start` and `benchmark_end` (a benchmark lease
+  on the machine goes live and ends), `manifest_arrives` (the server learns of a signed manifest).
+
+**State expectations** (`state.expect`'s keys), the whole vocabulary (both loaders refuse any
+other):
+- helper side: `in_flight` (completions in flight), `exit` (the process exited with this code),
+  `held_results` (the runs whose results it holds), `running` (the runs it is playing), `downloads`
+  (update downloads made), `logged` (a line of its log contains this text);
+- hub side: `slot_free` and `draining` (the request's slot, and the slots draining), `flags` (flags
+  the machine carries), `step` (the parsed step: `{"tool_calls": [names]}`), `requeued` (this
+  request is queued again), `request` (`{"id", "failed": code}`: this request failed, with that
+  cause, and is not retried on the machine), `llm_slots`, `cpu_threads`, `cpu_percent`,
+  `memory_mb`, `work` and `cpu_enabled` (the figures the scheduler and the dispatcher use for the
+  machine, after the clamp), `quiet` (the machine is in its helper's quiet hours), `models` and
+  `loaded` (its catalog's keys, and the loaded ones), `last_report` (`"updated"`), `power_rows`
+  (rows written), `key` (the key on its row), `audit` (audit actions written), `token_lookups`,
+  `audit_rows` and `rate_count` (what a refused hello cost), `run` (`{"id", "state"}`, a
+  `cpu_job_runs` state), `job` (the job's state), `result_lines` (lines in the results file for
+  the job), `backoff` (the reject reason the dispatcher backs off for the machine),
+  `mem_mb_raised`, `claim_failures`, `events` (ledger events for the run), `update_status` (the
+  last one reported).
 
 ### The matcher language
 
@@ -871,8 +948,12 @@ A frame in a transcript is a **pattern**:
 | `"<golden:SET/NAME>"`, `"<golden:SET/NAME/FIELD>"` | a value equal to the golden set SET's entry NAME (or its FIELD), from the set's committed file (`jobs`: `crates/citar-jobs/golden/jobs.json`) |
 
 Bindings live for the whole transcript, across both directions and every connection. A player may
-bind names before the first step: the token it configured or issued (`token`), its own jobs build
-(`jobs_build`), the machine's id when it made the row (`machine`).
+bind names before the first step: the token it configured or issued (`token`), its own jobs build,
+bot versions and ruleset id (`jobs_build`, `bots`, `ruleset`), the machine's id when it made the
+row (`machine`). The job transcripts' hellos carry `<id:jobs_build>`, `<id:bots>` and
+`<id:ruleset>`, so the hub side's fake helper presents the hub's own build and the dispatcher
+offers it work. A fake clock starts where its player puts it: `values.quiet_until` is far in the
+future, so quiet hours a fake helper reports are in force on any clock.
 
 **Realizing.** The scripted side sends a pattern by realizing it: literals as written; `<id:NAME>` as
 NAME's binding, or else `values[NAME]` (which then binds it); `<golden:…>` as the golden value; any

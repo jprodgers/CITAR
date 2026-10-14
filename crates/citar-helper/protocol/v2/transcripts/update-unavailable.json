@@ -8,7 +8,30 @@
     "machine": "sv_0123456789abcdef",
     "token": "cwt_example_0123456789abcdef0123456789abcdef"
   },
-  "setup": {"helper": {}, "hub": {"update": {"manifest": "signed with the test key"}}},
+  "setup": {
+    "helper": {
+      "config": {
+        "max_concurrent": 1,
+        "cpu": {"enabled": false, "threads": 1, "cpu_percent": 10, "memory_mb": 512, "work": ["lab_game"]}
+      }
+    },
+    "hub": {
+      "machine": {
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        }
+      },
+      "update": {"manifest": "signed with the test key"}
+    }
+  },
   "steps": [
     {
       "h2s": {
@@ -43,7 +66,17 @@
         "t": "welcome",
         "protocol": 2,
         "machine": {"id": "<id:machine>", "name": "<string>"},
-        "settings": "<any>",
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
         "ping_s": "<int:5..300>",
         "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
         "update": {"manifest": "<string>", "signature": "<base64>"},
@@ -51,7 +84,24 @@
       },
       "within_s": 5
     },
-    {"h2s": {"t": "settings_ack", "effective": "<any>", "capped": "<any>", "limits": "<any>"}},
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": false, "slots": 1},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": [],
+        "limits": "<any>"
+      }
+    },
     {
       "h2s": {"t": "update_status", "state": "unavailable", "version": "<any>", "message": "<string>"},
       "within_s": 5

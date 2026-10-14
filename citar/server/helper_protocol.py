@@ -10,6 +10,8 @@ accept from that sender; ``tests/test_helper_protocol.py`` holds this module to 
   and ``ts``; an ``Ignored`` for a type the receiver does not accept from that sender.
 - ``helper_frame`` / ``server_frame`` and the builders below them: a frame's text from its fields, checked the same
   way, stamped with ``ts``.
+- ``close_reason``: what the hub closes a bad hello with (code 4400); ``request_params``: a seat's sampling parameters
+  brought within the protocol's bounds before ``request`` builds the frame.
 
 This replaces protocol 1 (``citar/worker/protocol.py``) when 4-05 switches the hub to protocol 2 and deletes the
 Python worker; until then nothing on the server speaks it.
@@ -45,6 +47,8 @@ CLOSE_STALE = 4408
 CLOSE_REPLACED = 4409
 CLOSE_PROTOCOL = 4426
 CLOSE_RATE = 4429
+#: The longest close reason a WebSocket close frame carries, in bytes of UTF-8.
+MAX_CLOSE_REASON = 123
 
 #: The protocol errors, in the order the checks run.
 ERROR_CODES = ("too_large", "too_deep", "not_json", "not_object", "no_type", "protocol", "missing", "type", "value",
@@ -714,6 +718,15 @@ def v1_refusal() -> str:
     return server_frame("error", id="", message=V1_REFUSAL_MESSAGE)
 
 
+def close_reason(error: ProtocolError) -> str:
+    """The reason a bad first frame is closed with (code 4400, PROTOCOL.md "Values and checks"): the protocol error's
+    code, a space and its path (the code alone when the path is empty), cut to 123 bytes on a character. The helper
+    logs it, so a helper whose hello the hub refuses learns why instead of reconnecting blind."""
+    reason = f"{error.code} {error.path}" if error.path else error.code
+    raw = reason.encode("utf-8")[:MAX_CLOSE_REASON]
+    return raw.decode("utf-8", errors="ignore")
+
+
 def welcome(machine_id: str, machine_name: str, settings: dict, ping_s: int, server: dict, update: Optional[dict],
             keep: list, drop: list, resend: list) -> str:
     return server_frame("welcome", protocol=PROTOCOL, machine={"id": machine_id, "name": machine_name},
@@ -740,6 +753,75 @@ def request(request_id: str, model: str, messages: list, tools: Optional[list], 
             timeout_s: float) -> str:
     return server_frame("request", id=request_id, model=model, messages=messages, tools=tools, params=params,
                         timeout_s=timeout_s)
+
+
+def _finite(v) -> Optional[float]:
+    """A number, or a string holding one, as a finite float; ``None`` for anything else (a boolean included)."""
+    if isinstance(v, str):
+        try:
+            v = float(v.strip())
+        except ValueError:
+            return None
+    x = as_number(v)
+    return x
+
+
+def _whole(v) -> Optional[int]:
+    """A whole number (an int, an integral float, a string of digits) as an int; ``None`` for anything else."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except ValueError:
+            return None
+    if isinstance(v, float) and math.isfinite(v) and v.is_integer():
+        return int(v)
+    return None
+
+
+def request_params(raw: dict) -> tuple[dict, list]:
+    """A seat's sampling parameters (``temperature max_tokens top_p seed reasoning_effort``, copied from what its member
+    saved), brought within the protocol's bounds so ``request`` never refuses them: numbers given as text read as
+    numbers, ``temperature`` and ``top_p`` clamped to 0..2 and 0..1, ``max_tokens`` to 1..1,048,576; a value that
+    cannot fit (a word for a number, a fraction of a token, a seed outside 0..2^53 - 1, an empty or overlong
+    ``reasoning_effort``) is dropped. Other parameters pass as they are (the helper drops them; P4.2.4) unless they
+    are not JSON. ``None`` means not set. Returns the parameters and the names of those changed or dropped, for one
+    log line per seat."""
+    out, changed = {}, []
+    for name, v in raw.items():
+        if v is None:
+            continue
+        got = None
+        if name in ("temperature", "top_p"):
+            x = _finite(v)
+            if x is not None:
+                hi = 2.0 if name == "temperature" else 1.0
+                got = v if (x == v and 0.0 <= x <= hi and not isinstance(v, str)) else min(max(x, 0.0), hi)
+        elif name == "max_tokens":
+            n = _whole(v)
+            if n is not None:
+                got = min(max(n, 1), 1048576)
+        elif name == "seed":
+            n = _whole(v)
+            if n is not None and 0 <= n <= 2 ** 53 - 1:
+                got = n
+        elif name == "reasoning_effort":
+            if isinstance(v, str) and 1 <= len(v) <= 32:
+                got = v
+        else:
+            try:
+                json.dumps(v, allow_nan=False)
+                got = v
+            except (TypeError, ValueError):
+                got = None
+        if got is None or type(got) is not type(v) or got != v:
+            changed.append(name)
+        if got is not None:
+            out[name] = got
+    return out, changed
 
 
 def cancel(request_id: str) -> str:

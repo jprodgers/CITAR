@@ -12,6 +12,7 @@
     "helper": {
       "config": {
         "no_llm": true,
+        "max_concurrent": 1,
         "cpu": {
           "enabled": true,
           "threads": 4,
@@ -92,8 +93,18 @@
     {
       "h2s": {
         "t": "settings_ack",
-        "effective": {"llm": {"enabled": false, "slots": 0}, "cpu": "<any>"},
-        "capped": "<any>",
+        "effective": {
+          "llm": {"enabled": false, "slots": 0},
+          "cpu": {
+            "enabled": true,
+            "threads": 4,
+            "cpu_percent": 25,
+            "memory_mb": 2048,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": ["llm.enabled", "llm.slots", "cpu.threads", "cpu.work"],
         "limits": "<any>"
       }
     }

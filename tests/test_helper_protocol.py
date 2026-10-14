@@ -6,7 +6,8 @@ in ``crates/citar-helper/protocol/v2/``, which the helper's own tests read too.
 - Gate 2: PROTOCOL.md's frame table is exactly the frame types this side knows.
 - Gate 3: 2,000 random mutations of the valid frames raise nothing but ``ProtocolError``.
 - Gate 4: every transcript loads, every frame in it realizes into a frame that passes its checks, and each matcher
-  accepts and refuses what it should.
+  accepts and refuses what it should. The hub can drive every transcript it plays: each frame it starts has its act,
+  and each settings_ack is what a correct helper sends for the transcript's settings (4-01's fix round).
 """
 import json
 import random
@@ -139,6 +140,40 @@ class Builders(unittest.TestCase):
                 self.assertIsInstance(frame["ts"], float)
         self.assertNotIn("retry_after_s", json.loads(HP.refused("token", "no")))
         self.assertIsInstance(HP.parse_helper_frame(HP.ping(HP.HELPER)), dict)
+
+    def test_the_close_reason_names_the_protocol_error_in_123_bytes(self):
+        for raw, want in (('{"t": "hello", "protocol": 2}', "missing token"), ("[1]", "not_object"),
+                          ("{", "not_json")):
+            with self.assertRaises(HP.ProtocolError) as caught:
+                HP.parse_helper_frame(raw)
+            self.assertEqual(HP.close_reason(caught.exception), want)
+        long = HP.ProtocolError("value", "llm.models." + "\u00e9" * 200, "x")
+        reason = HP.close_reason(long)
+        self.assertLessEqual(len(reason.encode("utf-8")), HP.MAX_CLOSE_REASON)
+        self.assertTrue(reason.startswith("value llm.models."))
+        reason.encode("utf-8").decode("utf-8")   # cut on a character, never inside one
+
+    def test_seat_parameters_are_brought_within_the_protocol_s_bounds(self):
+        """A seat's overrides are copied verbatim from what a member saved (``pool.seats``); the request builder refuses
+        anything outside the protocol's bounds, so ``request_params`` coerces and clamps them first and says what it
+        changed (4-05's ``WorkerConversation.step`` logs that once per seat)."""
+        params, changed = HP.request_params({"temperature": 3, "max_tokens": "4096", "top_p": -0.5, "seed": -1,
+                                             "reasoning_effort": "", "frequency_penalty": 0.5})
+        self.assertEqual(params, {"temperature": 2.0, "max_tokens": 4096, "top_p": 0.0, "frequency_penalty": 0.5})
+        self.assertEqual(changed, ["temperature", "max_tokens", "top_p", "seed", "reasoning_effort"])
+        for raw, want in (({"max_tokens": 0}, {"max_tokens": 1}), ({"max_tokens": 4096.0}, {"max_tokens": 4096}),
+                          ({"max_tokens": 10 ** 9}, {"max_tokens": 1048576}), ({"temperature": "0.7"},
+                                                                                {"temperature": 0.7}),
+                          ({"temperature": "hot"}, {}), ({"temperature": float("nan")}, {}),
+                          ({"temperature": True}, {}), ({"max_tokens": 12.5}, {}), ({"seed": "7"}, {"seed": 7}),
+                          ({"seed": 2 ** 60}, {}), ({"reasoning_effort": "x" * 33}, {}),
+                          ({"reasoning_effort": "high"}, {"reasoning_effort": "high"}), ({"temperature": None}, {}),
+                          ({"temperature": 0.7, "max_tokens": 2048}, {"temperature": 0.7, "max_tokens": 2048})):
+            with self.subTest(raw=raw):
+                self.assertEqual(HP.request_params(raw)[0], want)
+                HP.request("0123456789abcdef", "m", [{"role": "user", "content": "hi"}], None,
+                           HP.request_params(raw)[0], 60)
+        self.assertEqual(HP.request_params({"temperature": 0.7, "max_tokens": 2048})[1], [])
 
     def test_a_builder_refuses_what_a_receiver_would(self):
         with self.assertRaises(HP.ProtocolError) as caught:
@@ -348,12 +383,114 @@ class Transcripts(unittest.TestCase):
 
         first = paragraph("**Background frames.**").splitlines()[0].split(" come ")[0]
         self.assertEqual(tuple(first.split("`")[1::2]), F.BACKGROUND)
-        for start, keys in (("**Setup keys**", F.HELPER_SETUP + F.HELPER_CONFIG + F.HUB_SETUP + F.HUB_MACHINE),
+        for start, keys in (("**Setup keys**", F.HELPER_SETUP + F.HELPER_CONFIG + F.HELPER_HOST + F.HUB_SETUP
+                             + F.HUB_MACHINE),
                             ("**Endpoint steps**", F.ENDPOINT_KEYS + F.RESPOND_KEYS),
-                            ("**Host steps**", F.HOST_KEYS)):
+                            ("**Host steps**", F.HOST_KEYS),
+                            ("**Actions**", F.HELPER_ACTS + F.HUB_ACTS),
+                            ("**State expectations**", F.HELPER_STATE + F.HUB_STATE)):
             text = paragraph(start)
             for key in keys:
                 self.assertTrue(f"`{key}`" in text or f'"{key}"' in text, f"{start} does not name {key}")
+
+    # The frames the server starts, and the hub acts that start them (PROTOCOL.md, "Actions").
+    CAUSES = {"request": ("submit_request", "force_request"), "cancel": ("cancel_request",),
+              "settings": ("set_settings",), "rescan": ("rescan",), "update": ("manifest_arrives",),
+              "jobs_pause": ("benchmark_start",), "jobs_resume": ("benchmark_end",),
+              "shutdown": ("revoke_token", "disable_machine", "second_connection"),
+              "job_offer": ("queue_job", "force_offer"), "job_abort": ("abort_run",)}
+
+    @staticmethod
+    def _cause(steps, i):
+        """The step that caused step ``i`` on the hub's side: the nearest before it that is not an endpoint, host,
+        state or wait step (none of which the hub acts on)."""
+        for step in reversed(steps[:i]):
+            if step.action not in ("endpoint", "host", "state", "wait"):
+                return step
+        return None
+
+    def test_every_frame_the_hub_starts_has_its_act(self):
+        """The hub's side can drive every transcript it plays: a frame the server starts (a request, a cancel, a job
+        offer, a pushed setting...) and a connection the server drops are each caused by a hub act just before them.
+        A later offer of a job already offered is the dispatcher's own re-offer, and a job_abort may answer a late
+        job_accept."""
+        checked = 0
+        for t in F.transcripts():
+            if t.plays["hub"] is None:
+                continue
+            offered = set()
+            for i, step in enumerate(t.steps):
+                with self.subTest(transcript=t.name, step=i):
+                    cause = self._cause(t.steps, i)
+                    word = F.act_word(cause.body["do"]) if cause is not None and cause.action == "act" else None
+                    if step.action == "drop" and step.body["by"] == HP.SERVER:
+                        self.assertEqual(word, "drop_connection")
+                        checked += 1
+                    if step.action != "s2h" or step.body["t"] not in self.CAUSES:
+                        continue
+                    t_ = step.body["t"]
+                    if t_ == "job_offer":
+                        job = step.body["job"]
+                        if job in offered:
+                            continue
+                        offered.add(job)
+                    if t_ == "job_abort" and cause is not None and cause.action == "h2s" \
+                            and cause.body["t"] == "job_accept":
+                        continue
+                    self.assertIn(word, self.CAUSES[t_], f"{t_} needs one of {self.CAUSES[t_]} before it")
+                    checked += 1
+        self.assertGreater(checked, 50)
+
+    @staticmethod
+    def _literal(v) -> bool:
+        if isinstance(v, dict):
+            return all(Transcripts._literal(x) for x in v.values())
+        if isinstance(v, list):
+            return all(Transcripts._literal(x) for x in v)
+        return F.parse_matcher(v) is None
+
+    def test_every_acknowledgement_is_what_a_correct_helper_sends(self):
+        """Every transcript that reaches a welcome states the site's settings (the hub's setup and the welcome, the
+        same object) and the helper's slots and CPU ceiling, and each settings_ack the helper plays is what those make
+        by PROTOCOL.md's rules, written out in full, so the hub side's fake helper acknowledges exactly that."""
+        acks = 0
+        for t in F.transcripts():
+            site = None
+            for i, step in enumerate(t.steps):
+                with self.subTest(transcript=t.name, step=i):
+                    if step.action == "s2h" and step.body["t"] == "welcome":
+                        site = step.body["settings"]
+                        self.assertIsInstance(site, dict, "the welcome's settings are written out")
+                        self.assertTrue(self._literal(site))
+                        if t.plays["hub"] is not None:
+                            self.assertEqual(site, t.setup["hub"]["machine"]["settings"])
+                    elif step.action == "s2h" and step.body["t"] == "settings":
+                        site = {k: step.body[k] for k in ("llm", "cpu")}
+                    elif step.action == "h2s" and step.body["t"] == "settings_ack":
+                        self.assertIsNotNone(site, "an acknowledgement of no settings")
+                        self.assertTrue(self._literal({k: step.body[k] for k in ("effective", "capped")}))
+                        if t.plays["helper"] is not None:
+                            config = t.setup["helper"]["config"]
+                            self.assertIn("cpu", config)
+                            want = F.expected_ack(site, config)
+                            self.assertEqual({k: step.body[k] for k in ("effective", "capped")}, want)
+                        acks += 1
+        self.assertGreater(acks, 60)
+
+    def test_the_acknowledgement_rules(self):
+        site = {"llm": {"enabled": True, "slots": 4, "allow_swaps": False},
+                "cpu": {"enabled": True, "threads": 0, "cpu_percent": 25, "memory_mb": 4096,
+                        "work": ["reference_game", "lab_game"], "yield_to_llm": False}}
+        config = {"max_concurrent": 2, "cpu": {"enabled": False, "threads": 6, "cpu_percent": 50, "memory_mb": 1024,
+                                               "work": ["lab_game", "ranking_game"]}}
+        self.assertEqual(F.expected_ack(site, config), {
+            "effective": {"llm": {"enabled": True, "slots": 2},
+                          "cpu": {"enabled": False, "threads": 6, "cpu_percent": 25, "memory_mb": 1024,
+                                  "work": ["lab_game"], "yield_to_llm": False}},
+            "capped": ["llm.slots", "cpu.enabled", "cpu.memory_mb", "cpu.work"]})
+        no_llm = {**config, "no_llm": True}
+        self.assertEqual(F.expected_ack(site, no_llm)["effective"]["llm"], {"enabled": False, "slots": 0})
+        self.assertEqual(F.expected_ack(site, no_llm)["capped"][:2], ["llm.enabled", "llm.slots"])
 
     def test_the_hub_plays_the_v1_refusal_and_the_helper_never_does(self):
         for t in F.transcripts():
@@ -394,7 +531,18 @@ class Transcripts(unittest.TestCase):
             (self._with(["steps"], [{"state": {"side": "server", "expect": {}}}]), '"hub"'),
             (self._with(["setup", "helper"], {"confg": {}}), "unknown key"),
             (self._with(["setup", "hub"], {"machine": {"settngs": {}}}), "unknown key"),
+            (self._with(["setup", "helper"], {"host": {"canary": False}}), "unknown key"),
             (self._with(["extra"], 1), "unknown key"),
+            (self._with(["steps"], [{"act": {"side": "hub", "do": "sumbit_request"}}]), "not a word"),
+            (self._with(["steps"], [{"act": {"side": "helper", "do": "rescan"}}]), "not a word"),
+            (self._with(["steps"], [{"act": {"side": "hub", "do": {"a": 1, "b": 2}}}]), "one word"),
+            (self._with(["steps"], [{"act": {"side": "hub", "do": 5}}]), "one word"),
+            (self._with(["steps"], [{"state": {"side": "hub", "expect": {"slots": 1}}}]), "unknown key"),
+            (self._with(["steps"], [{"state": {"side": "helper", "expect": {"draining": 0}}}]), "unknown key"),
+            (self._with(["steps"], [{"connect": {}, "lost": True}]), "frame step only"),
+            (self._with(["steps"], [{"s2h": {"t": "ping"}, "lost": False}]), "frame step only"),
+            (self._with(["steps"], [{"close": {"by": "server", "code": 4400, "reason": 1}}]), "123 bytes"),
+            (self._with(["steps"], [{"close": {"by": "server", "code": 4400, "reason": "x" * 124}}]), "123 bytes"),
         ):
             with self.subTest(why):
                 with self.assertRaises(ValueError) as caught:
@@ -407,6 +555,19 @@ class Transcripts(unittest.TestCase):
         both["one_side"] = "but both play"
         with self.assertRaises(ValueError):
             F.transcript_from(both)
+
+    def test_acts_states_closes_and_lost_frames_load(self):
+        t = F.transcript_from(self._with(["steps"], [
+            {"act": {"side": "hub", "do": "submit_request"}},
+            {"act": {"side": "hub", "do": {"set_settings": {}}}},
+            {"act": {"side": "helper", "do": "quiet_begins"}},
+            {"s2h": {"t": "ping"}, "lost": True},
+            {"close": {"by": "server", "code": 4400, "reason": "missing machine"}},
+            {"state": {"side": "hub", "expect": {"slot_free": True, "draining": 0}}},
+            {"state": {"side": "helper", "expect": {"in_flight": 0}}}]))
+        self.assertEqual([s.lost for s in t.steps], [False, False, False, True, False, False, False])
+        self.assertEqual(t.steps[4].body["reason"], "missing machine")
+        self.assertEqual(F.act_word(t.steps[1].body["do"]), "set_settings")
 
 
 class Matchers(unittest.TestCase):

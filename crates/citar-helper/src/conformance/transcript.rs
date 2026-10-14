@@ -1,8 +1,8 @@
 //! The transcripts (PROTOCOL.md, "Transcripts"): one behaviour each, as the frames and events both
 //! sides see. [`Transcript::load`] reads one and refuses anything a player could misread: an
 //! unknown key, a step with no action or two, a frame of a type its sender never sends, a matcher
-//! spelled wrong, an `<id:NAME>` without a value, a setup key outside the vocabulary.
-//! `tests/helper_fixtures.py` is the server's copy.
+//! spelled wrong, an `<id:NAME>` without a value, a setup key, an act or a state word outside the
+//! vocabulary. `tests/helper_fixtures.py` is the server's copy.
 
 use std::path::Path;
 
@@ -23,8 +23,8 @@ pub enum Side {
 pub enum Action {
     /// `s2h` (the server sends) or `h2s` (the helper sends): a frame pattern.
     Frame { from: Sender, pattern: Value },
-    /// The sender closes the WebSocket with this code.
-    Close { by: Sender, code: u16 },
+    /// The sender closes the WebSocket with this code, and this reason when one is given.
+    Close { by: Sender, code: u16, reason: Option<String> },
     /// The connection is lost without a close.
     Drop { by: Sender },
     /// The helper opens a new connection.
@@ -35,7 +35,8 @@ pub enum Action {
     Endpoint(Map<String, Value>),
     /// The fake job host's next behaviour (helper side only).
     Host(Map<String, Value>),
-    /// Something happens around one side.
+    /// Something happens around one side: one of that side's [`act_words`], alone or as the one
+    /// key of an object holding its argument.
     Act { side: Side, what: Value },
     /// An assertion on one side's state.
     State { side: Side, expect: Map<String, Value> },
@@ -50,6 +51,9 @@ pub struct Step {
     pub note: Option<String>,
     /// A frame sent broken on purpose, refused with this code.
     pub invalid: Option<ErrorCode>,
+    /// A frame lost with the connection: the side under test must send it, and the scripted
+    /// side does not (its receiver never gets it).
+    pub lost: bool,
 }
 
 /// The package from which each side plays a transcript; `None` for a side that cannot.
@@ -82,14 +86,107 @@ pub struct Transcript {
 pub const BACKGROUND: &[&str] = &["ping", "pong", "status", "power"];
 
 /// The helper side's setup keys.
-pub const HELPER_SETUP: &[&str] = &["config", "clock", "home", "service", "endpoint", "update_key"];
+pub const HELPER_SETUP: &[&str] =
+    &["config", "clock", "home", "service", "endpoint", "update_key", "host"];
 /// The keys of `setup.helper.config`: the helper's own settings.
 pub const HELPER_CONFIG: &[&str] =
     &["max_concurrent", "models", "quiet", "cpu", "updates", "no_llm", "stream", "no_power"];
+/// The keys of `setup.helper.host`: the fake job host from the start.
+pub const HELPER_HOST: &[&str] = &["verifiable", "start"];
 /// The hub side's setup keys.
-pub const HUB_SETUP: &[&str] = &["machine", "token", "rate", "jobs", "update", "clock", "ping_s"];
+pub const HUB_SETUP: &[&str] = &[
+    "machine",
+    "token",
+    "rate",
+    "jobs",
+    "update",
+    "clock",
+    "ping_s",
+    "local_executor",
+    "verification",
+    "answer_pings",
+];
 /// The keys of `setup.hub.machine`.
 pub const HUB_MACHINE: &[&str] = &["settings", "key", "trust"];
+/// What can happen around the helper (`act` with side `helper`).
+pub const HELPER_ACTS: &[&str] = &["quiet_begins"];
+/// What can happen on the server (`act` with side `hub`).
+pub const HUB_ACTS: &[&str] = &[
+    "submit_request",
+    "force_request",
+    "cancel_request",
+    "drop_connection",
+    "queue_job",
+    "force_offer",
+    "lab_stop",
+    "abort_run",
+    "expire_run",
+    "set_settings",
+    "rescan",
+    "reset_key",
+    "revoke_token",
+    "disable_machine",
+    "second_connection",
+    "benchmark_start",
+    "benchmark_end",
+    "manifest_arrives",
+];
+/// What a `state` step may expect of the helper.
+pub const HELPER_STATE: &[&str] =
+    &["in_flight", "exit", "held_results", "running", "downloads", "logged"];
+/// What a `state` step may expect of the hub.
+pub const HUB_STATE: &[&str] = &[
+    "slot_free",
+    "draining",
+    "flags",
+    "step",
+    "requeued",
+    "request",
+    "llm_slots",
+    "cpu_threads",
+    "cpu_percent",
+    "memory_mb",
+    "work",
+    "cpu_enabled",
+    "quiet",
+    "models",
+    "loaded",
+    "last_report",
+    "power_rows",
+    "key",
+    "audit",
+    "token_lookups",
+    "audit_rows",
+    "rate_count",
+    "run",
+    "job",
+    "result_lines",
+    "backoff",
+    "mem_mb_raised",
+    "claim_failures",
+    "events",
+    "update_status",
+];
+/// The longest close reason, in bytes (a WebSocket close frame's limit).
+pub const MAX_CLOSE_REASON: usize = 123;
+
+/// The act words of one side.
+#[must_use]
+pub fn act_words(side: Side) -> &'static [&'static str] {
+    match side {
+        Side::Helper => HELPER_ACTS,
+        Side::Hub => HUB_ACTS,
+    }
+}
+
+/// The state words of one side.
+#[must_use]
+pub fn state_words(side: Side) -> &'static [&'static str] {
+    match side {
+        Side::Helper => HELPER_STATE,
+        Side::Hub => HUB_STATE,
+    }
+}
 /// An `endpoint` step's keys.
 pub const ENDPOINT_KEYS: &[&str] = &[
     "models",
@@ -108,7 +205,7 @@ const TOP_KEYS: &[&str] =
     &["name", "about", "refs", "plays", "one_side", "values", "setup", "steps"];
 const ACTIONS: &[&str] =
     &["s2h", "h2s", "close", "drop", "connect", "wait", "endpoint", "host", "act", "state"];
-const MODIFIERS: &[&str] = &["within_s", "note", "invalid"];
+const MODIFIERS: &[&str] = &["within_s", "note", "invalid", "lost"];
 
 fn unknown_keys(map: &Map<String, Value>, allowed: &[&str], what: &str) -> Result<(), String> {
     match map.keys().find(|k| !allowed.contains(&k.as_str())) {
@@ -276,6 +373,9 @@ fn check_setup(helper: &Map<String, Value>, hub: &Map<String, Value>) -> Result<
             "setup.helper.config",
         )?;
     }
+    if let Some(host) = helper.get("host") {
+        unknown_keys(object(Some(host), "setup.helper.host")?, HELPER_HOST, "setup.helper.host")?;
+    }
     if let Some(machine) = hub.get("machine") {
         unknown_keys(
             object(Some(machine), "setup.hub.machine")?,
@@ -284,6 +384,15 @@ fn check_setup(helper: &Map<String, Value>, hub: &Map<String, Value>) -> Result<
         )?;
     }
     Ok(())
+}
+
+/// The word an `act` step's `do` names: a string, or the one key of an object.
+fn act_word(what: &Value) -> Result<&str, String> {
+    match what {
+        Value::String(w) => Ok(w),
+        Value::Object(m) if m.len() == 1 => Ok(m.keys().next().map_or("", String::as_str)),
+        _ => Err("act.do must be a word or an object of one word".to_owned()),
+    }
 }
 
 fn step(v: &Value) -> Result<Step, String> {
@@ -308,13 +417,22 @@ fn step(v: &Value) -> Result<Step, String> {
         }
         "close" => {
             let b = object(Some(body), "close")?;
-            unknown_keys(b, &["by", "code"], "close")?;
+            unknown_keys(b, &["by", "code", "reason"], "close")?;
             let code = b
                 .get("code")
                 .and_then(Value::as_u64)
                 .and_then(|c| u16::try_from(c).ok())
                 .ok_or("close.code must be a close code")?;
-            Action::Close { by: sender(b.get("by"), "close.by")?, code }
+            let reason = match b.get("reason") {
+                None => None,
+                Some(Value::String(r)) if r.len() <= MAX_CLOSE_REASON => Some(r.clone()),
+                Some(_) => {
+                    return Err(format!(
+                        "close.reason must be a string of at most {MAX_CLOSE_REASON} bytes"
+                    ));
+                }
+            };
+            Action::Close { by: sender(b.get("by"), "close.by")?, code, reason }
         }
         "drop" => {
             let b = object(Some(body), "drop")?;
@@ -362,20 +480,25 @@ fn step(v: &Value) -> Result<Step, String> {
         "act" => {
             let b = object(Some(body), "act")?;
             unknown_keys(b, &["side", "do"], "act")?;
-            let what = b
-                .get("do")
-                .filter(|d| d.is_string() || d.is_object())
-                .ok_or("act.do must be a word or an object")?;
-            Action::Act { side: side(b.get("side"), "act.side")?, what: what.clone() }
+            let s = side(b.get("side"), "act.side")?;
+            let what = b.get("do").ok_or("act.do must be a word or an object of one word")?;
+            let word = act_word(what)?;
+            if !act_words(s).contains(&word) {
+                return Err(format!(
+                    "act.do {word:?} is not a word of that side (allowed: {})",
+                    act_words(s).join(", ")
+                ));
+            }
+            Action::Act { side: s, what: what.clone() }
         }
         // "state", the only action left.
         _ => {
             let b = object(Some(body), "state")?;
             unknown_keys(b, &["side", "expect"], "state")?;
-            Action::State {
-                side: side(b.get("side"), "state.side")?,
-                expect: object(b.get("expect"), "state.expect")?.clone(),
-            }
+            let s = side(b.get("side"), "state.side")?;
+            let expect = object(b.get("expect"), "state.expect")?;
+            unknown_keys(expect, state_words(s), "state.expect")?;
+            Action::State { side: s, expect: expect.clone() }
         }
     };
     let within_s = match map.get("within_s") {
@@ -399,7 +522,12 @@ fn step(v: &Value) -> Result<Step, String> {
             Some(code)
         }
     };
-    Ok(Step { action, within_s, note, invalid })
+    let lost = match map.get("lost") {
+        None => false,
+        Some(Value::Bool(true)) if matches!(action, Action::Frame { .. }) => true,
+        Some(_) => return Err("lost is true, on a frame step only".to_owned()),
+    };
+    Ok(Step { action, within_s, note, invalid, lost })
 }
 
 #[cfg(test)]
@@ -448,7 +576,39 @@ mod tests {
             (with(&["steps"], json!([{"state": {"side": "server", "expect": {}}}])), "\"hub\""),
             (with(&["setup", "helper"], json!({"confg": {}})), "unknown key"),
             (with(&["setup", "hub"], json!({"machine": {"settngs": {}}})), "unknown key"),
+            (with(&["setup", "helper"], json!({"host": {"canary": false}})), "unknown key"),
             (with(&["extra"], json!(1)), "unknown key"),
+            (
+                with(&["steps"], json!([{"act": {"side": "hub", "do": "sumbit_request"}}])),
+                "not a word",
+            ),
+            (with(&["steps"], json!([{"act": {"side": "helper", "do": "rescan"}}])), "not a word"),
+            (
+                with(&["steps"], json!([{"act": {"side": "hub", "do": {"a": 1, "b": 2}}}])),
+                "one word",
+            ),
+            (with(&["steps"], json!([{"act": {"side": "hub", "do": 5}}])), "one word"),
+            (
+                with(&["steps"], json!([{"state": {"side": "hub", "expect": {"slots": 1}}}])),
+                "unknown key",
+            ),
+            (
+                with(&["steps"], json!([{"state": {"side": "helper", "expect": {"draining": 0}}}])),
+                "unknown key",
+            ),
+            (with(&["steps"], json!([{"connect": {}, "lost": true}])), "frame step only"),
+            (with(&["steps"], json!([{"s2h": {"t": "ping"}, "lost": false}])), "frame step only"),
+            (
+                with(&["steps"], json!([{"close": {"by": "server", "code": 4400, "reason": 1}}])),
+                "123 bytes",
+            ),
+            (
+                with(
+                    &["steps"],
+                    json!([{"close": {"by": "server", "code": 4400, "reason": "x".repeat(124)}}]),
+                ),
+                "123 bytes",
+            ),
         ] {
             let e = Transcript::from_value(&bad).expect_err(why);
             assert!(e.contains(why), "{why}: {e}");
@@ -460,5 +620,36 @@ mod tests {
         let mut both = base();
         both["one_side"] = json!("but both play");
         assert!(Transcript::from_value(&both).is_err());
+    }
+
+    #[test]
+    fn acts_states_closes_and_lost_frames_load() {
+        let t = Transcript::from_value(&with(
+            &["steps"],
+            json!([
+                {"act": {"side": "hub", "do": "submit_request"}},
+                {"act": {"side": "hub", "do": {"set_settings": {}}}},
+                {"act": {"side": "helper", "do": "quiet_begins"}},
+                {"s2h": {"t": "ping"}, "lost": true},
+                {"close": {"by": "server", "code": 4400, "reason": "missing machine"}},
+                {"close": {"by": "helper", "code": 1000}},
+                {"state": {"side": "hub", "expect": {"slot_free": true, "draining": 0}}},
+                {"state": {"side": "helper", "expect": {"in_flight": 0}}}
+            ]),
+        ))
+        .expect("loads");
+        assert!(t.steps[3].lost && !t.steps[0].lost);
+        assert_eq!(
+            t.steps[4].action,
+            Action::Close {
+                by: Sender::Server,
+                code: 4400,
+                reason: Some("missing machine".to_owned())
+            }
+        );
+        assert_eq!(
+            t.steps[5].action,
+            Action::Close { by: Sender::Helper, code: 1000, reason: None }
+        );
     }
 }

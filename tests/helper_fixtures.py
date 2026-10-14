@@ -2,8 +2,9 @@
 
 Reads ``crates/citar-helper/protocol/v2/``: the frame fixtures, the transcripts (checked as strictly as the helper's
 loader checks them: an unknown key, a step with no action or two, a frame of a type its sender never sends, a matcher
-spelled wrong, an ``<id:NAME>`` without a value, a setup key outside the vocabulary are all refused), their matcher
-language (``matches`` and ``realize``), and PROTOCOL.md's frame table. The helper's copy is
+spelled wrong, an ``<id:NAME>`` without a value, a setup key, an act or a state word outside the vocabulary are all
+refused), their matcher language (``matches`` and ``realize``), the acknowledgement a correct helper makes of the
+site's settings (``expected_ack``), and PROTOCOL.md's frame table. The helper's copy is
 ``crates/citar-helper/src/conformance``; ``tests/test_helper_protocol.py`` holds both to the same files, and from 4-05
 the fake helper plays the transcripts against the real hub with this module.
 """
@@ -363,17 +364,34 @@ def matchers_in(v, path: str = ""):
 #: The frames that come on their own clocks (PROTOCOL.md, "Background frames"): a player skips them unless the next
 #: step expects their type, and a quiet wait allows them.
 BACKGROUND = ("ping", "pong", "status", "power")
-HELPER_SETUP = ("config", "clock", "home", "service", "endpoint", "update_key")
+HELPER_SETUP = ("config", "clock", "home", "service", "endpoint", "update_key", "host")
 HELPER_CONFIG = ("max_concurrent", "models", "quiet", "cpu", "updates", "no_llm", "stream", "no_power")
-HUB_SETUP = ("machine", "token", "rate", "jobs", "update", "clock", "ping_s")
+HELPER_HOST = ("verifiable", "start")
+HUB_SETUP = ("machine", "token", "rate", "jobs", "update", "clock", "ping_s", "local_executor", "verification",
+             "answer_pings")
 HUB_MACHINE = ("settings", "key", "trust")
+#: What can happen around each side (``act``), and what a ``state`` step may expect of it (PROTOCOL.md, "Actions" and
+#: "State expectations").
+HELPER_ACTS = ("quiet_begins",)
+HUB_ACTS = ("submit_request", "force_request", "cancel_request", "drop_connection", "queue_job", "force_offer",
+            "lab_stop", "abort_run", "expire_run", "set_settings", "rescan", "reset_key", "revoke_token",
+            "disable_machine", "second_connection", "benchmark_start", "benchmark_end", "manifest_arrives")
+HELPER_STATE = ("in_flight", "exit", "held_results", "running", "downloads", "logged")
+HUB_STATE = ("slot_free", "draining", "flags", "step", "requeued", "request", "llm_slots", "cpu_threads", "cpu_percent",
+             "memory_mb", "work", "cpu_enabled", "quiet", "models", "loaded", "last_report", "power_rows", "key",
+             "audit", "token_lookups", "audit_rows", "rate_count", "run", "job", "result_lines", "backoff",
+             "mem_mb_raised", "claim_failures", "events", "update_status")
+ACTS = {"helper": HELPER_ACTS, "hub": HUB_ACTS}
+STATES = {"helper": HELPER_STATE, "hub": HUB_STATE}
+#: The longest close reason, in bytes (a WebSocket close frame's limit).
+MAX_CLOSE_REASON = 123
 ENDPOINT_KEYS = ("models", "respond", "expect_request", "absent", "expect_disconnect_within_ms",
                  "expect_no_tokens_after")
 RESPOND_KEYS = ("stream", "delay_ms", "json", "status", "body", "hang")
 HOST_KEYS = ("progress", "finish", "crash_host", "hang")
 TOP_KEYS = ("name", "about", "refs", "plays", "one_side", "values", "setup", "steps")
 ACTIONS = ("s2h", "h2s", "close", "drop", "connect", "wait", "endpoint", "host", "act", "state")
-MODIFIERS = ("within_s", "note", "invalid")
+MODIFIERS = ("within_s", "note", "invalid", "lost")
 _PACKAGE = re.compile(r"4-\d\d")
 
 
@@ -384,6 +402,8 @@ class Step:
     within_s: Optional[float] = None
     note: str = ""
     invalid: str = ""
+    #: A frame lost with the connection: the side under test sends it, the scripted side does not.
+    lost: bool = False
 
     @property
     def sender(self) -> Optional[str]:
@@ -447,11 +467,14 @@ def _step(data) -> Step:
         if t not in HP.FRAMES[sender]:
             raise ValueError(f"the {sender} never sends {t!r}")
     elif kind == "close":
-        _unknown(_object(body, "close"), ("by", "code"), "close")
+        _unknown(_object(body, "close"), ("by", "code", "reason"), "close")
         if body.get("by") not in (HP.SERVER, HP.HELPER):
             raise ValueError('close.by must be "server" or "helper"')
         if type(body.get("code")) is not int or not 0 <= body["code"] <= 65535:
             raise ValueError("close.code must be a close code")
+        reason = body.get("reason", "")
+        if not isinstance(reason, str) or len(reason.encode("utf-8")) > MAX_CLOSE_REASON:
+            raise ValueError(f"close.reason must be a string of at most {MAX_CLOSE_REASON} bytes")
     elif kind == "drop":
         _unknown(_object(body, "drop"), ("by",), "drop")
         if body.get("by") not in (HP.SERVER, HP.HELPER):
@@ -474,13 +497,14 @@ def _step(data) -> Step:
         _unknown(_object(body, "act"), ("side", "do"), "act")
         if body.get("side") not in ("helper", "hub"):
             raise ValueError('act.side must be "helper" or "hub"')
-        if not isinstance(body.get("do"), (str, dict)):
-            raise ValueError("act.do must be a word or an object")
+        word = act_word(body.get("do"))
+        if word not in ACTS[body["side"]]:
+            raise ValueError(f"act.do {word!r} is not a word of that side (allowed: {', '.join(ACTS[body['side']])})")
     else:   # state
         _unknown(_object(body, "state"), ("side", "expect"), "state")
         if body.get("side") not in ("helper", "hub"):
             raise ValueError('state.side must be "helper" or "hub"')
-        _object(body.get("expect"), "state.expect")
+        _unknown(_object(body.get("expect"), "state.expect"), STATES[body["side"]], "state.expect")
     within = _positive(data["within_s"], "within_s") if "within_s" in data else None
     note = _text(data["note"], "note") if "note" in data else ""
     invalid = ""
@@ -490,7 +514,19 @@ def _step(data) -> Step:
         if data["invalid"] not in HP.ERROR_CODES:
             raise ValueError("invalid must be a protocol error code")
         invalid = data["invalid"]
-    return Step(kind, body, within, note, invalid)
+    lost = data.get("lost", False)
+    if "lost" in data and (lost is not True or kind not in ("s2h", "h2s")):
+        raise ValueError("lost is true, on a frame step only")
+    return Step(kind, body, within, note, invalid, lost)
+
+
+def act_word(do) -> str:
+    """The word an ``act`` step's ``do`` names: a string, or the one key of an object."""
+    if isinstance(do, str):
+        return do
+    if isinstance(do, dict) and len(do) == 1:
+        return next(iter(do))
+    raise ValueError("act.do must be a word or an object of one word")
 
 
 def transcript_from(data) -> Transcript:
@@ -522,6 +558,8 @@ def transcript_from(data) -> Transcript:
     _unknown(hub, HUB_SETUP, "setup.hub")
     if "config" in helper:
         _unknown(_object(helper["config"], "setup.helper.config"), HELPER_CONFIG, "setup.helper.config")
+    if "host" in helper:
+        _unknown(_object(helper["host"], "setup.helper.host"), HELPER_HOST, "setup.helper.host")
     if "machine" in hub:
         _unknown(_object(hub["machine"], "setup.hub.machine"), HUB_MACHINE, "setup.hub.machine")
     raw_steps = top.get("steps")
@@ -554,3 +592,41 @@ def load_transcript(path: Path) -> Transcript:
 def transcripts() -> list[Transcript]:
     """Every transcript, sorted by name."""
     return [load_transcript(p) for p in sorted((FIXTURES / "transcripts").glob("*.json"))]
+
+
+# ---------------------------------------------------------------------------- the acknowledgement of settings
+
+def expected_ack(site: dict, config: dict) -> dict:
+    """The ``effective`` and ``capped`` a correct helper with this configuration (a transcript's
+    ``setup.helper.config``) acknowledges for the site's settings (PROTOCOL.md, "Settings"): each figure the smaller of
+    the site's and the ceiling, the site's 0 meaning the ceiling; the kinds both list; CPU work on only when the site
+    and the machine's own switch say on; model work on only when the site says on and the helper has a model
+    endpoint."""
+    capped = set()
+    no_llm = bool(config.get("no_llm"))
+    local = config["cpu"]
+
+    def figure(name, asked, ceiling):
+        if asked == 0:
+            return ceiling
+        if ceiling < asked:
+            capped.add(name)
+            return ceiling
+        return asked
+
+    if site["llm"]["enabled"] and no_llm:
+        capped.add("llm.enabled")
+    if site["cpu"]["enabled"] and not local["enabled"]:
+        capped.add("cpu.enabled")
+    if any(k not in local["work"] for k in site["cpu"]["work"]):
+        capped.add("cpu.work")
+    effective = {
+        "llm": {"enabled": site["llm"]["enabled"] and not no_llm,
+                "slots": figure("llm.slots", site["llm"]["slots"], 0 if no_llm else config.get("max_concurrent", 1))},
+        "cpu": {"enabled": site["cpu"]["enabled"] and local["enabled"],
+                "threads": figure("cpu.threads", site["cpu"]["threads"], local["threads"]),
+                "cpu_percent": figure("cpu.cpu_percent", site["cpu"]["cpu_percent"], local["cpu_percent"]),
+                "memory_mb": figure("cpu.memory_mb", site["cpu"]["memory_mb"], local["memory_mb"]),
+                "work": [k for k in HP.KINDS_OF_WORK if k in site["cpu"]["work"] and k in local["work"]],
+                "yield_to_llm": site["cpu"]["yield_to_llm"]}}
+    return {"effective": effective, "capped": [c for c in HP.CAPPED if c in capped]}
