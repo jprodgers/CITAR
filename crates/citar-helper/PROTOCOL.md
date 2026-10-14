@@ -129,9 +129,14 @@ so a correct helper never sends a frame the hub refuses for them:
   200 characters is left out, and a label longer than 200 is cut;
 - `machine.name` (its `--name`) to 120 characters and `machine.hostname` to 255;
 - every `text` it sends (an `error`'s, a `job_failed`'s or an `update_status`'s `message`) to 4,000
-  characters.
+  characters;
+- what a `done` carries from its endpoint: at most 512 tool calls (the first by index; the rest are
+  left out), each call's `id` and `function.name` to 200 characters and its `type` to 32, and
+  `finish_reason` to 64. An answer whose text passes 8 MiB, or whose `done` would be larger than a
+  frame (its text escaped as JSON), is not sent: the request gets `error` `endpoint`, not
+  retryable.
 An endpoint that lists hundreds of models (an `openai_compatible` service such as OpenRouter) is
-therefore served as its first 500 by that order, not refused.
+therefore served as its first 500 by that order, not refused. Each cut is logged once.
 
 ## Versioning
 
@@ -268,7 +273,30 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
 - **`done`** (helper → server): the completion **as the endpoint returned it**, assembled from the
   stream when streaming. Nothing is parsed or repaired on the helper: the server parses tool calls.
   `gen_s` runs from sending the HTTP request to its last byte, `ttft_s` to the first token (`null`
-  when no token came); `usage` is `null` when the endpoint gave none.
+  when no token came, or when the answer was not streamed, whose first token is not seen apart from
+  the rest); `usage` is `null` when the endpoint gave none.
+- **How the helper builds the request and reads the answer** (the endpoint is OpenAI's chat API at
+  `<base>/chat/completions` on all four kinds):
+  - the body is the request's `model`, `messages` and `tools` as they came (`tools` left out when
+    `null` or empty: endpoints refuse an empty list), the five parameters it carries, and the
+    helper's own `stream` (with `stream_options.include_usage` when streaming);
+  - a streamed answer is read from its server-sent events up to `data: [DONE]`: `content` and
+    `reasoning` (the endpoint's `reasoning_content`, or `reasoning` where it names it so) are the
+    deltas' text concatenated, `null` when no delta carried any (an empty string when one carried
+    `""`); tool calls are put together by their `index` (a delta with no index starts a new call
+    when it has an `id`, and adds to the last call otherwise), keeping the first `id` and `type` and
+    concatenating `function.name` and `function.arguments` (arguments the endpoint gives as JSON
+    other than a string are written out as text); a call with no `type` is a `function` call;
+    `finish_reason` is the last one given and `usage` the last one given that has both counts. Only
+    choice 0 is read. `cancelled.tokens_out` counts the events that carried text;
+  - an endpoint that answers a streaming request with JSON is read as unstreamed (`streamed`
+    false); one that refuses a streaming request with tools (HTTP 400, 422, 500 or 501 whose body
+    names streaming and tools or functions) is asked again without streaming, and every request
+    with tools on that connection to the server then goes unstreamed (logged once: a cancel may not
+    stop such a generation).
+- **The order of the helper's own refusals:** `unknown_model` (no endpoint, `--no-llm`, or a model
+  outside the owner's allowlist), then `closed`, then `busy`; then the request runs. A `request`
+  whose `id` is already in flight is ignored (logged): one answer per id.
 - **`error`** (helper → server): the request did not complete. Codes:
 
   | `code` | Meaning | `retryable` |
@@ -277,7 +305,7 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
   | `closed` | the helper's local quiet hours | true |
   | `unknown_model` | the model is outside the helper's allowlist or not served | false |
   | `stopping` | the helper is shutting down | true |
-  | `endpoint` | the local endpoint failed or refused (the message carries its status and the first 300 characters of its body) | as the endpoint's failure suggests |
+  | `endpoint` | the local endpoint failed or refused (the message carries its status and the first 300 characters of its body) | as the endpoint's failure suggests: true when it could not be reached or its connection broke, and for HTTP 408, 425, 429 and 5xx; false for any other status, an answer that does not read, an error the endpoint reported in its answer, and an answer too large for a frame |
   | `timeout` | `timeout_s` passed (the helper caps it at 900 s) | false |
   | `bad_request` | the request frame failed its checks | false |
 
@@ -292,6 +320,9 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
 - **A lost connection cancels every completion in flight on the helper**, as a `cancel` would, with
   nobody to answer: the server has already failed those requests. After the reconnect the helper's
   slots are free, so the server's next requests are not refused `busy`.
+- **A helper that stops** (Ctrl-C, its service manager) stops every completion in flight the same
+  way and answers each `error` `stopping`, retryable, before it closes the socket, so the server can
+  give them to another machine at once.
 
 ## Jobs
 
@@ -462,7 +493,7 @@ without jobs, which is never offered one); `target` `string 1..64` (the Rust tar
 `std::env::consts` names: `windows`, `linux`, `macos`; `x86_64`, `aarch64`); `public_key`
 `base64:32` (the machine key's ed25519 public key).
 
-**Llm:** `enabled` `bool` (false for `--no-llm`); `provider` `"lmstudio" | "ollama" |
+**Llm:** `enabled` `bool` (true unless `--no-llm`); `provider` `"lmstudio" | "ollama" |
 "openai_compatible" | "openai" | null` (the endpoint's kind; `null` with `--no-llm`, which has none); `slots` `int 0..16` (its local
 ceiling of concurrent requests, the configured `max_concurrent`; 0 with `--no-llm`); `stream`
 `bool` (whether it streams from its endpoint); `models` `[Model] ≤500` (at most 500, chosen as
@@ -600,7 +631,7 @@ fields are kept in the frame, and the helper drops them (logged once per name).
 | `finish_reason` | `string ≤64 \| null` | the endpoint's, raw |
 | `usage` | Usage `\| null` | the endpoint's token counts, or `null` |
 | `gen_s` | `number` | seconds from the HTTP request to its last byte |
-| `ttft_s` | `number \| null` | seconds to the first token, or `null` |
+| `ttft_s` | `number \| null` | seconds to the first token, or `null` (no token, or not streamed) |
 | `streamed` | `bool` | whether it streamed |
 
 **ToolCall:** `id` `string ≤200` (as the endpoint gave it; may be empty); `type` `string ≤32`
