@@ -483,7 +483,8 @@ HELLO = Struct(
                                                 Field("memory_mb", MEMORY_MB), Field("work", KINDS))),
                         Field("limits", LIMITS), Field("verifiable", Bool()), Field("bots", BOTS),
                         Field("ruleset", HEX64))),
-    Field("report", Struct(Field("hardware", Nullable(Obj())), Field("hardware_source", OneOf("scan", "file", "none")))),
+    Field("report", Struct(Field("hardware", Nullable(Obj())),
+                           Field("hardware_source", OneOf("scan", "file", "none")))),
     Field("running", RUNS),
     Field("results", RUNS),
     Field("updates", OneOf("auto", "notify", "off")),
@@ -520,13 +521,12 @@ REQUEST = Struct(
                          opt("top_p", FRACTION), opt("seed", INT), opt("reasoning_effort", Str(1, 32)))),
     Field("timeout_s", Num(1.0, 86400.0)),
 )
+TOOL_CALL = Struct(Field("id", Str(0, 200)), Field("type", Str(0, 32)),
+                   Field("function", Struct(Field("name", Str(0, 200)), Field("arguments", Str()))))
 DONE = Struct(
     Field("id", ID),
-    Field("message", Struct(
-        Field("content", Nullable(Str())), Field("reasoning", Nullable(Str())),
-        Field("tool_calls", List(Struct(Field("id", Str(0, 200)), Field("type", Str(0, 32)),
-                                        Field("function", Struct(Field("name", Str(0, 200)), Field("arguments", Str())))),
-                                 0, 512)))),
+    Field("message", Struct(Field("content", Nullable(Str())), Field("reasoning", Nullable(Str())),
+                            Field("tool_calls", List(TOOL_CALL, 0, 512)))),
     Field("finish_reason", Nullable(Str(0, 64))),
     Field("usage", Nullable(Struct(Field("prompt_tokens", INT), Field("completion_tokens", INT),
                                    Field("reasoning_tokens", Nullable(INT)), Field("cached_tokens", Nullable(INT))))),
@@ -561,7 +561,8 @@ JOB_RESULT = Struct(
     Field("claim", CLAIM),
     Field("signature", B64(64)),
 )
-JOB_FAILED = Struct(Field("run", RUN), Field("code", OneOf("memory", "deadline", "host", "aborted_locally", "internal")),
+JOB_FAILED = Struct(Field("run", RUN),
+                    Field("code", OneOf("memory", "deadline", "host", "aborted_locally", "internal")),
                     Field("message", TEXT), Field("retryable", Bool()))
 
 #: What each side sends: its frame types and their fields (PROTOCOL.md, "The frame table").

@@ -483,7 +483,8 @@ class Matchers(unittest.TestCase):
         out = F.realize(pattern, b, values, self.golden, example)
         self.assertEqual(out, {"t": "x", "token": "tok", "id": "0123456789abcdef", "count": 1, "rate": 2.0,
                                "name": "ex", "list": ["aaaaaaaaaaaa", "aaaaaaaaaaaa"], "flag": False,
-                               "key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "g": 30, "h": 12, "any": {"k": 1}})
+                               "key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "g": 30, "h": 12,
+                               "any": {"k": 1}})
         self.assertEqual(b["req"], "0123456789abcdef")
         with self.assertRaises(ValueError):
             F.realize("<id:nobody>", b, values)
