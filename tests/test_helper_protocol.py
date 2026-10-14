@@ -323,6 +323,23 @@ class Transcripts(unittest.TestCase):
                      "job-reoffer-backoff", "jobs-pause", "update-notify", "keepalive-ping-pong", "shutdown-revoked"):
             self.assertIn(want, names)
 
+    def test_the_loaders_vocabularies_are_protocol_md_s(self):
+        md = F.PROTOCOL_MD.read_text(encoding="utf-8")
+
+        def paragraph(start):
+            at = md.index(start)
+            end = md.find("\n\n", at)
+            return md[at:] if end < 0 else md[at:end]
+
+        first = paragraph("**Background frames.**").splitlines()[0].split(" come ")[0]
+        self.assertEqual(tuple(first.split("`")[1::2]), F.BACKGROUND)
+        for start, keys in (("**Setup keys**", F.HELPER_SETUP + F.HELPER_CONFIG + F.HUB_SETUP + F.HUB_MACHINE),
+                            ("**Endpoint steps**", F.ENDPOINT_KEYS + F.RESPOND_KEYS),
+                            ("**Host steps**", F.HOST_KEYS)):
+            text = paragraph(start)
+            for key in keys:
+                self.assertTrue(f"`{key}`" in text or f'"{key}"' in text, f"{start} does not name {key}")
+
     def test_the_hub_plays_the_v1_refusal_and_the_helper_never_does(self):
         for t in F.transcripts():
             if t.name.startswith("handshake-v1-refusal-") and t.name != "handshake-v1-refusal-received":

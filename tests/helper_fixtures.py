@@ -361,6 +361,9 @@ def matchers_in(v, path: str = ""):
 
 # ---------------------------------------------------------------------------- transcripts
 
+#: The frames that come on their own clocks (PROTOCOL.md, "Background frames"): a player skips them unless the next
+#: step expects their type, and a quiet wait allows them.
+BACKGROUND = ("ping", "pong", "status", "power")
 HELPER_SETUP = ("config", "clock", "home", "service", "endpoint", "update_key")
 HELPER_CONFIG = ("max_concurrent", "models", "quiet", "cpu", "updates", "no_llm", "stream", "no_power")
 HUB_SETUP = ("machine", "token", "rate", "jobs", "update", "clock", "ping_s")

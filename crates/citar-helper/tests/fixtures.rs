@@ -155,6 +155,41 @@ fn every_transcript_loads_and_its_frames_realize_into_valid_frames() {
     assert!(frames > 300, "{frames} frames realized");
 }
 
+/// The vocabularies the transcript loader enforces are the ones PROTOCOL.md documents: the
+/// background frames word for word, and every setup, endpoint and host key named there.
+#[test]
+fn the_loaders_vocabularies_are_protocol_md_s() {
+    use citar_helper::conformance::transcript::{
+        BACKGROUND, ENDPOINT_KEYS, HELPER_CONFIG, HELPER_SETUP, HOST_KEYS, HUB_MACHINE, HUB_SETUP,
+        RESPOND_KEYS,
+    };
+    let md = std::fs::read_to_string(crate_dir().join("PROTOCOL.md")).expect("PROTOCOL.md reads");
+    let paragraph = |start: &str| -> String {
+        let at = md.find(start).unwrap_or_else(|| panic!("PROTOCOL.md has no {start}"));
+        let rest = &md[at..];
+        rest[..rest.find("\n\n").unwrap_or(rest.len())].to_owned()
+    };
+    let ticked = |line: &str| -> Vec<String> {
+        line.split('`').skip(1).step_by(2).map(str::to_owned).collect()
+    };
+    let background = paragraph("**Background frames.**");
+    let first = background.lines().next().unwrap_or_default();
+    assert_eq!(ticked(first.split(" come ").next().unwrap_or_default()), BACKGROUND);
+    for (start, keys) in [
+        ("**Setup keys**", [HELPER_SETUP, HELPER_CONFIG, HUB_SETUP, HUB_MACHINE].concat()),
+        ("**Endpoint steps**", [ENDPOINT_KEYS, RESPOND_KEYS].concat()),
+        ("**Host steps**", HOST_KEYS.to_vec()),
+    ] {
+        let text = paragraph(start);
+        for key in keys {
+            assert!(
+                text.contains(&format!("`{key}`")) || text.contains(&format!("\"{key}\"")),
+                "{start} does not name {key}"
+            );
+        }
+    }
+}
+
 /// The transcripts the design names for 4-01's scope are all there (P4.2.9, Appendix E 4-01).
 #[test]
 fn the_transcripts_cover_the_protocol() {

@@ -36,8 +36,9 @@ Contents: [Transport and framing](#transport-and-framing) ·
     a receiver accepts a frame without it.
 - **Size.** A frame is at most 8 MiB (8,388,608 bytes of UTF-8). A receiver refuses a larger one
   without parsing it. A `job_result` is well under 1 MiB.
-- **Depth.** Arrays and objects nest at most 64 deep, the frame itself being depth 1. A receiver
-  refuses a deeper frame before parsing it.
+- **Depth.** Arrays and objects nest at most 64 deep, the frame itself being depth 1, counted on
+  the text outside strings. A receiver refuses a deeper frame as `too_deep` before reading any of
+  it, so a deep frame that is not JSON either is `too_deep` too.
 - **Direction.** Each side accepts only the frame types the other side sends (the frame table's
   `From` column). A frame whose type the receiver does not accept from that sender, including a type
   it has never heard of, is **ignored**: logged once per type at debug level, never an error, never
@@ -79,8 +80,10 @@ the invalid fixtures hold.
 **Fields.** A field marked *optional* may be absent; when present it has its type (`null` is not
 absent). Every other field is required. A receiver **drops fields it does not know** from the
 protocol's own objects (the frame, and every object a field table describes) and keeps everything
-inside an `object` value untouched. **Closed** objects refuse unknown fields instead: in protocol 2
-only the job claim (`job_result.claim`), because its bytes are signed.
+inside an `object` value untouched. **Open** objects keep their other fields whole as well: a
+request's messages and its params. **Closed** objects refuse unknown fields instead: in protocol 2
+only the job claim (`job_result.claim`), because its bytes are signed. A sender writes no field a
+frame does not have (the server's builders refuse one).
 
 **Numbers on the wire.** A JSON integer literal outside −2^63 .. 2^64 − 1 is read as a floating-point
 number (as `serde_json` reads it), so it is never an `int`. A number literal that does not fit a
@@ -784,30 +787,45 @@ A transcript is one behaviour, as the frames and events both sides see:
 | `{"close": {"by": "server" \| "helper", "code": C}}` | the fake server closes with C, or the helper must close with C | the hub must close with C, or the fake helper closes with C |
 | `{"drop": {"by": "server" \| "helper"}}` | the connection is lost without a close (by the fake server), or the helper must drop it | the hub must drop it, or the fake helper drops it |
 | `{"connect": {}}` | the helper must open a new connection | the fake helper opens a new connection |
-| `{"wait": {"s": N, "quiet": B}}` | N seconds pass on the player's clock (a fake clock where it has one); with `quiet` true, the helper must send nothing and open no connection meanwhile | the same, for the hub |
+| `{"wait": {"s": N, "quiet": B}}` | N seconds pass on the player's clock (a fake clock where it has one); with `quiet` true, the helper must send nothing but background frames and open no connection meanwhile | the same, for the hub |
 | `{"endpoint": {…}}` | the fake model endpoint's next behaviour, or an expectation of it | skipped |
 | `{"host": {…}}` | the fake job host's next behaviour | skipped |
 | `{"act": {"side": S, "do": A}}` | when S is `helper`: something happens around the helper (its owner turns CPU lending off) | when S is `hub`: something happens on the server (an administrator revokes the token, the owner changes the machine's settings, a benchmark lease starts) |
 | `{"state": {"side": S, "expect": {…}}}` | checked when S is `helper` | checked when S is `hub` |
 
-`ping` and `pong` frames a transcript does not script are answered (`pong` to a `ping`) and skipped
-while matching, unless the next step is itself a `ping` or a `pong`.
+**Background frames.** `ping`, `pong`, `status` and `power` come on their own clocks (keep-alive,
+every change of the counts in flight, every minute), so a transcript cannot place each one:
+- a player answers an unscripted `ping` with `pong`;
+- while the next step expects a frame of another type, the side under test's background frames are
+  skipped;
+- when the next step expects a background type, frames of that type that do not match are skipped
+  until one matches, within the step's `within_s` (or the player's default wait);
+- a `quiet` wait allows them, except those of the type the step after it expects (so "no `ping`
+  before 45 s of silence" can be said): it asserts that no other frame comes and no connection
+  opens.
+Any other frame that arrives during a `wait` that is not `quiet` is kept, and the steps after the
+wait match it in order.
 
-**Setup keys.** Helper side: `config` (the helper's `helper.json` keys: `max_concurrent`, `models`,
-`quiet`, `cpu`, `updates`, `no_llm`), `clock` (`"fake"`: the player drives time), `home` (`{"results":
-[run]}`, results held from a previous connection; `{"running": [run]}`, runs still playing), `service`
-(true: run with `--service`), `endpoint` (`{"models": [Model]}`, the fake endpoint's models). Hub side:
-`machine` (`{"settings": Settings}`, the site's settings of the machine; `{"key": "registered" |
-"other"}`, a key already on its row), `token` (`"valid" | "revoked"`), `rate` (`{"failures": N}`,
-distinct failing tokens already counted for the address), `jobs` (`[{"run": run, "state": …}]`,
-runs the dispatcher already holds), `update` (`{"manifest": …}`, a manifest the server relays),
-`clock` (`"fake"`).
+**Setup keys**, the whole vocabulary (both loaders refuse any other):
+- helper side: `config` (the helper's own settings, with these keys only: `max_concurrent`,
+  `models`, `quiet`, `cpu`, `updates`, `no_llm`, `stream`, `no_power`), `clock` (`"fake"`: the
+  player drives time), `home` (`{"results": [run]}`, results held from a previous connection;
+  `{"running": [run]}`, runs still playing), `service` (true: run with `--service`), `endpoint`
+  (`{"models": [Model]}`, the fake endpoint's models), `update_key` (`"test"`: a build trusting the
+  run's throwaway update key, P4.3.8);
+- hub side: `machine` (with these keys only: `settings`, the site's settings of the machine; `key`,
+  `"registered"` or `"other"`, a key already on its row; `trust`, its tier), `token` (`"valid"` or
+  `"revoked"`), `rate` (`{"failures": N}`, distinct failing tokens already counted for the
+  address), `jobs` (`[{"run": run, "state": …}]`, runs the dispatcher already holds), `update`
+  (`{"manifest": …}`, a manifest the server relays), `clock` (`"fake"`), `ping_s` (the hub's ping
+  interval for the run).
 
 **Endpoint steps** (helper side): `{"models": [Model]}` (the model list from now on);
 `{"respond": {"stream": [delta, …], "delay_ms": N}}` (the next completion streams these
 OpenAI-format deltas, N ms apart); `{"respond": {"json": body}}` (a non-streaming body);
 `{"respond": {"status": S, "body": "…"}}` (an HTTP error); `{"respond": {"hang": true}}` (no answer);
-`{"expect_request": PATTERN}` (the next HTTP request's body matches PATTERN);
+`{"expect_request": PATTERN}` (the next HTTP request's body matches PATTERN), with `"absent":
+[key, …]` the keys it must not have;
 `{"expect_disconnect_within_ms": N}` (the client goes within N ms of the previous step);
 `{"expect_no_tokens_after": "disconnect"}` (no delta was sent after the client went).
 
@@ -830,7 +848,9 @@ A frame in a transcript is a **pattern**:
 - an **array** matches an array of the same length, element by element (**closed**);
 - any other literal (a string, number, boolean or `null`) matches an equal value, numbers compared by
   value;
-- a **string of exactly one of these forms is a matcher** (any other string is a literal):
+- a **string of exactly one of these forms is a matcher**. A string `<kind>` or `<kind:…>` whose kind
+  is one of these must be well formed, and the loaders refuse a transcript where it is not
+  (`<int:5>`, `<id:>`); any other string, `"<think>"` included, is a literal:
 
 | Matcher | Matches |
 |---|---|

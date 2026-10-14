@@ -77,6 +77,10 @@ pub struct Transcript {
     pub steps: Vec<Step>,
 }
 
+/// The frames that come on their own clocks (PROTOCOL.md, "Background frames"): a player skips
+/// them unless the next step expects their type, and a `quiet` wait allows them.
+pub const BACKGROUND: &[&str] = &["ping", "pong", "status", "power"];
+
 /// The helper side's setup keys.
 pub const HELPER_SETUP: &[&str] = &["config", "clock", "home", "service", "endpoint", "update_key"];
 /// The keys of `setup.helper.config`: the helper's own settings.
