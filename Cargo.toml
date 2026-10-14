@@ -86,9 +86,9 @@ rustls-pki-types = { version = "1.15", features = ["std"] }
 # helper dials only its configured endpoint.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 # The proxy's completions (4-04): HTTP/1.1 on a connection the request's own task dials and
-# drives, so dropping the request closes the socket there and then (real cancel, P4.3.4); a pooled
-# client's connection lives in a task of its own and notices a dropped response only when the
-# endpoint next writes. Both are already in the lock through reqwest, with these features.
+# drives, so dropping the request closes the socket in that drop, before `cancelled` is sent (real
+# cancel, P4.3.4), with no pool to keep or reuse a cancelled generation's connection. Both are
+# already in the lock through reqwest, with these features.
 hyper = { version = "1.12", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 # The machine key (P4.3.7): ed25519 from the OS's random source.

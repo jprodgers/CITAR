@@ -3,8 +3,8 @@
 //! `common`'s fake endpoint over real HTTP on loopback, in real time:
 //! - **cancel at the endpoint:** the endpoint's client goes within 1 s of the `cancel`, no event
 //!   goes out after it, and `cancelled` carries the tokens received, mid-stream and while a model
-//!   is thinking before its first token (headers sent, then silence: where a pooled client would
-//!   notice nothing until the next byte);
+//!   is thinking before its first token (headers sent, then silence: nothing for the client to
+//!   read, so only the drop itself can close the connection);
 //! - **parameters:** only the five reach the endpoint, each other name logged once; nothing in a
 //!   request changes the endpoint, its key or streaming;
 //! - an endpoint that refuses streaming with tools is asked again unstreamed, and is then asked so
@@ -298,9 +298,9 @@ fn a_cancel_mid_stream_closes_the_endpoint_connection_within_a_second() {
     });
 }
 
-/// Gate 2 before the first token: the endpoint sent its headers and is thinking. The helper's
-/// connection is its own, so the cancel closes it at once; a client whose connection lives in a
-/// pool's task would see nothing to read and keep it open until the model's first byte.
+/// Gate 2 before the first token: the endpoint sent its headers and is thinking, so there is
+/// nothing to read: only the drop of the completion's task can close the connection, and it must,
+/// at once, as it must in a long pause between two tokens.
 #[test]
 fn a_cancel_while_the_model_thinks_closes_the_connection_too() {
     rt().block_on(async {

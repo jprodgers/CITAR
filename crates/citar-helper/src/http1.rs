@@ -2,10 +2,13 @@
 //! (design/phase4-helper.md P4.3.4, "Real cancel"). A completion dials its own TCP connection
 //! (and TLS for an `https` endpoint), sends one request, and drives the connection itself while it
 //! reads the response: nothing of it runs in a task of its own. So dropping the [`Response`] (or
-//! the future still waiting for its head) drops the socket at that moment, and the endpoint sees
-//! its client go: LM Studio, Ollama, llama.cpp and vLLM stop a streaming generation then. A pooled
-//! client keeps each connection in a task of its own, which notices a dropped response only when
-//! the endpoint next writes, so a generation that is thinking before its first token would run on.
+//! the future still waiting for its head) closes the socket in that very drop, and the endpoint
+//! sees its client go: LM Studio, Ollama, llama.cpp and vLLM stop a streaming generation then.
+//! The order P4.2.4 asks for (the connection closed, and only then `cancelled`) therefore holds by
+//! construction, not by how soon another task gets to run; and there is no pool, so a cancelled
+//! or timed-out generation's connection is never kept, reused or waited on. (A pooled client
+//! closes it too, from its connection's own task, a fraction of a millisecond later on this
+//! laptop: measured in 4-04, the as-built note in design/phase4-helper.md.)
 //!
 //! Like the listings ([`crate::llm`]), it dials only the configured address: no system proxy, no
 //! redirect followed (a 3xx is a status like any other), and a connect timeout of its own; the
