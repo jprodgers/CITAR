@@ -17,6 +17,11 @@ dev-guard = []
 test-faults = []
 # --update-key FILE and CITAR_HELPER_VERSION at compile time, for the update gates (4-13).
 test-update-key = []
+# The conformance support (src/conformance: the fixtures' loaders, the matcher, the transcripts),
+# which reads files under this crate's source directory: for this crate's tests and the players of
+# the transcripts (4-03 on), never for the binary that ships. The tests turn it on through the
+# self dev-dependency below.
+conformance = []
 
 # cargo xtask check: the engine, the bot, the runner and the jobs crate (P4.3.1), the engine with
 # no test-only feature, since the helper ships.
@@ -35,6 +40,9 @@ base64.workspace = true
 [dev-dependencies]
 # The parser's robustness gate: mutated frames never panic it (tests/robustness.rs).
 proptest.workspace = true
+# This crate again, with its conformance support, for the integration tests in tests/ (a
+# dev-dependency never reaches a shipped build; cargo xtask check allows only this self-reference).
+citar-helper = { path = ".", features = ["conformance"] }
 
 [lib]
 name = "citar_helper"

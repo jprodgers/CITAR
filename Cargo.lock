@@ -254,6 +254,7 @@ dependencies = [
  "base64",
  "citar-bot",
  "citar-engine",
+ "citar-helper",
  "proptest",
  "serde",
  "serde_json",

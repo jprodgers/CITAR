@@ -7,8 +7,9 @@
 //!   refused, whatever lint allowance the file carries: the helper calls the module's safe
 //!   functions. A crate that does not exist yet (citar-jobs before 4-03) is skipped.
 //! - **The test features and the development guard never ship.** citar-helper's and
-//!   citar-jobs' `test-faults`, `test-update-key`, `test-jobs` and `dev-guard`, and every feature
-//!   of theirs that turns one on, are refused:
+//!   citar-jobs' `test-faults`, `test-update-key`, `test-jobs`, `dev-guard` and `conformance` (the
+//!   fixtures' loaders, which read files under the crate's source directory), and every feature of
+//!   theirs that turns one on, are refused:
 //!   - in their crate's default features;
 //!   - in a dependency's feature list, in any crate but the tools and tests;
 //!   - in a feature that forwards to one, unless that feature is itself one of them in a helper
@@ -16,8 +17,11 @@
 //!     of that feature);
 //!   - in `pyproject.toml`'s maturin features (`pyproject`);
 //!   - on any line of `release.yml`, and of `helper.yml`'s artifact jobs (those whose id starts
-//!     with `artifact`), which also may not pass `--all-features`. The workflows are read as
-//!     text, as `triggers` reads rust.yml; a comment line is not a build line.
+//!     with `artifact`) and its workflow-wide `env:` and `defaults:`, which apply to every job;
+//!     none of these may pass `--all-features`, or a feature list held in a variable
+//!     (`--features $FEATURES`, `-F ${{ matrix.features }}`), which no check can read. The
+//!     workflows are read as text, as `triggers` reads rust.yml: a comment is not a build line,
+//!     and a job id is a key at the indentation of the first key under `jobs:`, whatever it is.
 //!
 //! The loopback guard itself is the helper's code (4-03), compiled in with `dev-guard`.
 
@@ -39,7 +43,8 @@ pub const JOBS_SYS: &[&str] = &["src/sys/windows.rs", "src/sys/unix.rs"];
 /// The crates whose test features are checked.
 pub const HELPER_CRATES: &[&str] = &["citar-helper", "citar-jobs"];
 /// Their features that never ship.
-pub const TEST_FEATURES: &[&str] = &["test-faults", "test-update-key", "test-jobs", "dev-guard"];
+pub const TEST_FEATURES: &[&str] =
+    &["test-faults", "test-update-key", "test-jobs", "dev-guard", "conformance"];
 
 /// The workflow that builds releases, read whole.
 pub const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
@@ -47,6 +52,8 @@ pub const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 pub const HELPER_WORKFLOW: &str = ".github/workflows/helper.yml";
 /// helper.yml's jobs that build what ships: their ids start with this.
 pub const ARTIFACT_JOB: &str = "artifact";
+/// A workflow's top-level keys that apply to every job, so to the artifact jobs too.
+pub const WORKFLOW_WIDE: &[&str] = &["env", "defaults"];
 
 /// Every rule above, against the workspace at `root`.
 pub fn check(root: &Path, meta: &Metadata) -> Result<Vec<Finding>, String> {
@@ -166,49 +173,100 @@ pub fn check_features(meta: &Metadata) -> Vec<Finding> {
     out
 }
 
+/// A line without its comment: from the first ` #` (or a `#` starting it), as YAML reads one
+/// outside quotes. A `#` inside a quoted string is rare enough in a workflow to read as a comment.
+fn code_of(line: &str) -> &str {
+    let body = line.trim_start();
+    if body.starts_with('#') {
+        return "";
+    }
+    match line.find(" #") {
+        Some(at) => line[..at].trim_end(),
+        None => line.trim_end(),
+    }
+}
+
+/// Whether a line passes cargo a feature list held in a variable: `--features $X`,
+/// `--features=${{ matrix.features }}`, `-F "$X"`.
+fn features_from_a_variable(code: &str) -> bool {
+    let words: Vec<&str> = code.split_whitespace().collect();
+    words.iter().enumerate().any(|(i, w)| {
+        let w = w.trim_start_matches(['"', '\'']);
+        let value = if w == "--features" || w == "-F" {
+            words.get(i + 1).copied()
+        } else {
+            w.strip_prefix("--features=").or_else(|| w.strip_prefix("-F="))
+        };
+        value.is_some_and(|v| v.trim_start_matches(['"', '\'']).starts_with('$'))
+    })
+}
+
 /// A workflow's lines that would build a test feature into what ships: every line of
-/// `release.yml`, or the lines of `helper.yml`'s jobs whose id starts with `jobs_prefix`.
+/// `release.yml`, or the lines of `helper.yml`'s jobs whose id starts with `jobs_prefix` and of
+/// its workflow-wide `env:` and `defaults:`.
 pub fn check_workflow(file: &str, text: &str, jobs_prefix: Option<&str>) -> Vec<Finding> {
     let mut out = Vec::new();
-    let mut in_jobs = false;
+    let mut top: Option<String> = None;
+    let mut job_indent: Option<usize> = None;
     let mut current_job: Option<String> = None;
     for (i, line) in text.lines().enumerate() {
-        let body = line.trim_start();
-        if body.is_empty() || body.starts_with('#') {
+        let code = code_of(line);
+        let body = code.trim_start();
+        if body.is_empty() {
             continue;
         }
-        let indent = line.len() - body.len();
+        let indent = code.len() - body.len();
         if indent == 0 {
-            in_jobs = body.trim_end() == "jobs:";
+            top = body.strip_suffix(':').map(|k| k.trim_end().to_owned());
+            job_indent = None;
             current_job = None;
             continue;
         }
-        if in_jobs && indent == 2 {
-            current_job = body.trim_end().strip_suffix(':').map(str::to_owned);
+        if top.as_deref() == Some("jobs") {
+            let at = *job_indent.get_or_insert(indent);
+            if indent == at {
+                current_job = body.strip_suffix(':').map(|k| k.trim_end().to_owned());
+            }
         }
         let watched = match jobs_prefix {
             None => true,
-            Some(prefix) => current_job.as_deref().is_some_and(|j| j.starts_with(prefix)),
+            Some(prefix) => match top.as_deref() {
+                Some("jobs") => current_job.as_deref().is_some_and(|j| j.starts_with(prefix)),
+                Some(key) => WORKFLOW_WIDE.contains(&key),
+                None => false,
+            },
         };
         if !watched {
             continue;
         }
-        let code = body.split(" #").next().unwrap_or(body);
         let mut named: Vec<&str> =
-            TEST_FEATURES.iter().copied().filter(|f| code.contains(f)).collect();
-        if code.contains("--all-features") {
+            TEST_FEATURES.iter().copied().filter(|f| body.contains(f)).collect();
+        if body.contains("--all-features") {
             named.push("--all-features");
         }
+        let place = match (&current_job, top.as_deref()) {
+            (Some(j), Some("jobs")) if jobs_prefix.is_some() => format!(" (job {j})"),
+            (_, Some(key)) if jobs_prefix.is_some() && key != "jobs" => {
+                format!(" (workflow {key})")
+            }
+            _ => String::new(),
+        };
         for what in named {
-            let place = match &current_job {
-                Some(j) if jobs_prefix.is_some() => format!(" (job {j})"),
-                _ => String::new(),
-            };
             out.push(Finding::new(
                 "features",
                 format!(
                     "{file}:{}{place}: names `{what}`, which no release or artifact build may \
                      carry (P4.3.1)",
+                    i + 1
+                ),
+            ));
+        }
+        if features_from_a_variable(body) {
+            out.push(Finding::new(
+                "features",
+                format!(
+                    "{file}:{}{place}: takes its feature list from a variable, which no check \
+                     can read: a release or artifact build names its features (P4.3.1)",
                     i + 1
                 ),
             ));
@@ -366,6 +424,39 @@ mod tests {
         let found = check_workflow(HELPER_WORKFLOW, helper, Some(ARTIFACT_JOB));
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].message.contains(":8 (job artifacts)"), "{found:?}");
+    }
+
+    /// Any indentation of the jobs, a commented `jobs:`, the workflow-wide `env:` and
+    /// `defaults:`, and feature lists from variables (4-01's fix round).
+    #[test]
+    fn helper_yml_is_read_whatever_its_layout() {
+        let four = "on:\n    push:\njobs:   # the jobs\n    test:\n        steps:\n            - run: cargo test --features test-faults\n    artifact-linux:\n        steps:\n            - run: cargo build -p citar-helper --features dev-guard\n";
+        let found = check_workflow(HELPER_WORKFLOW, four, Some(ARTIFACT_JOB));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].message.contains(":9 (job artifact-linux): names `dev-guard`"),
+            "{found:?}"
+        );
+        let wide = "env:\n  FEATURES: test-update-key\ndefaults:\n  run:\n    shell: bash --all-features\njobs:\n  artifact:\n    steps:\n      - run: cargo build --release\n";
+        let found: Vec<String> = check_workflow(HELPER_WORKFLOW, wide, Some(ARTIFACT_JOB))
+            .into_iter()
+            .map(|f| f.message)
+            .collect();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].contains(":2 (workflow env): names `test-update-key`"), "{found:?}");
+        assert!(found[1].contains(":5 (workflow defaults): names `--all-features`"), "{found:?}");
+        let variables = "jobs:\n  test:\n    steps:\n      - run: cargo test --features $FEATURES\n  artifacts:\n    strategy:\n      matrix:\n        features: [\"\"]\n    steps:\n      - run: cargo build --features $FEATURES\n      - run: cargo build --features=${{ matrix.features }}\n      - run: cargo build -F \"$F\"\n      - run: cargo build --features conformance\n      - run: cargo build --features gpu # $not a list\n";
+        let found: Vec<String> = check_workflow(HELPER_WORKFLOW, variables, Some(ARTIFACT_JOB))
+            .into_iter()
+            .map(|f| f.message)
+            .collect();
+        assert_eq!(found.len(), 4, "{found:?}");
+        for (k, line) in [(0, ":10 "), (1, ":11 "), (2, ":12 ")] {
+            assert!(found[k].contains(line) && found[k].contains("from a variable"), "{found:?}");
+        }
+        assert!(found[3].contains(":13 (job artifacts): names `conformance`"), "{found:?}");
+        let release = "jobs:\n  wheels:\n    steps:\n      - run: maturin build -F $EXTRA\n";
+        assert_eq!(check_workflow(RELEASE_WORKFLOW, release, None).len(), 1);
     }
 
     /// The workflows as they are pass.

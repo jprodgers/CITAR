@@ -4,9 +4,11 @@
 //!
 //! - [`protocol`]: every frame of protocol 2 as a serde type, and the checks both sides run
 //!   (`PROTOCOL.md` is the normative text);
-//! - [`conformance`]: the shared fixtures under `protocol/v2/`, the matcher language of their
-//!   transcripts, and PROTOCOL.md's frame table, which this crate's tests and the later players
-//!   of the transcripts read;
+//! - `conformance` (only with the `conformance` feature, or in this crate's own unit tests): the
+//!   shared fixtures under `protocol/v2/`, the matcher language of their transcripts, and
+//!   PROTOCOL.md's frame table, which this crate's tests and the later players of the transcripts
+//!   read. It reads files under this crate's source directory, so it is never compiled into the
+//!   helper that ships (cargo xtask check refuses the feature there, as it refuses `dev-guard`);
 //! - [`version`]: what `citar-helper --version` prints.
 //!
 //! A library, so that tests drive the helper in-process; `src/main.rs` is the binary. Package
@@ -15,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 pub mod protocol;
 pub mod version;

@@ -11,6 +11,9 @@
 //! the jobs crate; the jobs crate (created in 4-03, filled in 4-07) the engine, the bot and the
 //! runner. Neither needs the store: jobs keep no saves. citar-jobs's row is reserved before the
 //! crate exists, so the package that creates it finds its place already decided.
+//!
+//! A crate may name itself as a dev-dependency (4-01's fix round): the helper does, to turn its
+//! `conformance` feature on for its own integration tests. That is no edge of the graph.
 
 use std::collections::BTreeSet;
 
@@ -53,7 +56,12 @@ pub fn check(meta: &Metadata) -> Vec<Finding> {
         let mut seen = BTreeSet::new();
         for dep in &m.dependencies {
             let name = dep.name.as_str();
-            if !members.contains(name) || allowed.contains(&name) || !seen.insert(name) {
+            let itself_for_tests = name == m.name && dep.kind.as_deref() == Some("dev");
+            if !members.contains(name)
+                || allowed.contains(&name)
+                || itself_for_tests
+                || !seen.insert(name)
+            {
                 continue;
             }
             let may = if allowed.is_empty() {
@@ -198,5 +206,18 @@ mod tests {
         assert!(found[2].contains("citar-new is not in the crate graph"), "{found:?}");
         // A crate outside the workspace is no workspace crate.
         assert_eq!(check(&meta(&[("citar-store", &[("zstd", N)])])), []);
+    }
+
+    /// The helper names itself as a dev-dependency, to test with its `conformance` feature; as a
+    /// normal or build dependency that would be a cycle cargo refuses anyway, but the check still
+    /// says so.
+    #[test]
+    fn a_crate_may_be_its_own_dev_dependency_only() {
+        let m = meta(&[("citar-helper", &[("citar-engine", N), ("citar-helper", r#""dev""#)])]);
+        assert_eq!(check(&m), []);
+        let m = meta(&[("citar-helper", &[("citar-helper", N)])]);
+        let found = check(&m);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("citar-helper depends on citar-helper"), "{found:?}");
     }
 }
