@@ -1,0 +1,49 @@
+{
+ "name": "text-gemma4-open-above-a-call",
+ "note": "a Gemma 4 object left open is not read past the next line's tool name, which is a call of its own (unchanged by 4-02's fix round, which stops the scan there)",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "set_research{tech:<|\"|>pottery<|\"|>\nend_turn{}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "set_research{tech:<|\"|>pottery<|\"|>\nend_turn{}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "set_research{tech:<|\"|>pottery<|\"|>\nend_turn{}",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

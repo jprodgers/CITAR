@@ -15,6 +15,14 @@ same prompt whichever way the request goes out.
 Moved without change of behaviour from `openai_provider.py` (the parsing half of `OpenAIConversation.step`, its lines
 105-152 at 8e7db41, and the parsers after it). `tests/data/completions` holds what the code gave before the move, and
 `tests/test_completions.py` holds both paths to it.
+
+**Hostile replies** (4-02's fix round; P4.6). From 4-05 every helper's `done.message` comes through here, so a modified
+helper chooses the input: up to 8 MiB a frame. Parsing therefore takes time linear in the reply (the patterns that
+rescanned the rest of the text from every candidate start are replaced by scans that never go back: `_strip_think`,
+`_fenced_object`, `_glm_args`, `_PARAM_RE` without its trailing ``\\s*``, `gemma_json`'s stops), never raises on a
+message protocol 2 accepts (JSON that Python refuses, by its nesting or a number's digits, is JSON that is not read),
+and yields at most `MAX_CALLS` calls whose arguments are always objects nested at most `MAX_DEPTH` deep.
+`tests/completion_oracle.py` keeps the code as it was, which the rewritten scans are checked against.
 """
 from __future__ import annotations
 
@@ -30,6 +38,40 @@ TOOL PROTOCOL (important): you cannot call functions natively. Reply ONLY with a
 {"thoughts": "<brief reasoning>", "calls": [{"tool": "<tool name>", "args": {<arguments>}}, ...]}
 Use 1-8 calls per reply. Results come back in the next message. Available tools (name: description; parameters):
 """
+
+#: The most calls one completion yields, however the model wrote them: protocol 2's own bound on a `done` frame's
+#: `tool_calls` (PROTOCOL.md, `done`), so calls written as text, or repaired out of one call's arguments, cannot
+#: multiply what a reply costs the turn loop either. The JSON protocol asks for 1-8.
+MAX_CALLS = 512
+#: The deepest a call's arguments (or a JSON-protocol reply) may nest. Deeper JSON is not read: Python decodes far
+#: deeper than it encodes (about 3,000 levels on 3.12, 14,000 on 3.14, against about 9,000 for `json.dumps`), so such
+#: arguments would fail later, in the stored entry or the tool's signature, and differently on each version.
+MAX_DEPTH = 64
+
+#: What `_loads` gives for text that is not read as JSON.
+_UNREAD = object()
+
+
+def _shallow(value) -> bool:
+    """Whether ``value`` (decoded JSON) nests at most `MAX_DEPTH` objects and arrays deep; level by level, so a deep
+    value costs no recursion and a wide one is walked once."""
+    level = [value] if isinstance(value, (dict, list)) else []
+    for _ in range(MAX_DEPTH):
+        if not level:
+            return True
+        level = [v for c in level for v in (c.values() if isinstance(c, dict) else c) if isinstance(v, (dict, list))]
+    return not level
+
+
+def _loads(text: str):
+    """``text`` decoded as JSON, or `_UNREAD`: when it is not JSON, when Python will not decode it (a number of more
+    than `sys.get_int_max_str_digits` digits is a ``ValueError``, nesting past the interpreter's limit a
+    ``RecursionError``), or when it nests deeper than `MAX_DEPTH`."""
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        return _UNREAD
+    return value if _shallow(value) else _UNREAD
 
 
 def openai_tools(tools: list[dict]) -> list[dict]:
@@ -65,6 +107,7 @@ def parse_completion(message: dict, finish_reason: Optional[str], mode: str,
 
     `StepResult.malformed` counts the calls that had to be repaired or were read from text, and the arguments that
     were not JSON (kept as ``{"__invalid_json__": text}`` so the tool answers with an error the model can read).
+    Arguments that are JSON but not an object are no arguments. At most `MAX_CALLS` calls are kept.
     """
     text = message.get("content") or ""
     thinking = message.get("reasoning") or ""
@@ -82,15 +125,14 @@ def parse_completion(message: dict, finish_reason: Optional[str], mode: str,
                 {"role": "assistant", "content": text})
     native = message.get("tool_calls") or []
     calls = []
-    for tc in native:
+    for tc in native[:MAX_CALLS]:
         function = tc.get("function") or {}
         arguments = function.get("arguments")
-        try:
-            args = json.loads(arguments or "{}")
-            if not isinstance(args, dict):
-                args = {}
-        except json.JSONDecodeError:
+        args = _loads(arguments or "{}")
+        if args is _UNREAD:
             args = {"__invalid_json__": arguments}
+        elif not isinstance(args, dict):
+            args = {}
         calls.append(ToolCall(tc.get("id"), function.get("name"), args))
     malformed = sum(1 for c in calls if "__invalid_json__" in c.args)
     calls, repaired = repair_tool_calls(calls)
@@ -113,25 +155,31 @@ def parse_completion(message: dict, finish_reason: Optional[str], mode: str,
 
 _LEAK_MARKERS = ("</parameter>", "<parameter=", "<function=", "</function>", "<tool_call>", "</tool_call>")
 _FUNC_RE = re.compile(r"<function=([\w.\-]+)>(.*?)(?=<function=|$)", re.S)
-_PARAM_RE = re.compile(r"<parameter=([\w.\-]+)>\s*(.*?)\s*(?=</parameter>|<parameter=|</function>|</tool_call>|<tool_call>|$)", re.S)
+# A value's trailing whitespace stays in the match (`_coerce` strips it): a lazy value followed by ``\s*`` and the
+# lookahead retried the whole run of spaces from each of its positions, quadratic in the run.
+_PARAM_RE = re.compile(r"<parameter=([\w.\-]+)>\s*(.*?)(?=</parameter>|<parameter=|</function>|</tool_call>|<tool_call>|$)", re.S)
+_WS = re.compile(r"\s*")
 
 
 def _coerce(v: str):
     """Coerce a model's argument into the type the schema asks for.
 
     Models send ``"3"`` for integers and comma-separated strings for arrays constantly. Refusing them
-    would measure formatting rather than play.
+    would measure formatting rather than play. A value Python will not convert (more digits than
+    `sys.get_int_max_str_digits`, JSON `_loads` does not read) stays the text it was.
     """
     v = v.strip()
     if re.fullmatch(r"-?\d+", v):
-        return int(v)
+        try:
+            return int(v)
+        except ValueError:
+            return v
     if v.lower() in ("true", "false"):
         return v.lower() == "true"
     if v[:1] in "[{":
-        try:
-            return json.loads(v)
-        except json.JSONDecodeError:
-            pass
+        value = _loads(v)
+        if value is not _UNREAD:
+            return value
     return v
 
 
@@ -142,11 +190,36 @@ def parse_xml_calls(text: str) -> list:
         name, body = m.group(1), m.group(2)
         args = {k: _coerce(v) for k, v in _PARAM_RE.findall(body)}
         calls.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", name, args))
+        if len(calls) == MAX_CALLS:
+            break
     return calls
 
 
 _GLM_CALL_RE = re.compile(r"<tool_call>\s*([\w.\-]+)\s*(.*?)(?=</tool_call>|<tool_call>|$)", re.S)
-_GLM_ARG_RE = re.compile(r"<arg_key>\s*(.*?)\s*</arg_key>\s*<arg_value>(.*?)(?:</arg_value>|(?=<arg_key>)|$)", re.S)
+_GLM_VALUE = re.compile(r"(.*?)(?:</arg_value>|(?=<arg_key>)|$)", re.S)
+
+
+def _glm_args(body: str) -> list[tuple[str, str]]:
+    """The ``(key, value)`` pairs of a GLM call's body, as ``re.findall(r"<arg_key>\\s*(.*?)\\s*</arg_key>\\s*
+    <arg_value>(.*?)(?:</arg_value>|(?=<arg_key>)|$)", body, re.S)`` gives them (the code before 4-02's fix round),
+    in one pass: a key runs to the first ``</arg_key>`` that a value follows, and that pattern looked for it again
+    from every ``<arg_key>`` left open, and across every run of spaces before one."""
+    pairs, pos = [], 0
+    while (start := body.find("<arg_key>", pos)) >= 0:
+        key_at = _WS.match(body, start + len("<arg_key>")).end()
+        close = body.find("</arg_key>", key_at)
+        while close >= 0:
+            value_at = _WS.match(body, close + len("</arg_key>")).end()
+            if body.startswith("<arg_value>", value_at):
+                break
+            close = body.find("</arg_key>", close + len("</arg_key>"))
+        if close < 0:
+            # no value follows any later </arg_key>, so no later <arg_key> starts a pair either
+            break
+        value = _GLM_VALUE.match(body, value_at + len("<arg_value>"))
+        pairs.append((body[key_at:close].rstrip(), value.group(1)))
+        pos = value.end()
+    return pairs
 
 
 def parse_glm_calls(text: str) -> list:
@@ -154,8 +227,10 @@ def parse_glm_calls(text: str) -> list:
     <tool_call>found_city<arg_key>unit_id</arg_key><arg_value>1</arg_value></tool_call>"""
     calls = []
     for m in _GLM_CALL_RE.finditer(text):
-        args = {k: _coerce(v) for k, v in _GLM_ARG_RE.findall(m.group(2))}
+        args = {k: _coerce(v) for k, v in _glm_args(m.group(2))}
         calls.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", m.group(1), args))
+        if len(calls) == MAX_CALLS:
+            break
     return calls
 
 
@@ -171,15 +246,22 @@ def parse_text_calls(text: str, tools: list[dict]) -> list:
 #: Gemma 4's string delimiter in its own tool-call syntax (``call:name{key:<|"|>text<|"|>,n:3}``).
 _GEMMA_QUOTE = '<|"|>'
 _GEMMA_WORD = re.compile(r"[A-Za-z_][\w.\-]*")
+_GEMMA_KEY = re.compile(r"\s*:")
+_JSON_WORDS = frozenset(("true", "false", "null", "NaN", "Infinity"))
 
 
-def gemma_json(text: str) -> str | None:
-    """The object at the start of ``text`` in Gemma 4's own tool-call syntax, which LM Studio sometimes leaves in the
+def gemma_json(text: str, start: int = 0, stops=frozenset()) -> str | None:
+    """The object at ``text[start:]`` in Gemma 4's own tool-call syntax, which LM Studio sometimes leaves in the
     reply's text (``respond_negotiation{action:<|"|>reply<|"|>,message:<|"|>Agreed.<|"|>,negotiation_id:3}``), as
-    JSON text: its keys are bare words and its strings sit between ``<|"|>`` marks. None when it is not one."""
-    if text[:1] != "{":
+    JSON text: its keys are bare words and its strings sit between ``<|"|>`` marks. None when it is not one.
+
+    ``stops`` are positions where a bare word ends the object unread (None): `parse_plain_calls` passes the tool names
+    that begin its later lines. Such a word, outside the object's strings and not a key, would stand bare in the JSON
+    after a raw line break, which no decoder reads, so the result is the one it was; but an object left open above
+    many calls no longer reads every one of them to the end of the reply."""
+    if text[start:start + 1] != "{":
         return None
-    out, i, depth = [], 0, 0
+    out, i, depth = [], start, 0
     while i < len(text):
         if text.startswith(_GEMMA_QUOTE, i):
             end = text.find(_GEMMA_QUOTE, i + len(_GEMMA_QUOTE))
@@ -190,9 +272,11 @@ def gemma_json(text: str) -> str | None:
             continue
         word = _GEMMA_WORD.match(text, i)
         if word:
-            after = text[word.end():].lstrip()
             # a key (followed by its colon) is quoted; a bare value (true, false, null) is kept as it is
-            out.append(json.dumps(word.group(0)) if after[:1] == ":" else word.group(0))
+            key = _GEMMA_KEY.match(text, word.end()) is not None
+            if not key and i in stops and word.group(0) not in _JSON_WORDS:
+                return None
+            out.append(json.dumps(word.group(0)) if key else word.group(0))
             i = word.end()
             continue
         ch = text[i]
@@ -207,38 +291,61 @@ def gemma_json(text: str) -> str | None:
     return None
 
 
+def _strip_think(text: str) -> str:
+    """``text`` without its ``<think>...</think>`` blocks, as ``re.sub(r"<think>.*?</think>", "", text, flags=re.S)``
+    gives it, in one pass: once a ``<think>`` has no ``</think>`` after it, no later one has either, where that
+    pattern looked for one from every later ``<think>`` again."""
+    out, i = [], 0
+    while (start := text.find("<think>", i)) >= 0 and (end := text.find("</think>", start + len("<think>"))) >= 0:
+        out.append(text[i:start])
+        i = end + len("</think>")
+    out.append(text[i:])
+    return "".join(out)
+
+
+def _decode_start(decoder: json.JSONDecoder, text: str):
+    """The JSON value at the start of ``text`` (what follows it is ignored), or `_UNREAD` as `_loads` says."""
+    try:
+        value, _ = decoder.raw_decode(text)
+    except (ValueError, RecursionError):
+        return _UNREAD
+    return value if _shallow(value) else _UNREAD
+
+
 def parse_plain_calls(text: str, tools: list[dict]) -> list:
     """Parse tool calls a model wrote as plain text instead of using the tool-call channel (seen with Gemma), e.g.
     `end_turn{}`, `set_research {"tech": "pottery"}`, `log_thought` followed by the note on the next lines, or Gemma 4's
     own syntax (``call:name{key:<|"|>text<|"|>}``, ``gemma_json``). Only lines that start with a known tool name count,
     so prose that merely mentions a tool is ignored."""
     schemas = {t["function"]["name"]: t["function"].get("parameters") or {} for t in tools}
-    t = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    t = _strip_think(text).strip()
     names = "|".join(re.escape(n) for n in sorted(schemas, key=len, reverse=True))
     if not names:
         return []
+    lines = list(re.finditer(rf"^[ \t>*`-]*(?:<\|tool_call>)?(?:call:)?({names})`?[ \t]*(?=[({{]|$)", t, flags=re.M))
+    # Each line's tool name ends a Gemma 4 object left open above it (gemma_json), and a JSON object never reaches
+    # past the next line's tool name (a bare word, or a raw line break inside a string), so it is decoded from its line
+    # to the next one's start: a decoding error's position is counted from the start of the text it was given. The
+    # work stays linear in the reply however many lines name a tool.
+    stops = frozenset(m.start(1) for m in lines)
     calls = []
     decoder = json.JSONDecoder()
-    for m in re.finditer(rf"^[ \t>*`-]*(?:<\|tool_call>)?(?:call:)?({names})`?[ \t]*(?=[({{]|$)", t, flags=re.M):
-        name, rest = m.group(1), t[m.end():]
-        if rest[:1] == "(":
-            rest = rest[1:].lstrip()
-        if rest[:1] == "{":
-            try:
-                args, _ = decoder.raw_decode(rest)
-            except json.JSONDecodeError:
-                converted = gemma_json(rest)
-                try:
-                    args = json.loads(converted) if converted is not None else None
-                except json.JSONDecodeError:
-                    args = None
-                if args is None:
+    for n, m in enumerate(lines):
+        if len(calls) == MAX_CALLS:
+            break
+        name, at = m.group(1), m.end()
+        if t.startswith("(", at):
+            at = _WS.match(t, at + 1).end()
+        if t.startswith("{", at):
+            args = _decode_start(decoder, t[at:lines[n + 1].start() if n + 1 < len(lines) else len(t)])
+            if args is _UNREAD:
+                converted = gemma_json(t, at, stops)
+                args = _UNREAD if converted is None else _loads(converted)
+                if args is _UNREAD:
                     continue
             if isinstance(args, dict):
                 calls.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", name, args))
             continue
-        if rest[:2] in ("()", ")"):
-            rest = ""
         schema = schemas[name]
         required = schema.get("required") or []
         if not required:
@@ -246,6 +353,7 @@ def parse_plain_calls(text: str, tools: list[dict]) -> list:
         elif not calls and m.start() == 0 and len(required) == 1 \
                 and (schema.get("properties") or {}).get(required[0], {}).get("type") == "string":
             # a bare tool name on the first line, followed by the value of its only (string) parameter
+            rest = "" if t[at:at + 2] in ("()", ")") else t[at:]
             body = re.split(rf"^[ \t>*`-]*(?:{names})`?[ \t]*(?:[({{]|$)", rest, maxsplit=1, flags=re.M)[0].strip()
             if body:
                 calls.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", name, {required[0]: body}))
@@ -258,6 +366,8 @@ def repair_tool_calls(calls: list) -> tuple[list, int]:
     Rebuild the XML stream from the arguments and re-parse it into separate calls."""
     out, repaired = [], 0
     for c in calls:
+        if len(out) >= MAX_CALLS:
+            break
         if not any(isinstance(v, str) and any(mk in v for mk in _LEAK_MARKERS) for v in c.args.values()):
             out.append(c)
             continue
@@ -271,25 +381,50 @@ def repair_tool_calls(calls: list) -> tuple[list, int]:
             out.extend(parsed)
         else:
             out.append(c)
-    return out, repaired
+    return out[:MAX_CALLS], repaired
+
+
+_FENCE_END = re.compile(r"\}\s*```")
+_FENCE_START = re.compile(r"```(?:json)?\s*\{")
+
+
+def _fenced_object(t: str) -> str | None:
+    """The object in a code fence, as ``re.search(r"```(?:json)?\\s*(\\{.*\\})\\s*```", t, re.S)`` finds it, in one pass:
+    from the brace of the first fence that opens on one to the last brace that closes a fence after it. (That pattern
+    ran to the end of the text and back from every fence that opened on a brace.)"""
+    end = None
+    for end in _FENCE_END.finditer(t):
+        pass
+    if end is None:
+        return None
+    start = _FENCE_START.search(t, 0, end.start())
+    return t[start.end() - 1:end.start() + 1] if start else None
 
 
 def parse_json_calls(text: str) -> tuple[list, str]:
-    """Extract {"thoughts", "calls"} from a model reply (tolerates code fences and surrounding prose)."""
-    t = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
-    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", t, flags=re.S)
-    candidate = m.group(1) if m else None
+    """Extract {"thoughts", "calls"} from a model reply (tolerates code fences and surrounding prose).
+
+    Only a list of calls is read; a call's ``args`` that are not an object are no arguments (as a native call's), and
+    ``thoughts`` that are not text are none."""
+    t = _strip_think(text)
+    candidate = _fenced_object(t)
     if candidate is None:
         start, end = t.find("{"), t.rfind("}")
         candidate = t[start:end + 1] if start != -1 and end > start else ""
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError:
+    data = _loads(candidate)
+    if data is _UNREAD:
         return [], text
     if isinstance(data, dict) and "tool" in data and "calls" not in data:
         data = {"calls": [data]}
+    if not isinstance(data, dict):
+        return [], ""
+    listed = data.get("calls")
     calls = []
-    for c in (data.get("calls") or []) if isinstance(data, dict) else []:
+    for c in listed if isinstance(listed, list) else []:
         if isinstance(c, dict) and isinstance(c.get("tool"), str):
-            calls.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", c["tool"], c.get("args") or {}))
-    return calls, (data.get("thoughts") or "") if isinstance(data, dict) else ""
+            args = c.get("args")
+            calls.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", c["tool"], args if isinstance(args, dict) else {}))
+            if len(calls) == MAX_CALLS:
+                break
+    thoughts = data.get("thoughts")
+    return calls, thoughts if isinstance(thoughts, str) else ""
