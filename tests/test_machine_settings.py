@@ -332,14 +332,23 @@ def _soon(check, limit: float = 10.0):
 
 class _Server:
     """A real uvicorn server for the app on a free port, with signed-in accounts (tests/test_worker.py's
-    ``Revocation`` harness)."""
+    ``Revocation`` harness). The app's start makes process-wide workers that would outlive the server: the host's
+    power sampler (which runs ``nvidia-smi`` every few seconds where there is one, and later modules watch for outbound
+    calls) is not started, the games other modules left marked open are not brought back, and the benchmark
+    scheduler, the probe and report runners it made are stopped and put back as they were (test_scheduler_e2e's
+    ``HelperBase``)."""
 
     @classmethod
     def start(cls, owner, handles: dict) -> None:
         import httpx
         import uvicorn
-        from citar.server.app import app
+        from citar import usage
+        from citar.server import app as appmod, reports_api
+        from citar.server.session import SessionManager
+        app = appmod.app
         _reset_db()
+        scheduler.reset()
+        owner.saved = (appmod.scheduler, appmod._probe_runner, reports_api._runner)
         owner.headers, owner.ids = {}, {}
         with db.session() as s:
             for handle, role in handles.items():
@@ -354,18 +363,25 @@ class _Server:
             owner.port = probe.getsockname()[1]
         owner.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=owner.port, log_level="error"))
         owner.thread = threading.Thread(target=owner.server.run, daemon=True)
-        owner.thread.start()
-        for _ in range(100):
-            if owner.server.started:
-                break
-            time.sleep(0.1)
+        with (mock.patch.object(SessionManager, "restore_live", lambda self: []),
+              mock.patch.object(usage, "start_power_sampler", lambda follow_host=False: None)):
+            owner.thread.start()
+            for _ in range(150):
+                if owner.server.started:
+                    break
+                time.sleep(0.1)
         owner.http = httpx.Client(base_url=f"http://127.0.0.1:{owner.port}", timeout=30)
 
     @classmethod
     def stop(cls, owner) -> None:
+        from citar.server import app as appmod, reports_api
         owner.http.close()
         owner.server.should_exit = True
         owner.thread.join(timeout=10)
+        if appmod.scheduler is not None and appmod.scheduler is not owner.saved[0]:
+            appmod.scheduler.stop()
+        appmod.scheduler, appmod._probe_runner, reports_api._runner = owner.saved
+        scheduler.reset()
 
 
 class EndToEnd(unittest.TestCase):
