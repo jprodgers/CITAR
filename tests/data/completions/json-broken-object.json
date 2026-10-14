@@ -1,0 +1,33 @@
+{
+ "name": "json-broken-object",
+ "note": "an object that does not parse: the text kept",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "{\"thoughts\": \"x\", \"calls\": [",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "length",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "{\"thoughts\": \"x\", \"calls\": [",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "length",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "{\"thoughts\": \"x\", \"calls\": ["
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

@@ -1,0 +1,65 @@
+{
+ "name": "text-gemma4-tool-call-prefix",
+ "note": "Gemma 4's syntax behind <|tool_call>call:, with lists and booleans",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "<|tool_call>call:respond_negotiation{action:<|\"|>counter<|\"|>,give:[{type:<|\"|>gold<|\"|>,amount:20}],receive:[{type:<|\"|>share_map<|\"|>}],message:<|\"|>Less.<|\"|>,negotiation_id:7,final:true}<tool_call|>",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "<|tool_call>call:respond_negotiation{action:<|\"|>counter<|\"|>,give:[{type:<|\"|>gold<|\"|>,amount:20}],receive:[{type:<|\"|>share_map<|\"|>}],message:<|\"|>Less.<|\"|>,negotiation_id:7,final:true}<tool_call|>",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "respond_negotiation",
+     "args": {
+      "action": "counter",
+      "give": [
+       {
+        "type": "gold",
+        "amount": 20
+       }
+      ],
+      "receive": [
+       {
+        "type": "share_map"
+       }
+      ],
+      "message": "Less.",
+      "negotiation_id": 7,
+      "final": true
+     }
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "<|tool_call>call:respond_negotiation{action:<|\"|>counter<|\"|>,give:[{type:<|\"|>gold<|\"|>,amount:20}],receive:[{type:<|\"|>share_map<|\"|>}],message:<|\"|>Less.<|\"|>,negotiation_id:7,final:true}<tool_call|>",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "respond_negotiation",
+      "arguments": "{\"action\": \"counter\", \"give\": [{\"type\": \"gold\", \"amount\": 20}], \"receive\": [{\"type\": \"share_map\"}], \"message\": \"Less.\", \"negotiation_id\": 7, \"final\": true}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

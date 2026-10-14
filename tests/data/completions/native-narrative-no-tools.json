@@ -1,0 +1,38 @@
+{
+ "name": "native-narrative-no-tools",
+ "note": "a report's narrative: no tools offered, plain prose",
+ "mode": "native",
+ "tools": "none",
+ "completion": {
+  "message": {
+   "content": "The game turned at turn 120, when Rome's navy took the strait.",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": {
+   "prompt_tokens": 3000,
+   "completion_tokens": 400,
+   "reasoning_tokens": null,
+   "cached_tokens": null
+  }
+ },
+ "expect": {
+  "step": {
+   "text": "The game turned at turn 120, when Rome's navy took the strait.",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "The game turned at turn 120, when Rome's navy took the strait."
+  },
+  "usage": {
+   "input_tokens": 3000,
+   "output_tokens": 400,
+   "reasoning_tokens": 0
+  }
+ }
+}

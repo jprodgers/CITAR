@@ -1,0 +1,97 @@
+{
+ "name": "native-merged-xml-repaired",
+ "note": "a local server merged XML calls into one call's arguments: split back into two, the first keeping the native id",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "",
+   "reasoning": null,
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "set_research",
+      "arguments": "{\"tech\": \"pottery</parameter>\\n</function>\\n</tool_call>\\n<tool_call>\\n<function=unit_order>\\n<parameter=unit_id>\\n9</parameter>\\n<parameter=order>\\nexplore\"}"
+     }
+    },
+    {
+     "id": "c2",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "name": "set_research",
+     "args": {
+      "tech": "pottery"
+     }
+    },
+    {
+     "id": "<gen:1>",
+     "name": "unit_order",
+     "args": {
+      "unit_id": 9,
+      "order": "explore"
+     }
+    },
+    {
+     "id": "c2",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "set_research",
+      "arguments": "{\"tech\": \"pottery\"}"
+     }
+    },
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "unit_order",
+      "arguments": "{\"unit_id\": 9, \"order\": \"explore\"}"
+     }
+    },
+    {
+     "id": "c2",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

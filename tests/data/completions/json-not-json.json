@@ -1,0 +1,33 @@
+{
+ "name": "json-not-json",
+ "note": "no object at all: a text answer",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "no json here",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "no json here",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "no json here"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

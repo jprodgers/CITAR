@@ -1,0 +1,49 @@
+{
+ "name": "text-small-tools",
+ "note": "plain calls against a small tool list: required parameters missing means no call",
+ "mode": "native",
+ "tools": "small",
+ "completion": {
+  "message": {
+   "content": "get_tile\nend_turn",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "get_tile\nend_turn",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "get_tile\nend_turn",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

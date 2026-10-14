@@ -1,0 +1,52 @@
+{
+ "name": "json-fenced",
+ "note": "the JSON protocol in a code fence: the thoughts become the text",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "Sure!\n```json\n{\"thoughts\": \"explore\", \"calls\": [{\"tool\": \"get_tile\", \"args\": {\"x\": 1, \"y\": 1}}, {\"tool\": \"end_turn\", \"args\": {}}]}\n```",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": {
+   "prompt_tokens": 2000,
+   "completion_tokens": 90,
+   "reasoning_tokens": null,
+   "cached_tokens": null
+  }
+ },
+ "expect": {
+  "step": {
+   "text": "explore",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "get_tile",
+     "args": {
+      "x": 1,
+      "y": 1
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "Sure!\n```json\n{\"thoughts\": \"explore\", \"calls\": [{\"tool\": \"get_tile\", \"args\": {\"x\": 1, \"y\": 1}}, {\"tool\": \"end_turn\", \"args\": {}}]}\n```"
+  },
+  "usage": {
+   "input_tokens": 2000,
+   "output_tokens": 90,
+   "reasoning_tokens": 0
+  }
+ }
+}

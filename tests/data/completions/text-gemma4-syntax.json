@@ -1,0 +1,53 @@
+{
+ "name": "text-gemma4-syntax",
+ "note": "Gemma 4's own syntax: bare keys, strings between <|\"|> marks",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "respond_negotiation{action:<|\"|>reply<|\"|>,message:<|\"|>Peace, friend: {always}.<|\"|>,negotiation_id:3}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "respond_negotiation{action:<|\"|>reply<|\"|>,message:<|\"|>Peace, friend: {always}.<|\"|>,negotiation_id:3}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "respond_negotiation",
+     "args": {
+      "action": "reply",
+      "message": "Peace, friend: {always}.",
+      "negotiation_id": 3
+     }
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "respond_negotiation{action:<|\"|>reply<|\"|>,message:<|\"|>Peace, friend: {always}.<|\"|>,negotiation_id:3}",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "respond_negotiation",
+      "arguments": "{\"action\": \"reply\", \"message\": \"Peace, friend: {always}.\", \"negotiation_id\": 3}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}
