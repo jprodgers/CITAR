@@ -36,10 +36,43 @@ serde_json.workspace = true
 thiserror.workspace = true
 # The keys and signatures of the frames are standard base64.
 base64.workspace = true
+# The owner-only machine key file (P4.3.7): citar-jobs' sys module holds the OS calls, so this
+# crate keeps forbid(unsafe_code).
+citar-jobs.workspace = true
+# The command line: protocol 1's flags, each with its meaning (P4.3.2), long names abbreviable
+# as argparse allowed.
+clap.workspace = true
+# The connection (P4.3.3): one runtime, the socket, timers, Ctrl-C and SIGTERM.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-platform-verifier.workspace = true
+rustls-pki-types.workspace = true
+# Model discovery (P4.3.4); the proxy joins in 4-04.
+reqwest.workspace = true
+# The machine key: ed25519 from the OS's random source; its fingerprint is blake3's.
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+blake3.workspace = true
+# The host name, and the logical CPUs and memory the default CPU ceiling is a share of.
+sysinfo.workspace = true
+# Local quiet hours, in the machine's own time zone.
+chrono.workspace = true
 
 [dev-dependencies]
+# The transcripts run on tokio's paused clock (the fake clock, `setup.helper.clock`), and the
+# binary's tests serve a fake hub and a fake endpoint on loopback.
+tokio = { workspace = true, features = ["test-util", "process"] }
 # The parser's robustness gate: mutated frames never panic it (tests/robustness.rs).
 proptest.workspace = true
+# The transcripts' fake server speaks the WebSocket's server half; the tests read the engine's
+# ruleset id and the bots' versions as the binary does.
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+citar-engine = { workspace = true, features = ["embedded-ruleset"] }
+citar-bot.workspace = true
 # This crate again, with its conformance support, for the integration tests in tests/ (a
 # dev-dependency never reaches a shipped build; cargo xtask check allows only this self-reference).
 citar-helper = { path = ".", features = ["conformance"] }

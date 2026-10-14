@@ -16,7 +16,10 @@
 //!    changes the engine's build, so sharing the test builds' directory would rebuild the engine
 //!    on every switch between them;
 //! 4. copies the library to `$CARGO_TARGET_DIR/citar-ext/_engine.<ext>`, renaming a copy a
-//!    running process holds aside;
+//!    running process holds aside; and builds the helper, `citar-helper`, in the same profile
+//!    with its development guard (`dev-guard`: loopback servers only, an explicit `--home`;
+//!    design/phase4-helper.md P4.3.1) into the same folder, where the end-to-end tests and the QA
+//!    script find it;
 //! 5. writes `citar-dev.pth` into the venv: the checkout on `sys.path`, and `CITAR_EXT_DIR`,
 //!    which `citar/__init__.py` puts first on the package's path, so `import citar._engine`
 //!    finds the built library while every other module comes from the checkout.
@@ -170,6 +173,11 @@ const fn library_names() -> (&'static str, &'static str) {
     }
 }
 
+/// The helper's executable, as cargo writes it and as the tests look for it.
+const fn helper_name() -> &'static str {
+    if cfg!(windows) { "citar-helper.exe" } else { "citar-helper" }
+}
+
 /// The venv's interpreter.
 fn venv_python(venv: &Path) -> PathBuf {
     if cfg!(windows) {
@@ -195,9 +203,9 @@ fn output(cmd: &mut Command, what: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// Copies the built library to `dest`, renaming aside a copy a running process holds (Windows
-/// refuses to replace a loaded library but lets it be renamed), and clearing the copies set
-/// aside before that nothing holds any more.
+/// Copies the built library (or the helper) to `dest`, renaming aside a copy a running process
+/// holds (Windows refuses to replace a loaded library or a running program but lets it be
+/// renamed), and clearing the copies set aside before that nothing holds any more.
 fn install_library(built: &Path, dest: &Path) -> Result<(), String> {
     let dir = dest.parent().ok_or("the extension's folder has no parent")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -367,6 +375,36 @@ fn develop(root: &Path, args: &[String]) -> Result<(), Step> {
     let built = build_dir.join(profile).join(built_name);
     let ext = target.join("citar-ext");
     install_library(&built, &ext.join(import_name)).map_err(Step::Failed)?;
+
+    // The helper, beside the library, always with its development guard: every helper the
+    // packages and QA run dials loopback only and needs an explicit --home.
+    run(
+        Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .args([
+                "build",
+                "--locked",
+                "-p",
+                "citar-helper",
+                "--bin",
+                "citar-helper",
+                "--features",
+                "dev-guard",
+                "--profile",
+                profile,
+            ])
+            .arg("--target-dir")
+            .arg(&build_dir)
+            .current_dir(root)
+            .env("CITAR_BUILD_ID", &label),
+        &format!(
+            "building citar-helper ({profile} profile, dev-guard) into {}",
+            build_dir.display()
+        ),
+    )
+    .map_err(Step::Failed)?;
+    let helper = helper_name();
+    install_library(&build_dir.join(profile).join(helper), &ext.join(helper))
+        .map_err(Step::Failed)?;
 
     // 5. The venv's link to this worktree and the library.
     std::fs::write(&pth, pth_text(root, &ext))

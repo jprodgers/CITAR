@@ -10,6 +10,7 @@ members = [
     "crates/citar-sim",
     "crates/citar-py",
     "crates/citar-helper",
+    "crates/citar-jobs",
     "crates/citar-testkit",
     "crates/citar-refcheck",
     "crates/citar-bench",
@@ -36,6 +37,8 @@ citar-testkit = { path = "crates/citar-testkit", default-features = false }
 citar-bot     = { path = "crates/citar-bot" }
 citar-store   = { path = "crates/citar-store" }
 citar-sim     = { path = "crates/citar-sim" }
+# Phase 4 (design/phase4-helper.md P4.3.1, P4.4): created holding only its `sys` module (4-03).
+citar-jobs    = { path = "crates/citar-jobs" }
 # engine (the xtask allow-list: exactly these, plus their transitive closure)
 serde        = { version = "1.0.229", features = ["derive"] }
 serde_json   = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
@@ -63,6 +66,35 @@ pyo3-build-config = "0.29"
 # Python's `time.process_time()` gave its worker process's. Safe wrappers over GetThreadTimes and
 # clock_gettime, so citar-sim keeps `forbid(unsafe_code)`; libc and winapi are already locked.
 cpu-time = "1.0"
+# The helper (design/phase4-helper.md P4.3.1). One tokio runtime; its features are each crate's.
+tokio = { version = "1.53", default-features = false }
+# The WebSocket over a stream the helper dials itself (TCP, then rustls for wss), so the TLS
+# configuration and the development guard's loopback check are the helper's own. 0.29, not 0.30:
+# 0.30's rand 0.10 turns on getrandom 0.4's rand_core, and the engine's and the bot's content
+# codes follow the lock to getrandom 0.4 (blake3's build dependency cc, through jobserver), so it
+# would move the build id with nothing in a game changed; citar-bot's lock test catches that.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# TLS with ring, not aws-lc-rs: no CMake or NASM on any target, the same C toolchain the
+# workspace already builds zstd with. The OS's own trust store verifies (no CA bundle hunt as the
+# Python worker did), plus `--ca-file` for a self-signed server.
+rustls = { version = "0.23.43", default-features = false, features = ["std", "tls12", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-platform-verifier = "0.7"
+rustls-pki-types = { version = "1.15", features = ["std"] }
+# The model endpoint's HTTP (discovery in 4-03, the streaming proxy in 4-04), on the same rustls,
+# with no system proxy: the helper dials only its configured endpoint.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+# The machine key (P4.3.7): ed25519 from the OS's random source.
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "zeroize"] }
+getrandom = "0.3"
+# The machine's name, logical CPUs and memory (the local CPU ceiling's defaults; the scan, 4-06).
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# Local quiet hours: the machine's own time zone.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+# citar-jobs' sys module only (the owner-only DACL of the machine key, P4.3.7; the job limits,
+# 4-08): the one place Phase 4 calls the OS without a safe wrapper.
+windows-sys = "0.61"
 # tools and tests only
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1.1"

@@ -23,6 +23,9 @@ on:
       # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, recorded from
       # the Python bot (cargo xtask check's triggers rule holds this line in place).
       - "tests/data/clean_params_cases.json"
+      # citar-helper's configuration test holds the helper to the table recorded from the Python
+      # worker's build_config (4-03).
+      - "tests/data/helper_config_cases.json"
       # The ruleset the engine compiles in (crates/** takes it too; named so a narrower filter keeps it).
       - "crates/citar-engine/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.
@@ -50,6 +53,9 @@ on:
       # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, recorded from
       # the Python bot (cargo xtask check's triggers rule holds this line in place).
       - "tests/data/clean_params_cases.json"
+      # citar-helper's configuration test holds the helper to the table recorded from the Python
+      # worker's build_config (4-03).
+      - "tests/data/helper_config_cases.json"
       # The ruleset the engine compiles in (crates/** takes it too; named so a narrower filter keeps it).
       - "crates/citar-engine/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.

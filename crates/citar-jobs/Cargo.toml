@@ -1,0 +1,31 @@
+[package]
+name = "citar-jobs"
+description = "CITAR's CPU jobs: the job vocabulary, the lab game, hashes, claims and the job host, shared by the helper and the server (design/phase4-helper.md P4.4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The `burn` and `alloc` job kinds the limit tests use (4-08). cargo xtask check refuses it in
+# every shipped build, as it refuses the helper's test features.
+test-jobs = []
+
+# cargo xtask check: the engine, the bot and the runner may join in 4-07 (P4.3.1). In 4-03 the
+# crate holds only its `sys` module, the OS calls no safe wrapper makes.
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+# The owner-only DACL of the helper's machine key (P4.3.7), written and read back: the security
+# descriptor calls, the process token's user, and LocalFree for what they allocate. The job limits
+# (Job Objects, 4-08) add their features here.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

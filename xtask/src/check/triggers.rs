@@ -26,8 +26,11 @@ pub const WORKFLOW: &str = ".github/workflows/rust.yml";
 /// Data files a Rust test reads from outside the trees rust.yml's filters take whole (`crates/`,
 /// `tests/rules/`, `refcheck/`): citar-testkit's bot params test holds `clean()` to 2-00b's
 /// clean-params table, which was recorded from the Python bot's `clean_params` (the tag
-/// `python-engine-0.1.6` keeps the recorder). A change to one alone must run the tests.
-pub const TEST_READS: &[&str] = &["tests/data/clean_params_cases.json"];
+/// `python-engine-0.1.6` keeps the recorder); citar-helper's configuration test holds the helper
+/// to 4-03's table, recorded from the Python worker's `build_config`. A change to one alone must
+/// run the tests.
+pub const TEST_READS: &[&str] =
+    &["tests/data/clean_params_cases.json", "tests/data/helper_config_cases.json"];
 
 pub fn check(root: &Path, reads: &[String]) -> Result<Vec<Finding>, String> {
     let path = root.join(WORKFLOW);

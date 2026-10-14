@@ -1,28 +1,24 @@
-//! `citar-helper`, the CITAR helper's binary (design/phase4-helper.md P4.3).
-//!
-//! Package 4-01 builds it to print `--version` only; the commands (`run`, `setup`, `scan`,
-//! `service`, `update`, `job-host`, `--self-test`) arrive with packages 4-03 to 4-14. Exit codes
-//! (P4.3.9): 0 when stopped, 75 to restart for an update, 78 for a permanent refusal from a
-//! console, 2 for a command line it does not take.
+//! `citar-helper`, the CITAR helper's binary (design/phase4-helper.md P4.3): the command line
+//! (`citar_helper::cli`) handed to `citar_helper::app`. Exit codes (P4.3.9): 0 when stopped, 78
+//! for a permanent refusal from a console, 2 for a command line or settings it cannot take, 75
+//! (4-13) to restart for an update.
 
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
 
+use clap::Parser as _;
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["--version" | "-V"] => {
-            println!("{}", citar_helper::version::build_info().line());
-            ExitCode::SUCCESS
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let bare = args.len() <= 1;
+    let cli = match citar_helper::cli::Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(e) => {
+            // --help prints to standard output and succeeds; a bad command line is argparse's 2.
+            let _printed = e.print();
+            return ExitCode::from(if e.use_stderr() { 2 } else { 0 });
         }
-        _ => {
-            eprintln!(
-                "citar-helper {}: this build only prints --version; the helper's commands come \
-                 with the Rust helper's later packages (design/phase4-helper.md, 4-03)",
-                citar_helper::version::VERSION
-            );
-            ExitCode::from(2)
-        }
-    }
+    };
+    ExitCode::from(citar_helper::app::main(&cli, bare))
 }

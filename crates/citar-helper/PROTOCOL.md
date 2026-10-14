@@ -241,7 +241,9 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
   helper) is logged and flags the machine `settings_overclaim`, shown to administrators.
 - **`catalog`** (helper → server): the endpoint's models, whenever the list or the loaded set
   changes; the helper polls its endpoint every 30 s. The models of `hello.llm.models` are the first
-  catalog.
+  catalog. A listing that fails or times out is not a change: the helper keeps its last catalog
+  (in its next hello too) until three listings in a row have failed, and only then reports its
+  models as none loaded (its allowlist's, or none).
 - **`hardware`** (helper → server): the hardware scan, when it changed since the last one sent, and
   after every `rescan`. A scan younger than 6 hours is reused at connect; the helper scans again
   every 6 hours.
@@ -250,7 +252,10 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
   10 s. They are measurements, written as the machine's power rows whatever its power mode.
 - **`status`** (helper → server, on change, at most once every 5 s): the local quiet hours in force,
   the model requests in flight and the job runs running and paused. The server treats a machine in
-  its helper's own quiet hours as one in the site's quiet hours.
+  its helper's own quiet hours as one in the site's quiet hours. `quiet_until` is a whole minute,
+  the same all through one stretch of quiet hours; quiet hours that cover every minute of the week
+  never end, and are reported as ending at the start (Monday 00:00, local time) of the week after
+  next: more than a week away, and changed once a week.
 
 ## Completions
 
@@ -458,7 +463,7 @@ without jobs, which is never offered one); `target` `string 1..64` (the Rust tar
 `base64:32` (the machine key's ed25519 public key).
 
 **Llm:** `enabled` `bool` (false for `--no-llm`); `provider` `"lmstudio" | "ollama" |
-"openai_compatible" | "openai" | null` (`null` when not enabled); `slots` `int 0..16` (its local
+"openai_compatible" | "openai" | null` (the endpoint's kind; `null` with `--no-llm`, which has none); `slots` `int 0..16` (its local
 ceiling of concurrent requests, the configured `max_concurrent`; 0 with `--no-llm`); `stream`
 `bool` (whether it streams from its endpoint); `models` `[Model] ≤500` (at most 500, chosen as
 [What the helper caps](#values-and-checks) says).
