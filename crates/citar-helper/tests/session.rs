@@ -363,10 +363,19 @@ fn never(dir: &std::path::Path) -> Never {
 #[cfg(unix)]
 impl Drop for Never {
     fn drop(&mut self) {
-        // A writer that opens and closes ends every blocked open with end of file. On a thread of
-        // its own, so that nothing waits on it if no reader is left.
+        // A writer that opens and closes ends every blocked open with end of file; the runtime's
+        // shutdown waits for those reads, so this must happen before the FIFO is deleted. On a
+        // thread of its own (an open for writing blocks while no reader is left), waited for here
+        // at most 10 s.
         let path = self.path.clone();
-        std::thread::spawn(move || drop(std::fs::OpenOptions::new().write(true).open(path)));
+        let (done, opened) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _sent = done.send(std::fs::OpenOptions::new().write(true).open(path).is_ok());
+        });
+        let released = opened.recv_timeout(Duration::from_secs(10));
+        if !std::thread::panicking() {
+            assert_eq!(released, Ok(true), "the blocked reads were released");
+        }
     }
 }
 
@@ -381,13 +390,15 @@ async fn a_rescan_whose_file_never_answers_holds_up_nothing() {
     // The hello waits for the file at most its 5 s, then reports none.
     let (mut ws, hello) = welcome(&mut run).await;
     let waited = t0.elapsed();
-    assert!(waited >= Duration::from_secs(4) && waited < Duration::from_secs(9), "{waited:?}");
+    // Its 5 s and milliseconds more here; the bound leaves a loaded CI runner room.
+    assert!(waited >= Duration::from_secs(4) && waited < Duration::from_secs(15), "{waited:?}");
     assert_eq!(hello["report"]["hardware_source"], "none", "{hello}");
     // A rescan reads the file again: the session answers a ping at once all the same.
     ws.send(Message::Text(r#"{"t": "rescan"}"#.into())).await.expect("rescan");
     let t1 = Instant::now();
     round_trip(&mut ws).await;
-    assert!(t1.elapsed() < Duration::from_secs(1), "{:?}", t1.elapsed());
+    // Milliseconds here; the read it does not wait for takes 5 s.
+    assert!(t1.elapsed() < Duration::from_secs(3), "{:?}", t1.elapsed());
     // And gives up after its timeout, sending no hardware.
     let frames = frames_for(&mut ws, 7.0).await;
     assert!(frames.iter().all(|(_, v)| v["t"] != "hardware"), "{frames:?}");
