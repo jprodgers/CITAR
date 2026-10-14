@@ -350,3 +350,51 @@ fn a_hardware_file_is_reported_in_the_hello_and_again_on_rescan() {
     .expect("nothing reported");
     std::fs::remove_dir_all(&dir).expect("cleaned");
 }
+
+#[test]
+fn until_its_proxy_and_jobs_exist_the_helper_refuses_requests_and_offers_as_the_protocol_says() {
+    let canonical = canonical_examples().expect("the canonical examples read");
+    let request = |id: &str, messages: Value| {
+        serde_json::json!({"t": "request", "id": id, "model": "model-a", "messages": messages,
+                           "tools": null, "params": {}, "timeout_s": 60})
+    };
+    let offer = |run: &str, spec_hash: &str| {
+        let mut o =
+            canonical[&(citar_helper::protocol::Sender::Server, "job_offer".to_owned())].clone();
+        o["run"] = Value::from(run);
+        o["spec_hash"] = Value::from(spec_hash);
+        o.as_object_mut().expect("an object").remove("ts");
+        o
+    };
+    let mut v: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            citar_helper::conformance::fixtures_dir()
+                .join("transcripts")
+                .join("handshake-welcome.json"),
+        )
+        .expect("read"),
+    )
+    .expect("json");
+    v["name"] = Value::from("refusals-before-4-04");
+    let steps = v["steps"].as_array_mut().expect("steps");
+    let user = serde_json::json!([{"role": "user", "content": "hello"}]);
+    steps.extend([
+        // A request: no proxy yet, so the model is not served (4-04 serves it).
+        serde_json::json!({"s2h": request("r1", user)}),
+        serde_json::json!({"h2s": {"t": "error", "id": "r1", "code": "unknown_model", "retryable": false}, "within_s": 2}),
+        // A request whose id can be read but that fails its checks: bad_request.
+        serde_json::json!({"s2h": request("r2", serde_json::json!([])), "invalid": "value"}),
+        serde_json::json!({"h2s": {"t": "error", "id": "r2", "code": "bad_request", "retryable": false}, "within_s": 2}),
+        // An offer: no jobs build yet, so none is this helper's build (4-10 runs jobs).
+        serde_json::json!({"s2h": offer("cr_one", &"6".repeat(64))}),
+        serde_json::json!({"h2s": {"t": "job_reject", "run": "cr_one", "reason": "build"}, "within_s": 2}),
+        // An offer whose run can be read but that fails its checks: bad_spec.
+        serde_json::json!({"s2h": offer("cr_two", "not-a-hash"), "invalid": "value"}),
+        serde_json::json!({"h2s": {"t": "job_reject", "run": "cr_two", "reason": "bad_spec"}, "within_s": 2}),
+        // A cancel for nothing in flight, and an update before 4-13: nothing is answered.
+        serde_json::json!({"s2h": {"t": "cancel", "id": "r9"}}),
+        serde_json::json!({"wait": {"s": 3, "quiet": true}}),
+    ]);
+    let t = Transcript::from_value(&v).expect("a transcript");
+    play(&t, &canonical).expect("refused as the protocol says");
+}

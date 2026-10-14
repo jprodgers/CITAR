@@ -69,8 +69,11 @@ cpu-time = "1.0"
 # The helper (design/phase4-helper.md P4.3.1). One tokio runtime; its features are each crate's.
 tokio = { version = "1.53", default-features = false }
 # The WebSocket over a stream the helper dials itself (TCP, then rustls for wss), so the TLS
-# configuration and the development guard's loopback check are the helper's own.
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# configuration and the development guard's loopback check are the helper's own. 0.29, not 0.30:
+# 0.30's rand 0.10 turns on getrandom 0.4's rand_core, and the engine's and the bot's content
+# codes follow the lock to getrandom 0.4 (blake3's build dependency cc, through jobserver), so it
+# would move the build id with nothing in a game changed; citar-bot's lock test catches that.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 # TLS with ring, not aws-lc-rs: no CMake or NASM on any target, the same C toolchain the
 # workspace already builds zstd with. The OS's own trust store verifies (no CA bundle hunt as the

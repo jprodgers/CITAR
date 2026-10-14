@@ -48,8 +48,13 @@ pub struct Options {
     /// per-user CITAR folder).
     #[arg(long, global = true, value_name = "DIR")]
     pub home: Option<PathBuf>,
-    /// The CITAR server, e.g. https://citar.example.com.
-    #[arg(long = "server", global = true, value_name = "URL")]
+    /// The CITAR server's address, as a browser opens it.
+    #[arg(
+        long = "server",
+        global = true,
+        value_name = "URL",
+        help = "The CITAR server, e.g. https://citar.example.com"
+    )]
     pub server_url: Option<String>,
     /// The worker token, issued on the Servers page.
     #[arg(long, global = true)]
@@ -58,8 +63,13 @@ pub struct Options {
     /// helper.json.
     #[arg(long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
-    /// The local model endpoint (default http://localhost:1234/v1).
-    #[arg(long = "base-url", global = true, value_name = "URL")]
+    /// The local model endpoint (default: LM Studio on this machine).
+    #[arg(
+        long = "base-url",
+        global = true,
+        value_name = "URL",
+        help = "The local model endpoint (default http://localhost:1234/v1)"
+    )]
     pub base_url: Option<String>,
     /// What serves the model locally.
     #[arg(long, global = true, value_parser = ["lmstudio", "ollama", "openai_compatible", "openai"])]
