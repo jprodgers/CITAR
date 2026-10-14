@@ -118,8 +118,9 @@ THIS CONVERSATION
 - It is one chat (a negotiation) with one other leader, held whenever it is your move in it, on your turn or not.
 - Each message here tells you what the other side said since your last answer, the proposal on the table as it
   stands for you, and how many minutes you have left to answer.
-- Answer with respond_negotiation: accept (their current proposal), reject (end the chat), counter (a new proposal,
-  give/receive from your perspective, at least one item) or reply (a message only). Every answer needs a message.
+- Answer by calling the respond_negotiation tool, with action accept (their current proposal), reject (end the
+  chat), counter (a new proposal, give/receive from your perspective, at least one item) or reply (a message only).
+  Every answer needs a message. Make the call itself: a call written out as text is no answer.
   You may first look things up (get_diplomacy, get_empire, get_players, get_victory_status, read_notes); note
   agreements worth remembering with write_notes. One answer per message: then their next message comes here.
 
@@ -136,6 +137,12 @@ def chat_system_prompt(persona: str | None = None) -> str:
     return text
 
 
+#: How every message of a chat's conversation asks for the answer, and the nudge after a step without a tool call
+#: (``ChatThread``): as a call of the tool, never as "respond_negotiation: accept", which a small model (the exit QA's
+#: gemma-4-e2b) copies as text instead of calling the tool.
+CHAT_ANSWER = ("Call the respond_negotiation tool (action accept, reject, counter or reply, with a message); do not "
+               "write the call as text.")
+
 #: A chat's first message to the model (a chat it had no conversation for: new, or after a restart).
 CHAT_PROMPT = """CHAT: {other} is waiting for your answer in negotiation #{nid}. {time_left}
 
@@ -148,13 +155,13 @@ Negotiation #{nid} (from your perspective):
 Your empire at a glance:
 {summary}
 
-Answer with respond_negotiation (accept, reject, counter or reply), with a message."""
+""" + CHAT_ANSWER
 
 #: A later message in the same chat: what changed since the model's last answer.
 CHAT_UPDATE = """NEGOTIATION UPDATE in negotiation #{nid}: {other} {said}
 The proposal from your side: {proposal}
 {current}
-{time_left} Answer with respond_negotiation (accept, reject, counter or reply), with a message."""
+{time_left} """ + CHAT_ANSWER
 
 #: Before a step of a model's own turn, for each chat it is in that changed since its last step (``late_note``).
 LATE_ANSWERED = ("NEGOTIATION UPDATE: {other} answered negotiation #{nid}: {said}; the proposal from your side: "

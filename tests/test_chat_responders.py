@@ -250,6 +250,51 @@ class Responders(Case):
                          "two silent steps, a look up, then three more: the third in a row ends it")
         rows = [(x["outcome"], x["cause"], x["steps"]) for x in s.metrics.data["negotiations"] if x["nid"] == nid]
         self.assertEqual(rows, [("fallback", "failed", 6)])
+        nudges = [t for seat, t in Silent.texts if seat == 1 and not t.startswith("CHAT:")]
+        self.assertEqual(nudges, [prompts.CHAT_ANSWER] * 4, "each silent step but the last is told to call the tool")
+
+    def test_steps_cut_off_at_their_token_limit_are_not_silent_answers(self):
+        """A step that ran out of tokens mid-thought (a reasoning model's) is not a silent answer, as a turn's is not
+        (``play_turn``): three of them, then the model's call, answer the chat; such steps stay bounded by the
+        exchange's step limit."""
+        class Truncated(Recording):
+            steps = 0
+
+            def step(self):
+                type(self).steps += 1
+                if type(self).steps <= 3:
+                    return StepResult(text="", thinking="Let me weigh the maps against", stop_reason="max_tokens")
+                return StepResult(text="answer", tool_calls=[ToolCall("r", "respond_negotiation", {
+                    "negotiation_id": self.nid, "action": "reply", "message": "Maps, then."})])
+        with mock.patch("citar.agents.llm_agent.make_conversation", Truncated):
+            s = self.game([{"type": "human"}, self.model(1)])
+            nid = self.open(s, 0, 1, "Maps?")
+            s.dispatch_waiting()
+            self.assertTrue(until(lambda: s.game.negotiation_head(nid)["awaiting"] == 0, 15), s.game.negotiation(nid))
+        n = s.game.negotiation(nid)
+        self.assertEqual((n["status"], n["history"][-1]["message"]), ("open", "Maps, then."))
+        rows = [(x["outcome"], x["cause"], x["steps"]) for x in s.metrics.data["negotiations"] if x["nid"] == nid]
+        self.assertEqual(rows, [("answered", None, 4)])
+        self.assertFalse([t for seat, t in Truncated.texts if seat == 1 and not t.startswith("CHAT:")],
+                         "a step cut off is asked again as it stands, with no nudge")
+
+    def test_every_chat_message_asks_for_the_answer_as_a_call_of_the_tool(self):
+        """The exit QA's real model (gemma-4-e2b) copied "Answer with respond_negotiation: accept ..." as text in every
+        chat and never called the tool; asked to call the tool, it did. The chat's system prompt, its first message,
+        its updates and the nudge all ask for the call, and none writes the tool's name followed by a colon."""
+        texts = {"system": prompts.chat_system_prompt("A careful trader."),
+                 "first": prompts.CHAT_PROMPT.format(other="Rome", nid=3, time_left="2 minutes left.", said="opened it",
+                                                     proposal="nothing", negotiation="{}", summary="{}"),
+                 "update": prompts.CHAT_UPDATE.format(other="Rome", nid=3, said='replied: "More?"', proposal="nothing",
+                                                      current="{}", time_left="1 minute left."),
+                 "nudge": prompts.CHAT_ANSWER}
+        for where, text in texts.items():
+            self.assertNotRegex(text, r"respond_negotiation\s*:", where)
+        self.assertIn("calling the respond_negotiation tool", texts["system"])
+        for where in ("first", "update", "nudge"):
+            self.assertTrue(texts[where].endswith(prompts.CHAT_ANSWER), where)
+        self.assertIn("Call the respond_negotiation tool", prompts.CHAT_ANSWER)
+        self.assertIn("do not write the call as text", prompts.CHAT_ANSWER)
 
     def test_a_bot_answers_at_once_while_sixteen_model_answers_wait_for_a_one_slot_machine(self):
         responders.reset()
