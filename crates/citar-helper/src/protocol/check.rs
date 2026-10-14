@@ -386,6 +386,36 @@ pub fn fields_of(
     Ok(())
 }
 
+/// What a type is, as JSON: `protocol/v2/schema.json` holds every frame's description, and both
+/// sides' tests compare theirs with it, so a bound written differently on one side is found even
+/// where no fixture reaches it. Unbounded string lengths are `null`.
+#[must_use]
+pub fn describe(ty: &Ty) -> Value {
+    use serde_json::json;
+    let fields = |fields: &[Field]| -> Value {
+        Value::Array(fields.iter().map(|f| json!([f.name, describe(&f.ty), f.optional])).collect())
+    };
+    match *ty {
+        Ty::Int { lo, hi } => json!({"int": [lo, hi]}),
+        Ty::Num { lo, hi } => json!({"number": [lo, hi]}),
+        Ty::Bool => json!("bool"),
+        Ty::Str { min, max } => json!({"string": [min, (max != usize::MAX).then_some(max)]}),
+        Ty::Hex(n) => json!({"hex": n}),
+        Ty::Base64(n) => json!({"base64": n}),
+        Ty::Id => json!("id"),
+        Ty::JobId => json!("job"),
+        Ty::RunId => json!("run"),
+        Ty::OneOf(values) => json!({"one_of": values}),
+        Ty::Exactly(k) => json!({"exactly": k}),
+        Ty::Object => json!("object"),
+        Ty::List { of, min, max } => json!({"list": describe(of), "min": min, "max": max}),
+        Ty::Nullable(inner) => json!({"nullable": describe(inner)}),
+        Ty::Struct(f) => json!({"struct": fields(f)}),
+        Ty::Closed(f) => json!({"closed": fields(f)}),
+        Ty::Open(f) => json!({"open": fields(f)}),
+    }
+}
+
 /// Removes, in place, the fields the protocol's own objects do not have, the way the serde types
 /// ignore them: what a reader keeps of a frame. `object` values and the unlisted fields of `Open`
 /// objects are kept whole.

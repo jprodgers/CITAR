@@ -152,6 +152,25 @@ pub fn parse_helper_frame(text: &str) -> Result<Parsed<HelperFrame>, ProtocolErr
     parse(text)
 }
 
+/// Every frame type each side sends, described (`check::describe`): what `protocol/v2/schema.json`
+/// holds, `{"helper": {type: …}, "server": {type: …}}`.
+#[must_use]
+pub fn schema() -> Value {
+    fn side<F: FrameSet>() -> Value {
+        let mut map = Map::new();
+        for t in F::TYPES {
+            if let Some(ty) = F::ty_of(t) {
+                map.insert((*t).to_owned(), check::describe(&ty));
+            }
+        }
+        Value::Object(map)
+    }
+    let mut out = Map::new();
+    out.insert("helper".to_owned(), side::<HelperFrame>());
+    out.insert("server".to_owned(), side::<ServerFrame>());
+    Value::Object(out)
+}
+
 /// `ts`, a number like any other.
 const TS: Ty = check::NUM;
 

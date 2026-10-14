@@ -90,6 +90,21 @@ class FrameTable(unittest.TestCase):
                          {"t": "error", "id": "", "message": HP.V1_REFUSAL_MESSAGE})
 
 
+class Schema(unittest.TestCase):
+    def test_the_field_tables_are_the_committed_schema(self):
+        """Every field table this side checks equals ``protocol/v2/schema.json``, which the helper's side is held to
+        as well: a bound written differently on one side fails here even where no fixture reaches it."""
+        committed = json.loads((F.FIXTURES / "schema.json").read_text(encoding="utf-8"))
+        ours = json.loads(json.dumps(HP.schema()))
+        self.assertEqual(set(ours), set(committed))
+        for side, frames in committed.items():
+            self.assertEqual(set(ours[side]), set(frames), side)
+            for t, want in frames.items():
+                with self.subTest(side=side, t=t):
+                    self.assertTrue(F.json_eq(ours[side][t], want),
+                                    f"{side} {t}:\n  this side {ours[side][t]}\n  committed {want}")
+
+
 class Builders(unittest.TestCase):
     """The server's builders write frames its own parser, and the helper's, accept."""
 

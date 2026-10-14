@@ -155,6 +155,29 @@ fn every_transcript_loads_and_its_frames_realize_into_valid_frames() {
     assert!(frames > 300, "{frames} frames realized");
 }
 
+/// Every field table this side checks equals `protocol/v2/schema.json`, which the server's side
+/// is held to as well: a bound written differently on one side fails here even where no fixture
+/// reaches it. After a deliberate change, `CITAR_BLESS_SCHEMA=1` rewrites the file from this
+/// side, and the server's test then shows where it differs.
+#[test]
+fn the_field_tables_are_the_committed_schema() {
+    let path = citar_helper::conformance::fixtures_dir().join("schema.json");
+    let ours = citar_helper::protocol::schema();
+    if std::env::var_os("CITAR_BLESS_SCHEMA").is_some() {
+        let text = serde_json::to_string_pretty(&ours).expect("the schema serializes");
+        std::fs::write(&path, text + "\n").expect("schema.json is written");
+    }
+    let text = std::fs::read_to_string(&path).expect("protocol/v2/schema.json reads");
+    let committed: Value = serde_json::from_str(&text).expect("schema.json is JSON");
+    for (side, frames) in committed.as_object().expect("an object") {
+        for (t, want) in frames.as_object().expect("an object per side") {
+            let got = &ours[side.as_str()][t.as_str()];
+            assert!(json_eq(got, want), "{side} {t}:\n  this side {got}\n  committed {want}");
+        }
+    }
+    assert!(json_eq(&ours, &committed), "a frame type is missing on one side");
+}
+
 /// The vocabularies the transcript loader enforces are the ones PROTOCOL.md documents: the
 /// background frames word for word, and every setup, endpoint and host key named there.
 #[test]

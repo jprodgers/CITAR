@@ -733,9 +733,15 @@ frames/valid/<from>.<type>[.<variant>].json     one frame each, parsed by both s
 frames/invalid/<from>.<type>.<defect>.json      one defect each, refused by both sides
 frames/ignored/<from>.<what>.json               frames both sides ignore without error
 transcripts/<name>.json                         behaviour, played from both sides
+schema.json                                     every frame's field table, as each side's code describes it
 ```
 
-`<from>` is `helper` or `server`, the sender.
+`<from>` is `helper` or `server`, the sender. `schema.json` is the field tables of this file as data
+(`{"helper": {type: …}, "server": {type: …}}`, each type described as `{"int": [lo, hi]}`,
+`{"string": [min, max]}`, `{"struct": [[name, type, optional], …]}` and so on): each side's tests
+describe the tables their code checks and compare them with it, so a bound written differently on
+one side is found even where no fixture reaches it. A change to a field table changes it
+(`CITAR_BLESS_SCHEMA=1` and the helper's tests rewrite it from the helper's side).
 
 - **A valid fixture** is `{"frame": F}` or `{"frame": F, "expect": E}`. Both sides parse `F` and
   serialize what they parsed again; the result equals `E` (by default `F`) as a JSON value, numbers

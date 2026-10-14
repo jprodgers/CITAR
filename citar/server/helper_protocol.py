@@ -431,6 +431,40 @@ class Struct(Ty):
         return out
 
 
+def describe(ty: Ty):
+    """What a type is, as JSON: ``protocol/v2/schema.json`` holds every frame's description, and both sides' tests
+    compare theirs with it, so a bound written differently on one side is found even where no fixture reaches it.
+    Unbounded string lengths are null. The helper's is ``check::describe``."""
+    if isinstance(ty, Int):
+        return {"int": [ty.lo, ty.hi]}
+    if isinstance(ty, Num):
+        return {"number": [ty.lo, ty.hi]}
+    if isinstance(ty, Bool):
+        return "bool"
+    if isinstance(ty, Str):
+        return {"string": [ty.lo, ty.hi]}
+    if isinstance(ty, Hex):
+        return {"hex": ty.n}
+    if isinstance(ty, B64):
+        return {"base64": ty.n}
+    if isinstance(ty, Id):
+        return {"": "id", "cj_": "job", "cr_": "run"}[ty.prefix]
+    if isinstance(ty, OneOf):
+        return {"one_of": list(ty.values)}
+    if isinstance(ty, Exactly):
+        return {"exactly": ty.k}
+    if isinstance(ty, Obj):
+        return "object"
+    if isinstance(ty, List):
+        return {"list": describe(ty.of), "min": ty.lo, "max": ty.hi}
+    if isinstance(ty, Nullable):
+        return {"nullable": describe(ty.of)}
+    if isinstance(ty, Struct):
+        kind = {"drop": "struct", "refuse": "closed", "keep": "open"}[ty.keep]
+        return {kind: [[f.name, describe(f.ty), f.optional] for f in ty.fields]}
+    raise TypeError(f"no description for {type(ty).__name__}")
+
+
 def Closed(*fields: Field) -> Struct:
     """An object that refuses a field it does not have (the job claim, whose bytes are signed)."""
     return Struct(*fields, keep="refuse")
@@ -611,6 +645,11 @@ SERVER_FRAMES: dict[str, Struct] = {
                                                                   "replaced"))),
 }
 FRAMES = {HELPER: HELPER_FRAMES, SERVER: SERVER_FRAMES}
+
+
+def schema() -> dict:
+    """Every frame type each side sends, described: what ``protocol/v2/schema.json`` holds."""
+    return {sender: {t: describe(spec) for t, spec in frames.items()} for sender, frames in FRAMES.items()}
 
 _TS = Num()
 
