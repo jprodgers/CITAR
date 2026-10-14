@@ -26,7 +26,9 @@ import tests  # noqa: F401  (temporary saves folder and server registry; must be
 from citar.agents.providers import completion, openai_provider
 
 CORPUS = Path(__file__).resolve().parent / "data" / "completions"
-TOOLSETS = json.loads((CORPUS / "tools.json").read_text(encoding="utf-8"))["sets"]
+TOOLS_FILE = json.loads((CORPUS / "tools.json").read_text(encoding="utf-8"))
+TOOLSETS = TOOLS_FILE["sets"]
+PROMPTS = TOOLS_FILE["json_prompts"]
 CASES = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(CORPUS.glob("*.json")) if p.name != "tools.json"]
 GENERATED = re.compile(r"^call_[0-9a-f]{8}$")
 
@@ -182,6 +184,19 @@ class Prompts(unittest.TestCase):
                 self.assertEqual(conv.tools[0], {"type": "function", "function": {
                     "name": tools[0]["name"], "description": tools[0]["description"],
                     "parameters": tools[0]["input_schema"]}})
+
+    def test_the_json_mode_prompt_is_the_one_models_were_given(self):
+        """The json-mode system prompt is byte for byte what `OpenAIConversation` sent at 8e7db41, before the request
+        side moved (`tools.json`'s `json_prompts`), through `system_prompt` and as the conversation's first message:
+        the target 4-05's WorkerConversation is held to."""
+        system = PROMPTS["system"]
+        for name in ("small", "game"):
+            with self.subTest(tools=name):
+                self.assertEqual(completion.system_prompt(system, TOOLSETS[name], "json"), PROMPTS[name])
+                with mock.patch.object(openai_provider, "OpenAI"):
+                    conv = openai_provider.OpenAIConversation({"model": "m", "base_url": "http://127.0.0.1:9/v1",
+                                                               "tool_mode": "json"}, system, TOOLSETS[name])
+                self.assertEqual(conv.messages[0]["content"], PROMPTS[name])
 
 
 if __name__ == "__main__":
