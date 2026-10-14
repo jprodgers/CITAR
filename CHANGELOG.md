@@ -313,6 +313,9 @@ files.
   window comes back with the other side's news; chat windows keep clear of the unit, city and side
   panels.
 - Debug routes are 404 on servers that are not in debug mode, whatever the body.
+- A route's changes were committed after its answer was sent, so a request made at once after it could
+  read things as they were before (a share link just rotated still opened the game), and a commit that
+  failed did so after a success. Every route now commits before it answers.
 - The lobby's Saved games list offered Load and Delete on another member's game shared with you,
   which the server refuses; it lists them without those buttons (`GET /api/saves` says `can_manage`
   for each save).
