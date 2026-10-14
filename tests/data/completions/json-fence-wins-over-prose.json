@@ -1,0 +1,39 @@
+{
+ "name": "json-fence-wins-over-prose",
+ "note": "a fenced object wins over braces in the prose before it",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "I think {maybe} this.\n```json\n{\"thoughts\": \"go\", \"calls\": [{\"tool\": \"end_turn\", \"args\": {}}]}\n```",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "go",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "I think {maybe} this.\n```json\n{\"thoughts\": \"go\", \"calls\": [{\"tool\": \"end_turn\", \"args\": {}}]}\n```"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}
