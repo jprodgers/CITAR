@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "shutdown", "ts": 1760000000.0, "code": "revoked"},
+  "code": "missing",
+  "path": "reason",
+  "why": "no reason"
+}

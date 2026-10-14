@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "power", "ts": 1760000000.0, "samples": []},
+  "code": "value",
+  "path": "samples",
+  "why": "at least one sample"
+}

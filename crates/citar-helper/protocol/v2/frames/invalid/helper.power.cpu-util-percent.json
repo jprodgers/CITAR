@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "power", "ts": 1760000000.0, "samples": [{"t": 1760000000.0, "gpu_w": null, "cpu_util": 12.5}]},
+  "code": "value",
+  "path": "samples.0.cpu_util",
+  "why": "a percentage where a fraction belongs"
+}

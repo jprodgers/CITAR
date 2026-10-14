@@ -1,0 +1,2124 @@
+{
+  "helper": {
+    "hello": {
+      "struct": [
+        [
+          "protocol",
+          {
+            "exactly": 2
+          },
+          false
+        ],
+        [
+          "token",
+          {
+            "string": [
+              1,
+              512
+            ]
+          },
+          false
+        ],
+        [
+          "helper",
+          {
+            "struct": [
+              [
+                "version",
+                {
+                  "string": [
+                    1,
+                    64
+                  ]
+                },
+                false
+              ],
+              [
+                "build",
+                {
+                  "hex": 12
+                },
+                false
+              ],
+              [
+                "jobs_build",
+                {
+                  "nullable": {
+                    "hex": 12
+                  }
+                },
+                false
+              ],
+              [
+                "target",
+                {
+                  "string": [
+                    1,
+                    64
+                  ]
+                },
+                false
+              ],
+              [
+                "label",
+                {
+                  "string": [
+                    0,
+                    200
+                  ]
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "machine",
+          {
+            "struct": [
+              [
+                "hostname",
+                {
+                  "string": [
+                    0,
+                    255
+                  ]
+                },
+                false
+              ],
+              [
+                "name",
+                {
+                  "string": [
+                    0,
+                    120
+                  ]
+                },
+                false
+              ],
+              [
+                "os",
+                {
+                  "string": [
+                    1,
+                    32
+                  ]
+                },
+                false
+              ],
+              [
+                "arch",
+                {
+                  "string": [
+                    1,
+                    32
+                  ]
+                },
+                false
+              ],
+              [
+                "public_key",
+                {
+                  "base64": 32
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "llm",
+          {
+            "struct": [
+              [
+                "enabled",
+                "bool",
+                false
+              ],
+              [
+                "provider",
+                {
+                  "nullable": {
+                    "one_of": [
+                      "lmstudio",
+                      "ollama",
+                      "openai_compatible",
+                      "openai"
+                    ]
+                  }
+                },
+                false
+              ],
+              [
+                "slots",
+                {
+                  "int": [
+                    0,
+                    16
+                  ]
+                },
+                false
+              ],
+              [
+                "stream",
+                "bool",
+                false
+              ],
+              [
+                "models",
+                {
+                  "list": {
+                    "struct": [
+                      [
+                        "key",
+                        {
+                          "string": [
+                            1,
+                            200
+                          ]
+                        },
+                        false
+                      ],
+                      [
+                        "label",
+                        {
+                          "string": [
+                            0,
+                            200
+                          ]
+                        },
+                        false
+                      ],
+                      [
+                        "context",
+                        {
+                          "nullable": {
+                            "int": [
+                              0,
+                              9007199254740991
+                            ]
+                          }
+                        },
+                        false
+                      ],
+                      [
+                        "loaded",
+                        "bool",
+                        false
+                      ]
+                    ]
+                  },
+                  "min": 0,
+                  "max": 500
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "cpu",
+          {
+            "struct": [
+              [
+                "enabled",
+                "bool",
+                false
+              ],
+              [
+                "ceiling",
+                {
+                  "struct": [
+                    [
+                      "threads",
+                      {
+                        "int": [
+                          0,
+                          1024
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "cpu_percent",
+                      {
+                        "int": [
+                          0,
+                          100
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "memory_mb",
+                      {
+                        "int": [
+                          0,
+                          16777216
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "work",
+                      {
+                        "list": {
+                          "one_of": [
+                            "lab_game",
+                            "ranking_game",
+                            "reference_game"
+                          ]
+                        },
+                        "min": 0,
+                        "max": 3
+                      },
+                      false
+                    ]
+                  ]
+                },
+                false
+              ],
+              [
+                "limits",
+                {
+                  "struct": [
+                    [
+                      "cpu",
+                      {
+                        "one_of": [
+                          "hard",
+                          "soft"
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "memory",
+                      {
+                        "one_of": [
+                          "hard",
+                          "soft"
+                        ]
+                      },
+                      false
+                    ]
+                  ]
+                },
+                false
+              ],
+              [
+                "verifiable",
+                "bool",
+                false
+              ],
+              [
+                "bots",
+                {
+                  "list": {
+                    "string": [
+                      1,
+                      64
+                    ]
+                  },
+                  "min": 0,
+                  "max": 64
+                },
+                false
+              ],
+              [
+                "ruleset",
+                {
+                  "hex": 64
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "report",
+          {
+            "struct": [
+              [
+                "hardware",
+                {
+                  "nullable": "object"
+                },
+                false
+              ],
+              [
+                "hardware_source",
+                {
+                  "one_of": [
+                    "scan",
+                    "file",
+                    "none"
+                  ]
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "running",
+          {
+            "list": "run",
+            "min": 0,
+            "max": 1024
+          },
+          false
+        ],
+        [
+          "results",
+          {
+            "list": "run",
+            "min": 0,
+            "max": 1024
+          },
+          false
+        ],
+        [
+          "updates",
+          {
+            "one_of": [
+              "auto",
+              "notify",
+              "off"
+            ]
+          },
+          false
+        ],
+        [
+          "quiet_until",
+          {
+            "nullable": {
+              "number": [
+                0.0,
+                1000000000000000.0
+              ]
+            }
+          },
+          false
+        ]
+      ]
+    },
+    "settings_ack": {
+      "struct": [
+        [
+          "effective",
+          {
+            "struct": [
+              [
+                "llm",
+                {
+                  "struct": [
+                    [
+                      "enabled",
+                      "bool",
+                      false
+                    ],
+                    [
+                      "slots",
+                      {
+                        "int": [
+                          0,
+                          16
+                        ]
+                      },
+                      false
+                    ]
+                  ]
+                },
+                false
+              ],
+              [
+                "cpu",
+                {
+                  "struct": [
+                    [
+                      "enabled",
+                      "bool",
+                      false
+                    ],
+                    [
+                      "threads",
+                      {
+                        "int": [
+                          0,
+                          1024
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "cpu_percent",
+                      {
+                        "int": [
+                          0,
+                          100
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "memory_mb",
+                      {
+                        "int": [
+                          0,
+                          16777216
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "work",
+                      {
+                        "list": {
+                          "one_of": [
+                            "lab_game",
+                            "ranking_game",
+                            "reference_game"
+                          ]
+                        },
+                        "min": 0,
+                        "max": 3
+                      },
+                      false
+                    ],
+                    [
+                      "yield_to_llm",
+                      "bool",
+                      false
+                    ]
+                  ]
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "capped",
+          {
+            "list": {
+              "one_of": [
+                "llm.enabled",
+                "llm.slots",
+                "cpu.enabled",
+                "cpu.threads",
+                "cpu.cpu_percent",
+                "cpu.memory_mb",
+                "cpu.work"
+              ]
+            },
+            "min": 0,
+            "max": 7
+          },
+          false
+        ],
+        [
+          "limits",
+          {
+            "struct": [
+              [
+                "cpu",
+                {
+                  "one_of": [
+                    "hard",
+                    "soft"
+                  ]
+                },
+                false
+              ],
+              [
+                "memory",
+                {
+                  "one_of": [
+                    "hard",
+                    "soft"
+                  ]
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "catalog": {
+      "struct": [
+        [
+          "models",
+          {
+            "list": {
+              "struct": [
+                [
+                  "key",
+                  {
+                    "string": [
+                      1,
+                      200
+                    ]
+                  },
+                  false
+                ],
+                [
+                  "label",
+                  {
+                    "string": [
+                      0,
+                      200
+                    ]
+                  },
+                  false
+                ],
+                [
+                  "context",
+                  {
+                    "nullable": {
+                      "int": [
+                        0,
+                        9007199254740991
+                      ]
+                    }
+                  },
+                  false
+                ],
+                [
+                  "loaded",
+                  "bool",
+                  false
+                ]
+              ]
+            },
+            "min": 0,
+            "max": 500
+          },
+          false
+        ]
+      ]
+    },
+    "hardware": {
+      "struct": [
+        [
+          "scan",
+          "object",
+          false
+        ],
+        [
+          "source",
+          {
+            "one_of": [
+              "scan",
+              "file"
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "power": {
+      "struct": [
+        [
+          "samples",
+          {
+            "list": {
+              "struct": [
+                [
+                  "t",
+                  {
+                    "number": [
+                      0.0,
+                      1000000000000000.0
+                    ]
+                  },
+                  false
+                ],
+                [
+                  "gpu_w",
+                  {
+                    "nullable": {
+                      "number": [
+                        0.0,
+                        1000000000000000.0
+                      ]
+                    }
+                  },
+                  false
+                ],
+                [
+                  "cpu_util",
+                  {
+                    "nullable": {
+                      "number": [
+                        0.0,
+                        1.0
+                      ]
+                    }
+                  },
+                  false
+                ]
+              ]
+            },
+            "min": 1,
+            "max": 360
+          },
+          false
+        ]
+      ]
+    },
+    "status": {
+      "struct": [
+        [
+          "quiet_until",
+          {
+            "nullable": {
+              "number": [
+                0.0,
+                1000000000000000.0
+              ]
+            }
+          },
+          false
+        ],
+        [
+          "llm_in_flight",
+          {
+            "int": [
+              0,
+              64
+            ]
+          },
+          false
+        ],
+        [
+          "jobs_running",
+          {
+            "int": [
+              0,
+              1024
+            ]
+          },
+          false
+        ],
+        [
+          "jobs_paused",
+          {
+            "int": [
+              0,
+              1024
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "done": {
+      "struct": [
+        [
+          "id",
+          "id",
+          false
+        ],
+        [
+          "message",
+          {
+            "struct": [
+              [
+                "content",
+                {
+                  "nullable": {
+                    "string": [
+                      0,
+                      null
+                    ]
+                  }
+                },
+                false
+              ],
+              [
+                "reasoning",
+                {
+                  "nullable": {
+                    "string": [
+                      0,
+                      null
+                    ]
+                  }
+                },
+                false
+              ],
+              [
+                "tool_calls",
+                {
+                  "list": {
+                    "struct": [
+                      [
+                        "id",
+                        {
+                          "string": [
+                            0,
+                            200
+                          ]
+                        },
+                        false
+                      ],
+                      [
+                        "type",
+                        {
+                          "string": [
+                            0,
+                            32
+                          ]
+                        },
+                        false
+                      ],
+                      [
+                        "function",
+                        {
+                          "struct": [
+                            [
+                              "name",
+                              {
+                                "string": [
+                                  0,
+                                  200
+                                ]
+                              },
+                              false
+                            ],
+                            [
+                              "arguments",
+                              {
+                                "string": [
+                                  0,
+                                  null
+                                ]
+                              },
+                              false
+                            ]
+                          ]
+                        },
+                        false
+                      ]
+                    ]
+                  },
+                  "min": 0,
+                  "max": 512
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "finish_reason",
+          {
+            "nullable": {
+              "string": [
+                0,
+                64
+              ]
+            }
+          },
+          false
+        ],
+        [
+          "usage",
+          {
+            "nullable": {
+              "struct": [
+                [
+                  "prompt_tokens",
+                  {
+                    "int": [
+                      0,
+                      9007199254740991
+                    ]
+                  },
+                  false
+                ],
+                [
+                  "completion_tokens",
+                  {
+                    "int": [
+                      0,
+                      9007199254740991
+                    ]
+                  },
+                  false
+                ],
+                [
+                  "reasoning_tokens",
+                  {
+                    "nullable": {
+                      "int": [
+                        0,
+                        9007199254740991
+                      ]
+                    }
+                  },
+                  false
+                ],
+                [
+                  "cached_tokens",
+                  {
+                    "nullable": {
+                      "int": [
+                        0,
+                        9007199254740991
+                      ]
+                    }
+                  },
+                  false
+                ]
+              ]
+            }
+          },
+          false
+        ],
+        [
+          "gen_s",
+          {
+            "number": [
+              0.0,
+              1000000000000000.0
+            ]
+          },
+          false
+        ],
+        [
+          "ttft_s",
+          {
+            "nullable": {
+              "number": [
+                0.0,
+                1000000000000000.0
+              ]
+            }
+          },
+          false
+        ],
+        [
+          "streamed",
+          "bool",
+          false
+        ]
+      ]
+    },
+    "error": {
+      "struct": [
+        [
+          "id",
+          "id",
+          false
+        ],
+        [
+          "code",
+          {
+            "one_of": [
+              "busy",
+              "closed",
+              "unknown_model",
+              "stopping",
+              "endpoint",
+              "timeout",
+              "bad_request"
+            ]
+          },
+          false
+        ],
+        [
+          "message",
+          {
+            "string": [
+              0,
+              4000
+            ]
+          },
+          false
+        ],
+        [
+          "retryable",
+          "bool",
+          false
+        ]
+      ]
+    },
+    "cancelled": {
+      "struct": [
+        [
+          "id",
+          "id",
+          false
+        ],
+        [
+          "gen_s",
+          {
+            "number": [
+              0.0,
+              1000000000000000.0
+            ]
+          },
+          false
+        ],
+        [
+          "tokens_out",
+          {
+            "int": [
+              0,
+              9007199254740991
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "job_accept": {
+      "struct": [
+        [
+          "run",
+          "run",
+          false
+        ]
+      ]
+    },
+    "job_reject": {
+      "struct": [
+        [
+          "run",
+          "run",
+          false
+        ],
+        [
+          "reason",
+          {
+            "one_of": [
+              "busy",
+              "build",
+              "kind",
+              "quiet",
+              "disabled",
+              "limits",
+              "memory",
+              "bad_spec",
+              "unverifiable"
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "job_progress": {
+      "struct": [
+        [
+          "run",
+          "run",
+          false
+        ],
+        [
+          "round",
+          {
+            "int": [
+              0,
+              9007199254740991
+            ]
+          },
+          false
+        ],
+        [
+          "of",
+          {
+            "int": [
+              0,
+              9007199254740991
+            ]
+          },
+          false
+        ],
+        [
+          "elapsed_s",
+          {
+            "number": [
+              0.0,
+              1000000000000000.0
+            ]
+          },
+          false
+        ],
+        [
+          "cpu_s",
+          {
+            "number": [
+              0.0,
+              1000000000000000.0
+            ]
+          },
+          false
+        ],
+        [
+          "paused_s",
+          {
+            "number": [
+              0.0,
+              1000000000000000.0
+            ]
+          },
+          false
+        ],
+        [
+          "peak_mb",
+          {
+            "number": [
+              0.0,
+              1000000000000000.0
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "job_result": {
+      "struct": [
+        [
+          "run",
+          "run",
+          false
+        ],
+        [
+          "outcome",
+          {
+            "struct": [
+              [
+                "result",
+                "object",
+                false
+              ],
+              [
+                "result_hash",
+                {
+                  "hex": 64
+                },
+                false
+              ],
+              [
+                "chain",
+                {
+                  "struct": [
+                    [
+                      "head",
+                      {
+                        "hex": 64
+                      },
+                      false
+                    ],
+                    [
+                      "rounds",
+                      {
+                        "int": [
+                          0,
+                          9007199254740991
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "digests",
+                      {
+                        "list": {
+                          "hex": 64
+                        },
+                        "min": 0,
+                        "max": 10000
+                      },
+                      false
+                    ]
+                  ]
+                },
+                false
+              ],
+              [
+                "cpu_s",
+                {
+                  "number": [
+                    0.0,
+                    1000000000000000.0
+                  ]
+                },
+                false
+              ],
+              [
+                "wall_s",
+                {
+                  "number": [
+                    0.0,
+                    1000000000000000.0
+                  ]
+                },
+                false
+              ],
+              [
+                "paused_s",
+                {
+                  "number": [
+                    0.0,
+                    1000000000000000.0
+                  ]
+                },
+                false
+              ],
+              [
+                "peak_mb",
+                {
+                  "number": [
+                    0.0,
+                    1000000000000000.0
+                  ]
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "claim",
+          {
+            "closed": [
+              [
+                "v",
+                {
+                  "exactly": 1
+                },
+                false
+              ],
+              [
+                "job",
+                "job",
+                false
+              ],
+              [
+                "run",
+                "run",
+                false
+              ],
+              [
+                "machine",
+                "id",
+                false
+              ],
+              [
+                "kind",
+                {
+                  "one_of": [
+                    "lab_game",
+                    "ranking_game",
+                    "reference_game"
+                  ]
+                },
+                false
+              ],
+              [
+                "spec_hash",
+                {
+                  "hex": 64
+                },
+                false
+              ],
+              [
+                "jobs_build",
+                {
+                  "hex": 12
+                },
+                false
+              ],
+              [
+                "bots",
+                {
+                  "list": {
+                    "string": [
+                      1,
+                      64
+                    ]
+                  },
+                  "min": 0,
+                  "max": 64
+                },
+                false
+              ],
+              [
+                "result_hash",
+                {
+                  "hex": 64
+                },
+                false
+              ],
+              [
+                "chain_head",
+                {
+                  "hex": 64
+                },
+                false
+              ],
+              [
+                "rounds",
+                {
+                  "int": [
+                    0,
+                    9007199254740991
+                  ]
+                },
+                false
+              ],
+              [
+                "key",
+                {
+                  "base64": 32
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "signature",
+          {
+            "base64": 64
+          },
+          false
+        ]
+      ]
+    },
+    "job_failed": {
+      "struct": [
+        [
+          "run",
+          "run",
+          false
+        ],
+        [
+          "code",
+          {
+            "one_of": [
+              "memory",
+              "deadline",
+              "host",
+              "aborted_locally",
+              "internal"
+            ]
+          },
+          false
+        ],
+        [
+          "message",
+          {
+            "string": [
+              0,
+              4000
+            ]
+          },
+          false
+        ],
+        [
+          "retryable",
+          "bool",
+          false
+        ]
+      ]
+    },
+    "job_aborted": {
+      "struct": [
+        [
+          "run",
+          "run",
+          false
+        ]
+      ]
+    },
+    "update_status": {
+      "struct": [
+        [
+          "state",
+          {
+            "one_of": [
+              "available",
+              "downloading",
+              "verified",
+              "restarting",
+              "applied",
+              "failed",
+              "refused",
+              "unavailable"
+            ]
+          },
+          false
+        ],
+        [
+          "version",
+          {
+            "nullable": {
+              "string": [
+                0,
+                64
+              ]
+            }
+          },
+          false
+        ],
+        [
+          "message",
+          {
+            "string": [
+              0,
+              4000
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "ping": {
+      "struct": []
+    },
+    "pong": {
+      "struct": []
+    }
+  },
+  "server": {
+    "welcome": {
+      "struct": [
+        [
+          "protocol",
+          {
+            "exactly": 2
+          },
+          false
+        ],
+        [
+          "machine",
+          {
+            "struct": [
+              [
+                "id",
+                "id",
+                false
+              ],
+              [
+                "name",
+                {
+                  "string": [
+                    0,
+                    120
+                  ]
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "settings",
+          {
+            "struct": [
+              [
+                "llm",
+                {
+                  "struct": [
+                    [
+                      "enabled",
+                      "bool",
+                      false
+                    ],
+                    [
+                      "slots",
+                      {
+                        "int": [
+                          0,
+                          16
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "allow_swaps",
+                      "bool",
+                      false
+                    ]
+                  ]
+                },
+                false
+              ],
+              [
+                "cpu",
+                {
+                  "struct": [
+                    [
+                      "enabled",
+                      "bool",
+                      false
+                    ],
+                    [
+                      "threads",
+                      {
+                        "int": [
+                          0,
+                          1024
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "cpu_percent",
+                      {
+                        "int": [
+                          0,
+                          100
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "memory_mb",
+                      {
+                        "int": [
+                          0,
+                          16777216
+                        ]
+                      },
+                      false
+                    ],
+                    [
+                      "work",
+                      {
+                        "list": {
+                          "one_of": [
+                            "lab_game",
+                            "ranking_game",
+                            "reference_game"
+                          ]
+                        },
+                        "min": 0,
+                        "max": 3
+                      },
+                      false
+                    ],
+                    [
+                      "yield_to_llm",
+                      "bool",
+                      false
+                    ]
+                  ]
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "ping_s",
+          {
+            "int": [
+              5,
+              300
+            ]
+          },
+          false
+        ],
+        [
+          "server",
+          {
+            "struct": [
+              [
+                "version",
+                {
+                  "string": [
+                    1,
+                    64
+                  ]
+                },
+                false
+              ],
+              [
+                "build",
+                {
+                  "hex": 12
+                },
+                false
+              ],
+              [
+                "jobs_build",
+                {
+                  "nullable": {
+                    "hex": 12
+                  }
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "update",
+          {
+            "nullable": {
+              "struct": [
+                [
+                  "manifest",
+                  {
+                    "string": [
+                      1,
+                      65536
+                    ]
+                  },
+                  false
+                ],
+                [
+                  "signature",
+                  {
+                    "base64": 64
+                  },
+                  false
+                ]
+              ]
+            }
+          },
+          false
+        ],
+        [
+          "jobs",
+          {
+            "struct": [
+              [
+                "keep",
+                {
+                  "list": "run",
+                  "min": 0,
+                  "max": 1024
+                },
+                false
+              ],
+              [
+                "drop",
+                {
+                  "list": "run",
+                  "min": 0,
+                  "max": 1024
+                },
+                false
+              ],
+              [
+                "resend",
+                {
+                  "list": "run",
+                  "min": 0,
+                  "max": 1024
+                },
+                false
+              ]
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "refused": {
+      "struct": [
+        [
+          "code",
+          {
+            "one_of": [
+              "token",
+              "key",
+              "protocol",
+              "rate",
+              "build"
+            ]
+          },
+          false
+        ],
+        [
+          "message",
+          {
+            "string": [
+              0,
+              4000
+            ]
+          },
+          false
+        ],
+        [
+          "retry_after_s",
+          {
+            "number": [
+              0.0,
+              1000000000000000.0
+            ]
+          },
+          true
+        ]
+      ]
+    },
+    "error": {
+      "struct": [
+        [
+          "id",
+          {
+            "string": [
+              0,
+              64
+            ]
+          },
+          true
+        ],
+        [
+          "message",
+          {
+            "string": [
+              0,
+              4000
+            ]
+          },
+          false
+        ],
+        [
+          "refusal",
+          {
+            "string": [
+              0,
+              64
+            ]
+          },
+          true
+        ],
+        [
+          "retryable",
+          "bool",
+          true
+        ]
+      ]
+    },
+    "settings": {
+      "struct": [
+        [
+          "llm",
+          {
+            "struct": [
+              [
+                "enabled",
+                "bool",
+                false
+              ],
+              [
+                "slots",
+                {
+                  "int": [
+                    0,
+                    16
+                  ]
+                },
+                false
+              ],
+              [
+                "allow_swaps",
+                "bool",
+                false
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "cpu",
+          {
+            "struct": [
+              [
+                "enabled",
+                "bool",
+                false
+              ],
+              [
+                "threads",
+                {
+                  "int": [
+                    0,
+                    1024
+                  ]
+                },
+                false
+              ],
+              [
+                "cpu_percent",
+                {
+                  "int": [
+                    0,
+                    100
+                  ]
+                },
+                false
+              ],
+              [
+                "memory_mb",
+                {
+                  "int": [
+                    0,
+                    16777216
+                  ]
+                },
+                false
+              ],
+              [
+                "work",
+                {
+                  "list": {
+                    "one_of": [
+                      "lab_game",
+                      "ranking_game",
+                      "reference_game"
+                    ]
+                  },
+                  "min": 0,
+                  "max": 3
+                },
+                false
+              ],
+              [
+                "yield_to_llm",
+                "bool",
+                false
+              ]
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "rescan": {
+      "struct": []
+    },
+    "request": {
+      "struct": [
+        [
+          "id",
+          "id",
+          false
+        ],
+        [
+          "model",
+          {
+            "string": [
+              1,
+              200
+            ]
+          },
+          false
+        ],
+        [
+          "messages",
+          {
+            "list": {
+              "open": [
+                [
+                  "role",
+                  {
+                    "string": [
+                      1,
+                      32
+                    ]
+                  },
+                  false
+                ]
+              ]
+            },
+            "min": 1,
+            "max": 10000
+          },
+          false
+        ],
+        [
+          "tools",
+          {
+            "nullable": {
+              "list": "object",
+              "min": 0,
+              "max": 512
+            }
+          },
+          false
+        ],
+        [
+          "params",
+          {
+            "open": [
+              [
+                "temperature",
+                {
+                  "number": [
+                    0.0,
+                    2.0
+                  ]
+                },
+                true
+              ],
+              [
+                "max_tokens",
+                {
+                  "int": [
+                    1,
+                    1048576
+                  ]
+                },
+                true
+              ],
+              [
+                "top_p",
+                {
+                  "number": [
+                    0.0,
+                    1.0
+                  ]
+                },
+                true
+              ],
+              [
+                "seed",
+                {
+                  "int": [
+                    0,
+                    9007199254740991
+                  ]
+                },
+                true
+              ],
+              [
+                "reasoning_effort",
+                {
+                  "string": [
+                    1,
+                    32
+                  ]
+                },
+                true
+              ]
+            ]
+          },
+          false
+        ],
+        [
+          "timeout_s",
+          {
+            "number": [
+              1.0,
+              86400.0
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "cancel": {
+      "struct": [
+        [
+          "id",
+          "id",
+          false
+        ]
+      ]
+    },
+    "job_offer": {
+      "struct": [
+        [
+          "job",
+          "job",
+          false
+        ],
+        [
+          "run",
+          "run",
+          false
+        ],
+        [
+          "kind",
+          {
+            "one_of": [
+              "lab_game",
+              "ranking_game",
+              "reference_game"
+            ]
+          },
+          false
+        ],
+        [
+          "spec",
+          "object",
+          false
+        ],
+        [
+          "spec_hash",
+          {
+            "hex": 64
+          },
+          false
+        ],
+        [
+          "jobs_build",
+          {
+            "hex": 12
+          },
+          false
+        ],
+        [
+          "deadline_s",
+          {
+            "number": [
+              1.0,
+              86400.0
+            ]
+          },
+          false
+        ],
+        [
+          "mem_mb",
+          {
+            "int": [
+              0,
+              16777216
+            ]
+          },
+          false
+        ],
+        [
+          "priority",
+          {
+            "int": [
+              -100,
+              100
+            ]
+          },
+          false
+        ],
+        [
+          "offer_ttl_s",
+          {
+            "number": [
+              1.0,
+              3600.0
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "job_result_ack": {
+      "struct": [
+        [
+          "run",
+          "run",
+          false
+        ]
+      ]
+    },
+    "job_abort": {
+      "struct": [
+        [
+          "run",
+          "run",
+          false
+        ],
+        [
+          "reason",
+          {
+            "string": [
+              0,
+              200
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "jobs_pause": {
+      "struct": [
+        [
+          "reason",
+          {
+            "string": [
+              0,
+              200
+            ]
+          },
+          false
+        ]
+      ]
+    },
+    "jobs_resume": {
+      "struct": []
+    },
+    "update": {
+      "struct": [
+        [
+          "manifest",
+          {
+            "string": [
+              1,
+              65536
+            ]
+          },
+          false
+        ],
+        [
+          "signature",
+          {
+            "base64": 64
+          },
+          false
+        ]
+      ]
+    },
+    "ping": {
+      "struct": []
+    },
+    "pong": {
+      "struct": []
+    },
+    "shutdown": {
+      "struct": [
+        [
+          "reason",
+          {
+            "string": [
+              0,
+              4000
+            ]
+          },
+          false
+        ],
+        [
+          "code",
+          {
+            "one_of": [
+              "revoked",
+              "disabled",
+              "deleted",
+              "suspended",
+              "replaced"
+            ]
+          },
+          false
+        ]
+      ]
+    }
+  }
+}

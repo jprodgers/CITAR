@@ -1,0 +1,6 @@
+{
+  "raw": "{\"t\": \"pong\", \"ts\": 1e400}",
+  "code": "not_json",
+  "path": "",
+  "why": "a number too large for a 64-bit float"
+}

@@ -1,0 +1,26 @@
+{
+  "frame": {
+    "t": "welcome",
+    "ts": 1760000000.0,
+    "protocol": 2,
+    "machine": {"id": "sv_0123456789abcdef", "name": "Framework Desktop"},
+    "settings": {
+      "llm": {"enabled": true, "slots": 2, "allow_swaps": false},
+      "cpu": {
+        "enabled": true,
+        "threads": 2,
+        "cpu_percent": 25,
+        "memory_mb": 1024,
+        "work": ["lab_game", "ranking_game"],
+        "yield_to_llm": true
+      }
+    },
+    "ping_s": 20,
+    "server": {"version": "0.1.6", "build": "a1b2c3d4e5f6", "jobs_build": "0f1e2d3c4b5a"},
+    "update": {
+      "manifest": "{\"v\":1,\"version\":\"0.1.7\",\"protocol\":2,\"build\":\"b2c3d4e5f6a1\",\"released_at\":\"2026-11-01T00:00:00Z\",\"assets\":{\"x86_64-pc-windows-msvc\":{\"name\":\"citar-helper-windows-x64.exe\",\"url\":\"https://github.com/jprodgers/CITAR/releases/download/v0.1.7/citar-helper-windows-x64.exe\",\"sha256\":\"abababababababababababababababababababababababababababababababab\",\"size\":9437184}}}",
+      "signature": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw=="
+    },
+    "jobs": {"keep": [], "drop": [], "resend": []}
+  }
+}

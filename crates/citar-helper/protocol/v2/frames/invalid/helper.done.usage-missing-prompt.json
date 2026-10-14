@@ -1,0 +1,20 @@
+{
+  "frame": {
+    "t": "done",
+    "ts": 1760000000.0,
+    "id": "0123456789abcdef",
+    "message": {
+      "content": null,
+      "reasoning": "The city needs walls first.",
+      "tool_calls": [{"id": "call_2", "type": "function", "function": {"name": "end_turn", "arguments": "{}"}}]
+    },
+    "finish_reason": "tool_calls",
+    "usage": {"completion_tokens": 42, "reasoning_tokens": 17, "cached_tokens": null},
+    "gen_s": 2.41,
+    "ttft_s": 0.38,
+    "streamed": true
+  },
+  "code": "missing",
+  "path": "usage.prompt_tokens",
+  "why": "usage without prompt_tokens"
+}

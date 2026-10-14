@@ -31,6 +31,10 @@ on:
       # operations or `legacy`, it builds crates/citar-py, and the version stays dynamic.
       - "pyproject.toml"
       - ".github/workflows/rust.yml"
+      # cargo xtask check holds release.yml, and helper.yml's artifact jobs, to builds without the
+      # helper crates' test features or development guard (design/phase4-helper.md P4.3.1).
+      - ".github/workflows/release.yml"
+      - ".github/workflows/helper.yml"
   pull_request:
     paths:
       - "crates/**"
@@ -54,6 +58,10 @@ on:
       # operations or `legacy`, it builds crates/citar-py, and the version stays dynamic.
       - "pyproject.toml"
       - ".github/workflows/rust.yml"
+      # cargo xtask check holds release.yml, and helper.yml's artifact jobs, to builds without the
+      # helper crates' test features or development guard (design/phase4-helper.md P4.3.1).
+      - ".github/workflows/release.yml"
+      - ".github/workflows/helper.yml"
   workflow_dispatch:
     inputs:
       chaos_seconds:

@@ -1,0 +1,23 @@
+{
+  "frame": {
+    "t": "hardware",
+    "ts": 1760000000.0,
+    "scan": {
+      "format": "citar-hardware",
+      "collector_version": 2,
+      "collector": "citar-helper",
+      "collected_at": "2026-10-14T05:00:00",
+      "hostname": "framework",
+      "os": {"system": "Windows", "release": "11", "arch": "AMD64"},
+      "system": {"form": "desktop"},
+      "cpu": {"model": "AMD Ryzen AI Max+ 395", "cores": 16, "threads": 32},
+      "memory": {"ram_gb": 128, "unified": true},
+      "gpus": [],
+      "physical_disks": [],
+      "volumes": [],
+      "runtimes": [{"name": "LM Studio", "running": true}],
+      "power": {"gpu_sampling": false, "suggested": {"idle_w": 20, "cpu_max_w": 120, "gpu_max_w": 0}}
+    },
+    "source": "scan"
+  }
+}

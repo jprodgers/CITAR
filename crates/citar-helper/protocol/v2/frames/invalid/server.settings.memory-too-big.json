@@ -1,0 +1,6 @@
+{
+  "raw": "{\"t\": \"settings\", \"ts\": 1760000000.0, \"llm\": {\"enabled\": true, \"slots\": 2, \"allow_swaps\": false}, \"cpu\": {\"enabled\": true, \"threads\": 2, \"cpu_percent\": 25, \"memory_mb\": 100000000000000000000, \"work\": [\"lab_game\", \"ranking_game\"], \"yield_to_llm\": true}}",
+  "code": "type",
+  "path": "cpu.memory_mb",
+  "why": "an integer beyond 64 bits reads as a float"
+}

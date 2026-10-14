@@ -1,0 +1,82 @@
+{
+  "name": "handshake-v015-server",
+  "about": "A 0.1.5 server answers a protocol 2 hello with its protocol 1 error and close 4426; the helper reads it as refused protocol and waits.",
+  "refs": ["P4.2.2", "P4.2.8"],
+  "plays": {"helper": "4-03", "hub": null},
+  "one_side": "scripts a 0.1.5 server; the 0.1.6 hub never sends its message",
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {"helper": {"clock": "fake"}, "hub": {}},
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "error",
+        "id": "",
+        "message": "This server speaks worker protocol v1; the worker speaks vNone. Update citar-worker.",
+        "refusal": "",
+        "retryable": false
+      }
+    },
+    {"close": {"by": "server", "code": 4426}},
+    {"wait": {"s": 590, "quiet": true}},
+    {"connect": {}, "within_s": 20},
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    }
+  ]
+}

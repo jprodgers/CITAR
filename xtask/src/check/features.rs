@@ -15,7 +15,8 @@
 //! The engine's `test-ops` (`api::testops`, `api::inspect`, the rule scripts' operations) ships in
 //! no wheel and no helper either (DESIGN.md P2.2, rule 3): the crates that ship (the bot, the
 //! store, the runner) never turn it on, and the bindings only through their own `test-ops`
-//! feature, which forwards it and does nothing else, and which no other feature of theirs turns
+//! feature, which forwards it and does nothing else (but for forwarding to the helper crates' test
+//! features too, P4.3.1, which `helper` checks), and which no other feature of theirs turns
 //! on. The Python suite's builds turn that feature on; pyproject's maturin features never list it
 //! (from package 2-06b). Every finding names the manifest at fault.
 
@@ -140,6 +141,7 @@ pub fn check(meta: &Metadata) -> Vec<Finding> {
 /// that also reaches `legacy` (`legacy_closure`) is the legacy check's, and not reported twice.
 fn check_test_ops(meta: &Metadata, legacy_closure: &BTreeSet<String>) -> Vec<Finding> {
     let mut out = Vec::new();
+    let helper_tests = super::helper::never_shipped(meta);
     let engine = meta.package(ENGINE);
     let ops: BTreeSet<String> =
         closure(engine, &[TEST_OPS]).difference(legacy_closure).cloned().collect();
@@ -197,15 +199,20 @@ fn check_test_ops(meta: &Metadata, legacy_closure: &BTreeSet<String>) -> Vec<Fin
         if !bindings {
             continue;
         }
-        // The bindings' own feature forwards, and nothing else of theirs turns it on.
+        // The bindings' own feature forwards, and nothing else of theirs turns it on. It may also
+        // turn on the helper crates' test features (P4.3.1), so the Python suite's build of the
+        // extension has the jobs crate's test kinds and its test update key.
         if let Some(values) = member.features.get(TEST_OPS) {
             let forward = |v: &String| key.and_then(|k| engine_feature(v, k)) == Some(TEST_OPS);
-            if values.len() != 1 || !values.iter().all(forward) {
+            let helper_test = |v: &String| helper_tests.contains(&v.replacen("?/", "/", 1));
+            let forwards = values.iter().filter(|v| forward(v)).count();
+            if forwards != 1 || !values.iter().all(|v| forward(v) || helper_test(v)) {
                 out.push(Finding::new(
                     CHECK,
                     format!(
                         "{manifest}: {BINDINGS}'s `{TEST_OPS}` feature must only forward to \
-                         {ENGINE}'s, but turns on [{}] (DESIGN.md P2.2)",
+                         {ENGINE}'s (and may add the helper crates' test features), but turns on \
+                         [{}] (DESIGN.md P2.2, P4.3.1)",
                         values.join(", ")
                     ),
                 ));
@@ -421,6 +428,22 @@ mod tests {
             "only forward",
         );
         bad(&plain, r#""test-ops": []"#, "only forward");
+        // The helper crates' test features may join the forward (P4.3.1), never replace it, and
+        // nothing else may: here citar-jobs is not in the workspace, so it has no test feature.
+        bad(&plain, r#""test-ops": ["citar-jobs/test-jobs"]"#, "only forward");
+        bad(
+            &plain,
+            r#""test-ops": ["citar-engine/test-ops", "citar-jobs/test-jobs"]"#,
+            "only forward",
+        );
+        let jobs = member("citar-jobs", "", r#""test-jobs": [], "fast": []"#);
+        let py_deps = format!("{plain}, {}", dep("citar-jobs", "null", ""));
+        let both = r#""test-ops": ["citar-engine/test-ops", "citar-jobs?/test-jobs"]"#;
+        assert_eq!(check(&workspace(&[jobs.clone(), member("citar-py", &py_deps, both)])), []);
+        let fast = r#""test-ops": ["citar-engine/test-ops", "citar-jobs/fast"]"#;
+        let found = check(&workspace(&[jobs, member("citar-py", &py_deps, fast)]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("only forward"), "{found:?}");
         // Its default, or any other feature, turning its test-ops on.
         bad(
             &plain,

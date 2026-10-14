@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "shutdown", "ts": 1760000000.0, "reason": "bye", "code": "evicted"},
+  "code": "value",
+  "path": "code",
+  "why": "a code the protocol does not name"
+}

@@ -1,0 +1,74 @@
+{
+  "name": "handshake-refused-protocol",
+  "about": "A server that does not speak protocol 2 refuses it; the helper waits ten minutes and tries again, and never exits on it.",
+  "refs": ["P4.2.2", "P4.2.8"],
+  "plays": {"helper": "4-03", "hub": null},
+  "one_side": "scripts a future server that does not speak protocol 2; the 0.1.6 hub speaks it",
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {"helper": {"clock": "fake"}, "hub": {}},
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {"s2h": {"t": "refused", "code": "protocol", "message": "<string>"}},
+    {"close": {"by": "server", "code": 4426}},
+    {"wait": {"s": 590, "quiet": true}},
+    {"connect": {}, "within_s": 20},
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    }
+  ]
+}

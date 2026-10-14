@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "job_accept", "ts": 1760000000.0, "run": "cr_"},
+  "code": "value",
+  "path": "run",
+  "why": "nothing after cr_"
+}

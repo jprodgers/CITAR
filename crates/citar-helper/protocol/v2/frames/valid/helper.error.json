@@ -1,0 +1,10 @@
+{
+  "frame": {
+    "t": "error",
+    "ts": 1760000000.0,
+    "id": "0123456789abcdef",
+    "code": "busy",
+    "message": "All 2 local slots are in use.",
+    "retryable": true
+  }
+}

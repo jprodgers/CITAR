@@ -1,0 +1,232 @@
+{
+  "name": "completion-streamed-tool-call",
+  "about": "A request with tools is streamed from the endpoint and returned raw: content, reasoning and the tool call assembled from their deltas by index, nothing parsed or repaired.",
+  "refs": ["P4.2.4", "P4.3.4"],
+  "plays": {"helper": "4-04", "hub": "4-05"},
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "machine": "sv_0123456789abcdef",
+    "req": "0123456789abcdef",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {
+    "helper": {
+      "config": {
+        "max_concurrent": 1,
+        "models": ["model-a"],
+        "cpu": {"enabled": false, "threads": 1, "cpu_percent": 10, "memory_mb": 512, "work": ["lab_game"]}
+      },
+      "endpoint": {"models": [{"key": "model-a", "label": "Model A", "context": 8192, "loaded": true}]}
+    },
+    "hub": {
+      "machine": {
+        "settings": {
+          "llm": {"enabled": true, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        }
+      }
+    }
+  },
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": {
+          "enabled": true,
+          "provider": "<any>",
+          "slots": 1,
+          "stream": "<bool>",
+          "models": [{"key": "model-a", "label": "Model A", "context": 8192, "loaded": true}]
+        },
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "welcome",
+        "protocol": 2,
+        "machine": {"id": "<id:machine>", "name": "<string>"},
+        "settings": {
+          "llm": {"enabled": true, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "ping_s": "<int:5..300>",
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "update": null,
+        "jobs": {"keep": [], "drop": [], "resend": []}
+      },
+      "within_s": 5
+    },
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": true, "slots": 1},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": [],
+        "limits": "<any>"
+      }
+    },
+    {"act": {"side": "hub", "do": "submit_request"}},
+    {
+      "s2h": {
+        "t": "request",
+        "id": "<id:req>",
+        "model": "model-a",
+        "messages": [{"role": "system", "content": "<string>"}, {"role": "user", "content": "<string>"}],
+        "tools": [
+          {
+            "type": "function",
+            "function": {"name": "end_turn", "description": "<string>", "parameters": "<any>"}
+          }
+        ],
+        "params": "<any>",
+        "timeout_s": "<number>"
+      }
+    },
+    {
+      "endpoint": {
+        "expect_request": {
+          "model": "model-a",
+          "stream": true,
+          "stream_options": {"include_usage": true},
+          "messages": "<any>",
+          "tools": "<any>"
+        }
+      }
+    },
+    {
+      "endpoint": {
+        "respond": {
+          "stream": [
+            {
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {"role": "assistant", "reasoning_content": "Walls first."},
+                  "finish_reason": null
+                }
+              ]
+            },
+            {
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {
+                    "tool_calls": [
+                      {
+                        "index": 0,
+                        "id": "call_9",
+                        "type": "function",
+                        "function": {"name": "end_", "arguments": ""}
+                      }
+                    ]
+                  },
+                  "finish_reason": null
+                }
+              ]
+            },
+            {
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {"tool_calls": [{"index": 0, "function": {"name": "turn", "arguments": "{\"no"}}]},
+                  "finish_reason": null
+                }
+              ]
+            },
+            {
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "te\": 1}"}}]},
+                  "finish_reason": null
+                }
+              ]
+            },
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+            {
+              "choices": [],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 14,
+                "completion_tokens_details": {"reasoning_tokens": 3},
+                "prompt_tokens_details": {"cached_tokens": 64}
+              }
+            }
+          ],
+          "delay_ms": 20
+        }
+      }
+    },
+    {
+      "h2s": {
+        "t": "done",
+        "id": "<id:req>",
+        "message": {
+          "content": null,
+          "reasoning": "Walls first.",
+          "tool_calls": [
+            {
+              "id": "call_9",
+              "type": "function",
+              "function": {"name": "end_turn", "arguments": "{\"note\": 1}"}
+            }
+          ]
+        },
+        "finish_reason": "tool_calls",
+        "usage": {"prompt_tokens": 120, "completion_tokens": 14, "reasoning_tokens": 3, "cached_tokens": 64},
+        "gen_s": "<number>",
+        "ttft_s": "<number>",
+        "streamed": true
+      },
+      "within_s": 5
+    },
+    {
+      "state": {"side": "hub", "expect": {"slot_free": true, "draining": 0, "step": {"tool_calls": ["end_turn"]}}}
+    }
+  ]
+}

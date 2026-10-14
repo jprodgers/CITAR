@@ -1,0 +1,19 @@
+{
+  "frame": {
+    "t": "settings_ack",
+    "ts": 1760000000.0,
+    "effective": {
+      "llm": {"enabled": true, "slots": 2},
+      "cpu": {
+        "enabled": true,
+        "threads": 2,
+        "cpu_percent": 25,
+        "memory_mb": 1024,
+        "work": ["lab_game"],
+        "yield_to_llm": true
+      }
+    },
+    "capped": ["cpu.work"],
+    "limits": {"cpu": "hard", "memory": "hard"}
+  }
+}

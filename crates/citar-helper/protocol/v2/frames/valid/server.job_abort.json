@@ -1,0 +1,8 @@
+{
+  "frame": {
+    "t": "job_abort",
+    "ts": 1760000000.0,
+    "run": "cr_0123456789abcdef",
+    "reason": "the offer expired before it was accepted"
+  }
+}

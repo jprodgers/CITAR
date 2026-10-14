@@ -1,0 +1,6 @@
+{
+  "raw": "{\"t\": \"status\", \"quiet_until\": null, \"llm_in_flight\": 0, \"jobs_running\": 0, \"jobs_paused\": 0, \"note\": \"\\ud800\"}",
+  "code": "not_json",
+  "path": "",
+  "why": "a lone surrogate escape in a string"
+}

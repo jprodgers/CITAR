@@ -5,7 +5,9 @@
 //! Python-state converter (`legacy`): the list may not turn either on, whether by citar-py's own
 //! feature, through a feature of citar-py's that reaches one, or as `citar-engine/<feature>`, and
 //! `all-features` may not be set. The Python suite's builds add `--features test-ops` on the
-//! command line (CI's build-ext job, `cargo xtask develop`), which this file never sees.
+//! command line (CI's build-ext job, `cargo xtask develop`), which this file never sees. From
+//! Phase 4 the list may not reach the helper crates' test features or development guard either
+//! (`helper`, design/phase4-helper.md P4.3.1).
 //!
 //! The features are citar-py's only while the table builds citar-py, so its `manifest-path` must
 //! be the bindings' manifest. The wheel's version is Cargo's, which the version check holds equal
@@ -117,14 +119,17 @@ pub fn check_text(text: &str, meta: &Metadata) -> Result<Vec<Finding>, String> {
     Ok(out)
 }
 
-/// What a wheel's feature may not reach: citar-py's own `test-ops`, and the engine's features
-/// that are test-only or turn on its test operations.
+/// What a wheel's feature may not reach: citar-py's own `test-ops`, the engine's features that
+/// are test-only or turn on its test operations, and the helper crates' test features and
+/// development guard (P4.3.1).
 struct Forbidden<'m> {
     bindings: Option<&'m Package>,
     /// The name citar-py's feature table uses for the engine (its rename, if it has one).
     engine_key: String,
     /// The engine's features that reach `legacy` or `test-ops`.
     engine: BTreeSet<String>,
+    /// The helper crates' features that never ship, as `crate/feature`.
+    helper: BTreeSet<String>,
 }
 
 impl<'m> Forbidden<'m> {
@@ -137,7 +142,7 @@ impl<'m> Forbidden<'m> {
             .and_then(|b| b.dependencies.iter().find(|d| d.name == ENGINE))
             .map_or(ENGINE, |d| d.rename.as_deref().unwrap_or(&d.name))
             .to_owned();
-        Forbidden { bindings, engine_key, engine: set }
+        Forbidden { bindings, engine_key, engine: set, helper: super::helper::never_shipped(meta) }
     }
 
     /// What the feature value `f` (citar-py's `x`, or `dep/x`, `dep?/x`) turns on that a wheel
@@ -153,6 +158,9 @@ impl<'m> Forbidden<'m> {
                 let dep = dep.strip_suffix('?').unwrap_or(dep);
                 if (dep == self.engine_key || dep == ENGINE) && self.engine.contains(feature) {
                     return Some(format!("{ENGINE}'s `{feature}`"));
+                }
+                if self.helper.contains(&format!("{dep}/{feature}")) {
+                    return Some(format!("{dep}'s `{feature}`, a test or development feature"));
                 }
                 // cargo's `--features citar-py/x` names the package's own feature.
                 if dep == BINDINGS {
@@ -256,6 +264,30 @@ mod tests {
         // A cycle in the table ends.
         let cyclic = workspace(r#""a": ["b"], "b": ["a"]"#);
         assert_eq!(found(&pyproject(r#"features = ["a"]"#), &cyclic), []);
+    }
+
+    /// P4.3.1: no wheel has a helper crate's test feature or development guard, named directly
+    /// or through a feature of citar-py's.
+    #[test]
+    fn a_helper_crates_test_feature_fails() {
+        let text = r#"{"packages": [
+            {"name": "citar-py", "version": "0.1.5", "id": "py", "targets": [],
+             "dependencies": [{"name": "citar-jobs", "req": "*", "kind": null,
+                               "uses_default_features": true, "features": []}],
+             "features": {"jobs-tests": ["citar-jobs/test-jobs"], "fast": ["citar-jobs/fast"]}},
+            {"name": "citar-jobs", "version": "0.1.5", "id": "jobs", "targets": [],
+             "dependencies": [], "features": {"test-jobs": [], "fast": []}}],
+            "workspace_members": ["py", "jobs"], "resolve": null}"#;
+        let meta = Metadata::parse(text.as_bytes()).expect("test metadata parses");
+        for listed in ["citar-jobs/test-jobs", "citar-jobs?/test-jobs", "jobs-tests"] {
+            let f = found(&pyproject(&format!("features = [{listed:?}]")), &meta);
+            assert_eq!(f.len(), 1, "{listed}: {f:?}");
+            assert!(
+                f[0].message.contains("citar-jobs's `test-jobs`, a test or development"),
+                "{f:?}"
+            );
+        }
+        assert_eq!(found(&pyproject(r#"features = ["fast", "citar-jobs/fast"]"#), &meta), []);
     }
 
     #[test]
