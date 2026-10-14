@@ -3,10 +3,11 @@
 //! the 0.1.5 helper kept it; the helper's own state goes under `helper/`. The helper writes
 //! nothing outside its home.
 //!
-//! **The development guard** (`dev-guard`, P4.3.1): on this laptop the platform's per-user base
-//! also holds the owner's `citar.db`, `secret_key` and `config/`, so a development build refuses
-//! to start without an explicit `--home`, and refuses one inside that base; a forgotten flag fails
-//! instead of writing there. Replaces `citar/paths.py`'s `_user_base` for the helper.
+//! **The development guard** (`dev-guard` or any test feature, P4.3.1): on this laptop the
+//! platform's per-user base also holds the owner's `citar.db`, `secret_key` and `config/`, so a
+//! development or test build refuses to start without an explicit `--home`, and refuses one inside
+//! that base; a forgotten flag fails instead of writing there. Replaces `citar/paths.py`'s
+//! `_user_base` for the helper.
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
@@ -120,14 +121,14 @@ pub fn resolve(flag: Option<&Path>, env: Env<'_>) -> Result<(Home, HomeSource), 
 /// What it refuses, in a sentence.
 pub fn guard(flag: Option<&Path>, env: Env<'_>) -> Result<(), String> {
     let Some(home) = flag else {
-        return Err("this is a development build (dev-guard): it starts only with an explicit \
+        return Err("this is a development or test build: it starts only with an explicit \
                     --home DIR outside the per-user CITAR folder"
             .to_owned());
     };
     let Some(base) = platform_base(env) else { return Ok(()) };
     if is_within(home, &base) {
         return Err(format!(
-            "this is a development build (dev-guard): --home {} is inside the per-user CITAR \
+            "this is a development or test build: --home {} is inside the per-user CITAR \
              folder {}, which holds a real installation's data; use a scratch directory",
             home.display(),
             base.display()

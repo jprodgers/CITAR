@@ -1,8 +1,9 @@
 //! What the binary does with its command line (design/phase4-helper.md P4.3.2): `--version`,
 //! `setup`, and `run` (the default) with every check in front of it, in this order, so that
 //! nothing is written or dialled before it is allowed:
-//! 1. the development guard (`dev-guard` builds): an explicit `--home` outside the per-user base,
-//!    and a loopback server, both refused before anything else happens;
+//! 1. the development guard (`dev-guard` builds, and every build with a test feature): an
+//!    explicit `--home` outside the per-user base, and a loopback server, both refused before
+//!    anything else happens;
 //! 2. the settings ([`config::resolve`], with the first-run questions at a terminal);
 //! 3. the machine key, refused when others can read it, and a warning for a `helper.json` they
 //!    can;
@@ -27,8 +28,13 @@ use crate::protocol::Provider;
 use crate::session::{Facts, Helper};
 use crate::version;
 
-/// Whether this is a development build: loopback servers only, an explicit `--home`.
-pub const DEV_GUARD: bool = cfg!(feature = "dev-guard");
+/// Whether this is a development or test build: loopback servers only, an explicit `--home`
+/// outside the per-user base. P4.3.1: "a helper built with a test feature or `dev-guard` dials
+/// loopback addresses only", so a build that cheats on purpose (`test-faults`, 4-11) or trusts an
+/// update key given at run time (`test-update-key`, 4-13) can never reach a real server or write
+/// a real installation's files, whether or not `dev-guard` was named with it.
+pub const DEV_GUARD: bool =
+    cfg!(any(feature = "dev-guard", feature = "test-faults", feature = "test-update-key"));
 
 /// A failure that stops the helper before it runs, with its exit code.
 struct Stop(u8, String);

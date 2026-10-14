@@ -5,8 +5,9 @@
 //!   verifier's reason, never relaxed;
 //! - `--insecure` (protocol 1's) is honoured only for loopback and private hosts (RFC 1918, ULA,
 //!   link-local, `.local`), with a warning, and ignored with a warning for any other;
-//! - a development build (`dev-guard`) dials loopback addresses only, checked on the URL before
-//!   any lookup and again on every address the name resolves to (P4.3.1).
+//! - a development or test build (`dev-guard`, or any test feature) dials loopback addresses
+//!   only, checked on the URL before any lookup and again on every address the name resolves to
+//!   (P4.3.1).
 //!
 //! [`Dialer`] is what the session dials through; the transcripts give it an in-memory one.
 
@@ -143,7 +144,7 @@ pub fn guard_loopback(t: &Target) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "this is a development build (dev-guard): it dials loopback addresses only, not {}",
+            "this is a development or test build: it dials loopback addresses only, not {}",
             t.host
         ))
     }
@@ -299,7 +300,7 @@ impl TcpDialer {
             && let Some(a) = addrs.iter().find(|a| !is_loopback(a.ip()))
         {
             return Err(format!(
-                "this is a development build (dev-guard): {} resolves to {}, which is not a \
+                "this is a development or test build: {} resolves to {}, which is not a \
                  loopback address",
                 t.host,
                 a.ip()

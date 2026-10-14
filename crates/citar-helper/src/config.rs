@@ -465,15 +465,23 @@ pub fn resolve(src: &Sources<'_>, prompt: Option<&mut dyn Prompt>) -> Result<Con
         &file,
     )?
     .unwrap_or_default();
-    let updates =
-        match opts.updates.as_deref().or_else(|| data.get("updates").and_then(Value::as_str)) {
-            None | Some("auto") => UpdatePolicy::Auto,
-            Some("notify") => UpdatePolicy::Notify,
-            Some("off") => UpdatePolicy::Off,
-            Some(other) => {
-                return Err(format!("{file}: updates must be auto, notify or off, not {other:?}"));
-            }
-        };
+    // A value of another type is refused, as for every new key: `"updates": false` must not
+    // quietly mean the most permissive policy.
+    let from_file = match data.get("updates") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(other) => {
+            return Err(format!("{file}: updates must be auto, notify or off, not {other}"));
+        }
+    };
+    let updates = match opts.updates.as_deref().or(from_file) {
+        None | Some("auto") => UpdatePolicy::Auto,
+        Some("notify") => UpdatePolicy::Notify,
+        Some("off") => UpdatePolicy::Off,
+        Some(other) => {
+            return Err(format!("{file}: updates must be auto, notify or off, not {other:?}"));
+        }
+    };
     let stream = match data.get("stream") {
         None | Some(Value::Null) => true,
         Some(Value::Bool(b)) => *b,
@@ -745,6 +753,35 @@ mod tests {
         assert!(
             resolve(&Sources { opts: &opts(&base[..4]), env: &env, home: &home }, None).is_err()
         );
+        std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    #[test]
+    fn updates_takes_its_three_words_and_refuses_anything_else() {
+        let dir = scratch("updates");
+        let home = Home::at(&dir);
+        let env = |_: &str| -> Option<OsString> { None };
+        let run = |file: &str, args: &[&str]| {
+            std::fs::write(home.config_file(), file).expect("written");
+            resolve(&Sources { opts: &opts(args), env: &env, home: &home }, None)
+        };
+        let base = r#""server_url": "http://127.0.0.1:1", "token": "t""#;
+        let policy = |file: String, args: &[&str]| run(&file, args).map(|c| c.updates);
+        assert_eq!(policy(format!("{{{base}}}"), &[]), Ok(UpdatePolicy::Auto));
+        assert_eq!(policy(format!(r#"{{{base}, "updates": null}}"#), &[]), Ok(UpdatePolicy::Auto));
+        assert_eq!(policy(format!(r#"{{{base}, "updates": "off"}}"#), &[]), Ok(UpdatePolicy::Off));
+        assert_eq!(
+            policy(format!(r#"{{{base}, "updates": "off"}}"#), &["--updates", "notify"]),
+            Ok(UpdatePolicy::Notify),
+            "the flag first"
+        );
+        for bad in ["false", "0", "true", r#"["off"]"#, r#""never""#] {
+            let e =
+                policy(format!(r#"{{{base}, "updates": {bad}}}"#), &[]).expect_err("not a policy");
+            assert!(e.contains("updates must be auto, notify or off"), "{bad}: {e}");
+        }
+        // Even beside a flag that names one: the file is wrong either way.
+        assert!(policy(format!(r#"{{{base}, "updates": false}}"#), &["--updates", "off"]).is_err());
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 }

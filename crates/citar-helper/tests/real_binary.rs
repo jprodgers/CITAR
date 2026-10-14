@@ -2,8 +2,9 @@
 //! real time: it connects, sends its key (whose fingerprint `--version` prints), acknowledges the
 //! site's settings with its own ceiling, reports a fake LM Studio's models and a change of the
 //! loaded set within 35 s, and on `shutdown` `revoked` exits 78 without reconnecting. A run with
-//! `--home` leaves everything outside that home as it was; a development build (`dev-guard`)
-//! refuses a non-loopback server, a missing `--home` and one inside the per-user base.
+//! `--home` leaves everything outside that home as it was; a development or test build
+//! (`dev-guard`, or any test feature alone) refuses a non-loopback server, a missing `--home` and
+//! one inside the per-user base.
 //!
 //! Every run here has its own home under the system's temporary directory, `CITAR_DATA_DIR`
 //! pointing at it too, and the `CITAR_WORKER_*` variables removed, so nothing of a real
@@ -246,7 +247,8 @@ async fn the_binary_connects_acknowledges_reports_and_exits_78_on_shutdown() {
     std::fs::remove_dir_all(&root).expect("cleaned");
 }
 
-#[cfg(feature = "dev-guard")]
+/// Run by every build the guard is on in: `dev-guard`, and each test feature alone (P4.3.1).
+#[cfg(any(feature = "dev-guard", feature = "test-faults", feature = "test-update-key"))]
 mod guard {
     use super::*;
 
