@@ -83,15 +83,9 @@ fn build_info(py: Python<'_>) -> PyResult<Bytes> {
 fn key_fingerprint(public: &[u8]) -> PyResult<String> {
     Ok(errors::shielded(|| {
         if public.len() != 32 {
-            return Err(Failure::Value(format!(
-                "a machine key is 32 bytes, not {}",
-                public.len()
-            )));
+            return Err(Failure::Value(format!("a machine key is 32 bytes, not {}", public.len())));
         }
-        Ok(blake3::hash(public).as_bytes()[..8]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect())
+        Ok(blake3::hash(public).as_bytes()[..8].iter().map(|b| format!("{b:02x}")).collect())
     })?)
 }
 
