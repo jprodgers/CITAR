@@ -51,9 +51,9 @@ pub const MAX_IDLE: usize = 8;
 pub const REUSE_RETRY: Duration = Duration::from_secs(1);
 /// How long the end of an answer's body is waited for after its last event (a chunked stream's
 /// closing bytes after its `[DONE]`), apart from the answer, which has gone already.
-const FINISH_WAIT: Duration = Duration::from_secs(1);
+pub const FINISH_WAIT: Duration = Duration::from_secs(1);
 /// The most bytes read after an answer's last event for its body's end.
-const FINISH_BYTES: usize = 64 * 1024;
+pub const FINISH_BYTES: usize = 64 * 1024;
 /// How long a kept connection may take to show it is ready.
 const READY_WAIT: Duration = Duration::from_millis(100);
 
