@@ -180,13 +180,14 @@ def part_helper(h) -> None:
 
         # ---- settings: its own ceiling wins, and a change is pushed at once
         effective = (worker.get("effective") or {}).get("llm") or {}
-        status = q3._machine_status(admin, hid)
+        # the scheduler's own view, as the machine settings dialog's "in effect" reads it (made on first read)
+        got = bob.get(f"/api/machines/{hid}/settings")
+        in_effect = (got.json().get("in_effect") or {}) if got.status_code == 200 else {}
         r.check("the site's 2 slots were acknowledged as the helper's own 1 (its --max-concurrent), capped named, and "
                 "the scheduler's capacity is 1",
                 effective.get("slots") == 1 and "llm.slots" in (worker.get("capped") or [])
-                and status.get("capacity") in (1, None),
-                json.dumps({"effective": effective, "capped": worker.get("capped"),
-                            "capacity": status.get("capacity")}))
+                and in_effect.get("capacity") == 1 and in_effect.get("helper_slots") == 1,
+                json.dumps({"effective": effective, "capped": worker.get("capped"), "in_effect": in_effect}))
         changed = bob.put(f"/api/machines/{hid}/settings", json={"slots": 1, "capabilities": {"llm": {
             "allow_swaps": True}}})
         t_change = time.perf_counter()
