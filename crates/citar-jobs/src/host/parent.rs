@@ -342,6 +342,7 @@ pub fn spawn(
             cpu_s: 0.0,
             pid: 0,
             counting: false,
+            notes: Vec::new(),
         },
         oom: None,
         in_flight: BTreeSet::new(),

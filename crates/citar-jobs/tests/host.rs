@@ -234,8 +234,15 @@ fn ready_says_how_the_limits_hold() -> Outcome {
     ensure(r.verifiable && r.counting && r.jobs_build == mine() && r.threads == 1, || {
         format!("{r:?}")
     })?;
+    println!("{w:?}: {:?}, {}", r.limits, r.notes.join("; "));
     if cfg!(target_os = "linux") && w == Wrapper::Scope {
         ensure(r.cgroup.as_deref().is_some_and(|c| c.ends_with(".scope")), || format!("{r:?}"))?;
+    }
+    // Gate 8 (macOS, CI-only): soft, soft, and the background band.
+    if cfg!(target_os = "macos") {
+        ensure(r.notes.iter().any(|n| n.contains("background band (PRIO_DARWIN_BG)")), || {
+            format!("{:?}", r.notes)
+        })?;
     }
     if cfg!(target_os = "linux") {
         // Without the wrapper: soft CPU (nice), hard memory (RLIMIT_DATA).
@@ -325,11 +332,13 @@ fn memory_death(w: Wrapper) -> Outcome {
     let req = Requested { threads: 1, cpu_percent: two_cores_percent(), memory_mb: 200 };
     let mut host = start_with(req, w, &[])?;
     let held = host.ready().limits;
-    if held.memory != Hardness::Hard {
-        println!("skipped: memory is not held hard here ({w:?}, {held:?})");
+    // Held hard, or (macOS) by the watchdog, which the held allocation gives time to see it.
+    if held.memory != Hardness::Hard && !cfg!(target_os = "macos") {
+        println!("skipped: memory is not held here ({w:?}, {held:?})");
         return Ok(());
     }
-    send(&mut host, &test_offer("cr_big", ALLOC, &json!({"mb": 400}), 60.0)?)?;
+    let big = json!({"mb": 400, "hold_s": 3.0});
+    send(&mut host, &test_offer("cr_big", ALLOC, &big, 60.0)?)?;
     accepted(&mut host, "cr_big")?;
     loop {
         match host.next(WAIT) {
@@ -346,7 +355,9 @@ fn memory_death(w: Wrapper) -> Outcome {
         return fail(format!("{w:?}: {death}; its log {:?}", host.take_log()));
     };
     println!("{w:?}: {why}");
-    let wanted = if cfg!(target_os = "linux") && w == Wrapper::Scope {
+    let wanted = if cfg!(target_os = "macos") {
+        "watchdog"
+    } else if cfg!(target_os = "linux") && w == Wrapper::Scope {
         "oom_kill"
     } else {
         "allocation failed"

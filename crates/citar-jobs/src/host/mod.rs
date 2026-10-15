@@ -12,11 +12,11 @@
 //!   before a binary swap never computes with the old code; so does one whose limits the OS will
 //!   not put in place (`fatal` `limits`; [`crate::limits`]).
 //! - **`ready`** (host, once): `{limits: {cpu, memory}, verifiable, jobs_build, threads, reason?,
-//!   cgroup, cpu_s, pid, counting}`: how hard each limit holds; whether the canary and the
+//!   cgroup, cpu_s, pid, counting, notes}`: how hard each limit holds; whether the canary and the
 //!   self-check passed (`reason` says what failed: the host then refuses every job,
 //!   `unverifiable`); its jobs build, which the parent holds to its own; its cgroup (Linux), whose
 //!   memory events the parent reads when it dies; its CPU seconds so far; whether its memory is
-//!   counted ([`crate::sys::alloc`]).
+//!   counted ([`crate::sys::alloc`]); how its limits are held, a line each, for the log.
 //! - **`fatal`** (host, in place of `ready`): `{code: build | limits | protocol, message}`, then it
 //!   exits with [`EXIT_REFUSED`].
 //! - **`job_offer`** (parent): `{run, job?, kind, spec, spec_hash, jobs_build, deadline_s, mem_mb,
@@ -207,6 +207,10 @@ pub struct Ready {
     pub cpu_s: f64,
     pub pid: u32,
     pub counting: bool,
+    /// How the limits are held, one line each (a Job Object, a cgroup, `nice`, `RLIMIT_DATA`, the
+    /// background band, the watchdog): for the parent's log.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 /// Why the host turned an offer down.
@@ -633,9 +637,16 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         None
     };
     citar_sim::panics::install();
-    let (held, cgroup) = applied.as_ref().map_or(
-        (Held { cpu: limits::Hardness::Soft, memory: limits::Hardness::Soft }, None),
-        |a| (a.held, a.cgroup.clone()),
+    let (held, cgroup, notes) = applied.as_ref().map_or_else(
+        || {
+            let soft = Held { cpu: limits::Hardness::Soft, memory: limits::Hardness::Soft };
+            (
+                soft,
+                None,
+                vec!["no limits put on this process (a host inside its parent)".to_owned()],
+            )
+        },
+        |a| (a.held, a.cgroup.clone(), a.notes.clone()),
     );
     let check = self_test(rules, setup.canary).map(|_| ());
     if let Err(why) = &check {
@@ -664,6 +675,7 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         cpu_s: process_cpu_s(),
         pid: std::process::id(),
         counting: alloc::installed(),
+        notes,
     }));
     let ticker = Arc::clone(&shared);
     let _ticks = std::thread::Builder::new()

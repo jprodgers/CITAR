@@ -73,6 +73,7 @@ class Ready(HostCase):
         self.assertTrue(r["verifiable"], r)
         self.assertTrue(r["counting"], "the extension counts each run's memory")
         self.assertEqual((r["limits"]["cpu"], r["limits"]["memory"]), expected_held(host.scope), r)
+        self.assertTrue(r["notes"], "how the limits are held, for the log")
         self.assertEqual(host.host_pid, r["pid"])
         if os.name != "nt" and not host.scope:
             self.assertEqual(r["pid"], host.pid, "the host is the child itself (a venv's launcher only on Windows)")
@@ -102,15 +103,21 @@ class LabJob(HostCase):
 class Memory(HostCase):
     def test_a_memory_death_is_classified_and_the_next_host_plays(self):
         host = self.start(memory_mb=300)
-        if host.ready["limits"]["memory"] != "hard":
-            self.skipTest(f"memory is not held hard here: {host.ready['limits']}")
-        big = test_spec("alloc", {"mb": 500})
+        if host.ready["limits"]["memory"] != "hard" and sys.platform != "darwin":
+            self.skipTest(f"memory is not held here: {host.ready['limits']}")
+        # Held, so that macOS's watchdog (every half second) sees it.
+        big = test_spec("alloc", {"mb": 500, "hold_s": 3.0})
         host.offer("cr_big", "alloc", big["spec"], big["spec_hash"], 60)
         with self.assertRaises(H.HostError) as caught:
             H.run_until(host, "cr_big", timeout=60)
         death = caught.exception.death
         self.assertEqual(death.kind, "memory", death)
-        wanted = "oom_kill" if (sys.platform.startswith("linux") and host.scope) else "allocation failed"
+        if sys.platform == "darwin":
+            wanted = "watchdog"
+        elif sys.platform.startswith("linux") and host.scope:
+            wanted = "oom_kill"
+        else:
+            wanted = "allocation failed"
         self.assertIn(wanted, death.why)
         failures = host.failures(death)
         self.assertEqual([(f["run"], f["code"], f["retryable"]) for f in failures], [("cr_big", "memory", True)])

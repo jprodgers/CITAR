@@ -258,6 +258,9 @@ class JobHost:
                 raise HostError("build", f"the job host's jobs build is {first.get('jobs_build')}, not this build's "
                                          f"{self.jobs_build}")
             self.ready = first
+            log.info("job host %s ready: cpu %s, memory %s, verifiable %s; %s", first.get("pid"),
+                     first.get("limits", {}).get("cpu"), first.get("limits", {}).get("memory"),
+                     first.get("verifiable"), "; ".join(first.get("notes") or []))
             cgroup = first.get("cgroup")
             if cgroup and "/" in cgroup.strip("/"):
                 parent = cgroup.rsplit("/", 1)[0]
