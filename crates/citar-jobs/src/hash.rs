@@ -1,0 +1,248 @@
+//! The result hash and the chain (design/phase4-helper.md P4.4.4).
+//!
+//! - **`result_hash = blake3("CITAR-RESULT-V1\0" ‖ kind ‖ "\0" ‖ serde_json bytes of the typed
+//!   deterministic result)`.** The server never hashes Python's JSON: [`result_hash`] reads the
+//!   result it received into the typed result (refusing an unknown key anywhere), writes it back
+//!   and hashes that, so two sides that agree on the result agree on its bytes whatever order or
+//!   spacing carried it.
+//! - **The chain:** every job's game runs under `Game::set_chain(DigestChain::new(spec_hash))`,
+//!   whose `chain_0 = blake3("CITAR-CHAIN" ‖ spec_hash)` takes the spec hash's 32 bytes. A
+//!   [`Chain`] carries the head, the round count and every round's digest, the round that ended
+//!   on turn `t` being the `t`-th: a job's game starts on turn 1 and chains each round from the
+//!   first. [`chain_check`] folds the digests from `chain_0` and checks that they reach the head
+//!   (replicas compare heads, and where two differ the first differing digest names the round
+//!   where two machines parted).
+//!
+//! Claims and their signatures are 4-11's.
+
+use citar_engine::base::digest::Digest;
+use citar_engine::base::ids::Turn;
+use citar_engine::save::chain::DigestChain;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::lab::LabOutcome;
+use crate::reference::ReferenceOutcome;
+use crate::spec::{Kind, SpecHash, hex, unhex32};
+
+/// What the result hash starts with.
+pub const RESULT_DOMAIN: &[u8] = b"CITAR-RESULT-V1\0";
+
+/// The most rounds a chain may carry: the protocol's bound on `chain.digests` (P4.2.5).
+pub const MAX_ROUNDS: usize = 10_000;
+
+/// A job's result: its kind's outcome.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum JobResult {
+    /// A lab or ranking game's.
+    Lab(LabOutcome),
+    /// A reference game's.
+    Reference(ReferenceOutcome),
+}
+
+/// Why a result does not read.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct ResultError(pub String);
+
+impl JobResult {
+    /// Reads a received result as a job of `kind`'s, refusing an unknown key anywhere.
+    ///
+    /// # Errors
+    /// What does not read.
+    pub fn read(kind: Kind, v: &Value) -> Result<Self, ResultError> {
+        let read = match kind {
+            Kind::LabGame | Kind::RankingGame => LabOutcome::read(v).map(Self::Lab),
+            Kind::ReferenceGame => ReferenceOutcome::read(v).map(Self::Reference),
+        };
+        read.map_err(|e| ResultError(format!("a {kind} result: {e}")))
+    }
+
+    /// The typed result's bytes: what the hash covers.
+    ///
+    /// # Errors
+    /// A float that is not finite, which serde_json would write as `null` and which would then
+    /// not read back. A game computes none (the engine's digest refuses one), so this is a guard.
+    pub fn bytes(&self) -> Result<Vec<u8>, ResultError> {
+        if has_non_finite(self) {
+            return Err(ResultError("a result holds a number that is not finite".to_owned()));
+        }
+        serde_json::to_vec(self).map_err(|e| ResultError(e.to_string()))
+    }
+
+    /// The result hash of this result, for a job of `kind`.
+    ///
+    /// # Errors
+    /// As [`bytes`](Self::bytes).
+    pub fn hash(&self, kind: Kind) -> Result<String, ResultError> {
+        let mut h = blake3::Hasher::new();
+        h.update(RESULT_DOMAIN);
+        h.update(kind.name().as_bytes());
+        h.update(b"\0");
+        h.update(&self.bytes()?);
+        Ok(hex(h.finalize().as_bytes()))
+    }
+}
+
+/// Whether a float of a finished result is not finite. (A JSON number of the overrides or levels
+/// is finite by construction.)
+fn has_non_finite(r: &JobResult) -> bool {
+    match r {
+        JobResult::Lab(LabOutcome::Finished(res)) => res.players.values().any(|p| {
+            let mut floats = vec![p.aggression, p.score_share, p.unhappy_share];
+            floats.extend(p.fixed_aggression);
+            for c in p.checkpoints.values() {
+                floats.extend([c.gold_per_turn, c.science, c.production, c.culture]);
+            }
+            floats.iter().any(|x| !x.is_finite())
+        }),
+        JobResult::Reference(ReferenceOutcome::Finished(res)) => {
+            res.civs.iter().any(|c| !c.aggression.is_finite())
+        }
+        _ => false,
+    }
+}
+
+/// The hash of a received result, read as a job of `kind`'s and written back (P4.4.4).
+///
+/// # Errors
+/// A result that does not read as `kind`'s, or holds a number that is not finite.
+pub fn result_hash(kind: Kind, result: &Value) -> Result<String, ResultError> {
+    JobResult::read(kind, result)?.hash(kind)
+}
+
+/// A job's chain of round digests, as an outcome carries it (P4.4.4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Chain {
+    /// `chain_t` after the last round, 64 hex digits.
+    pub head: String,
+    /// How many rounds it holds.
+    pub rounds: u32,
+    /// Each round's digest, the first round's first, 64 hex digits each.
+    pub digests: Vec<String>,
+}
+
+/// Why a chain does not check.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ChainError {
+    /// It does not read as a chain.
+    #[error("not a chain: {0}")]
+    Shape(String),
+    /// Its round count is not its number of digests.
+    #[error("the chain counts {rounds} rounds and carries {digests} digests")]
+    Count { rounds: u32, digests: usize },
+    /// More rounds than a chain may carry.
+    #[error("the chain carries {0} digests, more than {MAX_ROUNDS}")]
+    TooLong(usize),
+    /// A digest or the head that is not 64 lower-case hex digits.
+    #[error("{0} is not 64 lower-case hex digits")]
+    Hex(String),
+    /// The digests do not fold to the head.
+    #[error("the digests do not fold to the head: they give {folded}, the chain says {head}")]
+    Head { folded: String, head: String },
+}
+
+impl Chain {
+    /// The chain a game kept: its head, its round count and the digests taken.
+    #[must_use]
+    pub fn of(chain: &DigestChain, digests: &[Digest]) -> Self {
+        Self {
+            head: chain.head().to_hex(),
+            rounds: chain.rounds(),
+            digests: digests.iter().map(Digest::to_hex).collect(),
+        }
+    }
+}
+
+/// Checks that `chain`'s digests fold to its head from `chain_0` of the spec hash `spec_hash`,
+/// and that it counts as many rounds as it carries digests.
+///
+/// # Errors
+/// What does not hold, the first thing found.
+pub fn chain_check(spec_hash: &SpecHash, chain: &Chain) -> Result<(), ChainError> {
+    if chain.digests.len() > MAX_ROUNDS {
+        return Err(ChainError::TooLong(chain.digests.len()));
+    }
+    if usize::try_from(chain.rounds).ok() != Some(chain.digests.len()) {
+        return Err(ChainError::Count { rounds: chain.rounds, digests: chain.digests.len() });
+    }
+    let head = unhex32(&chain.head).ok_or_else(|| ChainError::Hex("the head".to_owned()))?;
+    let mut fold = DigestChain::new(&spec_hash.0);
+    for (n, d) in chain.digests.iter().enumerate() {
+        let d = unhex32(d).ok_or_else(|| ChainError::Hex(format!("round {}'s digest", n + 1)))?;
+        let turn = Turn::try_from(n + 1).map_err(|_| ChainError::TooLong(chain.digests.len()))?;
+        fold.push(turn, &Digest(d));
+    }
+    if fold.head().0 != head {
+        return Err(ChainError::Head { folded: fold.head().to_hex(), head: chain.head.clone() });
+    }
+    Ok(())
+}
+
+/// Reads a received chain and checks it ([`chain_check`]).
+///
+/// # Errors
+/// A chain that does not read, or does not check.
+pub fn chain_check_value(spec_hash: &SpecHash, chain: &Value) -> Result<(), ChainError> {
+    let chain = Chain::deserialize(chain).map_err(|e| ChainError::Shape(e.to_string()))?;
+    chain_check(spec_hash, &chain)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain_of(spec: &SpecHash, n: u8) -> Chain {
+        let digests: Vec<Digest> = (0..n).map(|i| Digest([i; 32])).collect();
+        let mut c = DigestChain::new(&spec.0);
+        for (t, d) in (1..).zip(&digests) {
+            c.push(t, d);
+        }
+        Chain::of(&c, &digests)
+    }
+
+    #[test]
+    fn a_chain_folds_to_its_head_and_an_altered_one_does_not() {
+        let spec = SpecHash([9; 32]);
+        let good = chain_of(&spec, 5);
+        assert_eq!(chain_check(&spec, &good), Ok(()));
+        assert_eq!(chain_check(&spec, &chain_of(&spec, 0)), Ok(()), "an empty chain is chain_0");
+        let mut altered = good.clone();
+        altered.digests[2] = Digest([77; 32]).to_hex();
+        assert!(matches!(chain_check(&spec, &altered), Err(ChainError::Head { .. })));
+        let mut short = good.clone();
+        short.digests.pop();
+        assert!(matches!(chain_check(&spec, &short), Err(ChainError::Count { .. })));
+        let mut upper = good.clone();
+        upper.digests[0] = "AB".repeat(32);
+        assert!(matches!(chain_check(&spec, &upper), Err(ChainError::Hex(_))));
+        assert!(
+            matches!(chain_check(&SpecHash([8; 32]), &good), Err(ChainError::Head { .. })),
+            "another spec's chain_0"
+        );
+        let v = serde_json::to_value(&good).expect("a value");
+        assert_eq!(chain_check_value(&spec, &v), Ok(()));
+        let mut extra = v;
+        extra["note"] = serde_json::json!(1);
+        assert!(matches!(chain_check_value(&spec, &extra), Err(ChainError::Shape(_))));
+    }
+
+    #[test]
+    fn the_result_hash_reads_the_result_typed_and_hashes_it_written_back() {
+        let crash = serde_json::json!({"crash": {"turn": 3, "player": null, "label": null,
+                                                 "message": "boom"}});
+        let spaced: Value =
+            serde_json::from_str(&serde_json::to_string_pretty(&crash).expect("text"))
+                .expect("JSON");
+        let h = result_hash(Kind::LabGame, &crash).expect("a hash");
+        assert_eq!(result_hash(Kind::LabGame, &spaced).expect("a hash"), h);
+        assert_ne!(result_hash(Kind::RankingGame, &crash).expect("a hash"), h, "kind hashed");
+        let mut h2 = blake3::Hasher::new();
+        h2.update(b"CITAR-RESULT-V1\0lab_game\0");
+        h2.update(br#"{"crash":{"turn":3,"player":null,"label":null,"message":"boom"}}"#);
+        assert_eq!(h, hex(h2.finalize().as_bytes()));
+        assert!(result_hash(Kind::ReferenceGame, &crash).is_err(), "not a reference's crash");
+    }
+}

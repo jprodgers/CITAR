@@ -12,9 +12,20 @@ publish.workspace = true
 # every shipped build, as it refuses the helper's test features.
 test-jobs = []
 
-# cargo xtask check: the engine, the bot and the runner may join in 4-07 (P4.3.1). In 4-03 the
-# crate holds only its `sys` module, the OS calls no safe wrapper makes.
+# cargo xtask check: the engine, the bot and the runner (P4.3.1), the engine with no test-only
+# feature, since the helper ships it. A job is the engine's ordinary game played by the runner,
+# so both sides of the wire compute one result from one spec with this crate's code.
 [dependencies]
+citar-engine = { workspace = true, features = ["embedded-ruleset"] }
+citar-bot.workspace = true
+citar-sim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The spec, result and jobs-build hashes; the chain is the engine's (DESIGN.md 4.10).
+blake3.workspace = true
+thiserror.workspace = true
+# A run's CPU time, reported beside its result and never hashed: the thread's that played it.
+cpu-time.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The owner-only DACL of the helper's machine key (P4.3.7), written and read back: the security
@@ -26,6 +37,24 @@ windows-sys = { workspace = true, features = [
     "Win32_Security_Authorization",
     "Win32_System_Threading",
 ] }
+
+# build.rs hashes the sources and the golden set into CITAR_JOBS_CODE, which the jobs build covers
+# (P4.4.5).
+[build-dependencies]
+blake3.workspace = true
+
+[dev-dependencies]
+# The specs' robustness: mutated specs never panic the parser (tests/specs.rs, P4.6).
+proptest.workspace = true
+# The `jobs` golden set's own test binary (tests/golden.rs): its jobs by name, and a child mode
+# that plays one in a second process.
+libtest-mimic.workspace = true
+
+# The `jobs` golden set (P4.4.5), with its own harness: run it in the ci and the release
+# profiles (`cargo nextest run -p citar-jobs`, and with `--cargo-profile release`).
+[[test]]
+name = "golden"
+harness = false
 
 [lints]
 workspace = true
