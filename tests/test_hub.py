@@ -1095,6 +1095,9 @@ class Frames(_Live):
             "millions of zeros (the walk)": '{"t":"hello","x":[' + "0," * ((n - 40) // 2) + "0]}",
             "eight MiB, over the hello's cap": "[" * 60 + "0," * ((8 * 1024 * 1024 - 200) // 2) + "}",
         }
+        # the server's first connections pay one-time costs on the loop (about 40 ms here): not what is measured
+        for _ in range(3):
+            self.refused_unread('{"t": "ping"}')
         for name, raw in shapes.items():
             with self.subTest(name):
                 bound = max(0.05, self.parse_seconds(raw) / 3) * (3 if CI else 1)
