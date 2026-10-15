@@ -178,7 +178,7 @@ shared machine that is the difference between one service restarting and all of 
 
 ## Lending GPUs to the server
 
-A worker lets somebody's home machine serve models to the server without opening a port on their
+The CITAR helper lets somebody's home machine serve models to the server without opening a port on their
 router — the connection is outbound. [WORKERS.md](Workers).
 
 ---

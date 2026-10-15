@@ -8,7 +8,7 @@ Pick the row that matches you. They all end up in the same place.
 | To play, on macOS or Linux | [One line](#one-line-macos-and-linux) |
 | A command you can upgrade and script | [pipx](#pipx-or-pip) |
 | A server other people sign in to | [Server install](#a-public-server) |
-| To lend your GPU to somebody else's CITAR | [Worker](#a-worker) |
+| To lend your GPU to somebody else's CITAR | [The CITAR helper](#the-citar-helper) |
 | To change the code | [From source](#from-source) |
 
 Python 3.11 or newer, on Windows 10+, macOS 12+, or any current Linux. About 400 MB of disk for the
@@ -91,7 +91,6 @@ clients you may not need:
 | `mcp` | MCP clients such as Claude Code taking a seat |
 | `oauth` | Google, GitHub, Discord and Microsoft sign-in |
 | `keyring` | API keys in the OS credential store |
-| `worker` | The worker agent |
 | `postgres` | PostgreSQL instead of SQLite |
 | `all` | Everything above except `postgres` |
 | `server` | What a public deployment needs, without the local-model clients |
@@ -162,17 +161,16 @@ Full walkthrough, including what to do when you have an nginx already: [server/D
 
 ---
 
-## A worker
+## The CITAR helper
 
-A worker lends this machine's models to a CITAR server somewhere else. The connection is outbound,
-so nothing needs to be opened on your router.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/jprodgers/CITAR/main/install.sh | bash -s -- --worker
-```
-
-You need a token from whoever runs the server; they get one with
-`citar admin add-server --name "your machine"`. See [server/WORKERS.md](server/WORKERS.md).
+The CITAR helper lends this machine's models to a CITAR server somewhere else. It is one file with
+nothing else to install, and its connection is outbound, so nothing needs to be opened on your
+router. Download it from the server's **Servers** page (it offers the file for your computer) or
+from the [latest release](https://github.com/jprodgers/CITAR/releases/latest), and run it with a
+token from whoever runs the server; they issue one on the Servers page, or with
+`citar admin add-server --name "your machine"`. Since 0.1.6 the helper replaces the Python worker:
+`citar worker`, `install.sh --worker` and `install.ps1 -Worker` only say where to download it. See
+[server/WORKERS.md](server/WORKERS.md).
 
 ---
 

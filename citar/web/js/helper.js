@@ -64,7 +64,7 @@ export function helperCard({ args = null, compact = false } = {}) {
         : el("p", { class: "muted" }, platform.os === "mobile"
             ? "The helper runs on the computer with your GPU, not on a phone. Open this page there, or pick a download below."
             : platform.os === "mac" && platform.arch === "x64"
-              ? "There is no ready-made build for Intel Macs: install CITAR with pipx and run `citar worker`."
+              ? "There is no ready-made build for Intel Macs yet: build the helper from a CITAR checkout with `cargo build --release -p citar-helper`."
               : "Pick the download for the machine that runs your models:"),
       el("div", { class: "row wrap helper-others" },
         el("span", { class: "muted small" }, mine ? "Other platforms:" : ""),
@@ -82,8 +82,6 @@ export function helperCard({ args = null, compact = false } = {}) {
     if (setup) body.append(copyBox(setup));
     else if (h.setup) body.append(el("p", { class: "muted small" }, h.setup));
     body.append(copyBox(`${h.run(h.file)} ${args || `--server ${location.origin} --token YOUR_TOKEN`}`));
-    body.append(el("p", { class: "muted small" }, "With CITAR itself installed on that machine, ",
-      el("code", {}, "citar worker"), " does the same job."));
   });
   return card;
 }

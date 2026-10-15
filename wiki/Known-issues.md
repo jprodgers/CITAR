@@ -61,8 +61,8 @@ for every asset and every build is a public CI run. See
 
 **macOS binaries are not notarised**, for the same reason — including the CITAR helper, which
 needs `xattr -d com.apple.quarantine` before macOS will run it. The `pip`, `pipx` and Homebrew routes
-are unaffected. There is no helper build for Intel Macs; `pipx install "citar[worker]"` and
-`citar worker` do the same job there.
+are unaffected. There is no helper build for Intel Macs yet (the Python worker that stood in for it
+there is gone in 0.1.6); build one from a checkout with `cargo build --release -p citar-helper`.
 
 **Homebrew, Scoop and winget lag the release** by a day or so — each needs the GitHub release to
 exist before its manifest can be updated.
