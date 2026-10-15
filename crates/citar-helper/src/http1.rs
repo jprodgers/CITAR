@@ -402,12 +402,23 @@ async fn exchange(
         c = &mut conn => {
             // A small answer with `connection: close` can be read whole, its body handed over
             // and the connection finished, in the one poll that delivers its head: the response
-            // is then waiting for `send`. A connection that failed has none.
+            // is then waiting for `send`, already there. A connection that failed has none, and
+            // nor has one the endpoint closed before the request went (a kept connection closed
+            // just then): its request waits in the finished connection, and would wait for the
+            // completion's whole timeout.
             conn_done = true;
             if let Err(e) = c {
                 return Err(Failure::new(format!("the connection failed: {e}"), true));
             }
-            send.await
+            match (&mut send).now_or_never() {
+                Some(r) => r,
+                None => {
+                    return Err(Failure::new(
+                        "the endpoint closed the connection before it took the request",
+                        true,
+                    ));
+                }
+            }
         }
     }
     .map_err(|e| Failure::new(format!("HTTP: {e}"), true))?;
@@ -530,6 +541,76 @@ mod tests {
             .await
             .expect("a handshake");
         (Idle { sender, conn: Box::pin(conn), since: Instant::now() }, theirs)
+    }
+
+    /// An endpoint that closed the connection before it took the request (a kept connection it
+    /// closed just then, or a port forward whose program is gone) never answers it: an error at
+    /// once, not a wait for the completion's whole timeout.
+    #[tokio::test]
+    async fn a_connection_closed_before_the_request_went_is_an_error_at_once() {
+        let (idle, peer) = idle_pair().await;
+        drop(peer);
+        let req = hyper::Request::post("/v1/chat/completions")
+            .header(header::HOST, "endpoint")
+            .body(String::from("{}"))
+            .expect("a request");
+        let out =
+            tokio::time::timeout(Duration::from_secs(2), exchange(idle.sender, idle.conn, req))
+                .await
+                .expect("an answer, not a wait");
+        match out {
+            Ok(x) => panic!("a response from nobody: {}", x.head.status()),
+            Err(f) => assert!(f.retryable, "{f:?}"),
+        }
+    }
+
+    /// The same on a connection that carried an answer before (a kept one), its close already
+    /// there when the next request comes.
+    #[tokio::test]
+    async fn a_kept_connection_closed_before_the_request_went_is_an_error_at_once() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (idle, mut peer) = idle_pair().await;
+        let req = || {
+            hyper::Request::post("/v1/chat/completions")
+                .header(header::HOST, "endpoint")
+                .header(header::CONTENT_LENGTH, 2)
+                .body(String::from("{}"))
+                .expect("a request")
+        };
+        let answer = tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let mut got = Vec::new();
+            while !got.windows(6).any(|w| w == b"\r\n\r\n{}") {
+                let n = peer.read(&mut buf).await.expect("read");
+                got.extend_from_slice(&buf[..n]);
+            }
+            peer.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}").await.expect("write");
+            peer
+        });
+        let x = exchange(idle.sender, idle.conn, req()).await.unwrap_or_else(|f| panic!("{f:?}"));
+        let mut resp = Response {
+            sent: x.sent,
+            status: x.head.status().as_u16(),
+            content_type: String::new(),
+            body: x.head.into_body(),
+            conn: x.conn,
+            conn_done: x.conn_done,
+            ended: false,
+            closing: false,
+            sender: x.sender,
+            pool: Arc::default(),
+        };
+        assert_eq!(resp.read_all(100).await.expect("the body"), b"{}");
+        // The endpoint closes it; the next request goes on it without a look.
+        drop(answer.await.expect("the peer"));
+        let Response { sender, conn, .. } = resp;
+        let out = tokio::time::timeout(Duration::from_secs(2), exchange(sender, conn, req()))
+            .await
+            .expect("an answer, not a wait");
+        match out {
+            Ok(x) => panic!("a response from nobody: {}", x.head.status()),
+            Err(f) => assert!(f.retryable, "{f:?}"),
+        }
     }
 
     #[tokio::test(start_paused = true)]
