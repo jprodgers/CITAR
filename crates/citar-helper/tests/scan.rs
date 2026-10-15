@@ -601,6 +601,27 @@ mod fake_probe {
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 
+    /// The JSON pointers at which `a` and `b` differ, with both values.
+    fn differing(a: &Value, b: &Value, at: &str, out: &mut Vec<String>) {
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) => {
+                let keys: std::collections::BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+                for k in keys {
+                    let (va, vb) =
+                        (x.get(k).unwrap_or(&Value::Null), y.get(k).unwrap_or(&Value::Null));
+                    differing(va, vb, &format!("{at}/{k}"), out);
+                }
+            }
+            (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+                for (i, (va, vb)) in x.iter().zip(y).enumerate() {
+                    differing(va, vb, &format!("{at}/{i}"), out);
+                }
+            }
+            _ if a != b => out.push(format!("{at}: {a} != {b}")),
+            _ => {}
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_scan_with_the_fakes_holds_their_gpu_and_hashes_the_same_twice() {
         let dir = common::scratch("fake-scan");
@@ -635,7 +656,20 @@ mod fake_probe {
         assert_eq!(two["runtimes"][0]["models"], json!([{"key": "model-a", "max_context": 8192}]));
         let mut two_without = two.clone();
         two_without.insert("runtimes".into(), json!([]));
-        assert_eq!(scan::hash(&one), scan::hash(&two_without), "the same machine an hour later");
+        // the fields that differ, named on failure (collected_at always does, and the hash leaves it out): the
+        // hashes parted once on CI's macOS runner only (rust.yml at 129dd5d), with nothing to say why
+        let mut differ = Vec::new();
+        differing(
+            &Value::Object(one.clone()),
+            &Value::Object(two_without.clone()),
+            "",
+            &mut differ,
+        );
+        assert_eq!(
+            scan::hash(&one),
+            scan::hash(&two_without),
+            "the same machine an hour later; fields that differ: {differ:?}"
+        );
         assert_ne!(scan::hash(&one), scan::hash(&two), "a runtime's models are the machine's");
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
