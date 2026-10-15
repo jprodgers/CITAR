@@ -285,11 +285,16 @@ Studio with the scripted endpoint to check the part itself, and `tests/test_help
 the same checks in every test run against stand-ins: they pass against one that stops a cancelled
 generation, and fail against one that goes on generating after the cancel, one whose generation is
 over before it, a model that is not loaded (with nothing sent to it) and one unloaded during the run.
+`scan` runs a helper that scans and measures, with `citar-fake-probe` as its `nvidia-smi` (below): its
+hello's scan as the machine's last report, Rescan now within 5 s, a minute of samples as one power
+row, costing measuring the machine's energy from it, every reading a call in the fake's log, and a
+`--no-hardware --no-power` helper sending neither.
 
 ```bash
 python scripts/qa_phase4.py helper --dir C:/dev/qa-phase4             # about 20 s; a free port
 python scripts/qa_phase4.py llm-real --dir C:/dev/qa-phase4           # the model loaded in LM Studio first
 python scripts/qa_phase4.py llm-real --stand-in --dir C:/dev/qa-phase4
+python scripts/qa_phase4.py scan --dir C:/dev/qa-phase4               # about 80 s: a minute of samples
 ```
 
 **Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
@@ -379,7 +384,18 @@ reach it, its errors, the slots, `localhost` at once, a finished answer's connec
 next), run the real binary against a fake hub, a fake LM Studio and the
 fake endpoint on loopback (`tests/real_binary.rs`, about 35 s), and check the machine key's file
 permissions (`tests/keys.rs`); `tests/config_cases.rs` holds its settings to the table recorded
-from the 0.1.5 helper (`tests/data/helper_config_cases.json`). One test talks to a real model, and
+from the 0.1.5 helper (`tests/data/helper_config_cases.json`). The hardware scan and the power
+samples (`src/scan`, `src/power.rs`) run the machine's own probe programs; a development or test build
+runs instead the ones `CITAR_HELPER_NVIDIA_SMI`, `CITAR_HELPER_POWERSHELL` and
+`CITAR_HELPER_SYSTEM_PROFILER` name (a release build never reads them), and `citar-fake-probe`, a
+second binary of the crate that only `dev-guard` builds make (`cargo xtask develop` puts it beside the
+helper), stands in for any of them: it prints fixed answers (one 24 GB GPU drawing 123.45 W) and logs
+each call beside itself (or where `CITAR_FAKE_PROBE_LOG` says). A fake first on the `PATH` would not
+do, since Windows looks in System32, where the NVIDIA driver puts the real `nvidia-smi.exe`, before
+the `PATH`. `tests/scan.rs` holds the scan's and the samples' rules on the paused clock and against
+the fake, and `tests/power_guess.rs` the power guess to the Python collector's answers on twelve
+recorded outputs (`tests/data/hwinfo_power_cases.json`); `citar-helper scan` prints what a scan
+holds. One test talks to a real model, and
 only when asked (an ignored test, which other runs report as skipped): with LM Studio on this
 machine already serving `google/gemma-4-e2b`, `CITAR_TEST_LMSTUDIO=http://localhost:1234 cargo
 nextest run -p citar-helper --features citar-helper/dev-guard --run-ignored only -E

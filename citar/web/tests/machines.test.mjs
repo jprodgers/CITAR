@@ -5,8 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  GATES, MODE_TEXT, SECTIONS, classText, inEffectText, legacyServersTarget, mayCall, poolLink, poolTarget, settingsBody,
-  sharesCpu, wholeIn,
+  GATES, MODE_TEXT, RESCAN_LOOK_MS, RESCAN_WAIT_MS, SECTIONS, classText, inEffectText, legacyServersTarget, mayCall,
+  poolLink, poolTarget, rescanned, settingsBody, sharesCpu, wholeIn,
 } from "../js/machines.js";
 
 test("the old Servers page's addresses lead to the Servers page", () => {
@@ -246,4 +246,20 @@ test("a class in a line", () => {
   assert.equal(classText({ name: "GPU (unclassified)", kind: "gpu", rate: 1 }),
     "GPU (unclassified) (1 credits per generation-second)");
   assert.equal(classText({ name: "Online API", kind: "api", rate: 1000 }), "Online API (1000 credits per unit of token cost)");
+});
+
+test("Rescan now waits for a report other than the one it had", () => {
+  const read = (at) => ({ report: { hardware_at: at } });
+  assert.equal(rescanned(null, read(null)), false, "nothing reported yet");
+  assert.equal(rescanned(null, read("2026-10-15T10:00:00+00:00")), true, "the first scan");
+  assert.equal(rescanned("2026-10-15T10:00:00+00:00", read("2026-10-15T10:00:00+00:00")), false, "the same one");
+  assert.equal(rescanned("2026-10-15T10:00:00+00:00", read("2026-10-15T10:00:03+00:00")), true, "a new one");
+  assert.equal(rescanned("x", {}), false);
+  assert.equal(rescanned("x", null), false);
+  // it looks often enough to show a scan the protocol sends within 5 s, and gives up well after it
+  assert.ok(RESCAN_LOOK_MS <= 1000 && RESCAN_WAIT_MS >= 10000);
+  // and only a machine's manager may ask (the route's gate)
+  assert.equal(GATES.rescanMachine, "manage");
+  assert.equal(mayCall("rescanMachine", { admin: false }, { can_manage: true }), true);
+  assert.equal(mayCall("rescanMachine", { admin: false }, { can_manage: false }), false);
 });

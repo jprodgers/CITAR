@@ -574,13 +574,15 @@ function power(S, draw) {
   return el("div", { class: "col" },
     S.reach === "worker" ? el("p", { class: "muted small" }, helperNote(S, "power")) : null,
     el("p", { class: "muted" }, "Wall-socket watts. Energy is estimated from these whenever CITAR can't measure it: idle + CPU watts × CPU load + GPU watts × " +
-      "the share of time the model was generating." + (S.is_host ? " On this machine, the one running CITAR, GPU power (nvidia-smi) and CPU load are also sampled live every few seconds." : "")),
+      "the share of time the model was generating." + (S.is_host ? " On this machine, the one running CITAR, GPU power (nvidia-smi) and CPU load are also sampled live every few seconds."
+        : S.reach === "worker" ? " Its CITAR helper samples GPU power (nvidia-smi) and CPU load every 10 seconds and sends them once a minute, unless it was started with --no-power." : "")),
     el("div", { class: "grid2" },
       field("Idle (W)", num(p, "idle_w", { min: 0 }), "Whole machine, sitting idle"),
       field("Extra at full CPU load (W)", num(p, "cpu_max_w", { min: 0 })),
       field("Extra with the GPU busy (W)", num(p, "gpu_max_w", { min: 0 }), "While a model generates"),
       field("Figures are", sel(p, "source", [["manual", "entered by me"], ["measured", "measured with a meter"], ["guess", "a rough guess"], ["unset", "unset"]])),
-      S.is_host ? field("Live sampling", sel(p, "sampling", [["auto", "on"], ["off", "off"]])) : null,
+      S.is_host || S.reach === "worker" ? field("Live sampling", sel(p, "sampling", [["auto", "on"], ["off", "off"]]),
+        S.is_host ? "" : "Off: its helper's samples are not kept") : null,
       field("Measured GPU → wall overhead (%)", num(p, "measured_overhead_pct", { min: 0, max: 100 }), "Power-supply losses on top of the GPU's own reading")),
     sug ? el("div", { class: "row" }, el("span", { class: "muted small" }, `Suggested from the hardware: idle ${sug.idle_w} W, CPU +${sug.cpu_max_w} W, GPU +${sug.gpu_max_w} W. ${sug.note || ""}`),
       el("button", { class: "small", onclick: () => { Object.assign(p, { idle_w: sug.idle_w, cpu_max_w: sug.cpu_max_w, gpu_max_w: sug.gpu_max_w, source: "guess" }); draw(); } }, "Use suggestion")) : null);

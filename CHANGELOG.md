@@ -117,6 +117,15 @@ that means for an existing install:
   and reset there (`POST /api/machines/{id}/key/reset`, which makes a connected helper reconnect and
   register its key at once); "Rescan" asks the helper for a new hardware scan
   (`POST /api/machines/{id}/rescan`); the helper's own quiet hours reach the scheduler.
+- **The CITAR helper scans the machine itself and samples its power.** Its hardware report is the
+  collectors' format, made in Rust (the CPU, memory, GPUs, disks and volumes, the form, its model
+  server's models, and the power guess the Python collector makes, with the same answers): at start (a
+  scan younger than 6 hours is reused), every 6 hours, sent only when the machine changed, and at once
+  when the machine settings dialog's **Rescan now** asks. `citar-helper scan [FILE]` prints or writes it,
+  to see what is sent or to import it by hand; `--hardware FILE` and `--no-hardware` work as before.
+  Every 10 s it reads the GPUs' draw and the CPU's utilisation, and once a minute sends them: the server
+  writes them as the machine's power rows, so a helper machine's energy is measured, not estimated
+  (`--no-power`, or the machine's Live sampling off, sends or keeps none).
 
 **Shared compute** ([docs/server/WORKERS.md](docs/server/WORKERS.md),
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)):
