@@ -303,7 +303,7 @@ helper lending its CPU play with the same Rust, so their results can be compared
   digests from its first round (DESIGN.md 4.10), never under a wall-clock budget (a slow, capped or paused
   machine computes what a fast one does; a deadline is a failure, never a result), without the engine's
   invariant checks (they watch a game and never change it). A panic anywhere in playing or summing it up is the
-  job's crash outcome, final and reproducible, never retried.
+  job's crash outcome: a result like any other, which the same spec reproduces and a replica must match.
 - **The lab game's result** (`citar_jobs::lab`) is built in Rust from the game and its typed events, as
   `lab.play` built it in Python from the events it heard (the seven games recorded from the Python building
   before it went, `tests/data/lab_results_*.json`, are the parity check); a reference game's is the baseline's

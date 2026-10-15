@@ -168,6 +168,15 @@ Python engine's, recorded by scripts the tag `python-engine-0.1.6` keeps: no ble
 games on every map size, is the nightly run's: `cargo golden check --long` checks it (about a
 minute) and `cargo golden bless long` writes it, so bless it too when a change moves the games.
 
+**The jobs golden set.** `crates/citar-jobs/golden/jobs.json` holds four short CPU jobs (lab,
+ranking and reference games) with their specs, results and chains of round digests, which a
+helper and the server must compute byte for byte alike. citar-jobs' own test binary checks it,
+in both profiles: `cargo nextest run -p citar-jobs` and `cargo nextest run -p citar-jobs
+--cargo-profile release` (the determinism workflow does both on all five targets). A change to
+the engine, the bot, the runner or how a job's result is built that moves a job re-blesses it:
+`CITAR_BLESS_JOBS=1 cargo test -p citar-jobs --test golden -- bless`, and say why in the commit.
+Its shortest job is also the self-check a job host plays before it takes work.
+
 When the targets disagree, the determinism workflow's `divergence` artifact holds each odd
 target's state at the first round where a game parted from the committed file, the same state
 played on Linux, and the places where they differ. To look into one by hand:
