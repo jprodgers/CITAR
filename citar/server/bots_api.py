@@ -212,7 +212,7 @@ class ExperimentBody(BaseModel):
     note: str = Field("", max_length=300)
     players: int = Field(4, ge=2, le=8)
     games: int = Field(12, ge=1, le=500)
-    seed: int = Field(5000, ge=0)
+    seed: int = Field(5000, ge=0, le=2**53 - 1)     # a job carries seeds JSON holds exactly (P4.4.1)
     size: str = "small"
     maps: list[str] = ["continents", "pangaea", "fractal"]
     speed: str = "Quick"

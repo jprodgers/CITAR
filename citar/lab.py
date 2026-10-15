@@ -37,9 +37,15 @@ Optional map generation keys pass straight to the generator: "map_edges" (ice_ca
 boxed), "river_density" (1 = normal) and "resources" (densities and per-resource rules; see mapgen.MapOptions).
 
 Game i uses seed+i and maps[i % len(maps)]; with "rotate" the seat list is rotated by i so every label plays every
-start position. "turns" 0 plays to the speed's time-victory turn. A seat's aggression, unless its profile fixes one
-(or the seat does, with "aggression", held to 0..1 at submission), comes from its start position and the seed, so
-rotation evens it out.
+start position. "turns" 0 plays to the speed's time-victory turn, and a limit past it is refused. A seat's aggression,
+unless its profile fixes one (or the seat does, with "aggression", held to 0..1 at submission), comes from its start
+position and the seed, so rotation evens it out.
+
+Every game is played as a job (``engine_api.run_job``, design/phase4-helper.md P4.4), so ``submit`` checks the
+experiment's games as jobs and refuses one that a job would refuse (a turn limit past the speed's, a seed past
+2^53 - 1, a label or a name of more than 200 characters, an override the bot does not take), saying which game and
+why, rather than queue games that can never be played. A game that crashes (a panic of the engine or a bot) crashes
+the same way every time it is played, so its crash is final: the runner that saw it does not play it again.
 During the restricted hours of the CITAR host server (Servers page) the runner uses --night-workers (fan noise).
 Every finished game is written to the usage ledger (saves/usage/lab-*.jsonl) so reports can cost experiments.
 
@@ -165,7 +171,58 @@ def normalize(spec: dict) -> dict:
         seats.append(seat)
     s["seats"] = seats
     s["submitted"] = s.get("submitted") or datetime.now().isoformat(timespec="seconds")
+    check_games(s)
     return s
+
+
+#: The most games of one experiment checked one by one as jobs (a tenth of a millisecond each); past it, the last
+#: game is checked too, whose seed is the largest.
+CHECK_GAMES = 5000
+
+
+def check_games(exp: dict):
+    """Refuse (ValueError) an experiment whose games a lab job would refuse: each game's spec through the jobs crate's
+    own check (``engine_api.check_job_spec``), which holds the bounds of design/phase4-helper.md P4.4.1 (the turn limit
+    within the speed's, the seed within 2^53 - 1, text of 200 characters at most, overrides the bot takes, settings the
+    engine knows). Every game is checked, as a factorial experiment's labels and overrides differ from game to game; an
+    experiment of more than ``CHECK_GAMES`` games has its first ones and its last checked."""
+    from . import engine_api
+    n = int(exp.get("games") or 0)
+    games = list(range(min(n, CHECK_GAMES)))
+    if n > CHECK_GAMES:
+        games.append(n - 1)
+    for i in games:
+        try:
+            engine_api.check_job_spec("lab_game", job_spec(game_spec(exp, i)))
+        except engine_api.JobRefused as e:
+            raise ValueError(f"Game {i} of experiment {exp.get('name')} cannot be played: {e}") from None
+
+
+#: How many times one runner plays a game that crashed in a way that might not happen again (a game process that
+#: died). A game whose crash is final, a panic of the engine or a bot (the same game always crashes the same way) or a
+#: spec the jobs crate refuses, is not played again by the runner that saw it.
+ATTEMPTS = 3
+
+#: Why a queued experiment cannot be played, by the experiment as queued (its priority aside): the runner and the Lab
+#: page ask about every queued experiment on every pass, and the answer for one experiment never changes.
+_REFUSALS: dict[str, str] = {}
+
+
+def refusal(exp: dict) -> str:
+    """Why a queued experiment cannot be played ('' if it can): one queued before its games were checked as jobs, and
+    one that a newer build's bounds refuse. Its games would each be refused when played."""
+    key = json.dumps({k: v for k, v in exp.items() if k != "priority"}, sort_keys=True, default=str)
+    if key not in _REFUSALS:
+        if len(_REFUSALS) > 1000:
+            _REFUSALS.clear()
+        try:
+            check_games(exp)
+            _REFUSALS[key] = ""
+        except ValueError as e:
+            _REFUSALS[key] = str(e)
+        except Exception:       # an experiment too broken to make specs of: its games crash and say why
+            _REFUSALS[key] = ""
+    return _REFUSALS[key]
 
 
 def submit(spec: dict) -> dict:
@@ -350,8 +407,10 @@ def play(spec: dict) -> dict:
     The game is a job (``engine_api.run_job``, the jobs crate: the same Rust a helper plays one with), and its result
     is the job's, built in Rust from the game: the deterministic part a result hash covers (design/phase4-helper.md
     P4.4.2), with the times added here, outside it (``seconds``, ``started_ts``, ``cpu_s``, ``finished``). A game that
-    panics comes back as ``{"exp", "i", "crash", "finished"}``: its turn, seat and message, and where it happened, for
-    crashes.log. Prints the runner's PROGRESS lines as each turn begins."""
+    panics comes back as ``{"exp", "i", "crash", "final", "finished"}``: its turn, seat and message, and where it
+    happened, for crashes.log; ``final``, because the same game always crashes the same way, so no runner plays it
+    again. A spec the jobs crate refuses comes back so too, its reason the crash. Prints the runner's PROGRESS lines as
+    each turn begins."""
     from . import engine_api
     t0 = time.time()
 
@@ -359,14 +418,18 @@ def play(spec: dict) -> dict:
         """The runner reads these lines from the game's process to show how far it has got."""
         print(f"PROGRESS {info['turn']} {info['turn_limit'] or 0} {time.time() - t0:.0f}", flush=True)
 
-    out = engine_api.run_job("lab_game", job_spec(spec), on_round=progress)
+    try:
+        out = engine_api.run_job("lab_game", job_spec(spec), on_round=progress)
+    except engine_api.JobRefused as e:
+        return {"exp": spec["exp"], "i": spec["i"], "crash": f"JobRefused ({e.code}): {e}", "final": True,
+                "finished": datetime.now().isoformat(timespec="seconds")}
     finished = datetime.now().isoformat(timespec="seconds")
     result = out["result"]
     if "crash" in result:
         text = crash_text(result["crash"])
         if out.get("trace"):
             text += "\n" + out["trace"]
-        return {"exp": spec["exp"], "i": spec["i"], "crash": text, "finished": finished}
+        return {"exp": spec["exp"], "i": spec["i"], "crash": text, "final": True, "finished": finished}
     return {**result, "seconds": round(out["wall_s"], 1), "started_ts": round(t0, 1),
             "cpu_s": round(out["cpu_s"], 1), "finished": finished}
 
@@ -417,9 +480,10 @@ def _job_paths(name: str, i: int):
 def _record(name: str, i: int, res: dict, finished_times: list):
     """Append a finished game's result, or its crash, to the experiment's results."""
     if res.get("crash"):
-        log(f"{name} #{i} crashed: {res['crash'].splitlines()[0]}")
+        final = " (final: not played again)" if res.get("final") else ""
+        log(f"{name} #{i} crashed{final}: {res['crash'].splitlines()[0]}")
         with open(LAB / "crashes.log", "a", encoding="utf-8") as f:
-            f.write(f"--- {datetime.now():%Y-%m-%d %H:%M} {name} #{i}\n{res['crash']}\n")
+            f.write(f"--- {datetime.now():%Y-%m-%d %H:%M} {name} #{i}{' final' if final else ''}\n{res['crash']}\n")
         return
     if i in {r["i"] for r in load_results(name)}:
         return
@@ -582,6 +646,8 @@ def _runner_step(args, running, attempts, finished_times, flags, max_workers) ->
                 tail = log_p.read_text(encoding="utf-8", errors="replace")[-3000:] if log_p.exists() else ""
                 res = {"exp": name, "i": i, "crash": f"exit code {proc.returncode}\n{tail}"}
             _record(name, i, res, finished_times)
+            if res.get("crash") and res.get("final"):
+                attempts[key] = max(attempts[key], ATTEMPTS)
             for q in (spec_p, res_p, log_p):
                 _unlink(q)
         # start new games
@@ -593,6 +659,12 @@ def _runner_step(args, running, attempts, finished_times, flags, max_workers) ->
         for exp in queue:
             if len(running) >= target:
                 break
+            why = refusal(exp)
+            if why:
+                if exp["name"] not in _told:
+                    _told.add(exp["name"])
+                    log(f"{why}; none of its games starts (delete the experiment and queue it again)")
+                continue
             done = {r["i"] for r in load_results(exp["name"])}
             if len(done) >= exp["games"]:
                 if not any(k[0] == exp["name"] for k in running):
@@ -604,7 +676,7 @@ def _runner_step(args, running, attempts, finished_times, flags, max_workers) ->
             for i in range(exp["games"]):
                 if len(running) >= target:
                     break
-                if i in done or (exp["name"], i) in running or attempts[(exp["name"], i)] >= 3:
+                if i in done or (exp["name"], i) in running or attempts[(exp["name"], i)] >= ATTEMPTS:
                     continue
                 attempts[(exp["name"], i)] += 1
                 spec_p, res_p, log_p = _job_paths(exp["name"], i)
@@ -623,15 +695,27 @@ def _runner_step(args, running, attempts, finished_times, flags, max_workers) ->
             if not queue:
                 log("queue empty: exiting")
                 return True
-            # A runner tries a game three times, so once every game left has crashed three times nothing will start
+            # A runner tries a game three times, and a game whose crash is final once, so once every game left has
+            # crashed for good or three times (or belongs to an experiment that cannot be played) nothing will start
             # again here, and waiting would be for ever. The next runner tries them again.
-            left = [(exp["name"], i) for exp in queue for i in _unplayed(exp)]
-            if left and all(attempts[key] >= 3 for key in left):
-                named = ", ".join(f"{n} #{i}" for n, i in left[:6]) + (", ..." if len(left) > 6 else "")
-                log(f"nothing left to play: {len(left)} game(s) crashed three times ({named}); exiting "
-                    "(crashes.log says why; the next runner tries them again)")
+            refused = [exp["name"] for exp in queue if refusal(exp)]
+            left = [(exp["name"], i) for exp in queue if exp["name"] not in refused for i in _unplayed(exp)]
+            if (left or refused) and all(attempts[key] >= ATTEMPTS for key in left):
+                why = []
+                if left:
+                    named = ", ".join(f"{n} #{i}" for n, i in left[:6]) + (", ..." if len(left) > 6 else "")
+                    why.append(f"{len(left)} game(s) crashed for good or three times ({named})")
+                if refused:
+                    named = ", ".join(refused[:6]) + (", ..." if len(refused) > 6 else "")
+                    why.append(f"{len(refused)} experiment(s) cannot be played ({named})")
+                log(f"nothing left to play: {'; '.join(why)}; exiting "
+                    "(crashes.log and lab.log say why; the next runner tries them again)")
                 return True
     return False
+
+
+#: The experiments this process has logged as unplayable, so the runner says so once.
+_told: set[str] = set()
 
 
 def _unplayed(exp: dict) -> list[int]:
@@ -699,13 +783,17 @@ def _runner_started() -> str:
 
 
 def _crash_counts(since: str = "") -> Counter:
-    """How many games crashed, by reason, for the status display."""
+    """How many times each game crashed, by (experiment, game), for the status display: a final crash (its header
+    ends ``final``) counts as all of a runner's attempts, since it is not played again."""
     counts = Counter()
     for line in _tail(LAB / "crashes.log", 200_000).splitlines():
         if line.startswith("--- ") and not line.endswith("bot errors") and line[4:20] >= since:
             parts = line.split()
+            final = parts[-1] == "final"
+            if final:
+                parts = parts[:-1]
             if len(parts) >= 5 and parts[-1].startswith("#"):
-                counts[(parts[-2], int(parts[-1][1:]))] += 1
+                counts[(parts[-2], int(parts[-1][1:]))] += ATTEMPTS if final else 1
     return counts
 
 
@@ -811,9 +899,12 @@ def overview() -> dict:
         per_game = statistics.median(mins) if mins else None
         turns = [r["turns"] for r in res if r.get("turns")]
         mine = [r for r in running if r["exp"] == exp["name"]]
-        failing = sorted(i for (e, i), n in crashes.items() if e == exp["name"] and n >= 3
+        failing = sorted(i for (e, i), n in crashes.items() if e == exp["name"] and n >= ATTEMPTS
                          and i not in {r["i"] for r in res} and i not in {r["i"] for r in mine})
-        if state == "queued":
+        why = refusal(exp) if state == "queued" and not mine else ""
+        if why:
+            state, left = "refused", 0.0
+        elif state == "queued":
             if per_game is None:
                 # no finished game yet: project the running ones from their turn progress
                 proj = [t for t in map(_projected_total, mine) if t is not None]
@@ -837,6 +928,7 @@ def overview() -> dict:
             "minutes_per_game": round(per_game, 1) if per_game else None, "remaining_minutes": round(left, 1),
             "submitted": exp.get("submitted"),
             "finished": max((r.get("finished") or "" for r in res), default=None),
+            "refused": why or None,
         })
     for exp in experiments:
         if exp["state"] in ("queued", "running"):
@@ -1111,7 +1203,11 @@ def main(argv=None):
         for path in args.specs:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             for spec in (data if isinstance(data, list) else [data]):
-                s = submit(spec)
+                try:
+                    s = submit(spec)
+                except ValueError as e:      # refused, saying why: a game a job would refuse, a profile, a name
+                    print(f"citar lab submit: {path}: {e}", file=sys.stderr)
+                    raise SystemExit(2) from None
                 print(f"queued {s['name']}: {s['games']} games, seats {[x['label'] + '=' + x['bot'] for x in s['seats']]}")
                 # an owned item (design/phase3-features.md P3.2.4), registered when the server's database is here
                 from . import items
