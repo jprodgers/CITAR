@@ -162,7 +162,7 @@
     {"act": {"side": "hub", "do": "cancel_request"}},
     {"s2h": {"t": "cancel", "id": "<id:req>"}},
     {"endpoint": {"expect_disconnect_within_ms": 1000}},
-    {"endpoint": {"expect_no_tokens_after": "disconnect"}},
+    {"endpoint": {"expect_no_tokens_after": "cancel"}},
     {
       "h2s": {"t": "cancelled", "id": "<id:req>", "gen_s": "<number>", "tokens_out": "<int:1..>"},
       "within_s": 1

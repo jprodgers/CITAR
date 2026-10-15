@@ -917,7 +917,9 @@ OpenAI-format deltas, N ms apart); `{"respond": {"json": body}}` (a non-streamin
 `{"expect_request": PATTERN}` (the next HTTP request's body matches PATTERN), with `"absent":
 [key, …]` the keys it must not have;
 `{"expect_disconnect_within_ms": N}` (the client goes within N ms of the previous step);
-`{"expect_no_tokens_after": "disconnect"}` (no delta was sent after the client went).
+`{"expect_no_tokens_after": "cancel"}` (no delta went out after the server's last `cancel` but the
+one that may already have been on its way: measured from the cancel, since a delta can never go
+out after the client went).
 
 **Host steps** (helper side): `{"progress": {"round": R}}` (the fake job host reports this round);
 `{"finish": "<golden:jobs/NAME>"}` (the run ends with that golden job's outcome); `{"crash_host":

@@ -184,6 +184,8 @@ pub struct Player<'t> {
     expect_cursor: usize,
     /// `respond` steps played: the last one answers request `responds - 1`.
     responds: usize,
+    /// When the last `cancel` frame went to the helper.
+    cancel_sent: Option<Instant>,
     last: Instant,
 }
 
@@ -210,6 +212,7 @@ impl<'t> Player<'t> {
             endpoint: None,
             expect_cursor: 0,
             responds: 0,
+            cancel_sent: None,
             last: Instant::now(),
         }
     }
@@ -322,7 +325,11 @@ impl<'t> Player<'t> {
             return Ok(());
         }
         self.ensure_conn(i).await?;
-        self.send_text(frame.to_string()).await.map_err(|e| self.fail(i, e))
+        self.send_text(frame.to_string()).await.map_err(|e| self.fail(i, e))?;
+        if t == "cancel" {
+            self.cancel_sent = Some(Instant::now());
+        }
+        Ok(())
     }
 
     async fn wait(&mut self, i: usize, secs: f64, quiet: bool) -> Result<(), String> {
@@ -527,14 +534,18 @@ impl<'t> Player<'t> {
             }
         }
         if let Some(after) = e.get("expect_no_tokens_after") {
-            if after != "disconnect" {
+            if after != "cancel" {
                 return Err(self.fail(i, format!("expect_no_tokens_after {after} is not known")));
             }
+            // Measured from the cancel as the fake server sent it, not from the fake endpoint's
+            // own record of the disconnect (which no event can pass): at most the one event that
+            // was already on its way may leave after it.
+            let cancel = self.cancel_sent.ok_or_else(|| self.fail(i, "no cancel was sent"))?;
             let k = current.ok_or_else(|| self.fail(i, "no completion was answered yet"))?;
             let seen = ep.seen(k).ok_or_else(|| self.fail(i, "no such request"))?;
-            let gone = seen.gone.ok_or_else(|| self.fail(i, "the client has not gone"))?;
-            if let Some(late) = seen.tokens.iter().position(|t| *t > gone) {
-                return Err(self.fail(i, format!("token {late} went out after the client went")));
+            let late = seen.tokens.iter().filter(|t| **t > cancel).count();
+            if late > 1 {
+                return Err(self.fail(i, format!("{late} events went out after the cancel")));
             }
         }
         Ok(())
