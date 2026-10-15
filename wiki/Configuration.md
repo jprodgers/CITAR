@@ -149,7 +149,14 @@ under new ids, beside the machines imported under their own; the log and the aud
 
 The host and the site's online APIs are the site's: an administrator manages them, whoever the import named as
 their owner. The power sampler follows whichever machine is the host, so a host that appears with the first
-administrator is sampled without a restart.
+administrator is sampled without a restart. A helper machine samples itself: its CITAR helper sends a minute of
+10-second readings (the GPUs' draw, the CPU's utilisation) at a time, which the server writes as the machine's power
+rows (`saves/usage/power-<machine>-YYYY-MM.jsonl`, the host sampler's format), so costing prices its energy from what
+it drew. Where a GPU's draw does not read (an AMD or Intel GPU, a Mac), the rows carry the CPU alone, and costing
+estimates the GPU's share from the machine's power figures while its model works, as for a machine without samples
+(such a minute counts as estimated, and the machine's metered total leaves those rows out). A machine whose **Live
+sampling** is `off` (its power settings' `sampling`) gets no rows, from the host's sampler or its helper; the helper's
+own `--no-power` sends none.
 `citar setup --local` writes its machines into the database when there is one, else into `servers.json` for the
 first start to import.
 

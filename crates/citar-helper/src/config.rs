@@ -383,7 +383,11 @@ fn flag_or_file_bool(
     }
 }
 
-fn provider(name: &str) -> Result<Provider, String> {
+/// The endpoint's kind, by the name the settings give it.
+///
+/// # Errors
+/// A name that is none of the four.
+pub fn provider(name: &str) -> Result<Provider, String> {
     Ok(match name {
         "lmstudio" => Provider::LmStudio,
         "ollama" => Provider::Ollama,
@@ -397,6 +401,84 @@ fn provider(name: &str) -> Result<Provider, String> {
     })
 }
 
+/// The model endpoint's settings, as [`resolve`] reads them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointSettings {
+    pub base_url: String,
+    pub provider: Provider,
+    pub api_key_env: String,
+    /// The owner's allowlist (`models`, `--model`).
+    pub models: Option<Vec<String>>,
+    pub no_llm: bool,
+}
+
+/// The settings file and its name for messages: `--config FILE`, else `helper.json` in `home`
+/// (none when it does not exist, or there is no home).
+fn settings_file(
+    opts: &Options,
+    home: Option<&Home>,
+) -> Result<(Map<String, Value>, String), String> {
+    if let Some(path) = &opts.config {
+        if !path.exists() {
+            return Err(format!("No such config file: {}", path.display()));
+        }
+        return Ok((read_file(path)?, path.display().to_string()));
+    }
+    let Some(home) = home else { return Ok((Map::new(), "the settings".to_owned())) };
+    let saved = home.config_file();
+    if saved.exists() {
+        Ok((read_file(&saved)?, saved.display().to_string()))
+    } else {
+        Ok((Map::new(), saved.display().to_string()))
+    }
+}
+
+/// The endpoint's settings from the flags, the file and the variables.
+fn endpoint_part(
+    opts: &Options,
+    data: &Map<String, Value>,
+    env: Env<'_>,
+    file: &str,
+) -> Result<EndpointSettings, String> {
+    let base_url =
+        pick(opts.base_url.as_ref(), data, "base_url", env, "CITAR_WORKER_BASE_URL", file)?
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+    let provider_name =
+        pick(opts.provider.as_ref(), data, "provider", env, "CITAR_WORKER_PROVIDER", file)?
+            .unwrap_or_else(|| "lmstudio".to_owned());
+    let api_key_env = pick(
+        opts.api_key_env.as_ref(),
+        data,
+        "api_key_env",
+        env,
+        "CITAR_WORKER_API_KEY_ENV",
+        file,
+    )?
+    .unwrap_or_default();
+    Ok(EndpointSettings {
+        base_url,
+        provider: provider(&provider_name)?,
+        api_key_env,
+        models: models(opts, data, file)?,
+        no_llm: flag_or_file_bool(opts.no_llm, data, "no_llm", file)?,
+    })
+}
+
+/// The model endpoint's settings alone, read as [`resolve`] reads them (the flags, then `--config
+/// FILE` or `home`'s `helper.json`, then the variables), for `scan`: it needs no server or token,
+/// asks nothing and writes nothing. Without a home, only the flags and variables count.
+///
+/// # Errors
+/// A settings file that cannot be read, or an endpoint setting it cannot take.
+pub fn endpoint(
+    opts: &Options,
+    env: Env<'_>,
+    home: Option<&Home>,
+) -> Result<EndpointSettings, String> {
+    let (data, file) = settings_file(opts, home)?;
+    endpoint_part(opts, &data, env, &file)
+}
+
 /// The effective settings, as protocol 1's `build_config` made them, with protocol 2's added.
 /// `prompt` is the terminal when a person is there to answer the first-run questions.
 ///
@@ -406,19 +488,7 @@ fn provider(name: &str) -> Result<Provider, String> {
 pub fn resolve(src: &Sources<'_>, prompt: Option<&mut dyn Prompt>) -> Result<Config, String> {
     let opts = src.opts;
     let env = src.env;
-    let (mut data, file) = if let Some(path) = &opts.config {
-        if !path.exists() {
-            return Err(format!("No such config file: {}", path.display()));
-        }
-        (read_file(path)?, path.display().to_string())
-    } else {
-        let saved = src.home.config_file();
-        if saved.exists() {
-            (read_file(&saved)?, saved.display().to_string())
-        } else {
-            (Map::new(), saved.display().to_string())
-        }
-    };
+    let (mut data, file) = settings_file(opts, Some(src.home))?;
     let given = opts.server_url.as_deref().is_some_and(|s| !s.is_empty())
         || opts.token.as_deref().is_some_and(|s| !s.is_empty())
         || env_text(env, "CITAR_WORKER_SERVER").is_some()
@@ -437,21 +507,7 @@ pub fn resolve(src: &Sources<'_>, prompt: Option<&mut dyn Prompt>) -> Result<Con
             .ok_or("Give --server (or CITAR_WORKER_SERVER): the CITAR server to connect to.")?;
     let token = pick(opts.token.as_ref(), &data, "token", env, "CITAR_WORKER_TOKEN", &file)?
         .ok_or("Give --token (or CITAR_WORKER_TOKEN): issue one on the Servers page.")?;
-    let base_url =
-        pick(opts.base_url.as_ref(), &data, "base_url", env, "CITAR_WORKER_BASE_URL", &file)?
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-    let provider_name =
-        pick(opts.provider.as_ref(), &data, "provider", env, "CITAR_WORKER_PROVIDER", &file)?
-            .unwrap_or_else(|| "lmstudio".to_owned());
-    let api_key_env = pick(
-        opts.api_key_env.as_ref(),
-        &data,
-        "api_key_env",
-        env,
-        "CITAR_WORKER_API_KEY_ENV",
-        &file,
-    )?
-    .unwrap_or_default();
+    let endpoint = endpoint_part(opts, &data, env, &file)?;
     let max_concurrent = max_concurrent(opts, &data, env, &file, &mut warnings)?;
     let name = pick(opts.name.as_ref(), &data, "name", env, "CITAR_WORKER_NAME", &file)?
         .unwrap_or_default();
@@ -494,17 +550,17 @@ pub fn resolve(src: &Sources<'_>, prompt: Option<&mut dyn Prompt>) -> Result<Con
     Ok(Config {
         server_url,
         token,
-        base_url,
-        provider: provider(&provider_name)?,
-        api_key_env,
+        base_url: endpoint.base_url,
+        provider: endpoint.provider,
+        api_key_env: endpoint.api_key_env,
         max_concurrent,
         name,
         quiet,
-        models: models(opts, &data, &file)?,
+        models: endpoint.models,
         insecure: opts.insecure || truthy(data.get("insecure")),
         collect_hardware: !opts.no_hardware,
         hardware_file,
-        no_llm: flag_or_file_bool(opts.no_llm, &data, "no_llm", &file)?,
+        no_llm: endpoint.no_llm,
         cpu: local_cpu(opts, &data, &file)?,
         updates,
         stream,

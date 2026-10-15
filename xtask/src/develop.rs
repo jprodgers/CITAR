@@ -19,7 +19,8 @@
 //!    running process holds aside; and builds the helper, `citar-helper`, in the same profile
 //!    with its development guard (`dev-guard`: loopback servers only, an explicit `--home`;
 //!    design/phase4-helper.md P4.3.1) into the same folder, where the end-to-end tests and the QA
-//!    script find it;
+//!    script find it, with `citar-fake-probe` beside it (the stand-in for the scan's probe
+//!    programs that those builds alone make, P4.3.5);
 //! 5. writes `citar-dev.pth` into the venv: the checkout on `sys.path`, and `CITAR_EXT_DIR`,
 //!    which `citar/__init__.py` puts first on the package's path, so `import citar._engine`
 //!    finds the built library while every other module comes from the checkout.
@@ -176,6 +177,11 @@ const fn library_names() -> (&'static str, &'static str) {
 /// The helper's executable, as cargo writes it and as the tests look for it.
 const fn helper_name() -> &'static str {
     if cfg!(windows) { "citar-helper.exe" } else { "citar-helper" }
+}
+
+/// The fake probe's executable, beside the helper.
+const fn fake_probe_name() -> &'static str {
+    if cfg!(windows) { "citar-fake-probe.exe" } else { "citar-fake-probe" }
 }
 
 /// The venv's interpreter.
@@ -387,6 +393,8 @@ fn develop(root: &Path, args: &[String]) -> Result<(), Step> {
                 "citar-helper",
                 "--bin",
                 "citar-helper",
+                "--bin",
+                "citar-fake-probe",
                 "--features",
                 "dev-guard",
                 "--profile",
@@ -402,9 +410,10 @@ fn develop(root: &Path, args: &[String]) -> Result<(), Step> {
         ),
     )
     .map_err(Step::Failed)?;
-    let helper = helper_name();
-    install_library(&build_dir.join(profile).join(helper), &ext.join(helper))
-        .map_err(Step::Failed)?;
+    for exe in [helper_name(), fake_probe_name()] {
+        install_library(&build_dir.join(profile).join(exe), &ext.join(exe))
+            .map_err(Step::Failed)?;
+    }
 
     // 5. The venv's link to this worktree and the library.
     std::fs::write(&pth, pth_text(root, &ext))

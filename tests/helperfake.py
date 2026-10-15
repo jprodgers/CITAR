@@ -257,12 +257,29 @@ def require_helper_binary(what: str) -> str:
     raise unittest.SkipTest(f"{what}: no citar-helper in CITAR_EXT_DIR (cargo xtask develop builds it)")
 
 
+def fake_probe() -> Optional[str]:
+    """``citar-fake-probe`` beside the helper binary (``helper_binary``): the stand-in for the scan's probe programs
+    that development builds of the helper run when ``CITAR_HELPER_NVIDIA_SMI`` (or ``_POWERSHELL``,
+    ``_SYSTEM_PROFILER``) names it (4-06). None when there is none."""
+    from pathlib import Path
+    binary = helper_binary()
+    if binary is None:
+        return None
+    for name in ("citar-fake-probe.exe", "citar-fake-probe"):
+        path = Path(binary).with_name(name)
+        if path.is_file():
+            return str(path)
+    return None
+
+
 class RealHelper:
     """The real binary as a child: its own home (``--home``, and ``CITAR_DATA_DIR`` with it) in a temporary directory,
-    the hub on loopback, its model endpoint the given URL; its log beside its home."""
+    the hub on loopback, its model endpoint the given URL; its log beside its home. It reports no hardware and takes
+    no power readings (``--no-hardware --no-power``) unless ``sensors``: then it scans and measures with the probe
+    programs ``env`` names (``CITAR_HELPER_NVIDIA_SMI`` and the others: the fake probe), or the machine's own."""
 
     def __init__(self, server_url: str, token: str, endpoint_url: str, *, name: str = "e2e helper",
-                 slots: int = 1, extra: tuple = (), home=None):
+                 slots: int = 1, extra: tuple = (), home=None, sensors: bool = False, env: Optional[dict] = None):
         import os
         import subprocess
         import tempfile
@@ -273,11 +290,13 @@ class RealHelper:
         self.home = Path(home or tempfile.mkdtemp(prefix="citar-helper-home-"))
         self.home.mkdir(parents=True, exist_ok=True)
         self.log = self.home.parent / f"{self.home.name}.log"
-        env = {k: v for k, v in os.environ.items() if not k.startswith("CITAR_WORKER_")}
+        given = env or {}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CITAR_WORKER_", "CITAR_HELPER_"))}
+        env.update(given)
         env["CITAR_DATA_DIR"] = str(self.home)
         self.args = [binary, "--home", str(self.home), "--server", server_url, f"--token={token}",
                      "--base-url", endpoint_url, "--provider", "openai_compatible", "--name", name,
-                     "--max-concurrent", str(slots), "--no-hardware", *extra]
+                     "--max-concurrent", str(slots), *(() if sensors else ("--no-hardware", "--no-power")), *extra]
         out = open(self.log, "w", encoding="utf-8")
         self.proc = subprocess.Popen(self.args, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                      env=env)
@@ -536,7 +555,11 @@ ACTS_PLAYED = ("submit_request", "force_request", "cancel_request", "drop_connec
                "reset_key", "revoke_token", "disable_machine", "second_connection")
 STATES_PLAYED = ("slot_free", "draining", "flags", "step", "requeued", "request", "llm_slots", "cpu_threads",
                  "cpu_percent", "memory_mb", "work", "cpu_enabled", "quiet", "models", "loaded", "key", "audit",
-                 "token_lookups", "audit_rows", "rate_count")
+                 "token_lookups", "audit_rows", "rate_count", "last_report", "power_rows")
+#: A wait on the hub's fake clock longer than this, with the helper connected, moves the clock a keep-alive interval
+#: at a time (each answered ping is the hub's sign that it saw the clock move), rather than a second at a time: six
+#: hours in about ten seconds, not seven minutes.
+LONG_WAIT_SECONDS = 600
 
 
 class Outcome:
@@ -580,6 +603,8 @@ class HubPlayer:
         hub = transcript.setup.get("hub") or {}
         self.answer_pings = hub.get("answer_pings", True)
         self.setup_hub = hub
+        #: The machine's last report's time before the fake helper's ``hardware`` frame (``last_report``).
+        self.report_before: Optional[str] = None
 
     # -------------------------------------------------------------- setting the scene
     def prepare(self) -> None:
@@ -737,6 +762,10 @@ class HubPlayer:
         pattern = step.body
         example = self.examples.get((HP.HELPER, pattern["t"]))
         frame = F.realize(pattern, self.bindings, self.t.values, example=example)
+        if pattern["t"] == "hardware":
+            # what the hello's report left, once it is kept (off the hub's loop), for ``last_report``
+            until(self._hardware_at, 2.0)
+            self.report_before = self._hardware_at()
         if step.lost:
             return                          # the connection took it: the hub never gets it
         text = json.dumps(frame, separators=(",", ":"), ensure_ascii=False)
@@ -824,7 +853,30 @@ class HubPlayer:
                 return
             if frame is not None and frame["t"] not in F.BACKGROUND:
                 frames.append(frame)
-        if self.clock is not None:
+        def drain_to_ping(timeout):
+            """Frames until the hub's ping (answered by ``_read``) or ``timeout``."""
+            deadline = time.perf_counter() + timeout
+            while conn.ended is None and time.perf_counter() < deadline:
+                try:
+                    frame = conn._read(max(0.0, deadline - time.perf_counter()))
+                except Closed:
+                    return
+                if frame is None or frame["t"] == "ping":
+                    return
+                if frame["t"] not in F.BACKGROUND:
+                    frames.append(frame)
+        connected = conn is not None and conn.ended is None
+        if self.clock is not None and connected and seconds > LONG_WAIT_SECONDS:
+            step_s = float(max(1, W.hub().ping_s))
+            moved = 0.0
+            while moved + step_s <= seconds and conn.ended is None:
+                self._advance(step_s)
+                moved += step_s
+                drain_to_ping(0.5)
+            if seconds - moved > 0:
+                self._advance(seconds - moved)
+            drain(0.05)
+        elif self.clock is not None:
             for _ in range(steps):
                 self._advance(1.0)
                 if conn is not None and conn.ended is None:
@@ -986,6 +1038,25 @@ class HubPlayer:
             row = s.get(Server, self.sid)
             return {"flags": dict(row.flags or {}), "public_key": row.public_key}
 
+    def _hardware_at(self) -> Optional[str]:
+        """When the machine's last hardware report was kept (``hardware_detected.hardware_at``), or None."""
+        from citar import db
+        from citar.db.models import Server
+        with db.session() as s:
+            row = s.get(Server, self.sid)
+            detected = row.hardware_detected if row is not None and isinstance(row.hardware_detected, dict) else {}
+            return detected.get("hardware_at")
+
+    def _power_rows(self) -> int:
+        """The power rows written for the machine (``usage``'s ``power-<machine>-YYYY-MM.jsonl``)."""
+        from citar import usage
+        rows = 0
+        for path in usage.USAGE_DIR.glob(f"power-{self.sid}-*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip() and json.loads(line).get("srv") == self.sid:
+                    rows += 1
+        return rows
+
     def _request_ids(self) -> set:
         return {v for k, v in self.bindings.items() if k.startswith("req")}
 
@@ -1095,6 +1166,18 @@ class HubPlayer:
             n = W.hub().limiter.count(ADDRESS)
             if n != want:
                 raise AssertionError(f"the address's limit counts {n}, not {want}")
+        elif word == "last_report":
+            if want != "updated":
+                raise AssertionError(f"last_report {want!r} is not a word this player knows")
+            from datetime import datetime
+            now = self._hardware_at()
+            before = self.report_before
+            if now is None or (before is not None and datetime.fromisoformat(now) <= datetime.fromisoformat(before)):
+                raise AssertionError(f"the machine's last report was kept at {now}, not after {before}")
+        elif word == "power_rows":
+            n = self._power_rows()
+            if n != want:
+                raise AssertionError(f"{n} power rows for the machine, not {want}")
 
 
 def hub_transcripts(package: str = "4-05") -> list:

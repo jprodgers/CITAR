@@ -1,6 +1,9 @@
 //! What the binary does with its command line (design/phase4-helper.md P4.3.2): `--version`,
-//! `setup`, and `run` (the default) with every check in front of it, in this order, so that
-//! nothing is written or dialled before it is allowed:
+//! `scan [FILE]` (the standalone collector: it reads the helper's settings for its model endpoint,
+//! writes only FILE and dials nothing but that endpoint, for its runtimes), `setup`, and `run`
+//! (the default) with
+//! every check in front of it, in this order, so that nothing is written or dialled before it is
+//! allowed:
 //! 1. the development guard (`dev-guard` builds, and every build with a test feature): an
 //!    explicit `--home` outside the per-user base, and a loopback server, both refused before
 //!    anything else happens;
@@ -14,18 +17,21 @@
 //! A double-clicked binary that cannot start says why and waits for Enter before its window
 //! closes, as protocol 1's frozen helper did.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::cli::{Cli, Command};
 use crate::clock::Clock;
-use crate::config::{self, Config, Machine, Sources};
+use crate::config::{self, Machine, Sources};
 use crate::home::{self, Home};
 use crate::key;
 use crate::llm::HttpEndpoint;
 use crate::log::Log;
 use crate::net::{self, TcpDialer};
+use crate::power::SystemPower;
 use crate::protocol::Provider;
-use crate::session::{Facts, Helper};
+use crate::scan::{self, Probes, Runtime, SystemScanner};
+use crate::session::{Facts, Helper, Sensors};
 use crate::version;
 
 /// Whether this is a development or test build: loopback servers only, an explicit `--home`
@@ -84,15 +90,79 @@ fn run(cli: &Cli) -> Result<u8, Stop> {
         println!("{}", version_line(cli));
         return Ok(0);
     }
+    if let Some(Command::Scan { file }) = &cli.command {
+        return scan(cli, file.as_deref());
+    }
     if DEV_GUARD {
         home::guard(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?;
     }
     let (home, _source) = home::resolve(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?;
     let log = Log::stderr(opts.verbose);
-    match cli.command.unwrap_or(Command::Run) {
+    match cli.command.clone().unwrap_or(Command::Run) {
         Command::Setup => setup(cli, &home),
-        Command::Run => serve(cli, &home, log),
+        Command::Run | Command::Scan { .. } => serve(cli, &home, log),
     }
+}
+
+/// How long `scan` waits for its model endpoint's list.
+const SCAN_LIST: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The runtime `scan` reports, as the running helper's scans report it: its endpoint (from its
+/// settings), when that is LM Studio or Ollama and answers within [`SCAN_LIST`], with the models
+/// it lists within the allowlist ([`scan::runtime_models`]); none with `no_llm`.
+fn scan_runtimes(ep: &config::EndpointSettings) -> Vec<Runtime> {
+    if ep.no_llm || !matches!(ep.provider, Provider::LmStudio | Provider::Ollama) {
+        return Vec::new();
+    }
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return Vec::new();
+    };
+    let listed = rt.block_on(async {
+        let tls = net::verified_tls(None).ok()?;
+        let key = api_key(&ep.api_key_env, ep.provider);
+        let endpoint = HttpEndpoint::new(ep.provider, &ep.base_url, key, tls).ok()?;
+        tokio::time::timeout(SCAN_LIST, crate::llm::Endpoint::list(&endpoint)).await.ok()?.ok()
+    });
+    let Some(listed) = listed else { return Vec::new() };
+    let models = scan::runtime_models(&listed, ep.models.as_deref());
+    scan::endpoint_runtime(ep.provider, &ep.base_url, models).into_iter().collect()
+}
+
+/// `citar-helper scan [FILE]`: this machine's hardware report, printed or written to `FILE`, as
+/// `python collect_hardware.py` gives it, to import on the Servers page, and as the helper with
+/// these settings would report it: its model endpoint, `models` allowlist and `no_llm` are read
+/// from the flags, the home's `helper.json` (or `--config`) and the variables, as `run` reads
+/// them, and nothing is written but `FILE`. A development build reads a home only when it is
+/// named (outside the per-user folder, as `run` requires).
+fn scan(cli: &Cli, file: Option<&Path>) -> Result<u8, Stop> {
+    let opts = &cli.opts;
+    let home = if DEV_GUARD {
+        match opts.home.as_deref() {
+            Some(h) => {
+                home::guard(Some(h), &env).map_err(|e| Stop(2, e))?;
+                Some(Home::at(h))
+            }
+            None => None,
+        }
+    } else {
+        Some(home::resolve(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?.0)
+    };
+    let endpoint = config::endpoint(opts, &env, home.as_ref()).map_err(|e| Stop(2, e))?;
+    let probes = Probes::from_env(&env, DEV_GUARD);
+    let runtimes = scan_runtimes(&endpoint);
+    let at = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let info = scan::collect(&probes, &runtimes, &at);
+    let text = serde_json::to_string_pretty(&info)
+        .map_err(|e| Stop(1, format!("could not write the report: {e}")))?;
+    match file {
+        None => println!("{text}"),
+        Some(f) => {
+            std::fs::write(f, format!("{text}\n"))
+                .map_err(|e| Stop(1, format!("{}: {e}", f.display())))?;
+            eprintln!("Wrote {}. Import it on CITAR's Servers page.", f.display());
+        }
+    }
+    Ok(0)
 }
 
 /// `citar-helper setup`: the first-run questions, also to give the helper a new token; the other
@@ -169,10 +239,34 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
     }
     let (facts, machine) = facts();
     let ceiling = cfg.ceiling(machine);
+    let probes = Probes::from_env(&env, DEV_GUARD);
+    if DEV_GUARD {
+        for var in scan::PROBE_VARS {
+            if let Some(v) = env(var).filter(|v| !v.is_empty()) {
+                log.info(format!("{var} names the probe {}", v.to_string_lossy()));
+            }
+        }
+    }
+    let sensors = Sensors {
+        scanner: (cfg.collect_hardware && cfg.hardware_file.is_empty()).then(|| {
+            Arc::new(SystemScanner { probes: probes.clone(), clock: Clock::system() })
+                as Arc<dyn scan::Scanner>
+        }),
+        power: (!cfg.no_power)
+            .then(|| Arc::new(SystemPower::new(probes)) as Arc<dyn crate::power::PowerProbe>),
+        cache: Some(home.scan_file()),
+    };
+    let reports = if !cfg.collect_hardware {
+        "none (--no-hardware)".to_owned()
+    } else if cfg.hardware_file.is_empty() {
+        "this machine's scan".to_owned()
+    } else {
+        format!("the file {}", cfg.hardware_file)
+    };
     let endpoint: Option<crate::llm::SharedEndpoint> = if cfg.no_llm {
         None
     } else {
-        let api_key = api_key(&cfg);
+        let api_key = api_key(&cfg.api_key_env, cfg.provider);
         if let Some(k) = &api_key {
             log.add_secret(k);
         }
@@ -204,6 +298,11 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
     if !cfg.quiet.is_empty() {
         log.info(format!("  quiet  : {} window(s), enforced here", cfg.quiet.len()));
     }
+    log.info(format!("  report : {reports}"));
+    log.info(format!(
+        "  power  : {}",
+        if cfg.no_power { "not sampled (--no-power)" } else { "sampled every 10 s" }
+    ));
     log.info(format!("  home   : {}", home.root().display()));
     log.info(format!("  key    : {}", machine_key.fingerprint()));
 
@@ -227,6 +326,7 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
             service: cli.opts.service,
             stop: stop_rx,
             in_flight: crate::proxy::InFlight::default(),
+            sensors,
         };
         helper.run().await.code()
     });
@@ -238,10 +338,10 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
 /// The API key the endpoint is given: the variable `api_key_env` names, else for `openai` the
 /// standard `OPENAI_API_KEY`; no other endpoint is sent a key (protocol 1 sent `OPENAI_API_KEY` to
 /// any endpoint).
-fn api_key(cfg: &Config) -> Option<String> {
-    let var = if !cfg.api_key_env.is_empty() {
-        cfg.api_key_env.as_str()
-    } else if cfg.provider == Provider::OpenAi {
+fn api_key(api_key_env: &str, provider: Provider) -> Option<String> {
+    let var = if !api_key_env.is_empty() {
+        api_key_env
+    } else if provider == Provider::OpenAi {
         "OPENAI_API_KEY"
     } else {
         return None;

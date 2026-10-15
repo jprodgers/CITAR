@@ -17,9 +17,21 @@
 //!   frame, and the connection dropped after 70 s; `settings_ack` for every `settings`; `catalog`
 //!   when the endpoint's models or loaded set change (polled every 30 s; a listing that fails is
 //!   not a change until [`FAILED_LISTINGS`] fail in a row); `status` when the local quiet hours
-//!   begin or end or the completions in flight change (at most every 5 s); `hardware` after a
-//!   `rescan`, read off the session's task. Until 4-10 it takes no job (`job_reject` `build`: it
-//!   has no jobs build).
+//!   begin or end or the completions in flight change (at most every 5 s); `hardware` when the
+//!   machine's scan changed and after every `rescan`; `power` once a minute (below). Until 4-10 it
+//!   takes no job (`job_reject` `build`: it has no jobs build).
+//! - **The hardware report** (P4.3.5, package 4-06): the owner's file (`--hardware FILE`, read
+//!   again at each connection and on `rescan`), nothing (`--no-hardware`), or the machine's own
+//!   scan ([`crate::scan`]). A scan younger than [`SCAN_EVERY`] by the wall clock serves a hello
+//!   (kept across connections, and across runs in `helper/scan.json` unless the machine started
+//!   since); an older one, or none, is made before the hello, which waits up to [`SCAN_WAIT`] for
+//!   it and otherwise goes with what it has, the scan's `hardware` frame following when it is
+//!   done. The machine is scanned again every [`SCAN_EVERY`], and a `hardware` frame goes only
+//!   when the scan's [`crate::scan::hash`] differs from what the server has; a `rescan` sends one
+//!   whatever the scan holds. Scans, and keeping them on disk, run off the session's task.
+//! - **Power** (P4.3.5): unless `--no-power`, a reading every 10 s ([`crate::power`]) on a task of
+//!   its own, and one `power` frame a minute with the minute's readings (none when nothing could be
+//!   measured).
 //! - **Completions** ([`crate::proxy`]): each `request` the local policy lets through runs as a
 //!   task of its own; local policy holds whatever the server asks, in this order: a model outside
 //!   the owner's allowlist (or no endpoint, `--no-llm`) is `unknown_model`, the local quiet hours
@@ -52,6 +64,7 @@ use crate::config::{Ceiling, Config};
 use crate::llm::{self, Listed, SharedEndpoint};
 use crate::log::{Level, Log, clip};
 use crate::net::{Dialer, Ws};
+use crate::power::{self, PowerProbe};
 use crate::protocol::{
     self, Ceiling as WireCeiling, CpuInfo, ErrorCode, FrameSet, HelloHardwareSource, HelperFrame,
     HelperInfo, JobReject, LlmInfo, MAX_FRAME_BYTES, MachineInfo, Model, Parsed, ProtocolError,
@@ -59,6 +72,7 @@ use crate::protocol::{
     Settings, Status,
 };
 use crate::proxy::{self, Finished, Flights, InFlight, Outcome};
+use crate::scan::{self, Runtime, Scanner};
 use crate::settings::{self, Local};
 
 /// The first reconnect delay.
@@ -103,6 +117,13 @@ pub const HARDWARE_FILE_MAX: u64 = 1024 * 1024;
 /// The largest hardware report a hello carries, in bytes of JSON as sent: the hub reads no first
 /// frame over 2 MiB (PROTOCOL.md "The handshake"), and 500 models leave room for this much.
 pub const HARDWARE_REPORT_MAX: usize = 256 * 1024;
+/// How long a scan serves: older, the machine is scanned again (P4.3.5).
+pub const SCAN_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// How long a hello waits for a scan being made; past it, the hello goes with what the helper
+/// has, and the scan's `hardware` frame follows.
+pub const SCAN_WAIT: Duration = Duration::from_secs(30);
+/// How long writing `helper/scan.json` may take.
+pub const SCAN_KEEP: Duration = Duration::from_secs(5);
 /// The most characters of the server's own text (a refusal's message, a bad frame's error, a
 /// list of runs) quoted in a log line.
 pub const SERVER_TEXT: usize = 300;
@@ -167,7 +188,81 @@ pub struct Helper {
     pub stop: watch::Receiver<bool>,
     /// The completions whose tasks are alive (the helper's `in_flight`, read by tests).
     pub in_flight: InFlight,
+    /// What scans the machine and measures its power.
+    pub sensors: Sensors,
 }
+
+/// What scans the machine and measures its power: the machine's own ([`crate::scan::SystemScanner`],
+/// [`crate::power::SystemPower`]), or a test's.
+#[derive(Clone, Default)]
+pub struct Sensors {
+    /// Makes the scans a helper reports when it has no `--hardware` file and no `--no-hardware`;
+    /// without one it reports none.
+    pub scanner: Option<Arc<dyn Scanner>>,
+    /// Takes the power readings, unless `--no-power`; without one it sends none.
+    pub power: Option<Arc<dyn PowerProbe>>,
+    /// `helper/scan.json`: the last scan, kept between runs.
+    pub cache: Option<std::path::PathBuf>,
+}
+
+impl Sensors {
+    /// No scan, no power, nothing kept.
+    #[must_use]
+    pub fn none() -> Sensors {
+        Sensors::default()
+    }
+}
+
+/// A scan, and when it was made.
+struct Scanned {
+    scan: Map<String, Value>,
+    hash: String,
+    /// Unix time on the helper's wall clock. Not tokio's clock: that one counts from the machine's
+    /// start (and on Linux stops while it sleeps), so a scan kept from before a restart of the
+    /// machine has no place on it.
+    at: f64,
+}
+
+/// What a scan task gives the session: a scan with its hash, already kept in
+/// `helper/scan.json`, or why there is none.
+enum Made {
+    Scan {
+        scan: Map<String, Value>,
+        hash: String,
+        at: f64,
+    },
+    /// The scanner could not make one.
+    Failed,
+    /// Over [`HARDWARE_REPORT_MAX`] bytes as sent: not reported, nor kept.
+    TooLarge(usize),
+}
+
+/// The machine's scans across connections (the module's doc).
+#[derive(Default)]
+struct Scans {
+    last: Option<Scanned>,
+    /// A scan being made (and kept), off the session's task.
+    task: Option<tokio::task::JoinHandle<Made>>,
+    /// When the next scan is due, as Unix time on the helper's wall clock (none while one is being
+    /// made).
+    due: Option<f64>,
+    /// The hash of the scan the server has: this connection's hello's, or its last `hardware`
+    /// frame's.
+    sent: Option<String>,
+    /// A `rescan` came: the next scan made is sent whatever it holds.
+    forced: bool,
+}
+
+impl Drop for Scans {
+    fn drop(&mut self) {
+        if let Some(t) = self.task.take() {
+            t.abort();
+        }
+    }
+}
+
+/// `helper/scan.json`: the last scan, its hash and when it was made (Unix time).
+const CACHE_VERSION: u64 = 1;
 
 /// How one connection ended.
 #[derive(Clone, Debug, PartialEq)]
@@ -243,12 +338,19 @@ struct Catalog {
     models: Vec<Model>,
     /// Listings in a row that failed.
     failures: u32,
+    /// The endpoint answered, and has not failed [`FAILED_LISTINGS`] listings in a row since: its
+    /// last listing's models are the scan's runtime's.
+    answered: bool,
+    /// What the last listing that answered named, within the allowlist
+    /// ([`scan::runtime_models`]): the scan's runtime's models. Not [`Catalog::models`], which
+    /// adds the allowlist's models the endpoint does not list.
+    installed: Vec<(String, Option<u64>)>,
 }
 
 impl Catalog {
     fn new(allow: Option<Vec<String>>) -> Catalog {
         let models = llm::choose(&[], allow.as_deref());
-        Catalog { allow, models, failures: 0 }
+        Catalog { allow, models, failures: 0, answered: false, installed: Vec::new() }
     }
 
     /// Takes one listing; true when the models to report changed.
@@ -256,6 +358,8 @@ impl Catalog {
         let next = match listed {
             Ok(l) => {
                 self.failures = 0;
+                self.answered = true;
+                self.installed = scan::runtime_models(&l, self.allow.as_deref());
                 llm::choose(&l, self.allow.as_deref())
             }
             Err(e) => {
@@ -273,6 +377,8 @@ impl Catalog {
                 if self.failures < FAILED_LISTINGS {
                     return false;
                 }
+                self.answered = false;
+                self.installed.clear();
                 let none = llm::choose(&[], self.allow.as_deref());
                 if none != self.models {
                     h.log.warn(format!(
@@ -329,6 +435,42 @@ async fn read_report(collect: bool, file: String, log: Log) -> Report {
     }
 }
 
+/// Writes `helper/scan.json` (`{v, at, hash, scan}`: a file beside it first, then renamed over
+/// it) on a blocking thread, within [`SCAN_KEEP`]; a failure is logged and changes nothing else.
+/// Called from the scan's task, never from the session's loop: a slow disk holds up no frame.
+async fn keep_scan(
+    path: std::path::PathBuf,
+    scan: &Map<String, Value>,
+    hash: &str,
+    at: f64,
+    log: &Log,
+) {
+    let doc = serde_json::json!({"v": CACHE_VERSION, "at": at, "hash": hash, "scan": scan});
+    let write = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&doc).unwrap_or_default())?;
+        std::fs::rename(&tmp, &path)
+    });
+    match tokio::time::timeout(SCAN_KEEP, write).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => log.throttled(
+            "scan file",
+            Duration::from_secs(3600),
+            Level::Warn,
+            format!("could not keep the hardware scan: {e}"),
+        ),
+        _ => log.throttled(
+            "scan file",
+            Duration::from_secs(3600),
+            Level::Warn,
+            "could not keep the hardware scan in time",
+        ),
+    }
+}
+
 /// A protocol error for the log, with what came from the server cut.
 fn describe(e: &ProtocolError) -> String {
     let at = if e.path.is_empty() { "the frame".to_owned() } else { clip(&e.path, TYPE_SHOWN) };
@@ -354,13 +496,176 @@ impl Helper {
         q.until(self.clock.now_local()).map(|t| self.clock.unix_of(t))
     }
 
-    /// Before each connection: list the endpoint's models into `catalog` and read the hardware
-    /// report, each within its timeout.
-    async fn prepare(&self, catalog: &mut Catalog) -> Report {
+    /// Before each connection: list the endpoint's models into `catalog` and get the hardware
+    /// report (the file, nothing, or a scan: one younger than [`SCAN_EVERY`], or one made now and
+    /// waited for up to [`SCAN_WAIT`]), each within its timeout.
+    async fn prepare(&self, catalog: &mut Catalog, scans: &mut Scans) -> Report {
         if let Some(ep) = &self.endpoint {
             catalog.take(list(ep).await, self);
         }
-        self.report().await
+        if !self.scanning() {
+            return self.report().await;
+        }
+        let fresh = scans.last.as_ref().is_some_and(|s| self.serves(s.at));
+        if !fresh {
+            self.start_scan(scans, self.runtimes(catalog));
+            if let Some(task) = scans.task.as_mut()
+                && let Ok(done) = tokio::time::timeout(SCAN_WAIT, task).await
+            {
+                scans.task = None;
+                // The hello carries it, whatever its hash: what the server has is set below.
+                let _sent = self.took_scan(scans, done.unwrap_or(Made::Failed));
+            }
+            if scans.task.is_some() {
+                self.log.info(format!(
+                    "the hardware scan is taking over {} s: connecting without it, and sending it \
+                     when it is done",
+                    SCAN_WAIT.as_secs()
+                ));
+            }
+        }
+        scans.sent = scans.last.as_ref().map(|s| s.hash.clone());
+        match &scans.last {
+            Some(s) => Report {
+                hardware: Some(s.scan.clone()),
+                hardware_source: HelloHardwareSource::Scan,
+            },
+            None => Report { hardware: None, hardware_source: HelloHardwareSource::Nothing },
+        }
+    }
+
+    /// Whether this helper reports its own scans: no `--hardware` file, no `--no-hardware`, and
+    /// a scanner.
+    fn scanning(&self) -> bool {
+        self.config.collect_hardware
+            && self.config.hardware_file.is_empty()
+            && self.sensors.scanner.is_some()
+    }
+
+    /// The model runtime a scan reports: the endpoint, when it is LM Studio or Ollama and its
+    /// last listings answered (P4.3.10: nothing else is dialled for it), with the models it listed
+    /// within the allowlist.
+    fn runtimes(&self, catalog: &Catalog) -> Vec<Runtime> {
+        if self.endpoint.is_none() || !catalog.answered {
+            return Vec::new();
+        }
+        let models = catalog.installed.clone();
+        scan::endpoint_runtime(self.config.provider, &self.config.base_url, models)
+            .into_iter()
+            .collect()
+    }
+
+    /// Whether a scan made at `at` (Unix time) still serves: made under [`SCAN_EVERY`] ago by the
+    /// wall clock, and not "later" than now (a clock set back since).
+    fn serves(&self, at: f64) -> bool {
+        (0.0..SCAN_EVERY.as_secs_f64()).contains(&(self.clock.now_unix() - at))
+    }
+
+    /// Starts a scan off the session's task, unless one is being made. The task also checks its
+    /// size, hashes it and keeps it in `helper/scan.json`, so the session's loop waits on no disk.
+    fn start_scan(&self, scans: &mut Scans, runtimes: Vec<Runtime>) {
+        if scans.task.is_some() {
+            return;
+        }
+        let Some(scanner) = &self.sensors.scanner else { return };
+        scans.due = None;
+        let made = scanner.scan(runtimes);
+        let (cache, clock, log) =
+            (self.sensors.cache.clone(), self.clock.clone(), self.log.clone());
+        scans.task = Some(tokio::spawn(async move {
+            let Some(scan) = made.await else { return Made::Failed };
+            let size = serde_json::to_vec(&scan).map_or(usize::MAX, |v| v.len());
+            if size > HARDWARE_REPORT_MAX {
+                return Made::TooLarge(size);
+            }
+            let hash = scan::hash(&scan);
+            let at = clock.now_unix();
+            if let Some(path) = cache {
+                keep_scan(path, &scan, &hash, at, &log).await;
+            }
+            Made::Scan { scan, hash, at }
+        }));
+    }
+
+    /// A scan task ended: its scan kept in memory, and returned when the server should be sent it
+    /// (a `rescan` asked for it, or it differs from what the server has). The next scan is due
+    /// [`SCAN_EVERY`] from now, whether this one was made or not.
+    fn took_scan(&self, scans: &mut Scans, made: Made) -> Option<Map<String, Value>> {
+        scans.due = Some(self.clock.now_unix() + SCAN_EVERY.as_secs_f64());
+        let forced = std::mem::take(&mut scans.forced);
+        let (scan, hash, at) = match made {
+            Made::Scan { scan, hash, at } => (scan, hash, at),
+            Made::Failed => {
+                self.log.throttled(
+                    "scan",
+                    Duration::from_secs(3600),
+                    Level::Warn,
+                    "the hardware scan could not be made: trying again in 6 hours",
+                );
+                return None;
+            }
+            Made::TooLarge(size) => {
+                self.log.throttled(
+                    "scan",
+                    Duration::from_secs(3600),
+                    Level::Warn,
+                    format!(
+                        "the hardware scan is {size} bytes, over the {} KiB a hello carries: not \
+                         reported",
+                        HARDWARE_REPORT_MAX / 1024
+                    ),
+                );
+                return None;
+            }
+        };
+        let changed = scans.sent.as_deref() != Some(hash.as_str());
+        if scans.last.as_ref().is_some_and(|s| s.hash != hash) {
+            self.log.info("the machine's hardware scan changed");
+        }
+        scans.last = Some(Scanned { scan: scan.clone(), hash: hash.clone(), at });
+        if forced || changed {
+            scans.sent = Some(hash);
+            return Some(scan);
+        }
+        None
+    }
+
+    /// The scan `helper/scan.json` keeps, when it is this collector's, reads whole, is younger
+    /// than [`SCAN_EVERY`] and was made since the machine last started (hardware changes with the
+    /// machine off: a restart after a reboot scans again).
+    async fn load_scans(&self) -> Scans {
+        let mut scans = Scans::default();
+        let Some(path) = self.sensors.cache.clone() else { return scans };
+        if !self.scanning() {
+            return scans;
+        }
+        let read = tokio::task::spawn_blocking(move || std::fs::read(path));
+        let Ok(Ok(Ok(bytes))) = tokio::time::timeout(SCAN_KEEP, read).await else { return scans };
+        let Ok(Value::Object(doc)) = serde_json::from_slice::<Value>(&bytes) else { return scans };
+        let (Some(at), Some(hash), Some(Value::Object(scan))) = (
+            doc.get("at").and_then(Value::as_f64),
+            doc.get("hash").and_then(Value::as_str),
+            doc.get("scan"),
+        ) else {
+            return scans;
+        };
+        let ours = doc.get("v").and_then(Value::as_u64) == Some(CACHE_VERSION)
+            && scan.get("collector").and_then(Value::as_str) == Some(scan::COLLECTOR)
+            && scan.get("collector_version").and_then(Value::as_u64)
+                == Some(u64::from(scan::COLLECTOR_VERSION))
+            && scan::hash(scan) == hash;
+        if !ours || !self.serves(at) {
+            return scans;
+        }
+        if self.clock.boot_unix().is_some_and(|boot| at < boot) {
+            self.log.debug("the kept hardware scan is from before the machine started: scanning");
+            return scans;
+        }
+        let age = self.clock.now_unix() - at;
+        scans.due = Some(at + SCAN_EVERY.as_secs_f64());
+        scans.last = Some(Scanned { scan: scan.clone(), hash: hash.to_owned(), at });
+        self.log.debug(format!("using the hardware scan made {:.0} minutes ago", age / 60.0));
+        scans
     }
 
     /// The hardware report as this helper is set up to give it.
@@ -442,12 +747,13 @@ impl Helper {
         let mut idle_logged = false;
         let mut first = true;
         let mut catalog = Catalog::new(self.config.models.clone());
+        let mut scans = self.load_scans().await;
         loop {
             if self.stopped() {
                 return Exit::Stopped;
             }
             let report = tokio::select! {
-                r = self.prepare(&mut catalog) => r,
+                r = self.prepare(&mut catalog, &mut scans) => r,
                 () = stop_signal(self.stop.clone()) => return Exit::Stopped,
             };
             let line = format!("connecting to {}", self.config.server_url);
@@ -462,7 +768,7 @@ impl Helper {
                 () = stop_signal(self.stop.clone()) => return Exit::Stopped,
             };
             let end = match dialled {
-                Ok(ws) => self.connection(ws, &mut catalog, report).await,
+                Ok(ws) => self.connection(ws, &mut catalog, &mut scans, report).await,
                 Err(e) => {
                     let d = backoff.delay();
                     self.log.warn(format!(
@@ -524,7 +830,13 @@ impl Helper {
     }
 
     /// One connection, from the hello to its end.
-    async fn connection(&self, ws: Ws, catalog: &mut Catalog, report: Report) -> End {
+    async fn connection(
+        &self,
+        ws: Ws,
+        catalog: &mut Catalog,
+        scans: &mut Scans,
+        report: Report,
+    ) -> End {
         let (mut tx, mut rx) = ws.split();
         let n = catalog.models.len();
         let hello = self.hello(catalog.models.clone(), report);
@@ -562,7 +874,7 @@ impl Helper {
         if self.ack(&mut tx, &welcome.settings).await.is_err() {
             return End::Reconnect { welcomed: true };
         }
-        let mut steady = Steady::new(self, catalog, quiet_until);
+        let mut steady = Steady::new(self, catalog, scans, quiet_until);
         let end = steady.serve(&mut tx, &mut rx).await;
         // However the connection ended, nothing it started outlives it: every completion still in
         // flight is dropped with its connection to the endpoint (P4.2.4), and its slot is free
@@ -923,6 +1235,7 @@ fn read_hardware_file(path: &std::path::Path) -> Result<Map<String, Value>, Stri
 struct Steady<'a> {
     h: &'a Helper,
     catalog: &'a mut Catalog,
+    scans: &'a mut Scans,
     last_rx: Instant,
     pinged: bool,
     /// The last `status` sent (the hello's figures before the first).
@@ -936,8 +1249,15 @@ struct Steady<'a> {
     /// Each listing the poller makes, every [`CATALOG_EVERY`].
     polls: Option<mpsc::Receiver<Result<Vec<Listed>, String>>>,
     poller: Option<tokio::task::JoinHandle<()>>,
-    /// A `rescan`'s read of the hardware report, off the session's task.
+    /// A `rescan`'s read of the hardware file, off the session's task.
     rescan: Option<tokio::task::JoinHandle<Report>>,
+    /// Each power reading the meter task takes, every [`power::EVERY`] (`None`: nothing could be
+    /// measured).
+    readings: Option<mpsc::Receiver<Option<protocol::Sample>>>,
+    meter: Option<tokio::task::JoinHandle<()>>,
+    /// This minute's readings: how many were taken, and the samples among them.
+    taken: u32,
+    samples: Vec<protocol::Sample>,
 }
 
 impl Drop for Steady<'_> {
@@ -948,12 +1268,51 @@ impl Drop for Steady<'_> {
         if let Some(r) = self.rescan.take() {
             r.abort();
         }
+        if let Some(m) = self.meter.take() {
+            m.abort();
+        }
     }
 }
 
+/// The meter task: a reading every [`power::EVERY`], each sent to the session's loop.
+fn meter(
+    probe: Arc<dyn PowerProbe>,
+    clock: Clock,
+    tx: mpsc::Sender<Option<protocol::Sample>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut next = Instant::now() + power::EVERY;
+        loop {
+            tokio::time::sleep_until(next).await;
+            let sample = probe.read().await.map(|r| protocol::Sample {
+                t: scan::round_to(clock.now_unix(), 3),
+                gpu_w: r.gpu_w,
+                cpu_util: r.cpu_util,
+            });
+            if tx.send(sample).await.is_err() {
+                return;
+            }
+            // A slow reading delays the next; readings never bunch up to catch up.
+            next = (next + power::EVERY).max(Instant::now());
+        }
+    })
+}
+
 impl<'a> Steady<'a> {
-    fn new(h: &'a Helper, catalog: &'a mut Catalog, quiet_until: Option<f64>) -> Steady<'a> {
+    fn new(
+        h: &'a Helper,
+        catalog: &'a mut Catalog,
+        scans: &'a mut Scans,
+        quiet_until: Option<f64>,
+    ) -> Steady<'a> {
         let now = Instant::now();
+        let (readings, meter) = match &h.sensors.power {
+            Some(probe) if !h.config.no_power => {
+                let (tx, rx) = mpsc::channel(1);
+                (Some(rx), Some(meter(probe.clone(), h.clock.clone(), tx)))
+            }
+            _ => (None, None),
+        };
         let (polls, poller) = match &h.endpoint {
             None => (None, None),
             Some(ep) => {
@@ -973,6 +1332,7 @@ impl<'a> Steady<'a> {
         Steady {
             h,
             catalog,
+            scans,
             last_rx: now,
             pinged: false,
             // What the hello said: the first status goes when that changes.
@@ -984,7 +1344,50 @@ impl<'a> Steady<'a> {
             polls,
             poller,
             rescan: None,
+            readings,
+            meter,
+            taken: 0,
+            samples: Vec::new(),
         }
+    }
+
+    /// When the next scan is due, when this helper scans and none is being made: the wall clock's
+    /// due time read as tokio's now, at most [`SCAN_EVERY`] ahead (a clock set back).
+    fn scan_due(&self) -> Option<Instant> {
+        if !self.h.scanning() || self.scans.task.is_some() {
+            return None;
+        }
+        let left = self.scans.due? - self.h.clock.now_unix();
+        Some(Instant::now() + Duration::from_secs_f64(left.clamp(0.0, SCAN_EVERY.as_secs_f64())))
+    }
+
+    /// Sends a scan as a `hardware` frame.
+    async fn send_scan(&mut self, tx: &mut Sink, scan: Map<String, Value>) -> Result<(), ()> {
+        let frame = protocol::Hardware { scan, source: protocol::HardwareSource::Scan };
+        self.h.send(tx, HelperFrame::Hardware(frame)).await
+    }
+
+    /// One power reading came: the minute's `power` frame goes after its sixth.
+    async fn reading(&mut self, tx: &mut Sink, sample: Option<protocol::Sample>) -> Result<(), ()> {
+        self.taken += 1;
+        if let Some(s) = sample {
+            self.samples.push(s);
+        }
+        if self.taken < power::PER_FRAME {
+            return Ok(());
+        }
+        self.taken = 0;
+        if self.samples.is_empty() {
+            self.h.log.throttled(
+                "power",
+                Duration::from_secs(3600),
+                Level::Info,
+                "no power reading could be taken this minute",
+            );
+            return Ok(());
+        }
+        let samples = std::mem::take(&mut self.samples);
+        self.h.send(tx, HelperFrame::Power(protocol::Power { samples })).await
     }
 
     /// The figures a `status` would carry now.
@@ -1016,6 +1419,10 @@ impl<'a> Steady<'a> {
             if let Some(s) = self.status_due {
                 wake = wake.min(s);
             }
+            let scan_due = self.scan_due();
+            if let Some(d) = scan_due {
+                wake = wake.min(d);
+            }
             let polls = &mut self.polls;
             let poll = async {
                 match polls.as_mut() {
@@ -1027,6 +1434,20 @@ impl<'a> Steady<'a> {
             let rescanned = async {
                 match rescan.as_mut() {
                     Some(r) => r.await,
+                    None => std::future::pending().await,
+                }
+            };
+            let scan_task = &mut self.scans.task;
+            let scanned = async {
+                match scan_task.as_mut() {
+                    Some(t) => t.await,
+                    None => std::future::pending().await,
+                }
+            };
+            let readings = &mut self.readings;
+            let read = async {
+                match readings.as_mut() {
+                    Some(r) => r.recv().await,
                     None => std::future::pending().await,
                 }
             };
@@ -1073,6 +1494,19 @@ impl<'a> Steady<'a> {
                         return End::Reconnect { welcomed: true };
                     }
                     self.note_status(Instant::now());
+                }
+                done = scanned => {
+                    self.scans.task = None;
+                    if let Some(scan) = self.h.took_scan(self.scans, done.unwrap_or(Made::Failed))
+                        && self.send_scan(tx, scan).await.is_err()
+                    {
+                        return End::Reconnect { welcomed: true };
+                    }
+                }
+                Some(sample) = read => {
+                    if self.reading(tx, sample).await.is_err() {
+                        return End::Reconnect { welcomed: true };
+                    }
                 }
                 report = rescanned => {
                     self.rescan = None;
@@ -1122,6 +1556,10 @@ impl<'a> Steady<'a> {
                         self.next_quiet = now + QUIET_TICK;
                         self.note_status(now);
                     }
+                    if scan_due.is_some_and(|d| now >= d) {
+                        let runtimes = self.h.runtimes(self.catalog);
+                        self.h.start_scan(self.scans, runtimes);
+                    }
                     if self.status_due.is_some_and(|d| now >= d) {
                         self.status_due = None;
                         let fresh = self.fresh_status();
@@ -1151,9 +1589,15 @@ impl<'a> Steady<'a> {
             ServerFrame::Ping(_) => self.h.send(tx, HelperFrame::Pong(protocol::Pong {})).await,
             ServerFrame::Settings(s) => self.h.ack(tx, &s).await,
             ServerFrame::Rescan(_) => {
-                // Read off this task (it may take up to its timeout), and sent from the loop when
-                // it is done; a rescan while one is under way is that one's.
-                if self.rescan.is_none() {
+                // Made or read off this task (it may take up to its timeout), and sent from the
+                // loop when it is done; a rescan while one is under way is that one's.
+                if self.h.scanning() {
+                    self.scans.forced = true;
+                    let runtimes = self.h.runtimes(self.catalog);
+                    self.h.start_scan(self.scans, runtimes);
+                } else if !self.h.config.collect_hardware {
+                    self.h.log.info("the server asked for a rescan; this helper reports no hardware (--no-hardware)");
+                } else if self.rescan.is_none() {
                     self.rescan = Some(tokio::spawn(self.h.report()));
                 }
                 Ok(())

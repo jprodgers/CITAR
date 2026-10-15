@@ -12,7 +12,8 @@
 //!   every reaction; [`settings`]: the acknowledgement of the site's settings; [`llm`]: the model
 //!   endpoint (discovery, and its completions); [`proxy`]: the completions the server asks for,
 //!   streamed, assembled raw and really cancelled; [`http1`]: one HTTP exchange on a connection
-//!   its task owns; [`quiet`]: local quiet hours;
+//!   its task owns; [`quiet`]: local quiet hours; [`scan`]: the hardware scan (the `citar-hardware`
+//!   format, the power guess, the probe programs); [`power`]: the power readings;
 //! - [`app`]: what the binary does with its command line; [`version`]: `--version`;
 //! - `conformance` (only with the `conformance` feature, or in this crate's own unit tests): the
 //!   shared fixtures under `protocol/v2/`, the matcher language of their transcripts, and
@@ -21,8 +22,10 @@
 //!   ships (cargo xtask check refuses the feature there, as it refuses `dev-guard`).
 //!
 //! A library, so that tests drive the helper in-process; `src/main.rs` is the binary. 4-03 adds
-//! the configuration, the connection, keys, settings and the catalog, 4-04 the proxy; the scan,
-//! jobs, updates and services arrive with 4-06 to 4-14.
+//! the configuration, the connection, keys, settings and the catalog, 4-04 the proxy, 4-06 the
+//! scan and the power samples; jobs, updates and services arrive with 4-07 to 4-14.
+//! `src/bin/fake_probe.rs` is `citar-fake-probe`, a stand-in for the probe programs that only
+//! development and test builds make (`required-features = ["dev-guard"]`).
 
 #![forbid(unsafe_code)]
 
@@ -38,9 +41,11 @@ pub mod key;
 pub mod llm;
 pub mod log;
 pub mod net;
+pub mod power;
 pub mod protocol;
 pub mod proxy;
 pub mod quiet;
+pub mod scan;
 pub mod session;
 pub mod settings;
 pub mod version;

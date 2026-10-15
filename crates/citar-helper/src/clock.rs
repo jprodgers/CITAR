@@ -1,7 +1,8 @@
 //! The helper's wall clock: frame stamps (`ts`), quiet hours in the machine's local time, and
 //! `quiet_until`. Durations and timers use tokio's clock, which the transcripts pause and drive
 //! (`setup.helper.clock: "fake"`); a fake wall clock follows that same paused clock, reads its
-//! local time as UTC, and can be moved, as when "the quiet hours begin".
+//! local time as UTC, and can be moved, as when "the quiet hours begin". It also says when the
+//! machine started ([`Clock::boot_unix`]), so a hardware scan kept from before then is not reused.
 
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +11,7 @@ use chrono::{DateTime, Local, NaiveDateTime, TimeZone as _, Utc};
 #[derive(Debug)]
 enum Kind {
     System,
-    Fake { base_unix: f64, base: tokio::time::Instant, offset: Mutex<f64> },
+    Fake { base_unix: f64, base: tokio::time::Instant, offset: Mutex<f64>, boot: Option<f64> },
 }
 
 /// A wall clock: the system's, or a fake one for the transcripts.
@@ -37,7 +38,35 @@ impl Clock {
             base_unix,
             base: tokio::time::Instant::now(),
             offset: Mutex::new(0.0),
+            boot: None,
         }))
+    }
+
+    /// [`Clock::fake`] on a machine that started at `boot_unix`.
+    #[must_use]
+    pub fn fake_booted(base_unix: f64, boot_unix: f64) -> Clock {
+        Clock(Arc::new(Kind::Fake {
+            base_unix,
+            base: tokio::time::Instant::now(),
+            offset: Mutex::new(0.0),
+            boot: Some(boot_unix),
+        }))
+    }
+
+    /// When the machine last started, as Unix time: the system's (`sysinfo`; on Windows with fast
+    /// startup, its last full restart), or what a fake clock was given. `None` when not known.
+    #[must_use]
+    pub fn boot_unix(&self) -> Option<f64> {
+        match &*self.0 {
+            Kind::System => {
+                let boot = sysinfo::System::boot_time();
+                // Seconds since 1970 fit an f64 exactly.
+                #[allow(clippy::cast_precision_loss)]
+                let b = boot as f64;
+                (boot > 0).then_some(b)
+            }
+            Kind::Fake { boot, .. } => *boot,
+        }
     }
 
     /// Unix time, in seconds.
@@ -50,7 +79,7 @@ impl Clock {
                     .unwrap_or_default();
                 since.as_secs_f64()
             }
-            Kind::Fake { base_unix, base, offset } => {
+            Kind::Fake { base_unix, base, offset, .. } => {
                 let off = *offset.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 base_unix + base.elapsed().as_secs_f64() + off
             }
@@ -131,6 +160,16 @@ mod tests {
         let local = c.now_local();
         assert!((c.unix_of(local) - 1_800_000_000.0).abs() < 1e-3);
         assert!(c.is_fake() && !Clock::system().is_fake());
+        assert_eq!(c.boot_unix(), None);
+        let booted = Clock::fake_booted(1_760_000_000.0, 1_759_990_000.0);
+        assert_eq!(booted.boot_unix(), Some(1_759_990_000.0));
+    }
+
+    #[test]
+    fn the_system_clock_knows_when_the_machine_started() {
+        let c = Clock::system();
+        let boot = c.boot_unix().expect("the boot time");
+        assert!(boot > 1_000_000_000.0 && boot <= c.now_unix(), "{boot}");
     }
 
     #[test]

@@ -250,7 +250,8 @@ def s_servers(x: Ctx) -> str:
     head = ["Server", "Kind", "Allocated to activities", "Time held", "Per hour held", "Fixed costs over the period", "Unallocated fixed",
             "In use", "kWh to activities", "Metered machine total"]
     return (x.f("servers") + '<p class="lead">Fixed costs accrue by the calendar; activities pay for the time they held a '
-            'server, and the rest is unallocated idle time. "Metered" covers minutes with live power samples.</p>'
+            'server, and the rest is unallocated idle time. "Metered" covers minutes with live power samples '
+            'that read the whole machine (a GPU whose draw cannot be read leaves its machine unmetered).</p>'
             + C.table(head, rows))
 
 

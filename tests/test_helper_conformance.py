@@ -1,14 +1,17 @@
-"""Protocol 2's conformance transcripts from the hub's side (design/phase4-helper.md P4.2.9; package 4-05's gate 1).
+"""Protocol 2's conformance transcripts from the hub's side (design/phase4-helper.md P4.2.9; packages 4-05's gate 1
+and 4-06's).
 
-Every transcript whose ``plays.hub`` is 4-05 is played against the real hub (the app under uvicorn, a real WebSocket)
-by ``tests/helperfake.HubPlayer``: the handshake with every ``refused`` code and the v1 refusal, settings (capped, not
-lent, pushed, an overclaim clamped), catalog, status, completions (streamed, not streamed, usage absent, busy, closed,
-unknown model, an endpoint error, a timeout, a broken ``done``, a stopping helper), cancel (before the first token,
-mid-stream, after ``done``, never acknowledged), the lost connection, keep-alive and shutdown. Each is a test of its own,
-named after its file. The helper's side plays the same files (``crates/citar-helper/tests/conformance.rs``).
+Every transcript whose ``plays.hub`` is 4-05 or 4-06 is played against the real hub (the app under uvicorn, a real
+WebSocket) by ``tests/helperfake.HubPlayer``: the handshake with every ``refused`` code and the v1 refusal, settings
+(capped, not lent, pushed, an overclaim clamped), catalog, hardware (a rescan's frame kept as the last report, an
+unchanged machine sending none), power (a minute's samples written as the machine's power row), status, completions
+(streamed, not streamed, usage absent, busy, closed, unknown model, an endpoint error, a timeout, a broken ``done``, a
+stopping helper), cancel (before the first token, mid-stream, after ``done``, never acknowledged), the lost connection,
+keep-alive and shutdown. Each is a test of its own, named after its file. The helper's side plays the same files
+(``crates/citar-helper/tests/conformance.rs``).
 
-A transcript of a later package (4-06, 4-10, 4-13) is not played here; ``test_the_package_plays_its_transcripts`` holds
-the count, and the player refuses any act or state word it cannot do rather than skip it.
+A transcript of a later package (4-10, 4-13) is not played here; ``test_the_package_plays_its_transcripts`` holds the
+count, and the player refuses any act or state word it cannot do rather than skip it.
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ from tests import helperfake as H
 _TMP = Path(tempfile.mkdtemp(prefix="citar_conformance_"))
 _URL = "sqlite:///" + (_TMP / "test.db").as_posix()
 
-TRANSCRIPTS = H.hub_transcripts("4-05")
+TRANSCRIPTS = H.hub_transcripts("4-05") + H.hub_transcripts("4-06")
 
 
 def setUpModule():
@@ -60,9 +63,11 @@ class Transcripts(unittest.TestCase):
         H.HubPlayer(self.server, t).play()
 
     def test_the_package_plays_its_transcripts(self):
-        """The 40 transcripts 4-05 plays from the hub's side are all here, and the player knows every word they
-        use."""
-        self.assertEqual(len(TRANSCRIPTS), 40)
+        """The 40 transcripts 4-05 plays from the hub's side and 4-06's 3 are all here, and the player knows every word
+        they use."""
+        self.assertEqual(len(TRANSCRIPTS), 43)
+        self.assertEqual(sorted(t.name for t in TRANSCRIPTS if t.plays.get("hub") == "4-06"),
+                         ["hardware-rescan", "hardware-unchanged", "power-minute"])
         for t in TRANSCRIPTS:
             self.assertIs(H.played(t), True, t.name)
         # a word of a later package is refused, not skipped

@@ -6,6 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+# `cargo run -p citar-helper` runs the helper, not the fake probe a development build also makes.
+default-run = "citar-helper"
 
 [features]
 # Test and development features (design/phase4-helper.md P4.3.1). cargo xtask check refuses them in
@@ -60,8 +62,9 @@ hyper-util.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 blake3.workspace = true
-# The host name, and the logical CPUs and memory the default CPU ceiling is a share of.
-sysinfo.workspace = true
+# The host name, and the logical CPUs and memory the default CPU ceiling is a share of; the scan's
+# CPU, memory and volumes (`disk`), and the CPU's utilisation for the power samples (4-06).
+sysinfo = { workspace = true, features = ["disk"] }
 # Local quiet hours, in the machine's own time zone.
 chrono.workspace = true
 
@@ -88,6 +91,15 @@ path = "src/lib.rs"
 [[bin]]
 name = "citar-helper"
 path = "src/main.rs"
+
+# A stand-in for the scan's probe programs (nvidia-smi, PowerShell, system_profiler), named by
+# CITAR_HELPER_NVIDIA_SMI and the others in a development or test build (4-06, P4.3.5): it prints
+# fixed answers and logs each call. Only builds with the development guard make it, so no release
+# build (`cargo build --release -p citar-helper`, no features) ever holds it.
+[[bin]]
+name = "citar-fake-probe"
+path = "src/bin/fake_probe.rs"
+required-features = ["dev-guard"]
 
 [lints]
 workspace = true

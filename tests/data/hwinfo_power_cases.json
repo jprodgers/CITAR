@@ -1,0 +1,1114 @@
+{
+ "about": "hwinfo.collect outputs and hwinfo.guess_power's answer for each (package 4-06, gate 1): the Rust helper's port gives the same answers (crates/citar-helper/tests/power_guess.rs), and tests/test_helper_scan.py holds the answers to hwinfo.guess_power. Written by a generator kept outside the repository (the session's scratchpad p406/gen_power_cases.py); the JSON is the record now.",
+ "cases": [
+  {
+   "about": "recorded on Windows 11: a laptop, an H-series CPU, an RTX 3050 laptop GPU of 6 GB with no power limit",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "laptop"
+    },
+    "cpu": {
+     "model": "13th Gen Intel(R) Core(TM) i5-13420H",
+     "cores": 8,
+     "threads": 12,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 15.7,
+     "unified": false,
+     "modules": [
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      },
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      }
+     ]
+    },
+    "gpus": [
+     {
+      "name": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+      "vendor": "NVIDIA",
+      "vram_gb": 6.0,
+      "driver": "546.18",
+      "power_limit_w": null,
+      "power_now_w": 5.29,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     },
+     {
+      "name": "Intel(R) UHD Graphics",
+      "vendor": "Intel",
+      "vram_gb": 1.0,
+      "driver": "31.0.101.4146",
+      "power_readable": false
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 12,
+    "cpu_max_w": 55,
+    "gpu_max_w": 80,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "recorded in WSL (Ubuntu 24.04) on the same laptop: a battery makes it a laptop",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Linux",
+     "release": "6.18.33.2-microsoft-standard-WSL2",
+     "version": "#1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+     "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+     "arch": "x86_64"
+    },
+    "system": {
+     "form": "laptop"
+    },
+    "cpu": {
+     "model": "13th Gen Intel(R) Core(TM) i5-13420H",
+     "cores": null,
+     "threads": 12,
+     "sockets": 1
+    },
+    "memory": {
+     "ram_gb": 7.6,
+     "unified": false
+    },
+    "gpus": [
+     {
+      "name": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+      "vendor": "NVIDIA",
+      "vram_gb": 6.0,
+      "driver": "546.18",
+      "power_limit_w": null,
+      "power_now_w": 5.34,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 0.3
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 0.2
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 2.0
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 1024.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "/",
+      "fs": null,
+      "total_gb": 1006.9,
+      "free_gb": 764.0
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 12,
+    "cpu_max_w": 55,
+    "gpu_max_w": 80,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "a desktop of 32 threads with an RTX 4090 limited to 450 W (0.85 x 450 = 382.5, rounded half to even)",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "desktop"
+    },
+    "cpu": {
+     "model": "AMD Ryzen 9 7950X 16-Core Processor",
+     "cores": 8,
+     "threads": 32,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 15.7,
+     "unified": false,
+     "modules": [
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      },
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      }
+     ]
+    },
+    "gpus": [
+     {
+      "name": "NVIDIA GeForce RTX 4090",
+      "vendor": "NVIDIA",
+      "vram_gb": 24.0,
+      "driver": "1.0",
+      "power_limit_w": 450.0,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 55,
+    "cpu_max_w": 200,
+    "gpu_max_w": 382,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "a desktop of 8 threads with a Radeon of 24 GB and no power limit",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "desktop"
+    },
+    "cpu": {
+     "model": "Intel(R) Core(TM) i7-7700K CPU @ 4.20GHz",
+     "cores": 8,
+     "threads": 8,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 15.7,
+     "unified": false,
+     "modules": [
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      },
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      }
+     ]
+    },
+    "gpus": [
+     {
+      "name": "Radeon RX 7900 XTX",
+      "vendor": "AMD",
+      "vram_gb": 24.0,
+      "driver": "1.0",
+      "power_limit_w": null,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": false
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 55,
+    "cpu_max_w": 65,
+    "gpu_max_w": 220,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "a desktop of 16 threads with two limited GPUs (297.5 + 272 = 569.5, rounded half to even)",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "desktop"
+    },
+    "cpu": {
+     "model": "13th Gen Intel(R) Core(TM) i5-13420H",
+     "cores": 8,
+     "threads": 16,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 15.7,
+     "unified": false,
+     "modules": [
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      },
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      }
+     ]
+    },
+    "gpus": [
+     {
+      "name": "NVIDIA GeForce RTX 3090",
+      "vendor": "NVIDIA",
+      "vram_gb": 24.0,
+      "driver": "1.0",
+      "power_limit_w": 350.0,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     },
+     {
+      "name": "NVIDIA GeForce RTX 3080",
+      "vendor": "NVIDIA",
+      "vram_gb": 10.0,
+      "driver": "1.0",
+      "power_limit_w": 320.0,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 55,
+    "cpu_max_w": 125,
+    "gpu_max_w": 570,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "a Threadripper workstation of 64 threads",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "desktop"
+    },
+    "cpu": {
+     "model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+     "cores": 8,
+     "threads": 64,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 15.7,
+     "unified": false,
+     "modules": [
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      },
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      }
+     ]
+    },
+    "gpus": [
+     {
+      "name": "NVIDIA RTX A6000",
+      "vendor": "NVIDIA",
+      "vram_gb": 48.0,
+      "driver": "1.0",
+      "power_limit_w": 300.0,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 110,
+    "cpu_max_w": 280,
+    "gpu_max_w": 255,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "a Xeon server with an A100 limited to 400 W",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Linux",
+     "release": "6.18.33.2-microsoft-standard-WSL2",
+     "version": "#1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+     "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+     "arch": "x86_64"
+    },
+    "system": {
+     "form": "server"
+    },
+    "cpu": {
+     "model": "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz",
+     "cores": null,
+     "threads": 128,
+     "sockets": 1
+    },
+    "memory": {
+     "ram_gb": 7.6,
+     "unified": false
+    },
+    "gpus": [
+     {
+      "name": "NVIDIA A100-PCIE-40GB",
+      "vendor": "NVIDIA",
+      "vram_gb": 40.0,
+      "driver": "1.0",
+      "power_limit_w": 400.0,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 0.3
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 0.2
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 2.0
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 1024.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "/",
+      "fs": null,
+      "total_gb": 1006.9,
+      "free_gb": 764.0
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 110,
+    "cpu_max_w": 280,
+    "gpu_max_w": 340,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "an Apple silicon laptop: unified memory, the GPU at least 25 W",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "laptop"
+    },
+    "cpu": {
+     "model": "Apple M3 Pro",
+     "cores": 8,
+     "threads": 12,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 36.0,
+     "unified": true
+    },
+    "gpus": [
+     {
+      "name": "Apple M3 Pro",
+      "vendor": "Apple",
+      "vram_gb": 36.0,
+      "gpu_cores": 18,
+      "unified_memory": true,
+      "power_readable": false
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 8,
+    "cpu_max_w": 30,
+    "gpu_max_w": 25,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "an Apple silicon desktop: unified memory, the GPU at least 60 W",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "desktop"
+    },
+    "cpu": {
+     "model": "Apple M2 Ultra",
+     "cores": 8,
+     "threads": 24,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 192.0,
+     "unified": true
+    },
+    "gpus": [
+     {
+      "name": "Apple M2 Ultra",
+      "vendor": "Apple",
+      "vram_gb": 192.0,
+      "gpu_cores": 76,
+      "unified_memory": true,
+      "power_readable": false
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 8,
+    "cpu_max_w": 60,
+    "gpu_max_w": 60,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "a U-series laptop whose NVIDIA GPU has 4 GB (under the 6 GB that counts)",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "laptop"
+    },
+    "cpu": {
+     "model": "Intel(R) Core(TM) i7-1255U",
+     "cores": 8,
+     "threads": 12,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 15.7,
+     "unified": false,
+     "modules": [
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      },
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      }
+     ]
+    },
+    "gpus": [
+     {
+      "name": "NVIDIA GeForce MX550",
+      "vendor": "NVIDIA",
+      "vram_gb": 4.0,
+      "driver": "1.0",
+      "power_limit_w": null,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": false
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 12,
+    "cpu_max_w": 25,
+    "gpu_max_w": 0,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "an HX laptop with an RTX 4080 laptop GPU limited to 175 W (148.75)",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Windows",
+     "release": "11",
+     "version": "10.0.26300",
+     "platform": "Windows-11-10.0.26300-SP0",
+     "arch": "AMD64"
+    },
+    "system": {
+     "manufacturer": "Acer",
+     "model": "Nitro ANV15-51",
+     "form": "laptop"
+    },
+    "cpu": {
+     "model": "13th Gen Intel(R) Core(TM) i9-13980HX",
+     "cores": 8,
+     "threads": 32,
+     "sockets": 1,
+     "max_ghz": 2.1
+    },
+    "memory": {
+     "ram_gb": 15.7,
+     "unified": false,
+     "modules": [
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      },
+      {
+       "gb": 8.0,
+       "mhz": 5600,
+       "part": "MTC4C10163S1SC56BD1"
+      }
+     ]
+    },
+    "gpus": [
+     {
+      "name": "NVIDIA GeForce RTX 4080 Laptop GPU",
+      "vendor": "NVIDIA",
+      "vram_gb": 12.0,
+      "driver": "1.0",
+      "power_limit_w": 175.0,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "NVMe WD PC SN740 SDDQNQD-512G-1014",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 476.9
+     },
+     {
+      "name": "NVMe Samsung SSD 990 EVO Plus 4TB",
+      "type": "SSD",
+      "bus": "NVMe",
+      "size_gb": 3726.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "C:\\",
+      "fs": null,
+      "total_gb": 3725.2,
+      "free_gb": 1242.7
+     },
+     {
+      "mount": "D:\\",
+      "fs": null,
+      "total_gb": 475.7,
+      "free_gb": 59.6
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 12,
+    "cpu_max_w": 55,
+    "gpu_max_w": 149,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  },
+  {
+   "about": "no form, no CPU model, no thread count; an Intel Arc of 16 GB and an NVIDIA card whose limit is 0",
+   "info": {
+    "format": "citar-hardware",
+    "collector_version": 1,
+    "collected_at": "2026-10-15T06:47:06",
+    "hostname": "recorded-host",
+    "os": {
+     "system": "Linux",
+     "release": "6.18.33.2-microsoft-standard-WSL2",
+     "version": "#1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+     "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+     "arch": "x86_64"
+    },
+    "system": {},
+    "cpu": {
+     "model": null,
+     "cores": null,
+     "threads": null
+    },
+    "memory": {
+     "ram_gb": 7.6,
+     "unified": false
+    },
+    "gpus": [
+     {
+      "name": "Intel(R) Arc(TM) A770 Graphics",
+      "vendor": "Intel",
+      "vram_gb": 16.0,
+      "driver": "1.0",
+      "power_limit_w": null,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": false
+     },
+     {
+      "name": "NVIDIA GeForce RTX 3060",
+      "vendor": "NVIDIA",
+      "vram_gb": 12.0,
+      "driver": "1.0",
+      "power_limit_w": 0.0,
+      "power_now_w": null,
+      "bus": "00000000:01:00.0",
+      "power_readable": true
+     }
+    ],
+    "physical_disks": [
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 0.3
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 0.2
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 2.0
+     },
+     {
+      "name": "Virtual Disk",
+      "type": "HDD",
+      "bus": null,
+      "size_gb": 1024.0
+     }
+    ],
+    "volumes": [
+     {
+      "mount": "/",
+      "fs": null,
+      "total_gb": 1006.9,
+      "free_gb": 764.0
+     }
+    ],
+    "runtimes": [],
+    "power": {
+     "gpu_sampling": true
+    }
+   },
+   "guess": {
+    "idle_w": 55,
+    "cpu_max_w": 65,
+    "gpu_max_w": 220,
+    "source": "guess",
+    "note": "Estimated from the hardware class; measure idle and busy wall power with a plug-in meter for better numbers."
+   }
+  }
+ ]
+}

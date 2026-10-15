@@ -29,7 +29,8 @@
             "yield_to_llm": true
           }
         }
-      }
+      },
+      "clock": "fake"
     }
   },
   "steps": [

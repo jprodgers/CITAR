@@ -3,13 +3,17 @@
 // - Capabilities: whether it takes model work, its LLM slots, whether pooled prompts may make it swap models, and its
 //   CPU sharing for the CPU jobs of CITAR's next helper;
 // - Hardware, models and power: for each, auto or manual (what its helper's report may change), the last report with
-//   its time and how the configuration differs from it, and Apply (copy it in, whatever the mode);
+//   its time and how the configuration differs from it, Apply (copy it in, whatever the mode), and Rescan now (its
+//   connected helper scans the machine again and sends the scan, which the dialog shows when it comes);
 // - Class and trust: the hardware classes it is priced by and its trust tier, shown to its owner, set by
 //   administrators (with what the prompt scheduler noticed of its helper over-reporting its time).
 // Every request goes through servers.js's `call`, which asks machines.js's gates first, as the rest of the page does.
 import { el, clear, toast, modal } from "./util.js";
 import { call, may } from "./servers.js";
-import { MODE_TEXT, SECTIONS, classText, inEffectText, settingsBody, sharesCpu, wholeIn } from "./machines.js";
+import {
+  MODE_TEXT, RESCAN_LOOK_MS, RESCAN_WAIT_MS, SECTIONS, classText, inEffectText, rescanned, settingsBody, sharesCpu,
+  wholeIn,
+} from "./machines.js";
 
 const NAMES = { hardware: "Hardware", models: "Models", power: "Power" };
 const WORK = {
@@ -140,12 +144,48 @@ export async function openMachineSettings(m, onSaved) {
       el("div", { class: "row between wrap" },
         el("span", { class: "muted" }, report.at ? `Last report: ${when(report.at)}${helper}.`
           : "No report yet: its helper sends one each time it connects."),
-        any ? el("button", { class: "small primary", onclick: () => act("applyScan") }, "Apply all of the last report")
-          : null),
+        el("div", { class: "row wrap gap" },
+          may("rescanMachine", target) ? el("button", { class: "small", title: "Its connected helper scans the "
+            + "machine again and sends the scan", onclick: (e) => rescan(e.currentTarget) }, "Rescan now") : null,
+          any ? el("button", { class: "small primary", onclick: () => act("applyScan") },
+            "Apply all of the last report") : null)),
       el("p", { class: "muted small" }, "Auto or manual says what its helper's next report may change; Save keeps a change "
         + "of mode. Apply copies the last report in now, whatever the mode."));
     for (const section of SECTIONS) box.appendChild(scanSection(section, report));
     return box;
+  }
+
+  // Asks the connected helper for a new scan, then reads the dialog again until it holds that scan (its report's time
+  // moves), for at most RESCAN_WAIT_MS. A helper that is not connected is the route's 409, said as it says it.
+  async function rescan(button) {
+    const before = (current.report || {}).hardware_at || null;
+    const idle = () => { button.disabled = false; button.textContent = "Rescan now"; };
+    button.disabled = true;
+    button.textContent = "Rescanning…";
+    try {
+      await call("rescanMachine", target, m.id);
+    } catch (e) {
+      toast(e.message, "error");
+      idle();
+      return;
+    }
+    const until = Date.now() + RESCAN_WAIT_MS;
+    while (Date.now() < until) {
+      await new Promise((done) => setTimeout(done, RESCAN_LOOK_MS));
+      let fresh;
+      try {
+        fresh = await call("machineSettings", target, m.id);
+      } catch (e) {
+        continue;
+      }
+      if (rescanned(before, fresh)) {
+        reload(fresh);
+        toast("Its helper sent a new scan.", "good");
+        return;
+      }
+    }
+    toast("No new scan yet: its helper may still be scanning. Open the dialog again in a moment.", "error");
+    idle();
   }
 
   function scanSection(section, report) {

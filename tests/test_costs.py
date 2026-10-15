@@ -82,6 +82,39 @@ class CostTests(unittest.TestCase):
         c = r["acts"]["m"]["total"]
         self.assertAlmostEqual(c["kwh_dynamic"], 20 / 60 / 1000, places=9)    # 0.5 x 40 W for one minute
         self.assertAlmostEqual(c["energy_measured_h"], 60 / 3600)
+        # the host has no GPU watts, so samples of its CPU alone measure all of it: its metered minute counts
+        self.assertEqual(r["servers"]["sv_host"]["metered"]["minutes"], 1)
+
+    def test_a_minute_sampled_without_the_gpus_draw_keeps_the_gpus_estimate(self):
+        """A machine whose GPU draw its driver does not report (an AMD or Intel GPU, a Mac) samples its CPU alone: the
+        model's work on its GPU is still estimated from the busy time, and the minute is not called measured."""
+        reg = S.load()
+        spans = [{"act": "g", "srv": "sv_gpu", "t0": T0, "t1": T0 + 60, "held": 60, "busy": 60, "cpu": 0,
+                  "model": "dry-run"}]
+        sampled = {"sv_gpu": [{"k": "pw", "srv": "sv_gpu", "t0": T0, "t1": T0 + 60, "n": 6, "cpu_util": 0.1,
+                               "gpu_w": None}]}
+        unsampled = costing.compute(T0, T0 + 60, reg, ledger(spans))["acts"]["g"]["total"]
+        r = costing.compute(T0, T0 + 60, reg, ledger(spans, power=sampled))
+        c = r["acts"]["g"]["total"]
+        # busy the whole minute: the GPU's 300 W as estimated, plus the CPU's 10% of 100 W as sampled
+        self.assertAlmostEqual(c["kwh_dynamic"], (300 + 10) * 60 / 3600 / 1000, places=9)
+        self.assertAlmostEqual(unsampled["kwh_dynamic"], 300 * 60 / 3600 / 1000, places=9)
+        self.assertAlmostEqual(c["energy_estimated_h"], 60 / 3600)
+        self.assertEqual(c["energy_measured_h"], 0)
+        self.assertEqual(r["servers"]["sv_gpu"]["measured_minutes"], 0)
+        # nor is the machine's draw metered: its samples read no GPU, and it has GPU watts
+        self.assertNotIn("metered", r["servers"]["sv_gpu"])
+        # with no work on the GPU that minute there is nothing to estimate: the CPU's samples measure it
+        idle_gpu = [dict(spans[0], busy=0, cpu=30)]
+        c = costing.compute(T0, T0 + 60, reg, ledger(idle_gpu, power=sampled))["acts"]["g"]["total"]
+        self.assertAlmostEqual(c["kwh_dynamic"], 10 * 60 / 3600 / 1000, places=9)
+        self.assertAlmostEqual(c["energy_measured_h"], 60 / 3600)
+        self.assertEqual(c["energy_estimated_h"], 0)
+        # and a sample that read the GPU but not the CPU estimates the CPU's part from its CPU seconds (8 threads)
+        gpu_only = {"sv_gpu": [dict(sampled["sv_gpu"][0], cpu_util=None, gpu_w=150.0)]}
+        c = costing.compute(T0, T0 + 60, reg, ledger(idle_gpu, power=gpu_only))["acts"]["g"]["total"]
+        self.assertAlmostEqual(c["kwh_dynamic"], 30 / (60 * 8) * 100 * 60 / 3600 / 1000, places=9)   # its idle GPU: 0 W
+        self.assertAlmostEqual(c["energy_estimated_h"], 60 / 3600)
 
     def test_effective_dated_rates(self):
         reg = S.snapshot()

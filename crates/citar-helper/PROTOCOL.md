@@ -124,9 +124,12 @@ and drops the frame. Then:
 
 **What the helper caps.** Values that come from the machine are cut to fit before they are sent,
 so a correct helper never sends a frame the hub refuses for them:
-- its hardware report (`hello.report.hardware`, from the owner's file): at most 256 KiB as sent
-  (a file over 1 MiB is not read at all); a larger one is not reported (`hardware_source`
-  `none`), logged once an hour, so its hello stays under the hub's 2 MiB for a first frame;
+- its hardware report (`hello.report.hardware` and `hardware.scan`, its scan or the owner's file): at
+  most 256 KiB as sent (a file over 1 MiB is not read at all); a larger one is not reported
+  (`hardware_source` `none`, and no `hardware` frame), logged once an hour, so its hello stays under
+  the hub's 2 MiB for a first frame. Its own scan keeps at most 32 GPUs, 64 physical disks, 64
+  volumes, 64 memory modules and 8 runtimes of at most 500 models each, every text cut to 1,000
+  characters;
 - its models (`hello.llm.models`, `catalog.models`): at most 500, chosen in this order: the models
   of its allowlist, then the loaded ones, then the others by key; a model whose key is longer than
   200 characters is left out, and a label longer than 200 is cut;
@@ -258,12 +261,30 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
   catalog. A listing that fails or times out is not a change: the helper keeps its last catalog
   (in its next hello too) until three listings in a row have failed, and only then reports its
   models as none loaded (its allowlist's, or none).
-- **`hardware`** (helper → server): the hardware scan, when it changed since the last one sent, and
-  after every `rescan`. A scan younger than 6 hours is reused at connect; the helper scans again
-  every 6 hours.
+- **`hardware`** (helper → server): the hardware scan, when it changed since the one the server has
+  (the hello's, or the last `hardware` frame's), and after every `rescan`. A scan younger than 6
+  hours by the wall clock is reused at connect (across the helper's restarts too, but not across a
+  restart of the machine); the helper scans again every 6 hours. A scan "changed" when its content did, leaving out what moves without the machine
+  changing: `collected_at`, each GPU's `power_now_w` and each volume's `free_gb`. A hello waits at
+  most 30 s for a scan being made; past that it carries the last scan it has (or none, `hardware_source`
+  `none`), and the scan's `hardware` frame follows when it is done. A helper reporting the owner's
+  file (`--hardware`) reads it again at each connection and on each `rescan`, and does not rescan
+  on its own; one reporting nothing (`--no-hardware`) sends no `hardware` frame, `rescan` or not.
 - **`rescan`** (server → helper): scan now, and send `hardware` even if nothing changed.
-- **`power`** (helper → server, once a minute when it can measure anything): samples taken every
-  10 s. They are measurements, written as the machine's power rows whatever its power mode.
+- **`power`** (helper → server, once a minute when it can measure anything): the minute's readings,
+  one taken every 10 s; a reading in which nothing could be measured is left out, and a minute with
+  none sends no frame. They are measurements, written as the machine's power rows whatever its
+  power mode. The hub writes each frame as one row (`usage.PowerSampler`'s format) placed by its own
+  clock, never the samples' `t` (the helper's clock is not the server's): it ends when the frame came
+  and covers 10 s a sample, never reaching back before the connection began or the machine's last
+  frame, whichever connection brought it, so a machine's rows never overlap; a frame leaving under
+  10 s for its row (one sent at once after connecting) writes none. A frame sooner than 30 s after
+  the machine's last one, over any connection, is dropped (logged once). A sample's `gpu_w` over
+  20,000 W, or over 1.5 times the sum of the power limits the helper's own scan reports for the GPUs
+  whose draw reads (when it lists one for each), is left out of its row; and a machine whose owner
+  turned its live sampling off (`power.sampling` `off`) gets no rows. A row without `gpu_w` (a GPU
+  whose draw does not read) is priced with the GPU's share estimated from the machine's power
+  figures while its model works.
 - **`status`** (helper → server, on change, at most once every 5 s): the local quiet hours in force,
   the model requests in flight and the job runs running and paused. The server treats a machine in
   its helper's own quiet hours as one in the site's quiet hours. `quiet_until` is a whole minute,

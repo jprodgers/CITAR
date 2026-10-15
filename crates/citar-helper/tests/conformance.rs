@@ -21,16 +21,19 @@ use citar_helper::http1;
 use citar_helper::key::MachineKey;
 use citar_helper::llm::{BoxFuture, Endpoint, HttpEndpoint, Listed, SharedEndpoint};
 use citar_helper::log::Log;
+use citar_helper::power::Reading;
 use citar_helper::protocol::{Kind, Provider, Sender, UpdatePolicy};
 use citar_helper::proxy::InFlight;
 use citar_helper::quiet::{self, Quiet};
-use citar_helper::session::{Exit, Facts, Helper};
-use common::{FakeEndpoint, Models, Pipe, Player, UnderTest, listed};
+use citar_helper::session::{Exit, Facts, Helper, Sensors};
+use common::{
+    FakeEndpoint, FixedPower, FixedScanner, Models, Pipe, Player, UnderTest, listed, test_scan,
+};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 /// The packages whose helper-side transcripts this crate plays (it refuses what it cannot do).
-const PLAYED_THROUGH: &str = "4-04";
+const PLAYED_THROUGH: &str = "4-06";
 
 /// The fake clock's start: Wednesday 2026-10-14, 12:00 UTC, outside any transcript's quiet hours.
 const START_UNIX: f64 = 1_791_979_200.0;
@@ -194,13 +197,24 @@ fn play(t: &Transcript, canonical: &Canonical) -> Result<(), String> {
     play_with(t, canonical, |_| {})
 }
 
+/// The in-process helper's scanner and meters: a fixed scan, a fixed reading.
+fn sensors() -> (Sensors, FixedScanner) {
+    let scanner = FixedScanner::new(test_scan("Transcript CPU"));
+    let sensors = Sensors {
+        scanner: Some(Arc::new(scanner.clone())),
+        power: Some(Arc::new(FixedPower(Reading { gpu_w: Some(42.5), cpu_util: Some(0.25) }))),
+        cache: None,
+    };
+    (sensors, scanner)
+}
+
 /// Plays `t` with the helper's settings changed by `tweak` (for settings no transcript key names).
 fn play_with(
     t: &Transcript,
     canonical: &Canonical,
     tweak: impl FnOnce(&mut Config),
 ) -> Result<(), String> {
-    play_bound(t, canonical, tweak, &[])
+    play_sensed(t, canonical, tweak, &[], sensors().0)
 }
 
 /// Whether a transcript runs a completion (a `request` sent, or an endpoint step beyond its model
@@ -222,6 +236,17 @@ fn play_bound(
     canonical: &Canonical,
     tweak: impl FnOnce(&mut Config),
     binds: &[(&str, Value)],
+) -> Result<(), String> {
+    play_sensed(t, canonical, tweak, binds, sensors().0)
+}
+
+/// [`play_bound`] with the helper's scanner and meters given.
+fn play_sensed(
+    t: &Transcript,
+    canonical: &Canonical,
+    tweak: impl FnOnce(&mut Config),
+    binds: &[(&str, Value)],
+    sensors: Sensors,
 ) -> Result<(), String> {
     for key in t.setup_helper.keys() {
         if !["config", "clock", "service", "endpoint"].contains(&key.as_str()) {
@@ -284,6 +309,7 @@ fn play_bound(
             service: t.setup_helper.get("service").and_then(Value::as_bool).unwrap_or(false),
             stop: stop_rx,
             in_flight: in_flight.clone(),
+            sensors,
         };
         let task = tokio::spawn(async move { helper.run().await });
         let mut under = InProcess {
@@ -310,7 +336,7 @@ fn the_helper_plays_its_transcripts() {
         .iter()
         .filter(|t| t.plays.helper.as_deref().is_some_and(|p| p <= PLAYED_THROUGH))
         .collect();
-    assert_eq!(mine.len(), 46, "4-03 and 4-04 play 46 transcripts from the helper's side");
+    assert_eq!(mine.len(), 49, "4-03, 4-04 and 4-06 play 49 transcripts from the helper's side");
     let (live, paused): (Vec<&Transcript>, Vec<&Transcript>) =
         mine.iter().partition(|t| runs_completions(t));
     assert_eq!(live.len(), 15, "4-04's 15 run completions");

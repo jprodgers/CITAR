@@ -147,6 +147,18 @@ export const MODE_TEXT = {
   },
 };
 
+/** How long the dialog's "Rescan now" waits for its helper's new scan, and how often it looks (a helper scans in a
+ *  few seconds; the protocol's bound is 5). */
+export const RESCAN_WAIT_MS = 15000;
+export const RESCAN_LOOK_MS = 500;
+
+/** Whether the dialog's fresh read `fresh` holds a hardware report other than the one it had when "Rescan now" was
+ *  asked (`before`: that report's `hardware_at`, or null when there was none). */
+export function rescanned(before, fresh) {
+  const at = ((fresh || {}).report || {}).hardware_at;
+  return !!at && at !== before;
+}
+
 /** Whether a kind of machine shares CPU (an online API or a test machine has none of its own to share). */
 export function sharesCpu(kind) {
   return kind === "owned" || kind === "leased";

@@ -147,6 +147,7 @@ async fn start_keyed(tweak: impl FnOnce(&mut Config), key: Option<&str>) -> Run 
         service: false,
         stop: stop_rx,
         in_flight: in_flight.clone(),
+        sensors: citar_helper::session::Sensors::none(),
     };
     let task = tokio::spawn(async move { helper.run().await });
     let mut ws = tokio::time::timeout(Duration::from_secs(20), conns.recv())
