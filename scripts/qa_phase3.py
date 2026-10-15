@@ -20,8 +20,11 @@ The harness:
   first administrator's creation imports (P3.2.8);
 - serves fake OpenAI-compatible endpoints on 127.0.0.1 that record every connection they accept and every request
   they serve, and answer from a scripted policy that plays (P3.9.4: tool calls from the request's tools, a delay per
-  completion): one is the ``accounts`` part's trap (a member's seat or machine that names it must make the server dial
-  nothing), another serves the real CITAR helpers (``python -m citar.worker``) a part starts for a helper machine;
+  completion; streamed as server-sent events when asked, recording when the client went, design/phase4-helper.md
+  P4.7.6): one is the ``accounts`` part's trap (a member's seat or machine that names it must make the server dial
+  nothing), another serves the real CITAR helpers a part starts for a helper machine: the Rust binary
+  (``citar-helper``, ``--helper-bin`` or the one ``cargo xtask develop`` built into ``CITAR_EXT_DIR``), each in a home
+  of its own in the harness's directory (``--home <dir>/helper-<n>``);
 - runs the part's checks, writes ``<dir>/qa-<part>.json`` (each check, its result, its numbers; the accounts and
   their throwaway password, for the browser checklist), stops the server unless ``--keep``, and exits 1 when a
   check failed, 0 when every one passed.
@@ -33,10 +36,11 @@ helper machine with a real helper, the machine routes' gates and dropped helpers
 lists to a member, another member and an administrator, the reads and saves of its dialogs, sharing a machine from it;
 with ``--keep`` its helper machine's helper stays connected for the browser checklist), ``queue`` (3-07: two lobby
 games sharing a helper machine's one slot through the prompt scheduler, never two requests at once and no busy
-refusal; the Servers page's test given up mid-completion, its request draining until the helper's late answer while
-the next request waits; 3-08: a lobby game's lease made when it is registered and again when the server, restarted,
-brings it back, a benchmark job waiting for it, and a one-job benchmark started beside a running test, which it
-cancels and waits to drain, ``drain_s`` in its result; 3-09: two members' report analyses and probe cases waiting as
+refusal; the Servers page's test given up mid-completion, its generation stopped by the helper and its slot freed by
+the helper's acknowledgement, so the next request goes at once (protocol 2, design/phase4-helper.md P4.5.3); 3-08: a
+lobby game's lease made when it is registered and again when the server, restarted, brings it back, a benchmark job
+waiting for it, and a one-job benchmark started beside a running test, which it cancels, ``drain_s`` in its result;
+3-09: two members' report analyses and probe cases waiting as
 pooled prompts behind a lobby game's seat mid-turn, their Queue pages, and the order they are served in, none while the
 seat is mid-turn; ``--hold-line`` keeps them waiting for the browser checklist), ``ledger`` (3-10: bob's helper
 machine serving alice's lobby game and her report's analysis, his given and her used read through ``/api/ledger/me``
@@ -64,7 +68,7 @@ taking what the report has, an administrator's pin and the trust tier, the route
 and model swaps taking effect at once, LLM off; with ``--keep`` its helper stays connected for the browser
 checklist's G1), and later ``real``
 (3-19); ``all`` runs every part written so far.
-It needs the extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
+It needs the extension and the helper (``cargo xtask develop`` builds both).
 """
 from __future__ import annotations
 
@@ -74,6 +78,7 @@ import json
 import os
 import re
 import secrets
+import select
 import shutil
 import socket
 import struct
@@ -258,8 +263,19 @@ class FakeEndpoint:
     at most ``max_trades`` times), votes when a vote is open, and ends the turn. ``delay`` seconds pass before each
     completion, so queues, drains and cancels can be seen. ``/models`` (and LM Studio's ``/api/v0/models``) name
     ``MODEL``, loaded (``models`` says otherwise once a part sets it). So a real CITAR helper pointed at it exercises
-    the hub, the hello, the requests and
-    ``Done.duration`` without a GPU."""
+    the hub, the hello, the requests and ``done.gen_s`` without a GPU.
+
+    **Streaming** (design/phase4-helper.md P4.7.6), as the CITAR helper asks for by default: a request with
+    ``stream`` is answered with server-sent events, as LM Studio sends them: the reply's text a word an event (its
+    reasoning first, when ``reasoning`` is set), each tool call an event, the finish reason, the usage (with
+    ``stream_options.include_usage``) and ``[DONE]``, ``delay`` spread evenly before the events that carry text or
+    calls. Between events it watches the socket, so it sees its client go within ``POLL`` seconds; each request's
+    entry records when each event went out (``events``), how many carried text (``tokens``) and when its client went
+    (``gone``, None when it read to the end). Connections are kept alive between requests (HTTP/1.1), as LM Studio
+    keeps them."""
+
+    #: How often a streaming answer looks whether its client went.
+    POLL = 0.02
 
     MODEL = "qa-fake-model"
 
@@ -267,6 +283,14 @@ class FakeEndpoint:
         outer = self
         self.connections: list[tuple[float, str]] = []
         self.requests: list[dict] = []
+        #: When each chat completion arrived (``time.time()``), before it is answered: ``requests`` lists them once
+        #: served.
+        self.arrivals: list[float] = []
+        #: Reasoning text a streamed answer sends before its text (a model that thinks), or None.
+        self.reasoning: Optional[str] = None
+        #: Every streamed answer's entry from its first byte, in progress or not (``requests`` lists it once its
+        #: answer ended or its client went).
+        self.live: list[dict] = []
         self.delay = delay
         #: Slower completions for some prompts: {text in the last user message: seconds} (``delay_for``), for the
         #: kinds of completion in ``slow_kinds`` (``describe``'s), or any kind when it is None.
@@ -288,6 +312,8 @@ class FakeEndpoint:
         self.held = 0
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def _send(self, code: int, body: dict):
                 data = json.dumps(body).encode()
                 self.send_response(code)
@@ -313,6 +339,8 @@ class FakeEndpoint:
                     body = json.loads(raw or b"{}")
                 except ValueError:
                     body = {}
+                with outer._lock:
+                    outer.arrivals.append(t0)
                 if outer.hold is not None and outer.hold(body):
                     with outer._lock:
                         outer.held += 1
@@ -321,19 +349,35 @@ class FakeEndpoint:
                         outer.held -= 1
                 t1 = time.time()
                 delay = outer.delay_for(body)
-                if delay:
+                stream = bool(body.get("stream"))
+                if delay and not stream:
                     time.sleep(delay)
                 reply, calls = outer.scripted_reply(body)
                 entry.update(tools=len(body.get("tools") or []), calls=[c["function"]["name"] for c in calls],
-                             delay=delay, seconds=round(time.time() - t0, 3), served=t1, **outer.describe(body))
-                outer.requests.append(entry)
-                self._send(200, reply)
+                             delay=delay, served=t1, stream=stream, **outer.describe(body))
+                if stream:
+                    def logged():
+                        entry["seconds"] = round(time.time() - t0, 3)
+                        outer.requests.append(entry)
+                    outer._stream(self, body, reply, delay, entry, logged)
+                else:
+                    # in the log before the answer goes: a client that reads the log once answered finds it there
+                    entry["seconds"] = round(time.time() - t0, 3)
+                    outer.requests.append(entry)
+                    self._send(200, reply)
 
             def log_message(self, *args):
                 pass
 
         class Server(ThreadingHTTPServer):
             daemon_threads = True
+
+            def handle_error(self, request, client_address):
+                # a connection kept alive between requests ends when its client goes, however it goes (a helper
+                # stopped, a cancelled stream): that is no error of the endpoint's
+                if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+                    return
+                super().handle_error(request, client_address)
 
             def get_request(self):
                 conn, addr = super().get_request()
@@ -344,6 +388,101 @@ class FakeEndpoint:
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}/v1"
         threading.Thread(target=self.httpd.serve_forever, daemon=True, name="qa-fake-endpoint").start()
+
+    # ------------------------------------------------------------------ streaming
+    def _stream(self, handler, body: dict, reply: dict, delay: float, entry: dict, logged: Callable) -> None:
+        """Answer ``reply`` as server-sent events (the class's doc), recording ``events``, ``tokens`` and ``gone`` in
+        ``entry``; ``logged()`` puts the entry in the log once, before the events that end the answer (so a client that
+        read the answer finds it there) or once its client went."""
+        done = []
+
+        def log_once():
+            if not done:
+                done.append(True)
+                logged()
+        message = reply["choices"][0]["message"]
+        finish = reply["choices"][0]["finish_reason"]
+        deltas: list = []
+        if self.reasoning:
+            deltas.append(({"role": "assistant", "reasoning_content": self.reasoning}, True))
+        words = re.findall(r"\S+\s*", message.get("content") or "")
+        for i, word in enumerate(words):
+            deltas.append(({"content": word, **({"role": "assistant"} if i == 0 and not self.reasoning else {})}, True))
+        for i, call in enumerate(message.get("tool_calls") or []):
+            deltas.append(({"tool_calls": [{"index": i, "id": call["id"], "type": "function",
+                                            "function": dict(call["function"])}]}, True))
+        gap = (delay or 0.0) / max(1, len(deltas))
+        events: list = []
+        entry.update(events=events, tokens=0, gone=None)
+        with self._lock:
+            self.live.append(entry)
+
+        def chunk(data: bytes) -> bool:
+            try:
+                handler.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+                handler.wfile.flush()
+                return True
+            except OSError:
+                return False
+
+        def event(payload) -> bool:
+            text = payload if isinstance(payload, str) else json.dumps(payload)
+            if entry["gone"] is not None or not chunk(f"data: {text}\n\n".encode()):
+                entry["gone"] = entry["gone"] or time.time()
+                return False
+            events.append(time.time())
+            return True
+
+        def wait(seconds: float) -> bool:
+            """Wait, watching the socket: False once the client went."""
+            end = time.time() + seconds
+            sock = handler.connection
+            while True:
+                left = end - time.time()
+                if left <= 0:
+                    return True
+                try:
+                    readable, _, _ = select.select([sock], [], [], min(left, self.POLL))
+                    if readable and not sock.recv(1, socket.MSG_PEEK):
+                        raise ConnectionResetError("the client went")
+                except (OSError, ValueError):
+                    entry["gone"] = time.time()
+                    return False
+                if readable:
+                    time.sleep(min(left, self.POLL))
+
+        try:
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.send_header("Cache-Control", "no-cache")
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.end_headers()
+            handler.wfile.flush()
+        except OSError:
+            entry["gone"] = time.time()
+            handler.close_connection = True
+            log_once()
+            return
+        base = {"id": reply["id"], "object": "chat.completion.chunk", "created": reply["created"],
+                "model": reply["model"]}
+        for delta, carries in deltas:
+            if not wait(gap) or not event({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}):
+                handler.close_connection = True
+                log_once()
+                return
+            if carries and "tool_calls" not in delta:
+                entry["tokens"] += 1
+        log_once()
+        ok = event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+        if ok and (body.get("stream_options") or {}).get("include_usage"):
+            ok = event({**base, "choices": [], "usage": reply["usage"]})
+        ok = ok and event("[DONE]") and chunk(b"")
+        if not ok:
+            handler.close_connection = True
+
+    def streamed(self) -> list:
+        """The completions it streamed, served (their entries)."""
+        return [r for r in self.completions() if r.get("stream")]
 
     # ------------------------------------------------------------------ the policy
     def completions(self) -> list:
@@ -1077,32 +1216,55 @@ def write_registry(state: Path) -> Path:
     return path
 
 
+#: The CITAR helper binary the harness runs (``--helper-bin``); None: the one ``cargo xtask develop`` built.
+HELPER_BIN: Optional[str] = None
+
+
+def helper_binary() -> str:
+    """The CITAR helper to run: ``--helper-bin``, else ``citar-helper`` beside the extension in ``CITAR_EXT_DIR``
+    (``cargo xtask develop`` builds it with its development guard: loopback servers only, an explicit ``--home``)."""
+    if HELPER_BIN:
+        return HELPER_BIN
+    folder = os.environ.get("CITAR_EXT_DIR") or ""
+    for name in ("citar-helper.exe", "citar-helper"):
+        path = Path(folder) / name if folder else None
+        if path is not None and path.is_file():
+            return str(path)
+    raise HarnessError("no CITAR helper: run cargo xtask develop (it builds citar-helper into CITAR_EXT_DIR), or "
+                       "give --helper-bin")
+
+
 class Helper:
-    """A real CITAR helper (``python -m citar.worker``) as a child, connected to the instance with a worker token and
-    serving from a fake endpoint; its log in the harness's directory."""
+    """A real CITAR helper (the Rust binary, ``helper_binary``) as a child, connected to the instance with a worker
+    token and serving from a fake endpoint; its home ``<dir>/helper-<n>`` (``--home``, and ``CITAR_DATA_DIR`` with it,
+    so it never reads or writes the owner's own helper settings) and its log in the harness's directory."""
 
     def __init__(self, h: "Harness", token: str, endpoint, name: str, *,
-                 hardware: Optional[Path] = None, max_concurrent: int = 0):
+                 hardware: Optional[Path] = None, max_concurrent: int = 0, machine: Optional[str] = None,
+                 provider: str = "openai_compatible"):
         """``endpoint``: a fake endpoint, or the address of a real one (the ``real`` part's LM Studio); ``hardware``:
         the hardware file it reports (``--hardware``), instead of none (``--no-hardware``); ``max_concurrent``: its
-        own slot count (``--max-concurrent``), else the helper's default, one."""
+        own slot count (``--max-concurrent``), else the helper's default, one; ``machine``: the machine it runs on,
+        whose home (``<dir>/helper-home-<machine>``, its machine key with it) a helper started again for that machine
+        keeps, as a real machine keeps its key across restarts (else a home of its own: a new key); ``provider``: what
+        serves its models (``lmstudio`` reads which are loaded from LM Studio's own list; an ``openai_compatible``
+        endpoint's every listed model counts as loaded)."""
         state = h.server.state
         n = len(list(state.glob("helper-*.log"))) + 1
         self.log = state / f"helper-{n}.log"
-        empty = state / f"helper-{n}.json"
-        empty.write_text("{}", encoding="utf-8")      # the helper reads this, never a saved helper configuration
+        self.home = state / (f"helper-home-{machine}" if machine else f"helper-{n}")
+        self.home.mkdir(parents=True, exist_ok=True)
         out = open(self.log, "w", encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if not k.startswith("CITAR_WORKER_")}
+        env["CITAR_DATA_DIR"] = str(self.home)
         extra = ["--hardware", str(hardware)] if hardware is not None else ["--no-hardware"]
         if max_concurrent:
             extra += ["--max-concurrent", str(max_concurrent)]
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "citar.worker", "--server", h.server.base, f"--token={token}",
-             "--base-url", endpoint if isinstance(endpoint, str) else endpoint.url, "--provider", "openai_compatible",
-             "--name", name, *extra,
-             "--config", str(empty)],
-            cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            env={**env, "PYTHONUNBUFFERED": "1"})
+            [helper_binary(), "--home", str(self.home), "--server", h.server.base, f"--token={token}",
+             "--base-url", endpoint if isinstance(endpoint, str) else endpoint.url, "--provider", provider,
+             "--name", name, *extra],
+            cwd=str(state), stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
         out.close()
 
     def exited(self, timeout: float) -> bool:
@@ -1125,6 +1287,13 @@ class Helper:
     def text(self) -> str:
         """What it logged."""
         return self.log.read_text(encoding="utf-8", errors="replace") if self.log.exists() else ""
+
+
+def _busy_lines(h: "Harness") -> list:
+    """The server's log lines saying a helper refused a request as busy (the prompt scheduler's warning): a protocol 2
+    helper answers ``busy`` only past the slots it acknowledged, which the scheduler never sends past."""
+    log = h.server.log.read_text(encoding="utf-8", errors="replace") if h.server.log.exists() else ""
+    return [line for line in log.splitlines() if "refused a request as busy" in line]
 
 
 def _online(who: "Account", sid: str) -> Optional[bool]:
@@ -1247,7 +1416,7 @@ def _accounts_machines(h: Harness) -> None:
             return t.json().get("token", "") if t.status_code == 200 else ""
 
         def connect() -> Optional[Helper]:
-            helper = Helper(h, token(), scripted, f"qa-helper-{len(helpers) + 1}")
+            helper = Helper(h, token(), scripted, f"qa-helper-{len(helpers) + 1}", machine="accounts")
             helpers.append(helper)
             return helper if wait_until(lambda: _online(alice, hid), 60, 0.25) else None
 
@@ -1344,11 +1513,11 @@ def _accounts_machines(h: Harness) -> None:
         second = connect()
         disabled = alice.put(f"/api/pool/servers/{hid}", json={"enabled": False})
         gone = _until_offline(alice, hid)
-        refused = Helper(h, token(), scripted, "qa-helper-disabled")
+        refused = Helper(h, token(), scripted, "qa-helper-disabled", machine="accounts")
         helpers.append(refused)
         r.check("disabling the machine drops its helper within a second, and a helper's new hello is refused",
                 second is not None and disabled.status_code == 200 and gone is not None and gone <= 1.0
-                and second.exited(15) and refused.exited(30) and "rejected" in refused.text(),
+                and second.exited(15) and refused.exited(30) and "refused this helper's token" in refused.text(),
                 f"offline after {gone} s", seconds=gone)
         alice.put(f"/api/pool/servers/{hid}", json={"enabled": True})
         third = connect()
@@ -1501,10 +1670,11 @@ def _queue_leases_and_drain(h: Harness) -> None:
     """3-07's checks, on a member's helper machine with one slot (a real helper behind the scripted endpoint, 0.4 s a
     completion): two lobby games with a model seat each play through the prompt scheduler, their requests never two at
     once and nothing refused as busy, both games' leases on the machine; then the Servers page's test, given up after
-    2 s while the helper takes 8 s over it, is cancelled: the helper is sent ``CANCEL`` and finishes it anyway, the
-    slot drains until its late answer, and a game's model seat resumed meanwhile waits for it (its queue time in its
-    turn's metrics), with the late frame counted by the scheduler and no drain timed out. While that test waits, a
-    second of the same machine from her other tab is refused at once (one test of a machine per person)."""
+    2 s while the endpoint would take 8 s over it, is cancelled: the helper is sent ``cancel``, stops the generation
+    (the endpoint sees its client go) and acknowledges it, which frees the slot with nothing draining
+    (design/phase4-helper.md P4.5.3), so a game's model seat resumed meanwhile goes at once rather than wait out the
+    8 s. While that test waits, a second of the same machine from her other tab is refused at once (one test of a
+    machine per person)."""
     r = h.report
     admin, alice = h.accounts["admin"], h.accounts["alice"]
     scripted = FakeEndpoint(delay=0.4)
@@ -1564,7 +1734,7 @@ def _queue_leases_and_drain(h: Harness) -> None:
                 bool(played) and len(served) >= 12 and overlaps == 0,
                 f"{len(served)} completions, {overlaps} overlapping; turns {[turn(g) for g in games]}",
                 completions=len(served), overlaps=overlaps)
-        busy_lines = [line for line in (helper.text() if helper else "").splitlines() if "(busy)" in line]
+        busy_lines = _busy_lines(h)
         leases = [lease for lease in status.get("leases") or [] if lease.get("kind") == "game"]
         r.check("the helper refused nothing as busy, the scheduler saw no busy refusal and at most one request in "
                 "flight, and it lists both games' leases on the machine",
@@ -1573,7 +1743,7 @@ def _queue_leases_and_drain(h: Harness) -> None:
                 json.dumps({"busy_lines": busy_lines[:3], "counters": counters,
                             "max_in_flight": status.get("max_in_flight"), "leases": len(leases)})[:500])
 
-        # ---- the Servers page's test, given up while the helper generates it: its slot drains
+        # ---- the Servers page's test, given up while the helper generates it: its slot is freed at once
         before = len(scripted.completions())
         queued_before = queued(games[0]) if games else 0.0
         result: dict = {}
@@ -1608,42 +1778,47 @@ def _queue_leases_and_drain(h: Harness) -> None:
                 tested is not None and tested.status_code == 200 and body.get("cancelled") is True and gave_up < 6,
                 f"HTTP {getattr(tested, 'status_code', None)} after {gave_up} s: {json.dumps(body)[:200]}",
                 seconds=gave_up)
-        draining = machine_status(hid)
-        r.check("its slot drains: the scheduler still counts the request the helper is finishing",
-                draining.get("draining") == 1 and draining.get("in_flight") == 1,
-                json.dumps({k: draining.get(k) for k in ("in_flight", "draining", "waiting")}))
+        given_up = result.get("t1", time.time())
+        late = wait_until(lambda: next((q for q in scripted.completions()[before:] if q.get("delay") == 8.0), None),
+                          10, 0.05)
+        freed = wait_until(lambda: (lambda m: m if m.get("in_flight") == 0 else None)(machine_status(hid)), 5, 0.05)
+        r.check("the helper stopped the cancelled generation: the endpoint saw its client go within a second of the "
+                "test giving up, long before its 8 s, with no event after it but the one on its way",
+                late is not None and late.get("stream") is True and late.get("gone") is not None
+                and late["gone"] - given_up < 1.0 and late["seconds"] < 8.0
+                and len([e for e in late.get("events") or [] if e > given_up]) <= 1,
+                json.dumps({"gone_after_s": round(late["gone"] - given_up, 3) if late and late.get("gone") else None,
+                            "seconds": (late or {}).get("seconds"), "tokens": (late or {}).get("tokens")}))
+        r.check("its slot is free at once, freed by the helper's acknowledgement: nothing drains",
+                bool(freed) and freed.get("draining") == 0 and freed.get("cancelling", 0) == 0,
+                json.dumps({k: (freed or {}).get(k) for k in ("in_flight", "draining", "cancelling", "waiting")}))
         if games:
             alice.post(f"/api/games/{games[0]}/control", json={"paused": False})    # its model seat wants the slot
-        finished = wait_until(lambda: any(q.get("delay") == 8.0 for q in scripted.completions()[before:])
-                              and len(scripted.completions()) > before + 1, 60, 0.25)
+        finished = wait_until(lambda: len(scripted.completions()) > before + 1, 60, 0.25)
         for g in games:
             alice.post(f"/api/games/{g}/control", json={"paused": True})
         time.sleep(1.5)
         after = scripted.completions()[before:]
-        late = next((q for q in after if q.get("delay") == 8.0), None)
         others = [q for q in after if q is not late]
-        ended = late["t"] + late["seconds"] if late else None
         first_other = min((q["t"] for q in others), default=None)
         waited = round((queued(games[0]) if games else 0.0) - queued_before, 2)
-        r.check("the resumed game's model seat waited for the drain: its next completion reached the endpoint only "
-                "after the helper finished the cancelled test, and the wait is in its turn's queue time",
-                bool(finished) and late is not None and first_other is not None and first_other >= ended - 0.05
-                and waited > 2.0,
-                f"test finished {round(ended - t0, 2) if ended else None} s after it began; the game's next "
-                f"completion at {round(first_other - t0, 2) if first_other else None} s; its queue time +{waited} s",
+        r.check("the resumed game's model seat went at once: its next completion reached the endpoint without waiting "
+                "for the 8 s the abandoned generation would have taken",
+                bool(finished) and first_other is not None and first_other - given_up < 6.0 and waited < 2.0,
+                f"the test gave up {round(given_up - t0, 2)} s after it began; the game's next completion "
+                f"{round(first_other - given_up, 2) if first_other else None} s after that; its queue time +{waited} s",
                 queue_s=waited)
         final = machine_status(hid)
         counters = final.get("counters") or {}
-        text = helper.text() if helper else ""
-        cancel_seen = "server cancelled" in text
-        busy_lines = [line for line in text.splitlines() if "(busy)" in line]
-        r.check("the helper was sent CANCEL, its late answer reached the scheduler (a late frame, no drain timed out) "
-                "and nothing was refused as busy",
-                cancel_seen and counters.get("late_frames", 0) >= 1 and counters.get("drain_timeouts", 0) == 0
+        busy_lines = _busy_lines(h)
+        r.check("the helper acknowledged the cancel: its answer reached the scheduler as a late frame, nothing drained, "
+                "no cancel went unacknowledged and nothing was refused as busy",
+                counters.get("late_frames", 0) >= 1 and counters.get("draining", 0) == 0
+                and counters.get("cancel_unacked", 0) == 0 and counters.get("drain_timeouts", 0) == 0
                 and counters.get("busy_refusals", 0) == 0 and not busy_lines,
-                json.dumps({"cancel_seen": cancel_seen, "counters": counters}))
+                json.dumps({"counters": counters, "busy_lines": busy_lines[:3]}))
         r.data["queue"].update({"completions": len(scripted.completions()), "overlaps": overlaps,
-                                "test": body, "test_gave_up_s": gave_up, "duplicate_s": dup_s, "drain_wait_s": waited,
+                                "test": body, "test_gave_up_s": gave_up, "duplicate_s": dup_s, "queue_wait_s": waited,
                                 "counters": counters})
     finally:
         for g in games:
@@ -1675,8 +1850,9 @@ def _queue_restored_game_and_benchmark_drain(h: Harness) -> None:
     again, and the game it brings back (``restore_live``) holds its lease again, before anything is asked of the model;
     a one-job benchmark on the machine waits for it. The member then tests the machine from the Servers page (the
     endpoint taking 10 s over it) and closes the game: the benchmark job starts at once, its lease cancels the running
-    test (the helper keeps generating it), and the job's first request waits for that request to drain, so no pooled
-    request overlaps a benchmark step; the wait is the job's ``drain_s`` in its result, not ``contaminated``."""
+    test, which the helper stops and acknowledges (protocol 2), and the job's first request waits only for that, so no
+    pooled request overlaps a benchmark step; the wait is the job's ``drain_s`` in its result, short and not
+    ``contaminated``."""
     r = h.report
     admin, alice = h.accounts["admin"], h.accounts["alice"]
     scripted = FakeEndpoint(delay=0.3)
@@ -1766,7 +1942,7 @@ def _queue_restored_game_and_benchmark_drain(h: Harness) -> None:
         tested = result.get("got")
         body = tested.json() if tested is not None and tested.status_code == 200 else {}
         r.check("the member's test of the machine ran on the slot the idle game lent, and was cancelled when the "
-                "benchmark took the machine (its request left draining)",
+                "benchmark took the machine",
                 bool(running) and closed.status_code == 200 and body.get("cancelled") is True
                 and body.get("code") == "benchmark",
                 f"running {bool(running)}; close HTTP {closed.status_code}; test HTTP "
@@ -1775,10 +1951,10 @@ def _queue_restored_game_and_benchmark_drain(h: Harness) -> None:
         done = wait_until(lambda: _runs_job(alice, run_id).get("status") in ("done", "failed", "cancelled"), 180, 1.0)
         job = _runs_job(alice, run_id)
         res = job.get("result") or {}
-        r.check("the benchmark job ran to its end with drain_s in its result: its first request waited for the "
-                "cancelled test to drain, and its timing is not contaminated",
-                bool(done) and job.get("status") == "done" and (res.get("drain_s") or 0) > 1.0
-                and res.get("contaminated") is False,
+        r.check("the benchmark job ran to its end with drain_s in its result: its first request waited only for the "
+                "helper to stop the cancelled test (well under the test's 10 s), and its timing is not contaminated",
+                bool(done) and job.get("status") == "done" and res.get("drain_s") is not None
+                and res["drain_s"] < 5.0 and res.get("contaminated") is False,
                 json.dumps({"status": job.get("status"), "error": job.get("error"), "drain_s": res.get("drain_s"),
                             "contaminated": res.get("contaminated"),
                             "started_after_close_s": round((job.get("started") or 0) - t_close, 2)})[:400],
@@ -1788,21 +1964,21 @@ def _queue_restored_game_and_benchmark_drain(h: Harness) -> None:
         bench = [q for q in after if q is not late]
         ended = late["t"] + late["seconds"] if late else None
         first = min((q["t"] for q in bench), default=None)
-        r.check("no pooled request overlapped a benchmark step: the benchmark's first completion reached the endpoint "
-                "only after the helper finished the cancelled test",
-                late is not None and first is not None and first >= ended - 0.05 and len(bench) >= 2,
+        r.check("no pooled request overlapped a benchmark step: the helper stopped the cancelled test (its client gone "
+                "before the 10 s were up) before the benchmark's first completion reached the endpoint",
+                late is not None and late.get("gone") is not None and late["seconds"] < 10.0 and first is not None
+                and first >= ended - 0.05 and len(bench) >= 2,
                 f"test ended {round(ended - result['t0'], 2) if ended else None} s after it began; the benchmark's "
                 f"first completion at {round(first - result['t0'], 2) if first else None} s; {len(bench)} benchmark "
                 f"completions")
         final = _machine_status(admin, hid)
         counters = final.get("counters") or {}
-        text = helper.text() if helper else ""
-        busy_lines = [line for line in text.splitlines() if "(busy)" in line]
-        r.check("the helper was sent CANCEL, its late answer freed the slot (a late frame, no drain timed out), "
-                "nothing was refused as busy, and no lease is left on the machine",
-                "server cancelled" in text and counters.get("late_frames", 0) >= 1
-                and counters.get("drain_timeouts", 0) == 0 and counters.get("busy_refusals", 0) == 0
-                and not busy_lines and not final.get("leases"),
+        busy_lines = _busy_lines(h)
+        r.check("the helper acknowledged the cancel: its answer freed the slot (a late frame, nothing drained, no cancel "
+                "unacknowledged), nothing was refused as busy, and no lease is left on the machine",
+                counters.get("late_frames", 0) >= 1 and counters.get("draining", 0) == 0
+                and counters.get("cancel_unacked", 0) == 0 and counters.get("drain_timeouts", 0) == 0
+                and counters.get("busy_refusals", 0) == 0 and not busy_lines and not final.get("leases"),
                 json.dumps({"counters": counters, "leases": final.get("leases")})[:400])
         data["restore"].update({"restart_leases": restored_leases, "test": body, "job": {
             "status": job.get("status"), "drain_s": res.get("drain_s"), "contaminated": res.get("contaminated")},
@@ -3251,14 +3427,15 @@ QA_HAND_SET = {"source": "manual", "cpu": {"model": "QA hand-set CPU", "cores": 
 
 
 def part_machines(h: Harness) -> None:
-    """3-18's checks (design/phase3-features.md P3.8): alice's helper machine with a real CITAR helper (``python -m
-    citar.worker``) behind the scripted endpoint, reporting its hardware from a file (``--hardware``) that the part
+    """3-18's checks (design/phase3-features.md P3.8): alice's helper machine with a real CITAR helper (the Rust
+    ``citar-helper``, its home kept across its restarts as a machine's is) behind the scripted endpoint, reporting its
+    hardware from a file (``--hardware``) that the part
     changes between reconnects, and the models the endpoint lists. Through the dialog's routes: the first hello kept as
     the last report and applied by the default modes (hardware and models auto, power manual); her hand-set hardware
     with hardware manual surviving the helper's reconnect with other hardware, the new scan kept beside it; models
     merged in auto (the unreported kept), only their loaded flags in manual; Apply per section, the hardware class
-    following the hardware it copied; a hardware file of figures no JSON answer carries (NaN, Infinity), an integer no
-    float holds and parts of other shapes, reported by the real helper: kept without them, every page that shows the
+    following the hardware it copied; a hardware file of a word for a number, figures beyond any machine and parts of
+    other shapes, reported by the real helper: kept without them, every page that shows the
     machine still answering (hers, the administrator's whole Servers page, the pool's listing), and "Apply all"
     taking the sections the report has (it suggests no power figures); an administrator's pin holding the class
     against the next scan, and its release; the trust tier set by an administrator and shown to her; the routes' gates
@@ -3305,7 +3482,8 @@ def part_machines(h: Harness) -> None:
             path.write_text(json.dumps(hardware, indent=1), encoding="utf-8")
             scripted.models = list(models)
             before = (read().get("report") or {}).get("at")
-            helpers.append(Helper(h, token, scripted, "qa-settings-box", hardware=path, max_concurrent=4))
+            helpers.append(Helper(h, token, scripted, "qa-settings-box", hardware=path, max_concurrent=4,
+                                  machine="settings-box", provider="lmstudio"))
             fresh = wait_until(lambda: (lambda s: s if (s.get("report") or {}).get("at") not in (None, before)
                                         and _online(alice, hid) else None)(read()), 60, 0.25)
             steps.append({"step": label, "hardware_file": str(path), "reported_models": [list(m) for m in models],
@@ -3412,13 +3590,14 @@ def part_machines(h: Harness) -> None:
                 and (merged.get("differences") or {}).get("models") == [],
                 json.dumps(got)[:600])
 
-        # a hardware file no page could show as it came: NaN and Infinity (Python writes and reads them; no JSON answer
-        # carries them), a figure of 400 digits (no float holds it), parts of other shapes, and no power suggestion
+        # a hardware file no page could show as it came: a word for a number, figures far beyond any machine, parts of
+        # other shapes, and no power suggestion. (NaN, Infinity and a figure of 400 digits are not JSON as the helper
+        # reads it: protocol 2's helper reports no file that holds them, and the hub refuses a frame that does.)
         odd = _qa_scan(cpu="QA CPU odd", gpu="QA GPU odd", vram=8, idle=1, cpu_w=1, gpu_w=1)
-        odd["gpus"] = [{"name": "QA GPU odd", "vram_gb": float("nan")}, "not a GPU"]
+        odd["gpus"] = [{"name": "QA GPU odd", "vram_gb": "eight"}, "not a GPU"]
         odd["memory"] = "lots"
-        odd["cpu"]["threads"] = 10 ** 400
-        odd["physical_disks"][0]["size_gb"] = float("inf")
+        odd["cpu"]["threads"] = 1e30
+        odd["physical_disks"][0]["size_gb"] = 1e300
         del odd["power"]["suggested"]
         s5 = connect("reconnect: a hardware file of odd figures and shapes, suggesting no power figures", odd,
                      [(third, True)])
@@ -3438,7 +3617,8 @@ def part_machines(h: Harness) -> None:
         sections = [(e.get("detail") or {}).get("sections") for e in audit.get("entries", [])]
         data["odd_scan"] = {"kept": kept, "pages_before_apply": before_apply, "apply_all": everything.status_code,
                             "pages_after_apply": after_apply, "applied_sections": sections}
-        r.check("a hardware file of NaN, Infinity, a 400-digit figure and parts of other shapes is kept without them "
+        r.check("a hardware file of a word for a number, figures beyond any machine and parts of other shapes is kept "
+                "without them "
                 "(the rest of the report as sent), every page that shows the machine still answers, and \"Apply all\" "
                 "takes the sections the report has (hardware and models; it suggests no power figures)",
                 kept.get("gpus") == [{"name": "QA GPU odd", "vram_gb": None}] and kept.get("memory") == {}
@@ -3791,7 +3971,8 @@ def part_exit(h: Harness) -> None:
         first_scan.write_text(json.dumps(_qa_scan(cpu="QA exit CPU", gpu="QA exit GPU 16 GB", vram=16, idle=30,
                                                   cpu_w=80, gpu_w=200, host="qa-exit-box"), indent=1), encoding="utf-8")
         if token:
-            helpers.append(Helper(h, token, endpoint, "qa-exit-helper", hardware=first_scan, max_concurrent=2))
+            helpers.append(Helper(h, token, endpoint, "qa-exit-helper", hardware=first_scan, max_concurrent=2,
+                                  machine="exit"))
         dry = bob.post("/api/servers", json={"name": f"QA exit dry run {h.tag}", "kind": "test",
                                              "connection": {"provider": "dryrun", "dry_run_delay": 0.1,
                                                             "max_parallel": 2},
@@ -4101,7 +4282,8 @@ def part_exit(h: Harness) -> None:
         second_scan.write_text(json.dumps(_qa_scan(cpu="QA exit CPU 2", gpu="QA exit GPU 24 GB", vram=24, idle=40,
                                                    cpu_w=90, gpu_w=250, host="qa-exit-box"), indent=1),
                                encoding="utf-8")
-        helpers.append(Helper(h, token, endpoint, "qa-exit-helper", hardware=second_scan, max_concurrent=2))
+        helpers.append(Helper(h, token, endpoint, "qa-exit-helper", hardware=second_scan, max_concurrent=2,
+                              machine="exit"))
         fresh = wait_until(lambda: (lambda s: s if (s.get("report") or {}).get("at") not in (None, before)
                                     and _online(bob, hid) else None)(
             bob.get(f"/api/machines/{hid}/settings").json()), 60, 0.25) or {}
@@ -4245,9 +4427,9 @@ def part_exit(h: Harness) -> None:
         # the whole game's: the readings before the restart and since (the scheduler's counters start again with it)
         counters = {k: int(counters_before.get(k, 0) or 0) + int(after.get(k, 0) or 0)
                     for k in sorted(set(counters_before) | set(after))}
-        busy_lines = [line for helper in helpers for line in helper.text().splitlines() if "(busy)" in line]
+        busy_lines = _busy_lines(h)
         r.check("the helper machine refused nothing as busy over the whole game (the scheduler's counters before the "
-                "restart and after it, and its helpers' logs) and holds no lease once the game is over",
+                "restart and after it, and the server's log) and holds no lease once the game is over",
                 counters.get("busy_refusals", 0) == 0 and counters.get("granted", 0) > 0 and not busy_lines
                 and not status.get("leases"),
                 json.dumps({"counters": counters, "before_restart": counters_before, "after_restart": after,
@@ -4791,10 +4973,15 @@ def main(argv=None) -> int:
     ap.add_argument("--skip", action="append", choices=sorted(PARTS), default=[], metavar="PART",
                     help="all: leave this part out (repeatable; say so when quoting the run, which is then not "
                          "the whole of all)")
+    ap.add_argument("--helper-bin", default=None, metavar="PATH",
+                    help="the CITAR helper to run (default: citar-helper in CITAR_EXT_DIR, which cargo xtask develop "
+                         "builds)")
     ap.add_argument("--hold-line", type=float, default=0.0, metavar="SECONDS",
                     help="queue: keep the pooled prompts waiting this long before they are served (the browser "
                          "checklist's C1; the accounts are written to <dir>/qa-hold.json)")
     args = ap.parse_args(argv)
+    global HELPER_BIN
+    HELPER_BIN = args.helper_bin
     try:
         code, report = run(args)
     except Refused as e:

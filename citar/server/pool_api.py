@@ -575,8 +575,8 @@ def test_server(server_id: str, request: Request, model: str = "",
     admitted as every one is (P3.3.7: ``partial_llm`` and a grant for ``pooled``, its concurrency the caller's cap), it
     waits for a slot like any pooled prompt, on a model the helper has loaded (unless its owner allows swaps), and goes
     through ``make_conversation`` like every model call. ``wait`` is how long the caller waits for the reply (1 to 120
-    seconds): then the ticket is cancelled, and a request the helper is still generating keeps its slot draining
-    until the helper's late answer. A caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all
+    seconds): then the ticket is cancelled, and the helper stops the generation and acknowledges, which frees its slot
+    (one that does not acknowledge leaves it draining, design/phase4-helper.md P4.5.3). A caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all
     (another answers at once, ``code`` ``duplicate`` or ``too_many``), at most ``server_test``'s rate
     (``citar.auth.ratelimit``; 429 past it), and the request's database connection is given back before the wait.
     The test is an activity of its own in the compute ledger (``test:<id>``, design/phase3-features.md P3.4.2): used
@@ -659,8 +659,7 @@ def test_server(server_id: str, request: Request, model: str = "",
                 why = ("a benchmark took the machine" if code == "benchmark" else
                        f"no reply within {wait:.0f} s")
                 return {"ok": False, "stage": "completion", "model": chosen, "cancelled": True, "code": code,
-                        "reason": f"The test was cancelled: {why} (a helper that is still generating it keeps its "
-                                  "slot until it finishes)."}
+                        "reason": f"The test was cancelled: {why} (its helper is told to stop generating it)."}
             cause = exc.__cause__
             return {"ok": False, "stage": "completion", "model": chosen, "reason": str(exc),
                     "refusal": getattr(cause, "refusal", "") or getattr(exc, "refusal", ""),
