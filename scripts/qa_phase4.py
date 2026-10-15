@@ -341,7 +341,8 @@ def part_llm_real(h) -> None:
         stand_in = FakeEndpoint(delay=0.2)
         stand_in.MODEL = REAL_MODEL
         stand_in.models = [(REAL_MODEL, True)]
-        stand_in.model_delay = {}
+        # its long generation takes as long as a real one would (well past the cancel at 2 s)
+        stand_in.slow = {"Write a very long essay": 40.0}
         url = stand_in.url
     data["endpoint"] = {"url": url, "model": REAL_MODEL, "stand_in": bool(STAND_IN)}
     try:
