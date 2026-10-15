@@ -1,9 +1,9 @@
 //! Compatibility with protocol 1's configuration (design/phase4-helper.md P4.3.2; package 4-03,
 //! gate 1): every case of `tests/data/helper_config_cases.json`, recorded from the Python
-//! worker's `build_config` (`python -m tests.test_helper_config_cases --record`), gives the Rust
-//! helper the same effective settings, or the same refusal; and a 0.1.5 `helper.json` lends no
-//! CPU. Each case reads only its own directory and the variables it names, never the process's
-//! environment.
+//! worker's `build_config` (by `tests/test_helper_config_cases.py`, deleted with the worker in
+//! 4-05: the file is the record now), gives the Rust helper the same effective settings, or the
+//! same refusal; and a 0.1.5 `helper.json` lends no CPU. Each case reads only its own directory
+//! and the variables it names, never the process's environment.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
