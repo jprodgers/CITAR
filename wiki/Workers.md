@@ -280,7 +280,7 @@ start says why and waits for Enter before its window closes.
 `~/Library/Application Support/CITAR` on macOS, `~/.local/share/citar` on Linux), unless `--home`
 or `CITAR_DATA_DIR` names another. `helper.json` sits at its root, as in 0.1.5; the helper keeps its
 own files under `helper/` there: `machine-key.json`, `scan.json` (its last hardware scan, so a restart within 6 hours
-does not scan again), and `logs/helper.log` (rotated at 5 MB, three old logs kept; the token never appears in it). If another program holds the log open so that it
+does not scan again unless the machine itself restarted), and `logs/helper.log` (rotated at 5 MB, three old logs kept; the token never appears in it). If another program holds the log open so that it
 cannot be rotated (an editor, or a window following it), the log grows to 10 MB at most; the helper
 then writes to its console only, and tries to rotate again every minute. It writes nothing outside
 its home.
@@ -298,17 +298,20 @@ sockets and highest clock); the memory (and its modules on Windows); the GPUs (f
 NVIDIA cards: memory, driver, power limit and draw; on Windows also what the system lists, on Linux
 `rocm-smi` and `lspci`, on macOS `system_profiler`); the physical disks and the volumes with their
 free space; whether it is a laptop; its model server, when that is LM Studio or Ollama, with the
-models it lists; and a first guess at its power draw, which the site may use as the machine's power
+models it lists (only those `models` names, when you set it); and a first guess at its power draw, which the site may use as the machine's power
 figures (Power is `manual` by default, so it does not). It is the same report the Servers page's
 collectors (`collect_hardware.py`, `.ps1`, `.sh`) write, made by the helper itself. It is scanned
-when the helper starts (a scan younger than 6 hours is reused), every 6 hours after, and when the
+when the helper starts (a scan younger than 6 hours is reused, unless the machine itself restarted
+since), every 6 hours after, and when the
 machine's owner asks for one on the Servers page; the server is sent it only when something in it
 changed (a volume's free space or a GPU's draw at that moment do not count).
 
 To keep it to yourself:
 
 - `citar-helper scan` prints exactly what would be sent, and `citar-helper scan FILE` writes it to a
-  file, which you can edit and import on the Servers page instead;
+  file, which you can edit and import on the Servers page instead. It reads the helper's own settings
+  for the model server and `models` (`helper.json` in its home, or `--config`, then the
+  `CITAR_WORKER_*` variables, the flags winning, as when the helper runs), and writes nothing else;
 - `--hardware FILE` (`hardware_file`) reports that file instead of a scan, read again at each
   connection and on each Rescan now (UTF-16, as PowerShell 5's `>` writes it, is read too);
 - `--no-hardware` reports nothing at all.
@@ -317,8 +320,9 @@ To keep it to yourself:
 together, where the driver reports it) and the CPU's utilisation, and once a minute sends the
 minute's readings. The server writes them as the machine's measured power, which costs energy by
 what the machine drew rather than estimating it from its power figures (the machine's power figures
-still say what its idle and full draw are). Where the GPU's draw cannot be read, the samples carry
-the CPU alone, and the helper asks the driver again only once an hour. `--no-power` (`no_power`)
+still say what its idle and full draw are). Where the GPU's draw cannot be read (an AMD or Intel
+GPU, a Mac), the samples carry the CPU alone, the helper asks the driver again only once an hour,
+and the server estimates the GPU's share from the machine's power figures while its model works. `--no-power` (`no_power`)
 sends none, and the server keeps none for a machine whose owner turned its **Live sampling** off
 (Hardware & power, on the Servers page).
 

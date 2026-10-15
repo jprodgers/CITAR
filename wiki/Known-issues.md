@@ -43,11 +43,12 @@ the model. Reports separate them; the single score does not.
 
 **Energy is estimated where power cannot be read.** The machine CITAR runs on, and every machine whose
 CITAR helper runs, sample their power live: the GPUs' draw from `nvidia-smi` and the CPU's utilisation.
-A machine with no NVIDIA card whose draw the driver reports (an AMD or Intel GPU, a Mac, a CPU-only
-box), one started with `--no-power`, and one the server dials itself without a helper are costed from
-the watts entered under Power & costs (idle, and extra while the model or the CPU works), and their CPU
-share from its utilisation at best. Even a sampled machine's idle and CPU figures are the entered ones:
-a plug-in meter reading makes the energy and cost-per-task figures far better than the hardware-class
+On a machine whose GPU's draw its driver does not report (an AMD or Intel GPU, a Mac) only the CPU is
+sampled: the GPU's share is estimated from the watts entered under Power & costs (extra while the
+model works), and those minutes count as estimated. A machine started with `--no-power`, and one the
+server dials itself without a helper, are costed from the entered watts alone (idle, and extra while
+the model or the CPU works). Even a sampled machine's idle and CPU figures are the entered ones: a
+plug-in meter reading makes the energy and cost-per-task figures far better than the hardware-class
 guesses.
 
 **Priority takes effect at a safe point.** Work moved to the top of a machine's queue waits for the

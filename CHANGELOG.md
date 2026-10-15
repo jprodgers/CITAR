@@ -120,11 +120,13 @@ that means for an existing install:
 - **The CITAR helper scans the machine itself and samples its power.** Its hardware report is the
   collectors' format, made in Rust (the CPU, memory, GPUs, disks and volumes, the form, its model
   server's models, and the power guess the Python collector makes, with the same answers): at start (a
-  scan younger than 6 hours is reused), every 6 hours, sent only when the machine changed, and at once
-  when the machine settings dialog's **Rescan now** asks. `citar-helper scan [FILE]` prints or writes it,
-  to see what is sent or to import it by hand; `--hardware FILE` and `--no-hardware` work as before.
-  Every 10 s it reads the GPUs' draw and the CPU's utilisation, and once a minute sends them: the server
-  writes them as the machine's power rows, so a helper machine's energy is measured, not estimated
+  scan younger than 6 hours is reused, unless the machine restarted since), every 6 hours, sent only
+  when the machine changed, and at once when the machine settings dialog's **Rescan now** asks.
+  `citar-helper scan [FILE]` prints or writes it, as the helper with its settings would send it, to see
+  what is sent or to import it by hand; `--hardware FILE` and `--no-hardware` work as before. Every
+  10 s it reads the GPUs' draw and the CPU's utilisation, and once a minute sends them: the server
+  writes them as the machine's power rows (one a minute per machine at most, never overlapping), so a
+  helper machine's energy is measured, not estimated, except a GPU's whose draw does not read
   (`--no-power`, or the machine's Live sampling off, sends or keeps none).
 
 **Shared compute** ([docs/server/WORKERS.md](docs/server/WORKERS.md),
@@ -381,6 +383,11 @@ files.
   turn, not twenty, before the chat is declined "(no response)": a small model that does it held its
   machine about two minutes an answer. A step cut off at its token limit does not count, as on its
   turn.
+- A minute of live power samples that read the CPU but not the GPU (a machine without an NVIDIA card
+  whose driver reports its draw) was costed as if the GPU drew nothing while the model worked, and
+  counted as measured; the GPU's share is now estimated from the machine's power figures as in a
+  minute without samples, the minute counts as estimated, and the machine's metered total leaves such
+  samples out.
 
 ## [0.1.5] - 2026-09-22
 
