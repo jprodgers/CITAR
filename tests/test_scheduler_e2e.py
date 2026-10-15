@@ -133,8 +133,7 @@ class HelperBase(unittest.TestCase):
     def helper(self, sid: str, token: str, endpoint, *, slots: int = 1):
         """The real CITAR helper serving ``endpoint``, connected for ``sid`` (its own home); stopped at the test's
         end."""
-        if H.helper_binary() is None:
-            self.skipTest("no citar-helper in CITAR_EXT_DIR (cargo xtask develop builds it)")
+        H.require_helper_binary("the scheduler's end-to-end metering")     # skips locally without one; fails on CI
         helper = H.RealHelper(f"http://127.0.0.1:{self.port}", token, endpoint.url, name=f"e2e-{sid}", slots=slots)
         self.addCleanup(helper.stop)
         self.assertTrue(_until(lambda: W.hub().is_online(sid) and W.hub().get(sid).ack is not None, 30),

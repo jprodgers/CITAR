@@ -17,6 +17,13 @@
   within a ping; a revoke between the hello and its registration still drops it.
 - ``Overhead`` (gate 10): 1,000 request and ``done`` round trips through a fake helper that answers at once, the hub's
   own time per round trip (observed minus the fake helper's) under 3 ms at the median.
+- ``Settings`` (4-05's fix round): a slot change made in the machine editor, by another process or while a helper was
+  being registered reaches it; an acknowledgement is held to the settings frame it answers, so one that crossed a push
+  is no overclaim; a change that changes nothing waits for nothing, and one request a machine waits.
+- ``Frames`` (4-05's fix round): a first frame over 2 MiB is refused unread, and a long frame is parsed off the event
+  loop, so a frame nobody signed in for does not stall every other connection.
+- ``Tokens``: only a token's hash is stored, a database that fails refuses nothing, two first hellos cannot both
+  register a key, and a seat on a pooled machine plays through its helper (what ``test_worker.py`` held of them).
 - ``PooledWork`` and ``QuietHours``: what the old module held of pooled machines, unchanged.
 
 Replaces ``tests/test_worker.py`` (protocol 1, the Python worker); the real binary end to end is
@@ -24,6 +31,7 @@ Replaces ``tests/test_worker.py`` (protocol 1, the Python worker); the real bina
 """
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import statistics
@@ -247,6 +255,33 @@ class Hub(unittest.TestCase):
         honest = {"effective": clamped, "capped": [], "limits": ack["limits"]}
         self.assertEqual(W.clamp(site, honest), (clamped, []), "a correct helper's acknowledgement is unchanged")
 
+    def test_a_helper_binary_named_but_missing_fails_rather_than_skips(self):
+        """CI names the build-ext job's helper in ``CITAR_HELPER_BIN``: a wrong path or a lost artifact must fail the
+        end-to-end tests, not skip them into a green run; on CI even no binary at all fails them."""
+        import unittest as ut
+        missing = str(_TMP / "no-such-helper.exe")
+        with mock.patch.dict(os.environ, {"CITAR_HELPER_BIN": missing}):
+            with self.assertRaises(H.NoHelperBinary):
+                H.helper_binary()
+        bare = {k: v for k, v in os.environ.items() if k not in ("CITAR_HELPER_BIN", "CITAR_EXT_DIR", "CI")}
+        with mock.patch.dict(os.environ, bare, clear=True):
+            self.assertIsNone(H.helper_binary())
+            with self.assertRaises(ut.SkipTest):
+                H.require_helper_binary("a test")
+            with mock.patch.dict(os.environ, {"CI": "true"}):
+                try:
+                    H.require_helper_binary("a test")
+                except H.NoHelperBinary:
+                    pass
+                except ut.SkipTest:
+                    self.fail("on CI a missing helper skipped the tests instead of failing them")
+                else:
+                    self.fail("on CI a missing helper was not noticed")
+        present = _TMP / "citar-helper-stand-in"
+        present.write_bytes(b"")
+        with mock.patch.dict(os.environ, {"CITAR_HELPER_BIN": str(present), "CI": "true"}):
+            self.assertEqual(H.require_helper_binary("a test"), str(present))
+
     def test_a_helper_that_serves_no_models_is_refused_like_model_work_off(self):
         """A helper started with ``--no-llm`` on a machine whose site settings take model work: its tickets and its
         seats' requests are refused, not left waiting for a slot that never comes."""
@@ -451,6 +486,23 @@ class Keys(_Live):
         with db.session() as s:
             self.assertEqual(s.get(Server, sid).public_key, theirs, "the next hello registered its own")
 
+    def test_a_reset_while_connected_makes_the_helper_reconnect_and_register_its_key(self):
+        """A reset leaves no connection serving under the key the row no longer holds: the hub closes it with 1012 and
+        no ``shutdown`` (a reconnect, not a refusal), and the helper's next hello registers its key at once."""
+        sid, token, _tid = _machine(self.ids["lena"], "reset while connected")
+        old, new = H.key_b64(11), H.key_b64(12)
+        helper = self.connect(token, key=old)
+        r = self.call("lena", "POST", f"/api/machines/{sid}/key/reset")
+        self.assertEqual(r.status_code, 200, r.text)
+        with self.assertRaises(H.Closed) as closed:
+            frame = helper.recv(timeout=5)
+            self.fail(f"a frame came before the close: {frame}")
+        self.assertEqual((closed.exception.code, closed.exception.reason), (HP.CLOSE_RECONNECT, "key_reset"))
+        self.assertFalse(W.hub().is_online(sid), "the old connection is gone")
+        self.connect(token, key=new)
+        with db.session() as s:
+            self.assertEqual(s.get(Server, sid).public_key, new, "the reconnecting helper registered its key")
+
     def test_the_card_shows_the_protocol_the_version_and_the_keys_fingerprint(self):
         sid, token, _tid = _machine(self.ids["lena"], "card box")
         key = H.key_b64(5)
@@ -503,6 +555,43 @@ class RateLimit(_Live):
         self.assertEqual((frame["code"], closed.code), ("rate", 4429))
         self.assertGreater(frame["retry_after_s"], 0)
         looked_up.assert_not_called()
+
+    def test_hellos_sent_at_once_get_no_more_lookups_than_the_limit(self):
+        """The check, the lookup and the count of its failure are one step per address: 40 hellos with distinct bad
+        tokens sent together make at most 20 lookups (and audit rows), and the rest are refused ``rate`` (4429)."""
+        n = 40
+        helpers = [H.FakeHelper(self.server.url) for _ in range(n)]
+        for h in helpers:
+            self.addCleanup(h.close)
+        lookups0 = W.hub().lookups
+        with db.session() as s:
+            audit0 = s.query(AuditLog).filter(AuditLog.action == "worker.auth_failed").count()
+        barrier = threading.Barrier(n)
+        answers: list = []
+        lock = threading.Lock()
+
+        def hello(i, h):
+            barrier.wait()
+            h.send("hello", **{k: v for k, v in H.hello(token=f"cwt_together_{i}").items() if k != "t"})
+            frame = h.recv(timeout=30)
+            with self.assertRaises(H.Closed) as closed:
+                h.recv(timeout=10)
+            with lock:
+                answers.append((frame["code"], closed.exception.code))
+        threads = [threading.Thread(target=hello, args=(i, h)) for i, h in enumerate(helpers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        self.assertEqual(len(answers), n, "every hello was answered")
+        self.assertEqual(W.hub().lookups - lookups0, 20, "no more lookups than the limit")
+        self.assertEqual(sorted(set(answers)), [("rate", 4429), ("token", 4401)])
+        self.assertEqual(answers.count(("token", 4401)), 20)
+        with db.session() as s:
+            audited = s.query(AuditLog).filter(AuditLog.action == "worker.auth_failed").count() - audit0
+        self.assertEqual(audited, 20, "one audit row a lookup that failed, no more")
+        self.assertEqual(W.hub().limiter.count(H.ADDRESS), 20)
+        self.assertEqual(W.hub()._gates, {}, "no gate is left behind")
 
     def test_one_revoked_token_retried_counts_once_and_a_neighbour_connects(self):
         from datetime import datetime, timezone
@@ -765,6 +854,374 @@ class Overhead(_Live):
         print(f"\nthe hub's own time per round trip: median {median * 1000:.3f} ms, p95 "
               f"{sorted(own)[int(len(own) * 0.95)] * 1000:.3f} ms over {len(own)}")
         self.assertLess(median, 0.003 * (3 if CI else 1))
+
+
+class Settings(_Live):
+    """The site's settings reach a connected helper whichever way they change, and its acknowledgements are held to
+    what each settings frame asked (4-05's fix round)."""
+
+    def setUp(self):
+        super().setUp()
+        S.reset()
+        self.addCleanup(S.reset)
+
+    def served(self, token: str, ceiling: int = 4) -> H.Responder:
+        """A fake helper whose own ceiling is ``ceiling`` slots, welcomed, acknowledging every settings frame."""
+        return H.Responder(self.connect(token, slots=ceiling), slots=ceiling)
+
+    def test_a_slot_change_in_the_machine_editor_reaches_its_helper(self):
+        """The machine editor ("Requests at once": ``PUT /api/pool/servers/{id}``, and the registry's own
+        ``POST /api/servers``) changes the slots; the helper is sent them and the scheduler's capacity follows at once,
+        not when the helper next reconnects."""
+        sid, token, _tid = _machine(self.ids["lena"], "editor box", slots=1)
+        served = self.served(token)
+        m = S.get().machine(sid)
+        self.assertEqual(m.capacity(), 1)
+        view = self.call("lena", "GET", f"/api/pool/servers/{sid}").json()
+        cfg = dict(view.get("config") or {})
+        cfg["connection"] = dict(cfg.get("connection") or {}, provider="lmstudio", max_parallel=3)
+        cfg.setdefault("name", "editor box")
+        r = self.call("lena", "PUT", f"/api/pool/servers/{sid}", {"config": cfg})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(H.until(lambda: [f["llm"]["slots"] for f in served.settings] == [3], 5),
+                        f"the helper was sent the new slots: {served.settings}")
+        self.assertTrue(H.until(lambda: m.capacity() == 3, 5), f"the capacity is {m.capacity()}")
+        sv = servers.get(sid)
+        sv["connection"] = dict(sv["connection"], max_parallel=2)
+        r = self.call("lena", "POST", "/api/servers", sv)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(H.until(lambda: [f["llm"]["slots"] for f in served.settings] == [3, 2], 5),
+                        f"the registry's editor reached it too: {served.settings}")
+        self.assertTrue(H.until(lambda: m.capacity() == 2, 5), f"the capacity is {m.capacity()}")
+
+    def test_a_change_made_elsewhere_is_pushed_within_a_ping(self):
+        """``admin_cli`` or another process changes the row where no route can push: the keep-alive finds the
+        difference at its next round and pushes it."""
+        sid, token, _tid = _machine(self.ids["lena"], "changed elsewhere", slots=1)
+        served = self.served(token)
+        before = W.hub().ping_s
+        W.hub().ping_s = 1
+        W.hub().poke()
+        self.addCleanup(setattr, W.hub(), "ping_s", before)
+        with db.session() as s:
+            s.get(Server, sid).max_concurrent = 3
+        servers.invalidate()                    # another process's change: this one learns of it at its cache's age
+        self.assertTrue(H.until(lambda: [f["llm"]["slots"] for f in served.settings] == [3], 5),
+                        f"pushed by the keep-alive: {served.settings}")
+        self.assertTrue(H.until(lambda: W.hub().get(sid).llm_slots == 3, 5))
+
+    def test_a_change_during_the_registration_follows_the_welcome(self):
+        """The settings are read before the connection is registered: a change committed in between found no
+        connection to push to, so the hub looks again once it is registered and sends it right after the welcome."""
+        sid, token, _tid = _machine(self.ids["lena"], "changed mid-hello", slots=1)
+        real = W.site_settings
+        calls: list = []
+
+        def read_then_change(server_id):
+            out = real(server_id)
+            if not calls:
+                with db.session() as s:
+                    s.get(Server, server_id).max_concurrent = 3
+                servers.invalidate()
+            calls.append(out["llm"]["slots"])
+            return out
+        with mock.patch.object(W, "site_settings", read_then_change):
+            helper = H.FakeHelper(self.server.url)
+            self.addCleanup(helper.close)
+            welcome = helper.handshake(H.hello(token=token, models=[H.model(MODEL)], slots=4))
+            self.assertEqual(welcome["settings"]["llm"]["slots"], 1, "the welcome carries what was read")
+            pushed = helper.recv(timeout=5)
+        self.assertEqual((pushed["t"], pushed["llm"]["slots"]), ("settings", 3), "the change follows the welcome")
+        self.assertEqual(calls[:2], [1, 3])
+
+    def test_an_acknowledgement_is_held_to_the_settings_frame_it_answers(self):
+        """The welcome asks 3 slots; the owner lowers them to 1 before the helper's acknowledgement of the welcome
+        arrives. That acknowledgement (3) crossed the push: it is no overclaim, and the capacity is held to the site's
+        1 meanwhile. One that claims more than its own frame asked is still flagged."""
+        sid, token, _tid = _machine(self.ids["lena"], "crossing box", slots=3)
+        helper = H.FakeHelper(self.server.url)
+        self.addCleanup(helper.close)
+        helper.send("hello", **{k: v for k, v in H.hello(token=token, models=[H.model(MODEL)], slots=4).items()
+                                if k != "t"})
+        welcome = helper.recv()
+        self.assertEqual(welcome["settings"]["llm"]["slots"], 3)
+        with db.session() as s:
+            s.get(Server, sid).max_concurrent = 1
+        servers.invalidate()
+        self.assertFalse(W.hub().push_settings(sid), "nothing acknowledged yet")
+        pushed = helper.recv()
+        self.assertEqual((pushed["t"], pushed["llm"]["slots"]), ("settings", 1))
+
+        def ack(slots: int) -> None:
+            site = welcome["settings"]
+            helper.send("settings_ack", effective={"llm": {"enabled": True, "slots": slots},
+                                                   "cpu": {**site["cpu"], "enabled": False}},
+                        capped=[], limits={"cpu": "soft", "memory": "soft"})
+        ack(3)                                  # the welcome's, correctly
+        self.assertTrue(H.until(lambda: W.hub().get(sid).ack is not None, 5))
+        self.assertEqual(W.hub().get(sid).llm_slots, 1, "held to what the site asks now")
+        ack(1)                                  # the push's, correctly
+        self.assertTrue(H.until(lambda: W.hub().push_settings(sid), 5), "every frame acknowledged")
+        time.sleep(0.3)
+        with db.session() as s:
+            self.assertNotIn("settings_overclaim", s.get(Server, sid).flags or {}, "an honest helper is not flagged")
+        with db.session() as s:
+            s.get(Server, sid).max_concurrent = 2
+        servers.invalidate()
+        W.hub().push_settings(sid)
+        self.assertEqual(helper.recv()["llm"]["slots"], 2)
+        ack(4)                                  # more than this frame asked
+
+        def flagged():
+            with db.session() as s:
+                return (s.get(Server, sid).flags or {}).get("settings_overclaim")
+        self.assertEqual(H.until(flagged, 5)["fields"], ["llm.slots"])
+        self.assertEqual(W.hub().get(sid).llm_slots, 2, "held to the site's")
+
+    def test_a_change_that_changes_nothing_waits_for_nothing_and_one_request_a_machine_waits(self):
+        """The settings route waits for the acknowledgement only when something changed, and only one request a
+        machine waits: a helper that never acknowledges cannot hold the server's request threads."""
+        sid, token, _tid = _machine(self.ids["lena"], "silent settings", slots=1)
+        self.connect(token, slots=4)            # acknowledges its welcome, then reads nothing more
+        path = f"/api/machines/{sid}/settings"
+        t0 = time.perf_counter()
+        self.assertEqual(self.call("lena", "PUT", path, {}).status_code, 200)
+        self.assertEqual(self.call("lena", "PUT", path, {"slots": 1}).status_code, 200)
+        self.assertLess(time.perf_counter() - t0, 1.0, "nothing changed: nothing to wait for")
+        took: list = []
+        barrier = threading.Barrier(4)
+
+        def change(slots: int) -> None:
+            import httpx
+            with httpx.Client(base_url=self.server.base, timeout=20) as client:
+                barrier.wait()
+                started = time.perf_counter()
+                r = client.put(path, json={"slots": slots}, headers=self.headers["lena"])
+                took.append((r.status_code, time.perf_counter() - started))
+        threads = [threading.Thread(target=change, args=(n,)) for n in (2, 3, 4, 5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual([c for c, _ in took], [200] * 4)
+        waited = [s for _, s in took if s >= 1.5]
+        self.assertLessEqual(len(waited), 1, f"one request at a time waits: {took}")
+        self.assertEqual(len(waited), 1, f"the one that waited waited for its acknowledgement: {took}")
+
+
+class Frames(_Live):
+    """A frame is never parsed on the event loop when that would hold it (P4.7.4; 4-05's fix round): a first frame,
+    which anyone can send before any token is checked, over 2 MiB is refused unread, and a long one is parsed on a
+    thread; so is a welcomed helper's long frame."""
+
+    @staticmethod
+    def stalls(during) -> float:
+        """The longest the hub's event loop went without running a callback while ``during()`` ran (a chain of
+        ``call_soon`` callbacks on it: exact, not rounded to the system's timer)."""
+        loop = W.hub()._loop
+        state = {"last": None, "stop": False, "gaps": []}
+
+        def tick():
+            now = time.perf_counter()
+            if state["last"] is not None:
+                state["gaps"].append(now - state["last"])
+            state["last"] = now
+            if not state["stop"]:
+                loop.call_soon(tick)
+        loop.call_soon_threadsafe(tick)
+        time.sleep(0.05)
+        try:
+            during()
+        finally:
+            state["stop"] = True
+        time.sleep(0.05)
+        return max(state["gaps"])
+
+    @staticmethod
+    def parse_seconds(raw: str) -> float:
+        """What parsing ``raw`` costs on this machine (what it would hold the loop for, parsed there)."""
+        t0 = time.perf_counter()
+        try:
+            HP.parse_helper_frame(raw)
+        except HP.ProtocolError:
+            pass
+        return time.perf_counter() - t0
+
+    def refused_unread(self, raw: str) -> H.Closed:
+        """Send ``raw`` as a first frame; the close it got (after the v1 refusal's frame, for a hello that names no
+        protocol)."""
+        helper = H.FakeHelper(self.server.url)
+        self.addCleanup(helper.close)
+        helper.send_text(raw)
+        deadline = time.perf_counter() + 20
+        while time.perf_counter() < deadline:
+            try:
+                helper.recv(timeout=max(0.1, deadline - time.perf_counter()))
+            except H.Closed as closed:
+                return closed
+        self.fail("the hub did not close the connection")
+
+    def test_a_first_frame_over_two_mib_is_refused_unread(self):
+        lookups = W.hub().lookups
+        big = H.hello(token="cwt_big")
+        big["report"] = {"hardware": {"format": "citar-hardware", "pad": "x" * HP.MAX_HELLO_BYTES},
+                         "hardware_source": "file"}
+        import json
+        raw = json.dumps(big)
+        with mock.patch.object(HP, "parse_helper_frame", wraps=HP.parse_helper_frame) as parsed:
+            closed = self.refused_unread(raw)
+        self.assertEqual((closed.code, closed.reason), (4400, "too_large"))
+        parsed.assert_not_called()
+        self.assertEqual(W.hub().lookups, lookups, "no lookup")
+        self.assertEqual(W.hub().limiter.count(H.ADDRESS), 0, "no count")
+        # just under it, a hello is read as any other
+        big["report"]["hardware"]["pad"] = "x" * (HP.MAX_HELLO_BYTES - 4096)
+        frame, closed = None, None
+        helper = H.FakeHelper(self.server.url)
+        self.addCleanup(helper.close)
+        helper.send_text(json.dumps(big))
+        frame = helper.recv(timeout=20)
+        self.assertEqual((frame["t"], frame["code"]), ("refused", "token"), "read, and refused for its token")
+
+    def test_a_long_frame_is_parsed_off_the_event_loop(self):
+        """Text that is not JSON and a hello of millions of tiny values are the parse's worst shapes (about 0.1 s a MiB
+        here). Parsed on the loop they held every other connection for the whole parse; parsed on a thread the loop
+        waits at most a handoff of the interpreter's lock. The bound is a third of the parse's own time, measured in
+        the same run, and never under 50 ms (a thread switch on Windows can take 16 ms, and the fake helper's own
+        sending shares this process)."""
+        n = HP.MAX_HELLO_BYTES - 64 * 1024
+        shapes = {
+            "not JSON (the depth scan)": "[" * 60 + "0," * ((n - 120) // 2) + "}",
+            "millions of zeros (the walk)": '{"t":"hello","x":[' + "0," * ((n - 40) // 2) + "0]}",
+            "eight MiB, over the hello's cap": "[" * 60 + "0," * ((8 * 1024 * 1024 - 200) // 2) + "}",
+        }
+        for name, raw in shapes.items():
+            with self.subTest(name):
+                bound = max(0.05, self.parse_seconds(raw) / 3)
+                closed: list = []
+                longest = self.stalls(functools.partial(lambda text, out: out.append(self.refused_unread(text)),
+                                                        raw, closed))
+                self.assertIn(closed[0].code, (4400, 4426))
+                print(f"\n{name}: the loop's longest stall {longest * 1000:.1f} ms (bound {bound * 1000:.0f} ms)")
+                self.assertLess(longest, bound)
+        # a welcomed helper's long bad frame: parsed on a thread too, and only logged
+        sid, token, _tid = _machine(self.ids["lena"], "long frames")
+        helper = self.connect(token)
+        raw = "[" * 60 + "0," * ((8 * 1024 * 1024 - 200) // 2) + "}"
+        bound = max(0.05, self.parse_seconds(raw) / 3)
+
+        def send_and_settle():
+            helper.send_text(raw)
+            helper.send("ping")
+            self.assertEqual(helper.recv(timeout=20, skip=())["t"], "pong", "the connection carries on")
+        longest = self.stalls(send_and_settle)
+        print(f"a welcomed helper's 8 MiB bad frame: the loop's longest stall {longest * 1000:.1f} ms "
+              f"(bound {bound * 1000:.0f} ms)")
+        self.assertLess(longest, bound)
+        self.assertTrue(W.hub().is_online(sid))
+
+    def test_waiting_for_a_hello_does_not_poll(self):
+        """A connection that sends nothing costs nothing until its 30 s are up: the wait sleeps on the frame and on
+        the hub's clock being moved, rather than looking at the clock every 50 ms."""
+        import asyncio
+        hub = W.WorkerHub()
+        looks = []
+
+        class Counting(W.Clock):
+            def time(self):
+                looks.append(1)
+                return super().time()
+        hub.clock = Counting()
+
+        class Silent:
+            async def receive_text(self):
+                await asyncio.sleep(3600)
+        with mock.patch.object(W, "HELLO_SECONDS", 0.6):
+            got = asyncio.run(W._first_frame(Silent(), hub))
+        self.assertIsNone(got)
+        self.assertLessEqual(len(looks), 5, f"the clock was read {len(looks)} times in 0.6 s (polling: about 13)")
+
+
+class Tokens(_Live):
+    """What stays true of a worker token and of the lookup (``test_worker.py``'s ``Authentication``, on protocol 2),
+    and the lookup's failures (4-05's fix round)."""
+
+    def test_only_the_hash_is_stored(self):
+        """A leaked database backup must not yield a usable worker credential."""
+        sid, _token, _tid = _machine(self.ids["lena"], "hashed box")
+        r = self.call("lena", "POST", f"/api/pool/servers/{sid}/workers/tokens", {"label": "issued"})
+        self.assertEqual(r.status_code, 200, r.text)
+        raw, token_id = r.json()["token"], r.json()["id"]
+        with db.session() as s:
+            row = s.get(WorkerToken, token_id)
+            self.assertNotEqual(row.token_hash, raw)
+            self.assertNotIn(raw, row.token_hash)
+            self.assertEqual(row.token_hash, tokens.hash_token(raw))
+        found = W.authenticate(raw, H.key_b64(21))
+        self.assertEqual((found.refusal, found.server_id, found.token_id), ("", sid, token_id))
+        self.assertEqual(W.authenticate("cwt_not_a_real_token", H.key_b64(21)).refusal, "token")
+        self.assertEqual(W.authenticate("", H.key_b64(21)).refusal, "token")
+
+    def test_a_database_that_fails_refuses_nothing(self):
+        """A failing lookup is the server's fault: the helper is closed with 1011 and no ``refused`` (which it would
+        take as permanent), and nothing is counted against its address or audited."""
+        from sqlalchemy.exc import OperationalError
+        _sid, token, _tid = _machine(self.ids["lena"], "locked box")
+        with db.session() as s:
+            audit0 = s.query(AuditLog).count()
+
+        def locked():
+            raise OperationalError("SELECT", {}, Exception("database is locked"))
+        with mock.patch.object(db, "session", side_effect=locked), \
+                self.assertLogs("citar.workers", level="ERROR"):
+            helper = H.FakeHelper(self.server.url)
+            self.addCleanup(helper.close)
+            helper.send("hello", **{k: v for k, v in H.hello(token=token).items() if k != "t"})
+            with self.assertRaises(H.Closed) as closed:
+                frame = helper.recv(timeout=10)
+                self.fail(f"a frame came before the close: {frame}")
+        self.assertEqual(closed.exception.code, HP.CLOSE_SERVER_ERROR)
+        self.assertEqual(W.hub().limiter.count(H.ADDRESS), 0, "nothing counted")
+        with db.session() as s:
+            self.assertEqual(s.query(AuditLog).count(), audit0, "nothing audited")
+        self.connect(token)                     # the database back, the same helper is let in
+
+    def test_two_first_hellos_cannot_both_register_a_key(self):
+        """Trust on first use is a conditional write: a hello that read "no key yet" while another registered its own
+        meanwhile finds that key and is refused ``key``, rather than overwrite it."""
+        sid, token, _tid = _machine(self.ids["lena"], "raced box")
+        mine, theirs = H.key_b64(31), H.key_b64(32)
+        real = W._refusal
+
+        def checked_then_registered_elsewhere(s, row, server):
+            out = real(s, row, server)
+            with db.session() as other:
+                other.get(Server, sid).public_key = theirs
+            return out
+        with mock.patch.object(W, "_refusal", checked_then_registered_elsewhere):
+            found = W.authenticate(token, mine)
+        self.assertIn(found.refusal, ("key", "error"), "never let in over another key")
+        with db.session() as s:
+            self.assertEqual(s.get(Server, sid).public_key, theirs, "the key that won stays")
+        self.assertEqual(W.authenticate(token, mine).refusal, "key")
+        self.assertEqual(W.authenticate(token, theirs).refusal, "")
+
+    def test_a_seat_on_a_pooled_machine_plays_through_its_helper(self):
+        """A machine from the Servers page is not in the registry's file; a seat naming it resolves to the worker
+        provider instead of failing with "No server", and a game on it is refused while its helper is offline."""
+        from citar.pool import seats as pool_seats
+        sid, _token, _tid = _machine(self.ids["lena"], "Box")
+        cfg = servers.resolve_llm({"server_id": sid, "model": "qwen/qwen3.8-27b", "reconnect_seconds": 30})
+        self.assertEqual((cfg["provider"], cfg["server_id"], cfg["model"], cfg["reconnect_seconds"]),
+                         ("worker", sid, "qwen/qwen3.8-27b", 30))
+        info = servers.describe_seat({"server_id": sid, "model": "qwen/qwen3.8-27b"})
+        self.assertEqual(info["server"], "Box")
+        self.assertFalse(info["missing_server"])
+        with db.session() as s:
+            lena = s.get(User, self.ids["lena"])
+            with self.assertRaises(ValueError):
+                pool_seats.authorize(s, lena, [{"type": "llm", "llm": {"server_id": sid, "model": "m"}}])
+            pool_seats.authorize(s, lena, [{"type": "bot"}, {"type": "llm", "llm": {"provider": "mock"}}])
 
 
 # ---------------------------------------------------------------------------- pooled machines (unchanged)

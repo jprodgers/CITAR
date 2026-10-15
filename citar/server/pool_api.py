@@ -183,6 +183,9 @@ def update_server(server_id: str, body: ServerUpdate, request: Request,
         _drop(s, server.id, "its machine was disabled")
     else:
         _saved(s)
+        # the editor's "Requests at once" is the machine's slots: the scheduler and the connected helper get them now
+        from .machines_api import settings_changed
+        settings_changed(server.id)
     return pool.public_server(s, server, me)
 
 

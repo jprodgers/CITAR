@@ -54,8 +54,7 @@ MODEL = qa.FakeEndpoint.MODEL
 
 
 def setUpModule():
-    if H.helper_binary() is None:
-        raise unittest.SkipTest("no citar-helper in CITAR_EXT_DIR: cargo xtask develop builds it")
+    H.require_helper_binary("the end-to-end helper tests")       # skips locally without one; fails on CI
     os.environ["CITAR_DATA_DIR"] = str(_TMP)
     os.environ["CITAR_DB_URL"] = _URL
     settings.reset()

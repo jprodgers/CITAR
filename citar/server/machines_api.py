@@ -9,7 +9,9 @@
                                                (``hardware``, ``models``, ``power``; none or empty: each one the
                                                report has something for)
     POST /api/machines/{sid}/key/reset         forget the helper's registered machine key: the next hello registers its
-                                               own (design/phase4-helper.md P4.3.7); the trust tier is unchanged
+                                               own (design/phase4-helper.md P4.3.7), and a connected helper is made to
+                                               reconnect (close 1012) so that it does at once; the trust tier is
+                                               unchanged
     POST /api/machines/{sid}/rescan            ask its connected helper to scan its hardware now; 409 when offline
     PUT  /api/admin/machines/{sid}/trust       ``{"trust_tier": "new" | "provisional" | "trusted" | "quarantined"}``
     PUT  /api/admin/machines/{sid}/class       ``{"pinned": true, "gpu_class_id"?, "cpu_class_id"?}`` pins the
@@ -21,8 +23,10 @@ online APIs, are administrators' whoever is named their owner): anyone a group l
 a visitor 401. The last two are administrators' alone (``require_role("admin", hide=True)``: anyone else signed in gets
 404). Each change writes one audit row and commits before it answers (the dialog reads it back at once); a change of
 slots or capabilities reaches the prompt scheduler at once (``Scheduler.refresh``) and the machine's connected helper
-too (``WorkerHub.push_settings``: protocol 2's ``settings`` frame, which it acknowledges), a pin the compute ledger
-from the next event on.
+too (``WorkerHub.push_settings``: protocol 2's ``settings`` frame, which it acknowledges; the route waits up to
+``ACK_WAIT_SECONDS`` for it, one request a machine at a time), a pin the compute ledger from the next event on. The
+machine editor's routes (``admin_api``, ``pool_api``) change the slots too, and call ``settings_changed`` after their
+commit the same way, without waiting.
 """
 from __future__ import annotations
 
@@ -83,14 +87,15 @@ def _refresh(server_id: str) -> None:
 ACK_WAIT_SECONDS = 2.0
 
 
-def settings_changed(server_id: str) -> None:
-    """A machine's settings changed and were committed: the prompt scheduler reads its row again, and its connected
-    helper is sent the new settings (design/phase4-helper.md P4.5.1), whose acknowledgement is waited for a moment.
-    Never raises."""
+def settings_changed(server_id: str, wait: float = 0.0) -> None:
+    """A machine's row changed and was committed (its slots, capabilities or switch, through this dialog or the
+    machine editor): the prompt scheduler reads it again, and its connected helper is sent the settings that differ
+    from what it was last sent (design/phase4-helper.md P4.5.1). With ``wait``, the helper's acknowledgement is waited
+    for that long (``WorkerHub.push_settings``: one waiter a machine). Never raises."""
     _refresh(server_id)
     try:
         from .workers import hub
-        hub().push_settings(server_id, wait=ACK_WAIT_SECONDS)
+        hub().push_settings(server_id, wait=wait)
     except Exception:
         log.warning("could not push machine %s's settings to its helper", server_id, exc_info=True)
 
@@ -138,7 +143,8 @@ def settings_change(sid: str, request: Request, body: dict = Body(...), p: Princ
         audit.record(s, "server.settings", actor=me, object_type="server", object_id=row.id,
                      ip=ratelimit.client_ip(request), changed=changed)
     s.commit()
-    settings_changed(row.id)
+    if changed:
+        settings_changed(row.id, wait=ACK_WAIT_SECONDS)
     return _answer(s, row, me)
 
 
@@ -165,11 +171,15 @@ def settings_apply(sid: str, request: Request, body: Optional[dict] = Body(None)
 @router.post("/api/machines/{sid}/key/reset")
 def key_reset(sid: str, request: Request, p: Principal = Depends(principal),
               s: Session = Depends(get_db, scope="function")):
-    """Forget the machine key its helper registered: the next hello registers its own (``reset_key``)."""
+    """Forget the machine key its helper registered: the next hello registers its own (``reset_key``). A helper still
+    connected under the old key is closed so that it reconnects (``WorkerHub.disconnect``), and its hello registers
+    its key at once; a token used by someone else is revoked as well, or whichever helper connects first registers."""
+    from .workers import hub
     me = require_user(request, p)
     row = _server(s, sid, me, access.MANAGE)
     reset_key(s, row, me, ip=ratelimit.client_ip(request))
     s.commit()
+    hub().disconnect(row.id, "its machine key was reset")
     return _answer(s, row, me)
 
 

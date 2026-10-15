@@ -12,19 +12,29 @@ while the sockets live on the event loop, so a completion crosses threads twice:
     turn thread   <- Event.wait()  <-  resolve()                 <-  event loop  <-  socket
 
 ``submit()`` blocks the calling thread, which has nothing else to do until the model answers; nothing on the event
-loop ever blocks: token lookups, the hello's report, catalogs and hardware scans go through ``asyncio.to_thread``.
+loop ever blocks (P4.7.4): token lookups, the hello's report, catalogs and hardware scans go through
+``asyncio.to_thread``, and a frame longer than ``PARSE_INLINE_CHARS`` is parsed on a thread too (a first frame, sent
+before any token is checked, on a thread of its own, ``_HELLO_PARSER``).
 
-**The handshake** (``serve``), in PROTOCOL.md's order: (1) the protocol, a hello that is not protocol 2 getting the v1
-refusal and close 4426 with no lookup, no audit row, no rate-limit count and at most one log line per address an hour;
-(2) the address's rate limit, before any lookup: an address with ``AuthLimiter.LIMIT`` distinct failing token hashes in
-the window is ``refused`` ``rate`` (P4.0's defects 1 and 2: the old limit never refused, and the address was whatever
-``X-Forwarded-For`` said); (3) the token, a failure counted and audited; (4) the machine key, registered by the first
-protocol 2 hello of a machine (trust on first use) and refused when it differs (``refused`` ``key``) until its owner
-resets it; (5) registration, then ``welcome`` with the site's settings, and the hello's report kept off the loop.
+**The handshake** (``serve``), in PROTOCOL.md's order: (0) a first frame over ``HP.MAX_HELLO_BYTES`` is closed with
+4400 ``too_large`` unread; (1) the protocol, a hello that is not protocol 2 getting the v1 refusal and close 4426 with
+no lookup, no audit row, no rate-limit count and at most one log line per address an hour; (2) the address's rate limit,
+before any lookup: an address with ``AuthLimiter.LIMIT`` distinct failing token hashes in the window is ``refused``
+``rate`` (P4.0's defects 1 and 2: the old limit never refused, and the address was whatever ``X-Forwarded-For`` said),
+and the check, the lookup and the count of its failure are one step per address (``WorkerHub.gate``), so hellos sent at
+once cannot all pass the check before the first failure is counted; (3) the token, a failure counted and audited (a
+database that fails is not the helper's failure: close 1011, nothing counted); (4) the machine key, registered by the
+first protocol 2 hello of a machine (trust on first use, by a conditional write, so two first hellos at once cannot
+both register) and refused when it differs (``refused`` ``key``) until its owner resets it, which closes the machine's
+connection with 1012 so its next hello registers at once (``WorkerHub.disconnect``); (5) registration, then ``welcome``
+with the site's settings, and the hello's report kept off the loop.
 
-**Settings** are acknowledged: the scheduler reads ``WorkerConnection.effective``, the helper's acknowledgement clamped
-to what the site asked (each number the smaller, the kinds both list, work on only when both say so; a claim of more
-flags the machine ``settings_overclaim``), and a change on the site is pushed at once (``WorkerHub.push_settings``).
+**Settings** are acknowledged: the scheduler reads ``WorkerConnection.effective``, the helper's newest acknowledgement
+clamped to what the site asks now (each number the smaller, the kinds both list, work on only when both say so). Each
+acknowledgement answers the oldest ``settings`` frame not yet answered (the welcome's included), and a claim of more
+than that frame asked flags the machine ``settings_overclaim``. A change of the machine's settings is pushed when it is
+committed (the settings route, the machine editor's routes: ``WorkerHub.push_settings``), and the keep-alive pushes any
+difference it finds between what the site asks and what a helper was last sent (a change made by another process).
 
 **Cancel is acknowledged** (P4.2.4): ``cancel`` ends the caller's wait at once and sends ``cancel``; the helper's
 ``cancelled`` (or a ``done`` or ``error`` that crossed it) is handed to the scheduler as the request's late frame, which
@@ -45,6 +55,9 @@ Replaces: ``citar/worker/protocol.py`` (protocol 1) and the hub's protocol 1 han
 from __future__ import annotations
 
 import asyncio
+import collections
+import concurrent.futures
+import contextlib
 import functools
 import itertools
 import logging
@@ -65,6 +78,17 @@ HELLO_SECONDS = 30.0
 NAP_SECONDS = 1.0
 #: How often a protocol 1 helper's refusal is logged per address.
 V1_LOG_SECONDS = 3600.0
+#: A frame longer than this many characters is parsed on a thread, never on the event loop: the parse's worst case
+#: (text that is not JSON, or millions of tiny values) is about 0.1 s a MiB on the owner's laptop, so no frame holds the
+#: loop for more than a few milliseconds (P4.7.4).
+PARSE_INLINE_CHARS = 64 * 1024
+#: How many ``settings`` frames may wait for their acknowledgement before the oldest is forgotten: each push is a
+#: change of the site's settings, so only a helper that never acknowledges comes near it.
+MAX_UNACKED_SETTINGS = 32
+
+#: The one thread that parses long first frames, the ones sent before any token is checked: however many arrive, they
+#: cost at most one core and never wait in front of the default pool's token lookups and database writes.
+_HELLO_PARSER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="citar-hello")
 
 #: Each connection's own number (``WorkerConnection.serial``): the prompt scheduler tells a helper's reconnect from the
 #: connection it had, since a request sent over a socket that has gone can never be answered.
@@ -260,6 +284,19 @@ class AuthLimiter:
 
 # ---------------------------------------------------------------------------- one connection
 
+class SettingsSent:
+    """A ``settings`` frame sent to a helper (the welcome's included) and not yet acknowledged: the site's settings it
+    carried, which its acknowledgement is held to (``WorkerConnection.acknowledge``); ``settled`` is set when the
+    acknowledgement came (``answered``) or the connection ended."""
+
+    __slots__ = ("settings", "settled", "answered")
+
+    def __init__(self, settings: dict):
+        self.settings = settings
+        self.settled = threading.Event()
+        self.answered = False
+
+
 class WorkerConnection:
     """One connected helper, serving one machine row: its hello, the site's settings it was sent, its acknowledgement,
     its models and quiet hours, and the requests in flight on it."""
@@ -287,11 +324,16 @@ class WorkerConnection:
         #: When the helper's own quiet hours in force end (Unix seconds), from its hello and its ``status`` frames.
         self.quiet_until: Optional[float] = hello.get("quiet_until")
         self.status_frame: dict = {}
-        #: The site's settings it was last sent, and its last acknowledgement as it sent it; ``acked`` is set when an
-        #: acknowledgement has been applied (``push_settings`` waits on it).
+        #: The site's settings it was last sent, and its last acknowledgement as it sent it.
         self.settings: Optional[dict] = settings
         self.ack: Optional[dict] = None
-        self.acked = threading.Event()
+        #: The ``settings`` frames sent and not yet acknowledged, oldest first: the helper answers them in order over
+        #: its one socket, so each acknowledgement settles the oldest (``acknowledge``). Recorded and queued for
+        #: sending under one lock, so this order is the order the frames go out in. Nothing else is done under it.
+        self._unacked: collections.deque = collections.deque()
+        self._settings_lock = threading.RLock()
+        #: Held by the one caller waiting for an acknowledgement (``WorkerHub.push_settings``).
+        self.ack_waiter = threading.Lock()
         self.connected_at = self.clock.time()
         self.last_seen = self.connected_at
         #: This connection's own number (unique in the process): a request's late answer comes back only over the
@@ -353,6 +395,58 @@ class WorkerConnection:
         if eff is None:
             return max(0, int(self.hello_llm["slots"]))
         return int(eff["llm"]["slots"])
+
+    # -------------------------------------------------------------- the settings and their acknowledgements
+    def _awaiting(self, settings: dict) -> SettingsSent:
+        entry = SettingsSent(settings)
+        self._unacked.append(entry)
+        while len(self._unacked) > MAX_UNACKED_SETTINGS:
+            self._unacked.popleft().settled.set()
+        return entry
+
+    def sent_in_welcome(self, settings: dict) -> SettingsSent:
+        """Record the welcome's settings, the first the helper acknowledges. Call it before the connection is
+        registered, so no push can be recorded ahead of it."""
+        with self._settings_lock:
+            self.settings = settings
+            return self._awaiting(settings)
+
+    def push_settings(self, settings: dict) -> tuple:
+        """Send the helper the site's ``settings`` when they differ from the last it was sent. Returns the entry its
+        acknowledgement settles (when nothing new went: the newest still unacknowledged, or None when the helper has
+        acknowledged what the site asks) and whether a frame was sent. Safe from any thread, the loop's included."""
+        with self._settings_lock:
+            if self.closed:
+                return None, False
+            if settings == self.settings:
+                return (self._unacked[-1] if self._unacked else None), False
+            self.settings = settings
+            entry = self._awaiting(settings)
+            self.send_threadsafe(HP.settings(settings["llm"], settings["cpu"]))
+            return entry, True
+
+    def acknowledge(self, ack: dict) -> list:
+        """Apply the helper's ``settings_ack``: it answers the oldest ``settings`` frame not yet answered, and is
+        held to what that frame asked. Returns the fields where it claimed more than that (a correct helper never
+        does). The scheduler reads the newest acknowledgement held to the site's newest settings (``effective``), and
+        is told before a caller waiting for this acknowledgement wakes (``WorkerHub.push_settings``), so what that
+        caller reads is in effect."""
+        with self._settings_lock:
+            entry = self._unacked.popleft() if self._unacked else None
+            asked = entry.settings if entry is not None else self.settings
+            self.ack = ack
+        over = clamp(asked, ack)[1] if asked is not None else []
+        _helper_changed(self.server_id)
+        if entry is not None:
+            entry.answered = True
+            entry.settled.set()
+        return over
+
+    def _settle_unacked(self) -> None:
+        with self._settings_lock:
+            waiting, self._unacked = list(self._unacked), collections.deque()
+        for entry in waiting:
+            entry.settled.set()
 
     def model_keys(self) -> list:
         """The models this helper offers."""
@@ -465,6 +559,7 @@ class WorkerConnection:
         for item in pending:
             item.error = WorkerError(message, refusal=refusal, retryable=retryable)
             item.event.set()
+        self._settle_unacked()              # nobody waits for an acknowledgement that cannot come
 
 
 def fingerprint(public_key: str) -> str:
@@ -492,7 +587,8 @@ class WorkerHub:
         self.limiter = AuthLimiter(self)
         #: The keep-alive's interval, ``welcome.ping_s`` (``CITAR_WORKER_PING_SECONDS``).
         self.ping_s = 20
-        self._wake: Optional[asyncio.Event] = None
+        self._ticks: dict = {}            # event loop -> the future the next poke resolves on it
+        self._gates: dict = {}            # (event loop, address) -> [asyncio.Lock, how many hold or wait for it]
         self._v1_logged: dict = {}        # address -> when its refusal was last logged
         self._ignored: set = set()
         #: Test hooks' counters (the conformance player reads them): token lookups made.
@@ -506,24 +602,52 @@ class WorkerHub:
         """Attach the event loop, so synchronous callers can schedule sends onto it."""
         self._loop = loop
 
+    # -------------------------------------------------------------- waiting on the hub's clock
+    def tick(self) -> asyncio.Future:
+        """A future of the running loop that the next ``poke`` resolves: what a wait on the hub's clock waits on
+        besides its own timeout, so a test's clock moved forward is seen at once and the real clock costs no polling."""
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            fut = self._ticks.get(loop)
+            if fut is None or fut.done():
+                fut = self._ticks[loop] = loop.create_future()
+        return fut
+
     def poke(self) -> None:
-        """Wake the keep-alive to look at the clock now (a test's clock moved). Safe from any thread."""
-        loop, wake = self._loop, self._wake
-        if loop is not None and wake is not None:
+        """Wake whatever waits on the hub's clock (the keep-alive, a connection's 30 s for its hello) to look at it now:
+        a test's clock moved. Safe from any thread."""
+        with self._lock:
+            ticks, self._ticks = list(self._ticks.items()), {}
+        for loop, fut in ticks:
             try:
-                loop.call_soon_threadsafe(wake.set)
-            except RuntimeError:
+                loop.call_soon_threadsafe(_settle, fut)
+            except RuntimeError:            # that loop is closed: so is everything that waited on it
                 pass
 
     async def nap(self, seconds: float) -> None:
         """Sleep up to ``seconds`` of real time (at most ``NAP_SECONDS``), or until poked."""
-        if self._wake is None:
-            self._wake = asyncio.Event()
+        await asyncio.wait({self.tick()}, timeout=max(0.0, min(seconds, NAP_SECONDS)))
+
+    @contextlib.asynccontextmanager
+    async def gate(self, address: str):
+        """One hello at a time per address through the rate limit's check, the token's lookup and the count of its
+        failure: otherwise hellos sent together would all pass the check before the first failure was counted, and a
+        brute force would get as many lookups as it opens connections. A lookup takes milliseconds, so helpers behind
+        one address barely wait; an address over the limit is answered from memory, without a lookup, once through."""
+        key = (asyncio.get_running_loop(), address)
+        with self._lock:
+            entry = self._gates.get(key)
+            if entry is None:
+                entry = self._gates[key] = [asyncio.Lock(), 0]
+            entry[1] += 1
         try:
-            await asyncio.wait_for(self._wake.wait(), timeout=max(0.0, min(seconds, NAP_SECONDS)))
-        except asyncio.TimeoutError:
-            pass
-        self._wake.clear()
+            async with entry[0]:
+                yield
+        finally:
+            with self._lock:
+                entry[1] -= 1
+                if entry[1] == 0 and self._gates.get(key) is entry:
+                    del self._gates[key]
 
     # -------------------------------------------------------------- registry
     def register(self, connection: WorkerConnection) -> Optional[WorkerConnection]:
@@ -648,23 +772,72 @@ class WorkerHub:
 
     # -------------------------------------------------------------- pushes to a helper
     def push_settings(self, server_id: str, wait: float = 0.0) -> bool:
-        """Send a machine's helper its settings again, as the site has them now (the settings route, after its
-        commit), and wait up to ``wait`` seconds for its acknowledgement, so the caller reads what is in effect.
-        Reads the registry's cache and may wait: never on the event loop. Returns whether the helper acknowledged
-        (with no wait: whether a helper was there to send them to)."""
+        """Send a machine's helper the site's settings as they are now, when they differ from what it was last sent:
+        after any committed change of the machine's slots, capabilities or switch (the settings route, the machine
+        editor's routes, the keep-alive's look for a change another process made). With ``wait``, wait up to that many
+        seconds for its acknowledgement, so the caller reads what is in effect; only one caller waits on a machine at a
+        time (another returns at once), so a helper that never acknowledges holds at most one thread a machine. Reads
+        the registry's cache and may wait: never on the event loop. Returns whether the helper has acknowledged what
+        the site asks (False with no helper connected)."""
         connection = self.get(server_id)
         if connection is None:
             return False
-        settings = site_settings(server_id)
-        connection.acked.clear()
-        connection.settings = settings
-        _helper_changed(server_id)
         try:
-            connection.send_threadsafe(HP.settings(settings["llm"], settings["cpu"]))
+            entry, sent = connection.push_settings(site_settings(server_id))
         except Exception:
             log.exception("could not push settings to %s's helper", server_id)
             return False
-        return connection.acked.wait(wait) if wait > 0 else True
+        if sent:
+            _helper_changed(server_id)      # the capacity is held to the new figures until they are acknowledged
+        if connection.closed:
+            return False
+        if entry is None:
+            return True
+        if wait > 0 and not entry.settled.is_set() and connection.ack_waiter.acquire(blocking=False):
+            try:
+                entry.settled.wait(wait)
+            finally:
+                connection.ack_waiter.release()
+        return entry.answered
+
+    def disconnect(self, server_id: str, reason: str) -> bool:
+        """Close a machine's helper connection so that the helper connects again at once: close 1012 with no
+        ``shutdown`` (PROTOCOL.md: a reconnect with backoff), what is in flight failed as worth retrying. After its
+        machine key was reset (``machines_api.key_reset``, once committed), so the next hello registers its key at once
+        instead of a connection serving under a key the row no longer holds. Returns whether a connection was closed."""
+        with self._lock:
+            connection = self._workers.pop(server_id, None)
+        if connection is None:
+            return False
+        connection.fail_all(f"The machine's helper is reconnecting: {reason}")
+        _helper_changed(server_id)
+        log.info("closed the helper of %s to have it reconnect: %s", server_id, reason)
+        if connection.loop is not None and connection.ws is not None:
+            async def close_it():
+                try:
+                    await connection.ws.close(code=HP.CLOSE_RECONNECT, reason="key_reset")
+                except Exception:
+                    pass
+            try:
+                asyncio.run_coroutine_threadsafe(close_it(), connection.loop)
+            except RuntimeError:            # the loop is gone: so is the socket
+                pass
+        return True
+
+    def _sync_settings(self, connections: list) -> None:
+        """Push to each connection whatever the site now asks that differs from what it was last sent (a change made
+        by ``admin_cli`` or another process, which no route here pushed). In a thread: the registry may be read."""
+        for connection in connections:
+            if connection.closed:
+                continue
+            try:
+                entry, sent = connection.push_settings(site_settings(connection.server_id))
+            except Exception:
+                log.exception("could not push settings to %s's helper", connection.server_id)
+                continue
+            if sent:
+                log.info("the settings of %s changed elsewhere: pushed to its helper", connection.server_id)
+                _helper_changed(connection.server_id)
 
     def rescan(self, server_id: str) -> bool:
         """Ask a machine's helper to scan its hardware now (the dialog's "Rescan now"). Returns whether a helper was
@@ -740,7 +913,6 @@ class WorkerHub:
         connection's token, machine and owner checked again (``still_allowed``), so a change made where this process
         could not drop the helper at once (``admin_cli``, another server process) takes effect within a ping.
         Survives its own exceptions."""
-        self._wake = asyncio.Event()
         interval = self.ping_s
         next_at = self.clock.time() + interval
         while True:
@@ -771,6 +943,10 @@ class WorkerHub:
             refused = {}
         for (server_id, token_id), (code, reason) in refused.items():
             self.drop(server_id, reason, code=code, token_id=token_id)
+        try:
+            await asyncio.to_thread(self._sync_settings, [c for c in connections if not c.closed])
+        except Exception:
+            log.exception("could not look for settings changed elsewhere")
         for connection in connections:
             if connection.closed:
                 continue
@@ -834,8 +1010,40 @@ def _bad_frame_id(raw: str) -> tuple:
     return t[:64], rid
 
 
+#: The checks a frame fails before its type and id can be read (``HP.envelope``'s): no id to fail.
+_ENVELOPE_CODES = frozenset(("too_large", "too_deep", "not_json", "not_object", "no_type"))
+
+
+def _settle(fut) -> None:
+    if not fut.done():
+        fut.set_result(None)
+
+
+def _read(raw: str) -> tuple:
+    """A helper's frame parsed: ``(frame, None)``, or ``(None, (error, type, request id))`` when it failed its checks
+    (``_bad_frame_id``). One call, so a long frame is read on one thread, once or (failing a field) twice."""
+    try:
+        return HP.parse_helper_frame(raw), None
+    except HP.ProtocolError as exc:
+        if exc.code in _ENVELOPE_CODES:
+            return None, (exc, "?", None)
+        return None, (exc, *_bad_frame_id(raw))
+
+
+async def _parse(raw: str, *, first: bool = False) -> tuple:
+    """``_read`` without holding the event loop: on the loop for a short frame, on a thread for a long one (a first
+    frame on ``_HELLO_PARSER``)."""
+    if len(raw) <= PARSE_INLINE_CHARS:
+        return _read(raw)
+    if first:
+        return await asyncio.get_running_loop().run_in_executor(_HELLO_PARSER, _read, raw)
+    return await asyncio.to_thread(_read, raw)
+
+
 async def _first_frame(websocket, the_hub: WorkerHub) -> Optional[str]:
-    """The connection's first frame, or None when none came within ``HELLO_SECONDS`` on the hub's clock."""
+    """The connection's first frame, or None when none came within ``HELLO_SECONDS`` on the hub's clock. It waits on
+    the frame and on the hub's ``tick`` (a test's clock moved), never polls: a socket that sends nothing costs nothing
+    until its time is up."""
     recv = asyncio.ensure_future(websocket.receive_text())
     deadline = the_hub.clock.time() + HELLO_SECONDS
     try:
@@ -843,7 +1051,7 @@ async def _first_frame(websocket, the_hub: WorkerHub) -> Optional[str]:
             left = deadline - the_hub.clock.time()
             if left <= 0:
                 return None
-            await asyncio.wait({recv}, timeout=min(left, 0.05))
+            await asyncio.wait({recv, the_hub.tick()}, timeout=left, return_when=asyncio.FIRST_COMPLETED)
         return recv.result()
     finally:
         if not recv.done():
@@ -862,9 +1070,13 @@ async def serve(websocket) -> None:
         if raw is None:
             await websocket.close(code=HP.CLOSE_STALE)
             return
-        try:
-            hello = HP.parse_helper_frame(raw)
-        except HP.ProtocolError as exc:
+        if HP.hello_too_large(raw):
+            # (0) longer than any hello a helper sends: refused unread, before anything costs more than its length
+            await websocket.close(code=HP.CLOSE_BAD_HELLO, reason="too_large")
+            return
+        hello, bad = await _parse(raw, first=True)
+        if bad is not None:
+            exc = bad[0]
             if exc.code == "protocol":
                 # (1) not protocol 2: the one refusal, which costs nothing and reaches a 0.1.5 helper in the one
                 # shape it reads (P4.2.8)
@@ -878,17 +1090,25 @@ async def serve(websocket) -> None:
             await websocket.close(code=HP.CLOSE_BAD_HELLO, reason="not_hello")
             return
 
-        # (2) the address's limit, before any lookup
-        wait = the_hub.limiter.retry_after(address)
+        # (2) the address's limit, before any lookup, (3) the token, (4) the key: one hello of an address at a time
+        wait, found = None, None
+        async with the_hub.gate(address):
+            wait = the_hub.limiter.retry_after(address)
+            if wait is None:
+                found = await asyncio.to_thread(authenticate, hello["token"], hello["machine"]["public_key"], address)
+                if found.refusal == "token":
+                    the_hub.limiter.failed(address, tokens.hash_token(hello["token"]))
         if wait is not None:
             await websocket.send_text(HP.refused("rate", "Too many refused worker tokens from this address. "
                                                  "Try again later.", retry_after_s=wait))
             await websocket.close(code=HP.CLOSE_RATE)
             return
-        # (3) the token, (4) the key
-        found = await asyncio.to_thread(authenticate, hello["token"], hello["machine"]["public_key"], address)
+        if found.refusal == "error":
+            # the database failed, not the helper: no refusal (which would stop it for good), no count, no audit row;
+            # 1011 has it connect again with backoff (PROTOCOL.md, "Close codes")
+            await websocket.close(code=HP.CLOSE_SERVER_ERROR)
+            return
         if found.refusal == "token":
-            the_hub.limiter.failed(address, tokens.hash_token(hello["token"]))
             await asyncio.to_thread(_auth_failed, address)
             await websocket.send_text(HP.refused("token", "That worker token was refused: it is unknown or revoked, "
                                                  "or its machine is disabled or deleted, or its owner's account is "
@@ -907,13 +1127,18 @@ async def serve(websocket) -> None:
         loop = asyncio.get_running_loop()
         settings = await asyncio.to_thread(site_settings, found.server_id)
         connection = WorkerConnection(websocket, found.server_id, hello, loop, token_id=found.token_id,
-                                      server_name=found.server_name, clock=the_hub.clock, settings=settings)
+                                      server_name=found.server_name, clock=the_hub.clock)
+        connection.sent_in_welcome(settings)
         refused = await the_hub.admit(connection)
         if refused:
             # taken away between the hello's check and the registration: told why, as a drop tells a helper
             await websocket.send_text(HP.shutdown(refused[0], refused[1]))
             await websocket.close(code=HP.CLOSE_SHUTDOWN)
             return
+        # a change committed between the settings' read and the registration found no connection to push to: it goes
+        # now, right after the welcome
+        if connection.push_settings(await asyncio.to_thread(site_settings, found.server_id))[1]:
+            _helper_changed(found.server_id)
         # no run is offered to a helper before package 4-10, so none it still plays is kept, and no held result wanted
         welcome = HP.welcome(found.server_id, found.server_name[:120], settings, max(5, min(300, int(the_hub.ping_s))),
                              await asyncio.to_thread(server_block), None, [], list(hello.get("running") or []), [])
@@ -943,11 +1168,11 @@ async def serve(websocket) -> None:
 
 
 async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> None:
-    """One frame from a welcomed helper. Never blocks the loop: what writes the database goes to a thread."""
-    try:
-        data = HP.parse_helper_frame(raw)
-    except HP.ProtocolError as exc:
-        t, rid = _bad_frame_id(raw)
+    """One frame from a welcomed helper. Never blocks the loop: what writes the database goes to a thread, and so
+    does the parse of a long frame."""
+    data, bad = await _parse(raw)
+    if bad is not None:
+        exc, t, rid = bad
         connection.log_once(f"bad:{t}", logging.WARNING, "helper of %s sent a bad %s frame: %s",
                             connection.server_id, t, exc)
         if t in ("done", "error", "cancelled") and rid:
@@ -973,15 +1198,13 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
         connection.resolve(data["id"], error=WorkerError("The helper stopped the request.", refusal="cancelled",
                                                          retryable=False))
     elif t == "settings_ack":
-        connection.ack = data
-        if connection.settings is not None:
-            _clamped, over = clamp(connection.settings, data)
-            if over:
-                connection.log_once("overclaim", logging.WARNING, "the helper of %s acknowledged more than the site "
-                                    "asked (%s): held to the site's settings", sid, ", ".join(over))
-                await asyncio.to_thread(flag_machine, sid, "settings_overclaim", {"fields": over})
-        _helper_changed(sid)
-        connection.acked.set()
+        # held to the settings frame it answers, not to newer ones it has not seen yet: an acknowledgement that
+        # crossed a push is not an overclaim
+        over = connection.acknowledge(data)
+        if over:
+            connection.log_once("overclaim", logging.WARNING, "the helper of %s acknowledged more than the site "
+                                "asked (%s): held to the site's settings", sid, ", ".join(over))
+            await asyncio.to_thread(flag_machine, sid, "settings_overclaim", {"fields": over})
         await asyncio.to_thread(record_ack, sid, data)
     elif t == "catalog":
         connection.models = list(data["models"])
@@ -1058,7 +1281,8 @@ def still_allowed(pairs) -> dict:
 
 @dataclass
 class Identity:
-    """What ``authenticate`` found: the machine, or ``refusal`` (``token`` or ``key``)."""
+    """What ``authenticate`` found: the machine, or ``refusal`` (``token`` or ``key``; ``error`` when the database
+    failed, which is not the helper's fault and refuses nothing)."""
     refusal: str = ""
     server_id: str = ""
     server_name: str = ""
@@ -1070,11 +1294,14 @@ def authenticate(token: str, public_key: str, address: str = "") -> Identity:
     database yields no usable worker credential, and a revoked or unknown token is indistinguishable from the outside,
     as is one whose machine is disabled or whose owner is suspended (``refusal`` ``token``). The key: the first
     protocol 2 hello of a machine registers its key on the row (trust on first use, bound to a valid token); another
-    key is ``refusal`` ``key`` until the owner or an administrator resets it. On success the token's ``last_seen_at``
-    and ``last_ip`` are written."""
+    key is ``refusal`` ``key`` until the owner or an administrator resets it. The registration is a conditional write
+    (only while the row has no key), so of two first hellos at once with different keys one registers and the other is
+    refused ``key``. On success the token's ``last_seen_at`` and ``last_ip`` are written. A database that fails (locked,
+    a snapshot gone stale under a concurrent registration) is ``refusal`` ``error``: the helper is told nothing it
+    would take as permanent, and nothing is counted against its address."""
     from datetime import datetime, timezone
 
-    from sqlalchemy import select
+    from sqlalchemy import select, update
 
     from .. import db
     from ..auth import tokens
@@ -1090,17 +1317,21 @@ def authenticate(token: str, public_key: str, address: str = "") -> Identity:
             if _refusal(s, row, server) is not None:
                 return Identity("token")
             now = datetime.now(timezone.utc)
-            if server.public_key and server.public_key != public_key:
-                return Identity("key", server.id, server.name, row.id)
             if not server.public_key:
-                server.public_key, server.key_at = public_key, now
-                log.info("machine %s registered its helper's key %s", server.id, fingerprint(public_key))
+                registered = s.execute(
+                    update(Server).where(Server.id == server.id, Server.public_key.is_(None))
+                    .values(public_key=public_key, key_at=now).execution_options(synchronize_session=False)).rowcount
+                s.refresh(server, ["public_key", "key_at"])     # this write, or the one that won
+                if registered:
+                    log.info("machine %s registered its helper's key %s", server.id, fingerprint(public_key))
+            if server.public_key != public_key:
+                return Identity("key", server.id, server.name, row.id)
             row.last_seen_at = now
             row.last_ip = (address or "")[:64] or None
             return Identity("", server.id, server.name, row.id)
     except Exception:
-        log.exception("helper authentication failed")
-        return Identity("token")
+        log.exception("helper authentication failed (the database, not the helper)")
+        return Identity("error")
 
 
 def _auth_failed(address: str) -> None:

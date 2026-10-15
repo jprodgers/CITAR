@@ -124,14 +124,12 @@ class StubConnection(W.WorkerConnection):
         frame = HP.parse_server_frame(text)
         self.frames.append(frame)
         if frame.get("t") == "settings":
-            # acknowledged as a correct helper does: its own slots the ceiling, no CPU lent
+            # acknowledged at once as a correct helper does: its own slots the ceiling, no CPU lent
             llm = self.hello_llm
-            self.ack = {"effective": {"llm": {"enabled": frame["llm"]["enabled"] and llm["enabled"],
-                                              "slots": min(frame["llm"]["slots"], llm["slots"])},
-                                      "cpu": {**frame["cpu"], "enabled": False}},
-                        "capped": [], "limits": {"cpu": "soft", "memory": "soft"}}
-            W._helper_changed(self.server_id)
-            self.acked.set()
+            self.acknowledge({"effective": {"llm": {"enabled": frame["llm"]["enabled"] and llm["enabled"],
+                                                    "slots": min(frame["llm"]["slots"], llm["slots"])},
+                                            "cpu": {**frame["cpu"], "enabled": False}},
+                              "capped": [], "limits": {"cpu": "soft", "memory": "soft"}})
             return
         if frame.get("t") == "cancel" and self.ack_cancel and frame["id"] in self.held:
             # a protocol 2 helper stops the generation and says so: ``cancelled``, the request's late frame
@@ -218,14 +216,22 @@ class HubServer:
 
 # ---------------------------------------------------------------------------- the real helper
 
+class NoHelperBinary(RuntimeError):
+    """``CITAR_HELPER_BIN`` names no file: a broken setup (CI's artifact path, its exec bit), never a reason to skip."""
+
+
 def helper_binary() -> Optional[str]:
     """The CITAR helper to run: ``CITAR_HELPER_BIN`` (CI's test jobs name the build-ext job's), else the one ``cargo
     xtask develop`` built (with its development guard: loopback servers only, an explicit ``--home``) beside the
-    extension in ``CITAR_EXT_DIR``; None when there is none (the end-to-end tests skip)."""
+    extension in ``CITAR_EXT_DIR``; None when there is none (the end-to-end tests skip, except on CI, where
+    ``require_helper_binary`` fails them). A ``CITAR_HELPER_BIN`` that names no file raises ``NoHelperBinary``: it was
+    meant to run them."""
     import os
     from pathlib import Path
     given = os.environ.get("CITAR_HELPER_BIN")
-    if given and Path(given).is_file():
+    if given:
+        if not Path(given).is_file():
+            raise NoHelperBinary(f"CITAR_HELPER_BIN names {given!r}, which is not a file")
         return given
     folder = os.environ.get("CITAR_EXT_DIR")
     if not folder:
@@ -235,6 +241,20 @@ def helper_binary() -> Optional[str]:
         if path.is_file():
             return str(path)
     return None
+
+
+def require_helper_binary(what: str) -> str:
+    """The helper binary for tests that run it (``helper_binary``): without one they skip (``unittest.SkipTest``),
+    but on CI (``CI`` set, as GitHub Actions sets it) they fail, so a workflow cannot go green without running them."""
+    import os
+    import unittest
+    binary = helper_binary()
+    if binary is not None:
+        return binary
+    if os.environ.get("CI"):
+        raise NoHelperBinary(f"{what}: no citar-helper on CI (set CITAR_HELPER_BIN, or CITAR_EXT_DIR with the helper "
+                             "cargo xtask develop builds)")
+    raise unittest.SkipTest(f"{what}: no citar-helper in CITAR_EXT_DIR (cargo xtask develop builds it)")
 
 
 class RealHelper:

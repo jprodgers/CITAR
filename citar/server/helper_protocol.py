@@ -47,6 +47,13 @@ CLOSE_STALE = 4408
 CLOSE_REPLACED = 4409
 CLOSE_PROTOCOL = 4426
 CLOSE_RATE = 4429
+#: The server could not check the hello (its database failed): no refusal, the helper connects again with backoff.
+CLOSE_SERVER_ERROR = 1011
+#: Connect again now: the machine's key was reset, and the next hello registers its key.
+CLOSE_RECONNECT = 1012
+#: The longest first frame the hub reads, in bytes of UTF-8 (PROTOCOL.md, "The handshake"): a longer one is closed
+#: with 4400 ``too_large`` before it is parsed.
+MAX_HELLO_BYTES = 2 * 1024 * 1024
 #: The longest close reason a WebSocket close frame carries, in bytes of UTF-8.
 MAX_CLOSE_REASON = 123
 
@@ -153,14 +160,19 @@ def _walk(value) -> tuple[int, bool]:
     return deepest, surrogate
 
 
-def _too_large(text: str) -> bool:
-    """Over ``MAX_FRAME_BYTES`` bytes of UTF-8, encoding only when the character count cannot tell (a character is
-    one to four bytes)."""
-    if len(text) > MAX_FRAME_BYTES:
+def _too_large(text: str, limit: int = MAX_FRAME_BYTES) -> bool:
+    """Over ``limit`` bytes of UTF-8, encoding only when the character count cannot tell (a character is one to four
+    bytes)."""
+    if len(text) > limit:
         return True
-    if len(text) * 4 <= MAX_FRAME_BYTES:
+    if len(text) * 4 <= limit:
         return False
-    return len(text.encode("utf-8", "surrogatepass")) > MAX_FRAME_BYTES
+    return len(text.encode("utf-8", "surrogatepass")) > limit
+
+
+def hello_too_large(raw: str) -> bool:
+    """Whether a first frame is over ``MAX_HELLO_BYTES``: the hub closes it with 4400 ``too_large`` unread."""
+    return _too_large(raw, MAX_HELLO_BYTES)
 
 
 def envelope(raw: str) -> tuple[dict, str]:
