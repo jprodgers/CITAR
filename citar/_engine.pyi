@@ -169,6 +169,12 @@ class jobs:
     def result_hash(kind: str, result_json: bytes) -> str:
         """The hash of a result read as the kind's and written back; JobRefused (bad_result)."""
     @staticmethod
+    def result_fits(kind: str, spec_json: bytes, result_json: bytes, chain_json: bytes,
+                    spec_hash: Optional[str] = None) -> None:
+        """Checks that the result and chain answer the spec: the chain folds from the spec's chain_0, the result holds
+        what the spec decides under this build, its turns follow the chain's rounds; JobRefused (bad_spec,
+        bad_result or bad_chain)."""
+    @staticmethod
     def chain_check(spec_hash: str, chain_json: bytes) -> None:
         """Checks the chain folds to its head from the spec hash's chain_0; JobRefused (bad_chain)."""
     @staticmethod

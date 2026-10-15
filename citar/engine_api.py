@@ -44,7 +44,8 @@ __all__ = [
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     # CPU jobs (design/phase4-helper.md P4.4): the same Rust as the helper's
-    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_chain_check", "jobs_build",
+    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
+    "jobs_build",
     # this build
     "build_info", "key_fingerprint",
     # one game

@@ -55,7 +55,8 @@ __all__ = [
     "map_ref", "map_file", "map_dir", "scenario_ref", "scenario_file", "scenario_dir",
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
-    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_chain_check", "jobs_build",
+    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
+    "jobs_build",
     "build_info", "key_fingerprint",
     "DEBUG_ACTIONS", "EngineGame",
     "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
@@ -512,6 +513,16 @@ def job_result_hash(kind: str, result: dict) -> str:
     """The result hash of a job's result, read as ``kind``'s and written back by the same Rust as the helper's: what
     a claim must name. Raises JobRefused (``bad_result``) for a result that does not read (an unknown key included)."""
     return _E.jobs.result_hash(kind, _dumps(result))
+
+
+def job_result_fits(kind: str, spec: dict, result: dict, chain: dict, spec_hash: Optional[str] = None) -> None:
+    """Checks that a job's result and chain answer its spec (P4.4.4): the chain folds from the spec's ``chain_0``, the
+    result holds everything the spec decides under this build (the experiment, the game, its seed and map; who sat in
+    each seat and what played it, fingerprints included; the build id), the winner's or the crash's label is its
+    seat's, and its turns follow the chain's rounds. What only playing decides (scores, stats, who won) is
+    replication's to check. Raises JobRefused: ``bad_spec`` (the spec, or ``spec_hash`` given and not its hash),
+    ``bad_result`` or ``bad_chain``, naming what does not hold."""
+    _E.jobs.result_fits(kind, _dumps(spec), _dumps(result), _dumps(chain), spec_hash)
 
 
 def job_chain_check(spec_hash: str, chain: dict) -> None:

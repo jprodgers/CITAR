@@ -4,9 +4,12 @@
 //! the helper's reads the spec, plays the game, hashes the result and folds the chain (P4.4.4).
 //!
 //! Every value crosses as JSON bytes, as the rest of the module's do. A refusal is `JobRefused`
-//! (a `ValueError`) with `.code`: `bad_spec` (the spec does not read, breaks a bound, or does not
-//! hash to the hash given), `bad_result` (a result that does not read as the kind's) or
-//! `bad_chain` (a chain that does not read, or whose digests do not fold to its head).
+//! (a `ValueError`) with `.code`: `bad_spec` (the spec is not JSON, does not read, breaks a bound,
+//! or does not hash to the hash given), `bad_result` (a result that is not JSON, does not read as
+//! the kind's, or does not answer its spec) or `bad_chain` (a chain that is not JSON, does not
+//! read, or whose digests do not fold to its head). Bytes that are not JSON are a refusal like
+//! any other: Python's `json` writes `NaN` and `Infinity`, which JSON has not, and a value nested
+//! deeper than 128 levels does not read.
 //!
 //! `run` plays the job with the GIL released one seat step at a time, as `run_game` does, so
 //! another thread's game goes on beside it; between steps it checks for signals and hands each
@@ -16,7 +19,7 @@
 use citar_engine::base::ids::PlayerId;
 #[cfg(feature = "test-ops")]
 use citar_engine::game::SeatDriver;
-use citar_jobs::{Checked, Job, Kind, RunError, SpecHash, check_spec};
+use citar_jobs::{Checked, FitError, Job, Kind, RunError, SpecHash, check_spec};
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -46,6 +49,11 @@ fn refused(code: &'static str, message: String) -> PyErr {
     })
 }
 
+/// JSON bytes the caller sent, or the refusal `code` saying why they do not read.
+fn read(bytes: &[u8], what: &str, code: &'static str) -> PyResult<Value> {
+    serde_json::from_slice(bytes).map_err(|e| refused(code, format!("{what} is not JSON: {e}")))
+}
+
 /// The kind named `name`, or `bad_spec`.
 fn kind_of(name: &str) -> PyResult<Kind> {
     Kind::from_name(name).ok_or_else(|| {
@@ -56,7 +64,7 @@ fn kind_of(name: &str) -> PyResult<Kind> {
 
 /// The spec read and checked, off the GIL: the first check compiles the ruleset.
 fn checked(py: Python<'_>, kind: Kind, spec_json: &[u8], hash: Option<&str>) -> PyResult<Checked> {
-    let spec = parse(spec_json, "The job's spec")?;
+    let spec = read(spec_json, "The job's spec", "bad_spec")?;
     let out = guarded(py, || Ok(check_spec(crate::rules::rules(), kind, &spec, hash)))?;
     out.map_err(|e| refused("bad_spec", e.0))
 }
@@ -224,9 +232,36 @@ fn run_error(e: RunError) -> PyErr {
 #[pyfunction]
 pub fn result_hash(kind: &str, result_json: &[u8]) -> PyResult<String> {
     let kind = kind_of(kind)?;
-    let result = parse(result_json, "The job's result")?;
+    let result = read(result_json, "The job's result", "bad_result")?;
     let out = shielded(|| Ok(citar_jobs::result_hash(kind, &result)))?;
     out.map_err(|e| refused("bad_result", e.0))
+}
+
+/// Checks that a job's result (`result_json`) and chain (`chain_json`, `{head, rounds,
+/// digests}`) answer the spec (`spec_json`, read as `kind`'s and, with `spec_hash`, held to it):
+/// the chain folds from the spec's `chain_0`, the result holds everything the spec decides under
+/// this build (the experiment, game, seed and map; who sat in each seat and what played it; the
+/// build id) and its turns follow the chain's rounds (P4.4.4). `None`, or `JobRefused`:
+/// `bad_spec`, `bad_result` or `bad_chain`, naming what does not hold.
+#[pyfunction]
+#[pyo3(signature = (kind, spec_json, result_json, chain_json, spec_hash = None))]
+pub fn result_fits(
+    py: Python<'_>,
+    kind: &str,
+    spec_json: &[u8],
+    result_json: &[u8],
+    chain_json: &[u8],
+    spec_hash: Option<&str>,
+) -> PyResult<()> {
+    let c = checked(py, kind_of(kind)?, spec_json, spec_hash)?;
+    let result = read(result_json, "The job's result", "bad_result")?;
+    let chain = read(chain_json, "The job's chain", "bad_chain")?;
+    let rules = crate::rules::rules();
+    let out = guarded(py, || Ok(citar_jobs::result_fits_value(rules, &c, &result, &chain)))?;
+    out.map_err(|e| match e {
+        FitError::Result(why) => refused("bad_result", why),
+        FitError::Chain(why) => refused("bad_chain", why.to_string()),
+    })
 }
 
 /// Checks that a chain (`{head, rounds, digests}`) folds to its head from `chain_0` of
@@ -237,7 +272,7 @@ pub fn chain_check(spec_hash: &str, chain_json: &[u8]) -> PyResult<()> {
     let hash = SpecHash::from_hex(spec_hash).ok_or_else(|| {
         refused("bad_chain", format!("the spec hash {spec_hash:?} is not 64 lower-case hex digits"))
     })?;
-    let chain = parse(chain_json, "The job's chain")?;
+    let chain = read(chain_json, "The job's chain", "bad_chain")?;
     let out = shielded(|| Ok(citar_jobs::chain_check_value(&hash, &chain)))?;
     out.map_err(|e| refused("bad_chain", e.to_string()))
 }
@@ -255,6 +290,7 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_function(wrap_pyfunction!(check_spec_py, &m)?)?;
     m.add_function(wrap_pyfunction!(run, &m)?)?;
     m.add_function(wrap_pyfunction!(result_hash, &m)?)?;
+    m.add_function(wrap_pyfunction!(result_fits, &m)?)?;
     m.add_function(wrap_pyfunction!(chain_check, &m)?)?;
     m.add_function(wrap_pyfunction!(jobs_build, &m)?)?;
     m.add("KINDS", pyo3::types::PyTuple::new(py, Kind::ALL.iter().map(|k| k.name()))?)?;
