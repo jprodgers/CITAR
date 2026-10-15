@@ -10,7 +10,10 @@
 //!   driver's thread) plays another game. [`canary_injected`] is the test switch: each check's
 //!   computed value can be replaced by what a flushing machine would compute.
 //! - **The self-check** ([`self_check`]): the golden set's shortest job ([`golden::SELF_CHECK`])
-//!   played here, its result hash and chain head compared with the committed ones.
+//!   played here, its chain head compared with the committed one and its result hash with the
+//!   committed result's under this build's id ([`GoldenJob::expected`]).
+//!
+//! [`GoldenJob::expected`]: crate::golden::GoldenJob::expected
 //!
 //! [`golden::SELF_CHECK`]: crate::golden::SELF_CHECK
 
@@ -20,7 +23,6 @@ use citar_engine::rules::Ruleset;
 
 use crate::golden::{GoldenSet, SELF_CHECK};
 use crate::job::{Unattended, run};
-use crate::spec::check_spec;
 
 /// Which canary check failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -80,16 +82,15 @@ pub struct SelfCheck {
     pub wall_s: f64,
 }
 
-/// Plays the golden set's shortest job under `rules` and compares its result hash and chain head
-/// with the committed ones.
+/// Plays the golden set's shortest job under `rules` and compares its chain head with the
+/// committed one, and its result hash with the committed result's under this build.
 ///
 /// # Errors
 /// What differs, or why the job could not be played.
 pub fn self_check(rules: &'static Ruleset) -> Result<SelfCheck, String> {
     let set = GoldenSet::committed()?;
     let job = set.jobs.get(SELF_CHECK).ok_or_else(|| format!("no golden job {SELF_CHECK}"))?;
-    let checked = check_spec(rules, job.kind, &job.spec, Some(&job.spec_hash))
-        .map_err(|e| format!("{SELF_CHECK}'s spec: {e}"))?;
+    let (checked, _, want) = job.expected(rules).map_err(|e| format!("{SELF_CHECK}: {e}"))?;
     let out = run(rules, &checked, &mut Unattended).map_err(|e| format!("{SELF_CHECK}: {e}"))?;
     if out.chain.head != job.chain_head || out.chain.rounds != job.rounds {
         return Err(format!(
@@ -97,10 +98,10 @@ pub fn self_check(rules: &'static Ruleset) -> Result<SelfCheck, String> {
             out.chain.head, out.chain.rounds, job.chain_head, job.rounds
         ));
     }
-    if out.result_hash != job.result_hash {
+    if out.result_hash != want {
         return Err(format!(
-            "{SELF_CHECK}'s result hash is {}, not the committed {}",
-            out.result_hash, job.result_hash
+            "{SELF_CHECK}'s result hash is {}, not the committed result's under this build, {want}",
+            out.result_hash
         ));
     }
     Ok(SelfCheck {

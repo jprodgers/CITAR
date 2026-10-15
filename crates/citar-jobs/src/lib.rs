@@ -13,6 +13,9 @@
 //!   [`Control`] that may stop it between seat steps;
 //! - [`hash`]: [`result_hash`] over the typed deterministic result and [`chain_check`] over the
 //!   chain (P4.4.4; claims and signatures are 4-11's);
+//! - [`fit`]: [`result_fits`], whether a result answers its spec (what the spec decides of it,
+//!   its turns against the chain's rounds), and [`rebased`], a golden result under this build's
+//!   id;
 //! - [`build`]: the jobs build, [`jobs_build`], the compatibility key every job carries (P4.4.5);
 //! - [`canary`](mod@canary): the two denormal checks and the self-check a job host runs before it
 //!   takes work;
@@ -30,6 +33,7 @@
 
 pub mod build;
 pub mod canary;
+pub mod fit;
 pub mod golden;
 pub mod hash;
 pub mod job;
@@ -40,12 +44,13 @@ pub mod sys;
 
 pub use self::build::{Flavour, jobs_build, jobs_build_of};
 pub use self::canary::{CanaryFailure, Inject, canary, canary_injected, self_check};
+pub use self::fit::{FitError, rebased, result_fits, result_fits_value};
 pub use self::hash::{
     Chain, ChainError, JobResult, ResultError, chain_check, chain_check_value, result_hash,
 };
 pub use self::job::{Control, Flow, Job, Output, Progress, RunError, Unattended, run};
-pub use self::lab::{LabCrash, LabOutcome, LabPlayer, LabResult};
-pub use self::reference::{ReferenceOutcome, ReferenceResult};
+pub use self::lab::{LabCrash, LabFacts, LabOutcome, LabPlayer, LabResult};
+pub use self::reference::{ReferenceFacts, ReferenceOutcome, ReferenceResult};
 pub use self::spec::{
     Checked, Kind, LabSeat, LabSpec, ReferenceSpec, Spec, SpecError, SpecHash, check_spec,
 };

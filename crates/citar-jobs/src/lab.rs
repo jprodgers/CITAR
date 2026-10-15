@@ -240,6 +240,105 @@ struct Played {
     aggression: f64,
 }
 
+/// What plays each seat of `spec` under `rules` (`lab.make_bot`), and the build id: each seat's
+/// version with its cleaned overrides, its profile's fixed aggression if it has one, else its
+/// start position's (`0.25 + 0.5 * ((pid * 37 + seed) % 10) / 9`).
+fn seated(rules: &Ruleset, spec: &LabSpec) -> Result<(String, Vec<(Played, BotSpec)>), SpecError> {
+    let build = build_id(rules);
+    let mut out = Vec::with_capacity(spec.seats.len());
+    for (n, seat) in spec.seats.iter().enumerate() {
+        let pid = u8::try_from(n).map(PlayerId).map_err(|_| SpecError("too many seats".into()))?;
+        let version = version_of(seat.bot.as_deref())
+            .ok_or_else(|| SpecError(format!("seat {n}: an unknown bot version")))?;
+        let given = seat.params.as_ref().map_or(Value::Object(serde_json::Map::new()), |p| {
+            Value::Object(p.clone().into_iter().collect())
+        });
+        let name = seat.bot.as_deref().unwrap_or("basic");
+        let overrides =
+            clean(name, &given).map_err(|e| SpecError(format!("seat {n}: {}", e.message)))?;
+        let cleaned = clean(version.id(), &given)
+            .map_err(|e| SpecError(format!("seat {n}: {}", e.message)))?;
+        let params = match cleaned.to_json() {
+            Value::Object(m) => m.into_iter().collect(),
+            _ => BTreeMap::new(),
+        };
+        let seat_aggression = citar_sim::baseline::aggression(pid, spec.seed);
+        let bot = BotSpec::new(
+            version,
+            Arc::new(Tuning::new(version, overrides)),
+            seat.aggression,
+            Some(seat_aggression),
+        );
+        let played = Played {
+            version,
+            fingerprint: fingerprint(&bot, &build),
+            params,
+            fixed_aggression: bot.fixed_aggression,
+            aggression: bot.aggression,
+        };
+        out.push((played, bot));
+    }
+    Ok((build, out))
+}
+
+/// What a lab spec decides of its result before a turn is played, as the result writes it
+/// (design/phase4-helper.md P4.4.4: a result is checked against its spec, and the `jobs` golden
+/// set against a build whose id has moved): the top's `exp`, `i`, `seed`, `map`, `engine` and
+/// `errors`, and per seat who sat there (`label`, `bot`, `levels`, the profile, its revision and
+/// name) and what played it (`build`, `version`, `fingerprint`, the cleaned `params`,
+/// `fixed_aggression` and the `aggression` played).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LabFacts {
+    /// Keys of the result's top.
+    pub top: serde_json::Map<String, Value>,
+    /// Keys of each seat's line, by seat.
+    pub seats: Vec<serde_json::Map<String, Value>>,
+    /// Each seat's label, for the winner's and a crash's.
+    pub labels: Vec<Option<String>>,
+}
+
+/// The keys of a result that name the build that played it: they move whenever the build id
+/// does (an edit of the engine's or the bot's sources, or CITAR's version), whether or not a
+/// game changes.
+pub const BUILD_KEYS: [&str; 2] = ["build", "fingerprint"];
+
+impl LabFacts {
+    /// What `spec` decides of its result under `rules`' build.
+    ///
+    /// # Errors
+    /// A seat whose version or overrides `check_spec` should have refused.
+    pub fn of(rules: &Ruleset, spec: &LabSpec) -> Result<Self, SpecError> {
+        let (build, bots) = seated(rules, spec)?;
+        let mut top = serde_json::Map::new();
+        top.insert("exp".into(), Value::from(spec.exp.clone()));
+        top.insert("i".into(), Value::from(spec.i));
+        top.insert("seed".into(), Value::from(spec.seed));
+        top.insert("map".into(), Value::from(spec.map_type.clone()));
+        top.insert("errors".into(), Value::Array(Vec::new()));
+        top.insert("engine".into(), Value::from(build.clone()));
+        let mut seats = Vec::with_capacity(bots.len());
+        for (seat, (played, _)) in spec.seats.iter().zip(&bots) {
+            let pairs = [
+                ("label", serde_json::json!(seat.label)),
+                ("bot", serde_json::json!(seat.bot)),
+                ("levels", serde_json::json!(seat.levels)),
+                ("profile", serde_json::json!(seat.profile)),
+                ("profile_rev", serde_json::json!(seat.profile_rev)),
+                ("profile_name", serde_json::json!(seat.profile_name)),
+                ("build", Value::from(build.clone())),
+                ("version", Value::from(played.version.id())),
+                ("fingerprint", Value::from(played.fingerprint.clone())),
+                ("params", serde_json::json!(played.params)),
+                ("fixed_aggression", serde_json::json!(played.fixed_aggression)),
+                ("aggression", serde_json::json!(round_ndigits(played.aggression, 3))),
+            ];
+            seats.push(pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect());
+        }
+        let labels = spec.seats.iter().map(|s| s.label.clone()).collect();
+        Ok(Self { top, seats, labels })
+    }
+}
+
 /// What a lab game heard from its events (`lab.play`'s listener): items built per player in the
 /// order first built, the turn each era began, and the event counts.
 #[derive(Clone, Debug, Default)]
@@ -341,40 +440,11 @@ impl LabPlay {
     /// # Errors
     /// A seat whose version or overrides `check_spec` should have refused.
     pub fn start(rules: &Ruleset, spec: &LabSpec) -> Result<(Self, Seats), SpecError> {
-        let build = build_id(rules);
-        let mut seats: Seats = Vec::with_capacity(spec.seats.len());
-        let mut played = Vec::with_capacity(spec.seats.len());
-        for (n, seat) in spec.seats.iter().enumerate() {
-            let pid =
-                u8::try_from(n).map(PlayerId).map_err(|_| SpecError("too many seats".into()))?;
-            let version = version_of(seat.bot.as_deref())
-                .ok_or_else(|| SpecError(format!("seat {n}: an unknown bot version")))?;
-            let given = seat.params.as_ref().map_or(Value::Object(serde_json::Map::new()), |p| {
-                Value::Object(p.clone().into_iter().collect())
-            });
-            let name = seat.bot.as_deref().unwrap_or("basic");
-            let overrides =
-                clean(name, &given).map_err(|e| SpecError(format!("seat {n}: {}", e.message)))?;
-            let cleaned = clean(version.id(), &given)
-                .map_err(|e| SpecError(format!("seat {n}: {}", e.message)))?;
-            let params = match cleaned.to_json() {
-                Value::Object(m) => m.into_iter().collect(),
-                _ => BTreeMap::new(),
-            };
-            let seat_aggression = citar_sim::baseline::aggression(pid, spec.seed);
-            let bot = BotSpec::new(
-                version,
-                Arc::new(Tuning::new(version, overrides)),
-                seat.aggression,
-                Some(seat_aggression),
-            );
-            played.push(Played {
-                version,
-                fingerprint: fingerprint(&bot, &build),
-                params,
-                fixed_aggression: bot.fixed_aggression,
-                aggression: bot.aggression,
-            });
+        let (build, bots) = seated(rules, spec)?;
+        let mut seats: Seats = Vec::with_capacity(bots.len());
+        let mut played = Vec::with_capacity(bots.len());
+        for (pid, (p, bot)) in (0u8..).map(PlayerId).zip(bots) {
+            played.push(p);
             seats.push((pid, Box::new(Bot::new(Arc::new(bot))) as Box<dyn SeatDriver>));
         }
         Ok((Self { spec: spec.clone(), build, played, heard: Heard::default() }, seats))

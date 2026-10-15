@@ -80,6 +80,56 @@ impl ReferenceOutcome {
     }
 }
 
+/// What a reference spec decides of its line before a turn is played, as the line writes it
+/// (design/phase4-helper.md P4.4.4: a result is checked against its spec, and the `jobs` golden
+/// set against a build whose id has moved): `i`, `seed`, `size`, `map_type`, `barbarians`,
+/// `speed`, `turn_limit`, `bot_errors` (none in a finished game), `engine` (the build id) and
+/// `bot` (`basic-1`, with its overrides' fingerprint under this build after a `+`), and each
+/// civilization's aggression, which its seat and the seed spread.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReferenceFacts {
+    /// Keys of the line's top.
+    pub top: serde_json::Map<String, Value>,
+    /// The game's seed.
+    pub seed: u64,
+}
+
+/// The keys of a reference line that name the build that played it: they move whenever the
+/// build id does, whether or not a game changes.
+pub const BUILD_KEYS: [&str; 2] = ["engine", "bot"];
+
+impl ReferenceFacts {
+    /// What `spec` decides of its line under `rules`' build.
+    ///
+    /// # Errors
+    /// Overrides `check_spec` should have refused.
+    pub fn of(rules: &Ruleset, spec: &ReferenceSpec) -> Result<Self, SpecError> {
+        let (code, _) = code_of_params(rules, &spec.params_value()).map_err(SpecError)?;
+        let pairs = [
+            ("i", Value::from(spec.i)),
+            ("seed", Value::from(spec.seed)),
+            ("size", Value::from(spec.size.clone())),
+            ("map_type", Value::from(spec.map_type.clone())),
+            ("barbarians", Value::from(spec.barbarians.clone())),
+            ("speed", Value::from(spec.speed.clone())),
+            ("turn_limit", serde_json::json!(spec.turn_limit)),
+            ("bot_errors", Value::from(0)),
+            ("engine", Value::from(code.engine)),
+            ("bot", Value::from(code.bot)),
+        ];
+        let top = pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+        Ok(Self { top, seed: spec.seed })
+    }
+
+    /// The aggression the civilization in seat `pid` played with, as the line writes it.
+    #[must_use]
+    pub fn aggression(&self, pid: u32) -> Option<f64> {
+        let pid = u8::try_from(pid).ok()?;
+        let a = citar_sim::baseline::aggression(citar_engine::base::ids::PlayerId(pid), self.seed);
+        Some(citar_engine::base::num::round_ndigits(a, 3))
+    }
+}
+
 /// A reference game in play: the baseline's context and game, and its war and capture tally.
 #[derive(Debug)]
 pub struct ReferencePlay {

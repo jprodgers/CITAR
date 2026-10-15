@@ -5,14 +5,18 @@
 //! citar-testkit's goldens.
 //!
 //! - `job::NAME` plays each job and holds everything to `golden/jobs.json`: the canonical spec
-//!   and its hash, the bots, the result and its hash, the chain's head, rounds and digests;
+//!   and its hash, the bots, the result and its hash, the chain's head, rounds and digests. The
+//!   result's keys that name the build (`engine`, each seat's `build` and `fingerprint`, a
+//!   reference line's `bot`) are held to this build's values (`GoldenJob::expected`): an edit
+//!   that moves the build id and changes no game needs no bless;
 //! - `determinism::*`: one job twice in one process and in two processes (this binary started
 //!   again with `CITAR_JOBS_GOLDEN_CHILD=NAME`, which plays NAME and prints its hashes), and a
 //!   lab and a reference job slowed between seat steps give the same hashes (no clock in a
 //!   result, 4-07's gate 3);
 //! - `self_check`: the self-check a job host runs passes, on the set's shortest job.
 //!
-//! **Blessing** (a deliberate change of what a job computes, as `cargo golden bless`):
+//! **Blessing** (a deliberate change of what a job computes, as `cargo golden bless`; not needed
+//! when only the build id moved):
 //! `CITAR_BLESS_JOBS=1 cargo test -p citar-jobs --test golden -- bless` rewrites the file from
 //! this build; commit it saying why. The bless trial is ignored without the variable.
 
@@ -23,7 +27,8 @@ use std::time::Duration;
 use citar_engine::rules::Ruleset;
 use citar_jobs::golden::{GoldenJob, GoldenSet, SELF_CHECK};
 use citar_jobs::{
-    Flow, Kind, Output, Progress, Unattended, chain_check, check_spec, jobs_build, result_hash, run,
+    Flow, Kind, Output, Progress, Unattended, chain_check, check_spec, jobs_build, result_fits,
+    result_hash, run,
 };
 use libtest_mimic::{Arguments, Failed, Trial};
 use serde_json::{Value, json};
@@ -50,7 +55,9 @@ fn same<T: PartialEq + std::fmt::Debug>(what: &str, got: T, want: T) -> Result<(
     if got == want { Ok(()) } else { Err(format!("{what}: got {got:?}, want {want:?}").into()) }
 }
 
-/// A job played, against the committed file.
+/// A job played, against the committed file: the spec, the chain and the result, the result
+/// with the keys that name the build given this build's values (`GoldenJob::expected`), so an
+/// edit that moves the build id and changes no game passes and a changed game does not.
 fn check_job(name: &str, job: &GoldenJob) -> Result<(), Failed> {
     let (checked, out) = play(job)?;
     same("the canonical spec", checked.canonical_value(), job.spec.clone())?;
@@ -59,16 +66,18 @@ fn check_job(name: &str, job: &GoldenJob) -> Result<(), Failed> {
     same("the rounds", out.chain.rounds, job.rounds)?;
     same("the digests", &out.chain.digests, &job.digests)?;
     same("the chain head", &out.chain.head, &job.chain_head)?;
-    same("the result", result_value(&out)?, job.result.clone())?;
-    same("the result hash", &out.result_hash, &job.result_hash)?;
+    let (_, want, want_hash) = job.expected(rules())?;
+    same("the result", result_value(&out)?, want)?;
+    same("the result hash", &out.result_hash, &want_hash)?;
     // The committed result read back as the server reads one gives the committed hash, and the
-    // committed chain folds to its head.
+    // committed chain folds to its head; what was played answers its spec.
     same(
         "the committed result's hash",
         result_hash(job.kind, &job.result)?,
         job.result_hash.clone(),
     )?;
     chain_check(&checked.hash, &job.chain()).map_err(|e| format!("{name}: {e}"))?;
+    result_fits(rules(), &checked, &out.result, &out.chain).map_err(|e| format!("{name}: {e}"))?;
     Ok(())
 }
 
@@ -131,7 +140,8 @@ fn slowed(set: &GoldenSet) -> Result<(), Failed> {
         if steps < job.rounds {
             return Err(format!("{name}: the control was asked only {steps} times").into());
         }
-        same(&format!("{name} slowed: the result hash"), &out.result_hash, &job.result_hash)?;
+        let (_, _, want) = job.expected(rules())?;
+        same(&format!("{name} slowed: the result hash"), &out.result_hash, &want)?;
         same(&format!("{name} slowed: the chain head"), &out.chain.head, &job.chain_head)?;
     }
     Ok(())
@@ -164,8 +174,10 @@ fn bless(set: &GoldenSet) -> Result<(), Failed> {
                  its canonical spec and spec hash, the bot versions it names, its result and \
                  result hash, and its chain (head, rounds and every round's digest). Checked by \
                  crates/citar-jobs/tests/golden.rs in the ci and release profiles, on five targets \
-                 in determinism.yml; the self-check plays duel-a. Blessed with CITAR_BLESS_JOBS=1 \
-                 cargo test -p citar-jobs --test golden -- bless, in a commit saying why.";
+                 in determinism.yml; the self-check plays duel-a. A build whose id differs checks \
+                 the results with their engine, builds, fingerprints and reference bot given its \
+                 own values. Blessed with CITAR_BLESS_JOBS=1 cargo test -p citar-jobs --test \
+                 golden -- bless, in a commit saying why, when what a game computes changes.";
     let blessed = GoldenSet { about: about.to_owned(), jobs };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("golden/jobs.json");
     std::fs::write(&path, blessed.text()?).map_err(|e| format!("{}: {e}", path.display()))?;

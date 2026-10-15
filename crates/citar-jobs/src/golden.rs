@@ -8,7 +8,8 @@
 //!   file in both the `ci` and the `release` profiles, locally and on five targets in
 //!   `determinism.yml`, so a target that computes another result fails there before any
 //!   volunteer's machine does; it is blessed like `cargo golden` (`CITAR_BLESS_JOBS=1`, then a
-//!   commit saying why);
+//!   commit saying why) when what a game computes changes, and not when only the build id moves
+//!   ([`GoldenJob::expected`]);
 //! - the self-check ([`crate::self_check`]), which plays [`SELF_CHECK`], the shortest job, before a
 //!   job host takes work, so a machine whose own build computes it otherwise is offered nothing;
 //! - the protocol's transcripts (`crates/citar-helper/protocol/v2/transcripts`), whose
@@ -16,11 +17,13 @@
 
 use std::collections::BTreeMap;
 
+use citar_engine::rules::Ruleset;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::hash::Chain;
-use crate::spec::Kind;
+use crate::fit::rebased;
+use crate::hash::{Chain, result_hash};
+use crate::spec::{Checked, Kind, check_spec};
 
 /// The set as committed.
 pub const JOBS_JSON: &str = include_str!("../golden/jobs.json");
@@ -51,6 +54,23 @@ impl GoldenJob {
     #[must_use]
     pub fn chain(&self) -> Chain {
         Chain { head: self.chain_head.clone(), rounds: self.rounds, digests: self.digests.clone() }
+    }
+
+    /// The job's spec checked against its committed hash, and the result and result hash this
+    /// build must give: the committed result with the keys that name the build (`engine`, each
+    /// seat's `build` and `fingerprint`, a reference line's `bot`) given this build's values
+    /// ([`crate::rebased`]). A build whose id has moved without any game changing (an edit of
+    /// the engine's or the bot's comments, a new version of CITAR) checks against the set as it
+    /// is; a change of what a game computes does not, and asks for a bless.
+    ///
+    /// # Errors
+    /// A spec that does not check or hash to its committed hash, or a result that does not read.
+    pub fn expected(&self, rules: &'static Ruleset) -> Result<(Checked, Value, String), String> {
+        let checked = check_spec(rules, self.kind, &self.spec, Some(&self.spec_hash))
+            .map_err(|e| format!("the spec: {e}"))?;
+        let result = rebased(rules, &checked, &self.result).map_err(|e| e.to_string())?;
+        let hash = result_hash(self.kind, &result).map_err(|e| e.to_string())?;
+        Ok((checked, result, hash))
     }
 }
 
