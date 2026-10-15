@@ -1,6 +1,10 @@
 //! The real model through the real binary (design/phase4-helper.md 4-04, gate 4): opt-in, with
-//! `CITAR_TEST_LMSTUDIO=http://localhost:1234` naming the machine's own LM Studio, and skipped
-//! otherwise. It reads LM Studio's model list (`/api/v0/models`) and requires
+//! `CITAR_TEST_LMSTUDIO=http://localhost:1234` naming the machine's own LM Studio. It is an
+//! ignored test, so a run that does not ask for it reports it skipped rather than passed:
+//! `CITAR_TEST_LMSTUDIO=http://localhost:1234 cargo nextest run -p citar-helper --features
+//! citar-helper/dev-guard --run-ignored only -E 'binary(real_model)' --no-capture` runs it, and
+//! asked for without the variable it fails, saying so. It reads LM Studio's model list
+//! (`/api/v0/models`) and requires
 //! `google/gemma-4-e2b` loaded before it sends anything and again after; it never loads, unloads
 //! or swaps a model, and a model that is not loaded fails the test with nothing sent to it
 //! (P4.7.1 rule 7). Then, through the binary and a hub of the test's own on loopback:
@@ -90,11 +94,11 @@ fn median(mut v: Vec<f64>) -> f64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "opt-in: CITAR_TEST_LMSTUDIO=http://localhost:1234, with google/gemma-4-e2b loaded in LM Studio, and --run-ignored only"]
 async fn the_real_model_answers_with_tools_and_a_cancel_stops_it() {
-    let Ok(base) = std::env::var("CITAR_TEST_LMSTUDIO") else {
-        eprintln!("skipped: set CITAR_TEST_LMSTUDIO=http://localhost:1234 to run it");
-        return;
-    };
+    let base = std::env::var("CITAR_TEST_LMSTUDIO").expect(
+        "the real-model test needs CITAR_TEST_LMSTUDIO=http://localhost:1234 (this machine's LM Studio)",
+    );
     let base = base.trim_end_matches('/').to_owned();
     let host_ok = ["http://localhost:", "http://127.0.0.1:", "http://[::1]:"]
         .iter()

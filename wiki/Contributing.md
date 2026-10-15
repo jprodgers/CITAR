@@ -353,15 +353,17 @@ fake model endpoint over HTTP on loopback, which streams with delays and records
 went), hold the session's own rules beyond them (`tests/session.rs`: a hostile server's frames, a
 flaky endpoint, quiet hours all week, a hardware file that never answers) and the proxy's
 (`tests/proxy.rs`: a cancel closing the endpoint's connection within a second, the parameters that
-reach it, its errors, the slots), run the real binary against a fake hub, a fake LM Studio and the
+reach it, its errors, the slots, `localhost` at once, a finished answer's connection kept for the
+next), run the real binary against a fake hub, a fake LM Studio and the
 fake endpoint on loopback (`tests/real_binary.rs`, about 35 s), and check the machine key's file
 permissions (`tests/keys.rs`); `tests/config_cases.rs` holds its settings to the table recorded
 from the 0.1.5 helper (`tests/data/helper_config_cases.json`). One test talks to a real model, and
-only when asked: with LM Studio on this machine already serving `google/gemma-4-e2b`,
-`CITAR_TEST_LMSTUDIO=http://localhost:1234 cargo nextest run -p citar-helper --features
-citar-helper/dev-guard -E 'binary(real_model)' --no-capture` sends it a request with a tool and
-cancels a long generation through the real binary. It reads LM Studio's model list before and
-after, never loads, unloads or swaps a model, and sends nothing when the model is not loaded. `citar-jobs` holds the one module of the helper
+only when asked (an ignored test, which other runs report as skipped): with LM Studio on this
+machine already serving `google/gemma-4-e2b`, `CITAR_TEST_LMSTUDIO=http://localhost:1234 cargo
+nextest run -p citar-helper --features citar-helper/dev-guard --run-ignored only -E
+'binary(real_model)' --no-capture` sends it a request with a tool and cancels a long generation
+through the real binary. It reads LM Studio's model list before and after, never loads, unloads or
+swaps a model, and sends nothing when the model is not loaded. `citar-jobs` holds the one module of the helper
 crates allowed `unsafe` (`src/sys/`), the operating-system calls no safe wrapper makes; `cargo
 xtask check` refuses `unsafe` anywhere else in them, and their test features and `dev-guard` in
 anything that ships.
