@@ -43,7 +43,8 @@ Parts:
   minute of 10-second samples lands as one power row of the machine, every sample the fake's draw; costing (run on the
   instance's own data, in a child with its environment) prices an activity holding the machine over that minute from
   the row, measured rather than estimated; every reading is a call in the fake's log and nothing else called it; and
-  a second machine's helper with ``--no-hardware --no-power`` reports no scan and writes no row.
+  a second machine's helper with ``--no-hardware --no-power`` reports no scan and writes no row. With ``--keep`` the
+  scanned machine's helper stays connected, for the browser checklist's H2 (the dialog's Rescan now).
 
 ``all`` runs every part written so far; later packages add ``lab`` (4-09), ``remote`` (4-10), ``verify`` (4-11,
 4-12), ``update`` (4-13), ``service`` (4-14), ``exit`` and ``real`` (4-15).
@@ -735,10 +736,15 @@ def part_scan(h) -> None:
         r.check("a helper started with --no-hardware --no-power reports no scan and writes no power row",
                 not quiet_report.get("hardware") and _rows(h, quiet_sid) == [],
                 json.dumps({"hardware": bool(quiet_report.get("hardware")), "rows": len(_rows(h, quiet_sid))}))
+        if h.keep:
+            # the browser checklist's H2: bob's scanned machine with its helper connected, for Rescan now
+            data.update(kept_helper=True)
+            helpers.remove(scanned)
     finally:
         for helper in helpers:
             helper.stop()
-        scripted.close()
+        if not h.keep:
+            scripted.close()
 
 
 # ---------------------------------------------------------------------------- the run
