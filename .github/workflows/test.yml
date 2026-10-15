@@ -99,7 +99,9 @@ jobs:
         # stand-in for the scan's probe programs that only such builds make (4-06), beside the helper.
         shell: bash
         run: |
-          cargo build --profile ci --locked -p citar-helper --features citar-helper/dev-guard
+          # both binaries named, as cargo xtask develop names them: with -p and citar-helper/dev-guard alone cargo
+          # built the helper but not citar-fake-probe, whose required feature it did not count as given
+          cargo build --profile ci --locked -p citar-helper --bin citar-helper --bin citar-fake-probe --features dev-guard
           mkdir -p helper
           cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
           cp "target/ci/citar-fake-probe${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
