@@ -114,7 +114,23 @@ class Memory(HostCase):
         self.assertIn(wanted, death.why)
         failures = host.failures(death)
         self.assertEqual([(f["run"], f["code"], f["retryable"]) for f in failures], [("cr_big", "memory", True)])
-        again = self.start(memory_mb=300)
+        self.next_host_plays()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux's fallback without the scope")
+    def test_without_the_scope_linux_holds_memory_by_rlimit(self):
+        host = self.start(memory_mb=300, scope=False)
+        self.assertEqual((host.ready["limits"]["cpu"], host.ready["limits"]["memory"]), ("soft", "hard"))
+        big = test_spec("alloc", {"mb": 500})
+        host.offer("cr_big", "alloc", big["spec"], big["spec_hash"], 60)
+        with self.assertRaises(H.HostError) as caught:
+            H.run_until(host, "cr_big", timeout=60)
+        death = caught.exception.death
+        self.assertEqual(death.kind, "memory", death)
+        self.assertIn("allocation failed", death.why)
+        self.next_host_plays(scope=False)
+
+    def next_host_plays(self, **kw):
+        again = self.start(memory_mb=300, **kw)
         small = test_spec("alloc", {"mb": 50})
         again.offer("cr_small", "alloc", small["spec"], small["spec_hash"], 60)
         out = H.run_until(again, "cr_small")[-1]
