@@ -1,7 +1,8 @@
-//! What this build of the helper is: `citar-helper --version`, and the hello's `helper` block
-//! (PROTOCOL.md: `version`, `build`, `jobs_build`, `target`, `label`). The jobs build is `none`
-//! until 4-07 gives the helper one; `--version` adds the machine key's fingerprint when the home
-//! holds a key (`app`).
+//! What this build of the helper is: `citar-helper --version` and `--self-test`, and the hello's
+//! `helper` block (PROTOCOL.md: `version`, `build`, `jobs_build`, `target`, `label`). The jobs
+//! build is the job host's (P4.4.5); the hello names it once the helper runs jobs (4-10, until
+//! when it says none, so no job is offered). `--version` adds the machine key's fingerprint when
+//! the home holds a key (`app`).
 
 use citar_engine::rules::Ruleset;
 
@@ -26,7 +27,7 @@ pub struct BuildInfo {
     pub label: &'static str,
     /// The protocol it speaks.
     pub protocol: u32,
-    /// The jobs compatibility key (P4.4.5); `None` before 4-07, and never offered a job.
+    /// The jobs compatibility key (P4.4.5): what this binary's job host computes with.
     pub jobs_build: Option<String>,
 }
 
@@ -40,7 +41,7 @@ pub fn build_info() -> BuildInfo {
         target: TARGET,
         label: info.label,
         protocol: PROTOCOL,
-        jobs_build: None,
+        jobs_build: Some(citar_jobs::jobs_build(Ruleset::shared())),
     }
 }
 

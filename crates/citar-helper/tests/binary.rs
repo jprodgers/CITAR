@@ -1,6 +1,8 @@
-//! The binary's command line: `--version` prints the build and exits 0; a command line it does not
-//! take exits 2, as argparse did; `setup` asks the first-run questions and saves them owner-only.
-//! The connection's tests are `tests/real_binary.rs`.
+//! The binary's command line: `--version` prints the build and exits 0; `--self-test` runs the
+//! job host's canary and self-check (4-08); `job-host` is the job host, played here from the
+//! parent's side (`citar_jobs::host::parent`); a command line it does not take exits 2, as
+//! argparse did; `setup` asks the first-run questions and saves them owner-only. The connection's
+//! tests are `tests/real_binary.rs`.
 
 use std::process::Command;
 
@@ -20,7 +22,82 @@ fn version_prints_the_build_and_exits_zero() {
     let line = String::from_utf8(out.stdout).expect("UTF-8");
     let want = citar_helper::version::build_info().line();
     assert_eq!(line.trim_end(), want);
-    assert!(line.contains("protocol 2") && line.contains("jobs build none"), "{line}");
+    let jobs = citar_jobs::jobs_build(citar_engine::rules::Ruleset::shared());
+    assert!(line.contains("protocol 2") && line.contains(&format!("jobs build {jobs}")), "{line}");
+}
+
+/// `--self-test` prints the version, the build, the jobs build and the target, runs the canary
+/// and the self-check, and passes (4-08's gate 6).
+#[test]
+fn self_test_prints_the_build_and_passes() {
+    let out = Command::new(BIN).arg("--self-test").output().expect("the binary runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    let info = citar_helper::version::build_info();
+    let first = text.lines().next().unwrap_or_default();
+    assert_eq!(first, info.line());
+    let jobs = info.jobs_build.clone().expect("a jobs build");
+    for part in [info.version, &info.build, &jobs, info.target] {
+        assert!(first.contains(part), "{part} in {first}");
+    }
+    assert!(text.contains("canary: ok") && text.contains("self-check: ok (duel-a"), "{text}");
+    assert!(text.trim_end().ends_with("self-test: passed"), "{text}");
+}
+
+/// `citar-helper job-host` is a job host: started as the helper will start it, it holds its
+/// limits as this OS can, takes the parent's jobs build and plays a golden job to its committed
+/// hash; told another jobs build, it refuses to start.
+#[test]
+fn job_host_plays_a_job_for_its_parent() {
+    use citar_jobs::host::parent::{self, Event, Program, SpawnError, Wrapper};
+    use citar_jobs::host::{FromHost, Offer, ToHost};
+    use citar_jobs::limits::{Hardness, Requested};
+
+    let rules = citar_engine::rules::Ruleset::shared();
+    let program = Program { program: BIN.into(), args: vec!["job-host".into()], env: Vec::new() };
+    let cpus = citar_jobs::limits::machine_cpus();
+    let req =
+        Requested { threads: 1, cpu_percent: (200 / cpus.max(1)).clamp(1, 100), memory_mb: 300 };
+    let build = citar_jobs::jobs_build(rules);
+    let wait = std::time::Duration::from_secs(120);
+    let mut host = parent::spawn(&program, Wrapper::detect(), &req, &build, wait).expect("ready");
+    let ready = host.ready().clone();
+    assert!(ready.verifiable && ready.counting && ready.jobs_build == build, "{ready:?}");
+    if cfg!(windows) {
+        assert_eq!((ready.limits.cpu, ready.limits.memory), (Hardness::Hard, Hardness::Hard));
+    }
+    let set = citar_jobs::golden::GoldenSet::committed().expect("the set");
+    let job = &set.jobs[citar_jobs::golden::SELF_CHECK];
+    let (_, _, want) = job.expected(rules).expect("expected");
+    host.send(&ToHost::JobOffer(Offer {
+        run: "cr_helper".to_owned(),
+        job: None,
+        kind: job.kind.name().to_owned(),
+        spec: job.spec.clone(),
+        spec_hash: job.spec_hash.clone(),
+        jobs_build: build.clone(),
+        deadline_s: 600.0,
+        mem_mb: 0,
+        priority: 0,
+    }))
+    .expect("sent");
+    let result = loop {
+        match host.next(wait) {
+            Some(Event::Frame(FromHost::JobResult(r))) => break r,
+            Some(Event::Frame(FromHost::JobReject(r))) => panic!("{r:?}"),
+            Some(Event::Frame(FromHost::JobFailed(f))) => panic!("{f:?}"),
+            Some(Event::Frame(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(result.outcome.result_hash, want);
+    assert_eq!(result.outcome.chain.head, job.chain_head);
+    assert!(result.outcome.peak_mb > 0.0, "{:?}", result.outcome);
+    assert!(host.close().is_some_and(|s| s.success()));
+    match parent::spawn(&program, Wrapper::Direct, &req, "000000000000", wait) {
+        Err(SpawnError::Refused(f)) => assert!(f.message.contains("000000000000"), "{f:?}"),
+        other => panic!("another jobs build: {other:?}"),
+    }
 }
 
 #[test]

@@ -67,7 +67,7 @@ use citar_engine::rules::Ruleset;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::canary::{Inject, canary_injected, self_check};
+use crate::canary::{Inject, SelfCheck, canary_injected, self_check};
 use crate::hash::Chain;
 use crate::limits::{self, Held, Requested};
 use crate::spec::{Checked, Kind, check_spec, clip};
@@ -637,7 +637,7 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         (Held { cpu: limits::Hardness::Soft, memory: limits::Hardness::Soft }, None),
         |a| (a.held, a.cgroup.clone()),
     );
-    let check = verify(rules, setup.canary);
+    let check = self_test(rules, setup.canary).map(|_| ());
     if let Err(why) = &check {
         log(&format!("not verifiable: {why}"));
     }
@@ -700,14 +700,19 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
     0
 }
 
-/// The canary and the self-check, on a thread made as run threads are.
-fn verify(rules: &'static Ruleset, inject: Inject) -> Result<(), String> {
+/// The canary (with `inject`, the test switch, in place of what it computes where it gives a
+/// value) and the self-check, on a thread made as run threads are: what a host runs before
+/// `ready`, and `citar-helper --self-test`.
+///
+/// # Errors
+/// What failed: the canary's check, or how the self-check's job came out otherwise.
+pub fn self_test(rules: &'static Ruleset, inject: Inject) -> Result<SelfCheck, String> {
     let checked = std::thread::Builder::new()
         .name("citar-host-self-check".to_owned())
         .stack_size(RUN_STACK)
         .spawn(move || {
             canary_injected(&inject).map_err(|e| format!("the canary: {e}"))?;
-            self_check(rules).map(|_| ()).map_err(|e| format!("the self-check: {e}"))
+            self_check(rules).map_err(|e| format!("the self-check: {e}"))
         })
         .map_err(|e| format!("the self-check's thread: {e}"))?;
     checked.join().unwrap_or_else(|_| Err("the self-check panicked".to_owned()))
