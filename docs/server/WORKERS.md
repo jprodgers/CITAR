@@ -334,6 +334,37 @@ and the server's machine dialog shows "not lent by this machine's owner". The `c
 ceiling: the helper takes the smaller of each of the server's figures and yours, and tells the
 server what it will actually do.
 
+### CPU limits, per operating system
+
+CPU work runs in a **job host**: a child process of the helper (`citar-helper job-host`, which you
+never start yourself) that plays the games under the limits in effect, so that a game's crash, a
+game that runs out of memory or one that hangs never touches the helper's connection, and the
+operating system has one process to hold to the limits. The server plays its own share of the
+lab's games the same way, in a child of its own (`python -m citar.jobs host`), under its machine's
+CPU settings. The limits are **hard** where the operating system can enforce them whatever the
+games do, and **soft** where the job host can only lower its own priority or watch itself; the
+helper reports which, and the server's machine dialog shows it:
+
+| Operating system | CPU (`cpu_percent` of the whole machine) | Memory (`memory_mb`, every game together) | Reported |
+|---|---|---|---|
+| Windows | a Job Object with a hard CPU rate, at below-normal priority | the same Job Object's memory limit | hard, hard |
+| Linux, with a user service manager (a desktop session, or `loginctl enable-linger`) | a `systemd-run --user --scope` with `CPUQuota` | the scope's `MemoryMax` (with no swap) | hard, hard |
+| Linux otherwise (a server's system service, a container) | `nice 10` and the number of threads | `RLIMIT_DATA` | soft, hard |
+| macOS | the background priority band (on Apple silicon, the efficiency cores) and the number of threads | a watchdog that ends the job host past the limit, checked twice a second | soft, soft |
+
+`threads` is the most games at once everywhere: the job host refuses more. A game that needs more
+memory than its share ends the whole job host: its games fail as `memory` and are played again
+elsewhere (the server learns how much they needed), and the helper starts a new job host for the
+next one. A job host that cannot put its limits in place refuses to start rather than run without
+them. If you need hard limits on a Mac, lend fewer threads.
+
+Before it takes any work, the job host checks that this machine computes games as every other
+machine does: a floating-point check (some libraries switch the processor to a mode that rounds
+tiny numbers to zero) and a short reference game whose result is known. A machine that fails
+either is offered no work at all, so it is never blamed for results it could not get right.
+`citar-helper --self-test` runs the same checks and prints the helper's version, its build and its
+jobs build (what its job host computes with; only machines of the same jobs build are compared).
+
 **The machine key.** On its first run the helper makes a key for the machine (`helper/machine-key.json`).
 The server registers it at the first connection and refuses a later connection that presents
 another one, until the machine's owner resets the key on the Servers page; `citar-helper --version

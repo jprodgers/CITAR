@@ -328,6 +328,17 @@ helper lending its CPU play with the same Rust, so their results can be compared
   that refuses a machine flushing denormals. The keys of a result that name the build (`engine`, each seat's
   `build` and `fingerprint`) are checked with this build's values (`citar_jobs::rebased`), so an edit that moves
   the build id and changes no game passes, and only a change of what a game computes asks for a bless.
+- **The job host** (`citar_jobs::host`, P4.4.3): the one program that plays jobs, a child process of the helper
+  (`citar-helper job-host`) and of the server (`python -m citar.jobs host`, started by `citar.jobs.host`), so a
+  crash, an out-of-memory death or a hung game stays away from the connection or the server, and the OS has one
+  process to hold to the limits (`citar_jobs::limits`: a Job Object on Windows, a `systemd --user` scope or
+  `RLIMIT_DATA` on Linux, the background band and a watchdog on macOS). It speaks the job frames as JSON lines
+  on its standard input and output, refuses a parent of another jobs build, runs the canary and the self-check
+  before its `ready`, plays each run on a thread of its own with its memory counted apart (the program's
+  `#[global_allocator]` is `citar_jobs::Counting`), checks abort, pause and the deadline between seat steps, and
+  ends its runs when its input closes. Its parent (`citar_jobs::host::parent`, and the same rules in
+  `citar/jobs/host.py`) classifies its death: the allocation-failure line, the scope's `oom_kill` or the
+  watchdog's line make a `memory` death, which fails every run of it as `memory`.
 
 ### Hybrid seats: the bot's turn, the model's diplomacy
 
