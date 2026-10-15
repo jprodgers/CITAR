@@ -40,7 +40,6 @@ import argparse
 import importlib.util
 import json
 import os
-import socket
 import statistics
 import sys
 import threading
