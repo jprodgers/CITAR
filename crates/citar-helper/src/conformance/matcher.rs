@@ -187,6 +187,38 @@ impl Golden for NoGolden {
     }
 }
 
+/// The committed golden sets: `jobs`, citar-jobs' `golden/jobs.json` (4-07), whose entry NAME is
+/// `jobs[NAME]` and whose FIELD is that entry's (`spec`, `spec_hash`, `bots`, `result`,
+/// `result_hash`, `chain_head`, `rounds`, `digests`).
+#[derive(Clone, Debug)]
+pub struct Committed {
+    jobs: Value,
+}
+
+impl Committed {
+    /// The sets as committed.
+    ///
+    /// # Errors
+    /// A golden file that does not read.
+    pub fn load() -> Result<Self, String> {
+        let set = citar_jobs::golden::GoldenSet::committed()?;
+        Ok(Self { jobs: serde_json::to_value(&set.jobs).map_err(|e| e.to_string())? })
+    }
+}
+
+impl Golden for Committed {
+    fn value(&self, set: &str, path: &[String]) -> Option<Value> {
+        if set != "jobs" {
+            return None;
+        }
+        let mut v = &self.jobs;
+        for p in path {
+            v = v.get(p.as_str())?;
+        }
+        Some(v.clone())
+    }
+}
+
 /// The values bound to `<id:NAME>` so far in a transcript, across both directions.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Bindings(pub BTreeMap<String, Value>);

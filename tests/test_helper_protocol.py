@@ -341,12 +341,13 @@ class Transcripts(unittest.TestCase):
         all_ = F.transcripts()
         self.assertGreaterEqual(len(all_), 60)
         canonical = F.canonical_examples()
+        golden = F.committed_golden()
         realized = 0
         for t in all_:
             bindings = {}
             for i, sender, pattern, invalid in t.frames():
                 with self.subTest(transcript=t.name, step=i):
-                    real = F.realize(pattern, bindings, t.values, F.no_golden,
+                    real = F.realize(pattern, bindings, t.values, golden,
                                      canonical.get((sender, pattern["t"])))
                     text = json.dumps(real)
                     if invalid:
@@ -359,6 +360,31 @@ class Transcripts(unittest.TestCase):
                                         f"a field the protocol drops:\n  {real}\n  {back}")
                     realized += 1
         self.assertGreater(realized, 300)
+
+    def test_every_golden_reference_resolves(self):
+        """The ``<golden:SET/NAME[/FIELD]>`` values the transcripts name are the committed jobs set's (4-07)."""
+        refs = set()
+
+        def walk(v):
+            if isinstance(v, str) and v.startswith("<golden:"):
+                refs.add(v)
+            elif isinstance(v, list):
+                for x in v:
+                    walk(x)
+            elif isinstance(v, dict):
+                for x in v.values():
+                    walk(x)
+
+        for p in (F.FIXTURES / "transcripts").glob("*.json"):
+            walk(json.loads(p.read_text(encoding="utf-8")))
+        self.assertGreaterEqual(len(refs), 10)
+        golden = F.committed_golden()
+        for r in sorted(refs):
+            m = F.parse_matcher(r)
+            self.assertEqual(m.kind, "golden", r)
+            self.assertIsNotNone(golden(m.golden[0], m.golden[1:]), r)
+        self.assertIsNone(golden("jobs", ("duel-z",)))
+        self.assertIsNone(golden("other", ("duel-a",)))
 
     def test_the_transcripts_cover_the_protocol(self):
         names = {t.name for t in F.transcripts()}

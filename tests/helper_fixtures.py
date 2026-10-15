@@ -236,6 +236,27 @@ def no_golden(set_name: str, path: tuple):
     return None
 
 
+#: The jobs golden set (crates/citar-jobs/golden/jobs.json, package 4-07): ``<golden:jobs/NAME/FIELD>``.
+JOBS_GOLDEN = ROOT / "crates" / "citar-jobs" / "golden" / "jobs.json"
+
+
+def committed_golden() -> Golden:
+    """The committed golden sets: ``jobs``, whose entry NAME is ``jobs[NAME]`` and whose FIELD is that entry's (spec,
+    spec_hash, bots, result, result_hash, chain_head, rounds, digests). Unknown sets and names give None."""
+    jobs = json.loads(JOBS_GOLDEN.read_text(encoding="utf-8"))["jobs"]
+
+    def golden(set_name: str, path: tuple):
+        if set_name != "jobs":
+            return None
+        v = jobs
+        for p in path:
+            if not isinstance(v, dict) or p not in v:
+                return None
+            v = v[p]
+        return v
+    return golden
+
+
 class Mismatch(AssertionError):
     def __init__(self, path: str, why: str):
         super().__init__(f"at {path or 'the root'}: {why}")
