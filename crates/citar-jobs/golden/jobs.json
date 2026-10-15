@@ -1,5 +1,5 @@
 {
-  "about": "The jobs golden set (design/phase4-helper.md P4.4.5): four short jobs, each with its canonical spec and spec hash, the bot versions it names, its result and result hash, and its chain (head, rounds and every round's digest). Checked by crates/citar-jobs/tests/golden.rs in the ci and release profiles, on five targets in determinism.yml; the self-check plays duel-a. Blessed with CITAR_BLESS_JOBS=1 cargo test -p citar-jobs --test golden -- bless, in a commit saying why.",
+  "about": "The jobs golden set (design/phase4-helper.md P4.4.5): four short jobs, each with its canonical spec and spec hash, the bot versions it names, its result and result hash, and its chain (head, rounds and every round's digest). Checked by crates/citar-jobs/tests/golden.rs in the ci and release profiles, on five targets in determinism.yml; the self-check plays duel-a. A build whose id differs checks the results with their engine, builds, fingerprints and reference bot given its own values. Blessed with CITAR_BLESS_JOBS=1 cargo test -p citar-jobs --test golden -- bless, in a commit saying why, when what a game computes changes.",
   "jobs": {
     "duel-a": {
       "kind": "lab_game",
@@ -195,7 +195,17 @@
             "bot": "basic",
             "difficulty": null,
             "params": {
+              "policy_order_peaceful": [
+                "Liberty",
+                "Tradition",
+                "Honor"
+              ],
               "prod_mode": "classic",
+              "promo_lines": [
+                "Drill",
+                "Shock",
+                "Accuracy"
+              ],
               "tech_noise": 0.25
             },
             "aggression": 0.9,
@@ -222,7 +232,7 @@
         "map_edges": "wrap_x",
         "river_density": 1.5
       },
-      "spec_hash": "3b97dff8bc1a327143cdf4a7e503cd910149baea5eb1fa61c7d9c6c5a2e5b74f",
+      "spec_hash": "9efc2917293e36f16713c48369295773af922dfd2308fcef6e44fc66f546d099",
       "bots": [
         "basic-1",
         "idle"
@@ -248,9 +258,19 @@
             "profile_name": "Classic production",
             "build": "0b412a18fe95",
             "version": "basic-1",
-            "fingerprint": "2fb237b8d963",
+            "fingerprint": "36c364dd1d92",
             "params": {
+              "policy_order_peaceful": [
+                "Liberty",
+                "Tradition",
+                "Honor"
+              ],
               "prod_mode": "classic",
+              "promo_lines": [
+                "Drill",
+                "Shock",
+                "Accuracy"
+              ],
               "tech_noise": 0.25
             },
             "fixed_aggression": 0.9,
@@ -313,8 +333,8 @@
         "errors": [],
         "engine": "0b412a18fe95"
       },
-      "result_hash": "925f6dc8903ee59160b22458dcd5a1fe7ae2079aa73dba94c3f2cff654c659cd",
-      "chain_head": "a585c1515100351deec416b51f559efcf3c60b3fa35ea4e604c9db271a68cdd2",
+      "result_hash": "e478a22f70f76196224a45b8e0d462bfd751f801c75d763d6b802de77f6498f7",
+      "chain_head": "e8abd15be42246b35c91662b7eae6f92d115ef6f28e6843177981d2a8f2471d7",
       "rounds": 30,
       "digests": [
         "57f702f562a05f8f2946b505416303e9f46976b57f6d3121de6c41195ca7225a",
@@ -504,14 +524,22 @@
             "bot": "basic-1",
             "difficulty": null,
             "params": {
-              "aggressive_above": 0.4
+              "aggressive_above": 0.4,
+              "promo_in_city": [
+                "Cover",
+                "Drill"
+              ]
             },
             "aggression": null,
             "profile": null,
             "profile_rev": null,
             "profile_name": null,
             "levels": {
-              "aggressive_above": 0.4
+              "aggressive_above": 0.4,
+              "promo_in_city": [
+                "Cover",
+                "Drill"
+              ]
             },
             "nation": null
           },
@@ -520,14 +548,20 @@
             "bot": "basic-1",
             "difficulty": null,
             "params": {
-              "aggressive_above": 0.7
+              "aggressive_above": 0.7,
+              "promo_in_city": [
+                "Shock"
+              ]
             },
             "aggression": null,
             "profile": null,
             "profile_rev": null,
             "profile_name": null,
             "levels": {
-              "aggressive_above": 0.7
+              "aggressive_above": 0.7,
+              "promo_in_city": [
+                "Shock"
+              ]
             },
             "nation": null
           },
@@ -572,7 +606,7 @@
           }
         }
       },
-      "spec_hash": "59023e6249e38e6574179281b28858dd88ac079debcf55d0032377b2398c0276",
+      "spec_hash": "a96f407b79a0ccde0e2e223ff0650ced2a5ce2f5488996c997964ddf6469ae19",
       "bots": [
         "basic-1"
       ],
@@ -592,16 +626,24 @@
             "difficulty": "Prince",
             "alive": true,
             "levels": {
-              "aggressive_above": 0.4
+              "aggressive_above": 0.4,
+              "promo_in_city": [
+                "Cover",
+                "Drill"
+              ]
             },
             "profile": null,
             "profile_rev": null,
             "profile_name": null,
             "build": "0b412a18fe95",
             "version": "basic-1",
-            "fingerprint": "faf5f82929aa",
+            "fingerprint": "5e038201c630",
             "params": {
-              "aggressive_above": 0.4
+              "aggressive_above": 0.4,
+              "promo_in_city": [
+                "Cover",
+                "Drill"
+              ]
             },
             "fixed_aggression": null,
             "aggression": 0.417,
@@ -619,7 +661,7 @@
             "era_turn": {},
             "events": {
               "city_founded": 1,
-              "unit_captured": 4
+              "unit_captured": 2
             },
             "built_top": {
               "Monument": 1,
@@ -633,16 +675,22 @@
             "difficulty": "Prince",
             "alive": true,
             "levels": {
-              "aggressive_above": 0.7
+              "aggressive_above": 0.7,
+              "promo_in_city": [
+                "Shock"
+              ]
             },
             "profile": null,
             "profile_rev": null,
             "profile_name": null,
             "build": "0b412a18fe95",
             "version": "basic-1",
-            "fingerprint": "bc1bdab76be7",
+            "fingerprint": "57d18e354c36",
             "params": {
-              "aggressive_above": 0.7
+              "aggressive_above": 0.7,
+              "promo_in_city": [
+                "Shock"
+              ]
             },
             "fixed_aggression": null,
             "aggression": 0.25,
@@ -666,7 +714,7 @@
               "Monument": 2,
               "Scout": 1,
               "Settler": 1,
-              "Spearman": 1,
+              "Spearman": 2,
               "Warrior": 2
             }
           },
@@ -751,8 +799,8 @@
         "errors": [],
         "engine": "0b412a18fe95"
       },
-      "result_hash": "ec0ef9f40007cb47b5e36dd820263df758b4adfb22091cc77002afae17c38592",
-      "chain_head": "651f6b88a4a8b0c8c3708966a3fa728d31693e9dae6395fd6edab2009137d655",
+      "result_hash": "35234a2944b913a0247438e1d5fcc284ee7b01e705270c86244e8a47f96dcce9",
+      "chain_head": "0ffa47ef593feb8c9efd26bc55f2c196dcca4731a2374bacc9e4b229fad1dfd2",
       "rounds": 40,
       "digests": [
         "ec2decbbe7c64d808327a4526ddb7e0b189c729e37081bf2165220b4121adcf3",
@@ -771,30 +819,30 @@
         "1d37fde9d3331a20ba6d702ce7bca3d8fd4cf156285072b032e6eb5dadfa6a38",
         "4c60e95c6f7d7b58c4323b09406a65192c3c6312c85e2d1fad4762b809bcff38",
         "3ed880008ad045c511acf91e4db1c90ab6ac5678c154204f936cbcfc3e86baed",
-        "9fdd124337a53ee136fee5321e3ed72e5ff38e2bfdda65149b81f654aad51422",
-        "abd404beb3bbd4acf626e11046ea7b2c1168cea5b4a471da6a4a7e905a246301",
-        "03a1af78ae55a0d39a96e8444cc0fb8b32087cc6469c6c56979ea121bc826af4",
-        "ebda25d505e11211250945c45f966e9056d532cf84e5c2b2ef71506582a62c37",
-        "72742dc9e84ede0105e13075ffefb2df1b7437a1eaec1afa27772bfec43b1963",
-        "7d2010cf857a3707805dffa00ad9a7f5f8b030e67c438525c105047477fc4ea5",
-        "ac2c9744b131630fc124ed18dc78916549afe5f5fbbc16745820af39cdd89732",
-        "154709935b014e1470222c2a686546e729af02da7882ca00e30ee9e8c2e2834b",
-        "e0a11099a28e6e55abb53e8155eea399c969c4b672ad825d2916b6f806eec362",
-        "019886c126d54ae6ba0cbc2e24ed38738c4926dd5cb30032babf36b0c28aa832",
-        "6c5006ab758da95281ef2d90dfb7ba94e0fea9a4cd69a7f517428fb1625fda15",
-        "82ee7a77558c1e4a940993e1f1568a5e86d16bb0331753e61d7f9eef3a2533da",
-        "15521d15dd736b35dbc74c7eb7f9e397fb5d50b9a3b3200cec7fa9b90dfd09bc",
-        "63aca1f91601f9311dabd0db03b481438620b2231d3c0bab361f135c4006609c",
-        "0a68838155315120ae8a0581a48b8e3890dbe66e55a03d9079ddf63b5cc379dc",
-        "82201867a17a966182ea5bd04323b6f49c6a699709ecd2d44c998af80067742c",
-        "9ca99b5bc0ced7db4517cf5e1ff34c11f07831419178eeaa4f087d13a7b0c5a9",
-        "f936e8c0ac5acf3ad0c7e3d5e9583a7f50a240adb1d2dd2cbd1f409541a9fe97",
-        "2c34ac9f06ed2632a28ce2a7125d76f278c7babd51663ade1fd132ac03a1ef5a",
-        "72c4a6f57d5bafcf842225004beddda953bf1ad87924838143e03fe50ea3c701",
-        "506954f4bd2fcb5ba8722083efb22258e6802e581acbee1148047ec120ae05bb",
-        "dcc64db4ccb4c1de4d813d4ba1f57c6075f89ece5eae35eb882c5184e964e568",
-        "ccb2fedfcc85b7f2301a3e314a504fe50bf6afdb84a2eef1cb20f7491ef0c4fc",
-        "d56f67c1561ac0439df1514794319cee98c5c7fe1c8e942bfcfc5ac7debcbc8e"
+        "7f5cdf69e617f1d977562bfccd921f7945551eac0772eefca320bdbf70a0a50e",
+        "c42c78bf01ad3707590af0fba84aacd286292c1140a2f1fb11a9a2d0d007fd3e",
+        "7a9905fb45325b31af0f7aa91d93c0d4e19bac12c3af90cc4154dbdb58be9d4d",
+        "ef4c985d1f0c03b081b2cdd6d9d802bd2741c2c4ffcb4abb197653e7ce09f7cf",
+        "202849c767f6d71312aa1671fd8d787f0756a33f265312b165d9298ada2961c2",
+        "5963c708467c9f35509ca14450ab522e4fe64aa1aca835787cbe99ea1495c974",
+        "aa10c6413398335f1218be6ac27141f73c8ded2c3e19c05744c31765de28480a",
+        "eeadd31de9addba757d930548bd6904a0be53b735b445fe9cebe55c63a88c872",
+        "8be1d754f7be49d89f0f3a123479f5b9dbd75a0d3eb9811dbf7c2e4c6a8bda46",
+        "b00d1dc68b9b6fc67800f5517e9d0944fad4798d39ee186b4c4eb7e112ac1fb1",
+        "71644c605ef460bb66bae2f426e899fd6a8d1e6d21a01b1affc8fad9c81fdb67",
+        "6dbe6dde66fdced973273805114457a3faa5e806ecdebc88bcb1bbac4bce9090",
+        "59a898493ed238aa646496da166c4cada629bfcb198b86fe111f9433cd390465",
+        "7fe18cf04ce932737881957e29ea2221c4103884556b4efe9b74d20985d9e2bb",
+        "a313ad3ad09993900cdd8e1877c1ff7238d56ff68c14c86d68dfd1afa659308e",
+        "4da7195c93d3356b2cf0ff169c920112c6f089dd99c6de006387a6771013b845",
+        "1d1a1f7a257fc150987730c15de044ba0ef2ef32eb9c5db5389a0624362b895d",
+        "dae2287a17ca3d36506bb4086455c74517c7e8af42d4f36b311508a0d57c07e7",
+        "fcf2b41a27da6065d5a7d33b75d50e4d37e2a21c758636845fdb0a8446890113",
+        "01748ccf5887babac69eaebe02734a89a0a2110026bd7adf56204171100f4cdb",
+        "be9fcab21dc96bda517129551dd511903c1a9c7005e17e33d2d4d511d95013c0",
+        "1e3bf576ea0d12e65e8615cc8398feed62eabaf22fbffbaaca53a2c4662fed1a",
+        "2cc2df787d8f89d07e3a2e26b1527352c73303ea50f606d4534e2c5f05110c3b",
+        "da1c345a39536575d9e86a532e75464282c9614811cabd4b2a665bd4e9117780"
       ]
     }
   }

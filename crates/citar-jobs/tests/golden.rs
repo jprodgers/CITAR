@@ -215,6 +215,19 @@ fn main() {
         let shortest = s.jobs.iter().min_by_key(|(n, j)| (j.rounds, n.as_str())).map(|(n, _)| n);
         same("the shortest job", shortest.map(String::as_str), Some(SELF_CHECK))?;
         same("the kinds", s.jobs.values().filter(|j| j.kind == Kind::ReferenceGame).count(), 1)?;
+        // A seat's list and order overrides, and a level that is a list, are pinned on every
+        // target: their canonical bytes are in the spec hashes.
+        let lists = |key: &str| {
+            s.jobs.values().any(|j| {
+                j.spec["seats"].as_array().is_some_and(|seats| {
+                    seats.iter().any(|seat| {
+                        seat[key].as_object().is_some_and(|m| m.values().any(Value::is_array))
+                    })
+                })
+            })
+        };
+        same("a seat with a list override", lists("params"), true)?;
+        same("a seat with a list level", lists("levels"), true)?;
         Ok(())
     }));
     trials.push(Trial::test("self_check", || {
