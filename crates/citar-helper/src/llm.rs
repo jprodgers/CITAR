@@ -12,7 +12,8 @@
 //!   `openai`; a model such a server lists is one it serves, so it counts as loaded.
 //!
 //! Completions go to `<base>/chat/completions` on every kind (all four speak OpenAI's chat API),
-//! each on a connection of its own ([`crate::http1`]), so a cancel closes it at once.
+//! each on a connection it owns while it runs ([`crate::http1`]), so a cancel closes it at once; a
+//! finished answer's connection is kept for the next completion ([`http1::Pool`]).
 //!
 //! The configured base URL is the only address dialled (P4.3.4, P4.3.10): no system proxy, and no
 //! redirect is followed (a 3xx is an endpoint error naming where it pointed). A configured model
@@ -100,6 +101,8 @@ pub struct HttpEndpoint {
     origin: Result<Origin, String>,
     /// TLS for an `https` endpoint's completions: the same configuration as the listings'.
     tls: Arc<rustls::ClientConfig>,
+    /// The completions' connections kept between them, and the address that answered last.
+    pool: Arc<http1::Pool>,
     /// LM Studio's last answer from its own API, and when it came.
     last_v0: Mutex<Option<(Instant, BTreeMap<String, V0Model>)>>,
 }
@@ -132,8 +135,15 @@ impl HttpEndpoint {
             api_key,
             origin: Origin::parse(base_url),
             tls: tls_completions,
+            pool: Arc::default(),
             last_v0: Mutex::new(None),
         })
+    }
+
+    /// The completions' connections waiting idle for the next one.
+    #[must_use]
+    pub fn idle_connections(&self) -> usize {
+        self.pool.idle_count()
     }
 
     /// The server's root: the base without its `/v1`.
@@ -278,8 +288,16 @@ impl Endpoint for HttpEndpoint {
             if let Some(k) = &self.api_key {
                 headers.push(("authorization", format!("Bearer {k}")));
             }
-            http1::post(origin, Some(&self.tls), "/chat/completions", &headers, body, LIST_TIMEOUT)
-                .await
+            http1::post(
+                origin,
+                Some(&self.tls),
+                &self.pool,
+                "/chat/completions",
+                &headers,
+                body,
+                LIST_TIMEOUT,
+            )
+            .await
         })
     }
 }

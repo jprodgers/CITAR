@@ -16,7 +16,8 @@
 //!   endpoint that answers JSON to a streaming request is read as unstreamed.
 //! - **Real cancel:** the completion's connection belongs to its task ([`crate::http1`]), so
 //!   aborting the task closes it there and then, and [`Flights`] reports `cancelled` only once the
-//!   task is gone, with the tokens it had received ([`Progress`]).
+//!   task is gone, with the tokens it had received ([`Progress`]). Only a finished answer's
+//!   connection is kept for the next completion ([`crate::http1::Pool`]).
 //! - **Bounds**, so that a broken or odd endpoint makes the helper hold nothing unbounded and send
 //!   nothing the hub refuses: at most [`MAX_ASSEMBLED`] bytes of text (a `done` must fit the
 //!   protocol's 8 MiB frame), a server-sent line or event at most as long, at most
@@ -579,7 +580,6 @@ async fn complete(
     let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
     let mut stream =
         prefer_stream && !(has_tools && quirks.no_stream_with_tools.load(Ordering::Relaxed));
-    let started = Instant::now();
     loop {
         let mut resp = match ep.complete(body(&req, stream)).await {
             Ok(r) => r,
@@ -619,7 +619,7 @@ async fn complete(
         let mut ttft = None;
         if streamed {
             if let Err((message, retryable)) =
-                read_stream(&mut resp, &mut asm, &mut ttft, started, &progress, &log).await
+                read_stream(&mut resp, &mut asm, &mut ttft, &progress, &log).await
             {
                 return failed(RequestErrorCode::Endpoint, message, retryable);
             }
@@ -653,8 +653,10 @@ async fn complete(
                 return failed(RequestErrorCode::Endpoint, too_large(), false);
             }
         }
-        let gen_s = seconds(started.elapsed());
-        drop(resp);
+        // From sending the request that answered (P4.2.4), not from dialling the endpoint.
+        let gen_s = seconds(resp.sent.elapsed());
+        // The answer is whole: its connection may carry the next completion.
+        resp.recycle();
         let (message, finish_reason, usage) = asm.into_parts(&log);
         return Outcome::Done(Done {
             id: req.id,
@@ -678,7 +680,6 @@ async fn read_stream(
     resp: &mut crate::http1::Response,
     asm: &mut Assembly,
     ttft: &mut Option<Duration>,
-    started: Instant,
     progress: &Progress,
     log: &Log,
 ) -> Result<(), (String, bool)> {
@@ -707,7 +708,7 @@ async fn read_stream(
                         .map_err(|e| (quote(log, "the endpoint reported an error: ", &e), false))?;
                     if token {
                         progress.token();
-                        ttft.get_or_insert_with(|| started.elapsed());
+                        ttft.get_or_insert_with(|| resp.sent.elapsed());
                     }
                     if asm.bytes() > MAX_ASSEMBLED {
                         return Err((too_large(), false));

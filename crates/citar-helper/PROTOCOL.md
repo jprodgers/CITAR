@@ -293,7 +293,11 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
     false); one that refuses a streaming request with tools (HTTP 400, 422, 500 or 501 whose body
     names streaming and tools or functions) is asked again without streaming, and every request
     with tools on that connection to the server then goes unstreamed (logged once: a cancel may not
-    stop such a generation).
+    stop such a generation);
+  - only a completion whose answer was read whole leaves its connection to the endpoint open, for
+    the next completion (HTTP keep-alive, at most 30 s idle); a cancelled, timed-out or failed
+    completion's connection is closed, so the endpoint sees its client go. `gen_s` and `ttft_s`
+    count from sending the request that answered, once its connection is made.
 - **The order of the helper's own refusals:** `unknown_model` (no endpoint, `--no-llm`, or a model
   outside the owner's allowlist), then `closed`, then `busy`; then the request runs. A `request`
   whose `id` is already in flight is ignored (logged): one answer per id.
