@@ -28,6 +28,12 @@
 //! `check_ruleset`), `errors` (the exceptions) and `calls` (the GIL, the calls in flight and the
 //! shutdown).
 
+/// The job host's counting allocator (design/phase4-helper.md P4.4.3): the server's job host
+/// (`python -m citar.jobs host`, `jobs::host_main`) reports each run's peak memory from it. Every
+/// other call of the module pays one thread-local read per allocation for it.
+#[global_allocator]
+static COUNTING: citar_jobs::Counting = citar_jobs::Counting;
+
 mod bot;
 mod calls;
 mod errors;
