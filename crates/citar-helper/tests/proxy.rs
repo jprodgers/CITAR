@@ -2,9 +2,10 @@
 //! gates 2 and 3), the helper's own session in-process against a fake server written here and
 //! `common`'s fake endpoint over real HTTP on loopback, in real time:
 //! - **cancel at the endpoint:** the endpoint's client goes within 1 s of the `cancel`, no event
-//!   goes out after it, and `cancelled` carries the tokens received, mid-stream and while a model
-//!   is thinking before its first token (headers sent, then silence: nothing for the client to
-//!   read, so only the drop itself can close the connection);
+//!   goes out after it but the one already on its way, and `cancelled` carries the tokens
+//!   received, mid-stream and while a model is thinking before its first token (headers sent,
+//!   then silence: nothing for the client to read, so only the drop itself can close the
+//!   connection);
 //! - **parameters:** only the five reach the endpoint, each other name logged once; nothing in a
 //!   request changes the endpoint, its key or streaming;
 //! - an endpoint that refuses streaming with tools is asked again unstreamed, and is then asked so
@@ -14,7 +15,12 @@
 //!   (as text, or only once escaped in JSON);
 //! - **slots:** two completions at once on two slots, a third `busy`; a repeated id answered once;
 //! - a stop answers each completion in flight `stopping`, and its endpoint connection closes;
-//! - `status` follows the completions in flight; a `timeout_s` above 900 s is held to 900 s.
+//! - `status` follows the completions in flight; a `timeout_s` above 900 s is held to 900 s;
+//! - `localhost` reaches an endpoint that listens on IPv4 only at once (on Windows `::1` comes
+//!   first and refuses only after about 2 s);
+//! - a finished answer's connection carries the next completion, a cancelled or failed one's
+//!   never; a kept connection the endpoint closed is not used, and a request it cuts off as it
+//!   comes goes again on a new connection.
 
 mod common;
 
@@ -80,6 +86,8 @@ fn facts() -> Facts {
 struct Run {
     ws: ServerWs,
     ep: FakeEndpoint,
+    /// The helper's endpoint, for the connections it keeps.
+    http: Arc<HttpEndpoint>,
     log: Log,
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<Exit>,
@@ -113,8 +121,10 @@ async fn start_keyed(tweak: impl FnOnce(&mut Config), key: Option<&str>) -> Run 
     cfg.base_url = ep.base_url();
     tweak(&mut cfg);
     let tls = citar_helper::net::verified_tls(None).expect("tls");
-    let http = HttpEndpoint::new(cfg.provider, &cfg.base_url, key.map(str::to_owned), tls)
-        .expect("a client");
+    let http = Arc::new(
+        HttpEndpoint::new(cfg.provider, &cfg.base_url, key.map(str::to_owned), tls)
+            .expect("a client"),
+    );
     let (tx, mut conns) = mpsc::unbounded_channel();
     let log = Log::memory();
     if let Some(k) = key {
@@ -133,7 +143,7 @@ async fn start_keyed(tweak: impl FnOnce(&mut Config), key: Option<&str>) -> Run 
         log: log.clone(),
         clock: Clock::system(),
         dialer: Arc::new(Pipe(tx)),
-        endpoint: Some(Arc::new(http)),
+        endpoint: Some(http.clone()),
         service: false,
         stop: stop_rx,
         in_flight: in_flight.clone(),
@@ -159,7 +169,7 @@ async fn start_keyed(tweak: impl FnOnce(&mut Config), key: Option<&str>) -> Run 
     ws.send(Message::Text(welcome.to_string().into())).await.expect("welcome sent");
     let ack = text(&ws.next().await.expect("a frame").expect("a frame")).expect("text");
     assert_eq!(ack["effective"]["llm"]["enabled"], true, "{ack}");
-    Run { ws, ep, log, stop, task, in_flight, statuses: Vec::new() }
+    Run { ws, ep, http, log, stop, task, in_flight, statuses: Vec::new() }
 }
 
 fn request(id: &str, extra: Value) -> Value {
@@ -238,6 +248,34 @@ impl Run {
         self.ep.gone(k, Instant::now() + Duration::from_secs_f64(secs)).await
     }
 
+    /// Waits (up to 2 s) until the helper keeps `n` connections idle.
+    async fn idle(&self, n: usize) {
+        let until = Instant::now() + Duration::from_secs(2);
+        while self.http.idle_connections() != n && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(self.http.idle_connections(), n, "connections kept idle");
+    }
+
+    /// The endpoint connection request `k` came on.
+    fn conn(&self, k: usize) -> usize {
+        self.ep.seen(k).expect("a request").conn
+    }
+
+    /// One streamed one-word completion, answered at once: its `done`.
+    async fn quick(&mut self, id: &str, k: usize) -> Value {
+        self.send(request(id, json!({}))).await;
+        self.at_endpoint(k).await;
+        self.ep.respond(Behaviour::Stream {
+            events: words(1),
+            delay: Duration::ZERO,
+            first: Duration::ZERO,
+        });
+        let done = self.next(5.0).await;
+        assert_eq!((done["t"].as_str(), done["id"].as_str()), (Some("done"), Some(id)), "{done}");
+        done
+    }
+
     fn end(self) {
         self.task.abort();
     }
@@ -273,7 +311,11 @@ fn a_cancel_mid_stream_closes_the_endpoint_connection_within_a_second() {
         );
         assert!(acked < Duration::from_secs(1), "{acked:?}");
         let seen = run.ep.seen(0).expect("the request");
-        assert!(seen.tokens.iter().all(|t| *t <= gone), "an event went out after the client went");
+        // Measured from the cancel, not from the fake's own record of the disconnect (which no
+        // event can pass): at a word every 100 ms, at most the one already on its way may leave
+        // after the cancel; a cancel that left the stream open would let the other 40 through.
+        let after = seen.tokens.iter().filter(|t| **t > cancel_sent).count();
+        assert!(after <= 1, "{after} events went out after the cancel");
         let sent = seen.tokens.len() as u64;
         let received = ack["tokens_out"].as_u64().expect("tokens_out");
         assert!((5..50).contains(&sent), "{sent} sent in about a second");
@@ -686,6 +728,129 @@ fn the_api_key_reaches_the_endpoint_and_never_the_server() {
         });
         let e = run.next(5.0).await;
         assert!(!e.to_string().contains(KEY), "{e}");
+        run.end();
+    });
+}
+
+/// The helper's default endpoint is `http://localhost:1234/v1`. On Windows `localhost` is `::1`
+/// first, where a refused connection takes about 2 s, and LM Studio listens on `127.0.0.1` only:
+/// tried one after the other, every completion paid those 2 s (and its `gen_s`, which counted
+/// the dialling then).
+#[test]
+fn localhost_reaches_an_endpoint_on_ipv4_only_at_once() {
+    rt().block_on(async {
+        let mut run = start(|c| c.base_url = c.base_url.replace("127.0.0.1", "localhost")).await;
+        // The first completion races the addresses: under a second from the request to its
+        // `done` (the race gives the next address 250 ms), not two.
+        let t0 = Instant::now();
+        let gen_first = run.quick("r1", 0).await["gen_s"].as_f64().expect("gen_s");
+        let first = t0.elapsed().as_secs_f64();
+        assert!(first < 1.0, "the first completion took {first} s");
+        // The next goes straight to the address that answered.
+        let t0 = Instant::now();
+        let gen_second = run.quick("r2", 1).await["gen_s"].as_f64().expect("gen_s");
+        let second = t0.elapsed().as_secs_f64();
+        assert!(second < 0.2, "the second completion took {second} s");
+        // `gen_s` counts from the request's sending, the dialling not included.
+        assert!(gen_first < 0.2 && gen_second < 0.2, "gen_s {gen_first} and {gen_second}");
+        eprintln!("localhost: {first:.4} s then {second:.4} s (gen_s {gen_first}, {gen_second})");
+        run.end();
+    });
+}
+
+/// Keep-alive: a finished answer's connection carries the next completion (no new TCP connection
+/// or TLS handshake for a remote endpoint), and a cancelled or failed one's is closed, never kept.
+#[test]
+fn a_finished_answers_connection_carries_the_next_and_a_cancelled_ones_never() {
+    rt().block_on(async {
+        let mut run = start(|_| {}).await;
+        run.ep.keep_alive(true);
+        run.quick("r1", 0).await;
+        run.idle(1).await;
+        // An unstreamed answer on the same connection.
+        run.send(request("r2", json!({}))).await;
+        run.at_endpoint(1).await;
+        run.ep.respond(Behaviour::Json(json!({"choices": [{"index": 0, "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "Again."}}]})));
+        assert_eq!(run.next(5.0).await["message"]["content"], "Again.");
+        run.idle(1).await;
+        assert_eq!(run.conn(0), run.conn(1), "one connection for both");
+        // A cancelled completion's connection is closed, and the next dials a new one.
+        run.send(request("r3", json!({}))).await;
+        run.at_endpoint(2).await;
+        run.ep.respond(Behaviour::Stream {
+            events: words(20),
+            delay: Duration::from_millis(100),
+            first: Duration::ZERO,
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        run.send(json!({"t": "cancel", "id": "r3"})).await;
+        assert_eq!(run.next(1.0).await["t"], "cancelled");
+        assert!(run.gone(2, 1.0).await.is_some(), "the cancelled stream's connection closed");
+        run.idle(0).await;
+        run.quick("r4", 3).await;
+        assert_ne!(run.conn(3), run.conn(2), "a new connection after the cancel");
+        run.idle(1).await;
+        // An HTTP error's connection is not kept either.
+        run.send(request("r5", json!({}))).await;
+        run.at_endpoint(4).await;
+        run.ep.respond(Behaviour::Status(503, "loading".into()));
+        assert_eq!(run.next(5.0).await["code"], "endpoint");
+        run.idle(0).await;
+        assert!(run.gone(4, 1.0).await.is_some(), "the error's connection closed");
+        run.end();
+    });
+}
+
+/// A kept connection the endpoint closed while it waited (its idle timeout) is not used; a
+/// request the endpoint cuts off as it comes on a kept connection goes again on a new one, and
+/// one cut off on a new connection is the endpoint's failure, not tried again.
+#[test]
+fn a_kept_connection_the_endpoint_closed_or_cuts_off_costs_nothing() {
+    rt().block_on(async {
+        let mut run = start(|_| {}).await;
+        run.ep.keep_alive(true);
+        run.quick("r1", 0).await;
+        run.idle(1).await;
+        run.ep.close_idle();
+        let until = Instant::now() + Duration::from_secs(2);
+        while run.ep.open_connections() > 0 && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(run.ep.open_connections(), 0, "the endpoint closed its idle connection");
+        run.quick("r2", 1).await;
+        assert_eq!(run.ep.requests(), 2);
+        assert_ne!(run.conn(1), run.conn(0), "a new connection");
+        run.idle(1).await;
+        // Cut off as it comes on the kept connection: once more on a new one, answered.
+        run.ep.respond(Behaviour::Close);
+        run.send(request("r3", json!({}))).await;
+        run.at_endpoint(3).await;
+        run.ep.respond(Behaviour::Stream {
+            events: words(2),
+            delay: Duration::ZERO,
+            first: Duration::ZERO,
+        });
+        let done = run.next(5.0).await;
+        assert_eq!((done["id"].as_str(), done["t"].as_str()), (Some("r3"), Some("done")), "{done}");
+        let (cut, again) = (run.ep.seen(2).expect("cut off"), run.ep.seen(3).expect("again"));
+        assert_eq!(cut.conn, run.conn(1), "cut off on the kept connection");
+        assert_ne!(again.conn, cut.conn, "and sent again on a new one");
+        assert_eq!(cut.body, again.body, "the same request");
+        run.end();
+        // On a new connection, a cut-off is the endpoint's failure (retryable), sent once.
+        let mut run = start(|_| {}).await;
+        run.send(request("r1", json!({}))).await;
+        run.at_endpoint(0).await;
+        run.ep.respond(Behaviour::Close);
+        let e = run.next(5.0).await;
+        assert_eq!(
+            (e["code"].as_str(), e["retryable"].as_bool()),
+            (Some("endpoint"), Some(true)),
+            "{e}"
+        );
+        run.quiet(1.0).await;
+        assert_eq!(run.ep.requests(), 1, "not tried again");
         run.end();
     });
 }

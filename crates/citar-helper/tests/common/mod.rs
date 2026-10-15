@@ -7,8 +7,11 @@
 //!
 //! [`FakeEndpoint`] is the fake model endpoint over real HTTP on loopback (4-04): it lists models
 //! as LM Studio does, answers each completion with the behaviour the transcript scripts for it
-//! (an SSE stream with delays between its events, a JSON body, an HTTP error, or no answer), and
-//! records each request's body, when each streamed event went out and when its client went.
+//! (an SSE stream with delays between its events, a JSON body, an HTTP error, no answer, or the
+//! connection closed at once), and records each request's body, the connection it came on, when
+//! each streamed event went out and when its client went. It answers one request per connection
+//! (`connection: close`) unless told to keep connections open (`keep_alive`), as LM Studio and
+//! the others do, for the helper's reuse of a finished answer's connection.
 //!
 //! The rules it keeps: background frames (`ping`, `pong`, `status`, `power`) are skipped unless
 //! the next step expects their type, and the helper's own unscripted pings are answered; a
@@ -747,6 +750,9 @@ pub enum Behaviour {
     Status(u16, String),
     /// No answer at all, until the client goes.
     Hang,
+    /// The connection closed at once with no answer: an endpoint closing a kept connection just
+    /// as a request came on it.
+    Close,
 }
 
 impl Behaviour {
@@ -778,10 +784,27 @@ pub struct Seen {
     pub head: String,
     pub body: Value,
     pub at: Instant,
+    /// The connection it came on, numbered from 0 as they were accepted.
+    pub conn: usize,
     /// When each streamed event went out (taken while the client was still there).
     pub tokens: Vec<Instant>,
-    /// When the client went, once it has.
+    /// When its connection's client went, once it has.
     pub gone: Option<Instant>,
+}
+
+/// One connection [`FakeEndpoint`] accepted.
+#[derive(Default)]
+struct ConnRec {
+    /// What the client sent that no request has taken yet.
+    buf: Vec<u8>,
+    /// When the client went (its end closed, or the connection broke).
+    closed: Option<Instant>,
+    /// The completion requests it carried.
+    requests: Vec<usize>,
+    /// Waiting for its next request, with none in flight.
+    idle: bool,
+    /// Told to close while idle ([`FakeEndpoint::close_idle`]).
+    kill: bool,
 }
 
 #[derive(Default)]
@@ -789,6 +812,24 @@ struct FakeState {
     seen: Vec<Seen>,
     /// The behaviour for each request, in the order they came.
     behaviours: Vec<Behaviour>,
+    conns: Vec<ConnRec>,
+    /// Keep each connection open after an answer, for the next request (off: `connection:
+    /// close`, one request per connection).
+    keep_alive: bool,
+}
+
+/// A request read whole from a connection's bytes: its head, and where it and its body end.
+fn whole_request(buf: &[u8]) -> Option<(String, usize, usize)> {
+    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+    let length = head
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0);
+    (buf.len() >= head_end + length).then_some((head, head_end, length))
 }
 
 /// The fake model endpoint over HTTP on loopback (see the module's doc).
@@ -828,6 +869,32 @@ impl FakeEndpoint {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, FakeState> {
         self.state.lock().expect("the fake endpoint's state")
+    }
+
+    /// Whether answers keep their connection open for the next request (from the next answer).
+    pub fn keep_alive(&self, on: bool) {
+        self.lock().keep_alive = on;
+    }
+
+    /// Closes every connection that waits for its next request, as an endpoint's idle timeout
+    /// does.
+    pub fn close_idle(&self) {
+        for c in &mut self.lock().conns {
+            if c.idle && c.closed.is_none() {
+                c.kill = true;
+            }
+        }
+        self.changed.notify_waiters();
+    }
+
+    /// The connections accepted so far.
+    pub fn connections(&self) -> usize {
+        self.lock().conns.len()
+    }
+
+    /// The connections still open.
+    pub fn open_connections(&self) -> usize {
+        self.lock().conns.iter().filter(|c| c.closed.is_none()).count()
     }
 
     /// The behaviour for the next completion request without one.
@@ -871,22 +938,107 @@ impl FakeEndpoint {
         self.wait_for(until, |s| s.seen.get(k).and_then(|r| r.gone)).await
     }
 
-    async fn serve(&self, mut tcp: tokio::net::TcpStream) {
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let head_end = loop {
-            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                break p + 4;
-            }
-            if buf.len() > 65_536 {
-                return;
-            }
-            match tcp.read(&mut chunk).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            }
+    /// Serves one connection: its requests one after another while answers keep it open.
+    async fn serve(&self, tcp: tokio::net::TcpStream) {
+        let c = {
+            let mut s = self.lock();
+            s.conns.push(ConnRec::default());
+            s.conns.len() - 1
         };
-        let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+        let (mut rd, mut wr) = tcp.into_split();
+        // Everything the client sends is kept for the requests to take; the end of it is when the
+        // client went.
+        let reader = {
+            let ep = self.clone();
+            tokio::spawn(async move {
+                let mut b = [0u8; 4096];
+                loop {
+                    match rd.read(&mut b).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            ep.lock().conns[c].buf.extend_from_slice(&b[..n]);
+                            ep.changed.notify_waiters();
+                        }
+                    }
+                }
+                let now = Instant::now();
+                {
+                    let mut s = ep.lock();
+                    s.conns[c].closed = Some(now);
+                    for k in s.conns[c].requests.clone() {
+                        s.seen[k].gone.get_or_insert(now);
+                    }
+                }
+                ep.changed.notify_waiters();
+            })
+        };
+        let far = Instant::now() + Duration::from_secs(3600);
+        while let Some(req) = self.next_request(c, far).await {
+            let keep = self.lock().keep_alive;
+            match self.answer(c, req, &mut wr, !keep).await {
+                // An answer given in full on a connection kept open: the next request.
+                Some(true) if keep => continue,
+                Some(true) => {
+                    // Wait for the client to close its end before ours goes, so it reads it all.
+                    let _gone = self
+                        .wait_for(Instant::now() + Duration::from_secs(10), |s| s.conns[c].closed)
+                        .await;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        reader.abort();
+        drop(wr);
+        // Closed from this end, if the client had not gone first.
+        let now = Instant::now();
+        {
+            let mut s = self.lock();
+            s.conns[c].closed.get_or_insert(now);
+            for k in s.conns[c].requests.clone() {
+                s.seen[k].gone.get_or_insert(now);
+            }
+        }
+        self.changed.notify_waiters();
+    }
+
+    /// Waits for the connection's next whole request, and takes its bytes: its head and body
+    /// (`None` when the connection ends or is told to close first).
+    async fn next_request(&self, c: usize, until: Instant) -> Option<(String, Vec<u8>)> {
+        self.lock().conns[c].idle = true;
+        let got = self
+            .wait_for(until, |s| {
+                let conn = &s.conns[c];
+                if conn.kill {
+                    return Some(None);
+                }
+                if let Some(r) = whole_request(&conn.buf) {
+                    return Some(Some(r));
+                }
+                if conn.closed.is_some() || conn.buf.len() > 65_536 {
+                    return Some(None);
+                }
+                None
+            })
+            .await
+            .flatten()?;
+        let (head, head_end, length) = got;
+        let mut s = self.lock();
+        let conn = &mut s.conns[c];
+        conn.idle = false;
+        let bytes: Vec<u8> = conn.buf.drain(..head_end + length).collect();
+        Some((head, bytes[head_end..].to_vec()))
+    }
+
+    /// Answers one request; `Some(true)` when the answer went in full (the connection can carry
+    /// another), `Some(false)` when it ended the connection, `None` when the client went.
+    async fn answer(
+        &self,
+        c: usize,
+        (head, body): (String, Vec<u8>),
+        wr: &mut tokio::net::tcp::OwnedWriteHalf,
+        close: bool,
+    ) -> Option<bool> {
         let line = head.lines().next().unwrap_or_default().to_owned();
         if line.starts_with("GET ") && line.contains("/models") {
             let data: Vec<Value> = self
@@ -900,50 +1052,26 @@ impl FakeEndpoint {
                 })
                 .collect();
             let body = serde_json::json!({"object": "list", "data": data}).to_string();
-            let _sent = write_whole(&mut tcp, 200, "application/json", &body).await;
-            return;
+            return write_whole(wr, 200, "application/json", &body, close)
+                .await
+                .ok()
+                .map(|()| true);
         }
         if !(line.starts_with("POST ") && line.contains("/chat/completions")) {
-            let _sent = write_whole(&mut tcp, 404, "application/json", "{}").await;
-            return;
+            return write_whole(wr, 404, "application/json", "{}", close).await.ok().map(|()| true);
         }
-        let length = head
-            .lines()
-            .find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
-            })
-            .unwrap_or(0);
-        while buf.len() < head_end + length {
-            match tcp.read(&mut chunk).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            }
-        }
-        let body: Value =
-            serde_json::from_slice(&buf[head_end..head_end + length]).unwrap_or(Value::Null);
+        let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         let k = {
             let mut s = self.lock();
-            s.seen.push(Seen { head, body, at: Instant::now(), tokens: Vec::new(), gone: None });
-            s.seen.len() - 1
+            let gone = s.conns[c].closed;
+            s.seen.push(Seen { head, body, at: Instant::now(), conn: c, tokens: Vec::new(), gone });
+            let k = s.seen.len() - 1;
+            s.conns[c].requests.push(k);
+            k
         };
         self.changed.notify_waiters();
-        let (mut rd, mut wr) = tcp.into_split();
-        // The client sends nothing more: a read that ends means it went.
-        let watcher = self.clone();
-        tokio::spawn(async move {
-            let mut b = [0u8; 1024];
-            loop {
-                match rd.read(&mut b).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-            }
-            watcher.lock().seen[k].gone = Some(Instant::now());
-            watcher.changed.notify_waiters();
-        });
         let far = Instant::now() + Duration::from_secs(3600);
-        let Some(behaviour) = self
+        let behaviour = self
             .wait_for(far, |s| {
                 if s.seen[k].gone.is_some() {
                     return Some(None);
@@ -951,25 +1079,25 @@ impl FakeEndpoint {
                 s.behaviours.get(k).cloned().map(Some)
             })
             .await
-            .flatten()
-        else {
-            return;
-        };
+            .flatten()?;
         match behaviour {
             Behaviour::Json(v) => {
-                let _sent = write_whole(&mut wr, 200, "application/json", &v.to_string()).await;
+                write_whole(wr, 200, "application/json", &v.to_string(), close).await.ok()?;
             }
             Behaviour::Status(status, body) => {
-                let _sent = write_whole(&mut wr, status, "text/plain", &body).await;
+                write_whole(wr, status, "text/plain", &body, close).await.ok()?;
             }
             Behaviour::Hang => {
                 let _gone = self.gone(k, far).await;
+                return None;
             }
+            Behaviour::Close => return Some(false),
             Behaviour::Stream { events, delay, first } => {
-                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
-                if wr.write_all(head.as_bytes()).await.is_err() {
-                    return;
-                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\n{}\r\n",
+                    if close { "connection: close\r\n" } else { "" }
+                );
+                wr.write_all(head.as_bytes()).await.ok()?;
                 let datas: Vec<String> = events
                     .iter()
                     .map(Value::to_string)
@@ -982,14 +1110,14 @@ impl FakeEndpoint {
                         // A wait the client's going ends at once, as a model stops.
                         let until = Instant::now() + wait;
                         if self.gone(k, until).await.is_some() {
-                            return;
+                            return None;
                         }
                     }
                     {
                         // The token's time is taken while the client is known to be there.
                         let mut s = self.lock();
                         if s.seen[k].gone.is_some() {
-                            return;
+                            return None;
                         }
                         if n < last {
                             s.seen[k].tokens.push(Instant::now());
@@ -997,29 +1125,28 @@ impl FakeEndpoint {
                     }
                     let event = format!("data: {data}\n\n");
                     let framed = format!("{:x}\r\n{event}\r\n", event.len());
-                    if wr.write_all(framed.as_bytes()).await.is_err() {
-                        return;
-                    }
+                    wr.write_all(framed.as_bytes()).await.ok()?;
                 }
-                let _end = wr.write_all(b"0\r\n\r\n").await;
+                wr.write_all(b"0\r\n\r\n").await.ok()?;
             }
         }
-        let _flushed = wr.flush().await;
-        // Wait for the client to close its end before ours goes, so the client reads it all.
-        let _gone = self.gone(k, Instant::now() + Duration::from_secs(10)).await;
+        wr.flush().await.ok()?;
+        Some(true)
     }
 }
 
-/// A whole response with a body.
+/// A whole response with a body, closing the connection after it when `close` says so.
 async fn write_whole<W: tokio::io::AsyncWrite + Unpin>(
     w: &mut W,
     status: u16,
     content_type: &str,
     body: &str,
+    close: bool,
 ) -> std::io::Result<()> {
     let resp = format!(
-        "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
+        "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n{}\r\n{body}",
+        body.len(),
+        if close { "connection: close\r\n" } else { "" }
     );
     w.write_all(resp.as_bytes()).await?;
     w.flush().await
