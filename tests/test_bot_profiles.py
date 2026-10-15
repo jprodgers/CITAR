@@ -375,6 +375,11 @@ class LabTests(unittest.TestCase):
                 self.assertEqual(cm.exception.status_code, 400)
                 self.assertIn(reason, cm.exception.detail)
                 self.assertFalse((lab.QUEUE / f"{body['name']}.json").exists())
+            # The speed bounds the turn limit, not the form: Marathon's last turn is 1500.
+            spec = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard"], games=1, speed="Marathon",
+                                                                     turns=1200, name="ab-marathon"), user=admin, s=s)
+            self.assertEqual((spec["speed"], spec["turns"]), ("Marathon", 1200))
+            (lab.QUEUE / "ab-marathon.json").unlink()
         with self.assertRaises(ValidationError):
             bots_api.ExperimentBody(profiles=["standard"], seed=2**53)
 

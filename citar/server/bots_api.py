@@ -216,7 +216,7 @@ class ExperimentBody(BaseModel):
     size: str = "small"
     maps: list[str] = ["continents", "pangaea", "fractal"]
     speed: str = "Quick"
-    turns: int = Field(0, ge=0, le=1000)
+    turns: int = Field(0, ge=0, le=10_000)    # the speed's last turn bounds it: lab.normalize checks each game as a job
     difficulty: str = "Prince"
     priority: int = Field(0, ge=-100, le=100)
 
