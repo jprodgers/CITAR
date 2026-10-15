@@ -26,8 +26,5 @@ Authlib>=1.3
 cryptography>=42.0
 keyring>=25.0
 
-# worker
-websockets>=12.0
-
 # Optional: only when CITAR_DB_URL points at PostgreSQL.
 # psycopg[binary]>=3.1

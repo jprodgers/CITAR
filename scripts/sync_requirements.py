@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 #: The extras a deployment needs. Local-model client libraries are deliberately absent: a server
 #: reaches models through workers and the Anthropic API, and does not run them itself.
-EXTRAS = ("anthropic", "oauth", "keyring", "worker")
+EXTRAS = ("anthropic", "oauth", "keyring")
 
 
 def render() -> str:
