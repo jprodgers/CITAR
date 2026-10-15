@@ -143,19 +143,40 @@ class Hub(unittest.TestCase):
 
     def test_a_power_row_is_placed_by_the_hubs_clock_and_never_overlaps(self):
         """The helper's own sample times are its clock's, not the server's: the row ends when the frame came and covers
-        ten seconds a sample, never reaching back before the connection or the last row, and never under ten seconds."""
+        ten seconds a sample, never reaching back before ``since`` (the machine's last frame, or its connection's
+        start); with under ten seconds left after it, there is no row at all rather than one reaching back."""
         samples = [{"t": 1000.0 + 10 * i, "gpu_w": 40.0 + i, "cpu_util": 0.1 * i} for i in range(6)]
         row = W.power_row("sv1", samples, 10_000.0, 9_000.0)
         self.assertEqual(row, {"k": "pw", "srv": "sv1", "t0": 9_940.0, "t1": 10_000.0, "n": 6, "cpu_util": 0.25,
                                "gpu_w": 42.5})
         self.assertEqual(W.power_row("sv1", samples, 10_000.0, 9_970.0)["t0"], 9_970.0, "not before the last row")
-        self.assertEqual(W.power_row("sv1", samples, 10_000.0, 9_995.0)["t0"], 9_990.0, "ten seconds at least")
+        self.assertEqual(W.power_row("sv1", samples, 10_000.0, 9_990.0)["t0"], 9_990.0, "ten seconds is a row")
+        self.assertIsNone(W.power_row("sv1", samples, 10_000.0, 9_995.0), "under ten seconds is none")
         # a draw no machine has is left out; a sample with nothing that reads is no row
         odd = [{"t": 1.0, "gpu_w": 1e9, "cpu_util": 0.5}, {"t": 2.0, "gpu_w": 100.0, "cpu_util": None}]
         self.assertEqual(W.power_row("sv1", odd, 100.0, 0.0), {"k": "pw", "srv": "sv1", "t0": 80.0, "t1": 100.0, "n": 2,
                                                               "cpu_util": 0.5, "gpu_w": 100.0})
         self.assertIsNone(W.power_row("sv1", [{"t": 1.0, "gpu_w": None, "cpu_util": None}], 100.0, 0.0))
         self.assertIsNone(W.power_row("sv1", [{"t": 1.0, "gpu_w": 1e9, "cpu_util": None}], 100.0, 0.0))
+        # nor is a draw over what the machine's own scan says its GPUs can draw
+        capped = [{"t": 1.0, "gpu_w": 100.0, "cpu_util": 0.5}, {"t": 2.0, "gpu_w": 451.0, "cpu_util": 0.5}]
+        self.assertEqual(W.power_row("sv1", capped, 100.0, 0.0, 450.0)["gpu_w"], 100.0)
+        self.assertEqual(W.power_row("sv1", capped, 100.0, 0.0)["gpu_w"], 275.5, "without a cap only 20 kW holds")
+
+    def test_the_cap_on_a_gpu_draw_is_what_the_machines_own_scan_says_its_cards_can_draw(self):
+        """1.5 times the power limits of the GPUs whose draw the helper samples (``power_readable``), when the scan
+        lists every one of them; otherwise none (only 20 kW holds)."""
+        def card(limit, readable=True, **kw):
+            return {"name": "card", "vendor": "NVIDIA", "power_limit_w": limit, "power_readable": readable, **kw}
+        self.assertEqual(W.gpu_draw_cap({"gpus": [card(300.0)]}), 450.0)
+        self.assertEqual(W.gpu_draw_cap({"gpus": [card(300.0), card(200)]}), 750.0)
+        # a card whose draw does not read (the system's list, an Intel GPU) neither counts nor stops the cap
+        self.assertEqual(W.gpu_draw_cap({"gpus": [card(300.0), card(None, readable=False)]}), 450.0)
+        for scan in ({"gpus": [card(None)]}, {"gpus": [card(300.0), card(0)]}, {"gpus": [card("lots")]},
+                     {"gpus": [card(None, readable=False)]}, {"gpus": []}, {"gpus": "x"}, {}, None, "x",
+                     {"gpus": [card(float("nan"))]}):
+            self.assertIsNone(W.gpu_draw_cap(scan), scan)
+        self.assertEqual(W.gpu_draw_cap({"gpus": [card(100_000.0)]}), W.POWER_W_MAX)
 
     def test_nothing_reaches_a_helper_before_its_welcome(self):
         """Registering a helper wakes the requests waiting for its machine, which may be sent before the server has
@@ -1293,7 +1314,7 @@ class Power(_Live):
         helper.send("power", samples=self._minute())
         time.sleep(0.3)
         self.assertEqual(len(self._rows(sid)), 1, "a frame sooner than a minute is dropped")
-        connection.power_at -= 60
+        W.hub()._power_at[sid] -= 60          # the machine's last frame a minute ago
         helper.send("power", samples=self._minute(gpu_w=90.0))
         self.assertTrue(H.until(lambda: len(self._rows(sid)) == 2, 5))
         second = self._rows(sid)[1]
@@ -1326,6 +1347,87 @@ class Power(_Live):
         time.sleep(0.3)
         self.assertEqual(self._rows(sid), [])
         self.assertEqual(self._rows(sid2), [])
+
+    def test_a_minute_without_the_gpus_draw_is_a_row_costed_with_the_gpus_estimate(self):
+        """A machine whose GPU draw its driver does not report samples its CPU alone: its row carries the CPU, and
+        costing still prices the GPU's work from the model's busy time (an estimate, so not a measured minute)."""
+        from citar import costing, usage
+        sid, helper = self._powered("radeon box", gpu_max_w=200)
+        W.hub().get(sid).connected_at -= 120
+        helper.send("power", samples=self._minute(gpu_w=None, cpu_util=0.1))
+        self.assertTrue(H.until(lambda: self._rows(sid), 5), "a row was written")
+        row = self._rows(sid)[0]
+        self.assertEqual((row["gpu_w"], row["cpu_util"]), (None, 0.1))
+        ledger = usage.read(row["t0"] - 1, row["t1"] + 1)
+        ledger["spans"].append({"act": "game:r", "srv": sid, "t0": row["t0"], "t1": row["t1"],
+                                "held": row["t1"] - row["t0"], "busy": row["t1"] - row["t0"]})
+        r = costing.compute(row["t0"] - 1, row["t1"] + 1, ledger=ledger)
+        c = r["acts"]["game:r"]["servers"][sid]
+        # busy all the time it was held: the GPU's 200 W as estimated over that time, and the CPU's 10% of 60 W as
+        # sampled in each clock minute the row touches (two at most)
+        gpu_kwh = 200 * (row["t1"] - row["t0"]) / 3600 / 1000
+        self.assertGreaterEqual(c["kwh_dynamic"], 0.999 * gpu_kwh, c)
+        self.assertLessEqual(c["kwh_dynamic"], gpu_kwh + 6 * 120 / 3600 / 1000 + 1e-9, c)
+        self.assertGreater(c["energy_estimated_h"], 0, c)
+        self.assertEqual(c["energy_measured_h"], 0, c)
+        self.assertNotIn("metered", r["servers"][sid], "its samples read no GPU: no meter reading of the machine")
+
+    def test_a_reconnect_neither_overlaps_the_machines_last_row_nor_reaches_back_before_it(self):
+        """The power rows' guarantees are the machine's, not a connection's: a helper that reconnects and sends
+        samples at once writes no row over its last one, and a frame just after a connection began writes none
+        reaching back before it."""
+        clock = H.FakeClock()
+        W.hub().clock = clock
+        self.addCleanup(lambda: setattr(W.hub(), "clock", W.Clock()))
+        sid, token, _tid = _machine(self.ids["lena"], "flapping box")
+
+        def reconnect(old):
+            old.close()
+            self.assertTrue(H.until(lambda: W.hub().get(sid) is None, 5), "the old connection is gone")
+            return self.connect(token)
+
+        def handled(h):
+            h.send("ping")
+            self.assertEqual(h.recv(timeout=5, skip=())["t"], "pong")
+
+        helper = self.connect(token)
+        W.hub().get(sid).connected_at -= 120
+        helper.send("power", samples=self._minute(gpu_w=60.0))
+        self.assertTrue(H.until(lambda: self._rows(sid), 5))
+        # at once over a new connection: under a minute after the machine's last frame, dropped
+        helper = reconnect(helper)
+        helper.send("power", samples=self._minute(gpu_w=61.0))
+        handled(helper)
+        # 35 s on: a row from where the last one ended, not reaching back over it
+        clock.advance(35)
+        helper.send("power", samples=self._minute(gpu_w=62.0))
+        self.assertTrue(H.until(lambda: len(self._rows(sid)) == 2, 5))
+        # another connection 30 s on, and a frame 5 s into it: no row reaching back before the connection
+        clock.advance(30)
+        helper = reconnect(helper)
+        clock.advance(5)
+        helper.send("power", samples=self._minute(gpu_w=63.0))
+        handled(helper)
+        time.sleep(0.3)
+        rows = self._rows(sid)
+        self.assertEqual([r["gpu_w"] for r in rows], [60.0, 62.0], rows)
+        first, second = rows
+        self.assertGreaterEqual(second["t0"], first["t1"], "the rows do not overlap")
+        self.assertAlmostEqual(second["t1"] - second["t0"], 35.0, delta=0.2)
+
+    def test_a_gpu_draw_over_what_the_machines_scan_says_it_can_draw_is_left_out(self):
+        """A reading 1.5 times past the power limits the helper's own scan reports is not the machine's."""
+        sid, helper = self._powered("capped box")
+        W.hub().get(sid).connected_at -= 120
+        scan = {"format": "citar-hardware", "collector_version": 2, "collector": "citar-helper",
+                "gpus": [{"name": "Card", "vendor": "NVIDIA", "power_limit_w": 300.0, "power_readable": True}]}
+        helper.send("hardware", scan=scan, source="scan")
+        samples = self._minute(gpu_w=100.0)
+        samples[-1]["gpu_w"] = 5000.0
+        helper.send("power", samples=samples)
+        self.assertTrue(H.until(lambda: self._rows(sid), 5))
+        self.assertEqual(self._rows(sid)[0]["gpu_w"], 100.0)
+        self.assertEqual(W.hub().get(sid).gpu_cap_w, 450.0)
 
     def test_a_rescan_reaches_the_helper_and_its_frame_is_the_last_report(self):
         sid, token, _tid = _machine(self.ids["lena"], "rescanned box")

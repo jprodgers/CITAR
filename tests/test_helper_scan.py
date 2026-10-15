@@ -11,7 +11,10 @@
   as its ``nvidia-smi`` (named by ``CITAR_HELPER_NVIDIA_SMI``, so the real ``nvidia-smi.exe`` in System32 is never run):
   its hello's scan is the machine's last report; a rescan brings a ``hardware`` frame within 5 s, kept whole; a minute
   of samples lands as the machine's power row, every sample the fake's draw, every reading a call in the fake's log;
-  and costing prices the helper machine's energy from the row.
+  and costing prices the helper machine's energy from the row. Locally the machine's own PowerShell (Windows) and
+  ``system_profiler`` (macOS) run, as the gate asks; on CI the fake stands in for them too, so the 5 s (15 s there,
+  P4.7.9's three times) measures the helper rather than the runner's PowerShell or ``system_profiler``, which can take
+  longer on a virtual machine (``Scan`` still runs them, with no deadline).
 
 The binary is the one ``cargo xtask develop`` builds into ``CITAR_EXT_DIR`` with the fake beside it (test.yml's
 build-ext job on CI's three OSes); without them ``Scan`` and ``Sensors`` skip locally and fail on CI.
@@ -43,6 +46,25 @@ _URL = "sqlite:///" + (_TMP / "test.db").as_posix()
 #: The fake's answers (crates/citar-helper/src/bin/fake_probe.rs).
 FAKE_GPU = "CITAR Fake GPU"
 FAKE_WATTS = 123.45
+CI = bool(os.environ.get("CI"))
+
+
+def _copy_as(fake: str, name: str) -> Path:
+    """The fake copied into a folder of its own as ``name`` (with the fake's own suffix, ``.exe`` on Windows): it logs
+    each call to ``<copy>.log`` beside it, so each probe it stands in for has a log of its own."""
+    import shutil
+    folder = _TMP / f"probe-{name}"
+    folder.mkdir(parents=True, exist_ok=True)
+    copy = folder / f"{name}{Path(fake).suffix}"
+    shutil.copy2(fake, copy)
+    return copy
+
+
+def _calls(probe: Path) -> list:
+    """The arguments of each call the copy ``probe`` logged, in order."""
+    log = probe.with_name(probe.name + ".log")
+    lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return [line.split(" ", 1)[1] if " " in line else "" for line in lines]
 
 
 def _binaries(what: str) -> tuple:
@@ -170,10 +192,13 @@ class Sensors(unittest.TestCase):
 
     def test_its_scan_a_rescan_and_a_minute_of_samples_through_the_fake(self):
         from citar import costing, usage
-        log = _TMP / "sensors-probe.log"
+        nvidia = _copy_as(self.fake, "nvidia-smi")
+        env = {"CITAR_HELPER_NVIDIA_SMI": str(nvidia)}
+        if CI:
+            env.update(CITAR_HELPER_POWERSHELL=str(_copy_as(self.fake, "powershell")),
+                       CITAR_HELPER_SYSTEM_PROFILER=str(_copy_as(self.fake, "system_profiler")))
         helper = H.RealHelper(self.server.base, self.token, "http://127.0.0.1:9/v1", name="measured",
-                              sensors=True, env={"CITAR_HELPER_NVIDIA_SMI": self.fake,
-                                                 "CITAR_FAKE_PROBE_LOG": str(log)})
+                              sensors=True, env=env)
         self.addCleanup(helper.stop)
         connected = H.until(lambda: W.hub().get(self.sid) is not None and W.hub().get(self.sid).ack is not None, 60)
         self.assertTrue(connected, f"the helper did not connect:\n{helper.text()[-3000:]}")
@@ -186,13 +211,14 @@ class Sensors(unittest.TestCase):
         self.assertEqual((scan["collector"], scan["gpus"][0]["name"]), ("citar-helper", FAKE_GPU))
         self.assertEqual(machine_settings.valid_scan(scan), scan)
 
-        # A rescan brings a hardware frame within 5 s (the machine's own probes but nvidia-smi are real).
+        # A rescan brings a hardware frame within 5 s (locally the machine's own probes but nvidia-smi are real).
+        bound = 15.0 if CI else 5.0
         asked = time.perf_counter()
         self.assertTrue(W.hub().rescan(self.sid))
-        rescanned = H.until(lambda: self._detected().get("hardware_at") != first.get("hardware_at"), 10)
+        rescanned = H.until(lambda: self._detected().get("hardware_at") != first.get("hardware_at"), 2 * bound)
         took = time.perf_counter() - asked
         self.assertTrue(rescanned, f"no hardware frame after the rescan:\n{helper.text()[-3000:]}")
-        self.assertLess(took, 5.0, f"the rescan's frame took {took:.2f} s")
+        self.assertLess(took, bound, f"the rescan's frame took {took:.2f} s")
         self.assertEqual(machine_settings.valid_scan(self._detected()["hardware"]), self._detected()["hardware"])
 
         # A minute of samples: one power row of the machine, every sample the fake's draw.
@@ -208,7 +234,7 @@ class Sensors(unittest.TestCase):
 
         # Every reading was a call of the fake's: two scans (the hello's, the rescan's) and the minute's six readings
         # (a seventh may be under way). The real nvidia-smi never answered: every sample is the fake's figure.
-        calls = [line.split(" ", 1)[1] for line in log.read_text(encoding="utf-8").splitlines()]
+        calls = _calls(nvidia)
         scans = [c for c in calls if c.startswith("--query-gpu=name,")]
         draws = [c for c in calls if c == "--query-gpu=power.draw --format=csv,noheader,nounits"]
         self.assertEqual(len(scans), 2, calls)

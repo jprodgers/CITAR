@@ -33,8 +33,10 @@ with the site's settings, and the hello's report kept off the loop.
 frame are the machine's last report (``record_report``, applied as its modes say); each ``power`` frame, a minute of
 10-second samples, is one power row of the machine (``record_power``, ``usage.PowerSampler``'s format, which costing
 prices), whatever its power mode, since samples are measurements and the mode governs the static figures. The row is
-placed by the hub's clock, never the helper's, and at most one a ``POWER_MIN_SECONDS`` per connection; samples that do not
-read as a machine's (a draw over ``POWER_W_MAX``) are left out; and an owner who turned the machine's live sampling off
+placed by the hub's clock, never the helper's, at most one a ``POWER_MIN_SECONDS`` per machine, and never overlapping
+the machine's last row or reaching back before its connection, across reconnects (``WorkerHub.power_since``); samples
+that do not read as the machine's (a draw over ``POWER_W_MAX``, or over ``POWER_LIMIT_MARGIN`` times the power limits
+its own scan reports, ``gpu_draw_cap``) are left out; and an owner who turned the machine's live sampling off
 (``power.sampling`` ``off``) gets no rows.
 
 **Settings** are acknowledged: the scheduler reads ``WorkerConnection.effective``, the helper's newest acknowledgement
@@ -109,11 +111,15 @@ NOT_YET = ("job_accept", "job_reject", "job_progress", "job_result", "job_failed
 #: How often a helper takes a power reading (PROTOCOL.md: "samples taken every 10 s"): a frame's samples cover this
 #: long each.
 POWER_SAMPLE_SECONDS = 10.0
-#: The shortest time between two power rows of one connection: a helper sends a frame a minute, so a faster one is
-#: dropped (logged once), and no helper can write rows faster than costing reads them.
+#: The shortest time between two power rows of one machine, across its connections: a helper sends a frame a minute,
+#: so a faster one is dropped (logged once), and no helper, reconnecting or not, writes rows faster than costing reads
+#: them.
 POWER_MIN_SECONDS = 30.0
 #: A draw above this, in watts, is no machine's reading and is left out of its row.
 POWER_W_MAX = 20000.0
+#: A GPU draw above this many times the sum of the power limits the machine's own scan reports (``gpu_draw_cap``) is
+#: no reading of that machine (a glitch, or a helper reporting what its cards cannot draw): left out of its row.
+POWER_LIMIT_MARGIN = 1.5
 
 
 class Clock:
@@ -365,8 +371,11 @@ class WorkerConnection:
         self.welcomed = False
         self._early: list = []
         self._logged: set = set()
-        #: When the hub's clock wrote this connection's last power row (``record_power``), or None.
-        self.power_at: Optional[float] = None
+        #: The most its GPUs can draw as its own scan says (``gpu_draw_cap``): its hello's scan, then each ``hardware``
+        #: frame's. None (only ``POWER_W_MAX`` holds) without a scan that lists every sampled GPU's power limit.
+        report = hello.get("report") if isinstance(hello.get("report"), dict) else {}
+        self.gpu_cap_w: Optional[float] = (gpu_draw_cap(report.get("hardware"))
+                                           if report.get("hardware_source") == "scan" else None)
 
     # -------------------------------------------------------------- state
     @property
@@ -608,12 +617,27 @@ class WorkerHub:
         self._gates: dict = {}            # (event loop, address) -> [asyncio.Lock, how many hold or wait for it]
         self._v1_logged: dict = {}        # address -> when its refusal was last logged
         self._ignored: set = set()
+        #: server_id -> when the hub's clock took the machine's last ``power`` frame (``power_since``), across its
+        #: connections. In memory: a restarted hub's connections all start after any row the last one wrote.
+        self._power_at: dict = {}
         #: Test hooks' counters (the conformance player reads them): token lookups made.
         self.lookups = 0
 
     def time(self) -> float:
         """The hub's clock (``AuthLimiter`` reads it through the hub, so a test's clock swap reaches it)."""
         return self.clock.time()
+
+    def power_since(self, connection: WorkerConnection, now: float) -> Optional[float]:
+        """Where the row of a ``power`` frame that came at ``now`` may start: after the machine's last frame, whichever
+        connection brought it, and after this connection began; None when the machine's last frame was under
+        ``POWER_MIN_SECONDS`` ago (the frame is dropped). Taking a frame moves the machine's mark, so a frame racing it
+        over another connection is the one dropped."""
+        with self._lock:
+            last = self._power_at.get(connection.server_id)
+            if last is not None and now - last < POWER_MIN_SECONDS:
+                return None
+            self._power_at[connection.server_id] = now
+        return connection.connected_at if last is None else max(last, connection.connected_at)
 
     def attach_loop(self, loop):
         """Attach the event loop, so synchronous callers can schedule sends onto it."""
@@ -1228,17 +1252,22 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
         the_hub.models_changed(connection)
         await asyncio.to_thread(record_report, sid, models=connection.models)
     elif t == "hardware":
+        if data["source"] == "scan":
+            connection.gpu_cap_w = gpu_draw_cap(data["scan"])
         await asyncio.to_thread(record_report, sid, hardware=data["scan"])
     elif t == "power":
         now = connection.clock.time()
-        last = connection.power_at
-        if last is not None and now - last < POWER_MIN_SECONDS:
-            connection.log_once("power:fast", logging.WARNING, "the helper of %s sent power samples %.0f s after its "
-                                "last ones: dropped (one frame a minute)", sid, now - last)
+        since = the_hub.power_since(connection, now)
+        if since is None:
+            connection.log_once("power:fast", logging.WARNING, "the helper of %s sent power samples under %.0f s "
+                                "after the machine's last ones: dropped (one frame a minute)", sid, POWER_MIN_SECONDS)
             return
-        connection.power_at = now
-        since = last if last is not None else connection.connected_at
-        await asyncio.to_thread(record_power, sid, data["samples"], now, since)
+        cap = connection.gpu_cap_w
+        if cap is not None and any(x.get("gpu_w") is not None and x["gpu_w"] > cap for x in data["samples"]):
+            connection.log_once("power:implausible", logging.WARNING, "the helper of %s sent GPU draws over %.0f W, "
+                                "%.1f times the power limits its scan reports: left out", sid, cap,
+                                POWER_LIMIT_MARGIN)
+        await asyncio.to_thread(record_power, sid, data["samples"], now, since, cap)
     elif t == "status":
         connection.status_frame = data
         connection.quiet_until = data["quiet_until"]
@@ -1443,25 +1472,48 @@ def record_report(server_id: str, *, hardware: Optional[dict] = None, models: Op
         return {"kept": [], "applied": []}
 
 
-def power_row(server_id: str, samples: list, now: float, since: float) -> Optional[dict]:
+def gpu_draw_cap(scan) -> Optional[float]:
+    """The most a machine's GPUs can draw as its own scan says: ``POWER_LIMIT_MARGIN`` times the sum of the power
+    limits of the GPUs whose draw reads (``power_readable``: ``nvidia-smi``'s, whose draw the helper samples), at most
+    ``POWER_W_MAX``. None when the scan lists no such GPU or one of them without a limit: then only ``POWER_W_MAX``
+    holds. Not a defence against the machine's owner, who sets its power figures anyway: a bound on a reading that
+    cannot be the machine's."""
+    from ..servers import hardware_figure
+    gpus = scan.get("gpus") if isinstance(scan, dict) else None
+    readable = ([g for g in gpus if isinstance(g, dict) and g.get("power_readable") is True]
+                if isinstance(gpus, list) else [])
+    limits = [hardware_figure(g.get("power_limit_w")) for g in readable]
+    if not limits or any(x is None or x <= 0 for x in limits):
+        return None
+    return min(POWER_W_MAX, POWER_LIMIT_MARGIN * sum(limits))
+
+
+def power_row(server_id: str, samples: list, now: float, since: float,
+              gpu_cap: Optional[float] = None) -> Optional[dict]:
     """One power row (``usage.PowerSampler``'s format: ``{"k": "pw", "srv", "t0", "t1", "n", "gpu_w", "cpu_util"}``)
     from a helper's ``power`` frame that came at ``now`` on the hub's clock: the means of the GPUs' draw and of the CPU's
-    utilisation over the samples that read (a draw over ``POWER_W_MAX`` does not), covering the
-    ``POWER_SAMPLE_SECONDS`` each sample took before ``now``, and never before ``since`` (the connection's start or its
-    last row), so a helper's rows never overlap and never reach back before it was connected. The helper's own times
-    are not used: its clock is not the server's. None when no sample reads."""
-    gpu = [x["gpu_w"] for x in samples if x.get("gpu_w") is not None and 0 <= x["gpu_w"] <= POWER_W_MAX]
+    utilisation over the samples that read (a draw over ``POWER_W_MAX``, or over ``gpu_cap``, does not), covering the
+    ``POWER_SAMPLE_SECONDS`` each sample took before ``now``, and never before ``since`` (the machine's last frame or
+    its connection's start, ``WorkerHub.power_since``), so a machine's rows never overlap and never reach back before
+    its helper was connected. The helper's own times are not used: its clock is not the server's. None when no sample
+    reads, or when less than one sample's ``POWER_SAMPLE_SECONDS`` is left after ``since`` (a frame at once after a
+    connection began)."""
+    cap = POWER_W_MAX if gpu_cap is None else min(POWER_W_MAX, gpu_cap)
+    gpu = [x["gpu_w"] for x in samples if x.get("gpu_w") is not None and 0 <= x["gpu_w"] <= cap]
     cpu = [x["cpu_util"] for x in samples if x.get("cpu_util") is not None]
     if not gpu and not cpu:
         return None
     t1 = now
-    t0 = min(max(t1 - POWER_SAMPLE_SECONDS * len(samples), since), t1 - POWER_SAMPLE_SECONDS)
+    t0 = max(t1 - POWER_SAMPLE_SECONDS * len(samples), since)
+    if t1 - t0 < POWER_SAMPLE_SECONDS:
+        return None
     return {"k": "pw", "srv": server_id, "t0": round(t0, 1), "t1": round(t1, 1), "n": len(samples),
             "cpu_util": round(sum(cpu) / len(cpu), 4) if cpu else None,
             "gpu_w": round(sum(gpu) / len(gpu), 2) if gpu else None}
 
 
-def record_power(server_id: str, samples: list, now: float, since: float) -> Optional[dict]:
+def record_power(server_id: str, samples: list, now: float, since: float,
+                 gpu_cap: Optional[float] = None) -> Optional[dict]:
     """Write a helper's ``power`` frame as the machine's power row (``power_row``; ``usage``'s
     ``power-<machine>-YYYY-MM.jsonl``, which costing reads), unless its owner turned the machine's live sampling off
     (``power.sampling`` ``off``) or it is gone. Off the event loop; never raises. Returns the row written, or None."""
@@ -1470,7 +1522,7 @@ def record_power(server_id: str, samples: list, now: float, since: float) -> Opt
         sv = servers.find(server_id)
         if sv is None or (sv.get("power") or {}).get("sampling") == "off":
             return None
-        row = power_row(server_id, samples, now, since)
+        row = power_row(server_id, samples, now, since, gpu_cap)
         if row is not None:
             usage.append(f"power-{server_id}", [row])
         return row
