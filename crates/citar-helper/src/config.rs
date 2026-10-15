@@ -383,7 +383,11 @@ fn flag_or_file_bool(
     }
 }
 
-fn provider(name: &str) -> Result<Provider, String> {
+/// The endpoint's kind, by the name the settings give it.
+///
+/// # Errors
+/// A name that is none of the four.
+pub fn provider(name: &str) -> Result<Provider, String> {
     Ok(match name {
         "lmstudio" => Provider::LmStudio,
         "ollama" => Provider::Ollama,

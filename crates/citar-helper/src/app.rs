@@ -1,6 +1,8 @@
 //! What the binary does with its command line (design/phase4-helper.md P4.3.2): `--version`,
-//! `setup`, and `run` (the default) with every check in front of it, in this order, so that
-//! nothing is written or dialled before it is allowed:
+//! `scan [FILE]` (the standalone collector: it reads no home, writes only FILE and dials nothing
+//! but the model endpoint it is given, for its runtimes), `setup`, and `run` (the default) with
+//! every check in front of it, in this order, so that nothing is written or dialled before it is
+//! allowed:
 //! 1. the development guard (`dev-guard` builds, and every build with a test feature): an
 //!    explicit `--home` outside the per-user base, and a loopback server, both refused before
 //!    anything else happens;
@@ -14,6 +16,7 @@
 //! A double-clicked binary that cannot start says why and waits for Enter before its window
 //! closes, as protocol 1's frozen helper did.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::cli::{Cli, Command};
@@ -24,8 +27,10 @@ use crate::key;
 use crate::llm::HttpEndpoint;
 use crate::log::Log;
 use crate::net::{self, TcpDialer};
+use crate::power::SystemPower;
 use crate::protocol::Provider;
-use crate::session::{Facts, Helper};
+use crate::scan::{self, Probes, Runtime, SystemScanner};
+use crate::session::{Facts, Helper, Sensors};
 use crate::version;
 
 /// Whether this is a development or test build: loopback servers only, an explicit `--home`
@@ -84,15 +89,71 @@ fn run(cli: &Cli) -> Result<u8, Stop> {
         println!("{}", version_line(cli));
         return Ok(0);
     }
+    if let Some(Command::Scan { file }) = &cli.command {
+        return scan(cli, file.as_deref());
+    }
     if DEV_GUARD {
         home::guard(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?;
     }
     let (home, _source) = home::resolve(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?;
     let log = Log::stderr(opts.verbose);
-    match cli.command.unwrap_or(Command::Run) {
+    match cli.command.clone().unwrap_or(Command::Run) {
         Command::Setup => setup(cli, &home),
-        Command::Run => serve(cli, &home, log),
+        Command::Run | Command::Scan { .. } => serve(cli, &home, log),
     }
+}
+
+/// How long `scan` waits for its model endpoint's list.
+const SCAN_LIST: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The runtime `scan` reports: the endpoint `--base-url` and `--provider` name (LM Studio on this
+/// machine by default), when it is LM Studio or Ollama and answers within [`SCAN_LIST`].
+fn scan_runtimes(cli: &Cli) -> Vec<Runtime> {
+    let provider = match cli.opts.provider.as_deref().map(config::provider) {
+        None => Provider::LmStudio,
+        Some(Ok(p)) => p,
+        Some(Err(_)) => return Vec::new(),
+    };
+    let name = match provider {
+        Provider::LmStudio => "LM Studio",
+        Provider::Ollama => "Ollama",
+        _ => return Vec::new(),
+    };
+    let base = cli.opts.base_url.clone().unwrap_or_else(|| config::DEFAULT_BASE_URL.to_owned());
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return Vec::new();
+    };
+    let listed = rt.block_on(async {
+        let tls = net::verified_tls(None).ok()?;
+        let ep = HttpEndpoint::new(provider, &base, None, tls).ok()?;
+        tokio::time::timeout(SCAN_LIST, crate::llm::Endpoint::list(&ep)).await.ok()?.ok()
+    });
+    let Some(listed) = listed else { return Vec::new() };
+    let mut models: Vec<(String, Option<u64>)> =
+        listed.into_iter().map(|m| (m.key, m.context)).collect();
+    models.sort();
+    vec![Runtime { name: name.to_owned(), endpoint: base, models }]
+}
+
+/// `citar-helper scan [FILE]`: this machine's hardware report, printed or written to `FILE`, as
+/// `python collect_hardware.py` gives it, to import on the Servers page. With `--no-llm` it lists
+/// no runtime.
+fn scan(cli: &Cli, file: Option<&Path>) -> Result<u8, Stop> {
+    let probes = Probes::from_env(&env, DEV_GUARD);
+    let runtimes = if cli.opts.no_llm { Vec::new() } else { scan_runtimes(cli) };
+    let at = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let info = scan::collect(&probes, &runtimes, &at);
+    let text = serde_json::to_string_pretty(&info)
+        .map_err(|e| Stop(1, format!("could not write the report: {e}")))?;
+    match file {
+        None => println!("{text}"),
+        Some(f) => {
+            std::fs::write(f, format!("{text}\n"))
+                .map_err(|e| Stop(1, format!("{}: {e}", f.display())))?;
+            eprintln!("Wrote {}. Import it on CITAR's Servers page.", f.display());
+        }
+    }
+    Ok(0)
 }
 
 /// `citar-helper setup`: the first-run questions, also to give the helper a new token; the other
@@ -169,6 +230,30 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
     }
     let (facts, machine) = facts();
     let ceiling = cfg.ceiling(machine);
+    let probes = Probes::from_env(&env, DEV_GUARD);
+    if DEV_GUARD {
+        for var in scan::PROBE_VARS {
+            if let Some(v) = env(var).filter(|v| !v.is_empty()) {
+                log.info(format!("{var} names the probe {}", v.to_string_lossy()));
+            }
+        }
+    }
+    let sensors = Sensors {
+        scanner: (cfg.collect_hardware && cfg.hardware_file.is_empty()).then(|| {
+            Arc::new(SystemScanner { probes: probes.clone(), clock: Clock::system() })
+                as Arc<dyn scan::Scanner>
+        }),
+        power: (!cfg.no_power)
+            .then(|| Arc::new(SystemPower::new(probes)) as Arc<dyn crate::power::PowerProbe>),
+        cache: Some(home.scan_file()),
+    };
+    let reports = if !cfg.collect_hardware {
+        "none (--no-hardware)".to_owned()
+    } else if cfg.hardware_file.is_empty() {
+        "this machine's scan".to_owned()
+    } else {
+        format!("the file {}", cfg.hardware_file)
+    };
     let endpoint: Option<crate::llm::SharedEndpoint> = if cfg.no_llm {
         None
     } else {
@@ -204,6 +289,11 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
     if !cfg.quiet.is_empty() {
         log.info(format!("  quiet  : {} window(s), enforced here", cfg.quiet.len()));
     }
+    log.info(format!("  report : {reports}"));
+    log.info(format!(
+        "  power  : {}",
+        if cfg.no_power { "not sampled (--no-power)" } else { "sampled every 10 s" }
+    ));
     log.info(format!("  home   : {}", home.root().display()));
     log.info(format!("  key    : {}", machine_key.fingerprint()));
 
@@ -227,6 +317,7 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
             service: cli.opts.service,
             stop: stop_rx,
             in_flight: crate::proxy::InFlight::default(),
+            sensors,
         };
         helper.run().await.code()
     });

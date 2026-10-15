@@ -620,6 +620,70 @@ impl<'t> Player<'t> {
     }
 }
 
+/// A scanner for the in-process helper (4-06): it answers the scan it holds at once (a test may
+/// change it), and counts the scans it made.
+#[derive(Clone)]
+pub struct FixedScanner {
+    pub scan: Arc<Mutex<Map<String, Value>>>,
+    pub made: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FixedScanner {
+    #[must_use]
+    pub fn new(scan: Map<String, Value>) -> FixedScanner {
+        FixedScanner { scan: Arc::new(Mutex::new(scan)), made: Arc::default() }
+    }
+
+    /// The scans made so far.
+    #[must_use]
+    pub fn made(&self) -> usize {
+        self.made.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// What the next scans find.
+    pub fn set(&self, scan: Map<String, Value>) {
+        *self.scan.lock().expect("the scan") = scan;
+    }
+}
+
+impl citar_helper::scan::Scanner for FixedScanner {
+    fn scan(
+        &self,
+        _runtimes: Vec<citar_helper::scan::Runtime>,
+    ) -> BoxFuture<'static, Option<Map<String, Value>>> {
+        self.made.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let scan = self.scan.lock().expect("the scan").clone();
+        Box::pin(async move { Some(scan) })
+    }
+}
+
+/// A small scan in the helper's own format, with `cpu` as its CPU's name.
+#[must_use]
+pub fn test_scan(cpu: &str) -> Map<String, Value> {
+    let v = serde_json::json!({
+        "format": citar_helper::scan::FORMAT, "collector_version": citar_helper::scan::COLLECTOR_VERSION,
+        "collector": citar_helper::scan::COLLECTOR, "collected_at": "2026-10-14T12:00:00",
+        "hostname": "transcript-host", "system": {"form": "desktop"},
+        "cpu": {"model": cpu, "cores": 8, "threads": 16}, "memory": {"ram_gb": 32.0, "unified": false},
+        "gpus": [], "physical_disks": [], "volumes": [], "runtimes": [],
+        "power": {"gpu_sampling": false}
+    });
+    match v {
+        Value::Object(m) => m,
+        _ => unreachable!("an object"),
+    }
+}
+
+/// Power readings for the in-process helper: the same reading every time.
+pub struct FixedPower(pub citar_helper::power::Reading);
+
+impl citar_helper::power::PowerProbe for FixedPower {
+    fn read(&self) -> BoxFuture<'static, Option<citar_helper::power::Reading>> {
+        let r = self.0;
+        Box::pin(async move { Some(r) })
+    }
+}
+
 /// A fake hub on loopback: every connection accepted, its WebSocket handshake done, handed to the
 /// player. Returns the port.
 pub async fn loopback_hub() -> (u16, mpsc::UnboundedReceiver<ServerWs>) {

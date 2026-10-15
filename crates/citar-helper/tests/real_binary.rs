@@ -11,6 +11,12 @@
 //! endpoint's connection within a second, a timeout, an unstreamed answer, and parameters outside
 //! the five dropped.
 //!
+//! And (4-06, in a development build) the binary reports its own scan, made with
+//! `citar-fake-probe` standing in for `nvidia-smi`, PowerShell and `system_profiler`, and sends
+//! it again within 5 s of a `rescan`; with `--hardware` it reports a UTF-16 file, again on
+//! `rescan`. The other runs here take `--no-hardware --no-power`: what they check is not the
+//! machine's report, and none of them runs the machine's own probe programs.
+//!
 //! Every run here has its own home under the system's temporary directory, `CITAR_DATA_DIR`
 //! pointing at it too, and the `CITAR_WORKER_*` variables removed, so nothing of a real
 //! installation is read or written (P4.7.1).
@@ -219,6 +225,7 @@ async fn the_binary_connects_acknowledges_reports_and_exits_78_on_shutdown() {
         .arg(&home)
         .args(["--server", &format!("http://127.0.0.1:{hub}"), "--token", TOKEN])
         .args(["--base-url", &format!("http://127.0.0.1:{endpoint}/v1"), "--max-concurrent", "2"])
+        .args(["--no-hardware", "--no-power"])
         .env("CITAR_DATA_DIR", &home)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -367,6 +374,7 @@ async fn the_binary_serves_streams_cancels_and_times_out_completions() {
             .arg(&home)
             .args(["--server", &format!("http://127.0.0.1:{hub}"), "--token", &token])
             .args(["--base-url", &fake.base_url()])
+            .args(["--no-hardware", "--no-power"])
             .env("CITAR_DATA_DIR", &home)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -382,5 +390,133 @@ async fn the_binary_serves_streams_cancels_and_times_out_completions() {
         let log = std::fs::read_to_string(&helper.log).unwrap_or_default();
         played.unwrap_or_else(|e| panic!("{e}\n  the helper's log:\n{log}"));
         std::fs::remove_dir_all(&root).expect("cleaned");
+    }
+}
+
+/// The binary's own scan (4-06), with `citar-fake-probe` for the probe programs: only a
+/// development build makes the fake, and only such a build reads the variables that name it.
+#[cfg(feature = "dev-guard")]
+mod scan {
+    use super::*;
+
+    const FAKE: &str = env!("CARGO_BIN_EXE_citar-fake-probe");
+
+    /// `hardware-rescan` with what this run checks of the scans written in: the hello's and the
+    /// rescan's come from the binary's scan (its collector, the fake GPU's readable draw) or, with
+    /// `--hardware`, from the file.
+    fn rescan_transcript(source: &str, report: Value) -> Transcript {
+        let path = citar_helper::conformance::fixtures_dir()
+            .join("transcripts")
+            .join("hardware-rescan.json");
+        let mut v: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json");
+        for step in v["steps"].as_array_mut().expect("steps") {
+            if step["h2s"]["t"] == "hello" {
+                step["h2s"]["report"] =
+                    json!({"hardware": report.clone(), "hardware_source": source});
+                step["within_s"] = json!(20);
+            }
+            if step["h2s"]["t"] == "hardware" {
+                step["h2s"]["scan"] = report.clone();
+                step["h2s"]["source"] = json!(source);
+                assert_eq!(step["within_s"], 5, "the transcript's own bound");
+            }
+        }
+        Transcript::from_value(&v).expect("a transcript")
+    }
+
+    async fn play_rescan(name: &str, extra: &[&str], t: &Transcript) -> PathBuf {
+        let root = scratch(name);
+        let home = root.join("home");
+        let probes = root.join("probes");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&probes).expect("probes");
+        let fake = |n: &str| {
+            let to = probes.join(format!("{n}{}", std::env::consts::EXE_SUFFIX));
+            std::fs::copy(FAKE, &to).expect("the fake copied");
+            to
+        };
+        std::fs::write(home.join("helper.json"), t.setup_helper["config"].to_string())
+            .expect("helper.json");
+        let (hub, conns) = loopback_hub().await;
+        let token = t.values["token"].as_str().expect("a token").to_owned();
+        let child = command(&root)
+            .args(["--home"])
+            .arg(&home)
+            .args(["--server", &format!("http://127.0.0.1:{hub}"), "--token", &token])
+            .args(["--base-url", "http://127.0.0.1:9/v1"])
+            .args(extra)
+            .env("CITAR_DATA_DIR", &home)
+            .env("CITAR_HELPER_NVIDIA_SMI", fake("nvidia-smi"))
+            .env("CITAR_HELPER_POWERSHELL", fake("powershell"))
+            .env("CITAR_HELPER_SYSTEM_PROFILER", fake("system_profiler"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the binary starts");
+        let mut helper =
+            Process { child, log: home.join("helper").join("logs").join("helper.log") };
+        let mut player =
+            Player::new(t, conns, Models::default(), canonical_examples().expect("examples"));
+        player.bindings.bind("token", Value::String(token));
+        let played = player.play(&mut helper).await;
+        let _killed = helper.child.kill().await;
+        let log = std::fs::read_to_string(&helper.log).unwrap_or_default();
+        played.unwrap_or_else(|e| panic!("{e}\n  the helper's log:\n{log}"));
+        root
+    }
+
+    fn calls(probe: &Path) -> Vec<String> {
+        std::fs::read_to_string(probe)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.split_once(' ').map_or("", |(_, a)| a).to_owned())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_binary_reports_its_scan_and_sends_it_again_within_five_seconds_of_a_rescan() {
+        let report = json!({"format": "citar-hardware", "collector": "citar-helper",
+                            "collector_version": 2, "power": {"gpu_sampling": true}});
+        let t = rescan_transcript("scan", report);
+        let root = play_rescan("scan-rescan", &[], &t).await;
+        let probes = root.join("probes");
+        let nvidia = calls(&probes.join(format!("nvidia-smi{}.log", std::env::consts::EXE_SUFFIX)));
+        let scans = nvidia.iter().filter(|c| c.starts_with("--query-gpu=name,")).count();
+        assert_eq!(scans, 2, "the hello's scan and the rescan's: {nvidia:?}");
+        assert!(nvidia.iter().all(|c| c.starts_with("--query-gpu=")), "{nvidia:?}");
+        if cfg!(windows) {
+            let ps = calls(&probes.join("powershell.exe.log"));
+            assert_eq!(ps.len(), 2, "{ps:?}");
+            assert!(ps.iter().all(|c| c.starts_with("-NoProfile -NonInteractive -Command")));
+        }
+        // The scan was kept in the home.
+        let kept = root.join("home").join("helper").join("scan.json");
+        let kept: Value =
+            serde_json::from_slice(&std::fs::read(kept).expect("scan.json")).expect("JSON");
+        assert_eq!(kept["scan"]["gpus"][0]["name"], "CITAR Fake GPU");
+        std::fs::remove_dir_all(&root).expect("cleaned");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_binary_reports_a_utf16_hardware_file_and_reads_it_again_on_rescan() {
+        let file_scan = json!({"format": "citar-hardware", "cpu": {"model": "Files Own CPU"}});
+        let t = rescan_transcript("file", file_scan.clone());
+        let dir = scratch("scan-file-utf16");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("hw16.json");
+        let mut utf16 = vec![0xff, 0xfe];
+        for u in file_scan.to_string().encode_utf16() {
+            utf16.extend_from_slice(&u.to_le_bytes());
+        }
+        std::fs::write(&file, &utf16).expect("written");
+        let path = file.display().to_string();
+        let root = play_rescan("scan-file", &["--hardware", &path], &t).await;
+        let nvidia = calls(
+            &root.join("probes").join(format!("nvidia-smi{}.log", std::env::consts::EXE_SUFFIX)),
+        );
+        assert!(nvidia.iter().all(|c| !c.starts_with("--query-gpu=name,")), "no scan: {nvidia:?}");
+        std::fs::remove_dir_all(&root).expect("cleaned");
+        std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 }

@@ -6,9 +6,9 @@
 //! argparse allowed. The flags work before or after the command; `run` is the default command.
 //!
 //! New in protocol 2: `--home`, `--no-llm`, `--cpu`, `--ca-file`, `--no-power`, `--updates`,
-//! `--service`, and the `setup` command. They make a few prefixes ambiguous that were not
-//! (`--serv`, `--no`, `--c`), which are refused as argparse refuses an ambiguous one. `scan`, `service`, `update`, `job-host` and
-//! `--self-test` arrive with packages 4-06 to 4-14.
+//! `--service`, and the `setup` and `scan [FILE]` commands. They make a few prefixes ambiguous
+//! that were not (`--serv`, `--no`, `--c`), which are refused as argparse refuses an ambiguous
+//! one. `service`, `update`, `job-host` and `--self-test` arrive with packages 4-08 to 4-14.
 
 use std::path::PathBuf;
 
@@ -33,12 +33,18 @@ pub struct Cli {
 }
 
 /// What to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Subcommand)]
+#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
 pub enum Command {
     /// Connect to the server and serve it (the default).
     Run,
     /// Ask for the server, a new token and whether to lend CPU, and save them in helper.json.
     Setup,
+    /// Scan this machine's hardware and print the report (or write it to FILE), to import on the
+    /// Servers page: the standalone collector. Nothing is sent anywhere.
+    Scan {
+        /// Where to write the report (default: print it).
+        file: Option<PathBuf>,
+    },
 }
 
 /// The flags, each also accepted after the command.
@@ -173,6 +179,11 @@ mod tests {
         assert_eq!(c.opts.token.as_deref(), Some("t"));
         assert_eq!(c.opts.home, Some(PathBuf::from("/h")));
         assert_eq!(parse(&["setup"]).command, Some(Command::Setup));
+        assert_eq!(parse(&["scan"]).command, Some(Command::Scan { file: None }));
+        assert_eq!(
+            parse(&["scan", "hw.json", "--no-llm"]).command,
+            Some(Command::Scan { file: Some(PathBuf::from("hw.json")) })
+        );
         assert!(parse(&["-V"]).opts.version);
         for bad in
             [&["--provider", "vllm"][..], &["--max-concurrent", "two"], &["--no"], &["bogus"]]

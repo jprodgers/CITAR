@@ -65,6 +65,12 @@ impl Home {
     pub fn log_dir(&self) -> PathBuf {
         self.state_dir().join("logs")
     }
+
+    /// `helper/scan.json`: the last hardware scan and its hash (P4.3.5).
+    #[must_use]
+    pub fn scan_file(&self) -> PathBuf {
+        self.state_dir().join("scan.json")
+    }
 }
 
 /// Reads one environment variable; tests pass their own.
