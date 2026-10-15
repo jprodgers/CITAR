@@ -363,7 +363,10 @@ machine already serving `google/gemma-4-e2b`, `CITAR_TEST_LMSTUDIO=http://localh
 nextest run -p citar-helper --features citar-helper/dev-guard --run-ignored only -E
 'binary(real_model)' --no-capture` sends it a request with a tool and cancels a long generation
 through the real binary. It reads LM Studio's model list before and after, never loads, unloads or
-swaps a model, and sends nothing when the model is not loaded. `citar-jobs` holds the one module of the helper
+swaps a model, and sends nothing when the model is not loaded. Its checks also run in every run
+against a stand-in for LM Studio (the fake endpoint with one model answering one request at a
+time): they pass there, and fail against a server that goes on generating after a cancel, a model
+that is not loaded and one unloaded during the run. `citar-jobs` holds the one module of the helper
 crates allowed `unsafe` (`src/sys/`), the operating-system calls no safe wrapper makes; `cargo
 xtask check` refuses `unsafe` anywhere else in them, and their test features and `dev-guard` in
 anything that ships.
