@@ -1287,6 +1287,25 @@ class WriteVolume(World):
                                       .where(ComputeEvent.activity == "game:kept")), 500)
         self.assertFalse(self.led._writer.is_alive() and self.led.q.qsize(), "nothing left behind")
 
+    def test_what_is_put_after_a_stop_is_written_by_the_next_stop_at_once(self):
+        """A stopped ledger starts no writer again, so an event put after its stop (a server started again in the same
+        process, as the tests' hubs are) is written by the next stop on the calling thread: not waited for until the
+        stop's timeout and then lost (package 4-05: every hub stopped after the first in a test process waited its
+        10 s, two thirds of the hub tests' time)."""
+        a = self.ids["alice"]
+        self.led.step(event("sv_bob", "game:before", a, 1.0))
+        self.assertTrue(self.led.stop(10))
+        self.assertTrue(until(lambda: not self.led._writer.is_alive(), 5), "the writer ends with its stop")
+        self.led.step(event("sv_bob", "game:after", a, 1.0))
+        self.assertFalse(self.led._writer.is_alive(), "a stopped ledger starts no writer again")
+        t0 = time.perf_counter()
+        self.assertTrue(self.led.stop(10), "the next stop wrote it")
+        self.assertLess(time.perf_counter() - t0, 3.0 if os.environ.get("CI") else 1.0, "at once, not at its timeout")
+        with db.session() as s:
+            self.assertEqual(s.scalar(select(func.count()).select_from(ComputeEvent)
+                                      .where(ComputeEvent.activity == "game:after")), 1)
+        self.assertEqual(self.led._pending, 0)
+
 
 # ---------------------------------------------------------------------------- the database's write lock held briefly
 

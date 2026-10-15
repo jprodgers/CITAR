@@ -398,7 +398,9 @@ class Ledger:
 
     def flush(self, timeout: float = 10.0) -> bool:
         """Wait until everything queued so far is written (or failed). Returns whether it was within ``timeout``. A
-        ledger with no threads writes it on the calling thread."""
+        ledger with no threads writes it on the calling thread, and so does a stopped one whose writer has gone: what
+        was put after its stop (a server started again in the same process, as the tests' hubs are) is written by the
+        next flush or stop, not waited for until the timeout and lost."""
         if not self.background:
             self.drain()
             return True
@@ -413,9 +415,15 @@ class Ledger:
                     if self._writer is None or not self._writer.is_alive():
                         self._lock.release()
                         try:
-                            self.ensure_threads()
+                            if self._stop.is_set():
+                                # stopped: no writer comes back (``ensure_threads``), so this thread writes it
+                                self.drain()
+                            else:
+                                self.ensure_threads()
                         finally:
                             self._lock.acquire()
+                        if self._pending <= 0:
+                            break
                     self._idle.wait(timeout=min(left, 0.25))
                 return True
         finally:
