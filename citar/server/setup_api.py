@@ -268,8 +268,8 @@ def operator_console(me: User = Depends(require_admin)):
     checks.append(_check(
         playable > 0, "Models",
         f"{playable} model(s) available to seats" if playable else "none registered",
-        "Add a machine on the Servers page, or have somebody run `citar setup --worker` to "
-        "connect theirs."))
+        "Add a machine on the Servers page, or have somebody run the CITAR helper with a token "
+        "issued there to connect theirs."))
 
     state = paths.state_dir()
     checks.append(_check(

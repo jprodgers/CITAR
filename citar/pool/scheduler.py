@@ -43,13 +43,20 @@ becomes live, queued tickets that do not wait for benchmarks are refused and run
 first request waits until no ticket request is in flight there (draining ones included), for at most
 ``drain_seconds``; the wait is its ``drain_s``, and a drain cut short by the bound marks it ``contaminated``.
 
-**Draining.** A cancelled or timed-out request on a helper is still being generated there (the v1 helper ignores
-``CANCEL``), so its slot stays taken (*draining*) until the hub hands the scheduler the request's late frame
-(``late_frame``) or its request timeout plus the hub's grace has passed. The helper answers only over the connection
-the request went out on, so a draining slot whose connection is gone (the helper disconnected, or a new connection
-replaced it) is given back at once: a helper process still finishing it answers ``busy``, which the fallback absorbs.
-A ``busy`` refusal anyway is never slept on: the machine's capacity is lowered to what is in flight until the next
-frame frees a slot, and the request goes back to the head of its queue.
+**Cancel and draining** (design/phase4-helper.md P4.5.3). A cancelled or timed-out request on a helper keeps its slot
+(*cancelling*) until the hub hands the scheduler the helper's acknowledgement (``cancelled``, or a ``done`` or ``error``
+that crossed the cancel: ``late_frame``), which frees it at once: the protocol 2 helper stops the generation and says
+so. Only when no answer comes within ``CANCEL_ACK_SECONDS`` does the slot *drain*, as P3.3.3 described for protocol 1:
+it stays taken until the late frame or the request's timeout plus the hub's grace, the machine is flagged
+``cancel_unacked`` (shown to administrators), and the counter ``draining`` counts it. The helper answers only over the
+connection the request went out on, so a slot held for a connection that is gone (the helper disconnected, or a new
+connection replaced it) is given back at once. A ``busy`` refusal is never slept on: the machine's capacity is lowered
+to what is in flight until the next frame frees a slot, and the request goes back to the head of its queue.
+
+**The helper's part** (P4.5.3): capacity is the row's slots capped by what its helper acknowledged
+(``settings_ack.effective.llm.slots``, held to the site's figures by the hub); a helper that serves no models (its own
+``--no-llm``) refuses like a machine whose model work is off; and the helper's own quiet hours (its ``status``) are
+read like the site's.
 
 **Threading.** One lock and one condition per machine. Only ``acquire`` blocks, in ticks of at most a second, and in
 test mode (``CITAR_TEST_LOCKS``) it asserts that the calling thread holds no game session's lock; ``cancel``,
@@ -114,6 +121,8 @@ DEFAULT_STEPS = 8
 BENCHMARK_DRAIN_SECONDS = 120.0
 #: The hub's grace beyond a request's own timeout (``WorkerHub.submit``): a draining request is given up after it.
 DRAIN_GRACE_SECONDS = 15.0
+#: How long a cancelled request's slot waits for the helper's acknowledgement before it drains (P4.5.3).
+CANCEL_ACK_SECONDS = 5.0
 #: How often a machine's row is read again (P3.3.2).
 SETTINGS_SECONDS = 5.0
 #: How long a capacity lowered by a ``busy`` refusal holds when no frame frees a slot meanwhile.
@@ -167,6 +176,18 @@ def _off(st: "MachineSettings", server_id: str) -> MachineRefused:
         return MachineRefused(f"{name} takes no model work: its owner turned it off in its machine settings.",
                               code="disabled")
     return MachineRefused(f"{name} is disabled.", code="disabled")
+
+
+def _serves_none(st: "MachineSettings") -> bool:
+    """A helper machine whose connected helper serves no models (its own ``--no-llm``, or model work off in what it
+    acknowledged although the site has it on)."""
+    return st.reach == "worker" and bool(st.online) and st.helper_llm is False
+
+
+def _no_models(st: "MachineSettings", server_id: str) -> MachineRefused:
+    """The refusal of a machine whose helper serves no models: ``disabled`` to its callers, as a machine whose model
+    work is off."""
+    return MachineRefused(f"{st.name or server_id} takes no model work: its helper serves no models.", code="disabled")
 
 
 # ---------------------------------------------------------------------------- test mode: no session lock in acquire
@@ -224,6 +245,10 @@ class MachineSettings:
     helper_loaded: frozenset = frozenset()
     contexts: dict = field(default_factory=dict)
     connection: Optional[int] = None
+    #: Whether its helper serves models at all (False: started with ``--no-llm``), and when the helper's own quiet
+    #: hours end (naive local time; None outside them).
+    helper_llm: Optional[bool] = None
+    helper_quiet_until: Optional[datetime] = None
 
 
 def read_settings(server_id: str) -> MachineSettings:
@@ -245,21 +270,27 @@ def read_settings(server_id: str) -> MachineSettings:
 
 
 def helper_state(server_id: str) -> dict:
-    """A helper machine's state as the hub has it now: ``online``, ``helper_slots``, ``helper_loaded``, ``contexts``
-    and ``connection`` (the connection's serial)."""
+    """A helper machine's state as the hub has it now: ``online``, ``helper_slots`` (what it acknowledged, held to the
+    site's), ``helper_llm`` (whether it serves models), ``helper_loaded``, ``contexts``, ``quiet_until`` (its own quiet
+    hours' end, naive local time) and ``connection`` (the connection's serial)."""
     try:
         from ..server.workers import hub
         connection = hub().get(server_id)
     except Exception:
         connection = None
     if connection is None:
-        return {"online": False, "helper_slots": None, "helper_loaded": frozenset(), "contexts": {},
-                "connection": None}
+        return {"online": False, "helper_slots": None, "helper_llm": None, "helper_loaded": frozenset(),
+                "contexts": {}, "quiet_until": None, "connection": None}
     models = list(connection.models or [])
-    return {"online": True, "helper_slots": max(1, int(connection.max_concurrent or 1)),
+    quiet = connection.quiet_until
+    try:
+        quiet_at = datetime.fromtimestamp(float(quiet)) if quiet is not None else None
+    except (OverflowError, OSError, ValueError):
+        quiet_at = datetime.max
+    return {"online": True, "helper_slots": max(0, int(connection.llm_slots)), "helper_llm": connection.llm_on,
             "helper_loaded": frozenset(m.get("key") for m in models if m.get("key") and m.get("loaded")),
             "contexts": {m.get("key"): m.get("context") for m in models if m.get("key") and m.get("context")},
-            "connection": getattr(connection, "serial", None)}
+            "quiet_until": quiet_at, "connection": getattr(connection, "serial", None)}
 
 
 def _lmstudio_loaded(server_id: str) -> Optional[frozenset]:
@@ -309,18 +340,27 @@ class StepEvent:
 
 class _Slot:
     """A slot of a machine's capacity, taken by a lease request for its one call, or by a ticket from its start to its
-    close. ``draining``: its request was abandoned but the helper may still be generating it, to answer over
-    ``conn`` (the serial of the connection it went out on)."""
-    __slots__ = ("binding", "request_id", "requesting", "draining", "drain_until", "taken", "conn")
+    close. ``cancelling``: its request was given up, and the helper's acknowledgement (to come over ``conn``, the
+    serial of the connection it went out on) frees it, until ``ack_until``; ``draining``: no acknowledgement came, and
+    the helper may still be generating it, until ``drain_until`` (P4.5.3)."""
+    __slots__ = ("binding", "request_id", "requesting", "cancelling", "ack_until", "draining", "drain_until", "taken",
+                 "conn")
 
     def __init__(self, binding, taken: float):
         self.binding = binding
         self.request_id = ""
         self.requesting = False
+        self.cancelling = False
+        self.ack_until = 0.0
         self.draining = False
         self.drain_until = 0.0
         self.taken = taken
         self.conn: Optional[int] = None
+
+    @property
+    def held(self) -> bool:
+        """Held for a request that was given up (cancelling or draining)."""
+        return self.cancelling or self.draining
 
 
 class _Request:
@@ -609,7 +649,7 @@ class Machine:
         if st.reach == "worker":
             if not st.online:
                 return None
-            cap = min(st.slots, st.helper_slots or st.slots)
+            cap = min(st.slots, st.helper_slots if st.helper_slots is not None else st.slots)
         else:
             cap = st.slots
         if self.busy_cap is not None:
@@ -645,8 +685,10 @@ class Machine:
         return loaded is None or ticket.model in loaded
 
     def _quiet(self) -> Optional[datetime]:
-        end = self.settings.quiet_until
-        return end if end is not None and end > datetime.now() else None
+        """When the quiet hours in force end, the site's or its helper's own (the later), or None outside both."""
+        now = datetime.now()
+        ends = [e for e in (self.settings.quiet_until, self.settings.helper_quiet_until) if e is not None and e > now]
+        return max(ends) if ends else None
 
     def _ticket_order(self, r: _Request):
         b = r.binding
@@ -660,6 +702,8 @@ class Machine:
             return _off(st, self.id)
         if st.reach == "worker" and not st.online:
             return MachineRefused(f"{st.name or self.id} is offline: its helper is not connected.", code="offline")
+        if _serves_none(st):
+            return _no_models(st, self.id)
         if self._bench_live() and not ticket.wait_for_benchmark:
             return MachineRefused(f"{st.name or self.id} is held by a benchmark.", code="benchmark")
         if not self._model_ok(ticket):
@@ -785,7 +829,7 @@ class Machine:
         if s in self.slots:
             self.slots.remove(s)
             b = s.binding
-            if b.is_lease and not s.draining:
+            if b.is_lease and not s.held:
                 b.inflight = max(0, b.inflight - 1)
             if not b.is_lease and b.slot is s:
                 b.slot = None
@@ -797,6 +841,15 @@ class Machine:
     def _housekeep(self, now: float) -> None:
         """Expire what is due: draining slots past their bound, a ``busy`` lowering held too long, queued tickets past
         their deadline. Lock held."""
+        for s in [s for s in self.slots if s.cancelling and now >= s.ack_until]:
+            # the helper did not acknowledge the cancel: it may still be generating, so the slot drains (P3.3.3), and
+            # the machine is flagged for administrators: a protocol 2 helper that drains is misbehaving
+            s.cancelling, s.draining = False, True
+            self.counters["draining"] += 1
+            self.counters["cancel_unacked"] += 1
+            log.warning("%s did not acknowledge the cancel of request %s within %.0f s: its slot drains", self.id,
+                        s.request_id, CANCEL_ACK_SECONDS)
+            self.sched.run_db_job(lambda sid=self.id, rid=s.request_id: flag_cancel_unacked(sid, rid))
         for s in [s for s in self.slots if s.draining and now >= s.drain_until]:
             log.info("draining request %s on %s given up after its timeout", s.request_id, self.id)
             self.counters["drain_timeouts"] += 1
@@ -888,6 +941,8 @@ class Machine:
         st = self.settings
         if st.known and (not st.enabled or not st.llm):
             return _off(st, self.id)
+        if st.known and _serves_none(st):
+            return _no_models(st, self.id)
         if b.is_lease:
             if b.released or b not in self.leases:
                 return Cancelled("This seat's lease was released.", code="released")
@@ -917,7 +972,7 @@ class Machine:
             if error is not None:
                 if ticket.state == "running":
                     ticket.state, ticket.error = "done", error
-                    if ticket.slot is not None and not ticket.slot.draining:
+                    if ticket.slot is not None and not ticket.slot.held:
                         self._free(ticket.slot, now, frame=False)
                     self._dispatch(now)
                 raise error
@@ -939,17 +994,18 @@ class Machine:
         return st.reach == "worker" and (not st.online or conn != st.connection)
 
     def _drop_drain(self, s: _Slot, now: float) -> None:
-        """Give back a draining slot whose request's connection is gone (P3.3.3): no late frame can come for it. A
-        helper process still finishing it answers ``busy`` meanwhile, which the fallback absorbs. Lock held."""
-        log.info("draining request %s on %s given up: the helper's connection it went out on is gone",
+        """Give back a slot held for a given-up request whose connection is gone (P3.3.3): no late frame can come for
+        it, and the helper cancels whatever it was generating when its connection goes (P4.2.4). Lock held."""
+        log.info("given-up request %s on %s: the helper's connection it went out on is gone, its slot freed",
                  s.request_id, self.id)
         self.counters["drains_dropped"] += 1
         self._free(s, now, frame=False)
 
     def finish(self, grant: Grant, *, unfinished: Optional[tuple] = None, gen_s: Optional[float] = None) -> None:
         """A call ended (non-blocking). ``unfinished`` (request id, seconds left[, the serial of the helper's connection
-        it went out on]): the helper may still be generating it, so its slot drains until the late frame, the bound, or
-        that connection's end (at once when it has gone already)."""
+        it went out on]): the request was given up, so its slot waits for the helper's acknowledgement (cancelling, for
+        ``CANCEL_ACK_SECONDS``), then drains until the late frame or the bound; that connection's end frees it at once
+        (P4.5.3)."""
         r = grant.request
         with self.lock:
             now = self.sched.clock()
@@ -972,9 +1028,10 @@ class Machine:
                 else:
                     if b.is_lease:
                         b.inflight = max(0, b.inflight - 1)
-                    s.draining, s.request_id, s.conn = True, rid, conn
-                    s.drain_until = now + max(0.0, float(left or 0.0))
-                    self.counters["draining"] += 1
+                    s.cancelling, s.request_id, s.conn = True, rid, conn
+                    s.ack_until = now + CANCEL_ACK_SECONDS
+                    s.drain_until = now + max(CANCEL_ACK_SECONDS, float(left or 0.0))
+                    self.counters["cancelling"] += 1
                     if not b.is_lease and b.state == "running":
                         b.state = "cancelled"
                     if self._gone(conn):                # its connection went while the caller was unwinding
@@ -1023,13 +1080,13 @@ class Machine:
                 self._dispatch(self.sched.clock())
 
     def late_frame(self, request_id: str) -> bool:
-        """The helper's ``Done`` or error for a request the hub had already given up (non-blocking): its draining slot
-        comes back. Returns whether one did."""
+        """The helper's answer for a request the hub had already given up (non-blocking): its ``cancelled``, or a
+        ``done`` or ``error`` that crossed the cancel. The slot held for it comes back. Returns whether one did."""
         with self.lock:
             now = self.sched.clock()
             self.counters["late_frames"] += 1
             for s in self.slots:
-                if s.draining and s.request_id == request_id:
+                if s.held and s.request_id == request_id:
                     self._free(s, now, frame=True)
                     self._dispatch(now)
                     return True
@@ -1171,7 +1228,7 @@ class Machine:
             if ticket.state in ("queued", "running"):
                 ticket.state = "done"
                 self._status(ticket, {"state": "done"})
-            if ticket.slot is not None and not ticket.slot.draining and not ticket.slot.requesting:
+            if ticket.slot is not None and not ticket.slot.held and not ticket.slot.requesting:
                 self._free(ticket.slot, now, frame=False)
             self._dispatch(now)
 
@@ -1183,6 +1240,7 @@ class Machine:
             settings.online, settings.helper_slots = old.online, old.helper_slots
             settings.helper_loaded, settings.contexts = old.helper_loaded, old.contexts
             settings.connection = old.connection
+            settings.helper_llm, settings.helper_quiet_until = old.helper_llm, old.helper_quiet_until
             if settings.loaded is None:
                 settings.loaded = old.loaded          # a direct LM Studio's, asked of it by ``refresh_loaded``
             self.settings = settings
@@ -1199,12 +1257,14 @@ class Machine:
             before = st.connection
             st.online = state.get("online")
             st.helper_slots = state.get("helper_slots")
+            st.helper_llm = state.get("helper_llm")
             st.helper_loaded = frozenset(state.get("helper_loaded") or ())
             st.contexts = dict(state.get("contexts") or {})
+            st.helper_quiet_until = state.get("quiet_until")
             st.connection = state.get("connection") if st.online else None
             now = self.sched.clock()
             if st.reach == "worker":
-                for s in [s for s in self.slots if s.draining and self._gone(s.conn)]:
+                for s in [s for s in self.slots if s.held and self._gone(s.conn)]:
                     self._drop_drain(s, now)
                 if st.connection != before and self.busy_cap is not None:
                     self.busy_cap = self.busy_since = None
@@ -1247,6 +1307,7 @@ class Machine:
             return {"id": self.id, "name": self.settings.name, "capacity": self.capacity(),
                     "slots": self.settings.slots, "in_flight": len(self.slots),
                     "draining": sum(1 for s in self.slots if s.draining),
+                    "cancelling": sum(1 for s in self.slots if s.cancelling),
                     "waiting": len(self.waiting), "busy_cap": self.busy_cap,
                     "leases": [lease.client() for lease in self.leases],
                     "tickets": [s.binding.client() for s in self.slots if not s.binding.is_lease]
@@ -1387,8 +1448,10 @@ class Scheduler:
             except Exception:
                 h = {"online": False}
             st.online, st.helper_slots = h.get("online"), h.get("helper_slots")
+            st.helper_llm = h.get("helper_llm")
             st.helper_loaded = frozenset(h.get("helper_loaded") or ())
             st.contexts = dict(h.get("contexts") or {})
+            st.helper_quiet_until = h.get("quiet_until")
             st.connection = h.get("connection") if st.online else None
         return st
 
@@ -2001,6 +2064,18 @@ def flag_overreports(server_id: str, count: int) -> None:
         log.exception("could not flag machine %s for over-reporting", server_id)
 
 
+def flag_cancel_unacked(server_id: str, request_id: str) -> None:
+    """Count ``flags.cancel_unacked`` on a machine's row (P4.5.3): its helper did not acknowledge a cancel within
+    ``CANCEL_ACK_SECONDS``, so the slot drained. Runs on the notifier thread."""
+    try:
+        from .. import db
+        from ..server.workers import flag_machine
+        if db.configured():
+            flag_machine(server_id, "cancel_unacked", {"request": request_id})
+    except Exception:
+        log.exception("could not flag machine %s for an unacknowledged cancel", server_id)
+
+
 # ---------------------------------------------------------------------------- the process's scheduler
 
 _SCHED: Optional[Scheduler] = None
@@ -2022,6 +2097,16 @@ def get() -> Scheduler:
 def current() -> Optional[Scheduler]:
     """The process's scheduler if one was made, else None (the hub's pushes need none)."""
     return _SCHED
+
+
+def install(sched: Scheduler) -> Scheduler:
+    """Make ``sched`` the process's scheduler, the one before it stopped (tests: a scheduler on a test's clock)."""
+    global _SCHED
+    with _SCHED_LOCK:
+        if _SCHED is not None and _SCHED is not sched:
+            _SCHED.stop()
+        _SCHED = sched
+    return sched
 
 
 def reset() -> None:

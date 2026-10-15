@@ -8,17 +8,25 @@
     POST /api/machines/{sid}/hardware/apply    copy the last report into the configuration: ``{"sections": [...]}``
                                                (``hardware``, ``models``, ``power``; none or empty: each one the
                                                report has something for)
+    POST /api/machines/{sid}/key/reset         forget the helper's registered machine key: the next hello registers its
+                                               own (design/phase4-helper.md P4.3.7), and a connected helper is made to
+                                               reconnect (close 1012) so that it does at once; the trust tier is
+                                               unchanged
+    POST /api/machines/{sid}/rescan            ask its connected helper to scan its hardware now; 409 when offline
     PUT  /api/admin/machines/{sid}/trust       ``{"trust_tier": "new" | "provisional" | "trusted" | "quarantined"}``
     PUT  /api/admin/machines/{sid}/class       ``{"pinned": true, "gpu_class_id"?, "cpu_class_id"?}`` pins the
                                                classes it is priced by; ``{"pinned": false}`` lets them follow its
                                                hardware again
 
-The first three are the machine's owner's and administrators' (MANAGE on its row: the site's machines, the host and its
+The first five are the machine's owner's and administrators' (MANAGE on its row: the site's machines, the host and its
 online APIs, are administrators' whoever is named their owner): anyone a group lends it to gets 403, anyone else 404,
 a visitor 401. The last two are administrators' alone (``require_role("admin", hide=True)``: anyone else signed in gets
 404). Each change writes one audit row and commits before it answers (the dialog reads it back at once); a change of
-slots or capabilities reaches the prompt scheduler at once (``Scheduler.refresh``), a pin the compute ledger from the
-next event on.
+slots or capabilities reaches the prompt scheduler at once (``Scheduler.refresh``) and the machine's connected helper
+too (``WorkerHub.push_settings``: protocol 2's ``settings`` frame, which it acknowledges; the route waits up to
+``ACK_WAIT_SECONDS`` for it, one request a machine at a time), a pin the compute ledger from the next event on. The
+machine editor's routes (``admin_api``, ``pool_api``) change the slots too, and call ``settings_changed`` after their
+commit the same way, without waiting.
 """
 from __future__ import annotations
 
@@ -74,6 +82,37 @@ def _refresh(server_id: str) -> None:
         log.warning("could not refresh machine %s in the scheduler", server_id, exc_info=True)
 
 
+#: How long the settings route waits for a connected helper to acknowledge its new settings, so its answer shows what
+#: is in effect (the helper's ceiling applied); a helper that does not answer in time is shown as it was.
+ACK_WAIT_SECONDS = 2.0
+
+
+def settings_changed(server_id: str, wait: float = 0.0) -> None:
+    """A machine's row changed and was committed (its slots, capabilities or switch, through this dialog or the
+    machine editor): the prompt scheduler reads it again, and its connected helper is sent the settings that differ
+    from what it was last sent (design/phase4-helper.md P4.5.1). With ``wait``, the helper's acknowledgement is waited
+    for that long (``WorkerHub.push_settings``: one waiter a machine). Never raises."""
+    _refresh(server_id)
+    try:
+        from .workers import hub
+        hub().push_settings(server_id, wait=wait)
+    except Exception:
+        log.warning("could not push machine %s's settings to its helper", server_id, exc_info=True)
+
+
+def reset_key(s: Session, row: Server, actor: Optional[User], ip: Optional[str] = None) -> bool:
+    """Forget the machine key its helper registered (P4.3.7), so the next hello registers its own: for a machine whose
+    helper was reinstalled, or whose token was stolen before the real helper's first hello. One audit row; its trust is
+    left as it is (a quarantined machine stays quarantined with a new key, P4.5.8). The caller commits. Returns whether
+    a key was registered."""
+    had = bool(row.public_key)
+    from .workers import fingerprint
+    audit.record(s, "server.key_reset", actor=actor, object_type="server", object_id=row.id, ip=ip,
+                 fingerprint=fingerprint(row.public_key or "") or None)
+    row.public_key, row.key_at = None, None
+    return had
+
+
 def _answer(s: Session, row: Server, me: User) -> dict:
     return M.client(s, row, me, in_effect=_in_effect(row.id))
 
@@ -104,7 +143,8 @@ def settings_change(sid: str, request: Request, body: dict = Body(...), p: Princ
         audit.record(s, "server.settings", actor=me, object_type="server", object_id=row.id,
                      ip=ratelimit.client_ip(request), changed=changed)
     s.commit()
-    _refresh(row.id)
+    if changed:
+        settings_changed(row.id, wait=ACK_WAIT_SECONDS)
     return _answer(s, row, me)
 
 
@@ -126,6 +166,35 @@ def settings_apply(sid: str, request: Request, body: Optional[dict] = Body(None)
                  ip=ratelimit.client_ip(request), sections=applied)
     s.commit()
     return _answer(s, row, me)
+
+
+@router.post("/api/machines/{sid}/key/reset")
+def key_reset(sid: str, request: Request, p: Principal = Depends(principal),
+              s: Session = Depends(get_db, scope="function")):
+    """Forget the machine key its helper registered: the next hello registers its own (``reset_key``). A helper still
+    connected under the old key is closed so that it reconnects (``WorkerHub.disconnect``), and its hello registers
+    its key at once; a token used by someone else is revoked as well, or whichever helper connects first registers."""
+    from .workers import hub
+    me = require_user(request, p)
+    row = _server(s, sid, me, access.MANAGE)
+    reset_key(s, row, me, ip=ratelimit.client_ip(request))
+    s.commit()
+    hub().disconnect(row.id, "its machine key was reset")
+    return _answer(s, row, me)
+
+
+@router.post("/api/machines/{sid}/rescan")
+def rescan(sid: str, request: Request, p: Principal = Depends(principal),
+           s: Session = Depends(get_db, scope="function")):
+    """Ask the machine's connected helper to scan its hardware now (the dialog's "Rescan now"): its ``hardware`` frame
+    follows, kept as the last report. 409 when no helper is connected."""
+    from .workers import hub
+    me = require_user(request, p)
+    row = _server(s, sid, me, access.MANAGE)
+    s.commit()
+    if not hub().rescan(row.id):
+        raise HTTPException(409, "Its helper is not connected: start the CITAR helper on the machine first.")
+    return {"rescan": row.id}
 
 
 @router.put("/api/admin/machines/{sid}/trust")

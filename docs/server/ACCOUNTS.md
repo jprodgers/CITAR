@@ -479,14 +479,15 @@ waits its turn, and the grant's concurrency is the scheduler's cap on the subjec
 
 The VPS cannot reach a GPU sitting behind your home NAT, so the connection is inverted.
 
-`citar-worker` is a small program you run on the machine that has the model. It dials **out** to
-`wss://citar.example.com/ws/worker`, authenticates with a per-server token, and then serves
-inference requests over that one connection.
+The CITAR helper (`citar-helper`; the Python worker before 0.1.6) is a small program you run on the
+machine that has the model. It dials **out** to `wss://citar.example.com/ws/worker`, authenticates
+with a per-server token and the machine's key, and then serves inference requests over that one
+connection (protocol 2, `crates/citar-helper/PROTOCOL.md`).
 
     laptop / desktop (LM Studio, Ollama)          VPS
-        citar-worker  ── outbound wss ───────────▶  worker hub
+        citar-helper  ── outbound wss ───────────▶  worker hub
                       ◀── inference requests ───
-                      ─── streamed responses ──▶
+                      ─── raw completions ─────▶
 
 Properties that matter:
 
@@ -575,7 +576,7 @@ Each phase ends green (full test suite) and committed.
 1. Identity — users, sessions, password + email, four SSO providers, invites, hCaptcha, roles.
 2. Authorization — ownership, ACLs, visibility, the single `permissions()` gate on every route.
 3. Servers — ownership, groups, grants, windows in owner time, budgets, admission control.
-4. Worker agent — protocol, hub, `citar-worker`, the `worker` provider, live test laptop→VPS.
+4. Worker agent — protocol, hub, the worker (since 0.1.6 the CITAR helper), the `worker` provider, live test laptop→VPS.
 5. Sharing — public/link games and reports, spectators, data pooling and private analysis.
 6. Web UI — auth screens, account settings, sharing dialogs, admin console, moderation queue.
 7. Hardening and deploy — rate limits, audit log, security review, Caddy + systemd, load test, docs.

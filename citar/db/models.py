@@ -514,7 +514,7 @@ class Server(Base):
 
 
 class WorkerToken(Base):
-    """Credential a `citar-worker` presents when it dials in. Scoped to one server, revocable, and
+    """Credential a CITAR helper (`citar-helper`) presents when it dials in. Scoped to one server, revocable, and
     stored only as a hash — losing the database does not let anyone impersonate a worker."""
     __tablename__ = "worker_tokens"
 

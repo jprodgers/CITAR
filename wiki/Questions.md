@@ -48,7 +48,7 @@ worse than a smaller one that can.
 
 No. There is no telemetry, no analytics and no phoning home. The only outbound connections are to
 the model endpoints you configure — which may be entirely on your own machine — and, if you run a
-worker, to the CITAR server you pointed it at.
+helper (the CITAR helper, which lends your models), to the CITAR server you pointed it at.
 
 API keys go to your operating system's credential store and are never written to the project
 folder, a save file or a report.

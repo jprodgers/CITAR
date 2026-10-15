@@ -342,6 +342,7 @@ dependencies = [
 name = "citar-py"
 version = "0.1.5"
 dependencies = [
+ "blake3",
  "citar-bot",
  "citar-engine",
  "citar-sim",

@@ -42,6 +42,8 @@ export const GATES = {
   machineSettings: "manage",
   saveMachineSettings: "manage",
   applyScan: "manage",
+  resetMachineKey: "manage",
+  rescanMachine: "manage",
   setMachineTrust: "admin",
   setMachineClass: "admin",
   storeKey: "direct",

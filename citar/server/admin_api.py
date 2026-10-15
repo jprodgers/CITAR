@@ -204,7 +204,15 @@ def servers_save(body: dict = Body(...), me: User = Depends(require_user), s: Se
     audit.record(s, "server.updated" if row is not None else "server.created", actor=me, object_type="server",
                  object_id=sv["id"], name=sv["name"], reach=new_reach)
     s.commit()
+    _settings_changed(sv["id"])
     return S.public(S.get(sv["id"]))
+
+
+def _settings_changed(server_id: str) -> None:
+    """A machine saved through the registry may have new slots (``connection.max_parallel``): the scheduler reads it
+    again and its connected helper is sent what changed (design/phase4-helper.md P4.5.1; no wait here)."""
+    from .machines_api import settings_changed
+    settings_changed(server_id)
 
 
 @router.delete("/api/servers/{sid}")
@@ -335,6 +343,7 @@ def servers_collect(sid: str, me: User = Depends(require_admin_hidden), s: Sessi
     sv = _server(s, sid, me)
     hw = hwinfo.collect()
     saved = _call(S.upsert, S.apply_hardware(sv, hw, "collected"), actor=me)
+    _settings_changed(saved["id"])
     return S.public(S.get(saved["id"]))
 
 
@@ -344,6 +353,7 @@ def servers_import_hardware(sid: str, body: dict = Body(...), me: User = Depends
     """Import hardware collected on another machine (the collector script's file) into a machine's configuration."""
     sv = _server(s, sid, me)
     saved = _call(S.upsert, _call(S.apply_hardware, sv, body, "imported"), actor=me)
+    _settings_changed(saved["id"])
     return S.public(S.get(saved["id"]))
 
 
@@ -405,6 +415,7 @@ def servers_key(sid: str, body: KeyBody, me: User = Depends(require_user), s: Se
     saved = _call(S.upsert, sv, actor=me, session=s)
     audit.record(s, "server.key", actor=me, object_type="server", object_id=sid, backend=body.backend)
     s.commit()
+    _settings_changed(sid)
     return {"key_status": keystore.status(saved)}
 
 

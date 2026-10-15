@@ -31,6 +31,9 @@ citar-sim.workspace = true
 citar-store.workspace = true
 pyo3.workspace = true
 serde_json.workspace = true
+# The fingerprint of a helper's machine key, as the helper prints it (design/phase4-helper.md
+# P4.3.7): one hash function on both sides.
+blake3.workspace = true
 
 # build.rs: an extension leaves libpython's symbols to the interpreter that imports it.
 [build-dependencies]

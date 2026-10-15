@@ -232,8 +232,10 @@ and machine work end to end, over HTTP and the game socket, on a server-mode dev
 third member for `all` and `exit`) with `citar admin create-user`, signs them in as a browser would
 (a cookie and the CSRF token), serves fake OpenAI-compatible endpoints that record every connection
 they get and answer from a scripted policy that plays (tool calls read from the request: a turn's
-orders, a chat's answer, a hybrid seat's diplomat phase), starts real helpers
-(`python -m citar.worker`) in front of them for helper machines, runs the part's checks, and writes
+orders, a chat's answer, a hybrid seat's diplomat phase; streamed as server-sent events when asked,
+recording when the client went), starts real helpers (the Rust `citar-helper` that `cargo xtask
+develop` builds, or `--helper-bin PATH`, each with `--home` in the QA directory) in front of them for
+helper machines, runs the part's checks, and writes
 each check and its numbers to `<dir>/qa-<part>.json` (with the throwaway accounts' password, for the
 browser checklist). It exits 2, touching nothing, for the dev server's port 8799, a port in use, a
 directory holding anything without its `.qa-phase3` marker, the owner's `C:/dev/citar-play`, CITAR's
@@ -269,6 +271,26 @@ swaps a model, changes LM Studio's settings or names another model. A small mode
 tens of minutes for the 20 rounds; the part tests the plumbing, not the play, and records each model
 turn and how it ended, the tool calls made and refused, each chat's answer and its time, every
 fallback to the bot with its cause, and the generation seconds metered against the compute ledger.
+
+**The Phase 4 QA script** (`scripts/qa_phase4.py`, design/phase4-helper.md P4.7.6) runs on the same
+harness, imported rather than copied, with the same refusals and evidence. Its parts so far:
+`helper` (a helper machine end to end with the real `citar-helper`: its key and card, settings, a
+seat playing through it, a cancel stopped at the endpoint, a 0.1.5 worker refused, a key reset, the
+rate limit and a revoke) and `llm-real` (the helper's real-model checks through the hub and the
+scheduler: with `google/gemma-4-e2b` loaded in LM Studio, a request with tools parsed on the server,
+a long generation cancelled at 2 s acknowledged within a second, and the requests after it no
+slower than those before). `llm-real` reads LM Studio's model list before and after, never loads,
+unloads or swaps a model, and sends nothing when the model is not loaded. `--stand-in` plays LM
+Studio with the scripted endpoint to check the part itself, and `tests/test_helper_llm_real.py` runs
+the same checks in every test run against stand-ins: they pass against one that stops a cancelled
+generation, and fail against one that goes on generating after the cancel, one whose generation is
+over before it, a model that is not loaded (with nothing sent to it) and one unloaded during the run.
+
+```bash
+python scripts/qa_phase4.py helper --dir C:/dev/qa-phase4             # about 20 s; a free port
+python scripts/qa_phase4.py llm-real --dir C:/dev/qa-phase4           # the model loaded in LM Studio first
+python scripts/qa_phase4.py llm-real --stand-in --dir C:/dev/qa-phase4
+```
 
 **Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
 fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of

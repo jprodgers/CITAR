@@ -368,14 +368,15 @@ class Rules(unittest.TestCase):
         with self.assertRaises(S.Cancelled):
             granted(m, r)
         self.assertEqual(queued.state, "cancelled")
-        running.cancel()                                    # its conversation closes; on a helper the request drains
+        running.cancel()                                    # its conversation closes; the helper is sent cancel
         self.assertEqual(running.state, "cancelled")
         m.finish(g, unfinished=(g.request_id, 60.0))
-        self.assertTrue(m.slots and m.slots[0].draining, "the abandoned request keeps its slot while it drains")
+        self.assertTrue(m.slots and m.slots[0].cancelling, "the abandoned request keeps its slot until acknowledged")
         lease = sched.lease("box", "m", kind="game")
         waiting = m.submit(lease)
-        self.assertIsNone(granted(m, waiting), "the next request waits for the drain")
-        self.assertTrue(m.late_frame(g.request_id), "the helper's late answer frees the slot")
+        self.assertIsNone(granted(m, waiting), "the next request waits for the acknowledgement")
+        self.assertTrue(m.late_frame(g.request_id), "the helper's acknowledgement frees the slot")
+        self.assertEqual(m.counters["draining"], 0, "nothing drained: it was acknowledged")
         got = granted(m, waiting)
         self.assertIsNotNone(got)
         # a drain whose late frame never comes ends at the request's timeout plus the grace
@@ -385,6 +386,27 @@ class Rules(unittest.TestCase):
         clock.advance(31)
         sched.tick()
         self.assertIsNotNone(granted(m, r2))
+
+    def test_an_unacknowledged_cancel_drains_after_its_wait_and_is_counted(self):
+        """P4.5.3: a cancelled request's slot waits ``CANCEL_ACK_SECONDS`` for the helper's acknowledgement, then drains
+        (counted, the machine flagged), and its late frame or its bound frees it."""
+        sched, clock = make(slots=1)
+        m = sched.machine("box")
+        lease = sched.lease("box", "m", kind="game")
+        g = granted(m, m.submit(lease))
+        m.finish(g, unfinished=(g.request_id, 60.0))
+        self.assertEqual(([s.cancelling for s in m.slots], m.counters["draining"]), ([True], 0))
+        clock.advance(S.CANCEL_ACK_SECONDS - 0.5)
+        sched.tick()
+        self.assertEqual([s.cancelling for s in m.slots], [True], "still waiting for the acknowledgement")
+        clock.advance(1.0)
+        with self.assertLogs("citar.scheduler", level="WARNING"):
+            sched.tick()
+        self.assertEqual([s.draining for s in m.slots], [True])
+        self.assertEqual((m.counters["draining"], m.counters["cancel_unacked"]), (1, 1))
+        self.assertEqual(sched.deliver(), 1, "the machine's flag is written off the lock")
+        self.assertTrue(m.late_frame(g.request_id), "the late answer still frees it")
+        self.assertEqual(m.slots, [])
 
     def test_a_late_frame_that_comes_before_the_caller_marks_the_drain(self):
         sched, clock = make(slots=1)
@@ -515,7 +537,9 @@ class Rules(unittest.TestCase):
         clock.advance(121)
         with self.assertLogs("citar.scheduler", level="WARNING") as logged:
             sched.tick()
-        self.assertIn("contaminated", logged.output[0])
+        # the helper never acknowledged the cancel either (its slot drains, the machine is flagged)
+        self.assertTrue(any("contaminated" in line for line in logged.output), logged.output)
+        self.assertTrue(any("did not acknowledge" in line for line in logged.output), logged.output)
         self.assertIsNotNone(granted(m, first), "the bound reached, it goes ahead")
         self.assertTrue(bench.contaminated)
         self.assertEqual(bench.drain_s, 121)
@@ -582,7 +606,7 @@ class Rules(unittest.TestCase):
         self.assertEqual(m.slots, [])
 
     def test_a_drain_ends_when_the_helpers_connection_goes(self):
-        """A v1 helper answers only over the socket a request went out on: once that connection is gone (the helper
+        """A helper answers only over the socket a request went out on: once that connection is gone (the helper
         disconnected, or a reconnect replaced it), no late frame can come, and the slot comes back at once rather than
         after the request's timeout (a turn's, up to half an hour)."""
         state = {"online": True, "helper_slots": 1, "helper_loaded": frozenset(), "contexts": {}, "connection": 1}
@@ -593,8 +617,8 @@ class Rules(unittest.TestCase):
             # the helper restarts (disconnects, then a new process connects) while a cancelled request drains
             g = granted(m, m.submit(lease))
             m.finish(g, unfinished=(g.request_id, 1815.0, 1))
-            m.apply_helper(dict(state))                         # a catalog on the same connection: still draining
-            self.assertTrue(m.slots and m.slots[0].draining)
+            m.apply_helper(dict(state))                         # a catalog on the same connection: still held
+            self.assertTrue(m.slots and m.slots[0].held)
             m.apply_helper({"online": False})
             self.assertEqual(m.slots, [], "its connection went, and its drain with it")
             m.apply_helper({**state, "connection": 2})
@@ -602,7 +626,7 @@ class Rules(unittest.TestCase):
             self.assertIsNotNone(g, "the next request goes at once")
             # a new connection replacing the old one, with no disconnect between
             m.finish(g, unfinished=(g.request_id, 900.0, 2))
-            self.assertTrue(m.slots[0].draining)
+            self.assertTrue(m.slots[0].held)
             m.apply_helper({**state, "connection": 3})
             self.assertEqual(m.slots, [])
             # a request whose connection went while its caller was still unwinding never drains

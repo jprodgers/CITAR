@@ -180,6 +180,9 @@ export const api = {
   machineSettings: (id) => request("GET", `/api/machines/${encodeURIComponent(id)}/settings`),
   saveMachineSettings: (id, body) => request("PUT", `/api/machines/${encodeURIComponent(id)}/settings`, body),
   applyScan: (id, sections) => request("POST", `/api/machines/${encodeURIComponent(id)}/hardware/apply`, { sections }),
+  // its helper's machine key and a scan now (design/phase4-helper.md P4.5.10)
+  resetMachineKey: (id) => request("POST", `/api/machines/${encodeURIComponent(id)}/key/reset`),
+  rescanMachine: (id) => request("POST", `/api/machines/${encodeURIComponent(id)}/rescan`),
   setMachineTrust: (id, trust_tier) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/trust`, { trust_tier }),
   setMachineClass: (id, body) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/class`, body),
   // reports

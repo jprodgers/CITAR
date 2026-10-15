@@ -134,7 +134,7 @@ export async function openMachineSettings(m, onSaved) {
     }
     const report = current.report || {};
     const helper = report.helper ? ` from ${report.helper.hostname || "its helper"}`
-      + (report.helper.worker_version ? ` (helper ${report.helper.worker_version})` : "") : "";
+      + (report.helper.version ? ` (helper ${report.helper.version})` : "") : "";
     const any = Object.values(current.differences || {}).some((d) => d.length);
     const box = el("div", { class: "col" },
       el("div", { class: "row between wrap" },

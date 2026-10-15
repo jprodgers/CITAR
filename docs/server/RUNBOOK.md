@@ -156,19 +156,22 @@ sudo citar-admin worker-token "Desktop"                            # another tok
 sudo citar-admin workers                                           # what is registered
 ```
 
-On the machine with the model:
+On the machine with the model, the CITAR helper (download it from the Servers page):
 
 ```bash
-python -m citar.worker --server https://citar.example.com --token TOKEN --name "Desktop"
+citar-helper --server https://citar.example.com --token TOKEN --name "Desktop"
 ```
 
-The worker dials out, so nothing at that end needs a port forward. Add `--quiet "22:00-06:00"` for
+The helper dials out, so nothing at that end needs a port forward. Add `--quiet "22:00-06:00"` for
 quiet hours **enforced on that machine**, which the server cannot override.
 
-A worker that will not connect:
+A helper that will not connect:
 
-- `That worker token was refused` — the token is wrong or revoked. Issue another.
-- `ssl=None is incompatible` — an old worker. Update it.
+- `The server refused this helper's token` — the token is wrong or revoked. Issue another.
+- `another helper's key` — the machine's key was registered by another helper: compare the fingerprint
+  with `citar-helper --version`, then Reset key… in the machine's Helper dialog.
+- a 0.1.5 worker gets "This server runs CITAR 0.1.6, which needs the new CITAR helper": replace it
+  ([Workers](WORKERS.md#moving-from-015); a 0.1.5 system unit needs `systemctl disable --now` first).
 - connects then drops — check `sudo journalctl -u citar -f` while it tries.
 
 ---

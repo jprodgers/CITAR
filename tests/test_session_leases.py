@@ -413,8 +413,9 @@ class BenchmarkDrain(LeaseCase):
 
     def run_job(self, *, release_after: float = None):
         """A one-job benchmark run on ``sv_drain`` (four slots) started while a test ticket's request is in flight
-        there; with ``release_after``, the helper's late answer for it comes that long after the job's first request
-        began to wait. Returns the job once done, its benchmark scheduler and the held request."""
+        there; with ``release_after``, the helper's answer for it (its acknowledgement of the cancel) comes that long
+        after the job's first request began to wait. Returns the job once done, its benchmark scheduler and the held
+        request."""
         sched = S.get()
         ticket, inner, worker, failed = self.held_ticket()
         sch, run, job = self.bench("sv_drain", "m_drain", turn_limit=3)
@@ -424,7 +425,9 @@ class BenchmarkDrain(LeaseCase):
         self.assertEqual(ticket.error.code, "benchmark")
         worker.join(5)
         self.assertIsInstance(failed.get("e"), RuntimeError)
-        self.assertEqual(m.status()["draining"], 1, "its request drains: the helper is still generating it")
+        held = m.status()
+        self.assertEqual(held["cancelling"] + held["draining"], 1,
+                         "its request holds its slot until the helper acknowledges (or, unacknowledged, drains)")
         if release_after is not None:
             self.assertTrue(until(lambda: any(r.binding.is_lease for r in list(m.waiting)), 30),
                             "the job's first request waits for the drain")

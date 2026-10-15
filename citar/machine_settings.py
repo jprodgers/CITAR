@@ -6,15 +6,16 @@ The **machine settings** of a ``servers`` row, edited in the Servers page's "Mac
 - **capabilities** (``Server.capabilities``): ``llm`` (``enabled``: whether it takes model work at all;
   ``allow_swaps``: whether a pooled prompt may make it load a model it has not loaded) and ``cpu`` (CPU sharing for
   Phase 4's CPU jobs: ``enabled``, ``threads``, ``cpu_percent``, ``memory_mb`` and the kinds of ``work``, a subset of
-  ``CPU_WORK``). Its LLM slots are the row's ``max_concurrent``, the one site number (P3.2.8). The prompt scheduler
-  reads slots and swaps through ``servers.machine_settings``, which Phase 4's welcome and settings frames will carry
-  with the CPU limits; Phase 3's helper (protocol v1) is sent none of it.
+  ``CPU_WORK``; and ``yield_to_llm``, default on: its games pause while its own model works). Its LLM slots are the
+  row's ``max_concurrent``, the one site number (P3.2.8). The prompt scheduler reads slots and swaps through
+  ``servers.machine_settings``, which the hub's ``welcome`` and ``settings`` frames carry to its helper with the CPU
+  limits (design/phase4-helper.md P4.2.3), and reads back what the helper acknowledged.
 - **modes** (``hardware_mode``, ``models_mode``, ``power_mode``: ``auto`` or ``manual``; by default auto, auto, manual):
   what a helper's report may change of the machine's configuration (``record_report``).
 - **class and trust**: the hardware classes it is priced by (``gpu_class_id``, ``cpu_class_id``; ``class_override``
   when an administrator pinned them) and its ``trust_tier``, both administrators' to set and shown to its owner.
 
-**A helper's report** (``record_report``, from its hello and each catalog frame; ``workers.record_connection``) is kept
+**A helper's report** (``record_report``, from its hello and each catalog and hardware frame; ``workers.record_report``) is kept
 whole every time in ``hardware_detected`` (``{"hardware": the scan, "hardware_at", "models": the models it reported,
 "models_at", "helper": its name and version}``) with ``detected_at``, the time of the last report. Then, by mode:
 
@@ -32,7 +33,7 @@ whole every time in ``hardware_detected`` (``{"hardware": the scan, "hardware_at
 it: each section it has something for), and ``differences`` says how the configuration and the last scan differ,
 section by section, for the dialog.
 
-Replaces: ``workers.record_connection``'s overwrite of a machine's hardware with each hello and its replacement of
+Replaces: the hub's overwrite of a machine's hardware with each hello and its replacement of
 the model list (before 3-18), which lost whatever its owner had typed in.
 """
 from __future__ import annotations
@@ -104,7 +105,8 @@ def capabilities(raw) -> dict:
             "cpu": {"enabled": bool(cpu.get("enabled", False)), "threads": _whole(cpu.get("threads"), 0, THREADS_MAX),
                     "cpu_percent": _whole(cpu.get("cpu_percent"), 0, 100),
                     "memory_mb": _whole(cpu.get("memory_mb"), 0, MEMORY_MB_MAX),
-                    "work": [w for w in CPU_WORK if w in work]}}
+                    "work": [w for w in CPU_WORK if w in work],
+                    "yield_to_llm": bool(cpu.get("yield_to_llm", True))}}
 
 
 def modes(row) -> dict:
@@ -159,9 +161,11 @@ def update(row, body) -> dict:
             for k in llm:
                 new_caps["llm"][k] = _bool(llm[k], f"capabilities.llm.{k}")
         if "cpu" in given:
-            cpu = _object(given["cpu"], "capabilities.cpu", ("enabled", "threads", "cpu_percent", "memory_mb", "work"))
-            if "enabled" in cpu:
-                new_caps["cpu"]["enabled"] = _bool(cpu["enabled"], "capabilities.cpu.enabled")
+            cpu = _object(given["cpu"], "capabilities.cpu", ("enabled", "threads", "cpu_percent", "memory_mb", "work",
+                                                             "yield_to_llm"))
+            for k in ("enabled", "yield_to_llm"):
+                if k in cpu:
+                    new_caps["cpu"][k] = _bool(cpu[k], f"capabilities.cpu.{k}")
             for k, hi in (("threads", THREADS_MAX), ("cpu_percent", 100), ("memory_mb", MEMORY_MB_MAX)):
                 if k in cpu:
                     new_caps["cpu"][k] = _int(cpu[k], f"capabilities.cpu.{k}", 0, hi)
@@ -370,7 +374,7 @@ def record_report(row, *, hardware=None, models=None, helper: Optional[dict] = N
         config["models"] = merge_models(config.get("models"), reported, full=mode["models"] == "auto")
         applied.append("models" if mode["models"] == "auto" else "loaded")
     if helper:
-        detected["helper"] = {k: str(helper.get(k) or "")[:120] for k in ("hostname", "worker_version")}
+        detected["helper"] = {k: str(helper.get(k) or "")[:120] for k in ("hostname", "version")}
     row.hardware_detected = detected
     row.detected_at = now
     if _reads(row, config):

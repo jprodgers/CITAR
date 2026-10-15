@@ -183,6 +183,9 @@ def update_server(server_id: str, body: ServerUpdate, request: Request,
         _drop(s, server.id, "its machine was disabled")
     else:
         _saved(s)
+        # the editor's "Requests at once" is the machine's slots: the scheduler and the connected helper get them now
+        from .machines_api import settings_changed
+        settings_changed(server.id)
     return pool.public_server(s, server, me)
 
 
@@ -457,21 +460,29 @@ def worker_status(server_id: str, request: Request, p: Principal = Depends(princ
          "last_ip": t.last_ip, "revoked": t.revoked_at is not None}
         for t in s.query(WorkerToken).filter(WorkerToken.server_id == server.id)
         .order_by(WorkerToken.created_at.desc())]
+    from .workers import fingerprint
+    block = server.helper if isinstance(server.helper, dict) else None
     return {"online": connection is not None,
             "worker": connection.client() if connection else None,
+            # its helper's last hello (version, builds, target, protocol), kept on the row while it is offline
+            "helper": {k: block.get(k) for k in ("protocol", "version", "build", "jobs_build", "target", "label",
+                                                  "connected_at")} if block else None,
+            "key": {"fingerprint": fingerprint(server.public_key or "") or None,
+                    "registered_at": server.key_at.isoformat() if server.key_at else None},
             "tokens": tokens_out,
             "command": _worker_command(server), "args": _worker_args(server)}
 
 
 def _worker_args(server) -> str:
-    """The worker's arguments on their own, for the page to put after whichever helper file was downloaded."""
+    """The helper's arguments on their own, for the page to put after whichever helper file was downloaded."""
     from .. import settings as cfg
     return f"--server {cfg.get().public_origin} --token YOUR_TOKEN --name \"{server.name}\""
 
 
 def _worker_command(server) -> str:
-    """The exact command the machine's owner should run to connect it (with CITAR installed there)."""
-    return "python -m citar.worker " + _worker_args(server)
+    """The exact command the machine's owner should run to connect it, with the CITAR helper (``citar-helper``,
+    downloaded from this page) on its PATH."""
+    return "citar-helper " + _worker_args(server)
 
 
 class TokenBody(BaseModel):
@@ -567,8 +578,8 @@ def test_server(server_id: str, request: Request, model: str = "",
     admitted as every one is (P3.3.7: ``partial_llm`` and a grant for ``pooled``, its concurrency the caller's cap), it
     waits for a slot like any pooled prompt, on a model the helper has loaded (unless its owner allows swaps), and goes
     through ``make_conversation`` like every model call. ``wait`` is how long the caller waits for the reply (1 to 120
-    seconds): then the ticket is cancelled, and a request the helper is still generating keeps its slot draining
-    until the helper's late answer. A caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all
+    seconds): then the ticket is cancelled, and the helper stops the generation and acknowledges, which frees its slot
+    (one that does not acknowledge leaves it draining, design/phase4-helper.md P4.5.3). A caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all
     (another answers at once, ``code`` ``duplicate`` or ``too_many``), at most ``server_test``'s rate
     (``citar.auth.ratelimit``; 429 past it), and the request's database connection is given back before the wait.
     The test is an activity of its own in the compute ledger (``test:<id>``, design/phase3-features.md P3.4.2): used
@@ -651,8 +662,7 @@ def test_server(server_id: str, request: Request, model: str = "",
                 why = ("a benchmark took the machine" if code == "benchmark" else
                        f"no reply within {wait:.0f} s")
                 return {"ok": False, "stage": "completion", "model": chosen, "cancelled": True, "code": code,
-                        "reason": f"The test was cancelled: {why} (a helper that is still generating it keeps its "
-                                  "slot until it finishes)."}
+                        "reason": f"The test was cancelled: {why} (its helper is told to stop generating it)."}
             cause = exc.__cause__
             return {"ok": False, "stage": "completion", "model": chosen, "reason": str(exc),
                     "refusal": getattr(cause, "refusal", "") or getattr(exc, "refusal", ""),

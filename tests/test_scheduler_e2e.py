@@ -1,16 +1,14 @@
-"""The prompt scheduler end to end (design/phase3-features.md P3.3.3-P3.3.4), package 3-07's gates 3, 4 and 5.
+"""The prompt scheduler end to end (design/phase3-features.md P3.3.3-P3.3.4), package 3-07's gates 4 and 5.
 
-- **Draining** (gate 3): a real server, a real Python helper (the worker agent in a thread, its completions made by the
-  OpenAI-compatible provider against the QA harness's scripted endpoint, which takes 20 s a completion). A running
-  ticket cancelled sends ``CANCEL``; the helper (protocol v1) finishes the completion anyway, so the slot drains: the
-  next request waits for the helper's late ``Done``, which reaches the scheduler, and the helper refuses nothing as
-  busy.
+Its gate 3 (a cancelled request draining on a protocol 1 helper) is protocol 2's acknowledged cancel now, end to end
+with the real binary in ``tests/test_helper_e2e.py`` (design/phase4-helper.md P4.5.3).
 - **One slot, several seats** (gate 4): the dry-run provider on a row with ``max_concurrent = 1`` (the test
   registry's ``sv_gpu``). Two lobby games with a model seat each play five rounds with never more than one request
   in flight and no busy refusal; two model seats of one game: the one that opened a trade and waits lends its slot,
   and the other's answer (a lease request) gets it, with no timeout; a test ticket answering the chat gets it too.
-- **Metering** (gate 5), through the scripted endpoint: an honest helper's ``gen_s`` is its ``duration``; one
-  reporting ten times the time the server observed is credited the observed time and flagged after three such
+- **Metering** (gate 5), through the scripted endpoint and the real CITAR helper (``citar-helper``, the binary
+  ``cargo xtask develop`` builds; skipped without it): an honest helper's ``gen_s`` is its ``done.gen_s``; a fake
+  helper reporting ten times the time the server observed is credited the observed time and flagged after three such
   requests; token counts above ``max_tokens`` are capped; ``queue_s`` is recorded; a turn's metrics carry the
   generation and the queue time apart.
 """
@@ -18,9 +16,7 @@ from __future__ import annotations
 
 import tests  # noqa: F401  (temporary saves folder and registry; must be imported before citar)
 
-import asyncio
 import importlib.util
-import json
 import os
 import socket
 import tempfile
@@ -37,7 +33,7 @@ from citar.auth import tokens
 from citar.db.models import AuditLog, Base, Server, WorkerToken
 from citar.pool import scheduler as S
 from citar.server import workers as W
-from citar.worker import protocol as P
+from tests import helperfake as H
 
 ROOT = Path(__file__).resolve().parent.parent
 _TMP = Path(tempfile.mkdtemp(prefix="citar_sched_e2e_"))
@@ -90,26 +86,6 @@ def _until(check, limit: float = 10.0, step: float = 0.02):
     return check()
 
 
-class Overreporting:
-    """A helper whose ``Done`` frames claim ten times the time it took (and five seconds more)."""
-
-    @staticmethod
-    def wrap(worker):
-        original = worker.handle_request
-
-        async def handle_request(websocket, data):
-            class Proxy:
-                async def send(self, text):
-                    frame = json.loads(text)
-                    if frame.get("t") == P.DONE:
-                        frame["duration"] = round(float(frame.get("duration") or 0) * 10 + 5, 3)
-                        text = json.dumps(frame)
-                    await websocket.send(text)
-            await original(Proxy(), data)
-        worker.handle_request = handle_request
-        return worker
-
-
 class HelperBase(unittest.TestCase):
     """A real server on a free port; helpers connect to it in threads of their own.
 
@@ -154,40 +130,23 @@ class HelperBase(unittest.TestCase):
         S.get().add_listener(self.events.append)
         self.addCleanup(S.get().remove_listener, self.events.append)
 
-    def helper(self, sid: str, token: str, endpoint, *, wrap=None, slots: int = 1):
-        """A real helper serving ``endpoint``, connected for ``sid``; stopped at the test's end."""
-        from citar.worker.agent import Worker, WorkerConfig
-        worker = Worker(WorkerConfig(server_url=f"http://127.0.0.1:{self.port}", token=token, base_url=endpoint.url,
-                                     provider="openai_compatible", max_concurrent=slots, name=f"e2e-{sid}",
-                                     collect_hardware=False))
-        if wrap is not None:
-            wrap(worker)
-        refusals: list = []
-        refuse = worker._refuse
+    def helper(self, sid: str, token: str, endpoint, *, slots: int = 1):
+        """The real CITAR helper serving ``endpoint``, connected for ``sid`` (its own home); stopped at the test's
+        end."""
+        H.require_helper_binary("the scheduler's end-to-end metering")     # skips locally without one; fails on CI
+        helper = H.RealHelper(f"http://127.0.0.1:{self.port}", token, endpoint.url, name=f"e2e-{sid}", slots=slots)
+        self.addCleanup(helper.stop)
+        self.assertTrue(_until(lambda: W.hub().is_online(sid) and W.hub().get(sid).ack is not None, 30),
+                        f"the helper did not connect: {helper.text()[-2000:]}")
+        return helper
 
-        async def recording_refuse(websocket, request_id, refusal, message, retryable=True):
-            refusals.append(refusal)
-            await refuse(websocket, request_id, refusal, message, retryable)
-        worker._refuse = recording_refuse
-        loop = asyncio.new_event_loop()
-
-        def run():
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(worker.run())
-            except asyncio.CancelledError:
-                pass
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        self.assertTrue(_until(lambda: W.hub().is_online(sid), 15), "the helper did not connect")
-
-        def stop():
-            worker.stop()
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(lambda: [t.cancel() for t in asyncio.all_tasks(loop)])
-            thread.join(timeout=10)
-        self.addCleanup(stop)
-        return worker, refusals
+    def fake_helper(self, sid: str, token: str, answer):
+        """A fake helper over a real socket (``tests/helperfake``), answering each request with ``answer(frame)``."""
+        helper = H.FakeHelper(f"ws://127.0.0.1:{self.port}/ws/worker")
+        self.addCleanup(helper.close)
+        helper.handshake(H.hello(token=token, models=[H.model(MODEL)]))
+        self.assertTrue(_until(lambda: W.hub().is_online(sid) and W.hub().get(sid).ack is not None, 10))
+        return H.Responder(helper, answer)
 
     @staticmethod
     def conversation(sid: str, binding, **cfg):
@@ -197,62 +156,12 @@ class HelperBase(unittest.TestCase):
         return conv
 
 
-class Draining(HelperBase):
-    """Gate 3."""
+class Started(HelperBase):
 
     def test_the_servers_start_left_no_power_sampler_behind(self):
         from citar import usage
         self.assertIs(usage._sampler, self.sampler, "the app's start made no process-wide power sampler here")
         self.assertFalse([t for t in threading.enumerate() if t.name == "power-sampler" and self.sampler is None])
-
-    def test_a_cancelled_ticket_drains_until_the_helpers_late_answer(self):
-        endpoint = qa.FakeEndpoint(delay=20.0)
-        self.addCleanup(endpoint.close)
-        sid, token = _helper_machine("drain box")
-        _worker, refusals = self.helper(sid, token, endpoint)
-        base = len(endpoint.connections)                    # the helper's model listing at its hello
-        sched = S.get()
-        m = sched.machine(sid)
-        self.assertEqual(m.capacity(), 1)
-        ticket = sched.ticket(sid, MODEL, cls="test", label="drained test")
-        self.assertEqual(ticket.state, "queued", ticket.reason)
-        first = self.conversation(sid, ticket)
-        out: dict = {}
-
-        def run(conv, key):
-            try:
-                out[key] = conv.step()
-            except Exception as e:
-                out[key] = e
-        a = threading.Thread(target=run, args=(first, "a"), daemon=True)
-        a.start()
-        self.assertTrue(_until(lambda: len(endpoint.connections) >= base + 1, 15), "the request reached the endpoint")
-        with self.assertLogs("citar.worker", level="INFO") as logged:
-            ticket.cancel()
-            a.join(5)
-            self.assertFalse(a.is_alive(), "the caller stops waiting at once")
-            self.assertIsInstance(out["a"], Exception)
-            self.assertTrue(_until(lambda: any("cancelled" in line for line in logged.output), 5),
-                            "the helper was sent CANCEL")
-        self.assertTrue(m.slots and m.slots[0].draining, "its slot drains while the helper finishes it")
-
-        lease = sched.lease(sid, MODEL, kind="game", label="next")
-        second = self.conversation(sid, lease)
-        b = threading.Thread(target=run, args=(second, "b"), daemon=True)
-        b.start()
-        self.assertTrue(_until(lambda: len(endpoint.connections) >= base + 2, 40), "the next request went out")
-        done = endpoint.completions()
-        self.assertEqual(len(done), 1, "the first completion was finished by the helper")
-        first_end = done[0]["t"] + done[0]["seconds"]
-        second_sent = endpoint.connections[base + 1][0]
-        self.assertGreaterEqual(second_sent, first_end - 0.05, "the next request waited for the drain")
-        self.assertGreaterEqual(m.counters["late_frames"], 1, "the late Done reached the scheduler")
-        self.assertEqual(m.counters["drain_timeouts"], 0)
-        self.assertEqual(m.counters["busy_refusals"], 0)
-        self.assertNotIn("busy", refusals, "the helper refused nothing as busy")
-        second.close()                                      # it drains too; the helper is stopped with the test
-        b.join(5)
-        self.assertGreater(second.last_queue_s, 15.0, "its wait was its queue time")
 
 
 class Metering(HelperBase):
@@ -273,10 +182,12 @@ class Metering(HelperBase):
         self.assertFalse(e.flags.get("overreported"))
 
     def test_an_overreporting_helper_is_credited_the_observed_time_and_flagged(self):
-        endpoint = qa.FakeEndpoint(delay=0.3)
-        self.addCleanup(endpoint.close)
         sid, token = _helper_machine("boastful box")
-        self.helper(sid, token, endpoint, wrap=Overreporting.wrap)
+
+        def boast(frame):
+            time.sleep(0.3)                 # it took 0.3 s, and claims ten times that and five seconds more
+            return H.done_fields(frame, gen_s=0.3 * 10 + 5)
+        self.fake_helper(sid, token, boast)
         lease = S.get().lease(sid, MODEL, kind="game")
         for _ in range(3):
             self.conversation(sid, lease).step()

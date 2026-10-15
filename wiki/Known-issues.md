@@ -61,8 +61,8 @@ for every asset and every build is a public CI run. See
 
 **macOS binaries are not notarised**, for the same reason — including the CITAR helper, which
 needs `xattr -d com.apple.quarantine` before macOS will run it. The `pip`, `pipx` and Homebrew routes
-are unaffected. There is no helper build for Intel Macs; `pipx install "citar[worker]"` and
-`citar worker` do the same job there.
+are unaffected. There is no helper build for Intel Macs yet (the Python worker that stood in for it
+there is gone in 0.1.6); build one from a checkout with `cargo build --release -p citar-helper`.
 
 **Homebrew, Scoop and winget lag the release** by a day or so — each needs the GitHub release to
 exist before its manifest can be updated.
@@ -96,11 +96,6 @@ time counted afresh.
 ---
 
 ## Shared machines (new in 0.1.6)
-
-**A cancelled request still runs on a helper.** The 0.1.5 helper does not stop a request the server
-cancels (a chat whose time ran out, a test given up, a benchmark taking the machine), so its slot
-stays taken until the helper's late answer, and the machine's next request waits for it (the Queue
-page calls it draining). The helper of the next release stops it.
 
 **CPU sharing waits for the next helper.** The machine settings dialog keeps a machine's CPU limits
 (threads, CPU share, memory, the kinds of work), but nothing runs CPU work on members' machines yet.

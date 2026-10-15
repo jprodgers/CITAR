@@ -8,7 +8,7 @@ the module layout::
     citar setup               interactive first-time configuration
     citar doctor              check this installation and print what it found
     citar admin …             operator commands (accounts, invitations, worker tokens)
-    citar worker …            run the worker agent that serves local models to a remote CITAR
+    citar worker              where to get the CITAR helper, which replaced the Python worker in 0.1.6
     citar mcp …               the MCP bridge, for Claude Code and other MCP clients
     citar bench …             command-line model benchmark
     citar sim …               one headless bot-vs-bot game in the console
@@ -35,7 +35,7 @@ from . import __version__
 #: Sub-commands that delegate: name -> (import path, attribute, one-line help).
 DELEGATES = {
     "admin": ("citar.server.admin_cli", "main", "accounts, invitations, policies, worker tokens and the compute ledger"),
-    "worker": ("citar.worker.__main__", "main", "serve this machine's models to a remote CITAR server"),
+    "worker": ("citar.helper_pointer", "main", "replaced by the CITAR helper (citar-helper): where to get it"),
     "mcp": ("citar.agents.mcp_server", "main", "MCP bridge for an external AI client"),
     "bench": ("citar.bench", "main", "benchmark models from the command line"),
     "sim": ("citar.sim", "main", "play one headless bot-vs-bot game"),

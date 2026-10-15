@@ -59,16 +59,15 @@ openai = ["openai>=1.40"]
 mcp = ["mcp>=2.0"]
 oauth = ["Authlib>=1.3"]                     # Google, GitHub, Discord, Microsoft sign-in
 keyring = ["keyring>=25.0", "cryptography>=42.0"]   # OS credential store for API keys
-worker = ["websockets>=12.0"]                # the outbound worker agent
 postgres = ["psycopg[binary]>=3.1"]
 
 # Everything a person would want on a workstation.
 all = [
-    "citar[anthropic,openai,mcp,oauth,keyring,worker]",
+    "citar[anthropic,openai,mcp,oauth,keyring]",
 ]
 # What a public deployment needs, without the local-model client libraries.
 server = [
-    "citar[anthropic,oauth,keyring,worker]",
+    "citar[anthropic,oauth,keyring]",
 ]
 dev = [
     "citar[all]",
@@ -90,7 +89,6 @@ Changelog = "https://github.com/jprodgers/CITAR/blob/main/CHANGELOG.md"
 [project.scripts]
 citar = "citar.cli:main"
 citar-admin = "citar.server.admin_cli:main"
-citar-worker = "citar.worker.__main__:main"
 citar-mcp = "citar.agents.mcp_server:main"
 
 # --------------------------------------------------------------------------------- build

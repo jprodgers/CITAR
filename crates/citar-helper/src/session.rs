@@ -98,6 +98,11 @@ pub const FAILED_LISTINGS: u32 = 3;
 /// How long reading the hardware file may take: a file on a share that does not answer must not
 /// hold up a connection.
 pub const HARDWARE_READ: Duration = Duration::from_secs(5);
+/// The largest hardware file read at all, in bytes (a collector's is a few kilobytes).
+pub const HARDWARE_FILE_MAX: u64 = 1024 * 1024;
+/// The largest hardware report a hello carries, in bytes of JSON as sent: the hub reads no first
+/// frame over 2 MiB (PROTOCOL.md "The handshake"), and 500 models leave room for this much.
+pub const HARDWARE_REPORT_MAX: usize = 256 * 1024;
 /// The most characters of the server's own text (a refusal's message, a bad frame's error, a
 /// list of runs) quoted in a log line.
 pub const SERVER_TEXT: usize = 300;
@@ -866,6 +871,19 @@ enum Read {
 }
 
 fn read_hardware_file(path: &std::path::Path) -> Result<Map<String, Value>, String> {
+    let too_large = || {
+        format!(
+            "the hardware file {} is larger than a hello carries ({} KiB as JSON): reporting none",
+            path.display(),
+            HARDWARE_REPORT_MAX / 1024
+        )
+    };
+    let size = std::fs::metadata(path)
+        .map_err(|e| format!("could not read the hardware file {}: {e}", path.display()))?
+        .len();
+    if size > HARDWARE_FILE_MAX {
+        return Err(too_large());
+    }
     let raw = std::fs::read(path)
         .map_err(|e| format!("could not read the hardware file {}: {e}", path.display()))?;
     // Windows PowerShell 5's `>` writes UTF-16 with a byte-order mark; everything else UTF-8.
@@ -886,6 +904,11 @@ fn read_hardware_file(path: &std::path::Path) -> Result<Map<String, Value>, Stri
         Ok(Value::Object(m))
             if m.get("format").and_then(Value::as_str) == Some("citar-hardware") =>
         {
+            // As sent, not as read: numbers and escapes can come out longer than the file wrote them.
+            let sent = serde_json::to_vec(&m).map(|v| v.len()).unwrap_or(usize::MAX);
+            if sent > HARDWARE_REPORT_MAX {
+                return Err(too_large());
+            }
             Ok(m)
         }
         Ok(_) => Err(format!(
@@ -1331,6 +1354,37 @@ mod tests {
         let g = dir.join("other.json");
         std::fs::write(&g, "{\"format\": \"other\"}").expect("written");
         assert!(read_hardware_file(&g).expect_err("refused").contains("not a CITAR hardware file"));
+        std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    /// A hello stays under the hub's 2 MiB for a first frame: a hardware report over 256 KiB as
+    /// sent is not reported (nor read at all over 1 MiB), even one whose file is shorter than what
+    /// it re-serializes to.
+    #[test]
+    fn a_hardware_report_too_large_for_a_hello_is_not_sent() {
+        let dir = std::env::temp_dir().join(format!("citar-helper-hw-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let fits = dir.join("fits.json");
+        let pad = "x".repeat(HARDWARE_REPORT_MAX - 100);
+        std::fs::write(&fits, format!("{{\"format\":\"citar-hardware\",\"note\":\"{pad}\"}}"))
+            .expect("written");
+        assert!(read_hardware_file(&fits).is_ok(), "just under the cap is reported");
+        let big = dir.join("big.json");
+        let pad = "x".repeat(HARDWARE_REPORT_MAX + 1);
+        std::fs::write(&big, format!("{{\"format\":\"citar-hardware\",\"note\":\"{pad}\"}}"))
+            .expect("written");
+        assert!(read_hardware_file(&big).expect_err("refused").contains("larger than a hello"));
+        // 1e9 is three bytes in the file and twelve as sent (1000000000.0)
+        let grows = dir.join("grows.json");
+        let numbers = vec!["1e9"; HARDWARE_REPORT_MAX / 4 + 1].join(",");
+        std::fs::write(&grows, format!("{{\"format\":\"citar-hardware\",\"n\":[{numbers}]}}"))
+            .expect("written");
+        assert!(std::fs::metadata(&grows).expect("there").len() < HARDWARE_FILE_MAX);
+        assert!(read_hardware_file(&grows).expect_err("refused").contains("larger than a hello"));
+        let huge = dir.join("huge.json");
+        std::fs::write(&huge, vec![b' '; usize::try_from(HARDWARE_FILE_MAX).expect("fits") + 1])
+            .expect("written");
+        assert!(read_hardware_file(&huge).expect_err("refused").contains("larger than a hello"));
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 }

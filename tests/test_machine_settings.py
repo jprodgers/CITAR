@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
-import asyncio
 import copy
 import json
 import os
@@ -252,7 +251,8 @@ class Report(unittest.TestCase):
         self.assertEqual(M.modes(row), {"hardware": "auto", "models": "auto", "power": "manual"})
         self.assertEqual(M.capabilities(row.capabilities),
                          {"llm": {"enabled": True, "allow_swaps": False},
-                          "cpu": {"enabled": False, "threads": 0, "cpu_percent": 0, "memory_mb": 0, "work": []}})
+                          "cpu": {"enabled": False, "threads": 0, "cpu_percent": 0, "memory_mb": 0, "work": [],
+                                  "yield_to_llm": True}})
 
     def test_hardware_auto_applies_the_scan_and_power_manual_keeps_the_figures(self):
         out = self.report(hardware=scan(), models=[model("m1", loaded=True)])
@@ -479,12 +479,6 @@ class Report(unittest.TestCase):
 
 # ---------------------------------------------------------------------------- a real helper reconnecting
 
-def _async_value(value):
-    async def _inner():
-        return value
-    return _inner()
-
-
 def _soon(check, limit: float = 10.0):
     """``check()``'s value once it is true, within ``limit`` seconds, else its last value."""
     t0 = time.perf_counter()
@@ -590,28 +584,20 @@ class EndToEnd(unittest.TestCase):
             return row
 
     def connect(self, hardware: dict, models: list) -> Server:
-        """(Re)connect the machine's helper, reporting ``hardware`` (its ``--hardware`` file, written now) and
-        ``models``; returns the row once the server has recorded the report."""
-        from citar.worker.agent import Worker, WorkerConfig
+        """(Re)connect the machine's helper (the fake helper of ``tests/helperfake``, over a real socket), its hello
+        reporting ``hardware`` (as its ``--hardware`` file would) and ``models``; returns the row once the server has
+        recorded the report."""
+        from tests import helperfake as H
         self.disconnect()
-        self.hw_file.write_text(json.dumps(hardware), encoding="utf-8")
         before = self.row().detected_at
-        worker = Worker(WorkerConfig(server_url=f"http://127.0.0.1:{self.port}", token=self.token, name="settings box",
-                                     max_concurrent=2, hardware_file=str(self.hw_file)))
-        worker.discover_models = lambda: _async_value([dict(m) for m in models])
-        worker._complete = lambda data: {"text": "ok", "thinking": "", "stop_reason": "stop", "malformed": 0,
-                                         "tool_calls": [], "usage": {}}
-        loop = asyncio.new_event_loop()
-
-        def run():
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(worker.run())
-            except asyncio.CancelledError:
-                pass
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        self.worker = (worker, loop, thread)
+        fields = H.hello(token=self.token, slots=2, hostname="settings box", version="1.0",
+                         models=[H.model(m["key"], m.get("loaded", False), m.get("context"), m.get("label") or "")
+                                 for m in models])
+        fields["report"] = {"hardware": hardware, "hardware_source": "file"}
+        helper = H.FakeHelper(f"ws://127.0.0.1:{self.port}/ws/worker")
+        helper.handshake(fields)
+        H.Responder(helper, slots=2)            # it answers what the server sends it, settings pushed included
+        self.worker = helper
         row = _soon(lambda: (lambda r: r if r.detected_at is not None and r.detected_at != before else None)(self.row()))
         self.assertIsNotNone(row, "the helper's report was not recorded")
         return row
@@ -619,14 +605,8 @@ class EndToEnd(unittest.TestCase):
     def disconnect(self):
         if self.worker is None:
             return
-        worker, loop, thread = self.worker
-        self.worker = None
-        worker.stop()
-        if not loop.is_closed():
-            loop.call_soon_threadsafe(lambda: [task.cancel() for task in asyncio.all_tasks(loop)])
-        thread.join(timeout=5)
-        if not thread.is_alive() and not loop.is_closed():
-            loop.close()
+        helper, self.worker = self.worker, None
+        helper.close()
         _soon(lambda: not W.hub().is_online(self.sid), 5)
 
     def settings(self, **body) -> dict:
@@ -647,7 +627,7 @@ class EndToEnd(unittest.TestCase):
         first = self.connect(scan(gpu="First GPU", vram=8), [model("m")])
         self.assertEqual(first.config["hardware"]["gpus"], [{"name": "First GPU", "vram_gb": 8}])
         self.assertEqual(first.config["hardware"]["source"], "helper")
-        self.assertEqual(first.hardware_detected["helper"], {"hostname": "settings box", "worker_version": "1.0"})
+        self.assertEqual(first.hardware_detected["helper"], {"hostname": "settings box", "version": "1.0"})
         # the owner types her own hardware in (the Hardware & power dialog) and keeps it: hardware manual
         self.save_registry_view(lambda v: v.update(hardware=copy.deepcopy(HAND_SET)))
         self.assertEqual(self.settings(modes={"hardware": "manual"})["modes"]["hardware"], "manual")
@@ -795,7 +775,7 @@ class _Routes(unittest.TestCase):
 
     def report(self, hardware=None, models=None) -> dict:
         """The helper's report, as its socket's handler records it."""
-        return W.record_connection(self.helper, hardware=hardware, models=models)
+        return W.record_report(self.helper, hardware=hardware, models=models)
 
 
 class Routes(_Routes):
@@ -908,7 +888,8 @@ class Routes(_Routes):
         got = r.json()
         self.assertEqual((got["slots"], got["modes"]), (3, {"hardware": "manual", "models": "auto", "power": "auto"}))
         self.assertEqual(got["capabilities"]["cpu"], {"enabled": True, "threads": 8, "cpu_percent": 50,
-                                                      "memory_mb": 4096, "work": ["lab_game"]})
+                                                      "memory_mb": 4096, "work": ["lab_game"],
+                                                      "yield_to_llm": True})
         ms = servers.machine_settings(self.helper)
         self.assertEqual((ms["slots"], ms["allow_swaps"], ms["llm"]), (3, True, True))
         self.assertEqual(ms["cpu"], got["capabilities"]["cpu"], "what Phase 4's settings frame will carry")
@@ -1040,7 +1021,7 @@ class Routes(_Routes):
                 with db.session() as s:
                     row = s.get(Server, self.helper)
                     row.config, row.hardware_detected = {}, None
-                out = W.record_connection(self.helper, hardware=odd, models=[model("m")])
+                out = W.record_report(self.helper, hardware=odd, models=[model("m")])
                 self.assertEqual(out["kept"], ["hardware", "models"])
                 row = self.row()
                 self.assertTrue(encodes(row.hardware_detected) and encodes(row.config))
@@ -1092,9 +1073,8 @@ class Scheduler(_Routes):
     def setUp(self):
         super().setUp()
         # a connected helper: four slots of its own, one model loaded and one not
-        self.conn = W.WorkerConnection(None, self.helper, {
-            "max_concurrent": 4, "models": [{"key": "warm", "loaded": True}, {"key": "cold", "loaded": False}]},
-            loop=None)
+        from tests import helperfake as H
+        self.conn = H.StubConnection(self.helper, [H.model("warm"), H.model("cold", loaded=False)], slots=4)
         W.hub().register(self.conn)
         self.addCleanup(W.hub().unregister, self.conn)
         # only the dialog's route may refresh the machine: the scheduler's own reread (every 5 s) is off
@@ -1118,7 +1098,8 @@ class Scheduler(_Routes):
                       {"slots": 3, "capabilities": {"llm": {"allow_swaps": True}}})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(m.capacity(), 3)
-        self.assertEqual(r.json()["in_effect"], {"capacity": 3, "slots": 3, "helper_slots": 4, "llm": True,
+        # protocol 2: the helper's slots are what it acknowledged for the site's 3, its own ceiling (4) not reached
+        self.assertEqual(r.json()["in_effect"], {"capacity": 3, "slots": 3, "helper_slots": 3, "llm": True,
                                                  "allow_swaps": True, "online": True, "known": True})
         self.assertEqual(self.ticket("cold").state, "queued", "swaps allowed: a model not loaded is taken")
 

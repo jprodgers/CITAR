@@ -44,7 +44,7 @@ __all__ = [
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     # this build
-    "build_info",
+    "build_info", "key_fingerprint",
     # one game
     "DEBUG_ACTIONS", "EngineGame",
     # saves: the .citar container and its journal
