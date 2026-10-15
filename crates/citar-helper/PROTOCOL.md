@@ -93,7 +93,7 @@ number (as `serde_json` reads it), so it is never an `int`. A number literal tha
 
 | Code | Path | When |
 |---|---|---|
-| `too_large` | `""` | the frame is over 8 MiB |
+| `too_large` | `""` | the frame is over 8 MiB (a first frame: over 2 MiB, see [the handshake](#the-handshake)) |
 | `too_deep` | `""` | it nests more than 64 deep |
 | `not_json` | `""` | it is not JSON (a syntax error, `NaN`, a number too large for a float, a lone surrogate in a string, a byte-order mark) |
 | `not_object` | `""` | it is JSON but not an object |
@@ -124,6 +124,9 @@ and drops the frame. Then:
 
 **What the helper caps.** Values that come from the machine are cut to fit before they are sent,
 so a correct helper never sends a frame the hub refuses for them:
+- its hardware report (`hello.report.hardware`, from the owner's file): at most 256 KiB as sent
+  (a file over 1 MiB is not read at all); a larger one is not reported (`hardware_source`
+  `none`), logged once an hour, so its hello stays under the hub's 2 MiB for a first frame;
 - its models (`hello.llm.models`, `catalog.models`): at most 500, chosen in this order: the models
   of its allowlist, then the loaded ones, then the others by key; a model whose key is longer than
   200 characters is left out, and a label longer than 200 is cut;
@@ -172,6 +175,8 @@ frame, the code alone decides.
 | 4426 | after the v1 refusal, or `refused` `protocol` or `build` | waits for an upgrade (10 minutes) |
 | 4429 | after `refused` `rate` | retries after 60 s (`retry_after_s` when the frame came) |
 | 1000, 1001 | the server stopped or restarted | reconnects with backoff |
+| 1011 | the server could not check the `hello` (its database failed); no frame before it | reconnects with backoff |
+| 1012 | the machine's key was reset while this helper was connected; no frame before it | reconnects with backoff (its next `hello` registers its key) |
 
 Any other code, and a connection lost without a close, is a reconnect with backoff.
 
@@ -186,7 +191,9 @@ and tries again every hour, so no service manager restarts it into a loop.
 ## The handshake
 
 1. The helper connects and sends **`hello`** as its first frame, within 30 s.
-2. The server checks, in this order:
+2. A first frame over 2 MiB is closed with 4400 `too_large` before it is read: a correct helper's
+   `hello` is far below it (at most 500 models, their keys and labels at most 200 characters, and
+   a hardware report of at most 256 KiB). Then the server checks, in this order:
    1. **the protocol:** a `hello` failing the `protocol` check, and any first frame that is a
       protocol 1 `hello` (it has `version: 1` and no `protocol`), gets the v1 refusal and close code
       4426: no token lookup, no audit row, no rate-limit count, at most one log line per address an
@@ -197,7 +204,9 @@ and tries again every hour, so no service manager restarts it into a loop.
       `refused` `token`; the failure counts toward the address's limit and is audited;
    4. **the key:** the first protocol 2 `hello` of a machine registers `machine.public_key` on its
       row (trust on first use, bound to a valid token); a later `hello` with another key gets
-      `refused` `key` until the machine's owner or an administrator resets the key;
+      `refused` `key` until the machine's owner or an administrator resets the key. A reset closes
+      the machine's connection, if it has one, with 1012, so its helper connects again and its
+      `hello` registers its key at once;
    5. **registration**, then `welcome`.
 3. The server answers with exactly one of `welcome` and `refused`, and sends nothing else before it.
    After `refused` it closes the socket (4401, 4426 or 4429).
