@@ -235,7 +235,8 @@ Budgets on grants are counted in the same credits ([Accounts](server/ACCOUNTS.md
 
 The limit of refused worker tokens per address (`worker_auth`: 20 different tokens in five minutes) is counted before
 any token is looked up, from the address `CITAR_BEHIND_PROXY` and `CITAR_TRUSTED_PROXY_HOPS` give, as every other
-limit; it holds in local mode too.
+limit, one hello of an address at a time (so hellos sent together cannot all get past it); it holds in local mode
+too.
 
 On the helper's side (the CITAR helper, `citar-helper`): `CITAR_WORKER_SERVER`, `CITAR_WORKER_TOKEN`,
 `CITAR_WORKER_BASE_URL`, `CITAR_WORKER_PROVIDER`, `CITAR_WORKER_MAX_CONCURRENT`, `CITAR_WORKER_NAME`,

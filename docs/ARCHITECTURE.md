@@ -538,14 +538,20 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
 
 A machine behind a home router is served by the CITAR helper (`crates/citar-helper`), which dials out to the server's
 `/ws/worker` and serves completions down that connection. `citar/server/workers.py` is the hub, on protocol 2 only
-(`crates/citar-helper/PROTOCOL.md`; design/phase4-helper.md P4.5.1). Its handshake checks, in order: the protocol (a
-protocol 1 hello gets the one-line "download the new helper" refusal and close 4426, at no cost), the address's limit
-of refused tokens (distinct token hashes per address, before any lookup), the token, then the machine key (registered
-by the first hello, trust on first use; another is refused until its owner resets it). Then `welcome` with the
-machine's settings, which the helper acknowledges (`settings_ack`): the hub holds each acknowledgement to what the site
-asked, and the prompt scheduler reads that, never the site's figures alone. A change in the machine settings dialog is
-pushed at once (`push_settings`). Frames from a helper are handled on the event loop without blocking it: completions
-resolve their waiting seat's request; a catalog, a hardware scan or the hello's report goes to a thread
+(`crates/citar-helper/PROTOCOL.md`; design/phase4-helper.md P4.5.1). A first frame over 2 MiB (more than any hello)
+is refused unread. Then its handshake checks, in order: the protocol (a protocol 1 hello gets the one-line "download
+the new helper" refusal and close 4426, at no cost), the address's limit of refused tokens (distinct token hashes per
+address, before any lookup; the check, the lookup and the count of a failure are one step per address, so hellos sent
+together cannot all get past it), the token (a database that fails is not a refusal: close 1011, and the helper tries
+again), then the machine key (registered by the first hello with a conditional write, trust on first use; another is
+refused until its owner resets it, which closes the machine's connection with 1012 so its helper registers at once).
+Then `welcome` with the machine's settings, which the helper acknowledges (`settings_ack`): the hub holds each
+acknowledgement to the settings frame it answers, and the prompt scheduler reads the newest held to what the site asks
+now, never the site's figures alone. A change of the machine's settings (its dialog, the machine editor) is pushed once
+it is committed (`push_settings`), and the keep-alive pushes any difference it finds (a change another process made).
+Frames from a helper are handled on the event loop without blocking it: a frame over 64 KiB is parsed on a thread (a
+first frame, which comes before any token is checked, on one thread of its own); completions resolve their waiting
+seat's request; a catalog, a hardware scan or the hello's report goes to a thread
 (`machine_settings.record_report`); `status` carries its own quiet hours to the scheduler. A helper returns each
 completion raw, and `WorkerConversation` parses it with `parse_completion`, as `OpenAIConversation` does
 ([One parser](#one-parser-for-every-completion)). The conformance transcripts (`crates/citar-helper/protocol/v2/

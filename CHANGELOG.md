@@ -111,9 +111,11 @@ that means for an existing install:
 - The hub speaks helper protocol 2: a helper returns each completion raw and the server parses it with
   the parser it uses for every model, so a `json`-mode seat on a helper machine now gets the JSON
   protocol in its prompt (it never did through the 0.1.5 worker). The machine's settings go to its
-  helper at once and are acknowledged with what it will do, its own ceiling always winning; a machine
-  key is registered by the first connection, shown as a fingerprint in the Helper dialog, and reset
-  there (`POST /api/machines/{id}/key/reset`); "Rescan" asks the helper for a new hardware scan
+  helper at once, from the settings dialog or the machine editor (and from another process at the
+  next keep-alive), and are acknowledged with what it will do, its own ceiling always winning; a
+  machine key is registered by the first connection, shown as a fingerprint in the Helper dialog,
+  and reset there (`POST /api/machines/{id}/key/reset`, which makes a connected helper reconnect and
+  register its key at once); "Rescan" asks the helper for a new hardware scan
   (`POST /api/machines/{id}/rescan`); the helper's own quiet hours reach the scheduler.
 
 **Shared compute** ([docs/server/WORKERS.md](docs/server/WORKERS.md),
@@ -184,8 +186,12 @@ own, and all of them at once in one game, with a real model in LM Studio last
 - The limit on refused worker tokens never refused anything (it was counted after the lookup and its
   refusal dropped), and it took the client's address from `X-Forwarded-For` whatever the proxy
   settings: an address is now refused before any lookup once 20 different tokens failed from it in
-  five minutes (a revoked token retried counts once), read as every other limit reads it. A token's
-  last address is written.
+  five minutes (a revoked token retried counts once, and hellos sent together get no more lookups),
+  read as every other limit reads it. A token's last address is written.
+- A helper's first frame was read on the server's event loop, up to 8 MiB of it before any token was
+  checked, holding up every game and helper meanwhile: a first frame over 2 MiB is now refused
+  unread and long frames are read on a thread. A database error while checking a token no longer
+  counts as a refused token (the helper is asked to try again).
 - A cancelled request kept running on its helper until it finished, holding its slot (draining); the
   helper now stops it.
 

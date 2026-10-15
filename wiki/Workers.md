@@ -47,12 +47,16 @@ Once the helper connects it appears on the **Servers** page like any other machi
 can be used in seats and benchmark suites. Availability windows and budgets apply to it the same
 way.
 
-**What the hub checks, in order** (design/phase4-helper.md P4.5.1): the protocol (a 0.1.5 worker gets
-the one-line "download the new helper" refusal and close code 4426, at no cost: no token lookup, no
-audit row, a log line per address an hour); the address's limit of refused tokens (20 different ones
-in five minutes from one address and the next hello is refused for a while, before any token is
-looked up; one revoked token retried over and over counts once, so it never locks out the owner's
-other machines behind the same address); the token; and the machine key (below). The address is the
+**What the hub checks, in order** (design/phase4-helper.md P4.5.1), once a first frame over 2 MiB
+(far more than any hello) has been refused unread: the protocol (a 0.1.5 worker gets the one-line
+"download the new helper" refusal and close code 4426, at no cost: no token lookup, no audit row, a
+log line per address an hour); the address's limit of refused tokens (20 different ones in five
+minutes from one address and the next hello is refused for a while, before any token is looked up;
+one revoked token retried over and over counts once, so it never locks out the owner's other machines
+behind the same address; the hellos of one address are checked one at a time, so a burst of them
+sent together gets no more lookups than the limit); the token (if the server's database fails while
+checking it, that is no refusal: the helper is closed with 1011 and tries again); and the machine key
+(below). The address is the
 connection's own unless `CITAR_BEHIND_PROXY` says a proxy in front is trusted for
 `CITAR_TRUSTED_PROXY_HOPS` hops, as for every other limit. A token's last address and time are kept
 and shown on the machine's Helper dialog.
@@ -130,9 +134,11 @@ it, saying why), its **LLM slots** (how many requests it takes at once, the site
 analysis, a probe's answer, a test or a hybrid seat's diplomacy runs only on a model it has loaded, or one a game is
 using there). These take effect at once: the dialog shows what the prompt scheduler has in effect, and the machine's
 connected helper is sent them at once (protocol 2's `settings`), which it answers with what it will actually do: each
-figure the smaller of the site's and its owner's own ceiling. The server holds that answer to what it asked, so a
-helper can never take more than the site gave it (one that claims more is flagged `settings_overclaim` for
-administrators). **CPU sharing** (threads, CPU %, memory, the kinds of CPU work: lab games, ranking games, reference
+figure the smaller of the site's and its owner's own ceiling. The slots changed in the machine's editor (**Requests at
+once**) reach it the same way, and a change made from the command line or another process at the next keep-alive. The
+server holds each answer to what the settings it answers asked, so a helper can never take more than the site gave it
+(one that claims more is flagged `settings_overclaim` for administrators), and an answer that crossed a newer change
+on the way is not taken for one. The dialog waits up to two seconds for the answer when something changed. **CPU sharing** (threads, CPU %, memory, the kinds of CPU work: lab games, ranking games, reference
 games, and whether its games pause while its own model works) is sent and acknowledged the same way; the CPU work
 itself starts with a later 0.1.6 package. Its limits are hard where the operating system allows, and the helper's own
 local settings always win.
@@ -185,7 +191,9 @@ tokens registers its key on the machine (trust on first use); a later connection
 `POST /api/machines/{id}/key/reset`), after which the next helper to connect registers its own. The dialog shows the
 key's **fingerprint**, the 16 hex digits `citar-helper --version --home DIR` prints on the machine: if they differ,
 someone else's helper used the token first, and the fix is to revoke the machine's tokens, reset the key and issue a
-new token. A reset is audited and never changes the machine's trust tier.
+new token. A reset alone is not enough then: whichever helper connects next with a valid token registers its key. A
+reset closes the helper's connection, if it has one (close code 1012), so that it reconnects and registers its key at
+once. A reset is audited and never changes the machine's trust tier.
 
 ---
 
@@ -246,7 +254,7 @@ as not given, and so does an empty value in the file.
 | The machine's name | `--name` | `name` | `CITAR_WORKER_NAME` | none: the server's name for it |
 | Only these models | `--model` (repeat) | `models` | | every model the endpoint lists |
 | Quiet hours | `--quiet` (repeat) | `quiet_hours` | | none |
-| A hardware file to report | `--hardware FILE` | `hardware_file` | `CITAR_WORKER_HARDWARE_FILE` | none |
+| A hardware file to report (at most 256 KiB, else none is reported) | `--hardware FILE` | `hardware_file` | `CITAR_WORKER_HARDWARE_FILE` | none |
 | Report no hardware | `--no-hardware` | | | |
 | Skip TLS checks | `--insecure` | `insecure` | | off, and only for a server on this machine or a private network |
 | The helper's home | `--home DIR` | | `CITAR_DATA_DIR` | the per-user CITAR folder |

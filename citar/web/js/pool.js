@@ -221,9 +221,11 @@ function helperFacts(info, m, refresh) {
       title: "Forget this key: the next helper to connect with a token of this machine registers its own",
       onclick: async () => {
         if (!(await confirmBox("Reset the machine key?",
-              "The next helper that connects with one of this machine's tokens registers its own key. Do this "
-              + "after reinstalling the helper, or when the fingerprint is not the one citar-helper --version "
-              + "prints on your machine (then revoke its tokens too)."))) return;
+              "The next helper that connects with one of this machine's tokens registers its own key; a helper "
+              + "connected now is made to reconnect, and registers its key at once. Do this after reinstalling the "
+              + "helper. If the fingerprint is not the one citar-helper --version prints on your machine, someone "
+              + "else's helper used a token: revoke this machine's tokens first and issue a new one, or theirs may "
+              + "register again."))) return;
         try { await call("resetMachineKey", gateOf(m), m.id); toast("Key reset.", "good"); refresh(); }
         catch (e) { toast(e.message, "error"); }
       },
