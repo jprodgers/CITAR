@@ -199,6 +199,24 @@ it. Every result records per seat the build that played it, the version, the pro
 the overrides, the fixed aggression its bot played and the fingerprint, so a queued experiment that
 a newer build finishes is labelled with that build.
 
+**What a lab result records.** Each game is a job (`engine_api.run_job`): the jobs crate plays it
+and builds its result in Rust, the same code a helper lending its CPU runs, and the result's hash
+covers only what the game decides. A result line holds the experiment (`exp`), the game's index
+(`i`), `seed` and `map`, the turns played, the winner and its seat's label, the victory, `engine`
+(the build id), `errors`, and per seat, by player id, eliminated seats too: the seat's label, bot,
+difficulty, levels, profile with its revision and name; what played (`build`, `version`,
+`fingerprint`, the cleaned `params`, `fixed_aggression` and the `aggression` played); the score and
+its share, the rank, techs, cities, policies, religion, great people, spaceship parts, the share of
+rounds it was unhappy, the twelve stats at turns 50, 100, … 300, the turn each era began, its event
+counts and its 25 most built items. Then the times, added by the lab outside the hash: `seconds`,
+`started_ts`, `cpu_s` and `finished`.
+
+`errors` holds the messages of a game's errors only, never a trace or an address. A bot compiled
+into the engine raises none short of a panic, so it is empty. **A game that panics is a crash, not
+a result line**: its turn, the seat whose bot was playing, its label and the message (in
+`crashes.log`, with where it happened). A crash is final: the same game always crashes the same
+way, so it is not worth playing again, and a check of the result must reproduce it.
+
 **Factorial experiments** (`"factors"`) screen many parameters at once: each seat plays with its own
 mix of factor levels, spread evenly across seats and shuffled per game, so each factor's effect can
 be measured within games rather than between them.

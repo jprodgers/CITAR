@@ -55,6 +55,7 @@ __all__ = [
     "map_ref", "map_file", "map_dir", "scenario_ref", "scenario_file", "scenario_dir",
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
+    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_chain_check", "jobs_build",
     "build_info", "key_fingerprint",
     "DEBUG_ACTIONS", "EngineGame",
     "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
@@ -472,6 +473,57 @@ def run_game(spec: dict, on_turn: Optional[Callable[[dict], None]] = None,
     run["config"] = _run_config(spec["config"])
     bots = {int(pid): _bot(b) for pid, b in (spec.get("bots") or {}).items() if b is not None}
     return json.loads(_E.run_game(_dumps(run), bots, on_turn, on_event))
+
+
+# ----------------------------------------------------------------------------
+# CPU jobs (design/phase4-helper.md P4.4): the jobs crate, the same Rust as the helper's
+# ----------------------------------------------------------------------------
+#: A job's spec, result or chain refused (a ValueError): ``.code`` is ``bad_spec``, ``bad_result`` or ``bad_chain``.
+JobRefused = _E.jobs.JobRefused
+#: The kinds of job: ``lab_game``, ``ranking_game``, ``reference_game``.
+JOB_KINDS: tuple = tuple(_E.jobs.KINDS)
+
+
+def check_job_spec(kind: str, spec: dict, spec_hash: Optional[str] = None) -> dict:
+    """A job's spec read as ``kind``'s: {"spec" (the canonical spec), "spec_hash" (64 hex digits), "bots" (the bot
+    versions it names, sorted)}. Raises JobRefused (``bad_spec``) for an unknown kind or key, a value out of its
+    bounds, an unknown bot version or overrides the bot refuses, a setting the engine does not know, or, with
+    ``spec_hash``, a spec that does not hash to it."""
+    return json.loads(_E.jobs.check_spec(kind, _dumps(spec), spec_hash))
+
+
+def run_job(kind: str, spec: dict, on_round: Optional[Callable[[dict], None]] = None,
+            spec_hash: Optional[str] = None, test_panic: Optional[dict] = None) -> dict:
+    """Plays one job to its end in this process (the jobs crate, P4.4): {"spec_hash", "result", "result_hash",
+    "chain" {"head", "rounds", "digests"}, "wall_s", "cpu_s", "trace" (only after a crash)}.
+
+    ``result`` is the kind's outcome: a lab or ranking game's LabResult (``lab.play``'s line without its times), a
+    reference game's baseline line without its times, or a crash, ``{"crash": {"turn", "player", "label",
+    "message"}}`` for a lab game and ``{"crash": message}`` for a reference game: a game that panics is a result, never
+    an exception. ``wall_s``, ``cpu_s`` and ``trace`` are measurements, never hashed. ``on_round({"turn",
+    "turn_limit"})`` hears the first turn and each turn as it begins; its exception ends the run and is raised. Raises
+    JobRefused (``bad_spec``) as :func:`check_job_spec` does. ``test_panic`` ({"player", "turn"}), in a build with the
+    test operations only, seats a bot that panics from that turn in that seat: the crash outcome's way in tests."""
+    panic = None if test_panic is None else _dumps(test_panic)
+    return json.loads(_E.jobs.run(kind, _dumps(spec), spec_hash, on_round, panic))
+
+
+def job_result_hash(kind: str, result: dict) -> str:
+    """The result hash of a job's result, read as ``kind``'s and written back by the same Rust as the helper's: what
+    a claim must name. Raises JobRefused (``bad_result``) for a result that does not read (an unknown key included)."""
+    return _E.jobs.result_hash(kind, _dumps(result))
+
+
+def job_chain_check(spec_hash: str, chain: dict) -> None:
+    """Checks that a job's chain ({"head", "rounds", "digests"}) folds to its head from the spec hash's ``chain_0``
+    and counts as many rounds as it carries digests. Raises JobRefused (``bad_chain``) naming what does not hold."""
+    _E.jobs.chain_check(spec_hash, _dumps(chain))
+
+
+def jobs_build() -> str:
+    """This build's jobs build (P4.4.5): 12 hex digits over the build id, the runner's and the jobs crate's code and
+    the build's flavour (a ci and a release build differ). Results are only compared within one jobs build."""
+    return _E.jobs.jobs_build()
 
 
 # ----------------------------------------------------------------------------
