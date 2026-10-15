@@ -309,9 +309,14 @@ helper lending its CPU play with the same Rust, so their results can be compared
   before it went, `tests/data/lab_results_*.json`, are the parity check); a reference game's is the baseline's
   line. Only what the game decides is in it: the times and a crash's trace are the writer's, outside the hash.
 - **Hashes** (`citar_jobs::hash`): `result_hash` reads a received result into the typed result, refusing unknown
-  keys, and hashes it written back; `chain_check` folds the digests to the head. The server never hashes JSON in
-  Python: it calls the jobs crate through `citar._engine.jobs` (`engine_api.run_job`, `check_job_spec`,
-  `job_result_hash`, `job_chain_check`, `jobs_build`).
+  keys, and hashes it written back; `chain_check` folds the digests to the head. **Whether a result answers its
+  spec** (`citar_jobs::fit`): `result_fits` holds a result to everything its spec decides before a turn is played
+  under this build (the experiment, the game, its seed and map; who sat in each seat and what played it,
+  fingerprints included; the build id) and its turns to the chain's rounds, so another game's result, or one
+  invented beside a chain folded from the right start, is refused; what only playing decides is replication's to
+  check. The server never hashes or checks JSON in Python: it calls the jobs crate through `citar._engine.jobs`
+  (`engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_result_fits`, `job_chain_check`,
+  `jobs_build`); bytes that are not JSON are refused like any spec, result or chain that does not read.
 - **The jobs build** (`citar_jobs::build`), the compatibility key every job carries: 12 hex digits over the build
   id, the content codes of the runner and the jobs crate (each crate's `build.rs`, the engine's
   `content_code.rs` copied) and the build's flavour (debug assertions, overflow checks, the engine's checks), so a
@@ -320,7 +325,9 @@ helper lending its CPU play with the same Rust, so their results can be compared
 - **The `jobs` golden set** (`crates/citar-jobs/golden/jobs.json`): four short jobs with their spec, result and
   chain, held by citar-jobs' own test binary in the `ci` and `release` profiles here and on five targets in
   `determinism.yml`; its shortest job is the self-check a job host plays before taking work, beside the canary
-  that refuses a machine flushing denormals.
+  that refuses a machine flushing denormals. The keys of a result that name the build (`engine`, each seat's
+  `build` and `fingerprint`) are checked with this build's values (`citar_jobs::rebased`), so an edit that moves
+  the build id and changes no game passes, and only a change of what a game computes asks for a bless.
 
 ### Hybrid seats: the bot's turn, the model's diplomacy
 

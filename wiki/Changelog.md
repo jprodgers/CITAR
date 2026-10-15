@@ -74,6 +74,18 @@ that means for an existing install:
   `citar-worker` command are gone. A 0.1.5 worker installed as a system service is restarted into the
   refusal every 15 s until it is disabled (`sudo systemctl disable --now citar-worker`):
   [docs/server/WORKERS.md](Workers#moving-from-015).
+- **The lab plays each game as a job,** built in Rust by the jobs crate (`crates/citar-jobs`, the code
+  a helper lending its CPU will run): the result line holds what 0.1.5's did, with `seconds`,
+  `started_ts`, `cpu_s` and `finished` added outside the result's hash. A bot that panics now ends
+  its game as a crash in `crashes.log` (the turn, the seat, its label and the message), where 0.1.5
+  wrote a result whose `errors` carried the trace, so `errors` is always empty; and a crash is final:
+  the runner does not play the game again (a runner started later plays it once more). An experiment
+  is checked game by game as jobs when it is queued (`citar lab submit`, the A/B form): a turn limit
+  past the speed's last turn, a seed past 2^53 − 1, a label or a name of more than 200 characters or
+  an override the bot does not take is refused, saying which game and why (`citar lab submit` exits
+  2; the A/B form's turn limit stops at the chosen speed's last turn). One queued before that a job
+  refuses is shown on the Lab page as one that cannot be played, and none of its games starts.
+  [docs/BOTS.md](Scripted-bots).
 - **API changes.** The report sharing routes under `/api/shared/reports` moved to the owned items'
   routes (`/api/items/report/{id}/sharing`) and `/r/{slug}`; `replay_data("full")` and a replay asked
   for in it are refused (the recap reads the `delta` frames); a seat's view no longer carries
@@ -150,6 +162,12 @@ that means for an existing install:
   administrators' users page's 30 days of compute. Budgets are in credits, reserved and settled per
   request, and a hard budget stops at its limit, an online API's too (a model with no price is
   refused under one).
+- **CPU jobs in Rust** (`crates/citar-jobs`, design/phase4-helper.md P4.4), what a helper lending its
+  CPU will run: lab, ranking and reference games as closed, typed and bounded specs with their
+  hashes, a chain of round digests, the result hash, whether a result answers its spec, and the jobs
+  build, the compatibility key; in Python `engine_api.check_job_spec`, `run_job`, `job_result_hash`,
+  `job_result_fits`, `job_chain_check` and `jobs_build`. A `jobs` golden set holds every target to
+  the same results (`determinism.yml`).
 
 **Chat** ([docs/PLAYING.md](Playing-in-the-browser), [docs/AI_PLAYERS.md](AI-players)):
 

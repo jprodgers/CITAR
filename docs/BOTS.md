@@ -195,7 +195,13 @@ version it names then, so a version added later cannot contaminate a queued expe
 `"bot": "live"` to opt out and play the latest version at play time). A seat's overrides are
 checked against its version's schema at submission, so a misspelt parameter is refused then, not
 after a day of games; so is an `"aggression"` that is no number, and one outside 0 to 1 is held to
-it. Every result records per seat the build that played it, the version, the profile and revision,
+it. An `order` or a `list` parameter (`policy_order_peaceful`, `promo_lines`, the beliefs) takes a
+list of names, or an order a preset's name. Every game of the experiment is also checked as the
+job it will be played as (below), so whatever a job refuses is refused at submission, saying which
+game and why: a turn limit past the speed's last turn (`"turns": 0` plays to it), a seed past
+2^53 − 1 (the last game's is `seed + games − 1`), a label or a name of more than 200 characters
+(a factorial seat's label is its levels written out), at most 1,000 overrides and lists of at most
+256 names. Every result records per seat the build that played it, the version, the profile and revision,
 the overrides, the fixed aggression its bot played and the fingerprint, so a queued experiment that
 a newer build finishes is labelled with that build.
 
@@ -214,8 +220,12 @@ counts and its 25 most built items. Then the times, added by the lab outside the
 `errors` holds the messages of a game's errors only, never a trace or an address. A bot compiled
 into the engine raises none short of a panic, so it is empty. **A game that panics is a crash, not
 a result line**: its turn, the seat whose bot was playing, its label and the message (in
-`crashes.log`, with where it happened). A crash is final: the same game always crashes the same
-way, so it is not worth playing again, and a check of the result must reproduce it.
+`crashes.log`, with where it happened, its header ending `final`). A crash is final: the same game
+always crashes the same way, so the runner that saw it does not play it again (it plays a game
+three times only when its process died, which may not happen twice), and a check of the result
+must reproduce it. A runner started later plays such a game once more. An experiment queued
+before its games were checked as jobs, which a job refuses, is shown on the Lab page as one that
+cannot be played, with the reason, and none of its games starts: delete it and queue it again.
 
 **Factorial experiments** (`"factors"`) screen many parameters at once: each seat plays with its own
 mix of factor levels, spread evenly across seats and shuffled per game, so each factor's effect can
