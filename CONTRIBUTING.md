@@ -168,6 +168,26 @@ Python engine's, recorded by scripts the tag `python-engine-0.1.6` keeps: no ble
 games on every map size, is the nightly run's: `cargo golden check --long` checks it (about a
 minute) and `cargo golden bless long` writes it, so bless it too when a change moves the games.
 
+**The jobs golden set.** `crates/citar-jobs/golden/jobs.json` holds four short CPU jobs (lab,
+ranking and reference games) with their specs, results and chains of round digests, which a
+helper and the server must compute byte for byte alike. citar-jobs' own test binary checks it,
+in both profiles: `cargo nextest run -p citar-jobs` and `cargo nextest run -p citar-jobs
+--cargo-profile release` (the determinism workflow does both on all five targets). A result
+names the build that played it (`engine`, each seat's `build` and `fingerprint`, a reference
+game's `bot`), which moves with any edit of the engine's or the bot's sources and with CITAR's
+version; the check gives those keys this build's values, so such an edit needs no bless. A change
+to the engine, the bot, the runner or how a job's result is built that moves what a job computes
+re-blesses it: `CITAR_BLESS_JOBS=1 cargo test -p citar-jobs --test golden -- bless`, and say why
+in the commit. Its shortest job is also the self-check a job host plays before it takes work.
+
+**The lab's parity games.** `tests/data/lab_results_*.json` are seven lab games as the Python
+result building played them before the lab moved to the jobs crate; `tests/test_jobs.py` holds
+`lab.play` to them while the build is the one that recorded them, and to the old building kept in
+`tests/lab_play_oracle.py`, played live, on every build. To record them again under the build at
+hand (after a change that moves the games, for the exact comparison), run `python -m
+tests.lab_results --force` from the repository's root with the extension built, and commit the
+files saying why.
+
 When the targets disagree, the determinism workflow's `divergence` artifact holds each odd
 target's state at the first round where a game parted from the committed file, the same state
 played on Linux, and the places where they differ. To look into one by hand:

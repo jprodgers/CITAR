@@ -1,0 +1,291 @@
+{
+ "about": "A lab game played by the Python result building (citar/lab.py play() before package 4-07 moved it to Rust), recorded for 4-07's parity gate: the Rust LabResult of `spec` equals `result` on every deterministic key (all but seconds, started_ts, cpu_s and finished).",
+ "recorded_at": "2026-10-15",
+ "build": {
+  "version": "0.1.5",
+  "build_id": "0b412a18fe95",
+  "engine_code": "b6dfa8c7df72fe1b",
+  "bot_code": "6722048c0ca36c7c",
+  "rules": "3b89bbdfb807639c32c28f6c0ad8d1d2935355d61f86d43994fff824e5d8a389"
+ },
+ "spec": {
+  "exp": "parity-small-b",
+  "i": 1,
+  "seed": 5201,
+  "map_type": "archipelago",
+  "size": "small",
+  "speed": "Quick",
+  "turns": 40,
+  "difficulty": "Prince",
+  "barbarians": "normal",
+  "barbarian_difficulty": null,
+  "nation": "BenchmarkCiv",
+  "city_states": null,
+  "seats": [
+   {
+    "label": "tech_noise=0.0,aggressive_above=0.7",
+    "bot": "basic-1",
+    "difficulty": null,
+    "params": {
+     "tech_noise": 0.0,
+     "aggressive_above": 0.7
+    },
+    "levels": {
+     "tech_noise": 0.0,
+     "aggressive_above": 0.7
+    },
+    "aggression": null,
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null
+   },
+   {
+    "label": "tech_noise=0.0,aggressive_above=0.7",
+    "bot": "basic-1",
+    "difficulty": null,
+    "params": {
+     "tech_noise": 0.0,
+     "aggressive_above": 0.7
+    },
+    "levels": {
+     "tech_noise": 0.0,
+     "aggressive_above": 0.7
+    },
+    "aggression": null,
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null
+   },
+   {
+    "label": "tech_noise=0.3,aggressive_above=0.4",
+    "bot": "basic-1",
+    "difficulty": null,
+    "params": {
+     "tech_noise": 0.3,
+     "aggressive_above": 0.4
+    },
+    "levels": {
+     "tech_noise": 0.3,
+     "aggressive_above": 0.4
+    },
+    "aggression": null,
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null
+   },
+   {
+    "label": "tech_noise=0.3,aggressive_above=0.4",
+    "bot": "basic-1",
+    "difficulty": null,
+    "params": {
+     "tech_noise": 0.3,
+     "aggressive_above": 0.4
+    },
+    "levels": {
+     "tech_noise": 0.3,
+     "aggressive_above": 0.4
+    },
+    "aggression": null,
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null
+   }
+  ],
+  "ai_base_values": "monotonic"
+ },
+ "result": {
+  "exp": "parity-small-b",
+  "i": 1,
+  "seed": 5201,
+  "map": "archipelago",
+  "turns": 40,
+  "winner": 3,
+  "winner_label": "tech_noise=0.3,aggressive_above=0.4",
+  "victory": "Time",
+  "players": {
+   "0": {
+    "label": "tech_noise=0.0,aggressive_above=0.7",
+    "bot": "basic-1",
+    "difficulty": "Prince",
+    "alive": true,
+    "levels": {
+     "tech_noise": 0.0,
+     "aggressive_above": 0.7
+    },
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null,
+    "build": "0b412a18fe95",
+    "version": "basic-1",
+    "fingerprint": "c1cc5448c0f8",
+    "params": {
+     "aggressive_above": 0.7,
+     "tech_noise": 0.0
+    },
+    "fixed_aggression": null,
+    "aggression": 0.306,
+    "score": 59,
+    "score_share": 0.2252,
+    "rank": 2,
+    "techs": 7,
+    "cities": 2,
+    "policies": 4,
+    "religion": "pantheon",
+    "great_people": 0,
+    "spaceship": 0,
+    "unhappy_share": 0.3,
+    "checkpoints": {},
+    "era_turn": {},
+    "events": {
+     "city_founded": 2,
+     "camp_cleared": 2
+    },
+    "built_top": {
+     "Warrior": 3,
+     "Monument": 2,
+     "Scout": 1,
+     "Settler": 1
+    }
+   },
+   "1": {
+    "label": "tech_noise=0.0,aggressive_above=0.7",
+    "bot": "basic-1",
+    "difficulty": "Prince",
+    "alive": true,
+    "levels": {
+     "tech_noise": 0.0,
+     "aggressive_above": 0.7
+    },
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null,
+    "build": "0b412a18fe95",
+    "version": "basic-1",
+    "fingerprint": "c1cc5448c0f8",
+    "params": {
+     "aggressive_above": 0.7,
+     "tech_noise": 0.0
+    },
+    "fixed_aggression": null,
+    "aggression": 0.694,
+    "score": 71,
+    "score_share": 0.271,
+    "rank": 1,
+    "techs": 9,
+    "cities": 2,
+    "policies": 5,
+    "religion": "none",
+    "great_people": 0,
+    "spaceship": 0,
+    "unhappy_share": 0.15,
+    "checkpoints": {},
+    "era_turn": {},
+    "events": {
+     "city_founded": 2
+    },
+    "built_top": {
+     "Monument": 2,
+     "Spearman": 2,
+     "Scout": 1,
+     "Warrior": 1,
+     "Settler": 1
+    }
+   },
+   "2": {
+    "label": "tech_noise=0.3,aggressive_above=0.4",
+    "bot": "basic-1",
+    "difficulty": "Prince",
+    "alive": true,
+    "levels": {
+     "tech_noise": 0.3,
+     "aggressive_above": 0.4
+    },
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null,
+    "build": "0b412a18fe95",
+    "version": "basic-1",
+    "fingerprint": "c84ce9c88402",
+    "params": {
+     "aggressive_above": 0.4,
+     "tech_noise": 0.3
+    },
+    "fixed_aggression": null,
+    "aggression": 0.528,
+    "score": 58,
+    "score_share": 0.2214,
+    "rank": 3,
+    "techs": 7,
+    "cities": 2,
+    "policies": 4,
+    "religion": "none",
+    "great_people": 0,
+    "spaceship": 0,
+    "unhappy_share": 0.0,
+    "checkpoints": {},
+    "era_turn": {},
+    "events": {
+     "city_founded": 2
+    },
+    "built_top": {
+     "Warrior": 2,
+     "Scout": 1,
+     "Monument": 1,
+     "Settler": 1,
+     "Worker": 1
+    }
+   },
+   "3": {
+    "label": "tech_noise=0.3,aggressive_above=0.4",
+    "bot": "basic-1",
+    "difficulty": "Prince",
+    "alive": true,
+    "levels": {
+     "tech_noise": 0.3,
+     "aggressive_above": 0.4
+    },
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null,
+    "build": "0b412a18fe95",
+    "version": "basic-1",
+    "fingerprint": "c84ce9c88402",
+    "params": {
+     "aggressive_above": 0.4,
+     "tech_noise": 0.3
+    },
+    "fixed_aggression": null,
+    "aggression": 0.361,
+    "score": 74,
+    "score_share": 0.2824,
+    "rank": 0,
+    "techs": 8,
+    "cities": 3,
+    "policies": 4,
+    "religion": "none",
+    "great_people": 0,
+    "spaceship": 0,
+    "unhappy_share": 0.325,
+    "checkpoints": {},
+    "era_turn": {},
+    "events": {
+     "city_founded": 3,
+     "camp_cleared": 1
+    },
+    "built_top": {
+     "Monument": 3,
+     "Settler": 2,
+     "Archer": 2,
+     "Scout": 1,
+     "Warrior": 1
+    }
+   }
+  },
+  "seconds": 0.1,
+  "started_ts": 1792081920.6,
+  "cpu_s": 0.1,
+  "errors": [],
+  "engine": "0b412a18fe95",
+  "finished": "2026-10-15T12:32:00"
+ }
+}

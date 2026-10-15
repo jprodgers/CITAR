@@ -143,6 +143,45 @@ def run_game(spec_json: bytes, bots: dict[int, Bot], on_turn: Optional[Callable[
     between steps) or any other BaseException from either hook."""
 
 
+class jobs:
+    """The submodule citar._engine.jobs (a module, stubbed as a namespace): CPU jobs, the jobs crate
+    (design/phase4-helper.md P4.4), the same Rust as the helper's. Kinds are lab_game, ranking_game and
+    reference_game."""
+
+    KINDS: Final[tuple[str, ...]]
+
+    class JobRefused(ValueError):
+        """A spec, result or chain refused; .code is bad_spec, bad_result or bad_chain."""
+        code: str
+
+    @staticmethod
+    def check_spec(kind: str, spec_json: bytes, spec_hash: Optional[str] = None) -> bytes:
+        """{spec (canonical), spec_hash, bots}; JobRefused (bad_spec) for a spec refused, or one that does not
+        hash to spec_hash."""
+    @staticmethod
+    def run(kind: str, spec_json: bytes, spec_hash: Optional[str] = None,
+            on_round: Optional[Callable[[dict], object]] = None, test_panic_json: Optional[bytes] = None) -> bytes:
+        """Plays the job: {spec_hash, result, result_hash, chain {head, rounds, digests}, wall_s, cpu_s, trace?}.
+        A game that panics is its crash outcome, never an exception. on_round hears {turn, turn_limit} on the first
+        turn and each new one; its exception ends the run and is raised. test_panic_json ({player, turn}), with test
+        operations only, seats a bot that panics from that turn."""
+    @staticmethod
+    def result_hash(kind: str, result_json: bytes) -> str:
+        """The hash of a result read as the kind's and written back; JobRefused (bad_result)."""
+    @staticmethod
+    def result_fits(kind: str, spec_json: bytes, result_json: bytes, chain_json: bytes,
+                    spec_hash: Optional[str] = None) -> None:
+        """Checks that the result and chain answer the spec: the chain folds from the spec's chain_0, the result holds
+        what the spec decides under this build, its turns follow the chain's rounds; JobRefused (bad_spec,
+        bad_result or bad_chain)."""
+    @staticmethod
+    def chain_check(spec_hash: str, chain_json: bytes) -> None:
+        """Checks the chain folds to its head from the spec hash's chain_0; JobRefused (bad_chain)."""
+    @staticmethod
+    def jobs_build() -> str:
+        """This build's jobs build: 12 hex digits."""
+
+
 # ---------------------------------------------------------------------------- saves v2 (package 2-11)
 class Journal:
     """One journal of a session's timeline, open for appending, holding its file's OS lock until closed, and the

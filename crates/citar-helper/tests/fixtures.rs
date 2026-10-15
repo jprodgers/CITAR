@@ -8,7 +8,9 @@
 
 use std::collections::BTreeSet;
 
-use citar_helper::conformance::matcher::{Bindings, Matcher, NoGolden, json_eq, realize};
+use citar_helper::conformance::matcher::{
+    Bindings, Committed, Golden, Matcher, NoGolden, json_eq, realize,
+};
 use citar_helper::conformance::transcript::Action;
 use citar_helper::conformance::{
     FixtureKind, canonical_examples, crate_dir, frame_fixtures, frame_table, transcripts,
@@ -121,21 +123,22 @@ fn the_frame_table_is_exactly_the_types_this_side_knows() {
 }
 
 /// Gate 4: every transcript loads, and every frame in it, realized as the scripted side would
-/// send it (from the canonical examples, the golden sets standing in by them until 4-07 commits
-/// them), passes its checks and reads back unchanged, so no field in a pattern is one the
+/// send it (golden values from the committed sets, 4-07's `jobs`; the rest from the canonical
+/// examples), passes its checks and reads back unchanged, so no field in a pattern is one the
 /// protocol does not have; a frame sent broken on purpose is refused with its code.
 #[test]
 fn every_transcript_loads_and_its_frames_realize_into_valid_frames() {
     let all = transcripts().expect("the transcripts load");
     assert!(all.len() >= 60, "{} transcripts", all.len());
     let canonical = canonical_examples().expect("the valid fixtures read");
+    let golden = Committed::load().expect("the golden sets read");
     let mut frames = 0;
     for t in &all {
         let mut bindings = Bindings::default();
         for (i, from, pattern, invalid) in t.frames() {
             let ty = pattern.get("t").and_then(Value::as_str).unwrap_or_default().to_owned();
             let example = canonical.get(&(from, ty));
-            let real = realize(pattern, &mut bindings, &t.values, &NoGolden, example)
+            let real = realize(pattern, &mut bindings, &t.values, &golden, example)
                 .unwrap_or_else(|e| panic!("{} step {i}: {e}", t.name));
             let got = parse_from(from, &real.to_string());
             match (invalid, got) {
@@ -155,6 +158,43 @@ fn every_transcript_loads_and_its_frames_realize_into_valid_frames() {
         }
     }
     assert!(frames > 300, "{frames} frames realized");
+}
+
+/// Every `<golden:SET/NAME[/FIELD]>` a transcript names resolves to a value of the committed sets
+/// (4-01 left them to 4-07, which names the `jobs` set's entries), and a name the set lacks
+/// does not.
+#[test]
+fn every_golden_reference_resolves() {
+    fn walk(v: &Value, out: &mut BTreeSet<String>) {
+        match v {
+            Value::String(s) if s.starts_with("<golden:") => {
+                out.insert(s.clone());
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            Value::Object(m) => m.values().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let dir = citar_helper::conformance::fixtures_dir().join("transcripts");
+    let mut refs = BTreeSet::new();
+    for entry in std::fs::read_dir(&dir).expect("the transcripts' folder") {
+        let path = entry.expect("an entry").path();
+        let text = std::fs::read_to_string(&path).expect("a transcript reads");
+        walk(&serde_json::from_str(&text).expect("JSON"), &mut refs);
+    }
+    assert!(refs.len() >= 10, "{refs:?}");
+    let golden = Committed::load().expect("the golden sets read");
+    for r in &refs {
+        let Some(Ok(Matcher::Golden { set, path })) = Matcher::parse(r) else {
+            panic!("{r} is no golden matcher")
+        };
+        let v = golden.value(&set, &path).unwrap_or_else(|| panic!("{r} resolves to nothing"));
+        assert!(!v.is_null(), "{r}");
+    }
+    let missing = ["duel-z".to_owned()];
+    assert_eq!(golden.value("jobs", &missing), None);
+    assert_eq!(golden.value("other", &["duel-a".to_owned()]), None);
+    assert_eq!(NoGolden.value("jobs", &["duel-a".to_owned()]), None);
 }
 
 /// Every field table this side checks equals `protocol/v2/schema.json`, which the server's side

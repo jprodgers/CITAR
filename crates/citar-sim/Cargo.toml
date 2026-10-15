@@ -24,6 +24,16 @@ thiserror.workspace = true
 clap.workspace = true
 cpu-time.workspace = true
 
+# build.rs hashes the sources into CITAR_SIM_CODE, which the jobs build covers
+# (design/phase4-helper.md P4.4.5).
+[build-dependencies]
+blake3.workspace = true
+
+# The content code's helper runs its tests with the runner's (src/lib.rs); a dev-dependency is no
+# input of the code.
+[dev-dependencies]
+blake3.workspace = true
+
 [lib]
 name = "citar_sim"
 path = "src/lib.rs"

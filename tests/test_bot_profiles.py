@@ -359,6 +359,30 @@ class LabTests(unittest.TestCase):
         with _as_admin() as (s, admin):
             self._queue_experiment(lab, bots_api, s, admin)
 
+    def test_the_ab_route_refuses_games_a_job_would_refuse(self):
+        """The A/B route checks the experiment's games as jobs (``lab.normalize``): a turn limit past the speed's last
+        turn and a seed past what a job carries are a 400 saying why, before anything is queued; the form's seed is
+        bounded too."""
+        from fastapi import HTTPException
+        from pydantic import ValidationError
+        from citar import lab
+        from citar.server import bots_api
+        with _as_admin() as (s, admin):
+            for body, reason in (({"name": "ab-long", "speed": "Quick", "turns": 500}, "past the speed's last turn, 330"),
+                                 ({"name": "ab-seed", "games": 3, "seed": 2**53 - 2}, "more than 2^53 - 1")):
+                with self.subTest(reason=reason), self.assertRaises(HTTPException) as cm:
+                    bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard"], **body), user=admin, s=s)
+                self.assertEqual(cm.exception.status_code, 400)
+                self.assertIn(reason, cm.exception.detail)
+                self.assertFalse((lab.QUEUE / f"{body['name']}.json").exists())
+            # The speed bounds the turn limit, not the form: Marathon's last turn is 1500.
+            spec = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard"], games=1, speed="Marathon",
+                                                                     turns=1200, name="ab-marathon"), user=admin, s=s)
+            self.assertEqual((spec["speed"], spec["turns"]), ("Marathon", 1200))
+            (lab.QUEUE / "ab-marathon.json").unlink()
+        with self.assertRaises(ValidationError):
+            bots_api.ExperimentBody(profiles=["standard"], seed=2**53)
+
     def _queue_experiment(self, lab, bots_api, s, admin):
         spec = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard", "classic-production"],
                                                                  games=2, name="api-ab"), user=admin, s=s)
@@ -502,7 +526,7 @@ class LabCommandTests(unittest.TestCase):
                                               gave_up, [], 0, 1))
             with contextlib.redirect_stdout(io.StringIO()):     # log() prints each line too
                 self.assertTrue(lab._runner_step(args, {}, gave_up, [], 0, 1))
-            self.assertIn("nothing left to play: 1 game(s) crashed three times (gave-up #1)",
+            self.assertIn("nothing left to play: 1 game(s) crashed for good or three times (gave-up #1)",
                           (self.lab / "lab.log").read_text(encoding="utf-8"))
             self.assertTrue((own["QUEUE"] / "gave-up.json").exists())
             # a game it has yet to give up on keeps it waiting (here: one it would start, which this test refuses)

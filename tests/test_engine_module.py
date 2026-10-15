@@ -816,6 +816,11 @@ class StubTests(unittest.TestCase):
             if not E.HAS_TEST_OPS:
                 stubbed -= test_only
             self.assertEqual(stubbed, have, cls)
+        # The submodule citar._engine.jobs, stubbed as a namespace class.
+        jobs = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "jobs")
+        names = {n.name for n in jobs.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+        names |= {n.target.id for n in jobs.body if isinstance(n, ast.AnnAssign)}
+        self.assertEqual(names, {n for n in dir(E.jobs) if not n.startswith("_")}, "jobs")
 
 
 @needs_engine

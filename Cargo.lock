@@ -335,6 +335,16 @@ dependencies = [
 name = "citar-jobs"
 version = "0.1.5"
 dependencies = [
+ "blake3",
+ "citar-bot",
+ "citar-engine",
+ "citar-sim",
+ "cpu-time",
+ "libtest-mimic",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
  "windows-sys 0.61.2",
 ]
 
@@ -345,6 +355,7 @@ dependencies = [
  "blake3",
  "citar-bot",
  "citar-engine",
+ "citar-jobs",
  "citar-sim",
  "citar-store",
  "pyo3",
@@ -373,6 +384,7 @@ dependencies = [
 name = "citar-sim"
 version = "0.1.5"
 dependencies = [
+ "blake3",
  "citar-bot",
  "citar-engine",
  "clap",

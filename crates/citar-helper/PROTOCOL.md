@@ -1020,6 +1020,13 @@ A frame in a transcript is a **pattern**:
 | `"<id:NAME>"` | the first time NAME is seen, anything other than `null`, which is then **bound** to NAME; after that, only a value equal to NAME's binding |
 | `"<golden:SET/NAME>"`, `"<golden:SET/NAME/FIELD>"` | a value equal to the golden set SET's entry NAME (or its FIELD), from the set's committed file (`jobs`: `crates/citar-jobs/golden/jobs.json`) |
 
+The `jobs` set's entries are `jobs[NAME]` in its file: `duel-a` (a lab duel of 30 rounds, the
+self-check's job), `duel-b` (a ranking duel of 30), `small-a` (a four-seat lab game of 40) and
+`reference-a` (a reference game of 40). Each has the fields `kind`, `spec` (canonical), `spec_hash`,
+`bots`, `result` (the outcome's result), `result_hash`, `chain_head`, `rounds` and `digests`; a
+whole entry (`<golden:jobs/NAME>`) is what a `finish` host step ends a run with. Both sides' fixture
+tests resolve every reference against the committed file.
+
 Bindings live for the whole transcript, across both directions and every connection. A player may
 bind names before the first step: the token it configured or issued (`token`), its own jobs build,
 bot versions and ruleset id (`jobs_build`, `bots`, `ruleset`), the machine's id when it made the

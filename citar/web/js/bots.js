@@ -609,6 +609,15 @@ export async function abDialog(rules, preselect = []) {
       "Twelve games show a large difference; subtle ones need 24–40.";
   };
   const num = (key, attrs) => el("input", { type: "number", value: f[key], ...attrs, oninput: (e) => { f[key] = +e.target.value; update(); } });
+  // The turn limit stops at the speed's last turn, which is where a game ends anyway: the server refuses one past it.
+  const lastTurn = (speed) => (rules.max_turns && rules.max_turns[speed]) || 1000;
+  const turns = num("turns", { min: 0, max: lastTurn(f.speed) });
+  const setSpeed = (speed) => {
+    f.speed = speed;
+    turns.max = lastTurn(speed);
+    if (f.turns > lastTurn(speed)) { f.turns = lastTurn(speed); turns.value = f.turns; }
+    update();
+  };
   const content = el("div", { class: "col ab-form" },
     el("p", { class: "muted small" }, "The chosen profiles take the seats in turn (A, B, A, B…) and the seat order rotates every game, so each " +
       "profile plays every start position on the same maps and seeds — which removes map and position luck from the comparison. " +
@@ -617,15 +626,16 @@ export async function abDialog(rules, preselect = []) {
     el("div", { class: "grid-scenario" },
       field("Players", num("players", { min: 2, max: 8 })),
       field("Games", num("games", { min: 1, max: 500 })),
-      field("Turn limit (0 = full game)", num("turns", { min: 0, max: 1000 })),
+      field("Turn limit (0 = full game)", turns),
       field("Map size", el("select", { onchange: (e) => { f.size = e.target.value; } },
         ...Object.entries(rules.map_sizes).map(([k, v]) => el("option", { value: k, selected: k === f.size }, v.name)))),
-      field("Speed", el("select", { onchange: (e) => { f.speed = e.target.value; } },
-        ...Object.keys(rules.speeds).map((k) => el("option", { value: k, selected: k === f.speed }, k)))),
+      field("Speed", el("select", { onchange: (e) => setSpeed(e.target.value) },
+        ...Object.keys(rules.speeds).map((k) => el("option", { value: k, selected: k === f.speed },
+          rules.max_turns && rules.max_turns[k] ? `${k} (${rules.max_turns[k]} turns)` : k)))),
       field("Difficulty", el("select", { onchange: (e) => { f.difficulty = e.target.value; } },
         ...rules.difficulty_list.map((k) => el("option", { value: k, selected: k === f.difficulty }, k)))),
       field("Priority", num("priority", { min: -100, max: 100 })),
-      field("Seed", num("seed", { min: 0 })),
+      field("Seed", num("seed", { min: 0, max: Number.MAX_SAFE_INTEGER })),
       field("Name (optional)", el("input", { value: "", placeholder: "ab-…", oninput: (e) => { f.name = e.target.value; } }))),
     field("Maps (game i uses map i mod n)", el("div", { class: "row small" }, ...Object.entries(rules.map_types).map(([k, v]) => el("label", {},
       el("input", { type: "checkbox", checked: f.maps.includes(k), onchange: (e) => { f.maps = e.target.checked ? [...f.maps, k] : f.maps.filter((x) => x !== k); } }), ` ${v.name}`)))),

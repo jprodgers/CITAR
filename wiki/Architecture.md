@@ -284,8 +284,50 @@ A bot seat's `BotAgent` asks its session for a drive of the bot seats on its tur
 with another is answered inside the drive. After the drive the session does what it does after any
 tool call: bumps the version, records the turn's metrics (the bot's actions, taken and refused),
 wakes the seats a chat now waits on, broadcasts the turn and autosaves at a new round. Headless
-games (`citar sim`, `citar balance`, the lab) run whole games through `engine_api.run_game`, the
-runner of `crates/citar-sim`, with the GIL released, so a lab runner plays one game a core.
+games (`citar sim`, `citar balance`) run whole games through `engine_api.run_game`, the runner of
+`crates/citar-sim`, with the GIL released, so a runner plays one game a core; the lab's games are
+jobs (below), played on the same runner.
+
+### CPU jobs and the jobs build
+
+A lab game, a ranking game and a reference game are **jobs** (`crates/citar-jobs`; design/phase4-helper.md
+P4.4): a closed vocabulary of bot-only work with typed, bounded specs, which the server's own executor and a
+helper lending its CPU play with the same Rust, so their results can be compared byte for byte.
+
+- **Specs** (`citar_jobs::spec`): a lab or ranking game's `LabSpec` is `lab.game_spec(exp, i)`'s dict typed; a
+  reference game's `ReferenceSpec` is one game of the statistical baseline with nothing of a run's (no budget,
+  path, workers, name, smoke or checks). `check_spec` refuses an unknown key anywhere, a value past its bound,
+  an unknown bot version or overrides the bot refuses, and has the engine read the game's settings; the spec hash
+  is blake3 over the kind and the typed spec written back.
+- **A job's game** (`citar_jobs::job`) is the engine's ordinary game on the runner, under a chain of round
+  digests from its first round (DESIGN.md 4.10), never under a wall-clock budget (a slow, capped or paused
+  machine computes what a fast one does; a deadline is a failure, never a result), without the engine's
+  invariant checks (they watch a game and never change it). A panic anywhere in playing or summing it up is the
+  job's crash outcome: a result like any other, which the same spec reproduces and a replica must match.
+- **The lab game's result** (`citar_jobs::lab`) is built in Rust from the game and its typed events, as
+  `lab.play` built it in Python from the events it heard (the seven games recorded from the Python building
+  before it went, `tests/data/lab_results_*.json`, are the parity check); a reference game's is the baseline's
+  line. Only what the game decides is in it: the times and a crash's trace are the writer's, outside the hash.
+- **Hashes** (`citar_jobs::hash`): `result_hash` reads a received result into the typed result, refusing unknown
+  keys, and hashes it written back; `chain_check` folds the digests to the head. **Whether a result answers its
+  spec** (`citar_jobs::fit`): `result_fits` holds a result to everything its spec decides before a turn is played
+  under this build (the experiment, the game, its seed and map; who sat in each seat and what played it,
+  fingerprints included; the build id) and its turns to the chain's rounds, so another game's result, or one
+  invented beside a chain folded from the right start, is refused; what only playing decides is replication's to
+  check. The server never hashes or checks JSON in Python: it calls the jobs crate through `citar._engine.jobs`
+  (`engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_result_fits`, `job_chain_check`,
+  `jobs_build`); bytes that are not JSON are refused like any spec, result or chain that does not read.
+- **The jobs build** (`citar_jobs::build`), the compatibility key every job carries: 12 hex digits over the build
+  id, the content codes of the runner and the jobs crate (each crate's `build.rs`, the engine's
+  `content_code.rs` copied) and the build's flavour (debug assertions, overflow checks, the engine's checks), so a
+  `ci` and a `release` build are never compared, though they compute one result. Results are only ever compared
+  within one jobs build.
+- **The `jobs` golden set** (`crates/citar-jobs/golden/jobs.json`): four short jobs with their spec, result and
+  chain, held by citar-jobs' own test binary in the `ci` and `release` profiles here and on five targets in
+  `determinism.yml`; its shortest job is the self-check a job host plays before taking work, beside the canary
+  that refuses a machine flushing denormals. The keys of a result that name the build (`engine`, each seat's
+  `build` and `fingerprint`) are checked with this build's values (`citar_jobs::rebased`), so an edit that moves
+  the build id and changes no game passes, and only a change of what a game computes asks for a bless.
 
 ### Hybrid seats: the bot's turn, the model's diplomacy
 

@@ -74,9 +74,19 @@ pub const CHECKS_BUILT: bool = cfg!(any(debug_assertions, feature = "checks"));
 /// # Errors
 /// Parameters the bot refuses, with its message.
 pub fn code_of(rules: &Ruleset, o: &Options) -> Result<(Code, Arc<Tuning>), String> {
+    code_of_params(rules, o.params.as_ref().unwrap_or(&Value::Null))
+        .map_err(|e| format!("--params: {e}"))
+}
+
+/// The code of a run whose every seat plays `basic-1` with `params` (`null` for the defaults),
+/// and the bots' parameters: [`code_of`]'s, and a reference job's (citar-jobs), which has the
+/// overrides but no run's options.
+///
+/// # Errors
+/// Parameters the bot refuses, with its message.
+pub fn code_of_params(rules: &Ruleset, params: &Value) -> Result<(Code, Arc<Tuning>), String> {
     let version = VersionId::Basic1;
-    let overrides = clean(version.id(), o.params.as_ref().unwrap_or(&Value::Null))
-        .map_err(|e| format!("--params: {e}"))?;
+    let overrides = clean(version.id(), params).map_err(|e| e.to_string())?;
     let engine = build_id(rules);
     let plain = overrides.is_empty();
     let tuning = Arc::new(Tuning::new(version, overrides));

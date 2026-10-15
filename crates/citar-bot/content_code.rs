@@ -1,8 +1,11 @@
 //! A crate's content code (DESIGN.md P2.2.1): 16 hex digits that change exactly when the code
-//! that decides a game can.
+//! that decides a game can. The engine's and the bot's make the build id; the runner's and the
+//! jobs crate's join it in the jobs build (design/phase4-helper.md P4.4.5), since the runner
+//! changes games too (a seat with no driver passes) and the jobs crate builds the results.
 //!
 //! The code is blake3 over:
-//! - a domain tag naming the crate (`citar-engine-code-v1`, `citar-bot-code-v1`);
+//! - a domain tag naming the crate (`citar-engine-code-v1`, `citar-bot-code-v1`,
+//!   `citar-sim-code-v1`, `citar-jobs-code-v1`);
 //! - the package version;
 //! - every input file, in the order of its name (a label and its path below its folder, with `/`
 //!   separators), each with CRLF line endings turned to LF, so a Windows checkout with
@@ -17,8 +20,9 @@
 //! code as it is, and a `git describe` label (which moves on every commit) plays no part. Nor
 //! does a dev-dependency's bump, of the crate's own or of a workspace package it uses.
 //!
-//! The same file is `crates/citar-engine/content_code.rs` and `crates/citar-bot/content_code.rs`
-//! (citar-bot's tests hold the two equal): each build script includes its own copy, so either
+//! The same file is `crates/citar-engine/content_code.rs`, `crates/citar-bot/content_code.rs`,
+//! `crates/citar-sim/content_code.rs` and `crates/citar-jobs/content_code.rs` (each other crate's
+//! tests hold its copy equal to the engine's): each build script includes its own copy, so every
 //! crate builds from its own folder, and each crate's tests include it to check it.
 
 // A build-time helper: it reads the crate's files and prints nothing. It runs in build.rs, never
@@ -284,7 +288,8 @@ pub fn crate_locked(manifest: &Path, lock: &Path) -> Result<Vec<String>, String>
     Ok(std::fs::read_to_string(lock).map_or_else(|_| Vec::new(), |l| locked_versions(&direct, &l)))
 }
 
-/// A crate's inputs from its manifest's folder: [`engine_inputs`] or [`bot_inputs`].
+/// A crate's inputs from its manifest's folder: [`engine_inputs`], [`bot_inputs`],
+/// [`sim_inputs`] or [`jobs_inputs`].
 pub type Recipe = fn(&Path) -> Vec<Input>;
 
 /// The engine's code's domain tag.
@@ -313,6 +318,29 @@ pub fn bot_inputs(dir: &Path) -> Vec<Input> {
     vec![
         Input::Tree { label: "src/", dir: dir.join("src"), ext: "rs" },
         Input::Tree { label: "params/", dir: dir.join("params"), ext: "json" },
+    ]
+}
+
+/// The runner's code's domain tag.
+pub const SIM_TAG: &str = "citar-sim-code-v1";
+
+/// The runner's inputs, from its manifest's folder: its sources (the runner, the baseline's game
+/// and line, which a reference job plays and writes).
+#[must_use]
+pub fn sim_inputs(dir: &Path) -> Vec<Input> {
+    vec![Input::Tree { label: "src/", dir: dir.join("src"), ext: "rs" }]
+}
+
+/// The jobs crate's code's domain tag.
+pub const JOBS_TAG: &str = "citar-jobs-code-v1";
+
+/// The jobs crate's inputs, from its manifest's folder: its sources (the specs, how a result is
+/// built and hashed) and the golden set its self-check embeds.
+#[must_use]
+pub fn jobs_inputs(dir: &Path) -> Vec<Input> {
+    vec![
+        Input::Tree { label: "src/", dir: dir.join("src"), ext: "rs" },
+        Input::Tree { label: "golden/", dir: dir.join("golden"), ext: "json" },
     ]
 }
 
@@ -485,12 +513,30 @@ mod tests {
         assert_eq!(code_of(&lf.0), code, "nor a workspace package's dev dependency's");
     }
 
-    /// This crate's tag, the code its build script computed, and its recipe.
+    /// This crate's tag, the code its build script computed, and its recipe: each crate's build
+    /// script sets its own variable only.
     fn this_crate() -> (&'static str, &'static str, Recipe) {
-        match (option_env!("CITAR_ENGINE_CODE"), option_env!("CITAR_BOT_CODE")) {
-            (Some(code), _) => (ENGINE_TAG, code, engine_inputs),
-            (None, Some(code)) => (BOT_TAG, code, bot_inputs),
-            (None, None) => panic!("built without a content code"),
+        let codes: [(Option<&'static str>, &'static str, Recipe); 4] = [
+            (option_env!("CITAR_ENGINE_CODE"), ENGINE_TAG, engine_inputs),
+            (option_env!("CITAR_BOT_CODE"), BOT_TAG, bot_inputs),
+            (option_env!("CITAR_SIM_CODE"), SIM_TAG, sim_inputs),
+            (option_env!("CITAR_JOBS_CODE"), JOBS_TAG, jobs_inputs),
+        ];
+        codes
+            .into_iter()
+            .find_map(|(code, tag, recipe)| code.map(|c| (tag, c, recipe)))
+            .unwrap_or_else(|| panic!("built without a content code"))
+    }
+
+    /// What each crate's normal dependencies must reach in the real lock (a sample of what it
+    /// links), and whether it names the engine, a workspace package it depends on.
+    fn links_of(tag: &str) -> (&'static [&'static str], bool) {
+        match tag {
+            ENGINE_TAG => (&["serde", "serde_json", "blake3", "smallvec", "thiserror"], false),
+            BOT_TAG => (&["serde", "serde_json", "blake3", "smallvec", "thiserror"], true),
+            SIM_TAG => (&["serde", "serde_json", "thiserror", "cpu-time"], true),
+            JOBS_TAG => (&["serde", "serde_json", "blake3", "thiserror", "cpu-time"], true),
+            other => panic!("no crate has the tag {other}"),
         }
     }
 
@@ -560,14 +606,15 @@ mod tests {
         let locked = crate_locked(&real.join("Cargo.toml"), &real.join("../../Cargo.lock"))
             .expect("the manifest");
         let names: Vec<&str> = locked.iter().filter_map(|l| l.split(' ').next()).collect();
-        for linked in ["serde", "serde_json", "blake3", "smallvec", "thiserror"] {
-            assert!(names.contains(&linked), "{linked} in {locked:?}");
+        let (tag, _, _) = this_crate();
+        let (links, names_engine) = links_of(tag);
+        for linked in links {
+            assert!(names.contains(linked), "{linked} in {locked:?}");
         }
         for dev in ["proptest", "rand", "rand_chacha", "rand_core", "regex-syntax", "unarray"] {
             assert!(!names.contains(&dev), "{dev} in {locked:?}");
         }
-        let (tag, _, _) = this_crate();
-        assert_eq!(names.contains(&"citar-engine"), tag == BOT_TAG, "the bot names the engine");
+        assert_eq!(names.contains(&"citar-engine"), names_engine, "{tag} names the engine");
 
         // proptest bumped in the real lock: the same list, so the same code.
         let manifest = std::fs::read_to_string(real.join("Cargo.toml")).expect("the manifest");

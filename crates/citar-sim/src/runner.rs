@@ -32,6 +32,7 @@ use citar_engine::game::{
     Stop,
 };
 use citar_engine::rules::Ruleset;
+use citar_engine::save::chain::DigestChain;
 use citar_engine::state::Phase;
 use citar_engine::state::diplo::NegStatus;
 use serde::Serialize;
@@ -65,6 +66,9 @@ pub struct RunSpec {
     pub debug: Option<DebugOptions>,
     /// The most backtrace frames a crash record keeps (`traceback_limit`).
     pub traceback_limit: usize,
+    /// A chain of round digests to keep from the first round (DESIGN.md 4.10): a job's
+    /// (design/phase4-helper.md P4.4.4). `None` keeps none, as a lobby or lab game.
+    pub chain: Option<DigestChain>,
 }
 
 impl Default for RunSpec {
@@ -76,6 +80,7 @@ impl Default for RunSpec {
             budget: None,
             debug: None,
             traceback_limit: TRACEBACK_LIMIT,
+            chain: None,
         }
     }
 }
@@ -216,6 +221,10 @@ impl Runner {
         let (mut game, _created) = Game::new(rules, &setup)?;
         if let Some(d) = spec.debug {
             game.set_debug_options(d);
+        }
+        // Before the first step, so the chain holds every round from the first.
+        if spec.chain.is_some() {
+            game.set_chain(spec.chain);
         }
         let drivers = drivers(&game);
         Ok(Self {

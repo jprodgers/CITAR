@@ -1,0 +1,232 @@
+{
+ "about": "A lab game played by the Python result building (citar/lab.py play() before package 4-07 moved it to Rust), recorded for 4-07's parity gate: the Rust LabResult of `spec` equals `result` on every deterministic key (all but seconds, started_ts, cpu_s and finished).",
+ "recorded_at": "2026-10-15",
+ "build": {
+  "version": "0.1.5",
+  "build_id": "0b412a18fe95",
+  "engine_code": "b6dfa8c7df72fe1b",
+  "bot_code": "6722048c0ca36c7c",
+  "rules": "3b89bbdfb807639c32c28f6c0ad8d1d2935355d61f86d43994fff824e5d8a389"
+ },
+ "spec": {
+  "exp": "parity-duel-long",
+  "i": 0,
+  "seed": 4400,
+  "map_type": "pangaea",
+  "size": "duel",
+  "speed": "Quick",
+  "turns": 130,
+  "difficulty": "Prince",
+  "barbarians": "normal",
+  "barbarian_difficulty": null,
+  "nation": "BenchmarkCiv",
+  "city_states": null,
+  "seats": [
+   {
+    "label": "warlike",
+    "bot": "basic-1",
+    "aggression": 1.0,
+    "params": {},
+    "difficulty": null
+   },
+   {
+    "label": "steady",
+    "bot": "basic-1",
+    "aggression": 0.6,
+    "params": {},
+    "difficulty": null
+   }
+  ],
+  "ai_base_values": null
+ },
+ "result": {
+  "exp": "parity-duel-long",
+  "i": 0,
+  "seed": 4400,
+  "map": "pangaea",
+  "turns": 130,
+  "winner": 0,
+  "winner_label": "warlike",
+  "victory": "Time",
+  "players": {
+   "0": {
+    "label": "warlike",
+    "bot": "basic-1",
+    "difficulty": "Prince",
+    "alive": true,
+    "levels": null,
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null,
+    "build": "0b412a18fe95",
+    "version": "basic-1",
+    "fingerprint": "25f3ae4d2fd3",
+    "params": {},
+    "fixed_aggression": 1.0,
+    "aggression": 1.0,
+    "score": 537,
+    "score_share": 0.6729,
+    "rank": 0,
+    "techs": 26,
+    "cities": 5,
+    "policies": 9,
+    "religion": "religion",
+    "great_people": 1,
+    "spaceship": 0,
+    "unhappy_share": 0.385,
+    "checkpoints": {
+     "50": {
+      "score": 114,
+      "cities": 2,
+      "population": 9,
+      "techs": 11,
+      "era": 1,
+      "military": 36,
+      "gold": 300,
+      "gold_per_turn": 5.0,
+      "science": 12.0,
+      "production": 13.0,
+      "happiness": 2,
+      "culture": 7.0
+     },
+     "100": {
+      "score": 410,
+      "cities": 5,
+      "population": 30,
+      "techs": 22,
+      "era": 2,
+      "military": 91,
+      "gold": 434,
+      "gold_per_turn": 8.0,
+      "science": 38.0,
+      "production": 47.0,
+      "happiness": -2,
+      "culture": 18.0
+     }
+    },
+    "era_turn": {
+     "1": 48,
+     "2": 92
+    },
+    "events": {
+     "city_founded": 5,
+     "camp_cleared": 5,
+     "declared_war": 1,
+     "unit_captured": 5,
+     "great_person_born": 2
+    },
+    "built_top": {
+     "Settler": 5,
+     "Spearman": 5,
+     "Colosseum": 5,
+     "Catapult": 5,
+     "Walls": 4,
+     "Swordsman": 4,
+     "Granary": 3,
+     "Scout": 2,
+     "Warrior": 2,
+     "Worker": 2,
+     "Composite Bowman": 2,
+     "Circus": 2,
+     "Monument": 1,
+     "Temple of Artemis": 1,
+     "Garden": 1,
+     "Hanging Gardens": 1,
+     "Stonehenge": 1,
+     "Chariot Archer": 1,
+     "Library": 1,
+     "Aqueduct": 1,
+     "Colossus": 1,
+     "Mausoleum of Halicarnassus": 1,
+     "Pikeman": 1
+    }
+   },
+   "1": {
+    "label": "steady",
+    "bot": "basic-1",
+    "difficulty": "Prince",
+    "alive": true,
+    "levels": null,
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null,
+    "build": "0b412a18fe95",
+    "version": "basic-1",
+    "fingerprint": "8126308736e1",
+    "params": {},
+    "fixed_aggression": 0.6,
+    "aggression": 0.6,
+    "score": 261,
+    "score_share": 0.3271,
+    "rank": 1,
+    "techs": 24,
+    "cities": 3,
+    "policies": 9,
+    "religion": "none",
+    "great_people": 0,
+    "spaceship": 0,
+    "unhappy_share": 0.3,
+    "checkpoints": {
+     "50": {
+      "score": 112,
+      "cities": 2,
+      "population": 8,
+      "techs": 11,
+      "era": 0,
+      "military": 32,
+      "gold": 215,
+      "gold_per_turn": 8.0,
+      "science": 11.0,
+      "production": 10.0,
+      "happiness": 0,
+      "culture": 7.0
+     },
+     "100": {
+      "score": 234,
+      "cities": 3,
+      "population": 14,
+      "techs": 20,
+      "era": 1,
+      "military": 32,
+      "gold": 341,
+      "gold_per_turn": 5.0,
+      "science": 23.0,
+      "production": 12.0,
+      "happiness": 8,
+      "culture": 13.0
+     }
+    },
+    "era_turn": {
+     "1": 53,
+     "2": 102
+    },
+    "events": {
+     "city_founded": 3,
+     "camp_cleared": 3,
+     "unit_captured": 9,
+     "pillaged": 7
+    },
+    "built_top": {
+     "Spearman": 5,
+     "Composite Bowman": 4,
+     "Settler": 3,
+     "Colosseum": 2,
+     "Pikeman": 2,
+     "Scout": 1,
+     "Monument": 1,
+     "Walls": 1,
+     "Library": 1,
+     "The Great Library": 1,
+     "Worker": 1,
+     "Circus": 1
+    }
+   }
+  },
+  "seconds": 0.3,
+  "started_ts": 1792081941.8,
+  "cpu_s": 0.3,
+  "errors": [],
+  "engine": "0b412a18fe95",
+  "finished": "2026-10-15T12:32:22"
+ }
+}

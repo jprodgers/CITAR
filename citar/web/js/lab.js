@@ -24,7 +24,7 @@ function eta(minutes) {
 
 const STATE = {
   running: ["live", "● running"], queued: ["", "queued"], complete: ["good", "✓ complete"],
-  stalled: ["bad", "stalled"],
+  stalled: ["bad", "stalled"], refused: ["bad", "cannot be played"],
 };
 
 export async function renderLab(root, rules) {
@@ -60,7 +60,7 @@ function drawTop(card, d, rules) {
     : r.alive ? el("span", { class: "pill warn" }, `runner silent for ${secs(r.updated_age)}`)
     : el("span", { class: "pill bad" }, "runner stopped");
   const active = d.experiments.filter((e) => e.state === "running" || e.state === "queued");
-  const stalled = d.experiments.filter((e) => e.state === "stalled");
+  const stalled = d.experiments.filter((e) => e.state === "stalled" || e.state === "refused");
   card.append(
     el("div", { class: "row" }, el("h2", { style: { margin: 0 } }, "Bot-tuning lab"), health,
       el("span", { class: "grow" }), el("span", { class: "muted small" }, `updated ${new Date(d.now).toLocaleTimeString()}`),
@@ -73,7 +73,7 @@ function drawTop(card, d, rules) {
       stat("Experiments queued", active.length),
       stat("Queue finishes in", active.length ? eta(d.eta_minutes) : "queue empty",
         "Estimate: remaining games × median minutes per game for that experiment, spread over the workers."),
-      stalled.length ? stat("Stalled", stalled.map((e) => e.name).join(", "), "Games that crashed 3 times; see Crashes in the log.", "bad") : null),
+      stalled.length ? stat("Stalled", stalled.map((e) => e.name).join(", "), "Games that crashed for good or 3 times, or an experiment that cannot be played; see the log.", "bad") : null),
     el("p", { class: "muted small" }, "Each game is a separate bot-vs-bot simulation on the laptop CPU. This page refreshes every 5 seconds; " +
       "ETAs assume later turns are slower (more cities and units) and firm up as each experiment finishes games."));
 }
@@ -95,11 +95,13 @@ function drawExperiments(card, d, refresh) {
     table.appendChild(el("tr", { class: "clickable", onclick: () => toggleReport(e.name, refresh) },
       el("td", {}, el("b", {}, e.name), e.note ? el("div", { class: "muted small" }, e.note) : null),
       el("td", {}, el("span", { class: `pill ${cls}` }, label),
-        e.failing.length ? el("div", { class: "bad small" }, `crashing: #${e.failing.join(", #")}`) : null),
+        e.failing.length ? el("div", { class: "bad small" }, `crashing: #${e.failing.join(", #")}`) : null,
+        e.refused ? el("div", { class: "bad small" }, e.refused) : null),
       el("td", {}, bar(e.done / e.games, `${e.done} / ${e.games}${e.running ? ` (+${e.running} running)` : ""}`, e.state === "complete" ? "good" : "")),
       el("td", {}, e.minutes_per_game != null ? `${e.minutes_per_game}` : "–"),
       el("td", {}, e.state === "complete" ? el("span", { class: "muted" }, e.finished ? new Date(e.finished).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "done")
-        : e.state === "stalled" ? el("span", { class: "bad" }, "never (crashing games)") : eta(e.eta_minutes)),
+        : e.state === "stalled" ? el("span", { class: "bad" }, "never (crashing games)")
+        : e.state === "refused" ? el("span", { class: "bad" }, "never (delete it and queue it again)") : eta(e.eta_minutes)),
       el("td", { class: "small" }, what, e.turns ? el("span", { class: "muted" }, ` · ${e.turns} turns`) : null),
       el("td", {}, e.done ? (expanded ? "▾ report" : "▸ report") : "")));
     if (expanded) {

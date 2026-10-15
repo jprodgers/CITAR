@@ -212,11 +212,11 @@ class ExperimentBody(BaseModel):
     note: str = Field("", max_length=300)
     players: int = Field(4, ge=2, le=8)
     games: int = Field(12, ge=1, le=500)
-    seed: int = Field(5000, ge=0)
+    seed: int = Field(5000, ge=0, le=2**53 - 1)     # a job carries seeds JSON holds exactly (P4.4.1)
     size: str = "small"
     maps: list[str] = ["continents", "pangaea", "fractal"]
     speed: str = "Quick"
-    turns: int = Field(0, ge=0, le=1000)
+    turns: int = Field(0, ge=0, le=10_000)    # the speed's last turn bounds it: lab.normalize checks each game as a job
     difficulty: str = "Prince"
     priority: int = Field(0, ge=-100, le=100)
 
