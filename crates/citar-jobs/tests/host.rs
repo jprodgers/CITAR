@@ -406,18 +406,26 @@ fn results_do_not_depend_on_the_limits() -> Outcome {
         for (_, o, _, _) in &offers {
             send(&mut host, o)?;
         }
-        if slow.is_some() {
-            for _ in 0..2 {
-                std::thread::sleep(Duration::from_millis(250));
-                send(&mut host, &ToHost::Pause)?;
-                std::thread::sleep(Duration::from_millis(300));
-                send(&mut host, &ToHost::Resume)?;
-            }
-        }
         let mut results = BTreeMap::new();
+        // Paused twice: each pause is held until every run shows it is held, and the second is
+        // sent once every run shows it was let go (each game's steps are slowed, so both are still
+        // playing): no sleep decides whether a pause landed.
+        let (mut held, mut let_go) = (BTreeMap::new(), BTreeMap::new());
+        let mut accepted = 0;
+        let (mut pauses, mut resumes) = (0u32, 0u32);
+        let mut waiting = slow.is_some();
         while results.len() < offers.len() {
             let (f, _) = frame(&mut host)?;
             match f {
+                FromHost::JobAccept(_) => accepted += 1,
+                FromHost::JobProgress(p) => {
+                    let h = held.entry(p.run.clone()).or_insert(0u32);
+                    if p.paused {
+                        *h += 1;
+                    } else if *h > *let_go.get(&p.run).unwrap_or(&0) {
+                        let_go.insert(p.run.clone(), *h);
+                    }
+                }
                 FromHost::JobResult(r) => {
                     results.insert(r.run.clone(), r.outcome);
                 }
@@ -425,6 +433,32 @@ fn results_do_not_depend_on_the_limits() -> Outcome {
                 FromHost::JobReject(r) => return fail(format!("{label}: {r:?}")),
                 _ => {}
             }
+            if !waiting {
+                continue;
+            }
+            let every = |m: &BTreeMap<String, u32>, n: u32| {
+                offers.iter().all(|(run, ..)| m.get(run).copied().unwrap_or(0) == n)
+            };
+            if accepted == offers.len()
+                && pauses < 2
+                && every(&held, pauses)
+                && every(&let_go, pauses)
+            {
+                send(&mut host, &ToHost::Pause)?;
+                pauses += 1;
+            } else if resumes < pauses && every(&held, pauses) && every(&let_go, pauses - 1) {
+                std::thread::sleep(Duration::from_millis(300));
+                send(&mut host, &ToHost::Resume)?;
+                resumes += 1;
+                if pauses == 2 {
+                    waiting = false;
+                }
+            }
+        }
+        if slow.is_some() {
+            ensure(!waiting && pauses == 2, || {
+                format!("{label}: paused {pauses} times, {held:?}")
+            })?;
         }
         for (run, _, want, head) in &offers {
             let out = &results[run];
@@ -432,7 +466,7 @@ fn results_do_not_depend_on_the_limits() -> Outcome {
                 format!("{label} {run}: {} {}, want {want} {head}", out.result_hash, out.chain.head)
             })?;
             if slow.is_some() {
-                ensure(out.paused_s >= 0.5, || format!("{label} {run}: paused {}", out.paused_s))?;
+                ensure(out.paused_s >= 0.55, || format!("{label} {run}: paused {}", out.paused_s))?;
             }
             hashes.entry(run.clone()).or_insert_with(Vec::new).push(out.result_hash.clone());
         }

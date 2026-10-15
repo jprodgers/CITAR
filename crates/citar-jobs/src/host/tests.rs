@@ -351,3 +351,28 @@ fn frames_read_back_as_written() {
     assert!(matches!(receive(br#"{"t": "new_thing"}"#), Received::Unknown(_)));
     assert!(is_id("cr_0123-x") && !is_id("") && !is_id(&"x".repeat(65)) && !is_id("a b"));
 }
+
+/// A run held by a pause ends once it has lasted twice its deadline in all, though its active time
+/// is short of it: paused time extends a deadline, up to twice it.
+#[cfg(feature = "test-jobs")]
+#[test]
+fn a_run_paused_past_twice_its_deadline_fails() {
+    let p = Played::ready(1);
+    let (spec, hash) =
+        test_jobs::hashed(test_jobs::BURN, &json!({"seconds": 1.0})).expect("a burn");
+    p.send(&ToHost::Pause);
+    p.send(&offer("cr_held", test_jobs::BURN, spec, &hash, 1.0));
+    let started = Instant::now();
+    let failed = loop {
+        match p.about("cr_held") {
+            FromHost::JobAccept(_) | FromHost::JobProgress(_) => {}
+            FromHost::JobFailed(f) => break f,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(failed.code, FailCode::Deadline, "{failed:?}");
+    assert!(failed.message.contains("twice its deadline"), "{failed:?}");
+    let took = started.elapsed();
+    assert!(took >= Duration::from_millis(1900) && took < Duration::from_secs(10), "{took:?}");
+    assert_eq!(p.close(), 0);
+}

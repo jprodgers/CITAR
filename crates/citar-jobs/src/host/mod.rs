@@ -45,7 +45,7 @@
 //! deadline in all ends too: `job_failed` `deadline`.
 //!
 //! **Verifiable or not, at start:** after the limits, the canary and the self-check
-//! ([`crate::canary`]) run on a thread made as run threads are (FTZ and DAZ are per thread), and
+//! ([`mod@crate::canary`]) run on a thread made as run threads are (FTZ and DAZ are per thread), and
 //! each run's thread runs the canary again before it plays.
 //!
 //! **Ending:** standard input closing (the parent died, or let it go) aborts every run, and the
