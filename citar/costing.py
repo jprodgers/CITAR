@@ -8,7 +8,9 @@ Method, per server and per minute:
   * Rented machines' hourly usage rate is charged the same way, but only for time in use.
   * Energy: the machine's power for the minute is measured (GPU watts sampled with nvidia-smi plus CPU utilisation
     times the server's CPU watts) or, where there are no samples, estimated from what CITAR had it doing (model
-    generation seconds for the GPU, CPU seconds for the CPU). Idle power is split like fixed costs (by time held);
+    generation seconds for the GPU, CPU seconds for the CPU). A part the samples did not read (the GPU's draw on a
+    machine whose driver does not report it) is estimated so, and the minute counts as measured only when no part of
+    it was estimated. Idle power is split like fixed costs (by time held);
     the extra "dynamic" power above idle goes to the activities that did work in that minute, by their share of it.
     The energy price comes from the electricity plan in force (flat, time-of-use or tiered) plus, if chosen, the
     plan's fixed fee spread over the household's monthly kWh.
@@ -305,16 +307,23 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
             measured = False
             if energy_ok:
                 row = meas["rows"].get(m) if meas else None
-                if row is not None:
-                    measured = True
-                    agg["measured_minutes"] += 1
-                    dyn_w = (row.get("cpu_util") or 0.0) * cpu_max
-                    if row.get("gpu_w") is not None:
-                        dyn_w += max(0.0, row["gpu_w"] - meas["gpu_idle"]) * oh
+                busy_total = sum(c[1] for c in cells.values())
+                cpu_total = sum(c[2] for c in cells.values())
+                gpu_est = min(1.0, busy_total / (BUCKET * parallel)) * gpu_max
+                cpu_est = min(1.0, cpu_total / (BUCKET * threads)) * cpu_max
+                if row is None:
+                    dyn_w = gpu_est + cpu_est
                 else:
-                    busy_total = sum(c[1] for c in cells.values())
-                    cpu_total = sum(c[2] for c in cells.values())
-                    dyn_w = min(1.0, busy_total / (BUCKET * parallel)) * gpu_max + min(1.0, cpu_total / (BUCKET * threads)) * cpu_max
+                    # each part as the samples measured it, else estimated as in a minute without samples: a machine
+                    # whose GPU draw its driver does not report (an AMD or Intel GPU, a Mac) samples its CPU alone,
+                    # and its model's work still draws on the GPU
+                    gpu_w, cpu_util = row.get("gpu_w"), row.get("cpu_util")
+                    dyn_w = (max(0.0, gpu_w - meas["gpu_idle"]) * oh if gpu_w is not None else gpu_est) \
+                        + (cpu_util * cpu_max if cpu_util is not None else cpu_est)
+                    # measured when no part of it was estimated: what the minute's work drew on was sampled
+                    measured = (gpu_w is not None or gpu_est == 0) and (cpu_util is not None or cpu_est == 0)
+                if measured:
+                    agg["measured_minutes"] += 1
             W = sum(c[1] + c[2] for c in cells.values())
             for act, (held, busy, cpu) in cells.items():
                 share = held * scale                   # seconds of the minute this activity is charged for
@@ -377,16 +386,27 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
             if meas and sv["power"].get("idle_w") is not None:
                 kwh = 0.0
                 cost = 0.0
+                kept = 0
+                cpu_max_w = sv["power"].get("cpu_max_w") or 0
+                gpu_max_w = sv["power"].get("gpu_max_w") or 0
                 for row in meas["raw"]:
+                    # a row that did not read a part the machine's power figures price (the GPUs' draw where it has
+                    # GPU watts, the CPU's utilisation where it has CPU watts) is no meter reading of the machine: left
+                    # out, rather than counted as that part drawing nothing
+                    if (row.get("gpu_w") is None and gpu_max_w) or (row.get("cpu_util") is None and cpu_max_w):
+                        continue
+                    kept += 1
                     m = int(row["t0"] // BUCKET)
-                    w = sv["power"]["idle_w"] + (row.get("cpu_util") or 0) * (sv["power"].get("cpu_max_w") or 0)
+                    w = sv["power"]["idle_w"] + (row.get("cpu_util") or 0) * cpu_max_w
                     if row.get("gpu_w") is not None:
                         w += max(0.0, row["gpu_w"] - meas["gpu_idle"]) * (1 + (sv["power"].get("measured_overhead_pct") or 0) / 100)
                     e = w * (row["t1"] - row["t0"]) / 3600 / 1000
                     kwh += e
                     price = rates(sv, m)["kwh"]
                     cost += e * (price or 0)
-                out["metered"] = {"kwh": kwh, "cost": cost, "minutes": len(meas["raw"]), "gpu_idle_w": meas["gpu_idle"]}
+                if kept:
+                    out["metered"] = {"kwh": kwh, "cost": cost, "minutes": kept, "gpu_idle_w": meas["gpu_idle"],
+                                      "left_out": len(meas["raw"]) - kept}
     return {"acts": acts_out, "servers": server_out, "days": {d: dict(v) for d, v in days.items()},
             "hours": {h: dict(v) for h, v in hours.items()},
             "notes": sorted(notes), "notes_by_server": {srv: sorted(v) for srv, v in notes_by_server.items()},
