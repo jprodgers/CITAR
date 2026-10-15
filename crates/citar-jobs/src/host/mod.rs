@@ -57,6 +57,8 @@ mod run;
 #[cfg(feature = "test-jobs")]
 pub mod test_jobs;
 
+pub use self::parent::spawn;
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read as _, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
