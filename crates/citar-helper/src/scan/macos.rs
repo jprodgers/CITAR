@@ -5,7 +5,7 @@
 //! unified memory.
 //!
 //! [`apply_profile`] reads `system_profiler`'s JSON and is compiled on every OS, so its tests run
-//! everywhere; only [`probe`] runs the programs.
+//! everywhere; only `probe` (compiled on its own OS) runs the programs.
 
 use serde_json::{Map, Value};
 

@@ -4,7 +4,7 @@
 //! display controller), `lsblk` (the physical disks), and a battery for the form.
 //!
 //! The parsers take the files' and the programs' text and are compiled on every OS, so their
-//! tests run everywhere; only [`probe`] reads the machine.
+//! tests run everywhere; only `probe` (compiled on its own OS) reads the machine.
 
 use serde_json::{Map, Value};
 

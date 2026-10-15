@@ -7,7 +7,7 @@
 //! (a GPU or disk name outside ASCII came out garbled to Python's UTF-8 reading).
 //!
 //! [`apply`] reads the script's JSON and is compiled on every OS, so its tests run everywhere;
-//! only [`probe`] runs PowerShell.
+//! only `probe` (compiled on its own OS) runs PowerShell.
 
 use serde_json::{Map, Value};
 
