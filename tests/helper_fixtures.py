@@ -372,7 +372,7 @@ HUB_SETUP = ("machine", "token", "rate", "jobs", "update", "clock", "ping_s", "l
 HUB_MACHINE = ("settings", "key", "trust")
 #: What can happen around each side (``act``), and what a ``state`` step may expect of it (PROTOCOL.md, "Actions" and
 #: "State expectations").
-HELPER_ACTS = ("quiet_begins",)
+HELPER_ACTS = ("quiet_begins", "stop")
 HUB_ACTS = ("submit_request", "force_request", "cancel_request", "drop_connection", "queue_job", "force_offer",
             "lab_stop", "abort_run", "expire_run", "set_settings", "rescan", "reset_key", "revoke_token",
             "disable_machine", "second_connection", "benchmark_start", "benchmark_end", "manifest_arrives")

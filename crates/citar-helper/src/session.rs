@@ -17,10 +17,17 @@
 //!   frame, and the connection dropped after 70 s; `settings_ack` for every `settings`; `catalog`
 //!   when the endpoint's models or loaded set change (polled every 30 s; a listing that fails is
 //!   not a change until [`FAILED_LISTINGS`] fail in a row); `status` when the local quiet hours
-//!   begin or end (at most every 5 s); `hardware` after a `rescan`, read off the session's task.
-//!   Local policy holds whatever the server asks: until 4-04 the helper serves no completion
-//!   (`error` `unknown_model`), and until 4-10 it takes no job (`job_reject` `build`: it has no
-//!   jobs build).
+//!   begin or end or the completions in flight change (at most every 5 s); `hardware` after a
+//!   `rescan`, read off the session's task. Until 4-10 it takes no job (`job_reject` `build`: it
+//!   has no jobs build).
+//! - **Completions** ([`crate::proxy`]): each `request` the local policy lets through runs as a
+//!   task of its own; local policy holds whatever the server asks, in this order: a model outside
+//!   the owner's allowlist (or no endpoint, `--no-llm`) is `unknown_model`, the local quiet hours
+//!   `closed`, the local slots full `busy`. A `cancel` aborts the task, which closes its connection
+//!   to the endpoint, and only then is `cancelled` sent; a cancel that crosses a `done` or an
+//!   `error` is ignored. **A lost connection drops every completion in flight** (their connections
+//!   to the endpoint with them, P4.2.4), so none holds the model or a slot for an answer nobody
+//!   will read; a stop answers each `stopping` before the socket closes.
 //! - **A hostile server** (P4.6, threat A) cannot make the helper hold more than it bounds: a
 //!   frame type it invents or a value it fills is quoted cut to a few hundred characters
 //!   ([`SERVER_TEXT`]), a bad frame's throttling key is one of the known types or `?`, and every
@@ -47,9 +54,11 @@ use crate::log::{Level, Log, clip};
 use crate::net::{Dialer, Ws};
 use crate::protocol::{
     self, Ceiling as WireCeiling, CpuInfo, ErrorCode, FrameSet, HelloHardwareSource, HelperFrame,
-    HelperInfo, JobReject, LlmInfo, MachineInfo, Model, Parsed, ProtocolError, RefusedCode,
-    RejectReason, Report, RequestError, RequestErrorCode, ServerFrame, Settings, Status,
+    HelperInfo, JobReject, LlmInfo, MAX_FRAME_BYTES, MachineInfo, Model, Parsed, ProtocolError,
+    RefusedCode, RejectReason, Report, Request, RequestError, RequestErrorCode, ServerFrame,
+    Settings, Status,
 };
+use crate::proxy::{self, Finished, Flights, InFlight, Outcome};
 use crate::settings::{self, Local};
 
 /// The first reconnect delay.
@@ -95,9 +104,6 @@ pub const SERVER_TEXT: usize = 300;
 /// The most characters of a frame type the helper does not know quoted in a log line.
 pub const TYPE_SHOWN: usize = 64;
 
-/// Until 4-04 the helper serves no completion: its hello says `llm.enabled` false, and its
-/// acknowledgement never turns model work on.
-pub const SERVES_COMPLETIONS: bool = false;
 /// Until 4-10 the helper runs no job: its hello's `cpu.enabled` is false (it has no jobs build,
 /// so it is never offered one), whatever the machine's own switch says.
 pub const RUNS_JOBS: bool = false;
@@ -154,6 +160,8 @@ pub struct Helper {
     pub service: bool,
     /// Turns true when the helper must stop.
     pub stop: watch::Receiver<bool>,
+    /// The completions whose tasks are alive (the helper's `in_flight`, read by tests).
+    pub in_flight: InFlight,
 }
 
 /// How one connection ended.
@@ -327,7 +335,7 @@ impl Helper {
     fn local(&self) -> Local {
         let slots = if self.config.no_llm { 0 } else { self.config.max_concurrent };
         Local {
-            serves_llm: SERVES_COMPLETIONS && !self.config.no_llm,
+            serves_llm: !self.config.no_llm,
             slots,
             cpu_enabled: self.config.cpu.enabled,
             ceiling: self.ceiling.clone(),
@@ -361,7 +369,7 @@ impl Helper {
 
     fn hello(&self, models: Vec<Model>, report: Report) -> protocol::Hello {
         let f = &self.facts;
-        let llm_on = SERVES_COMPLETIONS && !self.config.no_llm;
+        let llm_on = !self.config.no_llm;
         protocol::Hello {
             protocol: protocol::PROTOCOL,
             token: self.config.token.clone(),
@@ -381,8 +389,7 @@ impl Helper {
             },
             llm: LlmInfo {
                 enabled: llm_on,
-                // The endpoint's kind whenever the helper has one: `null` with `--no-llm` only,
-                // so the server knows what the machine fronts before its proxy is on (4-04).
+                // The endpoint's kind whenever the helper has one: `null` with `--no-llm` only.
                 provider: (!self.config.no_llm).then_some(self.config.provider),
                 slots: if self.config.no_llm { 0 } else { self.config.max_concurrent },
                 stream: self.config.stream,
@@ -550,7 +557,20 @@ impl Helper {
         if self.ack(&mut tx, &welcome.settings).await.is_err() {
             return End::Reconnect { welcomed: true };
         }
-        Steady::new(self, catalog, quiet_until).run(&mut tx, &mut rx).await
+        let mut steady = Steady::new(self, catalog, quiet_until);
+        let end = steady.serve(&mut tx, &mut rx).await;
+        // However the connection ended, nothing it started outlives it: every completion still in
+        // flight is dropped with its connection to the endpoint (P4.2.4), and its slot is free
+        // before the next connection's first request.
+        let dropped = steady.flights.stop(CLOSE_SEND).await;
+        if !dropped.is_empty() {
+            self.log.info(format!(
+                "the connection ended: {} completion{} in flight stopped",
+                dropped.len(),
+                if dropped.len() == 1 { "" } else { "s" }
+            ));
+        }
+        end
     }
 
     async fn ack(&self, tx: &mut Sink, site: &Settings) -> Result<(), ()> {
@@ -564,23 +584,72 @@ impl Helper {
 
     async fn send(&self, tx: &mut Sink, frame: HelperFrame) -> Result<(), ()> {
         let text = frame.encode(self.clock.now_unix());
+        self.send_text(tx, text, frame.type_name()).await
+    }
+
+    async fn send_text(&self, tx: &mut Sink, text: String, what: &str) -> Result<(), ()> {
         match tokio::time::timeout(SEND_TIMEOUT, tx.send(Message::Text(text.into()))).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => {
-                self.log.info(format!(
-                    "the connection failed while sending {}: {e}",
-                    frame.type_name()
-                ));
+                self.log.info(format!("the connection failed while sending {what}: {e}"));
                 Err(())
             }
             Err(_) => {
-                self.log.warn(format!(
-                    "sending {} took over 30 s: the connection is dead",
-                    frame.type_name()
-                ));
+                self.log.warn(format!("sending {what} took over 30 s: the connection is dead"));
                 Err(())
             }
         }
+    }
+
+    /// Why this helper will not run `r` now, as the error it answers: the owner's policy first
+    /// (an endpoint at all, the allowlist), then the local quiet hours, then the local slots.
+    fn refuse(&self, r: &Request, in_flight: usize) -> Option<RequestError> {
+        let refusal = |code, message: String, retryable| RequestError {
+            id: r.id.clone(),
+            code,
+            message: cut(&message, proxy::MESSAGE_CHARS),
+            retryable,
+        };
+        let host = clip(&self.facts.hostname, 255);
+        if self.endpoint.is_none() {
+            return Some(refusal(
+                RequestErrorCode::UnknownModel,
+                format!("{host} serves no models (--no-llm)"),
+                false,
+            ));
+        }
+        if let Some(allow) = &self.config.models
+            && !allow.contains(&r.model)
+        {
+            return Some(refusal(
+                RequestErrorCode::UnknownModel,
+                format!(
+                    "{host} does not serve \u{201c}{}\u{201d}: it is not among the models its owner lends",
+                    clip(&r.model, llm::MAX_KEY)
+                ),
+                false,
+            ));
+        }
+        if self.quiet_until().is_some() {
+            return Some(refusal(
+                RequestErrorCode::Closed,
+                format!("{host} is in its local quiet hours"),
+                true,
+            ));
+        }
+        let slots = usize::try_from(self.config.max_concurrent).unwrap_or(usize::MAX);
+        if in_flight >= slots {
+            return Some(refusal(
+                RequestErrorCode::Busy,
+                format!(
+                    "{host} is at its local limit of {} concurrent request{}",
+                    self.config.max_concurrent,
+                    if self.config.max_concurrent == 1 { "" } else { "s" }
+                ),
+                true,
+            ));
+        }
+        None
     }
 
     /// The server's answer to the hello: its `welcome`, or how the connection ends.
@@ -833,9 +902,14 @@ struct Steady<'a> {
     catalog: &'a mut Catalog,
     last_rx: Instant,
     pinged: bool,
+    /// The last `status` sent (the hello's figures before the first).
     status: Status,
     status_sent: Option<Instant>,
+    /// When the next `status` may go, once the figures changed.
+    status_due: Option<Instant>,
     next_quiet: Instant,
+    /// The completions in flight on this connection.
+    flights: Flights,
     /// Each listing the poller makes, every [`CATALOG_EVERY`].
     polls: Option<mpsc::Receiver<Result<Vec<Listed>, String>>>,
     poller: Option<tokio::task::JoinHandle<()>>,
@@ -881,15 +955,34 @@ impl<'a> Steady<'a> {
             // What the hello said: the first status goes when that changes.
             status: Status { quiet_until, llm_in_flight: 0, jobs_running: 0, jobs_paused: 0 },
             status_sent: None,
+            status_due: None,
             next_quiet: now + QUIET_TICK,
+            flights: Flights::new(h.in_flight.clone()),
             polls,
             poller,
             rescan: None,
         }
     }
 
-    async fn run(mut self, tx: &mut Sink, rx: &mut Stream) -> End {
-        let mut status_due: Option<Instant> = None;
+    /// The figures a `status` would carry now.
+    fn fresh_status(&self) -> Status {
+        Status {
+            quiet_until: self.h.quiet_until(),
+            llm_in_flight: u32::try_from(self.flights.len()).unwrap_or(u32::MAX),
+            jobs_running: 0,
+            jobs_paused: 0,
+        }
+    }
+
+    /// Plans a `status` when the figures differ from the last one sent: at once, or 5 s after it.
+    fn note_status(&mut self, now: Instant) {
+        if self.status_due.is_none() && self.fresh_status() != self.status {
+            let earliest = self.status_sent.map_or(now, |t| t + STATUS_EVERY);
+            self.status_due = Some(earliest.max(now));
+        }
+    }
+
+    async fn serve(&mut self, tx: &mut Sink, rx: &mut Stream) -> End {
         loop {
             let ping_at = (!self.pinged).then(|| self.last_rx + PING_AFTER);
             let stale_at = self.last_rx + STALE_AFTER;
@@ -897,7 +990,7 @@ impl<'a> Steady<'a> {
             if let Some(p) = ping_at {
                 wake = wake.min(p);
             }
-            if let Some(s) = status_due {
+            if let Some(s) = self.status_due {
                 wake = wake.min(s);
             }
             let polls = &mut self.polls;
@@ -914,6 +1007,7 @@ impl<'a> Steady<'a> {
                     None => std::future::pending().await,
                 }
             };
+            let finished = self.flights.next();
             tokio::select! {
                 m = rx.next() => {
                     let msg = match m {
@@ -951,6 +1045,12 @@ impl<'a> Steady<'a> {
                         self.h.log.info(format!("the endpoint's models changed: {n} listed, {loaded} loaded"));
                     }
                 }
+                (id, how) = finished => {
+                    if self.finished(tx, id, how).await.is_err() {
+                        return End::Reconnect { welcomed: true };
+                    }
+                    self.note_status(Instant::now());
+                }
                 report = rescanned => {
                     self.rescan = None;
                     if let Ok(Report { hardware: Some(scan), hardware_source: HelloHardwareSource::File }) = report {
@@ -961,6 +1061,24 @@ impl<'a> Steady<'a> {
                     }
                 }
                 () = stop_signal(self.h.stop.clone()) => {
+                    // Each completion in flight is stopped, and the server told so, before the
+                    // close: it can give them to another machine at once.
+                    let ids = self.flights.stop(CLOSE_SEND).await;
+                    let h = self.h;
+                    let answered = async {
+                        for id in ids {
+                            let e = RequestError {
+                                id,
+                                code: RequestErrorCode::Stopping,
+                                message: "the helper is stopping".to_owned(),
+                                retryable: true,
+                            };
+                            if h.send(tx, HelperFrame::Error(e)).await.is_err() {
+                                return;
+                            }
+                        }
+                    };
+                    let _answered = tokio::time::timeout(CLOSE_SEND, answered).await;
                     let close = CloseFrame { code: CloseCode::Normal, reason: "the helper is stopping".into() };
                     let _closed = tokio::time::timeout(CLOSE_SEND, tx.send(Message::Close(Some(close)))).await;
                     return End::Stopped;
@@ -979,20 +1097,18 @@ impl<'a> Steady<'a> {
                     }
                     if now >= self.next_quiet {
                         self.next_quiet = now + QUIET_TICK;
-                        let fresh = Status { quiet_until: self.h.quiet_until(), ..self.status.clone() };
-                        if fresh != self.status && status_due.is_none() {
-                            let earliest = self.status_sent.map_or(now, |t| t + STATUS_EVERY);
-                            status_due = Some(earliest.max(now));
-                        }
+                        self.note_status(now);
                     }
-                    if status_due.is_some_and(|d| now >= d) {
-                        status_due = None;
-                        let fresh = Status { quiet_until: self.h.quiet_until(), ..self.status.clone() };
+                    if self.status_due.is_some_and(|d| now >= d) {
+                        self.status_due = None;
+                        let fresh = self.fresh_status();
                         if fresh != self.status {
-                            if fresh.quiet_until.is_some() {
-                                self.h.log.info("local quiet hours: no new work until they end");
-                            } else {
-                                self.h.log.info("local quiet hours are over");
+                            if fresh.quiet_until != self.status.quiet_until {
+                                if fresh.quiet_until.is_some() {
+                                    self.h.log.info("local quiet hours: no new work until they end");
+                                } else {
+                                    self.h.log.info("local quiet hours are over");
+                                }
                             }
                             self.status = fresh.clone();
                             self.status_sent = Some(now);
@@ -1019,15 +1135,17 @@ impl<'a> Steady<'a> {
                 }
                 Ok(())
             }
-            ServerFrame::Request(r) => {
-                // The proxy is 4-04's: until then the helper offers no model work.
-                let e = RequestError {
-                    id: r.id,
-                    code: RequestErrorCode::UnknownModel,
-                    message: "this helper does not serve completions yet".to_owned(),
-                    retryable: false,
-                };
-                self.h.send(tx, HelperFrame::Error(e)).await
+            ServerFrame::Request(r) => self.request(tx, r).await,
+            ServerFrame::Cancel(c) => {
+                if !self.flights.cancel(&c.id) {
+                    // Finished before the cancel came (its `done` or `error` crossed it), or
+                    // never here: nothing more is sent.
+                    self.h.log.debug(format!(
+                        "a cancel for {}, which is not in flight",
+                        clip(&c.id, TYPE_SHOWN)
+                    ));
+                }
+                Ok(())
             }
             ServerFrame::JobOffer(o) => {
                 // Jobs are 4-10's: this helper has no jobs build, so no offer is its build.
@@ -1035,12 +1153,111 @@ impl<'a> Steady<'a> {
                 self.h.send(tx, HelperFrame::JobReject(r)).await
             }
             other => {
-                // cancel (nothing in flight), job_result_ack, job_abort, jobs_pause,
-                // jobs_resume (no runs), update (4-13), pong, and a second welcome.
+                // job_result_ack, job_abort, jobs_pause, jobs_resume (no runs), update (4-13),
+                // pong, and a second welcome.
                 self.h.log.debug(format!("nothing to do for {}", other.type_name()));
                 Ok(())
             }
         }
+    }
+
+    /// A `request`: refused as local policy says, or started.
+    async fn request(&mut self, tx: &mut Sink, r: Request) -> Result<(), ()> {
+        if self.flights.contains(&r.id) {
+            // One answer per id: the first one's.
+            self.h.log.throttled(
+                "request again",
+                Duration::from_secs(60),
+                Level::Warn,
+                format!(
+                    "the server sent request {} again while it is in flight: ignored",
+                    clip(&r.id, TYPE_SHOWN)
+                ),
+            );
+            return Ok(());
+        }
+        if let Some(e) = self.h.refuse(&r, self.flights.len()) {
+            self.h.log.info(format!(
+                "refused request {} ({}): {}",
+                clip(&r.id, TYPE_SHOWN),
+                e.code.as_str(),
+                e.message
+            ));
+            return self.h.send(tx, HelperFrame::Error(e)).await;
+        }
+        for name in r.params.extra.keys() {
+            let name = clip(name, TYPE_SHOWN);
+            self.h.log.once(
+                &format!("parameter {name}"),
+                Level::Info,
+                format!(
+                    "ignoring the server's parameter \u{201c}{name}\u{201d}: only {} reach the \
+                     endpoint",
+                    proxy::SERVER_PARAMS.join(", ")
+                ),
+            );
+        }
+        let Some(ep) = self.h.endpoint.clone() else { return Ok(()) };
+        self.h.log.debug(format!(
+            "request {} for {}",
+            clip(&r.id, TYPE_SHOWN),
+            clip(&r.model, llm::MAX_KEY)
+        ));
+        self.flights.start(ep, r, self.h.config.stream, self.h.log.clone());
+        self.note_status(Instant::now());
+        Ok(())
+    }
+
+    /// A completion finished: its `done`, `error` or `cancelled` to the server.
+    async fn finished(&mut self, tx: &mut Sink, id: String, how: Finished) -> Result<(), ()> {
+        let shown = clip(&id, TYPE_SHOWN);
+        let error = |code, message: String, retryable| {
+            HelperFrame::Error(RequestError { id: id.clone(), code, message, retryable })
+        };
+        let frame = match how {
+            Finished::Outcome(Outcome::Done(done)) => {
+                let calls = done.message.tool_calls.len();
+                let gen_s = done.gen_s;
+                let text = HelperFrame::Done(done).encode(self.h.clock.now_unix());
+                if text.len() <= MAX_FRAME_BYTES {
+                    self.h.log.info(format!(
+                        "request {shown} done in {gen_s:.1} s ({calls} tool call{})",
+                        if calls == 1 { "" } else { "s" }
+                    ));
+                    return self.h.send_text(tx, text, "done").await;
+                }
+                let message = format!(
+                    "the answer is {} bytes as a frame, over the protocol's {MAX_FRAME_BYTES}",
+                    text.len()
+                );
+                self.h.log.warn(format!("request {shown} failed: {message}"));
+                error(RequestErrorCode::Endpoint, message, false)
+            }
+            Finished::Outcome(Outcome::Failed { code, message, retryable }) => {
+                self.h.log.info(format!(
+                    "request {shown} failed ({}): {}",
+                    code.as_str(),
+                    clip(&message, 2 * SERVER_TEXT)
+                ));
+                error(code, message, retryable)
+            }
+            Finished::Cancelled { gen_s, tokens_out } => {
+                self.h.log.info(format!(
+                    "request {shown} cancelled after {gen_s:.1} s ({tokens_out} token{} received)",
+                    if tokens_out == 1 { "" } else { "s" }
+                ));
+                HelperFrame::Cancelled(protocol::Cancelled { id: id.clone(), gen_s, tokens_out })
+            }
+            Finished::Broken(why) => {
+                self.h.log.error(format!("request {shown} failed in the helper: {why}"));
+                error(
+                    RequestErrorCode::Endpoint,
+                    "the helper failed while running it".to_owned(),
+                    false,
+                )
+            }
+        };
+        self.h.send(tx, frame).await
     }
 
     /// A frame that failed its checks: a `request` whose id can be read gets `bad_request`, a

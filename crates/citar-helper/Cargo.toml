@@ -50,8 +50,12 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-platform-verifier.workspace = true
 rustls-pki-types.workspace = true
-# Model discovery (P4.3.4); the proxy joins in 4-04.
+# Model discovery (P4.3.4).
 reqwest.workspace = true
+# The proxy's completions (P4.3.4): one HTTP/1.1 exchange per completion on a connection its own
+# task owns, so a cancel closes the socket before `cancelled` is sent.
+hyper.workspace = true
+hyper-util.workspace = true
 # The machine key: ed25519 from the OS's random source; its fingerprint is blake3's.
 ed25519-dalek.workspace = true
 getrandom.workspace = true

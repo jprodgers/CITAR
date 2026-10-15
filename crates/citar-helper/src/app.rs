@@ -226,6 +226,7 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
             endpoint,
             service: cli.opts.service,
             stop: stop_rx,
+            in_flight: crate::proxy::InFlight::default(),
         };
         helper.run().await.code()
     });

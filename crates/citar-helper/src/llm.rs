@@ -1,6 +1,6 @@
-//! The model endpoint (design/phase4-helper.md P4.3.4), its discovery half: which models the
-//! machine's endpoint serves and which are loaded, for the hello and for `catalog` whenever that
-//! changes (polled every 30 s). The proxy that runs completions arrives in 4-04.
+//! The model endpoint (design/phase4-helper.md P4.3.4): which models the machine's endpoint
+//! serves and which are loaded, for the hello and for `catalog` whenever that changes (polled
+//! every 30 s), and the completions the proxy ([`crate::proxy`]) runs on it.
 //!
 //! - **lmstudio:** `/api/v0/models` (load state and context length; embedding models left out,
 //!   since they cannot chat), else the OpenAI `/v1/models`. That fallback is for an LM Studio
@@ -11,6 +11,10 @@
 //! - **openai_compatible**, **openai:** `/v1/models`, with the key from `api_key_env` for
 //!   `openai`; a model such a server lists is one it serves, so it counts as loaded.
 //!
+//! Completions go to `<base>/chat/completions` on every kind (all four speak OpenAI's chat API),
+//! each on a connection it owns while it runs ([`crate::http1`]), so a cancel closes it at once; a
+//! finished answer's connection is kept for the next completion ([`http1::Pool`]).
+//!
 //! The configured base URL is the only address dialled (P4.3.4, P4.3.10): no system proxy, and no
 //! redirect is followed (a 3xx is an endpoint error naming where it pointed). A configured model
 //! list is the owner's allowlist (protocol 1's rule, `agent.py:234-243`): only those models are
@@ -18,8 +22,8 @@
 //! [`choose`] caps the list as PROTOCOL.md's "What the helper caps" says. Replaces
 //! `citar/worker/agent.py` `discover_models`.
 //!
-//! The client has a connect timeout only; each listing request has its own [`LIST_TIMEOUT`], so
-//! the proxy (4-04) can share the client and give a completion its own `timeout_s`.
+//! The listing client has a connect timeout only; each listing request has its own
+//! [`LIST_TIMEOUT`], and a completion its own `timeout_s` (the proxy's).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -29,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::http1::{self, Failure, Origin};
 use crate::protocol::{Model, Provider};
 
 /// The most models a hello or catalog carries.
@@ -61,6 +66,20 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait Endpoint: Send + Sync {
     /// The models it serves now.
     fn list(&self) -> BoxFuture<'_, Result<Vec<Listed>, String>>;
+
+    /// Starts one chat completion: `body` (OpenAI's JSON) POSTed to `<base>/chat/completions`,
+    /// answered once the response's head has come. The connection belongs to what is returned:
+    /// dropping it, or this future, closes the connection at once. An endpoint that only lists
+    /// (a test's) serves none.
+    fn complete(&self, body: Vec<u8>) -> BoxFuture<'_, Result<http1::Response, Failure>> {
+        drop(body);
+        Box::pin(async {
+            Err(Failure {
+                message: "this endpoint serves no completions".to_owned(),
+                retryable: false,
+            })
+        })
+    }
 }
 
 /// What LM Studio's own API last said of a model.
@@ -78,6 +97,12 @@ pub struct HttpEndpoint {
     provider: Provider,
     base: String,
     api_key: Option<String>,
+    /// The base URL taken apart for the completions, or why it cannot be.
+    origin: Result<Origin, String>,
+    /// TLS for an `https` endpoint's completions: the same configuration as the listings'.
+    tls: Arc<rustls::ClientConfig>,
+    /// The completions' connections kept between them, and the address that answered last.
+    pool: Arc<http1::Pool>,
     /// LM Studio's last answer from its own API, and when it came.
     last_v0: Mutex<Option<(Instant, BTreeMap<String, V0Model>)>>,
 }
@@ -93,6 +118,7 @@ impl HttpEndpoint {
         api_key: Option<String>,
         tls: rustls::ClientConfig,
     ) -> Result<HttpEndpoint, String> {
+        let tls_completions = Arc::new(tls.clone());
         let client = reqwest::Client::builder()
             .no_proxy()
             // The configured address is the only one dialled: a redirect is not followed.
@@ -107,8 +133,17 @@ impl HttpEndpoint {
             provider,
             base: base_url.trim_end_matches('/').to_owned(),
             api_key,
+            origin: Origin::parse(base_url),
+            tls: tls_completions,
+            pool: Arc::default(),
             last_v0: Mutex::new(None),
         })
+    }
+
+    /// The completions' connections waiting idle for the next one.
+    #[must_use]
+    pub fn idle_connections(&self) -> usize {
+        self.pool.idle_count()
     }
 
     /// The server's root: the base without its `/v1`.
@@ -240,6 +275,29 @@ impl Endpoint for HttpEndpoint {
                 Provider::Ollama => self.ollama().await,
                 Provider::OpenAiCompatible | Provider::OpenAi => self.openai_models(true).await,
             }
+        })
+    }
+
+    fn complete(&self, body: Vec<u8>) -> BoxFuture<'_, Result<http1::Response, Failure>> {
+        Box::pin(async move {
+            let origin = self
+                .origin
+                .as_ref()
+                .map_err(|e| Failure { message: e.clone(), retryable: false })?;
+            let mut headers = vec![("accept", "text/event-stream, application/json".to_owned())];
+            if let Some(k) = &self.api_key {
+                headers.push(("authorization", format!("Bearer {k}")));
+            }
+            http1::post(
+                origin,
+                Some(&self.tls),
+                &self.pool,
+                "/chat/completions",
+                &headers,
+                body,
+                LIST_TIMEOUT,
+            )
+            .await
         })
     }
 }

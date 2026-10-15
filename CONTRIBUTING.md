@@ -347,12 +347,26 @@ installation's `helper.json` or machine key, and no test build can reach a real 
 profile, next to the extension, where the end-to-end tests and the QA scripts look for it. Give
 every helper you run its own `--home` (and the same in `CITAR_DATA_DIR`), and never point one at a
 server that is not your own. The crate's tests play the shared transcripts of
-`crates/citar-helper/protocol/v2/transcripts/` against the helper's own session on a paused clock
-(`tests/conformance.rs`), hold the session's own rules beyond them (`tests/session.rs`: a hostile
-server's frames, a flaky endpoint, quiet hours all week, a hardware file that never answers), run
-the real binary against a fake hub and a fake LM Studio on loopback (`tests/real_binary.rs`, about
-30 s), and check the machine key's file permissions (`tests/keys.rs`); `tests/config_cases.rs` holds its settings to the table recorded from the 0.1.5
-helper (`tests/data/helper_config_cases.json`). `citar-jobs` holds the one module of the helper
+`crates/citar-helper/protocol/v2/transcripts/` against the helper's own session
+(`tests/conformance.rs`: on a paused clock, and those that run a completion in real time against a
+fake model endpoint over HTTP on loopback, which streams with delays and records when its client
+went), hold the session's own rules beyond them (`tests/session.rs`: a hostile server's frames, a
+flaky endpoint, quiet hours all week, a hardware file that never answers) and the proxy's
+(`tests/proxy.rs`: a cancel closing the endpoint's connection within a second, the parameters that
+reach it, its errors, the slots, `localhost` at once, a finished answer's connection kept for the
+next), run the real binary against a fake hub, a fake LM Studio and the
+fake endpoint on loopback (`tests/real_binary.rs`, about 35 s), and check the machine key's file
+permissions (`tests/keys.rs`); `tests/config_cases.rs` holds its settings to the table recorded
+from the 0.1.5 helper (`tests/data/helper_config_cases.json`). One test talks to a real model, and
+only when asked (an ignored test, which other runs report as skipped): with LM Studio on this
+machine already serving `google/gemma-4-e2b`, `CITAR_TEST_LMSTUDIO=http://localhost:1234 cargo
+nextest run -p citar-helper --features citar-helper/dev-guard --run-ignored only -E
+'binary(real_model)' --no-capture` sends it a request with a tool and cancels a long generation
+through the real binary. It reads LM Studio's model list before and after, never loads, unloads or
+swaps a model, and sends nothing when the model is not loaded. Its checks also run in every run
+against a stand-in for LM Studio (the fake endpoint with one model answering one request at a
+time): they pass there, and fail against a server that goes on generating after a cancel, a model
+that is not loaded and one unloaded during the run. `citar-jobs` holds the one module of the helper
 crates allowed `unsafe` (`src/sys/`), the operating-system calls no safe wrapper makes; `cargo
 xtask check` refuses `unsafe` anywhere else in them, and their test features and `dev-guard` in
 anything that ships.

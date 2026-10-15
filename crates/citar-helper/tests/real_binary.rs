@@ -6,6 +6,11 @@
 //! (`dev-guard`, or any test feature alone) refuses a non-loopback server, a missing `--home` and
 //! one inside the per-user base.
 //!
+//! And (4-04) the binary serves completions as the transcripts say, against `common`'s fake
+//! endpoint over HTTP: a streamed tool call assembled raw, a cancel mid-stream that closes the
+//! endpoint's connection within a second, a timeout, an unstreamed answer, and parameters outside
+//! the five dropped.
+//!
 //! Every run here has its own home under the system's temporary directory, `CITAR_DATA_DIR`
 //! pointing at it too, and the `CITAR_WORKER_*` variables removed, so nothing of a real
 //! installation is read or written (P4.7.1).
@@ -21,7 +26,10 @@ use citar_helper::conformance::canonical_examples;
 use citar_helper::conformance::transcript::Transcript;
 use citar_helper::key::fingerprint_of;
 use citar_helper::llm::{BoxFuture, Listed};
-use common::{Models, Player, UnderTest, loopback_hub, loopback_lmstudio, scratch};
+use common::{
+    FakeEndpoint, Models, Player, UnderTest, listed as listed_of, loopback_hub, loopback_lmstudio,
+    scratch,
+};
 use serde_json::{Value, json};
 
 const BIN: &str = env!("CARGO_BIN_EXE_citar-helper");
@@ -95,7 +103,7 @@ fn scenario(before: &[Listed], after: &[Listed]) -> Transcript {
         "steps": [
             {"h2s": {"t": "hello", "protocol": 2, "token": "<id:token>",
                      "machine": {"public_key": "<id:key>"},
-                     "llm": {"enabled": false, "provider": "lmstudio", "slots": 2, "stream": true,
+                     "llm": {"enabled": true, "provider": "lmstudio", "slots": 2, "stream": true,
                              "models": models_json(before)},
                      "cpu": {"enabled": false,
                              "ceiling": {"threads": 2, "cpu_percent": 25, "memory_mb": 512, "work": ["lab_game"]}},
@@ -310,6 +318,69 @@ mod guard {
         let err = refused(&mut c).await;
         assert!(err.contains("inside the per-user CITAR folder"), "{err}");
         assert!(!base.exists(), "nothing was written in the base");
+        std::fs::remove_dir_all(&root).expect("cleaned");
+    }
+}
+
+/// The completion transcripts the binary plays here: none checks the helper's own state (a process
+/// does not show its completions in flight) or moves its clock.
+const SERVED: &[&str] = &[
+    "completion-streamed-tool-call",
+    "cancel-mid-stream",
+    "completion-timeout",
+    "completion-not-streamed",
+    "completion-params-whitelisted",
+];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_binary_serves_streams_cancels_and_times_out_completions() {
+    let canonical = canonical_examples().expect("examples");
+    for name in SERVED {
+        let path = citar_helper::conformance::fixtures_dir()
+            .join("transcripts")
+            .join(format!("{name}.json"));
+        let mut v: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json");
+        // LM Studio's own API names no label, so the binary reports a model's key as its label;
+        // these runs check the completions, and the hello's labels are the in-process runs'.
+        for step in v["steps"].as_array_mut().expect("steps") {
+            if step["h2s"]["t"] == "hello" {
+                for m in step["h2s"]["llm"]["models"].as_array_mut().expect("models") {
+                    m["label"] = Value::from("<string>");
+                }
+            }
+        }
+        let t = Transcript::from_value(&v).expect("a transcript");
+        let setup = &t.setup_helper;
+        assert!(setup.keys().all(|k| k == "config" || k == "endpoint"), "{name}: {setup:?}");
+        let root = scratch(&format!("served-{name}"));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join("helper.json"), setup["config"].to_string()).expect("helper.json");
+        let models = Models::default();
+        models.set(listed_of(&setup["endpoint"]["models"]));
+        let fake = FakeEndpoint::start(models.clone()).await;
+        let (hub, conns) = loopback_hub().await;
+        let token = t.values["token"].as_str().expect("a token").to_owned();
+        let child = command(&root)
+            .args(["--home"])
+            .arg(&home)
+            .args(["--server", &format!("http://127.0.0.1:{hub}"), "--token", &token])
+            .args(["--base-url", &fake.base_url()])
+            .env("CITAR_DATA_DIR", &home)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the binary starts");
+        let mut helper =
+            Process { child, log: home.join("helper").join("logs").join("helper.log") };
+        let mut player = Player::new(&t, conns, models, canonical.clone());
+        player.endpoint = Some(fake);
+        player.bindings.bind("token", Value::String(token));
+        let played = player.play(&mut helper).await;
+        let _killed = helper.child.kill().await;
+        let log = std::fs::read_to_string(&helper.log).unwrap_or_default();
+        played.unwrap_or_else(|e| panic!("{e}\n  the helper's log:\n{log}"));
         std::fs::remove_dir_all(&root).expect("cleaned");
     }
 }
