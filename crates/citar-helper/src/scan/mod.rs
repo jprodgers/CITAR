@@ -381,13 +381,23 @@ fn volumes(info: &mut Map<String, Value>) {
         {
             continue;
         }
-        let key = (d.total_space(), d.available_space());
+        let mount = d.mount_point().to_string_lossy().into_owned();
+        // macOS: the boot container's other volumes (Data, Preboot, VM, Update, ...) share "/"'s space, which "/"
+        // reports. Their free bytes, read a moment after "/"'s, could differ from it or not, so the match below
+        // kept /System/Volumes/Data in one scan and not the next, and the scan's hash moved for an unchanged
+        // machine (rust.yml at 129dd5d, macOS only).
+        if cfg!(target_os = "macos") && mount.starts_with("/System/Volumes/") {
+            continue;
+        }
+        // The same space mounted twice: the same size, and the same free space to the GiB, as bytes read a moment
+        // apart may differ.
+        let key = (d.total_space(), d.available_space() >> 30);
         if seen.contains(&key) {
             continue;
         }
         seen.push(key);
         let mut v = Map::new();
-        v.insert("mount".into(), Value::from(d.mount_point().to_string_lossy().into_owned()));
+        v.insert("mount".into(), Value::from(mount));
         v.insert("fs".into(), Value::from(fs));
         v.insert("total_gb".into(), gb(Some(&Value::from(d.total_space()))));
         v.insert("free_gb".into(), gb(Some(&Value::from(d.available_space()))));
