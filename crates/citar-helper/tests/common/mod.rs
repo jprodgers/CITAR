@@ -11,7 +11,9 @@
 //! connection closed at once), and records each request's body, the connection it came on, when
 //! each streamed event went out and when its client went. It answers one request per connection
 //! (`connection: close`) unless told to keep connections open (`keep_alive`), as LM Studio and
-//! the others do, for the helper's reuse of a finished answer's connection.
+//! the others do, for the helper's reuse of a finished answer's connection. Told to have one
+//! model (`one_model`), it streams one answer at a time, as a server with one model loaded does,
+//! and can play a server that does not stop a generation when its client goes.
 //!
 //! The rules it keeps: background frames (`ping`, `pong`, `status`, `power`) are skipped unless
 //! the next step expects their type, and the helper's own unscripted pings are answered; a
@@ -827,6 +829,10 @@ struct FakeState {
     /// Keep each connection open after an answer, for the next request (off: `connection:
     /// close`, one request per connection).
     keep_alive: bool,
+    /// One model behind every streamed answer ([`FakeEndpoint::one_model`]).
+    one_model: Option<Arc<tokio::sync::Mutex<()>>>,
+    /// A streamed answer whose client went keeps the model to its last event.
+    runs_on: bool,
 }
 
 /// A request read whole from a connection's bytes: its head, and where it and its body end.
@@ -885,6 +891,17 @@ impl FakeEndpoint {
     /// Whether answers keep their connection open for the next request (from the next answer).
     pub fn keep_alive(&self, on: bool) {
         self.lock().keep_alive = on;
+    }
+
+    /// One model generates every streamed answer, one at a time, as a local server with one model
+    /// loaded does: an answer waits for the one before it to end. With `runs_on`, a generation
+    /// whose client went keeps the model busy until its last event would have gone (a server that
+    /// does not stop a generation when its client goes), so the answers after it wait; without,
+    /// the model is free the moment the client goes.
+    pub fn one_model(&self, runs_on: bool) {
+        let mut s = self.lock();
+        s.one_model = Some(Arc::new(tokio::sync::Mutex::new(())));
+        s.runs_on = runs_on;
     }
 
     /// Closes every connection that waits for its next request, as an endpoint's idle timeout
@@ -1104,6 +1121,15 @@ impl FakeEndpoint {
             }
             Behaviour::Close => return Some(false),
             Behaviour::Stream { events, delay, first } => {
+                // The model, when there is one, is held from the head to the last event.
+                let (model, runs_on) = {
+                    let s = self.lock();
+                    (s.one_model.clone(), s.runs_on)
+                };
+                let _model = match model {
+                    Some(m) => Some(m.lock_owned().await),
+                    None => None,
+                };
                 let head = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\n{}\r\n",
                     if close { "connection: close\r\n" } else { "" }
@@ -1115,28 +1141,42 @@ impl FakeEndpoint {
                     .chain(std::iter::once("[DONE]".to_owned()))
                     .collect();
                 let last = datas.len() - 1;
+                // A model that runs on after its client went is busy for the events left.
+                let run_on = |left: usize| async move {
+                    if runs_on {
+                        let left = u32::try_from(left).unwrap_or(u32::MAX);
+                        tokio::time::sleep(delay.saturating_mul(left)).await;
+                    }
+                };
                 for (n, data) in datas.into_iter().enumerate() {
                     let wait = if n == 0 { first } else { delay };
                     if !wait.is_zero() {
                         // A wait the client's going ends at once, as a model stops.
                         let until = Instant::now() + wait;
                         if self.gone(k, until).await.is_some() {
+                            run_on(last - n).await;
                             return None;
                         }
                     }
-                    {
+                    let gone = {
                         // The token's time is taken while the client is known to be there.
                         let mut s = self.lock();
-                        if s.seen[k].gone.is_some() {
-                            return None;
-                        }
-                        if n < last {
+                        let gone = s.seen[k].gone.is_some();
+                        if !gone && n < last {
                             s.seen[k].tokens.push(Instant::now());
                         }
+                        gone
+                    };
+                    if gone {
+                        run_on(last - n).await;
+                        return None;
                     }
                     let event = format!("data: {data}\n\n");
                     let framed = format!("{:x}\r\n{event}\r\n", event.len());
-                    wr.write_all(framed.as_bytes()).await.ok()?;
+                    if wr.write_all(framed.as_bytes()).await.is_err() {
+                        run_on(last - n).await;
+                        return None;
+                    }
                 }
                 wr.write_all(b"0\r\n\r\n").await.ok()?;
             }
