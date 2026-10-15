@@ -373,6 +373,7 @@ dependencies = [
 name = "citar-sim"
 version = "0.1.5"
 dependencies = [
+ "blake3",
  "citar-bot",
  "citar-engine",
  "clap",

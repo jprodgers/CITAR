@@ -277,7 +277,6 @@ fn play(
         ..RunSpec::default()
     };
     let mut r = Runner::new_with(cx.rules, run, seats)?;
-    let majors: Vec<PlayerId> = r.game().majors(false).map(|p| p.id()).collect();
     let mut tally = Tally::new(&spec.checkpoints);
     while !r.is_over() {
         let step = r.step()?;
@@ -295,7 +294,20 @@ fn play(
             });
         }
     }
-    let g = r.game();
+    let mut line = summary(cx, spec, r.game(), &tally);
+    let cpu = cpu0.and_then(|c| c.try_elapsed().ok()).map_or(0.0, |d| d.as_secs_f64());
+    line.seconds = round1(t0.elapsed().as_secs_f64());
+    line.cpu_s = round1(cpu);
+    Ok(line)
+}
+
+/// A finished game's line as its play left `g`, with the war and capture totals `tally` kept:
+/// everything but the times, which are 0 here (`seconds`, `cpu_s`: the run sets them; a
+/// reference job leaves them out, design/phase4-helper.md P4.4.1). Every major is summed up,
+/// eliminated ones too, in the order of their ids.
+#[must_use]
+pub fn summary(cx: &Context, spec: &GameSpec, g: &Game, tally: &Tally) -> BaselineGame {
+    let majors: Vec<PlayerId> = g.majors(false).map(|p| p.id()).collect();
     let stats: BTreeMap<Turn, &StatsRow> = g.stats(None).iter().map(|s| (s.turn, s)).collect();
     let last = stats.keys().next_back().copied();
     let row_of = |turn: Turn, pid: PlayerId| {
@@ -329,8 +341,7 @@ fn play(
         });
     }
     let st = g.state();
-    let cpu = cpu0.and_then(|c| c.try_elapsed().ok()).map_or(0.0, |d| d.as_secs_f64());
-    Ok(BaselineGame {
+    BaselineGame {
         i: spec.i,
         seed: spec.seed,
         size: spec.size.clone(),
@@ -348,9 +359,9 @@ fn play(
         engine: cx.code.engine.clone(),
         bot: cx.code.bot.clone(),
         checks: cx.checks,
-        seconds: round1(t0.elapsed().as_secs_f64()),
-        cpu_s: round1(cpu),
-    })
+        seconds: 0.0,
+        cpu_s: 0.0,
+    }
 }
 
 /// One civilization at one checkpoint (`baseline._row`): the engine's stats row (none, or not
