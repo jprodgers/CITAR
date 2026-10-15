@@ -343,7 +343,7 @@ class Cancel(_Live):
         conv.add_user_text(text)
         return conv
 
-    def run(self, conv) -> tuple:
+    def stepping(self, conv) -> tuple:
         out: dict = {}
 
         def go():
@@ -367,11 +367,11 @@ class Cancel(_Live):
         self.assertEqual(m.capacity(), 1)
         first = sched.ticket(sid, MODEL, cls="chat", label="held")
         conv_a = self.scheduled(sid, first, "hold this one")
-        a, out_a = self.run(conv_a)
+        a, out_a = self.stepping(conv_a)
         self.assertTrue(H.until(lambda: served.held, 10), "the first request reached the helper")
         behind = sched.ticket(sid, MODEL, cls="test", label="behind")
         conv_b = self.scheduled(sid, behind, "answer this one")
-        b, out_b = self.run(conv_b)
+        b, out_b = self.stepping(conv_b)
         self.assertTrue(H.until(lambda: m.waiting, 5), "the second waits behind the first")
         first.cancel()
         a.join(5)
@@ -397,7 +397,7 @@ class Cancel(_Live):
         m = sched.machine(sid)
         ticket = sched.ticket(sid, MODEL, cls="chat", label="never acked")
         conv = self.scheduled(sid, ticket)
-        th, out = self.run(conv)
+        th, out = self.stepping(conv)
         self.assertTrue(H.until(lambda: served.held, 10))
         ticket.cancel()
         th.join(5)

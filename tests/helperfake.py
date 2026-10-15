@@ -471,8 +471,9 @@ class Responder:
             elif t == "cancel":
                 with self.lock:
                     self.cancels.append((frame["id"], time.perf_counter()))
-                    held = self.held.pop(frame["id"], None)
-                if held is not None and self.ack_delay is not None:
+                    # a helper that never acknowledges goes on generating it: it stays held, for ``release``
+                    held = self.held.pop(frame["id"], None) if self.ack_delay is not None else None
+                if held is not None:
                     threading.Timer(self.ack_delay, self._cancelled, args=(frame["id"],)).start()
 
     def _send(self, frame: dict, reply) -> None:
@@ -1042,9 +1043,9 @@ class HubPlayer:
             if word == "llm_slots":
                 from citar.pool import scheduler as S
                 m = S.get().machine(self.sid)
-                if m.settings.helper_slots != want:
-                    raise AssertionError(f"the scheduler counts {m.settings.helper_slots} slots of the helper, not "
-                                         f"{want}")
+                if m.settings.helper_slots != want or m.capacity() != min(m.settings.slots, want):
+                    raise AssertionError(f"the scheduler counts {m.settings.helper_slots} slots of the helper and a "
+                                         f"capacity of {m.capacity()}, not {want} and {min(m.settings.slots, want)}")
         elif word == "quiet":
             if bool(self._machine()._quiet()) != bool(want):
                 raise AssertionError(f"the scheduler's quiet hours are {self._machine()._quiet()}, not {want}")
