@@ -1,7 +1,8 @@
 //! The specs' robustness (design/phase4-helper.md P4.6, 4-07's gate 5): 2,000 mutated `LabSpec`
 //! and 2,000 mutated `ReferenceSpec` values through `check_spec` never panic it; whatever is
 //! refused is refused with a reason (`bad_spec`), and whatever is accepted hashes again to its own
-//! hash from its canonical form. The frames that carry them were fuzzed in 4-01, where
+//! hash from its canonical form. The bases hold list and order overrides (and a level that is
+//! one), which a seat may carry. The frames that carry them were fuzzed in 4-01, where
 //! `job_offer.spec` is an opaque object; the job host's standard input is 4-08's.
 
 use citar_engine::rules::Ruleset;
@@ -15,9 +16,12 @@ fn lab() -> Value {
         "speed": "Quick", "turns": 12, "difficulty": "Prince", "barbarians": "normal",
         "barbarian_difficulty": "King", "nation": null, "city_states": 1,
         "seats": [
-            {"label": "a", "bot": "basic-1", "params": {"tech_noise": 0.2}, "aggression": 0.5,
+            {"label": "a", "bot": "basic-1", "aggression": 0.5,
+             "params": {"tech_noise": 0.2, "promo_lines": ["Shock", "Drill"],
+                        "policy_order_peaceful": ["Liberty", "Tradition"]},
              "profile": "standard", "profile_rev": 1, "profile_name": "Standard",
-             "levels": {"tech_noise": 0.2}, "difficulty": "Warlord", "nation": "Rome"},
+             "levels": {"tech_noise": 0.2, "promo_lines": ["Shock", "Drill"]},
+             "difficulty": "Warlord", "nation": "Rome"},
             {"label": "b", "bot": "idle"}
         ],
         "ai_base_values": "unciv", "map_edges": "wrap_x", "river_density": 1.2,
@@ -28,7 +32,8 @@ fn lab() -> Value {
 
 fn reference() -> Value {
     json!({"i": 0, "seed": 5000, "size": "duel", "map_type": "continents", "barbarians": "normal",
-           "speed": "Quick", "turn_limit": 12, "params": {"tech_noise": 0.1}})
+           "speed": "Quick", "turn_limit": 12,
+           "params": {"tech_noise": 0.1, "beliefs_pantheon": ["Fertility Rites", "Goddess of Love"]}})
 }
 
 /// Every path to a value in `v`, as keys and indexes.

@@ -46,8 +46,15 @@ pub const MAX_SEED: u64 = (1 << 53) - 1;
 /// The most city-states a lab game may ask for: the largest map's own number twice over.
 pub const MAX_CITY_STATES: u8 = 64;
 
-/// The most entries a seat's overrides or levels may hold.
-pub const MAX_ENTRIES: usize = 200;
+/// The most entries a seat's overrides or levels may hold: more than any version compiled in has
+/// parameters (basic-1 has 373), so a profile that sets every one still plays. The overrides go
+/// through the version's own `clean`, which refuses a name it does not know, and a factorial
+/// experiment's levels are overrides too; the bound only keeps a hostile spec small.
+pub const MAX_ENTRIES: usize = 1000;
+
+/// The most names a list or an order override (or a level that is one) may hold: an order of
+/// basic-1's has 16 options at most, and its `clean` takes a name more than once.
+pub const MAX_LIST: usize = 256;
 
 /// The most per-resource rules a spec's resources may hold.
 pub const MAX_RESOURCE_RULES: usize = 200;
@@ -491,9 +498,9 @@ impl LabSeat {
             number_in("aggression", a, 0.0, 1.0)?;
         }
         if let Some(levels) = &self.levels {
-            scalars("levels", levels)?;
+            plain("levels", levels)?;
         }
-        let params = self.params.as_ref().map(|p| scalars("params", p)).transpose()?;
+        let params = self.params.as_ref().map(|p| plain("params", p)).transpose()?;
         let overrides =
             params.map_or(Value::Null, |p| Value::Object(p.clone().into_iter().collect()));
         citar_bot::clean(version.id(), &overrides)
@@ -568,7 +575,7 @@ impl ReferenceSpec {
             text(k, v)?;
         }
         if let Some(p) = &self.params {
-            scalars("params", p)?;
+            plain("params", p)?;
         }
         citar_bot::clean(VersionId::Basic1.id(), &self.params_value())
             .map_err(|e| SpecError::new(format!("params: {}", e.message)))?;
@@ -615,8 +622,12 @@ fn number_in(key: &str, x: f64, lo: f64, hi: f64) -> Result<(), SpecError> {
     Ok(())
 }
 
-/// A map of names to plain values (numbers, text, booleans, `null`), bounded.
-fn scalars<'a>(
+/// A map of names to plain values, bounded: `null`, booleans, finite numbers and text, and lists
+/// of those, which an `order` or a `list` parameter takes (`promo_lines`,
+/// `policy_order_peaceful`: names in order of preference) and a factorial level of one is. Never
+/// an object, nor a list in a list. Which value a parameter takes is its version's `clean`'s to
+/// say.
+fn plain<'a>(
     key: &str,
     m: &'a BTreeMap<String, Value>,
 ) -> Result<&'a BTreeMap<String, Value>, SpecError> {
@@ -628,24 +639,38 @@ fn scalars<'a>(
     }
     for (name, v) in m {
         text(&format!("a name in {key}"), name)?;
+        let at = format!("{key}.{}", clip(name, 80));
         match v {
-            Value::Array(_) | Value::Object(_) => {
-                return Err(SpecError::new(format!(
-                    "{key}.{} must be a number, text or a boolean",
-                    clip(name, 80)
-                )));
+            Value::Array(items) => {
+                if items.len() > MAX_LIST {
+                    return Err(SpecError::new(format!(
+                        "{at} holds {} values, more than {MAX_LIST}",
+                        items.len()
+                    )));
+                }
+                for x in items {
+                    scalar(&at, x, "a list's values are numbers, text or booleans")?;
+                }
             }
-            Value::String(s) => text(&format!("{key}.{}", clip(name, 80)), s)?,
-            Value::Number(n) if n.as_f64().is_none_or(|x| !x.is_finite()) => {
-                return Err(SpecError::new(format!(
-                    "{key}.{} is no finite number",
-                    clip(name, 80)
-                )));
-            }
-            _ => {}
+            other => scalar(&at, other, "it must be a number, text, a boolean or a list of them")?,
         }
     }
     Ok(m)
+}
+
+/// One plain value at `at`: `null`, a boolean, a finite number or text; `nested` says what else
+/// was refused.
+fn scalar(at: &str, v: &Value, nested: &str) -> Result<(), SpecError> {
+    match v {
+        Value::Array(_) | Value::Object(_) => {
+            Err(SpecError::new(format!("{at} holds a list or an object: {nested}")))
+        }
+        Value::String(s) => text(at, s),
+        Value::Number(n) if n.as_f64().is_none_or(|x| !x.is_finite()) => {
+            Err(SpecError::new(format!("{at} is no finite number")))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `text` cut to `n` characters, for a reason that quotes what it refuses.
@@ -786,10 +811,87 @@ mod tests {
         assert!(r.contains("seats"), "{r}");
         let r = refused(Kind::LabGame, &with(&["river_density"], json!(9)));
         assert!(r.contains("river_density"), "{r}");
-        let r = refused(Kind::LabGame, &with(&["seats", "0", "levels"], json!({"a": [1]})));
-        assert!(r.contains("levels.a"), "{r}");
+        let r = refused(Kind::LabGame, &with(&["seats", "0", "levels"], json!({"a": [[1]]})));
+        assert!(r.contains("levels.a holds a list or an object"), "{r}");
+        let r = refused(Kind::LabGame, &with(&["seats", "0", "levels"], json!({"a": {"b": 1}})));
+        assert!(r.contains("levels.a holds a list or an object"), "{r}");
         let r = refused(Kind::LabGame, &json!([1, 2]));
         assert!(r.contains("JSON object"), "{r}");
+    }
+
+    /// basic-1's `order` and `list` parameters take lists of names (the Bots page edits them,
+    /// `profiles.clean_params` keeps them, a factorial experiment may vary them): a seat's
+    /// overrides, its levels and a reference game's overrides may hold them, bounded, and the
+    /// bot's `clean` says which names.
+    #[test]
+    fn list_and_order_overrides_are_plain_values_the_bot_cleans() {
+        let lists = json!({
+            "promo_lines": ["Shock", "Drill"],
+            "policy_order_peaceful": ["Liberty", "Tradition", "Rationalism"],
+            "beliefs_pantheon": ["Fertility Rites", "Goddess of Love"],
+            "tech_noise": 0.2
+        });
+        let mut s = duel();
+        s["seats"][0]["params"] = lists.clone();
+        s["seats"][0]["levels"] = json!({"promo_lines": ["Shock", "Drill"], "tech_noise": 0.2});
+        let c = check_spec(rules(), Kind::LabGame, &s, None).expect("lists are overrides");
+        let canonical = c.canonical_value();
+        assert_eq!(
+            canonical["seats"][0]["params"]["policy_order_peaceful"],
+            lists["policy_order_peaceful"]
+        );
+        assert_eq!(canonical["seats"][0]["levels"]["promo_lines"], json!(["Shock", "Drill"]));
+        // An order's preset by name, as before.
+        s["seats"][0]["params"] = json!({"policy_order_peaceful": "liberty_first"});
+        check_spec(rules(), Kind::LabGame, &s, None).expect("a preset");
+        // Names the parameter does not have: the bot's clean refuses them.
+        s["seats"][0]["params"] = json!({"promo_lines": ["Shock", "Teleport"]});
+        assert!(refused(Kind::LabGame, &s).contains("params"));
+        // A list too long, a list in a list, an object in a list, a long name in a list.
+        s["seats"][0]["params"] = json!({"promo_lines": vec!["Shock"; MAX_LIST + 1]});
+        assert!(refused(Kind::LabGame, &s).contains("more than 256"));
+        s["seats"][0]["params"] = json!({"promo_lines": [["Shock"]]});
+        assert!(refused(Kind::LabGame, &s).contains("params.promo_lines holds a list"));
+        s["seats"][0]["params"] = json!({"promo_lines": [{"x": 1}]});
+        assert!(refused(Kind::LabGame, &s).contains("params.promo_lines holds a list"));
+        s["seats"][0]["params"] = json!({"promo_lines": ["x".repeat(201)]});
+        assert!(refused(Kind::LabGame, &s).contains("more than 200"));
+        // A reference game's overrides too.
+        let reference = json!({"i": 0, "seed": 5000, "size": "duel", "map_type": "continents",
+                               "barbarians": "normal", "speed": "Quick", "turn_limit": 40,
+                               "params": {"beliefs_pantheon": ["Fertility Rites", "Goddess of Love"]}});
+        let c = check_spec(rules(), Kind::ReferenceGame, &reference, None).expect("an order");
+        assert_eq!(
+            c.canonical_value()["params"]["beliefs_pantheon"],
+            json!(["Fertility Rites", "Goddess of Love"])
+        );
+    }
+
+    /// Every compiled version's parameters fit in a seat's overrides, the two that basic-1 drops
+    /// (`site_cache_turns`, `bv_cache_turns`) with them.
+    #[test]
+    fn a_profile_that_sets_every_parameter_fits() {
+        for v in citar_bot::versions() {
+            let schema: Value =
+                serde_json::from_str(citar_bot::schema(v.id.id()).expect("a schema"))
+                    .expect("JSON");
+            let count: usize = schema["groups"].as_array().map_or(0, |gs| {
+                gs.iter().filter_map(|g| g["params"].as_array()).map(Vec::len).sum()
+            });
+            assert!(count + 2 <= MAX_ENTRIES, "{}: {count} parameters", v.id.id());
+            if v.id == VersionId::Basic1 {
+                assert!(count > 200, "basic-1 has more parameters than the first bound held");
+            }
+        }
+        // A seat that names every parameter of basic-1 (its lists and orders among them), each at
+        // its default.
+        let mut every = Map::new();
+        for p in citar_bot::params::SPECS {
+            every.insert(p.key.to_owned(), p.default.to_json());
+        }
+        let mut s = duel();
+        s["seats"][0]["params"] = Value::Object(every);
+        check_spec(rules(), Kind::LabGame, &s, None).expect("every parameter at its default");
     }
 
     #[test]
