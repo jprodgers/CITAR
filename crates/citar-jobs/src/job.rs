@@ -25,14 +25,14 @@
 //! [`Output::trace`], which a host logs.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use citar_engine::base::digest::Digest;
 use citar_engine::base::ids::{PlayerId, Turn};
 use citar_engine::game::DebugOptions;
 use citar_engine::rules::Ruleset;
 use citar_engine::save::chain::DigestChain;
-use citar_sim::{Crash, RunSpec, Runner, SimError};
+use citar_sim::{Crash, RunSpec, Runner, Seats, SimError};
 use cpu_time::ThreadTime;
 use serde::Serialize;
 
@@ -160,7 +160,9 @@ pub struct Job {
     ended: Option<Ended>,
     new_round: bool,
     started: Instant,
-    cpu0: Option<ThreadTime>,
+    /// The starting thread's CPU time when the job started (a `ThreadTime` is not `Send`, and a
+    /// job moves into the bindings' detached calls, which run on the same thread).
+    cpu0: Option<Duration>,
 }
 
 impl std::fmt::Debug for Job {
@@ -195,8 +197,23 @@ impl Job {
     /// # Errors
     /// A spec whose game the engine refuses; a fault of the runner.
     pub fn start(rules: &'static Ruleset, checked: &Checked) -> Result<Self, RunError> {
+        Self::start_seated(rules, checked, &mut |seats| seats)
+    }
+
+    /// [`start`](Self::start) with the seats' drivers passed through `seats` once made: the
+    /// test operations' way to seat a driver that panics on purpose (`citar._engine.jobs.run`'s
+    /// `test_panic` in a build with them; this crate's tests). A host never passes anything but
+    /// the seats as they are.
+    ///
+    /// # Errors
+    /// As [`start`](Self::start).
+    pub fn start_seated(
+        rules: &'static Ruleset,
+        checked: &Checked,
+        seats: &mut dyn FnMut(Seats) -> Seats,
+    ) -> Result<Self, RunError> {
         let started = Instant::now();
-        let cpu0 = ThreadTime::try_now().ok();
+        let cpu0 = ThreadTime::try_now().ok().map(|t| t.as_duration());
         let chain = Some(DigestChain::new(&checked.hash.0));
         let base = || RunSpec {
             raise_errors: true,
@@ -206,15 +223,15 @@ impl Job {
         };
         let (play, made) = match &checked.spec {
             Spec::Lab(s) => {
-                let (play, seats) = LabPlay::start(rules, s)?;
+                let (play, made_seats) = LabPlay::start(rules, s)?;
                 let run = RunSpec { config: s.config(), labels: play.labels(), ..base() };
-                let made = caught(|| Runner::new(rules, run, seats));
+                let made = caught(|| Runner::new(rules, run, seats(made_seats)));
                 (Play::Lab(Box::new(play)), made)
             }
             Spec::Reference(s) => {
                 let play = ReferencePlay::start(rules, s)?;
                 let run = RunSpec { config: play.config(), ..base() };
-                let made = caught(|| Runner::new_with(rules, run, |g| play.seats(g)));
+                let made = caught(|| Runner::new_with(rules, run, |g| seats(play.seats(g))));
                 (Play::Reference(Box::new(play)), made)
             }
         };
@@ -369,7 +386,8 @@ impl Job {
         trace: Option<String>,
     ) -> Result<Output, RunError> {
         let result_hash = result.hash(self.kind).map_err(|e| RunError::Internal(e.0))?;
-        let cpu_s = self.cpu0.and_then(|c| c.try_elapsed().ok()).map_or(0.0, |d| d.as_secs_f64());
+        let now = ThreadTime::try_now().ok().map(|t| t.as_duration());
+        let cpu_s = self.cpu0.zip(now).map_or(0.0, |(a, b)| b.saturating_sub(a).as_secs_f64());
         Ok(Output {
             result,
             result_hash,
@@ -399,4 +417,116 @@ pub fn run(
         job.step()?;
     }
     job.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A job moves between threads: into the bindings' detached calls, and onto a job host's
+    /// run thread (4-08).
+    use citar_engine::base::ids::NegotiationId;
+    use citar_engine::game::{DriverOutcome, Game, SeatDriver};
+    use citar_engine::state::players::DriverMemory;
+    use serde_json::json;
+
+    use crate::hash::chain_check;
+    use crate::spec::check_spec;
+
+    /// A seat's driver that plays its bot until turn `at`, then panics.
+    struct PanicAt {
+        bot: Box<dyn SeatDriver>,
+        at: Turn,
+    }
+
+    impl SeatDriver for PanicAt {
+        fn play_turn(
+            &mut self,
+            g: &mut Game,
+            pid: PlayerId,
+            m: &mut DriverMemory,
+        ) -> DriverOutcome {
+            assert!(
+                g.turn() < self.at,
+                "the test bot panics at 0x7ffd00001234 on turn {}",
+                g.turn()
+            );
+            self.bot.play_turn(g, pid, m)
+        }
+
+        fn respond(
+            &mut self,
+            g: &mut Game,
+            pid: PlayerId,
+            nid: NegotiationId,
+            m: &mut DriverMemory,
+        ) -> DriverOutcome {
+            self.bot.respond(g, pid, nid, m)
+        }
+    }
+
+    fn panicking(at: Turn) -> impl FnMut(Seats) -> Seats {
+        move |seats: Seats| {
+            seats
+                .into_iter()
+                .map(|(p, bot)| {
+                    let d: Box<dyn SeatDriver> =
+                        if p == PlayerId(1) { Box::new(PanicAt { bot, at }) } else { bot };
+                    (p, d)
+                })
+                .collect()
+        }
+    }
+
+    fn crashed(kind: Kind, spec: &serde_json::Value) -> Output {
+        let rules = Ruleset::shared();
+        let checked = check_spec(rules, kind, spec, None).expect("a good spec");
+        let mut job = Job::start_seated(rules, &checked, &mut panicking(4)).expect("started");
+        let mut steps = 0;
+        while !job.is_over() {
+            job.step().expect("a step");
+            steps += 1;
+            assert!(steps < 200, "the crash ends the game");
+        }
+        let out = job.finish().expect("an outcome");
+        chain_check(&checked.hash, &out.chain).expect("the chain to the crash folds");
+        assert_eq!(out.chain.rounds, 3, "three rounds ended before the crash");
+        out
+    }
+
+    /// A panic in a seat's turn is the crash outcome: the turn, the seat, its label and the
+    /// message without its address; the rounds before it chained; the same twice.
+    #[test]
+    fn a_panic_is_the_crash_outcome_with_the_chain_to_it() {
+        let lab = json!({"exp": "c", "i": 0, "seed": 3, "map_type": "continents", "size": "duel",
+                         "speed": "Quick", "turns": 10, "difficulty": "Prince",
+                         "seats": [{"label": "a"}, {"label": "b"}]});
+        let out = crashed(Kind::LabGame, &lab);
+        let JobResult::Lab(LabOutcome::Crashed(c)) = &out.result else {
+            panic!("a crash outcome: {:?}", out.result)
+        };
+        assert_eq!(
+            (c.crash.turn, c.crash.player, c.crash.label.as_deref()),
+            (4, Some(1), Some("b"))
+        );
+        assert_eq!(c.crash.message, "the test bot panics at 0x? on turn 4");
+        assert_eq!(crashed(Kind::LabGame, &lab).result_hash, out.result_hash, "reproduced");
+        let v = serde_json::to_value(&out.result).expect("a value");
+        assert_eq!(crate::hash::result_hash(Kind::LabGame, &v), Ok(out.result_hash.clone()));
+
+        let reference = json!({"i": 0, "seed": 3, "size": "duel", "map_type": "continents",
+                               "barbarians": "normal", "speed": "Quick", "turn_limit": 10});
+        let out = crashed(Kind::ReferenceGame, &reference);
+        let JobResult::Reference(ReferenceOutcome::Crashed(c)) = &out.result else {
+            panic!("a crash outcome: {:?}", out.result)
+        };
+        assert_eq!(c.crash, "T4 P1: panic: the test bot panics at 0x? on turn 4");
+    }
+
+    #[test]
+    fn a_job_is_send() {
+        fn send<T: Send>() {}
+        send::<Job>();
+        send::<Output>();
+    }
 }

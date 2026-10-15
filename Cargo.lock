@@ -355,6 +355,7 @@ dependencies = [
  "blake3",
  "citar-bot",
  "citar-engine",
+ "citar-jobs",
  "citar-sim",
  "citar-store",
  "pyo3",

@@ -20,8 +20,10 @@
 //!   `CITAR_RULESET_DIR` names, read when the module loads (DESIGN.md P2.8.4). Every game,
 //!   ruleset function and fingerprint uses it, and `build_info` reports its id.
 //!
-//! Modules: `game` (`Game`), `bot` (`Bot`), `run` (`run_game`), `save` (`Journal`,
-//! `SaveSnapshot`, `Save` and the save files: saves v2, package 2-11), `funcs` (the ruleset,
+//! Modules: `game` (`Game`), `bot` (`Bot`), `run` (`run_game`), `jobs` (the submodule
+//! `citar._engine.jobs`: CPU jobs' specs, play, result hash, chain and jobs build,
+//! design/phase4-helper.md P4.4), `save` (`Journal`, `SaveSnapshot`, `Save` and the save
+//! files: saves v2, package 2-11), `funcs` (the ruleset,
 //! tools, maps, scenarios, categories and bot versions), `rules` (the process's ruleset and
 //! `check_ruleset`), `errors` (the exceptions) and `calls` (the GIL, the calls in flight and the
 //! shutdown).
@@ -31,6 +33,7 @@ mod calls;
 mod errors;
 mod funcs;
 mod game;
+mod jobs;
 mod rules;
 mod run;
 mod save;
@@ -115,6 +118,7 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calls::calls_in_flight, m)?)?;
     m.add_function(wrap_pyfunction!(calls::shutdown, m)?)?;
     m.add_function(wrap_pyfunction!(run::run_game, m)?)?;
+    m.add_submodule(&jobs::module(py)?)?;
     m.add_function(wrap_pyfunction!(save::read_save, m)?)?;
     m.add_function(wrap_pyfunction!(save::save_header, m)?)?;
     m.add_function(wrap_pyfunction!(save::fork_journal, m)?)?;

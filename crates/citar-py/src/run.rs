@@ -77,7 +77,7 @@ fn labels_of(v: Option<&Value>) -> Result<BTreeMap<PlayerId, String>, Failure> {
 /// The seat and turn of the spec's `test_panic`, whose bot then panics on that turn or later:
 /// the crash record's way through `run_game`, for the bindings' tests. Builds without the test
 /// operations refuse it.
-fn test_panic(v: Option<&Value>) -> Result<Option<(PlayerId, i32)>, Failure> {
+pub(crate) fn test_panic(v: Option<&Value>) -> Result<Option<(PlayerId, i32)>, Failure> {
     let Some(v) = v.filter(|v| !v.is_null()) else { return Ok(None) };
     if !cfg!(feature = "test-ops") {
         return Err(Failure::Value(

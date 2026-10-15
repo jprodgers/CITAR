@@ -23,12 +23,15 @@ doctest = false
 # wheel has them.
 test-ops = ["citar-engine/test-ops"]
 
-# cargo xtask check: the engine, the bot, the runner and the store (DESIGN.md P2.2).
+# cargo xtask check: the engine, the bot, the runner, the store and the jobs crate (DESIGN.md
+# P2.2, design/phase4-helper.md P4.3.1).
 [dependencies]
 citar-engine = { workspace = true, features = ["embedded-ruleset"] }
 citar-bot.workspace = true
 citar-sim.workspace = true
 citar-store.workspace = true
+# CPU jobs' specs, play, hashes and chain (`citar._engine.jobs`): the same code as the helper's.
+citar-jobs.workspace = true
 pyo3.workspace = true
 serde_json.workspace = true
 # The fingerprint of a helper's machine key, as the helper prints it (design/phase4-helper.md
