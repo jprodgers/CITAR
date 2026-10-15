@@ -101,6 +101,8 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # citar-jobs' sys module only (the owner-only DACL of the machine key, P4.3.7; the job limits,
 # 4-08): the one place Phase 4 calls the OS without a safe wrapper.
 windows-sys = "0.61"
+# The same module on Unix (the job limits, 4-08: setpriority, RLIMIT_DATA, macOS's resident size).
+libc = "0.2.189"
 # tools and tests only
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1.1"

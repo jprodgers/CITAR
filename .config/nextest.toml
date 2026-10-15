@@ -24,6 +24,22 @@ threads-required = 2
 filter = 'binary_id(citar-testkit::bot) & test(/^bot::diplomacy::a_bot_game_saved/)'
 threads-required = 2
 
+# The job host's limit tests (citar-jobs' `host` binary, 4-08) start hosts under CPU and memory
+# limits: one at a time, so that together they stay within the laptop's bounds (at most two cores'
+# worth and 512 MB, design/phase4-helper.md P4.7.1), and the CPU test alone on the machine, so
+# that its host gets the share it was given.
+[test-groups]
+job-host = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary_id(citar-jobs::host) & test(=limits::cpu_is_held_to_its_share)'
+test-group = 'job-host'
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+filter = 'binary_id(citar-jobs::host)'
+test-group = 'job-host'
+
 [profile.ci]
 # No retries: a test that passes on a second try is a determinism bug, not a flake.
 retries = 0

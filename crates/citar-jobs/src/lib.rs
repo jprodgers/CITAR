@@ -20,8 +20,12 @@
 //! - [`canary`](mod@canary): the two denormal checks and the self-check a job host runs before it
 //!   takes work;
 //! - [`golden`]: the `jobs` golden set (`golden/jobs.json`), embedded for the self-check;
-//! - [`sys`]: the operating-system calls no safe wrapper makes (4-03; the job limits join it in
-//!   4-08).
+//! - [`host`]: the job host (P4.4.3), the one program that plays jobs under limits for the helper
+//!   and the server, its JSON-lines protocol, and its parent side ([`host::parent`]: starting it,
+//!   under a `systemd --user` scope on Linux, and classifying its death);
+//! - [`limits`]: what the host holds per OS (P4.3.6), and how hard;
+//! - [`sys`]: the operating-system calls no safe wrapper makes, and the counting allocator
+//!   ([`Counting`]) a program that runs a job host declares as its `#[global_allocator]`.
 //!
 //! The workspace denies `unsafe_code`; [`sys`]'s two per-OS files allow it, each block with its
 //! `// SAFETY:` comment, and `cargo xtask check` refuses an `unsafe` token anywhere else in this
@@ -36,8 +40,10 @@ pub mod canary;
 pub mod fit;
 pub mod golden;
 pub mod hash;
+pub mod host;
 pub mod job;
 pub mod lab;
+pub mod limits;
 pub mod reference;
 pub mod spec;
 pub mod sys;
@@ -50,10 +56,17 @@ pub use self::hash::{
 };
 pub use self::job::{Control, Flow, Job, Output, Progress, RunError, Unattended, run};
 pub use self::lab::{LabCrash, LabFacts, LabOutcome, LabPlayer, LabResult};
+pub use self::limits::{Hardness, Held};
 pub use self::reference::{ReferenceFacts, ReferenceOutcome, ReferenceResult};
 pub use self::spec::{
     Checked, Kind, LabSeat, LabSpec, ReferenceSpec, Spec, SpecError, SpecHash, check_spec,
 };
+pub use self::sys::alloc::Counting;
+
+// The unit tests count as a job host does, so the host's tests in this crate see real peaks.
+#[cfg(test)]
+#[global_allocator]
+static COUNTING: Counting = Counting;
 
 /// The jobs crate's content code (`build.rs`): 16 hex digits over its sources, the golden set,
 /// its version and the locked versions of what it links.

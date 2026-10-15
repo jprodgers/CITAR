@@ -1,6 +1,7 @@
 //! Windows: owner-only files by their DACL (P4.3.7), written and read back through the security
 //! API (`SetNamedSecurityInfoW`, `GetNamedSecurityInfoW`), never by parsing `icacls`, whose
-//! output is localised. The Job Object calls of the job host's limits join this file in 4-08.
+//! output is localised; and the job host's limits (P4.3.6, 4-08): a Job Object the host puts
+//! itself in ([`JobObject::hold_self`]), which caps its CPU and its memory hard.
 //!
 //! Every block below calls an API with pointers into buffers this module owns or the API
 //! allocated; each says why that is sound. What the API allocates is freed by [`Local`]'s drop,
@@ -25,7 +26,16 @@ use windows_sys::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectCpuRateControlInformation,
+    JobObjectExtendedLimitInformation, SetInformationJobObject,
+};
+use windows_sys::Win32::System::Threading::{
+    BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, OpenProcessToken, SetPriorityClass,
+};
 
 use super::Exposure;
 
@@ -100,7 +110,8 @@ struct Handle(HANDLE);
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        // SAFETY: the handle came from OpenProcessToken and is closed exactly once, here.
+        // SAFETY: the handle came from OpenProcessToken or CreateJobObjectW and is closed exactly
+        // once, here.
         unsafe { CloseHandle(self.0) };
     }
 }
@@ -386,4 +397,99 @@ pub(super) fn exposure(path: &Path) -> io::Result<Option<Exposure>> {
         }
     }
     Ok(Some(Exposure { who, fix }))
+}
+
+/// A Job Object holding this process: its CPU capped by a hard rate and its committed memory by a
+/// limit (P4.3.6's Windows row). Kept for the life of the process: with `KILL_ON_JOB_CLOSE`, the
+/// job's last handle closing (this process ending, however it ends) ends anything left in it.
+#[derive(Debug)]
+pub struct JobObject {
+    _job: Handle,
+}
+
+// SAFETY: a Job Object's handle is a kernel handle, valid on any thread of the process; nothing
+// here reads or writes through it after creation, and it is closed once, by its drop.
+unsafe impl Send for JobObject {}
+// SAFETY: as for Send: a shared reference allows nothing but holding the handle.
+unsafe impl Sync for JobObject {}
+
+impl std::fmt::Debug for Handle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Handle")
+    }
+}
+
+/// A structure's size as the Job Object calls take it.
+fn size_u32<T>() -> u32 {
+    u32::try_from(size_of::<T>()).unwrap_or(u32::MAX)
+}
+
+impl JobObject {
+    /// Creates a Job Object whose processes together get at most `cpu_rate` hundredths of a
+    /// percent of the machine's CPU cycles (`CpuRate`, 1 to 10,000, a hard cap) and commit at
+    /// most `memory` bytes (`JobMemoryLimit`), with `KILL_ON_JOB_CLOSE`; puts this process in it
+    /// (a job inside the job its parent may have put it in: nested jobs, Windows 8 and later);
+    /// and lowers this process to `BELOW_NORMAL_PRIORITY_CLASS`, so lent CPU yields to its
+    /// owner's own work.
+    ///
+    /// # Errors
+    /// The step that failed, with the OS's reason: nothing is held then, and the caller refuses
+    /// to run jobs (`limits`).
+    pub fn hold_self(cpu_rate: u32, memory: usize) -> io::Result<Self> {
+        let step = |what: &str| {
+            let e = io::Error::last_os_error();
+            io::Error::new(e.kind(), format!("{what}: {e}"))
+        };
+        // SAFETY: no security attributes and no name: an anonymous job, whose handle `Handle`
+        // closes.
+        let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        if raw.is_null() {
+            return Err(step("CreateJobObjectW"));
+        }
+        let job = Handle(raw);
+        let mut cpu = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+            ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+            ..JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default()
+        };
+        cpu.Anonymous.CpuRate = cpu_rate.clamp(1, 10_000);
+        // SAFETY: `cpu` is the structure this information class takes, of the size given, alive
+        // across the call; the API copies it.
+        let ok = unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectCpuRateControlInformation,
+                (&raw const cpu).cast(),
+                size_u32::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>(),
+            )
+        };
+        if ok == 0 {
+            return Err(step("the CPU rate (SetInformationJobObject)"));
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        limits.JobMemoryLimit = memory;
+        // SAFETY: as above, with the extended limits' structure.
+        let ok = unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                size_u32::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
+            )
+        };
+        if ok == 0 {
+            return Err(step("the memory limit (SetInformationJobObject)"));
+        }
+        // SAFETY: the job handle is open; GetCurrentProcess is a pseudo-handle that needs no
+        // closing.
+        if unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess()) } == 0 {
+            return Err(step("AssignProcessToJobObject"));
+        }
+        // SAFETY: this process's pseudo-handle and a valid priority class.
+        if unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) } == 0 {
+            return Err(step("SetPriorityClass"));
+        }
+        Ok(Self { _job: job })
+    }
 }
