@@ -32,6 +32,14 @@
 # round's digest and every seat's memory hash, so a bot that plays differently on one target shows
 # here too; the long set gains a whole 4-bot game. The sets here take about 10 seconds a target in
 # the ci profile, so pull requests need no shorter set.
+#
+# Package 4-07 (design/phase4-helper.md P4.4.5) adds the jobs set: crates/citar-jobs/golden/jobs.json,
+# four short jobs (lab, ranking and reference games) with their specs, results and chains of round
+# digests, checked by citar-jobs' own test binary (the engine without its test-only features). Every
+# target runs it in both the ci and the release profile: a job's result must be the same bytes on
+# every target and in every flavour, since helpers on all five compute results the server compares.
+# A deliberate change re-blesses it (CITAR_BLESS_JOBS=1 cargo test -p citar-jobs --test golden --
+# bless) in a commit saying why.
 name: determinism
 
 on:
@@ -111,6 +119,17 @@ jobs:
             check --out golden-${{ matrix.target }}.json --states golden-states
           echo "status=$?" >> "$GITHUB_OUTPUT"
 
+      - name: The jobs golden set, ci and release
+        id: jobs
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked --package citar-jobs --test golden --profile ci
+          ci=$?
+          cargo test --locked --package citar-jobs --test golden --release
+          release=$?
+          echo "status=$(( ci | release ))" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@v7
         with:
           name: golden-report-${{ matrix.target }}
@@ -126,7 +145,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Result
-        if: steps.golden.outputs.status != '0'
+        if: steps.golden.outputs.status != '0' || steps.jobs.outputs.status != '0'
         run: exit 1
 
   compare:
