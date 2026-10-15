@@ -7,7 +7,13 @@
 //!   link-local, `.local`), with a warning, and ignored with a warning for any other;
 //! - a development or test build (`dev-guard`, or any test feature) dials loopback addresses
 //!   only, checked on the URL before any lookup and again on every address the name resolves to
-//!   (P4.3.1).
+//!   (P4.3.1);
+//! - a name's addresses are raced as RFC 8305 ("Happy Eyeballs") says ([`Connector`]), for the
+//!   server here and for the model endpoint's completions ([`crate::http1`]): an address that
+//!   refuses slowly or never answers does not hold up the next. On Windows `localhost` resolves to
+//!   `::1` first, and a refused connection there takes about 2 s (the system tries the SYN again),
+//!   while LM Studio listens on `127.0.0.1` only: one address after another, every completion to
+//!   the default `http://localhost:1234/v1` paid those 2 s (4-04's review).
 //!
 //! [`Dialer`] is what the session dials through; the transcripts give it an in-memory one.
 
@@ -15,9 +21,11 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
+use futures_util::stream::FuturesUnordered;
 use rustls::ClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
@@ -150,6 +158,123 @@ pub fn guard_loopback(t: &Target) -> Result<(), String> {
     }
 }
 
+/// RFC 8305's "Connection Attempt Delay": how long one attempt runs alone before the next address
+/// is tried beside it.
+pub const ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// The order a name's addresses are tried in (RFC 8305, section 4): duplicates dropped, the
+/// families alternating from the family of the resolver's first choice (which put them in the
+/// system's order of preference), and `first`, the address that answered last time, before all.
+#[must_use]
+pub fn attempt_order(addrs: &[SocketAddr], first: Option<SocketAddr>) -> Vec<SocketAddr> {
+    let mut unique: Vec<SocketAddr> = Vec::with_capacity(addrs.len());
+    for a in addrs {
+        if !unique.contains(a) {
+            unique.push(*a);
+        }
+    }
+    let Some(lead) = unique.first().map(SocketAddr::is_ipv6) else { return unique };
+    let (mut same, mut other): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        unique.into_iter().partition(|a| a.is_ipv6() == lead);
+    let mut order = Vec::with_capacity(same.len() + other.len());
+    same.reverse();
+    other.reverse();
+    loop {
+        match (same.pop(), other.pop()) {
+            (None, None) => break,
+            (a, b) => order.extend(a.into_iter().chain(b)),
+        }
+    }
+    if let Some(f) = first
+        && let Some(at) = order.iter().position(|a| *a == f)
+    {
+        order.remove(at);
+        order.insert(0, f);
+    }
+    order
+}
+
+/// Races connection attempts over `order` (RFC 8305, section 5): the first starts at once, and
+/// each next one `delay` after the one before it or as soon as an attempt fails, whichever comes
+/// first; the first to connect wins and the others are dropped (their sockets closed). The caller
+/// bounds the whole race.
+///
+/// # Errors
+/// Every attempt failed: the last failure, with its address.
+pub async fn race<T, F, Fut>(
+    order: &[SocketAddr],
+    delay: Duration,
+    mut connect: F,
+) -> Result<(SocketAddr, T), String>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    let mut attempts = FuturesUnordered::new();
+    let mut next = 0;
+    let mut due = tokio::time::Instant::now();
+    let mut last_error: Option<String> = None;
+    loop {
+        if next < order.len() && (attempts.is_empty() || tokio::time::Instant::now() >= due) {
+            let a = order[next];
+            next += 1;
+            let attempt = connect(a);
+            attempts.push(async move { (a, attempt.await) });
+            due = tokio::time::Instant::now() + delay;
+            continue;
+        }
+        if attempts.is_empty() {
+            return Err(last_error.unwrap_or_else(|| "no address to connect to".to_owned()));
+        }
+        let more = next < order.len();
+        tokio::select! {
+            Some((a, r)) = attempts.next() => match r {
+                Ok(s) => return Ok((a, s)),
+                Err(e) => {
+                    last_error = Some(format!("{a}: {e}"));
+                    // A failed attempt starts the next one at once.
+                    due = tokio::time::Instant::now();
+                }
+            },
+            () = tokio::time::sleep_until(due), if more => {}
+        }
+    }
+}
+
+/// TCP connections to one host, its addresses raced ([`race`]), remembering the address that
+/// answered: the next connection tries it first, so a host whose first address never answers
+/// costs [`ATTEMPT_DELAY`] once, not on every connection.
+#[derive(Debug, Default)]
+pub struct Connector {
+    last: Mutex<Option<SocketAddr>>,
+}
+
+impl Connector {
+    fn last(&self) -> std::sync::MutexGuard<'_, Option<SocketAddr>> {
+        self.last.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A connection to one of `addrs`, `host`'s addresses in the resolver's order.
+    ///
+    /// # Errors
+    /// None of them could be reached: the last failure, with its address (after the host's
+    /// name, when it has one).
+    pub async fn connect(
+        &self,
+        host: &str,
+        addrs: &[SocketAddr],
+    ) -> Result<tokio::net::TcpStream, String> {
+        let first = *self.last();
+        let order = attempt_order(addrs, first);
+        let named =
+            |e: String| if host.parse::<IpAddr>().is_ok() { e } else { format!("{host}: {e}") };
+        let (a, tcp) =
+            race(&order, ATTEMPT_DELAY, tokio::net::TcpStream::connect).await.map_err(named)?;
+        *self.last() = Some(a);
+        Ok(tcp)
+    }
+}
+
 /// The TLS provider: ring.
 #[must_use]
 pub fn provider() -> Arc<CryptoProvider> {
@@ -248,6 +373,7 @@ pub struct TcpDialer {
     target: Target,
     tls: Option<Arc<ClientConfig>>,
     loopback_only: bool,
+    connector: Connector,
 }
 
 impl TcpDialer {
@@ -284,7 +410,7 @@ impl TcpDialer {
             }
             Some(Arc::new(verified_tls(ca_file)?))
         };
-        Ok(TcpDialer { target, tls, loopback_only })
+        Ok(TcpDialer { target, tls, loopback_only, connector: Connector::default() })
     }
 
     async fn connect(&self) -> Result<Ws, String> {
@@ -306,18 +432,7 @@ impl TcpDialer {
                 a.ip()
             ));
         }
-        let mut last = String::new();
-        let mut tcp = None;
-        for a in &addrs {
-            match tokio::net::TcpStream::connect(a).await {
-                Ok(s) => {
-                    tcp = Some(s);
-                    break;
-                }
-                Err(e) => last = e.to_string(),
-            }
-        }
-        let tcp = tcp.ok_or_else(|| format!("{}:{}: {last}", t.host, t.port))?;
+        let tcp = self.connector.connect(&t.host, &addrs).await?;
         let _nodelay = tcp.set_nodelay(true);
         let io: Box<dyn Io> = match &self.tls {
             None => Box::new(tcp),
@@ -405,5 +520,128 @@ mod tests {
         assert!(verified_tls(Some(&empty)).expect_err("no certificate").contains("no certificate"));
         assert!(verified_tls(Some(&dir.join("absent.pem"))).is_err());
         std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    fn sa(s: &str) -> SocketAddr {
+        s.parse().expect("an address")
+    }
+
+    #[test]
+    fn addresses_are_tried_families_alternating_and_the_last_good_one_first() {
+        let (v6a, v6b, v4a, v4b) =
+            (sa("[::1]:9"), sa("[fe80::1]:9"), sa("127.0.0.1:9"), sa("10.0.0.1:9"));
+        assert_eq!(attempt_order(&[v6a, v6b, v4a, v4b], None), [v6a, v4a, v6b, v4b]);
+        assert_eq!(attempt_order(&[v4a, v6a, v4b], None), [v4a, v6a, v4b]);
+        assert_eq!(attempt_order(&[v6a, v4a, v6a, v4a], None), [v6a, v4a], "duplicates once");
+        assert_eq!(attempt_order(&[v6a, v6b, v4a, v4b], Some(v4b)), [v4b, v6a, v4a, v6b]);
+        assert_eq!(attempt_order(&[v6a, v4a], Some(v4b)), [v6a, v4a], "a remembered address gone");
+        assert!(attempt_order(&[], Some(v4a)).is_empty());
+    }
+
+    /// How a fake attempt ends: after this long, connected or refused; or never.
+    #[derive(Clone, Copy)]
+    enum Fake {
+        Connects(u64),
+        Refused(u64),
+        Hangs,
+    }
+
+    /// Races `plan` with fake attempts on the paused clock: the winner, when the race ended (ms),
+    /// and when each attempt started (ms).
+    async fn fake_race(
+        plan: &[(SocketAddr, Fake)],
+    ) -> (Result<SocketAddr, String>, u64, Vec<(SocketAddr, u64)>) {
+        let t0 = tokio::time::Instant::now();
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let order: Vec<SocketAddr> = plan.iter().map(|(a, _)| *a).collect();
+        let log = started.clone();
+        let out = race(&order, ATTEMPT_DELAY, |a| {
+            let how = plan.iter().find(|(p, _)| *p == a).map(|(_, f)| *f).expect("planned");
+            let ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+            log.lock().expect("log").push((a, ms));
+            async move {
+                match how {
+                    Fake::Connects(d) => {
+                        tokio::time::sleep(Duration::from_millis(d)).await;
+                        Ok(a)
+                    }
+                    Fake::Refused(d) => {
+                        tokio::time::sleep(Duration::from_millis(d)).await;
+                        Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+                    }
+                    Fake::Hangs => std::future::pending().await,
+                }
+            }
+        })
+        .await
+        .map(|(a, _)| a);
+        let ended = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let started = started.lock().expect("log").clone();
+        (out, ended, started)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_or_silent_first_address_does_not_hold_up_the_next() {
+        let (v6, v4, v4b) = (sa("[::1]:1234"), sa("127.0.0.1:1234"), sa("127.0.0.2:1234"));
+        // Windows' `localhost`: ::1 refused after about 2 s, 127.0.0.1 listening.
+        let (won, at, started) =
+            fake_race(&[(v6, Fake::Refused(2040)), (v4, Fake::Connects(0))]).await;
+        assert_eq!((won, at), (Ok(v4), 250), "{started:?}");
+        // An address that never answers (a black-holed AAAA record) costs the same 250 ms.
+        let (won, at, _) = fake_race(&[(v6, Fake::Hangs), (v4, Fake::Connects(3))]).await;
+        assert_eq!((won, at), (Ok(v4), 253));
+        // A quick refusal starts the next attempt at once.
+        let (won, at, started) =
+            fake_race(&[(v6, Fake::Refused(1)), (v4, Fake::Connects(0))]).await;
+        assert_eq!((won, at), (Ok(v4), 1));
+        assert_eq!(started, [(v6, 0), (v4, 1)]);
+        // A first address that answers within the delay is the only one tried.
+        let (won, at, started) =
+            fake_race(&[(v6, Fake::Connects(100)), (v4, Fake::Connects(0))]).await;
+        assert_eq!((won, at, started.len()), (Ok(v6), 100, 1));
+        // Two silent addresses: the third starts at 500 ms.
+        let (won, at, started) =
+            fake_race(&[(v6, Fake::Hangs), (v4b, Fake::Hangs), (v4, Fake::Connects(0))]).await;
+        assert_eq!((won, at), (Ok(v4), 500));
+        assert_eq!(started, [(v6, 0), (v4b, 250), (v4, 500)]);
+        // Every one refused: the last refusal, named by its address, once all have ended.
+        let (won, at, _) = fake_race(&[(v6, Fake::Refused(2000)), (v4, Fake::Refused(10))]).await;
+        let e = won.expect_err("nothing answered");
+        assert!(e.starts_with("[::1]:1234: "), "{e}");
+        assert_eq!(at, 2000);
+        assert!(race(&[], ATTEMPT_DELAY, |a| async move { Ok(a) }).await.is_err());
+    }
+
+    /// The real thing: `localhost` with only its IPv4 address listening (LM Studio's way), on
+    /// whatever order this machine's resolver gives.
+    #[tokio::test]
+    async fn localhost_connects_at_once_when_only_ipv4_listens() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let port = listener.local_addr().expect("its address").port();
+        let accepting = tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                drop(s);
+            }
+        });
+        let addrs: Vec<SocketAddr> =
+            tokio::net::lookup_host(("localhost", port)).await.expect("localhost").collect();
+        let c = Connector::default();
+        let t0 = std::time::Instant::now();
+        c.connect("localhost", &addrs).await.expect("connected");
+        let first = t0.elapsed();
+        // Within the delay and some slack, not the 2 s a refused ::1 takes on Windows.
+        assert!(first < Duration::from_millis(1000), "{first:?} for {addrs:?}");
+        assert_eq!(*c.last(), Some(SocketAddr::from(([127, 0, 0, 1], port))));
+        // The address that answered goes first from now on.
+        let t0 = std::time::Instant::now();
+        c.connect("localhost", &addrs).await.expect("connected");
+        assert!(t0.elapsed() < Duration::from_millis(200), "{:?}", t0.elapsed());
+        // A refusal names the host and the address that refused.
+        let closed = SocketAddr::from(([127, 0, 0, 1], 9));
+        let e = c.connect("localhost", &[closed]).await.expect_err("nothing listens on 9");
+        assert!(e.starts_with("localhost: 127.0.0.1:9: "), "{e}");
+        let e = c.connect("127.0.0.1", &[closed]).await.expect_err("nothing listens on 9");
+        assert!(e.starts_with("127.0.0.1:9: "), "{e}");
+        accepting.abort();
     }
 }
