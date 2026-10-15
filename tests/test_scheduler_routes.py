@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
-import json
 import os
 import tempfile
 import threading
@@ -36,41 +35,11 @@ from citar.db.models import Base, Server, User
 from citar.pool import scheduler as S
 from citar.server import pool_api
 from citar.server import workers as W
-from citar.worker import protocol as P
+from tests.helperfake import StubConnection as StubHelper
 
 settings.reset()
 
 MODEL = "qa/scripted"
-
-
-class StubHelper(W.WorkerConnection):
-    """A connected helper with no socket. It answers each request at once with a ``Done`` (``CITAR OK``), or, with
-    ``hold``, keeps it until ``answer_held``; it records every frame the hub sends it."""
-
-    def __init__(self, server_id: str, models: list, *, hold: bool = False):
-        super().__init__(websocket=None, server_id=server_id, loop=None,
-                         hello={"hostname": "stub", "provider": "lmstudio", "models": models, "max_concurrent": 1})
-        self.hold = hold
-        self.held: list = []
-        self.frames: list = []
-
-    def send_threadsafe(self, text: str):
-        frame = json.loads(text)
-        self.frames.append(frame)
-        if frame.get("t") != P.REQUEST:
-            return
-        if self.hold:
-            self.held.append(frame["id"])
-        else:
-            self._done(frame["id"])
-
-    def _done(self, request_id: str):
-        self.resolve(request_id, result={"text": "CITAR OK", "duration": 0.01, "tool_calls": [],
-                                         "usage": {"input_tokens": 12, "output_tokens": 3}})
-
-    def answer_held(self):
-        while self.held:
-            self._done(self.held.pop(0))
 
 
 def _until(check, limit: float = 10.0):
@@ -241,7 +210,9 @@ class TestRoute(unittest.TestCase):
         self.helpers["gpu"].hold = False
         self.assertTrue(self.run_test("alice", "gpu", wait=30).json().get("ok"), "and she may test it again")
 
-    def test_a_test_given_up_is_cancelled_and_its_slot_drains(self):
+    def test_a_test_given_up_is_cancelled_and_its_slot_freed_by_the_helpers_acknowledgement(self):
+        """Protocol 2 (design/phase4-helper.md P4.5.3): the helper answers the cancel with ``cancelled``, which frees
+        the slot at once; nothing drains."""
         helper = self.helpers["gpu"]
         helper.hold = True
         t0 = time.monotonic()
@@ -249,9 +220,19 @@ class TestRoute(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 5.0)
         body = got.json()
         self.assertEqual((body["ok"], body.get("cancelled")), (False, True), body)
-        self.assertIn(P.CANCEL, [f.get("t") for f in helper.frames], "the helper was sent CANCEL")
+        self.assertIn("cancel", [f.get("t") for f in helper.frames], "the helper was sent cancel")
         machine = S.get().machine(self.machines["gpu"])
-        self.assertEqual([s.draining for s in machine.slots], [True], "its slot drains until the helper's answer")
+        self.assertTrue(_until(lambda: machine.slots == []), "its acknowledgement freed the slot")
+        self.assertEqual(machine.counters["late_frames"], 1)
+        self.assertEqual(machine.counters["draining"], 0)
+
+    def test_a_cancel_never_acknowledged_holds_its_slot_until_the_helpers_answer(self):
+        helper = self.helpers["gpu"]
+        helper.hold, helper.ack_cancel = True, False
+        body = self.run_test("alice", "gpu", wait=1).json()
+        self.assertTrue(body.get("cancelled"), body)
+        machine = S.get().machine(self.machines["gpu"])
+        self.assertEqual([s.held for s in machine.slots], [True], "its slot waits for the helper's answer")
         helper.answer_held()                    # the late answer: the hub hands it to the scheduler
         self.assertEqual(machine.slots, [])
         self.assertEqual(machine.counters["late_frames"], 1)
@@ -263,10 +244,10 @@ class TestRoute(unittest.TestCase):
         for how in ("disconnect", "reconnect"):
             with self.subTest(how=how):
                 helper = self.helpers["gpu"]
-                helper.hold = True
+                helper.hold, helper.ack_cancel = True, False
                 body = self.run_test("alice", "gpu", wait=1).json()
                 self.assertTrue(body.get("cancelled"), body)
-                self.assertEqual([s.draining for s in machine.slots], [True])
+                self.assertEqual([s.held for s in machine.slots], [True])
                 fresh = StubHelper(self.machines["gpu"], [{"key": MODEL, "loaded": True}])
                 if how == "disconnect":
                     W.hub().unregister(helper)

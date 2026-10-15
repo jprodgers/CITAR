@@ -94,8 +94,9 @@ async def _startup():
     from ..pool import registry_import
     registry_import.on_boot()                     # config/servers.json into rows, once, before any seat needs one
     from .workers import hub
-    hub().attach_loop(_loop)                      # lets game threads reach connected workers
-    asyncio.create_task(hub().ping_loop(citar_settings.get().worker_ping_seconds))
+    hub().attach_loop(_loop)                      # lets game threads reach connected helpers
+    hub().ping_s = citar_settings.get().worker_ping_seconds
+    asyncio.create_task(hub().ping_loop())
     # lobby games first, so queued benchmarks and probes see which machines they hold
     from .session import register_games_with_queue
     register_games_with_queue()
@@ -2559,115 +2560,14 @@ def _ws_viewer_may_watch(s: GameSession, websocket: WebSocket, share_key: str) -
 
 @app.websocket("/ws/worker")
 async def worker_socket(websocket: WebSocket):
-    """Where a citar-worker dials in.
+    """Where a CITAR helper dials in, on protocol 2 (``citar.server.workers.serve``; design/phase4-helper.md P4.5.1).
 
-    The worker connects OUT to here, which is what makes a GPU behind a home router usable without
-    exposing anything at that end. Authentication is the first frame; nothing else is accepted
-    until a valid token has been presented.
+    The helper connects OUT to here, which is what makes a GPU behind a home router usable without exposing anything
+    at that end. Its hello is the first frame; nothing else is accepted until a valid token and key have been
+    presented. A protocol 1 (0.1.5) helper is told to download the new one.
     """
-    from ..worker import protocol as P
-    from .workers import WorkerConnection, authenticate, hub, record_connection
-
-    await websocket.accept()
-    connection = None
-    try:
-        raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
-        hello = P.parse(raw)
-        if hello.get("t") != P.HELLO:
-            await websocket.send_text(P.error_frame(P.Failure(id="", message="Expected a hello frame.")))
-            await websocket.close(code=4400)
-            return
-        if int(hello.get("version") or 0) != P.PROTOCOL_VERSION:
-            await websocket.send_text(P.error_frame(P.Failure(
-                id="", message=f"This server speaks worker protocol v{P.PROTOCOL_VERSION}; "
-                               f"the worker speaks v{hello.get('version')}. Update citar-worker.")))
-            await websocket.close(code=4426)
-            return
-
-        ip = request_ip(websocket)
-        identity = await asyncio.to_thread(authenticate, hello.get("token") or "")
-        if identity is None:
-            # Deliberately vague, and rate limited: this endpoint is reachable by anyone.
-            await asyncio.to_thread(_worker_auth_fail, ip)
-            await websocket.send_text(P.error_frame(P.Failure(id="", message="That worker token was refused.")))
-            await websocket.close(code=4401)
-            return
-        server_id, server_name, token_id = identity
-
-        connection = WorkerConnection(websocket, server_id, hello, asyncio.get_running_loop(), token_id=token_id)
-        refused = await hub().admit(connection)
-        if refused:
-            # taken away between the hello's check and the registration: told why, as a drop tells a helper
-            await websocket.send_text(P.frame(P.SHUTDOWN, reason=refused))
-            await websocket.close(code=4403)
-            return
-        # what was sent to it since it was registered (a request waiting for the machine) follows the welcome
-        await connection.welcome(P.welcome_frame(P.Welcome(
-            server_id=server_id, server_name=server_name,
-            ping_seconds=citar_settings.get().worker_ping_seconds)))
-        await asyncio.to_thread(record_connection, server_id, ip=ip,
-                                hardware=hello.get("hardware"), models=hello.get("models"),
-                                hostname=str(hello.get("hostname") or ""),
-                                worker_version=str(hello.get("worker_version") or ""))
-        print(f"worker connected: {server_name} ({hello.get('hostname')}, "
-              f"{len(hello.get('models') or [])} models)", flush=True)
-
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                data = P.parse(raw)
-            except P.ProtocolError:
-                continue
-            connection.touch()
-            kind = data.get("t")
-            if kind == P.DONE:
-                connection.resolve(data.get("id"), result=data)
-            elif kind == P.ERROR:
-                from .workers import WorkerError
-                connection.resolve(data.get("id"), error=WorkerError(
-                    data.get("message") or "The worker reported an error.",
-                    refusal=data.get("refusal") or "", retryable=bool(data.get("retryable"))))
-            elif kind == P.CATALOG:
-                connection.models = list(data.get("models") or [])
-                hub().models_changed(connection)
-                await asyncio.to_thread(record_connection, server_id, models=connection.models)
-            elif kind == P.PONG:
-                pass
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        from starlette.websockets import WebSocketState
-        if not (connection is not None and connection.closed
-                and websocket.application_state != WebSocketState.CONNECTED):
-            import traceback
-            traceback.print_exc()
-        # else the hub dropped the helper (a revoked token, a disabled machine) and closed its socket before this
-        # loop's next receive: an ordinary end, not an error
-    finally:
-        if connection is not None:
-            hub().unregister(connection)
-            print(f"worker disconnected: {connection.server_id}", flush=True)
-
-
-def request_ip(websocket) -> str:
-    """The client address for a WebSocket, honouring the trusted proxy count."""
-    return (websocket.headers.get("x-forwarded-for", "").split(",")[-1].strip()
-            or (websocket.client.host if websocket.client else "unknown"))
-
-
-def _worker_auth_fail(ip: str):
-    """Rate limit and record a bad worker token, so this endpoint cannot be brute forced."""
-    from ..auth import audit, ratelimit
-    from .. import db
-    try:
-        ratelimit.check("worker_auth", ip)
-    except ratelimit.RateLimited:
-        pass
-    try:
-        with db.session() as s:
-            audit.record(s, "worker.auth_failed", actor_label="worker", ip=ip)
-    except Exception:
-        pass
+    from .workers import serve
+    await serve(websocket)
 
 
 @app.websocket("/ws/games/{gid}")

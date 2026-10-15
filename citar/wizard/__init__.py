@@ -9,7 +9,7 @@ runs and the rest follow from it:
 
 ``citar.wizard.local``    one person, this computer, models on localhost or an API key.
 ``citar.wizard.server``   a public deployment: domain, TLS, sign-in, the first administrator.
-``citar.wizard.worker``   this machine's GPU serving models to a CITAR server somewhere else.
+``citar.wizard.worker``   since 0.1.6 a pointer: the CITAR helper serves a machine's models to a server.
 
 Two rules hold across all three:
 

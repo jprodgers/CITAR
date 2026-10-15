@@ -457,21 +457,29 @@ def worker_status(server_id: str, request: Request, p: Principal = Depends(princ
          "last_ip": t.last_ip, "revoked": t.revoked_at is not None}
         for t in s.query(WorkerToken).filter(WorkerToken.server_id == server.id)
         .order_by(WorkerToken.created_at.desc())]
+    from .workers import fingerprint
+    block = server.helper if isinstance(server.helper, dict) else None
     return {"online": connection is not None,
             "worker": connection.client() if connection else None,
+            # its helper's last hello (version, builds, target, protocol), kept on the row while it is offline
+            "helper": {k: block.get(k) for k in ("protocol", "version", "build", "jobs_build", "target", "label",
+                                                  "connected_at")} if block else None,
+            "key": {"fingerprint": fingerprint(server.public_key or "") or None,
+                    "registered_at": server.key_at.isoformat() if server.key_at else None},
             "tokens": tokens_out,
             "command": _worker_command(server), "args": _worker_args(server)}
 
 
 def _worker_args(server) -> str:
-    """The worker's arguments on their own, for the page to put after whichever helper file was downloaded."""
+    """The helper's arguments on their own, for the page to put after whichever helper file was downloaded."""
     from .. import settings as cfg
     return f"--server {cfg.get().public_origin} --token YOUR_TOKEN --name \"{server.name}\""
 
 
 def _worker_command(server) -> str:
-    """The exact command the machine's owner should run to connect it (with CITAR installed there)."""
-    return "python -m citar.worker " + _worker_args(server)
+    """The exact command the machine's owner should run to connect it, with the CITAR helper (``citar-helper``,
+    downloaded from this page) on its PATH."""
+    return "citar-helper " + _worker_args(server)
 
 
 class TokenBody(BaseModel):

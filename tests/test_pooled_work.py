@@ -51,6 +51,7 @@ from citar.pool import queue as work_queue
 from citar.pool import scheduler as S
 from citar.pool import seats as pool_seats
 from citar.server import workers as W
+from tests.helperfake import StubConnection
 
 settings.reset()
 
@@ -72,19 +73,11 @@ def labels(sid: str) -> list:
     return [lease.label for lease in S.get().leases(sid)]
 
 
-class StubHelper(W.WorkerConnection):
-    """A connected helper with no socket, answering each request at once with a ``Done``."""
+class StubHelper(StubConnection):
+    """A connected helper with no socket, answering each request at once with a ``done``."""
 
     def __init__(self, server_id: str, models: list):
-        super().__init__(websocket=None, server_id=server_id, loop=None,
-                         hello={"hostname": "stub", "provider": "lmstudio", "models": models, "max_concurrent": 1})
-
-    def send_threadsafe(self, text: str):
-        from citar.worker import protocol as P
-        frame = json.loads(text)
-        if frame.get("t") == P.REQUEST:
-            self.resolve(frame["id"], result={"text": "Written on the helper.", "duration": 0.01, "tool_calls": [],
-                                              "usage": {"input_tokens": 12, "output_tokens": 3}})
+        super().__init__(server_id, models, content="Written on the helper.")
 
 
 class World(unittest.TestCase):

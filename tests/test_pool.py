@@ -323,7 +323,7 @@ class Admission(PoolFixtures):
             refused = admission.check(s, s.get(User, self.guest_id), s.get(Server, self.server_id),
                                       online=False)
             self.assertEqual(refused.code, "offline")
-            self.assertIn("citar-worker", refused.reason)
+            self.assertIn("citar-helper", refused.reason)
 
     def test_disabled_server_is_refused_even_for_its_owner(self):
         with db.session() as s:

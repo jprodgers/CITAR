@@ -200,6 +200,37 @@ function grantDialog(group, existing, onSaved) {
 
 // ---------------------------------------------------------------------------- the helper and its tokens
 
+/** What the machine's helper is (its version, build, target and protocol, from its last hello) and the fingerprint of
+ *  the machine key it registered, with "Reset key…" (design/phase4-helper.md P4.3.7, P4.5.11): the owner checks the
+ *  fingerprint against `citar-helper --version` on the machine, and resets the key when the helper was reinstalled or
+ *  its token was used by someone else first. */
+function helperFacts(info, m, refresh) {
+  const h = info.helper || null;
+  const key = info.key || {};
+  const rows = [];
+  if (h) {
+    rows.push(el("span", { class: "muted small" },
+      `CITAR helper ${h.version || "?"} · protocol ${h.protocol || 2} · build ${h.build || "?"}`
+      + (h.target ? ` · ${h.target}` : "")));
+  }
+  rows.push(el("div", { class: "row gap wrap" },
+    el("span", { class: "muted small" }, key.fingerprint
+      ? ["Machine key ", el("code", {}, key.fingerprint)] : "No machine key registered yet: its helper's next hello registers one."),
+    key.fingerprint ? el("button", {
+      class: "small danger",
+      title: "Forget this key: the next helper to connect with a token of this machine registers its own",
+      onclick: async () => {
+        if (!(await confirmBox("Reset the machine key?",
+              "The next helper that connects with one of this machine's tokens registers its own key. Do this "
+              + "after reinstalling the helper, or when the fingerprint is not the one citar-helper --version "
+              + "prints on your machine (then revoke its tokens too)."))) return;
+        try { await call("resetMachineKey", gateOf(m), m.id); toast("Key reset.", "good"); refresh(); }
+        catch (e) { toast(e.message, "error"); }
+      },
+    }, "Reset key…") : null));
+  return el("div", { class: "col" }, ...rows);
+}
+
 async function helperDialog(m) {
   const body = el("div", { class: "col gap" }, el("span", { class: "muted" }, "Loading…"));
   const dialog = modal({ title: `Helper for “${m.name}”`, content: body });
@@ -215,6 +246,7 @@ async function helperDialog(m) {
           info.worker ? el("span", { class: "muted" },
             `${info.worker.hostname} · ${info.worker.models.length} models · `
             + `${info.worker.in_flight}/${info.worker.max_concurrent} busy`) : null),
+        helperFacts(info, m, refresh),
         el("p", { class: "muted" },
           "The helper dials out to this server, so nothing on your machine needs to be reachable "
           + "from the internet. Run it where the model is:"),
@@ -249,7 +281,7 @@ async function helperDialog(m) {
                 el("h3", {}, "New worker token"),
                 el("p", { class: "warn-box" }, created.warning),
                 helperCard({ args: created.args }),
-                el("p", { class: "muted small" }, "With CITAR installed on that machine instead:"),
+                el("p", { class: "muted small" }, "Or, with the helper on that machine's PATH:"),
                 el("pre", { class: "code-block" }, created.command),
                 el("button", {
                   class: "primary",

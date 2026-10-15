@@ -306,8 +306,8 @@ def cmd_add_server(args) -> int:
               + (f" in group '{group.name}'." if group else "."))
         print(f"  server id : {server.id}")
         print()
-        print("Run this on the machine with the model:")
-        print(f"  python -m citar.worker --server {origin} \\")
+        print("Run the CITAR helper on the machine with the model (download it from the Servers page):")
+        print(f"  citar-helper --server {origin} \\")
         print(f"      --token {raw} \\")
         print(f"      --name \"{server.name}\"")
         print()
@@ -332,7 +332,7 @@ def cmd_worker_token(args) -> int:
         s.add(WorkerToken(server_id=server.id, token_hash=hashed,
                           prefix=token_util.prefix(raw), label=args.label or "admin_cli"))
         print(f"New worker token for '{server.name}':")
-        print(f"  python -m citar.worker --server {settings.get().public_origin} "
+        print(f"  citar-helper --server {settings.get().public_origin} "
               f"--token {raw} --name \"{server.name}\"")
         print("  Shown once; only the hash is stored.")
     return 0

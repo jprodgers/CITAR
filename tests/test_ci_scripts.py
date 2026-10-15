@@ -313,7 +313,7 @@ class Requirements(unittest.TestCase):
         project = data["project"]
         got = requirements.requirements(data, ["all"])
         want = list(project["dependencies"])
-        for extra in ("anthropic", "openai", "mcp", "oauth", "keyring", "worker"):
+        for extra in ("anthropic", "openai", "mcp", "oauth", "keyring"):
             want += [r for r in project["optional-dependencies"][extra] if r not in want]
         self.assertEqual(got, want)
         self.assertFalse([r for r in got if r.lower().startswith("citar")])
