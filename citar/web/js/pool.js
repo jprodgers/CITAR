@@ -245,7 +245,7 @@ async function helperDialog(m) {
                       : el("span", { class: "pill quiet" }, "not connected"),
           info.worker ? el("span", { class: "muted" },
             `${info.worker.hostname} · ${info.worker.models.length} models · `
-            + `${info.worker.in_flight}/${info.worker.max_concurrent} busy`) : null),
+            + `${info.worker.in_flight}/${info.worker.slots} busy`) : null),
         helperFacts(info, m, refresh),
         el("p", { class: "muted" },
           "The helper dials out to this server, so nothing on your machine needs to be reachable "

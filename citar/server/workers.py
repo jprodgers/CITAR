@@ -287,9 +287,11 @@ class WorkerConnection:
         #: When the helper's own quiet hours in force end (Unix seconds), from its hello and its ``status`` frames.
         self.quiet_until: Optional[float] = hello.get("quiet_until")
         self.status_frame: dict = {}
-        #: The site's settings it was last sent, and its last acknowledgement as it sent it.
+        #: The site's settings it was last sent, and its last acknowledgement as it sent it; ``acked`` is set when an
+        #: acknowledgement has been applied (``push_settings`` waits on it).
         self.settings: Optional[dict] = settings
         self.ack: Optional[dict] = None
+        self.acked = threading.Event()
         self.connected_at = self.clock.time()
         self.last_seen = self.connected_at
         #: This connection's own number (unique in the process): a request's late answer comes back only over the
@@ -352,11 +354,6 @@ class WorkerConnection:
             return max(0, int(self.hello_llm["slots"]))
         return int(eff["llm"]["slots"])
 
-    @property
-    def max_concurrent(self) -> int:
-        """``llm_slots``, under the name the pages read."""
-        return self.llm_slots
-
     def model_keys(self) -> list:
         """The models this helper offers."""
         return [m.get("key") for m in self.models if m.get("key")]
@@ -370,10 +367,10 @@ class WorkerConnection:
         limits = (self.ack or {}).get("limits")
         return {
             "server_id": self.server_id, "hostname": self.hostname, "provider": self.provider,
-            "protocol": HP.PROTOCOL, "version": self.helper_version, "worker_version": self.helper_version,
+            "protocol": HP.PROTOCOL, "version": self.helper_version,
             "build": self.build, "jobs_build": self.jobs_build, "target": self.target,
             "key_fingerprint": self.key_fingerprint(), "models": self.models,
-            "max_concurrent": self.llm_slots, "in_flight": self.in_flight,
+            "slots": self.llm_slots, "in_flight": self.in_flight,
             "effective": eff, "capped": list((self.ack or {}).get("capped") or []), "limits": limits,
             "quiet_until": self.quiet_until, "connected_at": self.connected_at, "last_seen": self.last_seen,
             "alive": self.alive, "uptime_seconds": round(self.clock.time() - self.connected_at),
@@ -650,13 +647,16 @@ class WorkerHub:
         return connection.effective() if connection else None
 
     # -------------------------------------------------------------- pushes to a helper
-    def push_settings(self, server_id: str) -> bool:
+    def push_settings(self, server_id: str, wait: float = 0.0) -> bool:
         """Send a machine's helper its settings again, as the site has them now (the settings route, after its
-        commit). Reads the registry's cache: never on the event loop. Returns whether a helper was there."""
+        commit), and wait up to ``wait`` seconds for its acknowledgement, so the caller reads what is in effect.
+        Reads the registry's cache and may wait: never on the event loop. Returns whether the helper acknowledged
+        (with no wait: whether a helper was there to send them to)."""
         connection = self.get(server_id)
         if connection is None:
             return False
         settings = site_settings(server_id)
+        connection.acked.clear()
         connection.settings = settings
         _helper_changed(server_id)
         try:
@@ -664,7 +664,7 @@ class WorkerHub:
         except Exception:
             log.exception("could not push settings to %s's helper", server_id)
             return False
-        return True
+        return connection.acked.wait(wait) if wait > 0 else True
 
     def rescan(self, server_id: str) -> bool:
         """Ask a machine's helper to scan its hardware now (the dialog's "Rescan now"). Returns whether a helper was
@@ -981,6 +981,7 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
                                     "asked (%s): held to the site's settings", sid, ", ".join(over))
                 await asyncio.to_thread(flag_machine, sid, "settings_overclaim", {"fields": over})
         _helper_changed(sid)
+        connection.acked.set()
         await asyncio.to_thread(record_ack, sid, data)
     elif t == "catalog":
         connection.models = list(data["models"])

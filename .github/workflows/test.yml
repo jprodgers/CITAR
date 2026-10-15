@@ -92,6 +92,23 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: The CITAR helper, for the end-to-end tests
+        # tests/test_helper_e2e.py runs the real binary against the real hub (design/phase4-helper.md, 4-05). Built
+        # as cargo xtask develop builds it on a laptop: the ci profile, with the development guard (loopback
+        # servers only, an explicit --home), which no shipped build ever has.
+        shell: bash
+        run: |
+          cargo build --profile ci --locked -p citar-helper --features citar-helper/dev-guard
+          mkdir -p helper
+          cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-${{ runner.os }}
+          path: helper/
+          if-no-files-found: error
+          retention-days: 7
+
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     needs: build-ext
@@ -121,6 +138,11 @@ jobs:
           name: ext-${{ runner.os }}
           path: ext
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-${{ runner.os }}
+          path: helper
+
       - name: Install
         # The dependencies alone, since installing the package would build the extension again:
         # the build-ext job's library goes into the checkout instead, and the unpacking fails
@@ -135,8 +157,13 @@ jobs:
 
       - name: Tests
         # Not pytest: the suite is unittest and is run the same way here as on a laptop, so a
-        # failure can be reproduced with the command in the contributing guide.
-        run: python -m unittest discover -s tests -v
+        # failure can be reproduced with the command in the contributing guide. The end-to-end
+        # tests run the build-ext job's helper (CITAR_HELPER_BIN; an artifact loses its exec bit).
+        shell: bash
+        run: |
+          chmod +x helper/citar-helper* || true
+          export CITAR_HELPER_BIN="$PWD/helper/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}"
+          python -m unittest discover -s tests -v
 
       - name: Route audit
         # Every HTTP route must declare a gate or be listed as public with a reason. This is the

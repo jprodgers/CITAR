@@ -89,7 +89,7 @@ async function overview() {
       h.disk ? meter("Disk", h.disk.used, h.disk.total, `${bytes(h.disk.used)} of ${bytes(h.disk.total)}`) : null,
       (status.workers || []).length ? el("div", {}, el("h3", {}, "Connected workers"),
         ...status.workers.map((w) => el("div", { class: "row m-line" }, el("span", {}, `● ${w.hostname || w.server_id}`),
-          el("span", { class: "muted" }, `${w.models} models · ${w.in_flight}/${w.max_concurrent} busy`)))) : null));
+          el("span", { class: "muted" }, `${w.models} models · ${w.in_flight}/${w.slots} busy`)))) : null));
   }
   const live = games.filter((x) => x.phase === "playing");
   out.push(section("Running games", ...(live.length ? live.map(gameRow) : [empty("Nothing running right now.")]),

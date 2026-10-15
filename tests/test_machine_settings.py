@@ -596,6 +596,7 @@ class EndToEnd(unittest.TestCase):
         fields["report"] = {"hardware": hardware, "hardware_source": "file"}
         helper = H.FakeHelper(f"ws://127.0.0.1:{self.port}/ws/worker")
         helper.handshake(fields)
+        H.Responder(helper, slots=2)            # it answers what the server sends it, settings pushed included
         self.worker = helper
         row = _soon(lambda: (lambda r: r if r.detected_at is not None and r.detected_at != before else None)(self.row()))
         self.assertIsNotNone(row, "the helper's report was not recorded")

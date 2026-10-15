@@ -78,13 +78,19 @@ def _refresh(server_id: str) -> None:
         log.warning("could not refresh machine %s in the scheduler", server_id, exc_info=True)
 
 
+#: How long the settings route waits for a connected helper to acknowledge its new settings, so its answer shows what
+#: is in effect (the helper's ceiling applied); a helper that does not answer in time is shown as it was.
+ACK_WAIT_SECONDS = 2.0
+
+
 def settings_changed(server_id: str) -> None:
     """A machine's settings changed and were committed: the prompt scheduler reads its row again, and its connected
-    helper is sent the new settings (design/phase4-helper.md P4.5.1). Never raises."""
+    helper is sent the new settings (design/phase4-helper.md P4.5.1), whose acknowledgement is waited for a moment.
+    Never raises."""
     _refresh(server_id)
     try:
         from .workers import hub
-        hub().push_settings(server_id)
+        hub().push_settings(server_id, wait=ACK_WAIT_SECONDS)
     except Exception:
         log.warning("could not push machine %s's settings to its helper", server_id, exc_info=True)
 

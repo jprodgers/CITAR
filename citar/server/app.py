@@ -553,7 +553,7 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
             pass
         out["host"] = host
         out["workers"] = [{"server_id": w["server_id"], "hostname": w["hostname"], "models": len(w["models"] or []),
-                           "in_flight": w["in_flight"], "max_concurrent": w["max_concurrent"], "alive": w["alive"]}
+                           "in_flight": w["in_flight"], "slots": w["slots"], "alive": w["alive"]}
                           for w in workers]
         # the prompt scheduler's machines (design/phase3-features.md P3.3.2): slots, leases, pooled prompts, what drains
         from ..pool import scheduler as prompt_scheduler

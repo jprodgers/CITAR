@@ -123,6 +123,16 @@ class StubConnection(W.WorkerConnection):
     def send_threadsafe(self, text: str):
         frame = HP.parse_server_frame(text)
         self.frames.append(frame)
+        if frame.get("t") == "settings":
+            # acknowledged as a correct helper does: its own slots the ceiling, no CPU lent
+            llm = self.hello_llm
+            self.ack = {"effective": {"llm": {"enabled": frame["llm"]["enabled"] and llm["enabled"],
+                                              "slots": min(frame["llm"]["slots"], llm["slots"])},
+                                      "cpu": {**frame["cpu"], "enabled": False}},
+                        "capped": [], "limits": {"cpu": "soft", "memory": "soft"}}
+            W._helper_changed(self.server_id)
+            self.acked.set()
+            return
         if frame.get("t") == "cancel" and self.ack_cancel and frame["id"] in self.held:
             # a protocol 2 helper stops the generation and says so: ``cancelled``, the request's late frame
             self.held.remove(frame["id"])
@@ -209,10 +219,14 @@ class HubServer:
 # ---------------------------------------------------------------------------- the real helper
 
 def helper_binary() -> Optional[str]:
-    """The CITAR helper ``cargo xtask develop`` built (with its development guard: loopback servers only, an explicit
-    ``--home``), beside the extension in ``CITAR_EXT_DIR``; None when there is none (the end-to-end tests skip)."""
+    """The CITAR helper to run: ``CITAR_HELPER_BIN`` (CI's test jobs name the build-ext job's), else the one ``cargo
+    xtask develop`` built (with its development guard: loopback servers only, an explicit ``--home``) beside the
+    extension in ``CITAR_EXT_DIR``; None when there is none (the end-to-end tests skip)."""
     import os
     from pathlib import Path
+    given = os.environ.get("CITAR_HELPER_BIN")
+    if given and Path(given).is_file():
+        return given
     folder = os.environ.get("CITAR_EXT_DIR")
     if not folder:
         return None
@@ -409,8 +423,10 @@ class Responder:
     keeps every request (``requests``), cancel (``cancels``) and, per answered request, the seconds it spent
     (``spent``: from reading the request to sending its answer)."""
 
-    def __init__(self, helper: FakeHelper, answer=None, *, ack_delay: Optional[float] = 0.0):
+    def __init__(self, helper: FakeHelper, answer=None, *, ack_delay: Optional[float] = 0.0, slots: int = 1):
         self.helper = helper
+        self.slots = slots
+        self.settings: list = []
         self.answer = answer or (lambda frame: done_fields(frame))
         self.ack_delay = ack_delay
         self.requests: list = []
@@ -441,6 +457,17 @@ class Responder:
                     continue
                 self._send(frame, reply)
                 self.spent[frame["id"]] = time.perf_counter() - got
+            elif t == "settings":
+                # acknowledged as a correct helper does with no CPU lent: its hello's slots its ceiling
+                self.settings.append(frame)
+                try:
+                    self.helper.send("settings_ack", effective={
+                        "llm": {"enabled": frame["llm"]["enabled"], "slots": min(frame["llm"]["slots"], self.slots)},
+                        "cpu": {**{k: frame["cpu"][k] for k in ("threads", "cpu_percent", "memory_mb", "work",
+                                                                 "yield_to_llm")}, "enabled": False}},
+                        capped=[], limits={"cpu": "soft", "memory": "soft"})
+                except Exception:
+                    pass
             elif t == "cancel":
                 with self.lock:
                     self.cancels.append((frame["id"], time.perf_counter()))
