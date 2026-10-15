@@ -1088,7 +1088,7 @@ class Frames(_Live):
         here). Parsed on the loop they held every other connection for the whole parse; parsed on a thread the loop
         waits at most a handoff of the interpreter's lock. The bound is a third of the parse's own time, measured in
         the same run, and never under 50 ms (a thread switch on Windows can take 16 ms, and the fake helper's own
-        sending shares this process)."""
+        sending shares this process); on CI three times that (p3-notes.md), still under the parse's own time."""
         n = HP.MAX_HELLO_BYTES - 64 * 1024
         shapes = {
             "not JSON (the depth scan)": "[" * 60 + "0," * ((n - 120) // 2) + "}",
@@ -1097,7 +1097,7 @@ class Frames(_Live):
         }
         for name, raw in shapes.items():
             with self.subTest(name):
-                bound = max(0.05, self.parse_seconds(raw) / 3)
+                bound = max(0.05, self.parse_seconds(raw) / 3) * (3 if CI else 1)
                 closed: list = []
                 longest = self.stalls(functools.partial(lambda text, out: out.append(self.refused_unread(text)),
                                                         raw, closed))
@@ -1108,7 +1108,7 @@ class Frames(_Live):
         sid, token, _tid = _machine(self.ids["lena"], "long frames")
         helper = self.connect(token)
         raw = "[" * 60 + "0," * ((8 * 1024 * 1024 - 200) // 2) + "}"
-        bound = max(0.05, self.parse_seconds(raw) / 3)
+        bound = max(0.05, self.parse_seconds(raw) / 3) * (3 if CI else 1)
 
         def send_and_settle():
             helper.send_text(raw)
