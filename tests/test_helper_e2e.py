@@ -204,6 +204,7 @@ class RealHelper(unittest.TestCase):
         self.assertLess(entry["gone"] - t_cancel, bound, "its client went within a second of the cancel")
         after = [t for t in entry["events"] if t > t_cancel]
         self.assertLessEqual(len(after), 1, "no event after the cancel but the one on its way")
+        self.assertEqual([t for t in entry["events"] if t > entry["gone"]], [], "no token after its client went")
         self.assertGreaterEqual(entry["tokens"], 1)
         # the next request is served at once, not refused busy
         lease = sched.lease(sid, MODEL, kind="game", label="next")
