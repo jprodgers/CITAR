@@ -272,7 +272,13 @@ class FakeEndpoint:
     calls. Between events it watches the socket, so it sees its client go within ``POLL`` seconds; each request's
     entry records when each event went out (``events``), how many carried text (``tokens``) and when its client went
     (``gone``, None when it read to the end). Connections are kept alive between requests (HTTP/1.1), as LM Studio
-    keeps them."""
+    keeps them.
+
+    **One model** (``one_model``), as LM Studio with its one model loaded: one completion generated at a time, the
+    others waiting their turn; with ``runs_on``, a generation whose client went keeps the model busy to its end, as a
+    server that does not stop a generation when its client goes. ``lengthy`` prompts are answered at length (an essay
+    to cancel), and ``unload_at`` plays the model unloaded during a run. ``qa_phase4.py``'s ``llm-real`` stand-in is
+    built of these."""
 
     #: How often a streaming answer looks whether its client went.
     POLL = 0.02
@@ -303,6 +309,17 @@ class FakeEndpoint:
         #: What ``/models`` names: (key, loaded) each. A part changes it to have a helper report other models at its
         #: next connection.
         self.models: list = [(self.MODEL, True)]
+        #: Once this many chat completions have arrived, ``/models`` lists every model not loaded: the model unloaded
+        #: during a run (None: never).
+        self.unload_at: Optional[int] = None
+        #: Prompts answered at length: {text in the last user message: words}. Such a prompt gets that many words of
+        #: text and no tool call, its ``delay_for`` seconds spread over them: a model writing an essay.
+        self.lengthy: dict = {}
+        #: ``one_model``'s lock: held while a completion is generated (None: any number at once).
+        self._model: Optional[threading.Lock] = None
+        #: With ``one_model``: a streamed answer whose client went keeps the model until its last event would have
+        #: gone.
+        self.runs_on = False
         self._lock = threading.Lock()
         #: Completions ``hold(body)`` picks wait for ``gate`` (set: open) before they are answered; ``held`` counts
         #: those waiting now. A part holds a game's turn so the work behind it queues on its machine.
@@ -325,8 +342,9 @@ class FakeEndpoint:
             def do_GET(self):
                 outer.requests.append({"t": time.time(), "method": "GET", "path": self.path})
                 if self.path.rstrip("/").endswith("/models"):
+                    unloaded = outer.unload_at is not None and len(outer.arrivals) >= outer.unload_at
                     return self._send(200, {"object": "list", "data": [
-                        {"id": key, "object": "model", "state": "loaded" if loaded else "not-loaded",
+                        {"id": key, "object": "model", "state": "loaded" if loaded and not unloaded else "not-loaded",
                          "max_context_length": 32768} for key, loaded in list(outer.models)]})
                 self._send(404, {"error": "not found"})
 
@@ -347,6 +365,14 @@ class FakeEndpoint:
                     outer.gate.wait(300)
                     with outer._lock:
                         outer.held -= 1
+                model = outer._model
+                if model is None:
+                    return self._answer(body, entry, t0)
+                # one model, one generation at a time: the others wait their turn here
+                with model:
+                    self._answer(body, entry, t0)
+
+            def _answer(self, body: dict, entry: dict, t0: float):
                 t1 = time.time()
                 delay = outer.delay_for(body)
                 stream = bool(body.get("stream"))
@@ -412,6 +438,8 @@ class FakeEndpoint:
             deltas.append(({"tool_calls": [{"index": i, "id": call["id"], "type": "function",
                                             "function": dict(call["function"])}]}, True))
         gap = (delay or 0.0) / max(1, len(deltas))
+        # when the generation would end: with ``runs_on``, a client that goes earlier leaves the model busy until then
+        finish_at = time.time() + (delay or 0.0)
         events: list = []
         entry.update(events=events, tokens=0, gone=None)
         with self._lock:
@@ -462,6 +490,7 @@ class FakeEndpoint:
             entry["gone"] = time.time()
             handler.close_connection = True
             log_once()
+            self._run_on(finish_at, entry)
             return
         base = {"id": reply["id"], "object": "chat.completion.chunk", "created": reply["created"],
                 "model": reply["model"]}
@@ -469,6 +498,7 @@ class FakeEndpoint:
             if not wait(gap) or not event({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}):
                 handler.close_connection = True
                 log_once()
+                self._run_on(finish_at, entry)
                 return
             if carries and "tool_calls" not in delta:
                 entry["tokens"] += 1
@@ -479,6 +509,24 @@ class FakeEndpoint:
         ok = ok and event("[DONE]") and chunk(b"")
         if not ok:
             handler.close_connection = True
+
+    def _run_on(self, finish_at: float, entry: dict) -> None:
+        """A streamed answer's client went before its end: with ``one_model``'s ``runs_on``, the model generates on,
+        busy until ``finish_at`` (``ran_on_s`` in the entry), as a server that does not stop a generation when its
+        client goes; else it stops at once, as LM Studio does."""
+        if self._model is None or not self.runs_on:
+            return
+        left = max(0.0, finish_at - time.time())
+        entry["ran_on_s"] = round(left, 3)
+        time.sleep(left)
+
+    def one_model(self, runs_on: bool = False) -> None:
+        """Play a server with one model loaded, as LM Studio is: one completion generated at a time, the others
+        waiting their turn. With ``runs_on``, a streamed answer whose client went keeps the model busy until its last
+        event would have gone: the server that does not stop a cancelled generation, which ``llm-real``'s bound on
+        the requests after a cancel exists to catch."""
+        self._model = threading.Lock()
+        self.runs_on = runs_on
 
     def streamed(self) -> list:
         """The completions it streamed, served (their entries)."""
@@ -534,6 +582,11 @@ class FakeEndpoint:
         steps = sum(1 for m in since if m.get("role") == "assistant")
         prompt = str(messages[last_user].get("content") or "") if last_user >= 0 else ""
         calls: list = []
+        words = next((n for text, n in self.lengthy.items() if text in prompt), 0)
+        if words:
+            # a model writing at length: words of text, no tool call
+            return self._reply(body, messages, {"role": "assistant",
+                                                "content": " ".join(str(n) for n in range(1, words + 1))}, [], words)
 
         def call(name: str, args: Optional[dict] = None) -> None:
             if name in tools:
@@ -574,12 +627,16 @@ class FakeEndpoint:
                                                                       or "nothing to do")}
         if calls:
             message["tool_calls"] = calls
+        return self._reply(body, messages, message, calls, 10 + 10 * len(calls))
+
+    def _reply(self, body: dict, messages: list, message: dict, calls: list, completion_tokens: int) -> tuple:
+        """The chat completion holding ``message`` (with ``calls``), and the calls."""
+        prompt_tokens = sum(len(str(m.get("content") or "")) for m in messages) // 4
         reply = {"id": f"qa-{len(self.requests)}", "object": "chat.completion", "created": int(time.time()),
                  "model": body.get("model") or self.MODEL,
                  "choices": [{"index": 0, "finish_reason": "tool_calls" if calls else "stop", "message": message}],
-                 "usage": {"prompt_tokens": sum(len(str(m.get("content") or "")) for m in messages) // 4,
-                           "completion_tokens": 10 + 10 * len(calls),
-                           "total_tokens": sum(len(str(m.get("content") or "")) for m in messages) // 4 + 10}}
+                 "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                           "total_tokens": prompt_tokens + completion_tokens}}
         return reply, calls
 
     @staticmethod

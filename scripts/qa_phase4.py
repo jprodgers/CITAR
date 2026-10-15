@@ -30,7 +30,11 @@ Parts:
   message whose tool call (or text) the server parses; a 1,500-token generation cancelled at 2 s is acknowledged
   within a second, freeing its slot with nothing draining; three short requests after it take no longer than 1.5
   times the median of three before it plus a second. ``--stand-in`` plays LM Studio with the scripted endpoint (the
-  same model name, loaded; streaming; a cancelled generation stopped), to check the part itself without the model.
+  same model name, loaded; streaming; one model generating one answer at a time; a cancelled generation stopped), to
+  check the part itself without the model. The checks are one function (``exercise``), and
+  ``tests/test_helper_llm_real.py`` runs it in every test run against stand-ins: it passes against one that stops a
+  cancelled generation, and fails against one that runs on after the cancel, against a model that is not loaded (with
+  nothing sent to it) and against one unloaded during the run.
 
 ``all`` runs every part written so far; later packages add ``scan`` (4-06), ``lab`` (4-09), ``remote`` (4-10),
 ``verify`` (4-11, 4-12), ``update`` (4-13), ``service`` (4-14), ``exit`` and ``real`` (4-15).
@@ -346,58 +350,125 @@ REAL_URL, REAL_MODEL = q3.REAL_URL, q3.REAL_MODEL
 #: The part's options (``--llm-url``, ``--stand-in``), set by ``main``.
 LLM_URL = REAL_URL
 STAND_IN = False
+#: The long generation, cancelled ``CANCEL_AT`` seconds after it is asked for; the stand-in knows it by ``LONG_KEY``.
+LONG_PROMPT = "Write a very long essay, at least 1,500 words, about the history of maps."
+LONG_KEY = "Write a very long essay"
+CANCEL_AT = 2.0
+
+
+class _Ended(Exception):
+    """A check failed whose failure leaves the later checks meaningless: the run ends there."""
+
+
+def stand_in(*, loaded: bool = True, runs_on: bool = False, long_s: float = 40.0, long_words: int = 1500):
+    """LM Studio as ``llm-real`` meets it, played by the scripted endpoint (``--stand-in``, and the tests of the checks
+    themselves, ``tests/test_helper_llm_real.py``): ``REAL_MODEL`` listed by LM Studio's own ``/api/v0/models``, loaded
+    or not; streamed answers on connections kept open; one model generating one answer at a time (``runs_on``: a
+    generation whose client went keeps it busy to its end, as a server that does not stop it); each short answer in
+    0.2 s, and the long generation's ``long_words`` words over ``long_s`` seconds, well past the cancel."""
+    ep = FakeEndpoint(delay=0.2)
+    ep.MODEL = REAL_MODEL
+    ep.models = [(REAL_MODEL, loaded)]
+    ep.one_model(runs_on)
+    ep.slow = {LONG_KEY: long_s}
+    ep.lengthy = {LONG_KEY: long_words}
+    return ep
+
+
+def endpoint_side(ep, cancel_at: Optional[float]) -> dict:
+    """What a stand-in saw of a run: its completions (how many, how many streamed, the tools the first offered) and,
+    of the long generation, its events in all, those after the cancel (``cancel_at``, ``time.time()``), how long after
+    the cancel its client went, the tokens it sent and how long the model ran on."""
+    served = ep.completions()
+    side = {"completions": len(served), "streamed": sum(1 for r in served if r.get("stream")),
+            "first_tools": served[0].get("tools") if served else None}
+    long = next((r for r in served if str(r.get("head") or "").startswith(LONG_KEY)), None)
+    if long is not None:
+        events = list(long.get("events") or [])
+        gone = long.get("gone")
+        side.update(long_events=len(events), long_tokens=long.get("tokens"),
+                    events_after_cancel=sum(1 for t in events if cancel_at is not None and t > cancel_at),
+                    gone_after_cancel_s=round(gone - cancel_at, 3) if gone and cancel_at is not None else None,
+                    ran_on_s=long.get("ran_on_s"))
+    return side
 
 
 def part_llm_real(h) -> None:
     """The ``llm-real`` part (the module's doc): a hub of its own in this process, its database in ``<dir>/llm-real``,
-    the real helper in front of LM Studio (or ``--stand-in``'s scripted LM Studio), checked through the scheduler."""
-    r = h.report
-    data = r.data.setdefault("llm_real", {})
-    stand_in = None
-    url = LLM_URL
-    if STAND_IN:
-        stand_in = FakeEndpoint(delay=0.2)
-        stand_in.MODEL = REAL_MODEL
-        stand_in.models = [(REAL_MODEL, True)]
-        # its long generation takes as long as a real one would (well past the cancel at 2 s)
-        stand_in.slow = {"Write a very long essay": 40.0}
-        url = stand_in.url
+    the real helper in front of LM Studio (or ``--stand-in``'s), checked through the scheduler (``exercise``)."""
+    data = h.report.data.setdefault("llm_real", {})
+    ep = stand_in() if STAND_IN else None
+    url = ep.url if ep is not None else LLM_URL
     data["endpoint"] = {"url": url, "model": REAL_MODEL, "stand_in": bool(STAND_IN)}
     try:
-        ready, said = q3.lmstudio_model(url, REAL_MODEL)
-        data["before"] = said
-        if not r.check(f"{'the stand-in' if STAND_IN else 'LM Studio'} at {url} lists {REAL_MODEL}, loaded (read only: "
-                       "GET /api/v0/models; the part never loads, unloads or swaps a model)", ready, said):
-            return
-        _llm_real(h, url, data, stand_in)
-        after, said_after = q3.lmstudio_model(url, REAL_MODEL)
-        data["after"] = said_after
-        r.check(f"{REAL_MODEL} is still loaded after the part", after, said_after)
+        _own_instance(h.server.state / "llm-real")
+        exercise(h.report.check, url, h.server.state, data, label="the stand-in" if STAND_IN else "LM Studio")
     finally:
-        if stand_in is not None:
-            stand_in.close()
+        if ep is not None:
+            data["stand_in_side"] = endpoint_side(ep, data.get("cancel_at"))
+            ep.close()
 
 
-def _llm_real(h, url: str, data: dict, stand_in) -> None:
-    r = h.report
-    home = h.server.state / "llm-real"
+def _own_instance(home: Path) -> None:
+    """This process's own instance for the part, in ``home``: its variables set before anything of citar is imported
+    here, then its database made."""
     home.mkdir(exist_ok=True)
-    # this process's own instance, before anything of citar is imported here
     os.environ.update({"CITAR_DATA_DIR": str(home), "CITAR_DB_URL": "sqlite:///" + (home / "hub.db").as_posix(),
                        "CITAR_SAVE_DIR": str(home / "saves"), "CITAR_CONFIG_DIR": str(home / "config"),
                        "CITAR_MODE": "local", "CITAR_KEYS_FILE": str(home / "config" / "keys.enc")})
-    sys.path.insert(0, str(ROOT))
-    from citar import db, servers, settings
-    from citar.agents.providers import make_conversation
-    from citar.auth import tokens
-    from citar.db.models import Base, Server, WorkerToken
-    from citar.pool import scheduler as S
-    from citar.server import workers as W
-    from tests import helperfake as HF
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from citar import db, settings
+    from citar.db.models import Base
     settings.reset()
     db.dispose()
     db.configure(os.environ["CITAR_DB_URL"])
     Base.metadata.create_all(db.engine())
+
+
+def exercise(check: Callable, url: str, state: Path, data: dict, *, label: str = "LM Studio",
+             ack_bound: float = 1.0) -> None:
+    """``llm-real``'s checks (the module's doc: 4-04 gate 4's, through the hub and the scheduler) against ``label`` at
+    ``url``, with the database this process has configured: a hub of its own on loopback, and the real helper (its
+    home ``<state>/helper-llm-real``) in front of the endpoint. Each check goes to ``check(name, ok, detail,
+    **numbers)`` (the harness's ``Report.check``), and what the run measured to ``data``.
+
+    Nothing is sent to a model that is not loaded: the first check ends the run there, before a helper starts. A
+    failure that leaves the later checks meaningless (the helper not connecting, a request failing) ends it at that
+    check, and the model's state is read again after the run whatever happened in it. ``ack_bound`` is the seconds
+    the cancel's acknowledgement may take: the gate's 1 (the tests give CI three times it, ``p3-notes.md``)."""
+    ready, said = q3.lmstudio_model(url, REAL_MODEL)
+    data["before"] = said
+    if not check(f"{label} at {url} lists {REAL_MODEL}, loaded (read only: GET /api/v0/models; the part never loads, "
+                 "unloads or swaps a model)", ready, said):
+        return
+    try:
+        _through_the_hub(check, url, state, data, ack_bound)
+    except _Ended:
+        pass
+    finally:
+        after, said_after = q3.lmstudio_model(url, REAL_MODEL)
+        data["after"] = said_after
+        check(f"{REAL_MODEL} is still loaded after the part", after, said_after)
+
+
+def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bound: float) -> None:
+    from citar import db, servers
+    from citar.agents.providers import make_conversation
+    from citar.auth import tokens
+    from citar.db.models import Server, WorkerToken
+    from citar.pool import scheduler as S
+    from citar.server import workers as W
+    from tests import helperfake as HF
+
+    def must(name: str, what: str, fn: Callable):
+        """``fn()``; if it raises, the check ``name`` fails saying ``what`` failed, and the run ends."""
+        try:
+            return fn()
+        except Exception as exc:
+            check(name, False, f"{what} failed: {type(exc).__name__}: {exc}"[:400])
+            raise _Ended from exc
+
     hub_server = HF.HubServer()
     helper = None
     try:
@@ -413,12 +484,13 @@ def _llm_real(h, url: str, data: dict, stand_in) -> None:
         S.reset()
         helper = HF.RealHelper(hub_server.base, raw, url, name="qa-llm-real", slots=1,
                                extra=("--provider", "lmstudio", "--model", REAL_MODEL),
-                               home=h.server.state / "helper-llm-real")
+                               home=state / "helper-llm-real")
         online = wait_until(lambda: W.hub().get(sid) is not None and W.hub().get(sid).ack is not None, 60, 0.25)
         models = {m.get("key"): m.get("loaded") for m in (W.hub().get(sid).models if online else [])}
-        r.check(f"the real helper in front of it connected to this hub and reports {REAL_MODEL} loaded (its allowlist)",
-                bool(online) and models == {REAL_MODEL: True}, json.dumps({"models": models})[:300])
-        if not online:
+        if not check(f"the real helper in front of it connected to this hub and reports {REAL_MODEL} loaded (its "
+                     "allowlist)", bool(online) and models == {REAL_MODEL: True},
+                     json.dumps({"models": models})[:300] + ("" if online else "; its log ends: "
+                                                            + helper.text()[-600:])):
             return
         sched = S.get()
         m = sched.machine(sid)
@@ -434,54 +506,61 @@ def _llm_real(h, url: str, data: dict, stand_in) -> None:
             conv.add_user_text(text)
             return conv
         lease = sched.lease(sid, REAL_MODEL, kind="game", label="qa llm-real")
-        step = conversation(lease, "Call the end_turn tool now.", max_tokens=256).step()
-        names = [c.name for c in step.tool_calls]
-        r.check("a request with tools comes back as a raw message the server parses: a tool call (or text)",
-                bool(names) or bool((step.text or "").strip()),
-                json.dumps({"tool_calls": names, "text": (step.text or "")[:120]}))
-        data["tool_call"] = {"names": names, "text": (step.text or "")[:200]}
+        try:
+            name = "a request with tools comes back as a raw message the server parses: a tool call (or text)"
+            step = must(name, "the request with tools",
+                        lambda: conversation(lease, "Call the end_turn tool now.", max_tokens=256).step())
+            names = [c.name for c in step.tool_calls]
+            data["tool_call"] = {"names": names, "text": (step.text or "")[:200]}
+            check(name, bool(names) or bool((step.text or "").strip()),
+                  json.dumps({"tool_calls": names, "text": (step.text or "")[:120]}))
 
-        def short() -> float:
-            t0 = time.perf_counter()
-            conversation(lease, "Reply with exactly: OK", max_tokens=16).step()
-            return time.perf_counter() - t0
-        before = [short() for _ in range(3)]
-        ticket = sched.ticket(sid, REAL_MODEL, cls="test", label="qa long generation")
-        conv = conversation(ticket, "Write a very long essay, at least 1,500 words, about the history of maps.",
-                            max_tokens=1500)
-        late0 = m.counters["late_frames"]
-        out: dict = {}
+            def short() -> float:
+                t0 = time.perf_counter()
+                conversation(lease, "Reply with exactly: OK", max_tokens=16).step()
+                return time.perf_counter() - t0
+            bound_name = ("three short requests after the cancel take no longer than 1.5 times the median of three "
+                          "before it plus a second: the model stopped the cancelled generation")
+            before = must(bound_name, "a short request before the cancel", lambda: [short() for _ in range(3)])
+            ticket = sched.ticket(sid, REAL_MODEL, cls="test", label="qa long generation")
+            conv = conversation(ticket, LONG_PROMPT, max_tokens=1500)
+            late0 = m.counters["late_frames"]
+            out: dict = {}
 
-        def long():
-            try:
-                out["result"] = conv.step()
-            except BaseException as exc:
-                out["error"] = exc
-        th = threading.Thread(target=long, daemon=True)
-        th.start()
-        time.sleep(2.0)
-        t_cancel = time.perf_counter()
-        ticket.cancel()
-        acked = wait_until(lambda: m.counters["late_frames"] > late0 and m.slots == [] and time.perf_counter(),
-                           10, 0.01)
-        th.join(10)
-        ack_s = round(acked - t_cancel, 3) if acked else None
-        r.check("a 1,500-token generation cancelled at 2 s is acknowledged within a second: the helper's cancelled "
-                "frees its slot, nothing drains",
-                "error" in out and acked is not None and acked - t_cancel < 1.0 and m.counters["draining"] == 0
-                and m.counters.get("cancel_unacked", 0) == 0,
-                json.dumps({"ack_s": ack_s, "counters": dict(m.counters)})[:400], ack_s=ack_s)
-        after = [short() for _ in range(3)]
-        bound = 1.5 * statistics.median(before) + 1.0
-        r.check("three short requests after the cancel take no longer than 1.5 times the median of three before it "
-                "plus a second: the model stopped the cancelled generation",
-                all(x <= bound for x in after),
-                json.dumps({"before": [round(x, 3) for x in before], "after": [round(x, 3) for x in after],
-                            "bound": round(bound, 3)}))
-        data.update(before_s=[round(x, 3) for x in before], after_s=[round(x, 3) for x in after], ack_s=ack_s,
-                    stand_in_gone=(stand_in.streamed()[-1].get("gone") is not None) if stand_in and
-                    stand_in.streamed() else None)
-        lease.release()
+            def long():
+                try:
+                    out["result"] = conv.step()
+                except BaseException as exc:
+                    out["error"] = exc
+            th = threading.Thread(target=long, daemon=True)
+            th.start()
+            time.sleep(CANCEL_AT)
+            # a generation that ended before the cancel tests no cancel: the check fails without waiting for one
+            running = th.is_alive()
+            t_cancel = time.perf_counter()
+            data["cancel_at"] = time.time()
+            ticket.cancel()
+            acked = wait_until(lambda: m.counters["late_frames"] > late0 and m.slots == [] and time.perf_counter(),
+                               10, 0.01) if running else None
+            th.join(10)
+            ack_s = round(acked - t_cancel, 3) if acked else None
+            ended = ("cancelled" if "error" in out else "answered before the cancel" if "result" in out
+                     else "still running")
+            check(f"a 1,500-token generation cancelled at {CANCEL_AT:g} s is acknowledged within {ack_bound:g} s: the "
+                  "helper's cancelled frees its slot, nothing drains",
+                  ended == "cancelled" and acked is not None and acked - t_cancel < ack_bound
+                  and m.counters["draining"] == 0 and m.counters.get("cancel_unacked", 0) == 0,
+                  json.dumps({"ack_s": ack_s, "the generation": ended, "counters": dict(m.counters)})[:400],
+                  ack_s=ack_s)
+            after = must(bound_name, "a short request after the cancel", lambda: [short() for _ in range(3)])
+            bound = 1.5 * statistics.median(before) + 1.0
+            check(bound_name, all(x <= bound for x in after),
+                  json.dumps({"before": [round(x, 3) for x in before], "after": [round(x, 3) for x in after],
+                              "bound": round(bound, 3)}))
+            data.update(before_s=[round(x, 3) for x in before], after_s=[round(x, 3) for x in after], ack_s=ack_s,
+                        bound_s=round(bound, 3))
+        finally:
+            lease.release()
     finally:
         if helper is not None:
             helper.stop()
