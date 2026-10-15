@@ -524,6 +524,13 @@ mod tests {
             "bus": "00000000:01:00.0", "power_readable": true})
         );
         assert!(nvidia("").is_empty());
+        // A card whose driver does not report its draw: not readable, and no power is sampled from it.
+        let g = nvidia("NVIDIA GeForce GTX 1650, 4096, 546.18, 50.00, [N/A], 00000000:02:00.0\n");
+        assert_eq!(g[0]["power_readable"], false);
+        assert_eq!(
+            (g[0]["power_now_w"].clone(), g[0]["power_limit_w"].clone()),
+            (Value::Null, Value::from(50.0))
+        );
     }
 
     #[test]

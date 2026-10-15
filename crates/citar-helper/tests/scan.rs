@@ -313,10 +313,15 @@ fn the_last_scan_serves_a_restart_for_six_hours_and_no_longer() {
         assert_eq!(third.made(), 1);
         run.stopped().await;
 
-        // A file that does not read, or whose hash is not its scan's, is not used.
+        // A file that does not read, whose hash is not its scan's, or written "later" than now (the
+        // wall clock was set back since), is not used.
+        let future = test_scan("Future CPU");
+        let future_hash = citar_helper::scan::hash(&future);
         for broken in [
             "not json".to_owned(),
             json!({"v": 1, "at": START_UNIX + 7.0 * 3600.0, "hash": "0", "scan": test_scan("Bad")})
+                .to_string(),
+            json!({"v": 1, "at": START_UNIX + 9.0 * 3600.0, "hash": future_hash, "scan": future})
                 .to_string(),
         ] {
             std::fs::write(&cache, broken).expect("written");
