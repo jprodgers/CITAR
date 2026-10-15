@@ -4,9 +4,13 @@ The machine with the GPU is usually the machine you cannot expose. It is behind 
 changing address, and opening a port to the internet so a server can reach it is both fiddly and a
 bad idea.
 
-So the connection runs the other way. The worker dials **out** to the CITAR server over a
-WebSocket, authenticates with a token, and serves model requests down that same connection. Nothing
-needs to be opened at the house, and the server never needs to know where the worker is.
+So the connection runs the other way. The **CITAR helper** (`citar-helper`, one program to download)
+dials **out** to the CITAR server over a WebSocket, authenticates with a token and the machine's own
+key, and serves model requests down that same connection. Nothing needs to be opened at the house,
+and the server never needs to know where the helper is. Since 0.1.6 the helper is a Rust binary
+speaking the helper protocol 2 (`crates/citar-helper/PROTOCOL.md`); the Python worker of 0.1.5 is
+gone, and a 0.1.6 server tells one that connects to download the new helper
+([Moving from 0.1.5](#moving-from-015)).
 
 ```
    CITAR server                          your PC
@@ -19,8 +23,10 @@ needs to be opened at the house, and the server never needs to know where the wo
                                             |      GPU
 ```
 
-**The server runs the games; workers only serve models.** The game engine, the bots and the state
-all stay on the server. A worker is a model endpoint with a tunnel around it.
+**The server runs the games; helpers only serve models** (and, from a later 0.1.6 package, bot games
+as CPU work). The game engine, the bots and the state all stay on the server. A helper is a model
+endpoint with a tunnel around it: it returns each completion exactly as its model server gave it, and
+the server reads the tool calls in it, with the same parser it uses for every model.
 
 ---
 
@@ -37,9 +43,19 @@ citar admin workers                      # list them
 Send the token to its owner through something private. It is a credential: anyone holding it can
 present themselves as that machine.
 
-Once the worker connects it appears on the **Servers** page like any other machine, and its models
+Once the helper connects it appears on the **Servers** page like any other machine, and its models
 can be used in seats and benchmark suites. Availability windows and budgets apply to it the same
 way.
+
+**What the hub checks, in order** (design/phase4-helper.md P4.5.1): the protocol (a 0.1.5 worker gets
+the one-line "download the new helper" refusal and close code 4426, at no cost: no token lookup, no
+audit row, a log line per address an hour); the address's limit of refused tokens (20 different ones
+in five minutes from one address and the next hello is refused for a while, before any token is
+looked up; one revoked token retried over and over counts once, so it never locks out the owner's
+other machines behind the same address); the token; and the machine key (below). The address is the
+connection's own unless `CITAR_BEHIND_PROXY` says a proxy in front is trusted for
+`CITAR_TRUSTED_PROXY_HOPS` hops, as for every other limit. A token's last address and time are kept
+and shown on the machine's Helper dialog.
 
 ---
 
@@ -88,7 +104,7 @@ and the members'. Each machine is a card, and the card of a machine you manage c
 | Costs | Components and cost periods (an electricity plan is an administrator's to name) | Its owner and administrators |
 | Quiet hours | When nothing runs on it, for anyone | Its owner and administrators |
 | API key | Where the server keeps the key of a machine it dials (an environment variable: administrators) | Its owner and administrators, on a machine the server dials |
-| Helper | Its worker tokens (issue, revoke) and how to run the helper | Its owner and administrators, on a helper machine |
+| Helper | Its worker tokens (issue, revoke), how to run the helper, what the helper is (version, build, protocol) and the fingerprint of its machine key, with **Reset key…** | Its owner and administrators, on a helper machine |
 | Machine settings… | Capabilities (LLM on or off, slots, model swaps for pooled prompts, CPU sharing), what its helper's reports may change (hardware, models and power, each auto or manual) with the last report and Apply, its hardware class and trust tier ([below](#machine-settings-and-what-a-helpers-report-changes)) | Its owner and administrators (pinning the class and the trust tier: administrators) |
 | Sharing | The server group that shares it | Its owner and administrators |
 | Disable, Enable, Remove | Disabling and removing drop its helper at once (below) | Its owner and administrators |
@@ -112,10 +128,14 @@ in [API](../API.md#a-machines-settings)).
 it, saying why), its **LLM slots** (how many requests it takes at once, the site's one number for it; its helper's own
 `--max-concurrent` still caps it), and whether pooled prompts may make it **swap models** (off by default: a report's
 analysis, a probe's answer, a test or a hybrid seat's diplomacy runs only on a model it has loaded, or one a game is
-using there). These take effect at once: the dialog shows what the prompt scheduler has in effect. **CPU sharing**
-(threads, CPU %, memory and the kinds of CPU work: lab games, ranking games, reference games) is kept for the 0.1.6
-helper, which runs CPU work; the helper of this version (worker protocol 1) is sent none of these settings. Its limits
-are hard where the operating system allows, and the helper's own local settings always win.
+using there). These take effect at once: the dialog shows what the prompt scheduler has in effect, and the machine's
+connected helper is sent them at once (protocol 2's `settings`), which it answers with what it will actually do: each
+figure the smaller of the site's and its owner's own ceiling. The server holds that answer to what it asked, so a
+helper can never take more than the site gave it (one that claims more is flagged `settings_overclaim` for
+administrators). **CPU sharing** (threads, CPU %, memory, the kinds of CPU work: lab games, ranking games, reference
+games, and whether its games pause while its own model works) is sent and acknowledged the same way; the CPU work
+itself starts with a later 0.1.6 package. Its limits are hard where the operating system allows, and the helper's own
+local settings always win.
 
 **What the helper's report changes.** Each time it connects, the helper reports the machine's hardware (its scan, the
 file given with `--hardware FILE`, or nothing with `--no-hardware`) and the models its model server lists, with which
@@ -150,54 +170,61 @@ observed whatever it reports.
 
 Taking a machine away from its helper takes effect at once: **revoking the token** it connected with,
 **disabling** the machine, **deleting** it, or **suspending its owner's account** closes the helper's connection
-within a second of the change being saved. Whatever it was generating fails (it is not retried), its next request
-is refused, the helper is told why and stops instead of reconnecting, and a helper that tries again with what was
-taken away is refused at its hello, or, if the change was saved while its hello was being checked, as soon as it
-is connected. Revoking one token leaves a helper connected with another token alone. A change made from the command
-line or another process is noticed at the next keep-alive (`CITAR_WORKER_PING_SECONDS`).
+within a second of the change being saved, with a `shutdown` naming why (`revoked`, `disabled`, `deleted`,
+`suspended`). Whatever it was generating fails (it is not retried), its next request is refused, the helper is told
+why and stops instead of reconnecting (exit code 78 from a console; as a service it waits an hour), and a helper that
+tries again with what was taken away is refused at its hello, or, if the change was saved while its hello was being
+checked, as soon as it is connected. Revoking one token leaves a helper connected with another token alone. A change
+made from the command line or another process is noticed at the next keep-alive (`CITAR_WORKER_PING_SECONDS`).
+
+## The machine key
+
+On its first run the helper makes a key for its machine. The first helper that connects with one of the machine's
+tokens registers its key on the machine (trust on first use); a later connection with another key is refused
+(`refused` `key`) until the machine's owner or an administrator presses **Reset key…** in the Helper dialog (or
+`POST /api/machines/{id}/key/reset`), after which the next helper to connect registers its own. The dialog shows the
+key's **fingerprint**, the 16 hex digits `citar-helper --version --home DIR` prints on the machine: if they differ,
+someone else's helper used the token first, and the fix is to revoke the machine's tokens, reset the key and issue a
+new token. A reset is audited and never changes the machine's trust tier.
 
 ---
 
 ## For the person lending the machine
 
-The simplest way is the **CITAR helper**: the worker as one file, with nothing else to install.
-The **Servers** and **Models** pages offer the right download for your computer (Windows, macOS on
-Apple silicon, Linux x64 and ARM64); the files are also on every
-[GitHub release](https://github.com/jprodgers/CITAR/releases/latest). Start it with no arguments —
-double-click it on Windows — and it asks for the server's address and the token once, remembers
-them in `helper.json` in your CITAR folder, and connects straight away every time after that. It
-takes the same options as `citar worker` below.
+Run the **CITAR helper**: one file, with nothing else to install. The **Servers** and **Models** pages
+offer the right download for your computer (Windows, macOS on Apple silicon, Linux x64 and ARM64); the
+files are also on every [GitHub release](https://github.com/jprodgers/CITAR/releases/latest). Start it
+with no arguments (double-click it on Windows) and it asks for the server's address and the token
+once, remembers them in `helper.json` in your CITAR folder, and connects straight away every time
+after that. `citar-helper setup` asks again, to give it a new token for instance.
 
 On macOS and Linux, make the download executable first (`chmod +x citar-helper-*`; on macOS also
 `xattr -d com.apple.quarantine citar-helper-macos-arm64`, since the build is not notarised).
 
 If the server restarts, the helper reconnects by itself (after 2 s, then backing off to a minute).
-Only a refused token stops it for good.
+Only a refused token or key, or a machine taken away, stops it for good.
 
-Or install CITAR itself on that machine:
+`citar worker`, `citar setup --worker`, `install.sh --worker` and `install.ps1 -Worker`, which set up
+the Python worker before 0.1.6, now say where to download the helper and exit with code 2.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/jprodgers/CITAR/main/install.sh | bash -s -- --worker
-```
+### Moving from 0.1.5
 
-or, if CITAR is already installed:
+A 0.1.6 server refuses the 0.1.5 worker with one message ("This server runs CITAR 0.1.6, which needs
+the new CITAR helper (protocol 2)…") and close code 4426, and the other way round a 0.1.6 helper waits
+for a 0.1.5 server to be upgraded, trying every 10 minutes: either side can move first, and in
+between the machine is simply offline. The 0.1.5 worker run by hand logs the message and stops. **Run
+as the system unit `citar setup --worker` installed** (`Restart=always`, `RestartSec=15`), it is
+restarted into the same refusal every 15 s until the unit is disabled: cheap for the server (no token
+lookup, a log line an hour) but noisy, so on such a machine:
 
-```bash
-citar setup --worker
-```
+1. `sudo systemctl disable --now citar-worker` (the 0.1.5 unit), or close the 0.1.5 worker;
+2. download `citar-helper` for the machine from the Servers page of the server;
+3. run `citar-helper setup`: it reads the old `helper.json` (its endpoint, models and quiet hours),
+   asks for the new token, and asks whether to lend CPU (default no). A `worker.json` written by
+   `citar setup --worker` works too, with `--config`.
 
-It asks for the server URL and the token, finds the model server running on your machine, checks
-both, and writes `worker.json` with mode 0600 — the token is never passed on a command line, where
-it would land in your shell history and in the process list.
-
-Then:
-
-```bash
-citar-worker --config ~/.local/share/citar/config/worker.json
-```
-
-On Linux, the wizard can install a systemd unit so it starts with the machine. `Restart=always`,
-because a dropped home connection should reconnect rather than stay down.
+A server started on a fresh database (as the VPS's 0.1.6 will be) has no 0.1.5 token: register the
+machine again and issue a token there first.
 
 ### The helper's settings (CITAR 0.1.6)
 
@@ -287,15 +314,19 @@ If the GPU is in a room somebody sleeps in:
 {"quiet_hours": ["21:00-06:00"]}
 ```
 
-or per weekday, `"Sat 23:00-08:00"`. During a window the worker takes no new work. Benchmarks and
-lab runs pause; a game somebody is playing warns rather than stopping.
+or per weekday, `"Sat 23:00-08:00"`. During a window the helper takes no new work, and tells the server
+when its window ends (protocol 2's `status`): the server's scheduler then treats the machine as in its
+quiet hours, so pooled prompts are refused as temporary, with the time they may try again, instead of
+being sent and refused one by one. Benchmarks and lab runs pause; a game somebody is playing warns rather
+than stopping.
 
 ### When a machine is busy
 
 Everything that asks a model something goes through the server's **prompt scheduler**, which keeps one queue per
 machine (the design is `design/phase3-features.md` P3.3). A machine has as many slots as its **LLM slots** setting
-(`max_concurrent`), capped by the helper's own `--max-concurrent`; the scheduler sends a machine no more requests than
-it has slots, so a busy machine **queues** work instead of refusing it, and nothing sleeps and retries:
+(`max_concurrent`), capped by what its helper acknowledged (its own `--max-concurrent`); the scheduler sends a machine
+no more requests than it has slots, so a busy machine **queues** work instead of refusing it, and nothing sleeps and
+retries:
 
 - A game's model seat holds a **lease** on its machine from the moment the game is created, loaded, brought back after
   a restart or launched from a scenario (paused or not, whoever moves first), until the seat is changed or eliminated
@@ -347,15 +378,17 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   falls back), a soft one only warns ([Accounts](ACCOUNTS.md#budgets)). Every request a machine serves is in the
   compute ledger, given by the machine's owner and used by whoever's work it was
   ([Accounts](ACCOUNTS.md#the-compute-ledger-and-the-ratio)).
-- **Cancelling drains on today's helper.** When the server gives up a request (a game is closed or paused, a seat is
-  changed, a prompt is cancelled or runs out of time), it sends the helper `CANCEL`. The helper of this version ignores
-  it and finishes the completion, so the scheduler keeps that slot taken (*draining*) until the helper's late answer
-  arrives, or the request's own timeout plus 15 seconds has passed. The helper answers only over the connection the
-  request went out on, so when that connection goes (the helper disconnects, or reconnects as a new connection) the
-  slot is given back at once. The helper is therefore never sent more requests than it has slots, and never has to
-  answer `busy`. A `busy` refusal anyway (a helper restarted with fewer slots, or one still finishing a request from
-  before its reconnect) is absorbed: the scheduler holds the machine at what it has in flight until a slot frees (at
-  most five seconds when nothing else is in flight), and queues the request again.
+- **Cancel stops the generation.** When the server gives up a request (a game is closed or paused, a seat is changed,
+  a prompt is cancelled or runs out of time), it sends the helper `cancel`. The helper drops its stream from the model
+  server, which closes the connection (LM Studio, Ollama, llama.cpp and vLLM stop generating when their client goes),
+  and then answers `cancelled`, which frees the slot at once: the next request goes straight away. Only a helper that
+  does not acknowledge within 5 seconds leaves the slot *draining* (taken until its late answer, or the request's own
+  timeout plus 15 seconds), and its machine is flagged `cancel_unacked` for administrators: a 0.1.6 helper that drains
+  is misbehaving. The helper answers only over the connection the request went out on, so when that connection goes
+  (it disconnects, or reconnects as a new connection) the slot is given back at once, and a helper that loses its
+  connection stops every completion it had in flight. A `busy` refusal (a helper whose own slots are below the site's,
+  before its acknowledgement arrived) is absorbed: the scheduler holds the machine at what it has in flight until a
+  slot frees (at most five seconds when nothing else is in flight), and queues the request again.
 - **The game screen shows the wait.** A model seat whose request waits for its machine shows "waiting for <machine>:
   2nd in line, about 40 s" (its status `queued`) until the request runs.
 - **The Servers page's test** is a pooled prompt like any other (its grant must cover pooled prompts). Each person has
@@ -368,7 +401,7 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   "someone's game" and so on, with no name and no member; other members' machines are only counted ("2 other machines
   are busy"). Priority buttons are on your own work only, and **Cancel** on a prompt is for its work's owner, the
   machine's owner and administrators.
-- **Generation time is what the server saw.** A step is credited the smaller of the helper's own `duration` and the
+- **Generation time is what the server saw.** A step is credited the smaller of the helper's own `gen_s` and the
   time from sending the request to receiving its answer; time spent queueing is recorded apart and never counted as the
   model's (nor against its turn's time limit, nor in its speed score). A helper that claims more than the server
   observed (by over 10% and a second) three times within an hour gets `overreports` in its machine's flags, with an
@@ -378,14 +411,18 @@ An administrator's `GET /api/status` lists what the scheduler holds for each mac
 
 ### What the server can and cannot do
 
-It can ask your machine to run a completion with one of the models you exposed. That is the whole
-protocol.
+It can ask your machine to run a completion with one of the models you exposed, with at most five
+sampling parameters (`temperature`, `max_tokens`, `top_p`, `seed`, `reasoning_effort`); the helper
+drops any other, and nothing in a request changes which endpoint it dials, the key it sends or whether
+it streams. It can ask it to scan its hardware again, and send it its settings, which your own
+ceiling caps.
 
 It cannot read your files, run commands, see other things on your network, or use models you did
-not list. The worker only speaks to the base URL you configured, and only forwards completion
-requests to it.
+not list. The helper only speaks to the base URL you configured, and only forwards completion
+requests to it; your quiet hours, your model list and your slots are enforced on your machine,
+whatever the server asks.
 
-Stop lending at any time: stop the worker, or revoke its token (or remove the machine) on the
+Stop lending at any time: stop the helper, or revoke its token (or remove the machine) on the
 Servers page; the server drops the connection at once. Neither needs the other's cooperation.
 
 ---
@@ -393,15 +430,18 @@ Servers page; the server drops the connection at once. Neither needs the other's
 ## Troubleshooting
 
 **Connects, then disconnects.** The token is wrong or has been revoked, the machine is disabled
-or removed, or its owner's account is suspended. The helper's log says which ("The server rejected
-this worker", or the server's reason). Issue a new token on the Servers page.
+or removed, or its owner's account is suspended. The helper's log says which ("The server refused
+this helper's token", or the server's reason). Issue a new token on the Servers page. "Another helper's
+key" means the machine's key was registered by another helper: check the fingerprint and reset it
+([The machine key](#the-machine-key)).
 
 **`wss://` fails immediately.** The server's reverse proxy is not passing the WebSocket upgrade.
 The nginx site and Caddyfile in `deploy/` do; a hand-written one often does not.
 
-**Connects, but never gets work.** The worker offers models; the *server* decides which seat uses
-which. Check that a seat or suite is configured to use that server's model. Also check the worker's
-own endpoint is reachable from the worker machine — `citar doctor` on that machine says.
+**Connects, but never gets work.** The helper offers models; the *server* decides which seat uses
+which. Check that a seat or suite is configured to use that server's model, and that the machine
+settings take model work. Also check the helper's own endpoint is reachable from its machine: its log
+says when a listing of the models failed.
 
 **Everything looks fine and completions fail.** The model is probably not loaded. A catalogue entry
 is not the same as a model in memory.
@@ -410,10 +450,10 @@ is not the same as a model in memory.
 
 ## A note for operators
 
-A worker is somebody else's computer doing work for your server. Two things follow:
+A helper is somebody else's computer doing work for your server. Two things follow:
 
 - **Their availability is not yours.** Windows, quiet hours and a laptop being closed are all
-  normal. Benchmarks that depend on a worker should expect to pause.
+  normal. Benchmarks that depend on a helper should expect to pause.
 - **Their costs are theirs.** The registry records the machine's hardware and electricity so
   reports attribute the cost to the right place. Non-owners never see a server's cost
   configuration — the tariff, hardware prices and key backend are visible only to its owner.

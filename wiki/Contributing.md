@@ -232,8 +232,10 @@ and machine work end to end, over HTTP and the game socket, on a server-mode dev
 third member for `all` and `exit`) with `citar admin create-user`, signs them in as a browser would
 (a cookie and the CSRF token), serves fake OpenAI-compatible endpoints that record every connection
 they get and answer from a scripted policy that plays (tool calls read from the request: a turn's
-orders, a chat's answer, a hybrid seat's diplomat phase), starts real helpers
-(`python -m citar.worker`) in front of them for helper machines, runs the part's checks, and writes
+orders, a chat's answer, a hybrid seat's diplomat phase; streamed as server-sent events when asked,
+recording when the client went), starts real helpers (the Rust `citar-helper` that `cargo xtask
+develop` builds, or `--helper-bin PATH`, each with `--home` in the QA directory) in front of them for
+helper machines, runs the part's checks, and writes
 each check and its numbers to `<dir>/qa-<part>.json` (with the throwaway accounts' password, for the
 browser checklist). It exits 2, touching nothing, for the dev server's port 8799, a port in use, a
 directory holding anything without its `.qa-phase3` marker, the owner's `C:/dev/citar-play`, CITAR's

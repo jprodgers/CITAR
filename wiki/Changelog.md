@@ -63,6 +63,17 @@ that means for an existing install:
 - **Grants name what they cover.** A grant for "Ordinary games" covers a model seat that plays every
   turn and nothing pooled: a report's narrative, a hybrid seat's diplomacy, a probe's offer or message
   case and a machine's test need "Pooled prompts". Budgets are in credits, not money.
+- **The Python worker is replaced by the CITAR helper.** A machine serves its models through
+  `citar-helper`, a single Rust program (the same download names), speaking helper protocol 2
+  ([crates/citar-helper/PROTOCOL.md](https://github.com/jprodgers/CITAR/blob/main/crates/citar-helper/PROTOCOL.md)). A 0.1.6 server refuses a
+  0.1.5 worker with one message telling its owner to download the new helper (close code 4426), and a
+  0.1.6 helper waits for a 0.1.5 server to be upgraded. The helper reads a 0.1.5 `helper.json` or
+  `worker.json` with the same meaning, lends no CPU unless its owner turns that on, and registers a
+  machine key with its first connection. `citar worker`, `citar setup --worker`, `install.sh --worker`
+  and `install.ps1 -Worker` now say where to download the helper and exit 2; the `worker` extra and the
+  `citar-worker` command are gone. A 0.1.5 worker installed as a system service is restarted into the
+  refusal every 15 s until it is disabled (`sudo systemctl disable --now citar-worker`):
+  [docs/server/WORKERS.md](Workers#moving-from-015).
 - **API changes.** The report sharing routes under `/api/shared/reports` moved to the owned items'
   routes (`/api/items/report/{id}/sharing`) and `/r/{slug}`; `replay_data("full")` and a replay asked
   for in it are refused (the recap reads the `delta` frames); a seat's view no longer carries
@@ -97,6 +108,13 @@ that means for an existing install:
   Power is manual by default, so a helper's guess no longer replaces measured figures, and a model a
   helper stops reporting is kept, marked. The helper takes `--hardware FILE` (a collector's file).
 - Revoking a helper's token, disabling or deleting its machine disconnects the helper at once.
+- The hub speaks helper protocol 2: a helper returns each completion raw and the server parses it with
+  the parser it uses for every model, so a `json`-mode seat on a helper machine now gets the JSON
+  protocol in its prompt (it never did through the 0.1.5 worker). The machine's settings go to its
+  helper at once and are acknowledged with what it will do, its own ceiling always winning; a machine
+  key is registered by the first connection, shown as a fingerprint in the Helper dialog, and reset
+  there (`POST /api/machines/{id}/key/reset`); "Rescan" asks the helper for a new hardware scan
+  (`POST /api/machines/{id}/rescan`); the helper's own quiet hours reach the scheduler.
 
 **Shared compute** ([docs/server/WORKERS.md](Workers),
 [docs/CONFIGURATION.md](Configuration)):
@@ -106,9 +124,10 @@ that means for an existing install:
   retried in a loop. A seat that plays every turn holds a lease; pooled prompts (chat answers, a
   hybrid seat's diplomacy, probe answers, report narratives, a machine's test) take tickets, by
   priority, then in turn between members, then in order, on loaded models only unless the owner
-  allows swaps, and never while a benchmark holds the machine. A cancelled request on a helper keeps
-  its slot until the helper's late answer. Speed figures use generation time, never time spent
-  queued.
+  allows swaps, and never while a benchmark holds the machine. A cancelled request on a helper stops
+  its generation: the helper closes its stream from the model server and acknowledges, which frees
+  the slot at once; a helper that does not acknowledge within 5 s leaves the slot draining and its
+  machine flagged. Speed figures use generation time, never time spent queued.
 - The Queue page lists each machine's leases and pooled prompts with their places, naming only what
   the viewer may see, with priority and cancel controls for one's own work.
 - The compute ledger: every model step and unit of host CPU is an event with who used it and whose
@@ -161,6 +180,14 @@ own, and all of them at once in one game, with a real model in LM Studio last
 ([CONTRIBUTING.md](Contributing)).
 
 ### Fixed
+
+- The limit on refused worker tokens never refused anything (it was counted after the lookup and its
+  refusal dropped), and it took the client's address from `X-Forwarded-For` whatever the proxy
+  settings: an address is now refused before any lookup once 20 different tokens failed from it in
+  five minutes (a revoked token retried counts once), read as every other limit reads it. A token's
+  last address is written.
+- A cancelled request kept running on its helper until it finished, holding its slot (draining); the
+  helper now stops it.
 
 **Rules the Rust engine fixes.** The new engine in `crates/citar-engine`, which replaces the Python
 engine in this release, plays by the same rules except where the Python engine was wrong or

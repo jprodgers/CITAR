@@ -22,7 +22,7 @@ citar where
 | | A git checkout | An installed copy |
 |---|---|---|
 | Saved games | `<checkout>/saves` | `<user data>/saves` |
-| `config/` (the helper's `worker.json`; once, the old registry) | `<checkout>/config` | `<user data>/config` |
+| `config/` (a 0.1.5 worker's `worker.json`, which the helper reads with `--config`; once, the old registry) | `<checkout>/config` | `<user data>/config` |
 | Benchmarks | `<checkout>/benchmarks` | `<user data>/benchmarks` |
 | Database, secret key | `<user data>` | `<user data>` |
 
@@ -43,7 +43,7 @@ mid-write corrupts it. Password hashes do not belong in a synced folder either.
 |---|---|
 | `CITAR_STATE_DIR` | Everything below, in one go |
 | `CITAR_SAVE_DIR` | Saved games, and maps, scenarios, probes, lab, reports and the usage ledger with them |
-| `CITAR_CONFIG_DIR` | The `config/` folder: the helper's `worker.json`, and a pre-0.1.6 `servers.json` until it is imported |
+| `CITAR_CONFIG_DIR` | The `config/` folder: a 0.1.5 worker's `worker.json`, and a pre-0.1.6 `servers.json` until it is imported |
 | `CITAR_BENCH_DIR` | Benchmark suites and runs |
 | `CITAR_DATA_DIR` | Database and secret key |
 
@@ -156,7 +156,8 @@ first start to import.
 A machine's **settings** live on its row too, edited in the Servers page's **Machine settings…** dialog
 ([Workers](server/WORKERS.md#machine-settings-and-what-a-helpers-report-changes)): its LLM slots (`max_concurrent`,
 the site's one number for it), its capabilities (`capabilities`: whether it takes model work, whether pooled prompts
-may make it swap models, and its CPU sharing for the 0.1.6 helper), and what its helper's reports may change
+may make it swap models, and its CPU sharing, all sent to its connected helper, which acknowledges what it will do),
+and what its helper's reports may change
 (`hardware_mode`, `models_mode`, `power_mode`, each `auto` or `manual`; by default the hardware and the models
 follow the helper and the power figures are yours). Its helper's last report is kept on the row
 (`hardware_detected`, `detected_at`) whatever those say. Its `trust_tier` and pinned hardware classes are an
@@ -230,13 +231,18 @@ Budgets on grants are counted in the same credits ([Accounts](server/ACCOUNTS.md
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CITAR_WORKER_PING_SECONDS` | `20` | Keep-alive on the worker WebSocket |
+| `CITAR_WORKER_PING_SECONDS` | `20` | Keep-alive on a CITAR helper's WebSocket (`welcome.ping_s`, 5 to 300): a helper silent for 70 s is dropped |
 
-On the worker side: `CITAR_WORKER_SERVER`, `CITAR_WORKER_TOKEN`, `CITAR_WORKER_BASE_URL`,
-`CITAR_WORKER_PROVIDER`, `CITAR_WORKER_MAX_CONCURRENT`, `CITAR_WORKER_NAME`, and `CITAR_WORKER_HARDWARE_FILE` (the
-hardware to report instead of a scan: a collector's file, as `--hardware`). Prefer the config file
-that `citar setup --worker` writes: a token on a command line ends up in the shell history and the
-process list.
+The limit of refused worker tokens per address (`worker_auth`: 20 different tokens in five minutes) is counted before
+any token is looked up, from the address `CITAR_BEHIND_PROXY` and `CITAR_TRUSTED_PROXY_HOPS` give, as every other
+limit; it holds in local mode too.
+
+On the helper's side (the CITAR helper, `citar-helper`): `CITAR_WORKER_SERVER`, `CITAR_WORKER_TOKEN`,
+`CITAR_WORKER_BASE_URL`, `CITAR_WORKER_PROVIDER`, `CITAR_WORKER_MAX_CONCURRENT`, `CITAR_WORKER_NAME`,
+`CITAR_WORKER_API_KEY_ENV` and `CITAR_WORKER_HARDWARE_FILE` (the hardware to report instead of a scan: a collector's
+file, as `--hardware`), each below the flag and the settings file ([Workers](server/WORKERS.md#the-helpers-settings-citar-016)).
+Prefer the settings file `citar-helper setup` writes (`helper.json`): a token on a command line ends up in the shell
+history and the process list.
 
 ---
 

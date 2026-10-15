@@ -97,11 +97,6 @@ time counted afresh.
 
 ## Shared machines (new in 0.1.6)
 
-**A cancelled request still runs on a helper.** The 0.1.5 helper does not stop a request the server
-cancels (a chat whose time ran out, a test given up, a benchmark taking the machine), so its slot
-stays taken until the helper's late answer, and the machine's next request waits for it (the Queue
-page calls it draining). The helper of the next release stops it.
-
 **CPU sharing waits for the next helper.** The machine settings dialog keeps a machine's CPU limits
 (threads, CPU share, memory, the kinds of work), but nothing runs CPU work on members' machines yet.
 

@@ -16,7 +16,7 @@ citar/
   usage.py, costing.py   what each activity held, and its price
   db/         SQLAlchemy models
   reports/    report building and rendering
-  worker/     the outbound agent that serves models from another machine
+  helper_pointer.py  what `citar worker` says since 0.1.6: where to download the CITAR helper
   web/        the browser client
   wizard/     first-time setup
   data/       the hardware collectors the Servers page offers
@@ -403,7 +403,8 @@ returns the whole registry with schemas (`engine_api.tool_list`).
 | `metrics.py` | Per-seat, per-turn measurement |
 | `auth_api.py`, `admin_api.py`, `pool_api.py`, `share_api.py`, `setup_api.py` | HTTP surfaces |
 | `boot.py` | Migrations at startup, and the configuration checks that refuse to start a broken server |
-| `workers.py` | The WebSocket endpoint worker agents connect to |
+| `workers.py` | The hub: the WebSocket CITAR helpers connect to, on protocol 2 only ([The hub](#the-hub-protocol-2)) |
+| `helper_protocol.py` | Protocol 2's frames, checked and built (`crates/citar-helper/PROTOCOL.md` is the protocol) |
 | `citar/pool/scheduler.py` | The prompt scheduler: one queue per machine for every model call (below) |
 | `admin_cli.py` | `citar admin` |
 
@@ -524,13 +525,32 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
   `idle` and `activate` only change counters, so `suspend`, `update_seat` and a crash can cancel a waiting or running
   call under the game's lock. Status callbacks run on the scheduler's notifier thread, after the machine's lock is let
   go.
-- **Draining and metering.** A request abandoned on a helper keeps its slot until the hub hands the scheduler the
-  helper's late frame (`late_frame`), or the connection it went out on goes (`helper_changed`: each connection has its
-  own `serial`). After each step the listeners get a `StepEvent` with the generation time (bounded by what the server
+- **Cancel, draining and metering.** A request abandoned on a helper keeps its slot until the hub hands the scheduler
+  the helper's acknowledgement (`cancelled`, or a `done` or `error` that crossed the cancel: `late_frame`), or the
+  connection it went out on goes (`helper_changed`: each connection has its own `serial`). With no acknowledgement
+  within `CANCEL_ACK_SECONDS` (5 s) the slot drains as protocol 1's did, and the machine is flagged `cancel_unacked`. After each step the listeners get a `StepEvent` with the generation time (bounded by what the server
   observed), the queue time and the tokens; the compute ledger (`citar.ledger.listener`) is the listener, which
   prices each step, settles its budget hold and queues its event for the ledger's writer. The agent adds queue
   and chat waits to the turn's waited time, so they never count against `max_turn_seconds`, and shows its seat as
   `queued` (with its place) while a step waits (`ScheduledConversation.on_wait`).
+
+### The hub (protocol 2)
+
+A machine behind a home router is served by the CITAR helper (`crates/citar-helper`), which dials out to the server's
+`/ws/worker` and serves completions down that connection. `citar/server/workers.py` is the hub, on protocol 2 only
+(`crates/citar-helper/PROTOCOL.md`; design/phase4-helper.md P4.5.1). Its handshake checks, in order: the protocol (a
+protocol 1 hello gets the one-line "download the new helper" refusal and close 4426, at no cost), the address's limit
+of refused tokens (distinct token hashes per address, before any lookup), the token, then the machine key (registered
+by the first hello, trust on first use; another is refused until its owner resets it). Then `welcome` with the
+machine's settings, which the helper acknowledges (`settings_ack`): the hub holds each acknowledgement to what the site
+asked, and the prompt scheduler reads that, never the site's figures alone. A change in the machine settings dialog is
+pushed at once (`push_settings`). Frames from a helper are handled on the event loop without blocking it: completions
+resolve their waiting seat's request; a catalog, a hardware scan or the hello's report goes to a thread
+(`machine_settings.record_report`); `status` carries its own quiet hours to the scheduler. A helper returns each
+completion raw, and `WorkerConversation` parses it with `parse_completion`, as `OpenAIConversation` does
+([One parser](#one-parser-for-every-completion)). The conformance transcripts (`crates/citar-helper/protocol/v2/
+transcripts`) are played against the real hub by `tests/test_helper_conformance.py`, and against the real helper by
+its own tests, so both sides keep to one protocol.
 
 ### Authorisation
 
@@ -559,7 +579,7 @@ reason. Run it after adding a route; CI runs it with `--strict`.
 | `providers/anthropic_provider.py` | Thinking, prompt caching, refusal fallbacks |
 | `providers/openai_provider.py` | Native and JSON tool modes, for every OpenAI-compatible endpoint |
 | `providers/completion.py` | The one parser of a model's reply: tool calls native or written as text, repairs, the JSON protocol ([One parser](#one-parser-for-every-completion)) |
-| `providers/worker_provider.py` | Sends the request down a worker's WebSocket instead |
+| `providers/worker_provider.py` | Sends the request down a helper's WebSocket instead, and parses the raw completion it returns here |
 | `providers/dryrun.py` | Answers plausibly without a model, for testing everything else |
 
 A provider's only job is turning a request into a completion. The turn loop, the guard rails and
