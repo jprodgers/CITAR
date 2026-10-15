@@ -19,7 +19,8 @@ Parts:
   once; a lobby game whose model seat plays through it (streamed completions, tool calls parsed on the server); the
   Servers page's test given up and its generation stopped at the endpoint, the slot freed with nothing draining; a
   rescan asked for; a 0.1.5 worker's hello refused with the upgrade message and 4426, logged once; another key refused
-  until the owner resets it; 20 refused tokens from an address and a good one then refused before any lookup (from
+  until the owner resets it; a reset while a helper is connected making it reconnect and register its key at once
+  (close 1012); 20 refused tokens from an address and a good one then refused before any lookup (from
   ``127.0.0.2``, so the run's own helpers on ``127.0.0.1`` are not held up); a revoked token ending the helper with
   exit code 78.
 - ``llm-real`` (4-05): 4-04's real-model checks through the hub and the scheduler, in a hub of its own in this process
@@ -288,6 +289,23 @@ def part_helper(h) -> None:
                 and len([a for a in audit if a.get("object_id") == hid]) == 1,
                 json.dumps({"refused_exit": refused, "reset": reset.status_code, "new": printed3, "old": printed,
                             "audit": len(audit)})[:400])
+
+        # ---- a reset while the helper is connected: closed with 1012, it reconnects and registers its key at once
+        connected = (_workers(bob, hid).get("worker") or {}).get("connected_at")
+        t_reset = time.perf_counter()
+        again = bob.post(f"/api/machines/{hid}/key/reset")
+
+        def rekeyed() -> bool:
+            info = _workers(bob, hid)
+            worker = info.get("worker") or {}
+            return ((info.get("key") or {}).get("fingerprint") == printed3 and bool(worker.get("effective"))
+                    and worker.get("connected_at") != connected)
+        rekey = wait_until(rekeyed, 30, 0.1)
+        took = round(time.perf_counter() - t_reset, 2)
+        r.check("a reset while its helper is connected closes the connection (1012, no shutdown): the helper, still "
+                "running, reconnects within its backoff and registers its key again at once",
+                again.status_code == 200 and bool(rekey) and third.proc.poll() is None and "1012" in third.text(),
+                f"its key registered again {took} s after the reset", seconds=took)
 
         # ---- the address's limit, before any lookup (from 127.0.0.2: the run's own helpers are on 127.0.0.1)
         codes = []
