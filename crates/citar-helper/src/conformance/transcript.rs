@@ -109,7 +109,7 @@ pub const HUB_SETUP: &[&str] = &[
 /// The keys of `setup.hub.machine`.
 pub const HUB_MACHINE: &[&str] = &["settings", "key", "trust"];
 /// What can happen around the helper (`act` with side `helper`).
-pub const HELPER_ACTS: &[&str] = &["quiet_begins"];
+pub const HELPER_ACTS: &[&str] = &["quiet_begins", "stop"];
 /// What can happen on the server (`act` with side `hub`).
 pub const HUB_ACTS: &[&str] = &[
     "submit_request",
@@ -630,6 +630,7 @@ mod tests {
                 {"act": {"side": "hub", "do": "submit_request"}},
                 {"act": {"side": "hub", "do": {"set_settings": {}}}},
                 {"act": {"side": "helper", "do": "quiet_begins"}},
+                {"act": {"side": "helper", "do": "stop"}},
                 {"s2h": {"t": "ping"}, "lost": true},
                 {"close": {"by": "server", "code": 4400, "reason": "missing machine"}},
                 {"close": {"by": "helper", "code": 1000}},
@@ -638,9 +639,9 @@ mod tests {
             ]),
         ))
         .expect("loads");
-        assert!(t.steps[3].lost && !t.steps[0].lost);
+        assert!(t.steps[4].lost && !t.steps[0].lost);
         assert_eq!(
-            t.steps[4].action,
+            t.steps[5].action,
             Action::Close {
                 by: Sender::Server,
                 code: 4400,
@@ -648,7 +649,7 @@ mod tests {
             }
         );
         assert_eq!(
-            t.steps[5].action,
+            t.steps[6].action,
             Action::Close { by: Sender::Helper, code: 1000, reason: None }
         );
     }

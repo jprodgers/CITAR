@@ -41,6 +41,8 @@ struct InProcess {
     clock: Clock,
     quiet: Quiet,
     in_flight: InFlight,
+    /// What Ctrl-C or the service manager would set.
+    stop: watch::Sender<bool>,
 }
 
 impl UnderTest for InProcess {
@@ -73,6 +75,9 @@ impl UnderTest for InProcess {
                     .next_start(self.clock.now_local())
                     .expect("the helper has quiet hours");
                 self.clock.jump_to(self.clock.unix_of(start));
+            }
+            Some("stop") => {
+                let _told = self.stop.send(true);
             }
             other => panic!("this player cannot yet act {other:?} around the helper"),
         }
@@ -247,7 +252,7 @@ fn play_bound(
         let log = Log::memory();
         // In real time too, the fake wall clock starts at START_UNIX and can jump.
         let clock = Clock::fake(START_UNIX);
-        let (_stop_tx, stop_rx) = watch::channel(false);
+        let (stop_tx, stop_rx) = watch::channel(false);
         let endpoint: Option<SharedEndpoint> = match (&fake, cfg.no_llm) {
             (_, true) => None,
             (None, false) => Some(Arc::new(models.clone())),
@@ -281,7 +286,14 @@ fn play_bound(
             in_flight: in_flight.clone(),
         };
         let task = tokio::spawn(async move { helper.run().await });
-        let mut under = InProcess { task: Some(task), log: log.clone(), clock, quiet, in_flight };
+        let mut under = InProcess {
+            task: Some(task),
+            log: log.clone(),
+            clock,
+            quiet,
+            in_flight,
+            stop: stop_tx,
+        };
         let result = player.play(&mut under).await;
         if let Some(task) = under.task.take() {
             task.abort();
@@ -298,10 +310,10 @@ fn the_helper_plays_its_transcripts() {
         .iter()
         .filter(|t| t.plays.helper.as_deref().is_some_and(|p| p <= PLAYED_THROUGH))
         .collect();
-    assert_eq!(mine.len(), 45, "4-03 and 4-04 play 45 transcripts from the helper's side");
+    assert_eq!(mine.len(), 46, "4-03 and 4-04 play 46 transcripts from the helper's side");
     let (live, paused): (Vec<&Transcript>, Vec<&Transcript>) =
         mine.iter().partition(|t| runs_completions(t));
-    assert_eq!(live.len(), 14, "4-04's 14 run completions");
+    assert_eq!(live.len(), 15, "4-04's 15 run completions");
     assert!(live.iter().all(|t| t.plays.helper.as_deref() == Some("4-04")));
     let mut failures = Vec::new();
     for t in &paused {

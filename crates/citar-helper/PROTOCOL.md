@@ -928,7 +928,8 @@ out after the client went).
 **Actions** (`act.do`: a word, or an object whose one key is the word and whose value is its
 argument), the whole vocabulary (both loaders refuse any other; a player refuses a word it cannot
 yet do rather than skip it):
-- helper side: `quiet_begins` (its local quiet hours begin, on its fake clock);
+- helper side: `quiet_begins` (its local quiet hours begin, on its fake clock), `stop` (it is told
+  to stop, as Ctrl-C or its service manager does);
 - hub side: `submit_request` (a seat submits the completion the next `request` step shows, through
   the scheduler), `force_request` (the next `request` step's request is sent past the scheduler's
   own checks, slots, quiet hours and catalog, through a test hook: a request a correct scheduler
