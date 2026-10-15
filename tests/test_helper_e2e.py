@@ -139,6 +139,26 @@ class RealHelper(unittest.TestCase):
         with db.session() as s:
             self.assertEqual((s.get(Server, sid).helper or {}).get("key_fingerprint"), printed)
 
+    def test_a_key_reset_makes_it_reconnect_and_register_its_key_again(self):
+        """What ``POST /api/machines/{id}/key/reset`` does after its commit (the route itself: ``test_hub.Keys``): the
+        key forgotten, the connection closed with 1012 and no ``shutdown``. The real helper reads that close as a
+        reconnect, not a refusal: it stays up, connects again within its backoff, and its hello registers its key."""
+        from citar.server.machines_api import reset_key
+        sid, token, _tid = self.machine("reset")
+        helper = self.helper(sid, token, self.endpoint())
+        with db.session() as s:
+            key = s.get(Server, sid).public_key
+        first = W.hub().get(sid).serial
+        with db.session() as s:
+            reset_key(s, s.get(Server, sid), None)
+        self.assertTrue(W.hub().disconnect(sid, "its machine key was reset"))
+        again = _until(lambda: W.hub().get(sid) is not None and W.hub().get(sid).serial != first, 15)
+        self.assertTrue(again, f"it did not reconnect:\n{helper.text()[-3000:]}")
+        self.assertIsNone(helper.proc.poll(), "it is still running: a reconnect, not a refusal")
+        with db.session() as s:
+            self.assertEqual(s.get(Server, sid).public_key, key, "its hello registered its key again")
+        self.assertIn("1012", helper.text(), "its log names the close")
+
     # -------------------------------------------------------------- parsed on the server
     def test_a_seat_plays_three_turns_and_a_tickets_step_is_parsed_here(self):
         from citar.server.session import SessionManager
