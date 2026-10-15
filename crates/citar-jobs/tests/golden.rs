@@ -74,7 +74,8 @@ fn check_job(name: &str, job: &GoldenJob) -> Result<(), Failed> {
 
 /// The hashes one run gives, as a line.
 fn hashes(out: &Output) -> Value {
-    json!({"result_hash": out.result_hash, "chain_head": out.chain.head, "rounds": out.chain.rounds})
+    let (hash, head, rounds) = (&out.result_hash, &out.chain.head, out.chain.rounds);
+    json!({"result_hash": hash, "chain_head": head, "rounds": rounds})
 }
 
 /// The child: play NAME and print its hashes and this build's jobs build.

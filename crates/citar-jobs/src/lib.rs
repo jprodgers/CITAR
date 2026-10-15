@@ -6,15 +6,16 @@
 //!   canonical bytes and [`SpecHash`] (P4.4.1);
 //! - [`lab`]: the lab game's result, [`LabResult`], built in Rust from the game as
 //!   `citar/lab.py`'s `play()` built it in Python from the events it heard (P4.4.2);
-//! - [`reference`]: one game of citar-sim's statistical baseline as a job, [`ReferenceResult`]
-//!   (the baseline's line without its times);
+//! - [`reference`](mod@reference): one game of citar-sim's statistical baseline as a job,
+//!   [`ReferenceResult`] (the baseline's line without its times);
 //! - [`job`]: [`Job`], one job played step by step under its chain of round digests, never with a
 //!   wall-clock budget, a panic its crash outcome; [`run`] plays one to its end under a
 //!   [`Control`] that may stop it between seat steps;
 //! - [`hash`]: [`result_hash`] over the typed deterministic result and [`chain_check`] over the
 //!   chain (P4.4.4; claims and signatures are 4-11's);
 //! - [`build`]: the jobs build, [`jobs_build`], the compatibility key every job carries (P4.4.5);
-//! - [`canary`]: the two denormal checks and the self-check a job host runs before it takes work;
+//! - [`canary`](mod@canary): the two denormal checks and the self-check a job host runs before it
+//!   takes work;
 //! - [`golden`]: the `jobs` golden set (`golden/jobs.json`), embedded for the self-check;
 //! - [`sys`]: the operating-system calls no safe wrapper makes (4-03; the job limits join it in
 //!   4-08).

@@ -155,7 +155,11 @@ fn check(kind: Kind, spec: &Value) -> Result<(), TestCaseError> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 2000, failure_persistence: None, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 2000,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn mutated_lab_specs_are_refused_with_a_reason_or_accepted_and_never_panic(
