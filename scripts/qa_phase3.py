@@ -1298,23 +1298,30 @@ class Helper:
 
     def __init__(self, h: "Harness", token: str, endpoint, name: str, *,
                  hardware: Optional[Path] = None, max_concurrent: int = 0, machine: Optional[str] = None,
-                 provider: str = "openai_compatible"):
+                 provider: str = "openai_compatible", scan: bool = False, power: bool = False,
+                 env: Optional[dict] = None):
         """``endpoint``: a fake endpoint, or the address of a real one (the ``real`` part's LM Studio); ``hardware``:
-        the hardware file it reports (``--hardware``), instead of none (``--no-hardware``); ``max_concurrent``: its
-        own slot count (``--max-concurrent``), else the helper's default, one; ``machine``: the machine it runs on,
-        whose home (``<dir>/helper-home-<machine>``, its machine key with it) a helper started again for that machine
-        keeps, as a real machine keeps its key across restarts (else a home of its own: a new key); ``provider``: what
-        serves its models (``lmstudio`` reads which are loaded from LM Studio's own list; an ``openai_compatible``
-        endpoint's every listed model counts as loaded)."""
+        the hardware file it reports (``--hardware``), instead of none (``--no-hardware``) or, with ``scan``, the
+        machine's own scan; ``power``: it takes power readings and sends them (else ``--no-power``); ``env``: more of
+        its environment (``CITAR_HELPER_NVIDIA_SMI`` naming the fake probe, phase 4's ``scan`` part);
+        ``max_concurrent``: its own slot count (``--max-concurrent``), else the helper's default, one; ``machine``: the
+        machine it runs on, whose home (``<dir>/helper-home-<machine>``, its machine key with it) a helper started
+        again for that machine keeps, as a real machine keeps its key across restarts (else a home of its own: a new
+        key); ``provider``: what serves its models (``lmstudio`` reads which are loaded from LM Studio's own list; an
+        ``openai_compatible`` endpoint's every listed model counts as loaded)."""
+        given = dict(env or {})
         state = h.server.state
         n = len(list(state.glob("helper-*.log"))) + 1
         self.log = state / f"helper-{n}.log"
         self.home = state / (f"helper-home-{machine}" if machine else f"helper-{n}")
         self.home.mkdir(parents=True, exist_ok=True)
         out = open(self.log, "w", encoding="utf-8")
-        env = {k: v for k, v in os.environ.items() if not k.startswith("CITAR_WORKER_")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CITAR_WORKER_", "CITAR_HELPER_"))}
+        env.update(given)
         env["CITAR_DATA_DIR"] = str(self.home)
-        extra = ["--hardware", str(hardware)] if hardware is not None else ["--no-hardware"]
+        extra = ["--hardware", str(hardware)] if hardware is not None else [] if scan else ["--no-hardware"]
+        if not power:
+            extra.append("--no-power")
         if max_concurrent:
             extra += ["--max-concurrent", str(max_concurrent)]
         self.proc = subprocess.Popen(

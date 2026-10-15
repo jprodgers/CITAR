@@ -95,12 +95,14 @@ jobs:
       - name: The CITAR helper, for the end-to-end tests
         # tests/test_helper_e2e.py runs the real binary against the real hub (design/phase4-helper.md, 4-05). Built
         # as cargo xtask develop builds it on a laptop: the ci profile, with the development guard (loopback
-        # servers only, an explicit --home), which no shipped build ever has.
+        # servers only, an explicit --home), which no shipped build ever has; with it, citar-fake-probe, the
+        # stand-in for the scan's probe programs that only such builds make (4-06), beside the helper.
         shell: bash
         run: |
           cargo build --profile ci --locked -p citar-helper --features citar-helper/dev-guard
           mkdir -p helper
           cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
+          cp "target/ci/citar-fake-probe${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -161,7 +163,7 @@ jobs:
         # tests run the build-ext job's helper (CITAR_HELPER_BIN; an artifact loses its exec bit).
         shell: bash
         run: |
-          chmod +x helper/citar-helper* || true
+          chmod +x helper/citar-helper* helper/citar-fake-probe* || true
           export CITAR_HELPER_BIN="$PWD/helper/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}"
           python -m unittest discover -s tests -v
 

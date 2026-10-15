@@ -24,6 +24,11 @@
   loop, so a frame nobody signed in for does not stall every other connection.
 - ``Tokens``: only a token's hash is stored, a database that fails refuses nothing, two first hellos cannot both
   register a key, and a seat on a pooled machine plays through its helper (what ``test_worker.py`` held of them).
+- ``Power`` (4-06, gate 3's hub half): a helper's minute of samples is one power row of its machine, placed by the
+  hub's clock and never overlapping the last; a frame sooner than ``POWER_MIN_SECONDS`` after the last, samples that do
+  not read, and a machine whose owner turned live sampling off write nothing; and costing prices the helper machine's
+  energy from its rows (measured, not estimated). A ``rescan`` reaches the helper and its ``hardware`` frame is kept
+  as the last report.
 - ``PooledWork`` and ``QuietHours``: what the old module held of pooled machines, unchanged.
 
 Replaces ``tests/test_worker.py`` (protocol 1, the Python worker); the real binary end to end is
@@ -135,6 +140,22 @@ class Hub(unittest.TestCase):
         self.assertIs(previous, first)
         self.assertTrue(first.closed)
         self.assertTrue(self.hub.is_online("sv1"))
+
+    def test_a_power_row_is_placed_by_the_hubs_clock_and_never_overlaps(self):
+        """The helper's own sample times are its clock's, not the server's: the row ends when the frame came and covers
+        ten seconds a sample, never reaching back before the connection or the last row, and never under ten seconds."""
+        samples = [{"t": 1000.0 + 10 * i, "gpu_w": 40.0 + i, "cpu_util": 0.1 * i} for i in range(6)]
+        row = W.power_row("sv1", samples, 10_000.0, 9_000.0)
+        self.assertEqual(row, {"k": "pw", "srv": "sv1", "t0": 9_940.0, "t1": 10_000.0, "n": 6, "cpu_util": 0.25,
+                               "gpu_w": 42.5})
+        self.assertEqual(W.power_row("sv1", samples, 10_000.0, 9_970.0)["t0"], 9_970.0, "not before the last row")
+        self.assertEqual(W.power_row("sv1", samples, 10_000.0, 9_995.0)["t0"], 9_990.0, "ten seconds at least")
+        # a draw no machine has is left out; a sample with nothing that reads is no row
+        odd = [{"t": 1.0, "gpu_w": 1e9, "cpu_util": 0.5}, {"t": 2.0, "gpu_w": 100.0, "cpu_util": None}]
+        self.assertEqual(W.power_row("sv1", odd, 100.0, 0.0), {"k": "pw", "srv": "sv1", "t0": 80.0, "t1": 100.0, "n": 2,
+                                                              "cpu_util": 0.5, "gpu_w": 100.0})
+        self.assertIsNone(W.power_row("sv1", [{"t": 1.0, "gpu_w": None, "cpu_util": None}], 100.0, 0.0))
+        self.assertIsNone(W.power_row("sv1", [{"t": 1.0, "gpu_w": 1e9, "cpu_util": None}], 100.0, 0.0))
 
     def test_nothing_reaches_a_helper_before_its_welcome(self):
         """Registering a helper wakes the requests waiting for its machine, which may be sent before the server has
@@ -1228,6 +1249,103 @@ class Tokens(_Live):
 
 
 # ---------------------------------------------------------------------------- pooled machines (unchanged)
+
+class Power(_Live):
+    """A helper's ``power`` frames as its machine's power rows, and costing reading them (4-06)."""
+
+    def _rows(self, sid: str) -> list:
+        import json
+        from citar import usage
+        out = []
+        for path in sorted(usage.USAGE_DIR.glob(f"power-{sid}-*.jsonl")):
+            out += [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return out
+
+    def _powered(self, name: str, **power) -> tuple:
+        """A helper machine of lena's with these power figures, its helper connected: (server id, fake helper)."""
+        sid, token, _tid = _machine(self.ids["lena"], name)
+        with db.session() as s:
+            row = s.get(Server, sid)
+            row.config = {**row.config, "power": {"idle_w": 20, "cpu_max_w": 60, "gpu_max_w": 100, **power}}
+        servers.invalidate()
+        helper = self.connect(token)
+        return sid, helper
+
+    @staticmethod
+    def _minute(gpu_w=50.0, cpu_util=0.5) -> list:
+        return [{"t": 1_000.0 + 10 * i, "gpu_w": gpu_w, "cpu_util": cpu_util} for i in range(6)]
+
+    def test_a_minute_of_samples_is_one_row_of_the_machine_and_costing_measures_its_energy(self):
+        from citar import costing, usage
+        sid, helper = self._powered("powered box")
+        connection = W.hub().get(sid)
+        connection.connected_at -= 120          # connected two minutes ago
+        sent = time.time()
+        helper.send("power", samples=self._minute(gpu_w=70.0, cpu_util=0.5))
+        self.assertTrue(H.until(lambda: self._rows(sid), 5), "a row was written")
+        rows = self._rows(sid)
+        self.assertEqual(len(rows), 1, rows)
+        row = rows[0]
+        self.assertEqual((row["k"], row["srv"], row["n"], row["gpu_w"], row["cpu_util"]), ("pw", sid, 6, 70.0, 0.5))
+        self.assertLess(abs(row["t1"] - sent), 5, "placed by the hub's clock, not the helper's samples' times")
+        self.assertAlmostEqual(row["t1"] - row["t0"], 60.0, delta=0.2)
+        # a second frame at once is no row (one a minute); one a minute later is, after the first
+        helper.send("power", samples=self._minute())
+        time.sleep(0.3)
+        self.assertEqual(len(self._rows(sid)), 1, "a frame sooner than a minute is dropped")
+        connection.power_at -= 60
+        helper.send("power", samples=self._minute(gpu_w=90.0))
+        self.assertTrue(H.until(lambda: len(self._rows(sid)) == 2, 5))
+        second = self._rows(sid)[1]
+        self.assertEqual(second["gpu_w"], 90.0)
+        # costing: an activity holding the machine over those minutes is priced from the rows (measured energy, the
+        # draw above the machine's idle GPU), and the machine's metered energy counts both rows
+        since, until = row["t0"] - 1, second["t1"] + 1
+        ledger = usage.read(since, until)
+        self.assertEqual(len(ledger["power"][sid]), 2)
+        ledger["spans"].append({"act": "game:x", "srv": sid, "t0": row["t0"], "t1": second["t1"],
+                                "held": second["t1"] - row["t0"], "busy": 30.0})
+        r = costing.compute(since, until, ledger=ledger)
+        c = r["acts"]["game:x"]["servers"][sid]
+        self.assertGreater(c["energy_measured_h"], 0, c)
+        self.assertEqual(c["energy_estimated_h"], 0, "every minute the machine was held was measured")
+        self.assertEqual(r["servers"][sid]["metered"]["minutes"], 2)
+        self.assertGreater(r["servers"][sid]["metered"]["kwh"], 0)
+
+    def test_an_owner_who_turned_live_sampling_off_gets_no_rows_and_samples_that_do_not_read_are_none(self):
+        sid, helper = self._powered("unsampled box", sampling="off")
+        W.hub().get(sid).connected_at -= 120
+        helper.send("power", samples=self._minute())
+        sid2, helper2 = self._powered("blind box")
+        W.hub().get(sid2).connected_at -= 120
+        helper2.send("power", samples=self._minute(gpu_w=None, cpu_util=None))
+        # a ping and its pong: the frames before it were handled
+        for h in (helper, helper2):
+            h.send("ping")
+            self.assertEqual(h.recv(timeout=5, skip=())["t"], "pong")
+        time.sleep(0.3)
+        self.assertEqual(self._rows(sid), [])
+        self.assertEqual(self._rows(sid2), [])
+
+    def test_a_rescan_reaches_the_helper_and_its_frame_is_the_last_report(self):
+        sid, token, _tid = _machine(self.ids["lena"], "rescanned box")
+        helper = self.connect(token)
+        r = self.call("lena", "POST", f"/api/machines/{sid}/rescan")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(helper.recv(timeout=5)["t"], "rescan")
+        scan = {"format": "citar-hardware", "collector_version": 2, "collector": "citar-helper",
+                "cpu": {"model": "Rescanned CPU", "cores": 4, "threads": 8}, "memory": {"ram_gb": 8.0}}
+        helper.send("hardware", scan=scan, source="scan")
+
+        def kept():
+            with db.session() as s:
+                d = s.get(Server, sid).hardware_detected or {}
+                return d.get("hardware", {}).get("cpu", {}).get("model") == "Rescanned CPU" and d.get("hardware_at")
+        self.assertTrue(H.until(kept, 5), "the scan is the last report")
+        page = self.call("lena", "GET", f"/api/machines/{sid}/settings").json()
+        self.assertEqual(page["report"]["hardware"]["cpu"]["model"], "Rescanned CPU")
+        self.assertTrue(page["report"]["hardware_at"])
+
 
 class PooledWork(unittest.TestCase):
     """Benchmarks on a machine from the Servers page, and waiting for a game that holds it."""

@@ -29,6 +29,14 @@ both register) and refused when it differs (``refused`` ``key``) until its owner
 connection with 1012 so its next hello registers at once (``WorkerHub.disconnect``); (5) registration, then ``welcome``
 with the site's settings, and the hello's report kept off the loop.
 
+**What a helper reports** (P4.2.3, P4.3.5): its hello's hardware report and models, each ``catalog`` and each ``hardware``
+frame are the machine's last report (``record_report``, applied as its modes say); each ``power`` frame, a minute of
+10-second samples, is one power row of the machine (``record_power``, ``usage.PowerSampler``'s format, which costing
+prices), whatever its power mode, since samples are measurements and the mode governs the static figures. The row is
+placed by the hub's clock, never the helper's, and at most one a ``POWER_MIN_SECONDS`` per connection; samples that do not
+read as a machine's (a draw over ``POWER_W_MAX``) are left out; and an owner who turned the machine's live sampling off
+(``power.sampling`` ``off``) gets no rows.
+
 **Settings** are acknowledged: the scheduler reads ``WorkerConnection.effective``, the helper's newest acknowledgement
 clamped to what the site asks now (each number the smaller, the kinds both list, work on only when both say so). Each
 acknowledgement answers the oldest ``settings`` frame not yet answered (the welcome's included), and a claim of more
@@ -94,11 +102,18 @@ _HELLO_PARSER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name
 #: connection it had, since a request sent over a socket that has gone can never be answered.
 _SERIALS = itertools.count(1)
 
-#: The frame types this package's hub does not act on yet (P4.11): jobs from 4-09 and 4-10, power rows from 4-06,
-#: updates from 4-13. A job frame names a run, and no run is offered to any helper before 4-10, so each would be
-#: dropped anyway (PROTOCOL.md: frames name only the helper's own runs).
-NOT_YET = ("power", "job_accept", "job_reject", "job_progress", "job_result", "job_failed", "job_aborted",
-           "update_status")
+#: The frame types this package's hub does not act on yet (P4.11): jobs from 4-09 and 4-10, updates from 4-13. A job
+#: frame names a run, and no run is offered to any helper before 4-10, so each would be dropped anyway (PROTOCOL.md:
+#: frames name only the helper's own runs).
+NOT_YET = ("job_accept", "job_reject", "job_progress", "job_result", "job_failed", "job_aborted", "update_status")
+#: How often a helper takes a power reading (PROTOCOL.md: "samples taken every 10 s"): a frame's samples cover this
+#: long each.
+POWER_SAMPLE_SECONDS = 10.0
+#: The shortest time between two power rows of one connection: a helper sends a frame a minute, so a faster one is
+#: dropped (logged once), and no helper can write rows faster than costing reads them.
+POWER_MIN_SECONDS = 30.0
+#: A draw above this, in watts, is no machine's reading and is left out of its row.
+POWER_W_MAX = 20000.0
 
 
 class Clock:
@@ -350,6 +365,8 @@ class WorkerConnection:
         self.welcomed = False
         self._early: list = []
         self._logged: set = set()
+        #: When the hub's clock wrote this connection's last power row (``record_power``), or None.
+        self.power_at: Optional[float] = None
 
     # -------------------------------------------------------------- state
     @property
@@ -1212,6 +1229,16 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
         await asyncio.to_thread(record_report, sid, models=connection.models)
     elif t == "hardware":
         await asyncio.to_thread(record_report, sid, hardware=data["scan"])
+    elif t == "power":
+        now = connection.clock.time()
+        last = connection.power_at
+        if last is not None and now - last < POWER_MIN_SECONDS:
+            connection.log_once("power:fast", logging.WARNING, "the helper of %s sent power samples %.0f s after its "
+                                "last ones: dropped (one frame a minute)", sid, now - last)
+            return
+        connection.power_at = now
+        since = last if last is not None else connection.connected_at
+        await asyncio.to_thread(record_power, sid, data["samples"], now, since)
     elif t == "status":
         connection.status_frame = data
         connection.quiet_until = data["quiet_until"]
@@ -1414,6 +1441,42 @@ def record_report(server_id: str, *, hardware: Optional[dict] = None, models: Op
     except Exception:
         log.exception("could not keep the report of %s's helper", server_id)
         return {"kept": [], "applied": []}
+
+
+def power_row(server_id: str, samples: list, now: float, since: float) -> Optional[dict]:
+    """One power row (``usage.PowerSampler``'s format: ``{"k": "pw", "srv", "t0", "t1", "n", "gpu_w", "cpu_util"}``)
+    from a helper's ``power`` frame that came at ``now`` on the hub's clock: the means of the GPUs' draw and of the CPU's
+    utilisation over the samples that read (a draw over ``POWER_W_MAX`` does not), covering the
+    ``POWER_SAMPLE_SECONDS`` each sample took before ``now``, and never before ``since`` (the connection's start or its
+    last row), so a helper's rows never overlap and never reach back before it was connected. The helper's own times
+    are not used: its clock is not the server's. None when no sample reads."""
+    gpu = [x["gpu_w"] for x in samples if x.get("gpu_w") is not None and 0 <= x["gpu_w"] <= POWER_W_MAX]
+    cpu = [x["cpu_util"] for x in samples if x.get("cpu_util") is not None]
+    if not gpu and not cpu:
+        return None
+    t1 = now
+    t0 = min(max(t1 - POWER_SAMPLE_SECONDS * len(samples), since), t1 - POWER_SAMPLE_SECONDS)
+    return {"k": "pw", "srv": server_id, "t0": round(t0, 1), "t1": round(t1, 1), "n": len(samples),
+            "cpu_util": round(sum(cpu) / len(cpu), 4) if cpu else None,
+            "gpu_w": round(sum(gpu) / len(gpu), 2) if gpu else None}
+
+
+def record_power(server_id: str, samples: list, now: float, since: float) -> Optional[dict]:
+    """Write a helper's ``power`` frame as the machine's power row (``power_row``; ``usage``'s
+    ``power-<machine>-YYYY-MM.jsonl``, which costing reads), unless its owner turned the machine's live sampling off
+    (``power.sampling`` ``off``) or it is gone. Off the event loop; never raises. Returns the row written, or None."""
+    from .. import servers, usage
+    try:
+        sv = servers.find(server_id)
+        if sv is None or (sv.get("power") or {}).get("sampling") == "off":
+            return None
+        row = power_row(server_id, samples, now, since)
+        if row is not None:
+            usage.append(f"power-{server_id}", [row])
+        return row
+    except Exception:
+        log.exception("could not write the power samples of %s's helper", server_id)
+        return None
 
 
 def flag_machine(server_id: str, flag: str, detail: Optional[dict[str, Any]] = None) -> None:
