@@ -1,6 +1,7 @@
 //! What the binary does with its command line (design/phase4-helper.md P4.3.2): `--version`,
-//! `scan [FILE]` (the standalone collector: it reads no home, writes only FILE and dials nothing
-//! but the model endpoint it is given, for its runtimes), `setup`, and `run` (the default) with
+//! `scan [FILE]` (the standalone collector: it reads the helper's settings for its model endpoint,
+//! writes only FILE and dials nothing but that endpoint, for its runtimes), `setup`, and `run`
+//! (the default) with
 //! every check in front of it, in this order, so that nothing is written or dialled before it is
 //! allowed:
 //! 1. the development guard (`dev-guard` builds, and every build with a test feature): an
@@ -21,7 +22,7 @@ use std::sync::Arc;
 
 use crate::cli::{Cli, Command};
 use crate::clock::Clock;
-use crate::config::{self, Config, Machine, Sources};
+use crate::config::{self, Machine, Sources};
 use crate::home::{self, Home};
 use crate::key;
 use crate::llm::HttpEndpoint;
@@ -106,41 +107,49 @@ fn run(cli: &Cli) -> Result<u8, Stop> {
 /// How long `scan` waits for its model endpoint's list.
 const SCAN_LIST: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The runtime `scan` reports: the endpoint `--base-url` and `--provider` name (LM Studio on this
-/// machine by default), when it is LM Studio or Ollama and answers within [`SCAN_LIST`].
-fn scan_runtimes(cli: &Cli) -> Vec<Runtime> {
-    let provider = match cli.opts.provider.as_deref().map(config::provider) {
-        None => Provider::LmStudio,
-        Some(Ok(p)) => p,
-        Some(Err(_)) => return Vec::new(),
-    };
-    let name = match provider {
-        Provider::LmStudio => "LM Studio",
-        Provider::Ollama => "Ollama",
-        _ => return Vec::new(),
-    };
-    let base = cli.opts.base_url.clone().unwrap_or_else(|| config::DEFAULT_BASE_URL.to_owned());
+/// The runtime `scan` reports, as the running helper's scans report it: its endpoint (from its
+/// settings), when that is LM Studio or Ollama and answers within [`SCAN_LIST`], with the models
+/// it lists within the allowlist ([`scan::runtime_models`]); none with `no_llm`.
+fn scan_runtimes(ep: &config::EndpointSettings) -> Vec<Runtime> {
+    if ep.no_llm || !matches!(ep.provider, Provider::LmStudio | Provider::Ollama) {
+        return Vec::new();
+    }
     let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
         return Vec::new();
     };
     let listed = rt.block_on(async {
         let tls = net::verified_tls(None).ok()?;
-        let ep = HttpEndpoint::new(provider, &base, None, tls).ok()?;
-        tokio::time::timeout(SCAN_LIST, crate::llm::Endpoint::list(&ep)).await.ok()?.ok()
+        let key = api_key(&ep.api_key_env, ep.provider);
+        let endpoint = HttpEndpoint::new(ep.provider, &ep.base_url, key, tls).ok()?;
+        tokio::time::timeout(SCAN_LIST, crate::llm::Endpoint::list(&endpoint)).await.ok()?.ok()
     });
     let Some(listed) = listed else { return Vec::new() };
-    let mut models: Vec<(String, Option<u64>)> =
-        listed.into_iter().map(|m| (m.key, m.context)).collect();
-    models.sort();
-    vec![Runtime { name: name.to_owned(), endpoint: base, models }]
+    let models = scan::runtime_models(&listed, ep.models.as_deref());
+    scan::endpoint_runtime(ep.provider, &ep.base_url, models).into_iter().collect()
 }
 
 /// `citar-helper scan [FILE]`: this machine's hardware report, printed or written to `FILE`, as
-/// `python collect_hardware.py` gives it, to import on the Servers page. With `--no-llm` it lists
-/// no runtime.
+/// `python collect_hardware.py` gives it, to import on the Servers page, and as the helper with
+/// these settings would report it: its model endpoint, `models` allowlist and `no_llm` are read
+/// from the flags, the home's `helper.json` (or `--config`) and the variables, as `run` reads
+/// them, and nothing is written but `FILE`. A development build reads a home only when it is
+/// named (outside the per-user folder, as `run` requires).
 fn scan(cli: &Cli, file: Option<&Path>) -> Result<u8, Stop> {
+    let opts = &cli.opts;
+    let home = if DEV_GUARD {
+        match opts.home.as_deref() {
+            Some(h) => {
+                home::guard(Some(h), &env).map_err(|e| Stop(2, e))?;
+                Some(Home::at(h))
+            }
+            None => None,
+        }
+    } else {
+        Some(home::resolve(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?.0)
+    };
+    let endpoint = config::endpoint(opts, &env, home.as_ref()).map_err(|e| Stop(2, e))?;
     let probes = Probes::from_env(&env, DEV_GUARD);
-    let runtimes = if cli.opts.no_llm { Vec::new() } else { scan_runtimes(cli) };
+    let runtimes = scan_runtimes(&endpoint);
     let at = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let info = scan::collect(&probes, &runtimes, &at);
     let text = serde_json::to_string_pretty(&info)
@@ -257,7 +266,7 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
     let endpoint: Option<crate::llm::SharedEndpoint> = if cfg.no_llm {
         None
     } else {
-        let api_key = api_key(&cfg);
+        let api_key = api_key(&cfg.api_key_env, cfg.provider);
         if let Some(k) = &api_key {
             log.add_secret(k);
         }
@@ -329,10 +338,10 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
 /// The API key the endpoint is given: the variable `api_key_env` names, else for `openai` the
 /// standard `OPENAI_API_KEY`; no other endpoint is sent a key (protocol 1 sent `OPENAI_API_KEY` to
 /// any endpoint).
-fn api_key(cfg: &Config) -> Option<String> {
-    let var = if !cfg.api_key_env.is_empty() {
-        cfg.api_key_env.as_str()
-    } else if cfg.provider == Provider::OpenAi {
+fn api_key(api_key_env: &str, provider: Provider) -> Option<String> {
+    let var = if !api_key_env.is_empty() {
+        api_key_env
+    } else if provider == Provider::OpenAi {
         "OPENAI_API_KEY"
     } else {
         return None;

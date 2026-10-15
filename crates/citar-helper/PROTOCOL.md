@@ -263,8 +263,8 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
   models as none loaded (its allowlist's, or none).
 - **`hardware`** (helper → server): the hardware scan, when it changed since the one the server has
   (the hello's, or the last `hardware` frame's), and after every `rescan`. A scan younger than 6
-  hours is reused at connect (across the helper's restarts too); the helper scans again every 6
-  hours. A scan "changed" when its content did, leaving out what moves without the machine
+  hours by the wall clock is reused at connect (across the helper's restarts too, but not across a
+  restart of the machine); the helper scans again every 6 hours. A scan "changed" when its content did, leaving out what moves without the machine
   changing: `collected_at`, each GPU's `power_now_w` and each volume's `free_gb`. A hello waits at
   most 30 s for a scan being made; past that it carries the last scan it has (or none, `hardware_source`
   `none`), and the scan's `hardware` frame follows when it is done. A helper reporting the owner's
@@ -276,10 +276,15 @@ The helper reads **the v1 refusal**, and a 0.1.5 server's answer to its `hello` 
   none sends no frame. They are measurements, written as the machine's power rows whatever its
   power mode. The hub writes each frame as one row (`usage.PowerSampler`'s format) placed by its own
   clock, never the samples' `t` (the helper's clock is not the server's): it ends when the frame came
-  and covers 10 s a sample, never reaching back before the connection began or the connection's last
-  row, and never under 10 s. A frame sooner than 30 s after the connection's last row is dropped
-  (logged once); a sample's `gpu_w` over 20,000 W is left out of its row; and a machine whose owner
-  turned its live sampling off (`power.sampling` `off`) gets no rows.
+  and covers 10 s a sample, never reaching back before the connection began or the machine's last
+  frame, whichever connection brought it, so a machine's rows never overlap; a frame leaving under
+  10 s for its row (one sent at once after connecting) writes none. A frame sooner than 30 s after
+  the machine's last one, over any connection, is dropped (logged once). A sample's `gpu_w` over
+  20,000 W, or over 1.5 times the sum of the power limits the helper's own scan reports for the GPUs
+  whose draw reads (when it lists one for each), is left out of its row; and a machine whose owner
+  turned its live sampling off (`power.sampling` `off`) gets no rows. A row without `gpu_w` (a GPU
+  whose draw does not read) is priced with the GPU's share estimated from the machine's power
+  figures while its model works.
 - **`status`** (helper → server, on change, at most once every 5 s): the local quiet hours in force,
   the model requests in flight and the job runs running and paused. The server treats a machine in
   its helper's own quiet hours as one in the site's quiet hours. `quiet_until` is a whole minute,

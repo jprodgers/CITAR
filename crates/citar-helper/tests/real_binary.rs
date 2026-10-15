@@ -14,7 +14,8 @@
 //! And (4-06, in a development build) the binary reports its own scan, made with
 //! `citar-fake-probe` standing in for `nvidia-smi`, PowerShell and `system_profiler`, and sends
 //! it again within 5 s of a `rescan`; with `--hardware` it reports a UTF-16 file, again on
-//! `rescan`. The other runs here take `--no-hardware --no-power`: what they check is not the
+//! `rescan`; and `citar-helper scan` reports the endpoint and allowlist of the helper's own
+//! settings. The other runs here take `--no-hardware --no-power`: what they check is not the
 //! machine's report, and none of them runs the machine's own probe programs.
 //!
 //! Every run here has its own home under the system's temporary directory, `CITAR_DATA_DIR`
@@ -518,5 +519,76 @@ mod scan {
         assert!(nvidia.iter().all(|c| !c.starts_with("--query-gpu=name,")), "no scan: {nvidia:?}");
         std::fs::remove_dir_all(&root).expect("cleaned");
         std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    /// `citar-helper scan` with `--home`, the fakes as its probes: its output.
+    async fn standalone(root: &Path, home: &Path, extra: &[&str]) -> Value {
+        let probes = root.join("probes");
+        std::fs::create_dir_all(&probes).expect("probes");
+        let fake = |n: &str| {
+            let to = probes.join(format!("{n}{}", std::env::consts::EXE_SUFFIX));
+            std::fs::copy(FAKE, &to).expect("the fake copied");
+            to
+        };
+        let out = command(root)
+            .arg("scan")
+            .arg("--home")
+            .arg(home)
+            .args(extra)
+            .env("CITAR_HELPER_NVIDIA_SMI", fake("nvidia-smi"))
+            .env("CITAR_HELPER_POWERSHELL", fake("powershell"))
+            .env("CITAR_HELPER_SYSTEM_PROFILER", fake("system_profiler"))
+            .output()
+            .await
+            .expect("the binary runs");
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).expect("a scan on standard output")
+    }
+
+    /// `scan` says what this helper would send: its endpoint and allowlist come from its settings
+    /// (`helper.json` in its home, as `run` reads them), and its runtime lists the models the
+    /// endpoint lists within the allowlist, not an allowlisted model that is not installed;
+    /// `no_llm` there lists none; a flag still wins over the file. Nothing is written in the home.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scan_reports_the_endpoint_and_allowlist_of_the_helpers_settings() {
+        let root = scratch("scan-settings");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let models = Models::default();
+        models.set(vec![listed("model-a", 8192, true), listed("model-b", 4096, false)]);
+        let port = loopback_lmstudio(models).await;
+        let base = format!("http://127.0.0.1:{port}/v1");
+        let settings = home.join("helper.json");
+        std::fs::write(
+            &settings,
+            json!({"provider": "lmstudio", "base_url": base, "models": ["model-a", "not-installed"]})
+                .to_string(),
+        )
+        .expect("helper.json");
+        let scan = standalone(&root, &home, &[]).await;
+        assert_eq!(
+            scan["runtimes"],
+            json!([{"name": "LM Studio", "endpoint": base,
+                    "models": [{"key": "model-a", "max_context": 8192}]}])
+        );
+        assert_eq!(scan["gpus"][0]["name"], "CITAR Fake GPU");
+        // A flag wins over the file, as for `run`: `--model` replaces the file's allowlist.
+        let flagged = standalone(&root, &home, &["--model", "model-b"]).await;
+        assert_eq!(
+            flagged["runtimes"][0]["models"],
+            json!([{"key": "model-b", "max_context": 4096}])
+        );
+        // `no_llm` in the settings: no runtime, the endpoint not asked.
+        std::fs::write(&settings, json!({"base_url": base, "no_llm": true}).to_string())
+            .expect("helper.json");
+        let none = standalone(&root, &home, &[]).await;
+        assert_eq!(none["runtimes"], json!([]));
+        let mut left: Vec<String> = std::fs::read_dir(&home)
+            .expect("the home")
+            .map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["helper.json"], "scan wrote nothing in the home");
+        std::fs::remove_dir_all(&root).expect("cleaned");
     }
 }

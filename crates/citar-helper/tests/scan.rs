@@ -4,7 +4,10 @@
 //! - a hello carries the machine's scan; a scan six hours later is sent only when the machine
 //!   changed;
 //! - a slow scan lets the hello go without it, and its `hardware` frame follows;
-//! - the last scan is kept in `helper/scan.json` and serves a restart for six hours, and no longer;
+//! - the last scan is kept in `helper/scan.json` and serves a restart for six hours by the wall
+//!   clock, and no longer, nor after the machine itself restarted;
+//! - a scan's runtime lists the models the endpoint lists, within the allowlist;
+//! - (Unix) a disk that never takes the kept scan holds up no frame;
 //! - one `power` frame a minute with the minute's readings, none with `--no-power` or when nothing
 //!   could be measured;
 //! - a `rescan` of a helper reporting no hardware sends nothing.
@@ -93,6 +96,15 @@ impl Run {
 }
 
 fn start(cfg: Config, sensors: Sensors, clock: Clock) -> Run {
+    start_with(cfg, sensors, clock, None)
+}
+
+fn start_with(
+    cfg: Config,
+    sensors: Sensors,
+    clock: Clock,
+    endpoint: Option<citar_helper::llm::SharedEndpoint>,
+) -> Run {
     let (tx, conns) = mpsc::unbounded_channel();
     let key = MachineKey::generate().expect("a key");
     let log = Log::memory();
@@ -106,7 +118,7 @@ fn start(cfg: Config, sensors: Sensors, clock: Clock) -> Run {
         log: log.clone(),
         clock,
         dialer: Arc::new(Pipe(tx)),
-        endpoint: None,
+        endpoint,
         service: false,
         stop: stop_rx,
         in_flight: Default::default(),
@@ -297,20 +309,46 @@ fn the_last_scan_serves_a_restart_for_six_hours_and_no_longer() {
         assert_eq!(kept["hash"], citar_helper::scan::hash(&scan));
         assert!(!dir.join("helper").join("scan.json.tmp").exists());
 
-        // Five hours later, a restart reports it without scanning.
+        // Five hours later, a restart reports it without scanning, and scans again one hour on: six
+        // hours after the kept scan was made, by the wall clock. (The kept scan's age is never
+        // taken off tokio's clock, which counts from the machine's start: on a machine up for less
+        // than five hours that subtraction failed, and the scan served six more hours.)
         let second = Sequence::new(vec![test_scan("New CPU")], Duration::ZERO);
         let mut run = start(config(), sensed(&second), Clock::fake(START_UNIX + 5.0 * 3600.0));
-        let (_ws, hello, _) = welcome(&mut run).await;
+        let (mut ws, hello, _) = welcome(&mut run).await;
         assert_eq!(hello["report"]["hardware"]["cpu"]["model"], "Kept CPU");
         assert_eq!(second.made(), 0);
+        let frames = frames_for(&mut ws, 3600.0 + 60.0).await;
+        assert_eq!(second.made(), 1, "scanned six hours after the kept scan");
+        let hw = of_type(&frames, "hardware");
+        assert_eq!(hw.len(), 1, "{frames:?}");
+        assert!((3599.0..3601.0).contains(&hw[0].0), "at {} s", hw[0].0);
         run.stopped().await;
 
-        // Seven hours later, it scans.
-        let third = Sequence::new(vec![test_scan("New CPU")], Duration::ZERO);
-        let mut run = start(config(), sensed(&third), Clock::fake(START_UNIX + 7.0 * 3600.0));
+        // Seven hours after that scan (made six hours in), it scans.
+        let third = Sequence::new(vec![test_scan("Third CPU")], Duration::ZERO);
+        let mut run = start(config(), sensed(&third), Clock::fake(START_UNIX + 13.0 * 3600.0));
         let (_ws, hello, _) = welcome(&mut run).await;
-        assert_eq!(hello["report"]["hardware"]["cpu"]["model"], "New CPU");
+        assert_eq!(hello["report"]["hardware"]["cpu"]["model"], "Third CPU");
         assert_eq!(third.made(), 1);
+        run.stopped().await;
+
+        // An hour on, on a machine that has run since before that scan, it serves; on one that
+        // started since (its hardware may have changed while it was off), the machine is scanned.
+        let up = Sequence::new(vec![test_scan("Rebooted CPU")], Duration::ZERO);
+        let at = START_UNIX + 14.0 * 3600.0;
+        let clock = Clock::fake_booted(at, START_UNIX + 12.0 * 3600.0);
+        let mut run = start(config(), sensed(&up), clock);
+        let (_ws, hello, _) = welcome(&mut run).await;
+        assert_eq!(hello["report"]["hardware"]["cpu"]["model"], "Third CPU");
+        assert_eq!(up.made(), 0);
+        run.stopped().await;
+        let rebooted = Sequence::new(vec![test_scan("Rebooted CPU")], Duration::ZERO);
+        let clock = Clock::fake_booted(at, START_UNIX + 13.5 * 3600.0);
+        let mut run = start(config(), sensed(&rebooted), clock);
+        let (_ws, hello, _) = welcome(&mut run).await;
+        assert_eq!(hello["report"]["hardware"]["cpu"]["model"], "Rebooted CPU");
+        assert_eq!(rebooted.made(), 1);
         run.stopped().await;
 
         // A file that does not read, whose hash is not its scan's, or written "later" than now (the
@@ -407,6 +445,112 @@ fn a_rescan_of_a_helper_that_reports_no_hardware_sends_nothing() {
         assert!(run.log.contains("reports no hardware (--no-hardware)"));
         run.stopped().await;
     });
+}
+
+/// A scanner that keeps the runtimes each scan was given.
+#[derive(Clone, Default)]
+struct Recording {
+    given: Arc<Mutex<Vec<Vec<Runtime>>>>,
+}
+
+impl Scanner for Recording {
+    fn scan(&self, runtimes: Vec<Runtime>) -> BoxFuture<'static, Option<Map<String, Value>>> {
+        self.given.lock().expect("given").push(runtimes);
+        Box::pin(async { Some(test_scan("Recorded CPU")) })
+    }
+}
+
+#[test]
+fn a_scans_runtime_lists_what_the_endpoint_lists_within_the_allowlist() {
+    paused().block_on(async {
+        let models = common::Models::default();
+        let listed = |key: &str, context, loaded| citar_helper::llm::Listed {
+            key: key.to_owned(),
+            label: key.to_owned(),
+            context,
+            loaded,
+        };
+        models.set(vec![listed("model-b", None, false), listed("model-a", Some(4096), true)]);
+        let mut cfg = config();
+        cfg.no_llm = false;
+        cfg.models = Some(vec!["model-a".to_owned(), "not-installed".to_owned()]);
+        let base_url = cfg.base_url.clone();
+        let recording = Recording::default();
+        let clock = Clock::fake(START_UNIX);
+        let mut run = start_with(cfg, scanning(recording.clone()), clock, Some(Arc::new(models)));
+        let (_ws, hello, _) = welcome(&mut run).await;
+        // The catalog offers the allowlist (a model not installed among it, not loaded) ...
+        let offered: Vec<&str> = hello["llm"]["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .map(|m| m["key"].as_str().expect("a key"))
+            .collect();
+        assert_eq!(offered, ["model-a", "not-installed"]);
+        // ... and the scan says what is installed: the endpoint's models the allowlist names.
+        let given = recording.given.lock().expect("given").clone();
+        let expected = Runtime {
+            name: "LM Studio".to_owned(),
+            endpoint: base_url,
+            models: vec![("model-a".to_owned(), Some(4096))],
+        };
+        assert_eq!(given, vec![vec![expected]]);
+        run.stopped().await;
+    });
+}
+
+/// A disk that never takes the kept scan: `scan.json.tmp` a FIFO with no reader, whose open for
+/// writing blocks. Its write runs in the scan's task, so the session answers at once all the same,
+/// and the scan's frame follows when the write gives up.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_kept_on_a_disk_that_never_answers_holds_up_no_frame() {
+    let dir = common::scratch("stuck-disk");
+    let cache = dir.join("helper").join("scan.json");
+    std::fs::create_dir_all(dir.join("helper")).expect("the folder");
+    let fifo = cache.with_extension("json.tmp");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status().expect("mkfifo runs");
+    assert!(made.success());
+    let scanner = FixedScanner::new(test_scan("Stuck disk CPU"));
+    let sensors =
+        Sensors { scanner: Some(Arc::new(scanner.clone())), power: None, cache: Some(cache) };
+    let mut run = start(config(), sensors, Clock::system());
+    // The hello waits for its scan, whose keeping gives up after 5 s.
+    let (mut ws, hello, waited) = welcome(&mut run).await;
+    assert_eq!(hello["report"]["hardware"]["cpu"]["model"], "Stuck disk CPU");
+    assert!((4.0..15.0).contains(&waited), "the hello waited {waited} s");
+    // A rescan: its scan is kept on the same stuck disk, and a ping is answered at once.
+    ws.send(Message::Text(r#"{"t": "rescan"}"#.into())).await.expect("rescan");
+    let t0 = Instant::now();
+    ws.send(Message::Text(r#"{"t": "ping"}"#.into())).await.expect("ping");
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .expect("an answer in time")
+            .expect("a frame")
+            .expect("a frame");
+        if text(&m).is_some_and(|v| v["t"] == "pong") {
+            break;
+        }
+    }
+    // Milliseconds here; the write it does not wait for takes 5 s.
+    assert!(t0.elapsed() < Duration::from_secs(3), "the pong took {:?}", t0.elapsed());
+    let frames = frames_for(&mut ws, 9.0).await;
+    let hw = of_type(&frames, "hardware");
+    assert_eq!(hw.len(), 1, "{frames:?}");
+    assert!(hw[0].0 >= 3.0, "the frame followed the write's 5 s, at {} s", hw[0].0);
+    assert!(run.log.contains("could not keep the hardware scan in time"), "{:#?}", run.log.lines());
+    run.stopped().await;
+    // A reader lets the blocked writes end (the runtime's shutdown waits for them), on a thread of
+    // its own, at most 10 s.
+    let (done, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let read_all = std::fs::File::open(&fifo)
+            .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut Vec::new()));
+        let _sent = done.send(read_all.is_ok());
+    });
+    assert_eq!(read.recv_timeout(Duration::from_secs(10)), Ok(true), "the writes were released");
+    let _cleaned = std::fs::remove_dir_all(&dir);
 }
 
 /// The machine's own meters and scan against `citar-fake-probe`, which only a development build

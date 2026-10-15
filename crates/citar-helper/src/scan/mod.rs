@@ -10,7 +10,8 @@
 //!   each OS's own part, read as the collector reads it: [`windows`] (PowerShell's CIM query),
 //!   [`linux`] (`/proc`, DMI, `rocm-smi`, `lspci`, `lsblk`, a battery), [`macos`] (`sysctl`,
 //!   `system_profiler`). Then the model runtimes (the helper's own endpoint, when it is LM Studio
-//!   or Ollama and answered; nothing else is dialled, P4.3.10) and the power guess
+//!   or Ollama and answered, with the models it lists within the owner's allowlist,
+//!   [`runtime_models`]; nothing else is dialled, P4.3.10) and the power guess
 //!   ([`guess::guess_power`]).
 //! - **Best effort** ([`probe::run`]): a probe that is missing, fails or outlives its timeout
 //!   gives less information, never an error.
@@ -107,6 +108,43 @@ pub struct Runtime {
     pub endpoint: String,
     /// Each model's key and context length.
     pub models: Vec<(String, Option<u64>)>,
+}
+
+/// The models a runtime reports: those the endpoint's listing names (only the allowlist's, when
+/// there is one), each key with its context length, by key, at most [`crate::llm::MAX_MODELS`].
+/// Not the catalog's models ([`crate::llm::choose`]), which add an allowlisted model the endpoint
+/// does not list: a scan says what is installed.
+#[must_use]
+pub fn runtime_models(
+    listed: &[crate::llm::Listed],
+    allow: Option<&[String]>,
+) -> Vec<(String, Option<u64>)> {
+    let mut models: Vec<(String, Option<u64>)> = listed
+        .iter()
+        .filter(|m| !m.key.is_empty() && m.key.chars().count() <= crate::llm::MAX_KEY)
+        .filter(|m| allow.is_none_or(|a| a.contains(&m.key)))
+        .map(|m| (m.key.clone(), m.context))
+        .collect();
+    models.sort();
+    models.dedup_by(|a, b| a.0 == b.0);
+    models.truncate(crate::llm::MAX_MODELS);
+    models
+}
+
+/// The runtime a scan reports for the helper's endpoint (P4.3.10: the only one it dials), named
+/// as the collector names it; `None` for an endpoint that is neither LM Studio nor Ollama.
+#[must_use]
+pub fn endpoint_runtime(
+    provider: crate::protocol::Provider,
+    base_url: &str,
+    models: Vec<(String, Option<u64>)>,
+) -> Option<Runtime> {
+    let name = match provider {
+        crate::protocol::Provider::LmStudio => "LM Studio",
+        crate::protocol::Provider::Ollama => "Ollama",
+        _ => return None,
+    };
+    Some(Runtime { name: name.to_owned(), endpoint: base_url.to_owned(), models })
 }
 
 // ---------------------------------------------------------------------------- Python's ways
@@ -576,5 +614,29 @@ mod tests {
         assert_eq!(as_list(Some(&serde_json::json!({"a": 1}))).len(), 1);
         assert!(as_list(Some(&serde_json::json!({}))).is_empty());
         assert_eq!(python_str(&Value::Bool(true)), "True");
+    }
+
+    #[test]
+    fn a_runtime_lists_what_the_endpoint_lists_within_the_allowlist() {
+        let l = |key: &str, context| crate::llm::Listed {
+            key: key.to_owned(),
+            label: key.to_owned(),
+            context,
+            loaded: false,
+        };
+        let listed = [l("b", None), l("a", Some(8192)), l("a", Some(1)), l(&"k".repeat(201), None)];
+        assert_eq!(
+            runtime_models(&listed, None),
+            [("a".to_owned(), Some(1)), ("b".to_owned(), None)],
+            "by key, once each, no key too long"
+        );
+        // An allowlisted model the endpoint does not list is not installed: not reported.
+        let allow = ["a".to_owned(), "not-installed".to_owned()];
+        assert_eq!(runtime_models(&listed, Some(&allow)), [("a".to_owned(), Some(1))]);
+        let p = crate::protocol::Provider::Ollama;
+        let rt = endpoint_runtime(p, "http://127.0.0.1:11434", Vec::new()).expect("Ollama's");
+        assert_eq!((rt.name.as_str(), rt.endpoint.as_str()), ("Ollama", "http://127.0.0.1:11434"));
+        let other = crate::protocol::Provider::OpenAiCompatible;
+        assert_eq!(endpoint_runtime(other, "http://127.0.0.1:1/v1", Vec::new()), None);
     }
 }

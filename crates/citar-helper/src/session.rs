@@ -22,13 +22,13 @@
 //!   takes no job (`job_reject` `build`: it has no jobs build).
 //! - **The hardware report** (P4.3.5, package 4-06): the owner's file (`--hardware FILE`, read
 //!   again at each connection and on `rescan`), nothing (`--no-hardware`), or the machine's own
-//!   scan ([`crate::scan`]). A scan younger than [`SCAN_EVERY`] serves a hello (kept across
-//!   connections, and across runs in `helper/scan.json`); an older one, or none, is made before
-//!   the hello, which waits up to [`SCAN_WAIT`] for it and otherwise goes with what it has, the
-//!   scan's `hardware` frame following when it is done. The machine is scanned again every
-//!   [`SCAN_EVERY`], and a `hardware` frame goes only when the scan's [`crate::scan::hash`]
-//!   differs from what the server has; a `rescan` sends one whatever the scan holds. Scans run off
-//!   the session's task.
+//!   scan ([`crate::scan`]). A scan younger than [`SCAN_EVERY`] by the wall clock serves a hello
+//!   (kept across connections, and across runs in `helper/scan.json` unless the machine started
+//!   since); an older one, or none, is made before the hello, which waits up to [`SCAN_WAIT`] for
+//!   it and otherwise goes with what it has, the scan's `hardware` frame following when it is
+//!   done. The machine is scanned again every [`SCAN_EVERY`], and a `hardware` frame goes only
+//!   when the scan's [`crate::scan::hash`] differs from what the server has; a `rescan` sends one
+//!   whatever the scan holds. Scans, and keeping them on disk, run off the session's task.
 //! - **Power** (P4.3.5): unless `--no-power`, a reading every 10 s ([`crate::power`]) on a task of
 //!   its own, and one `power` frame a minute with the minute's readings (none when nothing could be
 //!   measured).
@@ -217,18 +217,35 @@ impl Sensors {
 struct Scanned {
     scan: Map<String, Value>,
     hash: String,
-    /// On the session's clock (tokio's), for the next scan's time.
-    at: Instant,
+    /// Unix time on the helper's wall clock. Not tokio's clock: that one counts from the machine's
+    /// start (and on Linux stops while it sleeps), so a scan kept from before a restart of the
+    /// machine has no place on it.
+    at: f64,
+}
+
+/// What a scan task gives the session: a scan with its hash, already kept in
+/// `helper/scan.json`, or why there is none.
+enum Made {
+    Scan {
+        scan: Map<String, Value>,
+        hash: String,
+        at: f64,
+    },
+    /// The scanner could not make one.
+    Failed,
+    /// Over [`HARDWARE_REPORT_MAX`] bytes as sent: not reported, nor kept.
+    TooLarge(usize),
 }
 
 /// The machine's scans across connections (the module's doc).
 #[derive(Default)]
 struct Scans {
     last: Option<Scanned>,
-    /// A scan being made, off the session's task.
-    task: Option<tokio::task::JoinHandle<Option<Map<String, Value>>>>,
-    /// When the next scan is due (none while one is being made).
-    due: Option<Instant>,
+    /// A scan being made (and kept), off the session's task.
+    task: Option<tokio::task::JoinHandle<Made>>,
+    /// When the next scan is due, as Unix time on the helper's wall clock (none while one is being
+    /// made).
+    due: Option<f64>,
     /// The hash of the scan the server has: this connection's hello's, or its last `hardware`
     /// frame's.
     sent: Option<String>,
@@ -322,14 +339,18 @@ struct Catalog {
     /// Listings in a row that failed.
     failures: u32,
     /// The endpoint answered, and has not failed [`FAILED_LISTINGS`] listings in a row since: its
-    /// models are the scan's runtime's.
+    /// last listing's models are the scan's runtime's.
     answered: bool,
+    /// What the last listing that answered named, within the allowlist
+    /// ([`scan::runtime_models`]): the scan's runtime's models. Not [`Catalog::models`], which
+    /// adds the allowlist's models the endpoint does not list.
+    installed: Vec<(String, Option<u64>)>,
 }
 
 impl Catalog {
     fn new(allow: Option<Vec<String>>) -> Catalog {
         let models = llm::choose(&[], allow.as_deref());
-        Catalog { allow, models, failures: 0, answered: false }
+        Catalog { allow, models, failures: 0, answered: false, installed: Vec::new() }
     }
 
     /// Takes one listing; true when the models to report changed.
@@ -338,6 +359,7 @@ impl Catalog {
             Ok(l) => {
                 self.failures = 0;
                 self.answered = true;
+                self.installed = scan::runtime_models(&l, self.allow.as_deref());
                 llm::choose(&l, self.allow.as_deref())
             }
             Err(e) => {
@@ -356,6 +378,7 @@ impl Catalog {
                     return false;
                 }
                 self.answered = false;
+                self.installed.clear();
                 let none = llm::choose(&[], self.allow.as_deref());
                 if none != self.models {
                     h.log.warn(format!(
@@ -412,6 +435,42 @@ async fn read_report(collect: bool, file: String, log: Log) -> Report {
     }
 }
 
+/// Writes `helper/scan.json` (`{v, at, hash, scan}`: a file beside it first, then renamed over
+/// it) on a blocking thread, within [`SCAN_KEEP`]; a failure is logged and changes nothing else.
+/// Called from the scan's task, never from the session's loop: a slow disk holds up no frame.
+async fn keep_scan(
+    path: std::path::PathBuf,
+    scan: &Map<String, Value>,
+    hash: &str,
+    at: f64,
+    log: &Log,
+) {
+    let doc = serde_json::json!({"v": CACHE_VERSION, "at": at, "hash": hash, "scan": scan});
+    let write = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&doc).unwrap_or_default())?;
+        std::fs::rename(&tmp, &path)
+    });
+    match tokio::time::timeout(SCAN_KEEP, write).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => log.throttled(
+            "scan file",
+            Duration::from_secs(3600),
+            Level::Warn,
+            format!("could not keep the hardware scan: {e}"),
+        ),
+        _ => log.throttled(
+            "scan file",
+            Duration::from_secs(3600),
+            Level::Warn,
+            "could not keep the hardware scan in time",
+        ),
+    }
+}
+
 /// A protocol error for the log, with what came from the server cut.
 fn describe(e: &ProtocolError) -> String {
     let at = if e.path.is_empty() { "the frame".to_owned() } else { clip(&e.path, TYPE_SHOWN) };
@@ -447,7 +506,7 @@ impl Helper {
         if !self.scanning() {
             return self.report().await;
         }
-        let fresh = scans.last.as_ref().is_some_and(|s| s.at.elapsed() < SCAN_EVERY);
+        let fresh = scans.last.as_ref().is_some_and(|s| self.serves(s.at));
         if !fresh {
             self.start_scan(scans, self.runtimes(catalog));
             if let Some(task) = scans.task.as_mut()
@@ -455,7 +514,7 @@ impl Helper {
             {
                 scans.task = None;
                 // The hello carries it, whatever its hash: what the server has is set below.
-                let _sent = self.took_scan(scans, done.ok().flatten()).await;
+                let _sent = self.took_scan(scans, done.unwrap_or(Made::Failed));
             }
             if scans.task.is_some() {
                 self.log.info(format!(
@@ -484,71 +543,86 @@ impl Helper {
     }
 
     /// The model runtime a scan reports: the endpoint, when it is LM Studio or Ollama and its
-    /// last listings answered (P4.3.10: nothing else is dialled for it).
+    /// last listings answered (P4.3.10: nothing else is dialled for it), with the models it listed
+    /// within the allowlist.
     fn runtimes(&self, catalog: &Catalog) -> Vec<Runtime> {
-        let name = match self.config.provider {
-            protocol::Provider::LmStudio => "LM Studio",
-            protocol::Provider::Ollama => "Ollama",
-            _ => return Vec::new(),
-        };
         if self.endpoint.is_none() || !catalog.answered {
             return Vec::new();
         }
-        let mut models: Vec<(String, Option<u64>)> =
-            catalog.models.iter().map(|m| (m.key.clone(), m.context)).collect();
-        models.sort();
-        vec![Runtime { name: name.to_owned(), endpoint: self.config.base_url.clone(), models }]
+        let models = catalog.installed.clone();
+        scan::endpoint_runtime(self.config.provider, &self.config.base_url, models)
+            .into_iter()
+            .collect()
     }
 
-    /// Starts a scan off the session's task, unless one is being made.
+    /// Whether a scan made at `at` (Unix time) still serves: made under [`SCAN_EVERY`] ago by the
+    /// wall clock, and not "later" than now (a clock set back since).
+    fn serves(&self, at: f64) -> bool {
+        (0.0..SCAN_EVERY.as_secs_f64()).contains(&(self.clock.now_unix() - at))
+    }
+
+    /// Starts a scan off the session's task, unless one is being made. The task also checks its
+    /// size, hashes it and keeps it in `helper/scan.json`, so the session's loop waits on no disk.
     fn start_scan(&self, scans: &mut Scans, runtimes: Vec<Runtime>) {
         if scans.task.is_some() {
             return;
         }
         let Some(scanner) = &self.sensors.scanner else { return };
         scans.due = None;
-        scans.task = Some(tokio::spawn(scanner.scan(runtimes)));
+        let made = scanner.scan(runtimes);
+        let (cache, clock, log) =
+            (self.sensors.cache.clone(), self.clock.clone(), self.log.clone());
+        scans.task = Some(tokio::spawn(async move {
+            let Some(scan) = made.await else { return Made::Failed };
+            let size = serde_json::to_vec(&scan).map_or(usize::MAX, |v| v.len());
+            if size > HARDWARE_REPORT_MAX {
+                return Made::TooLarge(size);
+            }
+            let hash = scan::hash(&scan);
+            let at = clock.now_unix();
+            if let Some(path) = cache {
+                keep_scan(path, &scan, &hash, at, &log).await;
+            }
+            Made::Scan { scan, hash, at }
+        }));
     }
 
-    /// A scan is done (`None`: it could not be made): kept, in memory and in `helper/scan.json`,
-    /// and returned when the server should be sent it (a `rescan` asked for it, or it differs
-    /// from what the server has).
-    async fn took_scan(
-        &self,
-        scans: &mut Scans,
-        result: Option<Map<String, Value>>,
-    ) -> Option<Map<String, Value>> {
-        scans.due = Some(Instant::now() + SCAN_EVERY);
+    /// A scan task ended: its scan kept in memory, and returned when the server should be sent it
+    /// (a `rescan` asked for it, or it differs from what the server has). The next scan is due
+    /// [`SCAN_EVERY`] from now, whether this one was made or not.
+    fn took_scan(&self, scans: &mut Scans, made: Made) -> Option<Map<String, Value>> {
+        scans.due = Some(self.clock.now_unix() + SCAN_EVERY.as_secs_f64());
         let forced = std::mem::take(&mut scans.forced);
-        let Some(scan) = result else {
-            self.log.throttled(
-                "scan",
-                Duration::from_secs(3600),
-                Level::Warn,
-                "the hardware scan could not be made: trying again in 6 hours",
-            );
-            return None;
+        let (scan, hash, at) = match made {
+            Made::Scan { scan, hash, at } => (scan, hash, at),
+            Made::Failed => {
+                self.log.throttled(
+                    "scan",
+                    Duration::from_secs(3600),
+                    Level::Warn,
+                    "the hardware scan could not be made: trying again in 6 hours",
+                );
+                return None;
+            }
+            Made::TooLarge(size) => {
+                self.log.throttled(
+                    "scan",
+                    Duration::from_secs(3600),
+                    Level::Warn,
+                    format!(
+                        "the hardware scan is {size} bytes, over the {} KiB a hello carries: not \
+                         reported",
+                        HARDWARE_REPORT_MAX / 1024
+                    ),
+                );
+                return None;
+            }
         };
-        let size = serde_json::to_vec(&scan).map_or(usize::MAX, |v| v.len());
-        if size > HARDWARE_REPORT_MAX {
-            self.log.throttled(
-                "scan",
-                Duration::from_secs(3600),
-                Level::Warn,
-                format!(
-                    "the hardware scan is {size} bytes, over the {} KiB a hello carries: not reported",
-                    HARDWARE_REPORT_MAX / 1024
-                ),
-            );
-            return None;
-        }
-        let hash = scan::hash(&scan);
         let changed = scans.sent.as_deref() != Some(hash.as_str());
         if scans.last.as_ref().is_some_and(|s| s.hash != hash) {
             self.log.info("the machine's hardware scan changed");
         }
-        scans.last = Some(Scanned { scan: scan.clone(), hash: hash.clone(), at: Instant::now() });
-        self.keep_scan(&scan, &hash).await;
+        scans.last = Some(Scanned { scan: scan.clone(), hash: hash.clone(), at });
         if forced || changed {
             scans.sent = Some(hash);
             return Some(scan);
@@ -556,39 +630,9 @@ impl Helper {
         None
     }
 
-    /// Writes `helper/scan.json` (a file beside it first, then renamed over it), off the
-    /// session's task; a failure is logged and changes nothing else.
-    async fn keep_scan(&self, scan: &Map<String, Value>, hash: &str) {
-        let Some(path) = self.sensors.cache.clone() else { return };
-        let doc = serde_json::json!({"v": CACHE_VERSION, "at": self.clock.now_unix(),
-                                     "hash": hash, "scan": scan});
-        let write = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_vec(&doc).unwrap_or_default())?;
-            std::fs::rename(&tmp, &path)
-        });
-        match tokio::time::timeout(SCAN_KEEP, write).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(e))) => self.log.throttled(
-                "scan file",
-                Duration::from_secs(3600),
-                Level::Warn,
-                format!("could not keep the hardware scan: {e}"),
-            ),
-            _ => self.log.throttled(
-                "scan file",
-                Duration::from_secs(3600),
-                Level::Warn,
-                "could not keep the hardware scan in time",
-            ),
-        }
-    }
-
-    /// The scan `helper/scan.json` keeps, when it is this collector's, reads whole and is younger
-    /// than [`SCAN_EVERY`].
+    /// The scan `helper/scan.json` keeps, when it is this collector's, reads whole, is younger
+    /// than [`SCAN_EVERY`] and was made since the machine last started (hardware changes with the
+    /// machine off: a restart after a reboot scans again).
     async fn load_scans(&self) -> Scans {
         let mut scans = Scans::default();
         let Some(path) = self.sensors.cache.clone() else { return scans };
@@ -610,13 +654,15 @@ impl Helper {
             && scan.get("collector_version").and_then(Value::as_u64)
                 == Some(u64::from(scan::COLLECTOR_VERSION))
             && scan::hash(scan) == hash;
-        let age = self.clock.now_unix() - at;
-        if !ours || !(0.0..SCAN_EVERY.as_secs_f64()).contains(&age) {
+        if !ours || !self.serves(at) {
             return scans;
         }
-        let at =
-            Instant::now().checked_sub(Duration::from_secs_f64(age)).unwrap_or_else(Instant::now);
-        scans.due = Some(at + SCAN_EVERY);
+        if self.clock.boot_unix().is_some_and(|boot| at < boot) {
+            self.log.debug("the kept hardware scan is from before the machine started: scanning");
+            return scans;
+        }
+        let age = self.clock.now_unix() - at;
+        scans.due = Some(at + SCAN_EVERY.as_secs_f64());
         scans.last = Some(Scanned { scan: scan.clone(), hash: hash.to_owned(), at });
         self.log.debug(format!("using the hardware scan made {:.0} minutes ago", age / 60.0));
         scans
@@ -1305,12 +1351,14 @@ impl<'a> Steady<'a> {
         }
     }
 
-    /// When the next scan is due, when this helper scans and none is being made.
+    /// When the next scan is due, when this helper scans and none is being made: the wall clock's
+    /// due time read as tokio's now, at most [`SCAN_EVERY`] ahead (a clock set back).
     fn scan_due(&self) -> Option<Instant> {
         if !self.h.scanning() || self.scans.task.is_some() {
             return None;
         }
-        self.scans.due
+        let left = self.scans.due? - self.h.clock.now_unix();
+        Some(Instant::now() + Duration::from_secs_f64(left.clamp(0.0, SCAN_EVERY.as_secs_f64())))
     }
 
     /// Sends a scan as a `hardware` frame.
@@ -1449,7 +1497,7 @@ impl<'a> Steady<'a> {
                 }
                 done = scanned => {
                     self.scans.task = None;
-                    if let Some(scan) = self.h.took_scan(self.scans, done.ok().flatten()).await
+                    if let Some(scan) = self.h.took_scan(self.scans, done.unwrap_or(Made::Failed))
                         && self.send_scan(tx, scan).await.is_err()
                     {
                         return End::Reconnect { welcomed: true };
