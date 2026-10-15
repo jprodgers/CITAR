@@ -55,7 +55,7 @@ __all__ = [
     "map_ref", "map_file", "map_dir", "scenario_ref", "scenario_file", "scenario_dir",
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
-    "build_info",
+    "build_info", "key_fingerprint",
     "DEBUG_ACTIONS", "EngineGame",
     "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
 ]
@@ -483,6 +483,19 @@ def build_info() -> dict:
     "engine_code", "bot_code", "ruleset_dir" (the directory ``CITAR_RULESET_DIR`` gave the process its ruleset from,
     or None for the ruleset compiled in)}."""
     return json.loads(_E.build_info())
+
+
+def key_fingerprint(public_key: str) -> str:
+    """The fingerprint of a helper's machine key (``hello.machine.public_key``, standard base64 of 32 bytes): the
+    first 16 hex digits of blake3 over its bytes, computed by the same Rust as ``citar-helper --version`` prints it
+    (design/phase4-helper.md P4.3.7). Raises ValueError for a value that is not such a key."""
+    import base64
+    import binascii
+    try:
+        raw = base64.b64decode(public_key, validate=True)
+    except (binascii.Error, ValueError, TypeError):
+        raise ValueError("a machine key is standard base64 of 32 bytes") from None
+    return _E.key_fingerprint(raw)
 
 
 def bot_versions() -> list[dict]:

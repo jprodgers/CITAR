@@ -76,6 +76,25 @@ fn build_info(py: Python<'_>) -> PyResult<Bytes> {
     })?)
 }
 
+/// The fingerprint of a helper's machine key (design/phase4-helper.md P4.3.7): the first 16 hex
+/// digits of blake3 over the key's 32 bytes, as `citar-helper --version` prints it and the
+/// Servers page shows it, so an owner can tell the key on their machine's row is their helper's.
+#[pyfunction]
+fn key_fingerprint(public: &[u8]) -> PyResult<String> {
+    Ok(errors::shielded(|| {
+        if public.len() != 32 {
+            return Err(Failure::Value(format!(
+                "a machine key is 32 bytes, not {}",
+                public.len()
+            )));
+        }
+        Ok(blake3::hash(public).as_bytes()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
+    })?)
+}
+
 /// The module.
 #[pymodule]
 fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -97,6 +116,7 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("EngineCrash", py.get_type::<EngineCrash>())?;
 
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(key_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(rules::check_ruleset, m)?)?;
     m.add_function(wrap_pyfunction!(calls::calls_in_flight, m)?)?;
     m.add_function(wrap_pyfunction!(calls::shutdown, m)?)?;

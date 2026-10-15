@@ -42,6 +42,9 @@ class EngineCrash(RuntimeError):
 def build_info() -> bytes:
     """{version, build_id, label, rules, engine_code, bot_code, ruleset_dir}: ``rules`` is the process's ruleset id,
     ``ruleset_dir`` the directory CITAR_RULESET_DIR gave it (None for the ruleset compiled in)."""
+def key_fingerprint(public: bytes) -> str:
+    """A helper's machine key's fingerprint: the first 16 hex digits of blake3 over its 32 bytes (ValueError for
+    another length), as ``citar-helper --version`` prints it."""
 def check_ruleset(dir: str) -> bytes:
     """Loads the ruleset in a directory of the data layout (ruleset/, custom/, game.json) without adopting it: {dir, id,
     version, counts, errors}, errors [{kind, file, object, text}] (none when it loads, and then id, version and counts
