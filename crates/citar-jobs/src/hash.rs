@@ -245,4 +245,48 @@ mod tests {
         assert_eq!(h, hex(h2.finalize().as_bytes()));
         assert!(result_hash(Kind::ReferenceGame, &crash).is_err(), "not a reference's crash");
     }
+
+    /// Gate 3's schema test: no hashed result holds a measurement or a trace, at any depth (the
+    /// golden set's results, a result of each kind), and a result that carries one, anywhere,
+    /// does not read.
+    #[test]
+    fn no_hashed_result_holds_a_time_or_a_trace() {
+        const MEASURED: [&str; 6] =
+            ["seconds", "cpu_s", "started_ts", "finished", "trace", "wall_s"];
+        fn keys(v: &Value, out: &mut Vec<String>) {
+            match v {
+                Value::Object(m) => {
+                    for (k, x) in m {
+                        out.push(k.clone());
+                        keys(x, out);
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|x| keys(x, out)),
+                _ => {}
+            }
+        }
+        let set = crate::golden::GoldenSet::committed().expect("the golden set");
+        let mut kinds = std::collections::BTreeSet::new();
+        for (name, job) in &set.jobs {
+            kinds.insert(job.kind);
+            let mut found = Vec::new();
+            keys(&job.result, &mut found);
+            for k in MEASURED {
+                assert!(!found.iter().any(|f| f == k), "{name}'s result holds {k}");
+            }
+            assert_eq!(result_hash(job.kind, &job.result).as_ref(), Ok(&job.result_hash), "{name}");
+            for k in MEASURED {
+                let mut timed = job.result.clone();
+                timed[k] = serde_json::json!(1.5);
+                assert!(result_hash(job.kind, &timed).is_err(), "{name} with {k} at the top");
+            }
+            if let Some(p) = job.result.get("players").and_then(|p| p.get("0")) {
+                let mut timed = job.result.clone();
+                timed["players"]["0"]["seconds"] = serde_json::json!(1.5);
+                assert!(result_hash(job.kind, &timed).is_err(), "{name}: a player's time");
+                assert!(p.get("fingerprint").is_some());
+            }
+        }
+        assert_eq!(kinds.len(), Kind::ALL.len(), "the set holds every kind");
+    }
 }

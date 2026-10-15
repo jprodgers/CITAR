@@ -445,7 +445,7 @@ impl LabSpec {
             )));
         }
         for (n, seat) in self.seats.iter().enumerate() {
-            seat.check(n).map_err(|e| SpecError::new(format!("seat {n}: {e}")))?;
+            seat.check().map_err(|e| SpecError::new(format!("seat {n}: {e}")))?;
         }
         if let Some(d) = self.river_density {
             number_in("river_density", d, 0.0, 5.0)?;
@@ -467,7 +467,7 @@ impl LabSpec {
 }
 
 impl LabSeat {
-    fn check(&self, _n: usize) -> Result<(), SpecError> {
+    fn check(&self) -> Result<(), SpecError> {
         for (k, v) in [
             ("label", &self.label),
             ("difficulty", &self.difficulty),
