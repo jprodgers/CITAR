@@ -8,8 +8,8 @@
 //! **Owner-only.** The file is written owner-only (mode 0600, or an owner-only DACL on Windows,
 //! through citar-jobs' `sys` module) before the secret goes into it, and **at start the helper
 //! refuses a key file anyone else can read**, naming the command that fixes it. The secret never
-//! leaves the machine: it is in no frame, log or scan. Signing (4-11) happens in this process,
-//! never in the job host.
+//! leaves the machine: it is in no frame, log or scan. Signing a run's claim (4-10,
+//! [`MachineKey::sign_b64`]) happens in this process, never in the job host.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -68,6 +68,14 @@ impl MachineKey {
     #[must_use]
     pub fn fingerprint(&self) -> String {
         fingerprint_of(&self.public())
+    }
+
+    /// The ed25519 signature of `message` by this key, in standard base64 (64 bytes): a run's
+    /// claim (P4.4.4), signed here in the helper and never in the job host, which plays the games.
+    #[must_use]
+    pub fn sign_b64(&self, message: &[u8]) -> String {
+        use ed25519_dalek::Signer as _;
+        STANDARD.encode(self.signing.sign(message).to_bytes())
     }
 
     fn file_text(&self) -> String {

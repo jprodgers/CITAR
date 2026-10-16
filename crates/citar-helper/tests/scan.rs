@@ -123,6 +123,7 @@ fn start_with(
         stop: stop_rx,
         in_flight: Default::default(),
         sensors,
+        jobs: citar_helper::jobs::JobSetup::default(),
     };
     let task = tokio::spawn(async move { helper.run().await });
     Run { conns, log, stop, task }

@@ -23,10 +23,11 @@ gone, and a 0.1.6 server tells one that connects to download the new helper
                                             |      GPU
 ```
 
-**The server runs the games; helpers only serve models** (and, from a later 0.1.6 package, bot games
-as CPU work). The game engine, the bots and the state all stay on the server. A helper is a model
-endpoint with a tunnel around it: it returns each completion exactly as its model server gave it, and
-the server reads the tool calls in it, with the same parser it uses for every model.
+**The server runs the games; helpers serve models** (and, where the machine's owner lends its CPU, play
+the lab's bot games as CPU work: [below](#lending-cpu-what-plays-on-it-and-for-whom)). The game engine,
+the bots and the state of every played game stay on the server. A helper is a model endpoint with a
+tunnel around it: it returns each completion exactly as its model server gave it, and the server reads
+the tool calls in it, with the same parser it uses for every model.
 
 ---
 
@@ -74,6 +75,7 @@ the action touches:
 | See a machine and seat it | Its owner and administrators; anyone else through a grant on a server group it is in. No listing names a machine to anyone else (the lobby's availability, the machines in their quiet hours): it is 404 to them |
 | Change its configuration (name, models, hardware, power and costs, quiet hours), remove it | Its owner and administrators; another member gets 404 |
 | Its machine settings: LLM slots, model swaps, CPU sharing, what its helper's reports may change, applying the last one | Its owner and administrators; a member a group lends it to gets 403, any other member 404 |
+| Its CPU runs (`GET /api/machines/{id}/jobs`: the lab's games it played, what it lends now, its trust counters) | Its owner and administrators; a member a group lends it to gets 403, any other member 404. Another member's experiment is named "a member's experiment" unless the caller may see it |
 | Set its trust tier, pin the hardware classes it is priced by | Administrators; anyone else gets 404 |
 | Store or delete its API key | Its owner and administrators, on a machine the server dials; a helper machine has no key on the server (404) |
 | Add a machine the server dials itself, or switch one to that | Administrators, unless its provider is the dry run (it dials nothing): a member gets 403 with the reason |
@@ -139,9 +141,13 @@ once**) reach it the same way, and a change made from the command line or anothe
 server holds each answer to what the settings it answers asked, so a helper can never take more than the site gave it
 (one that claims more is flagged `settings_overclaim` for administrators), and an answer that crossed a newer change
 on the way is not taken for one. The dialog waits up to two seconds for the answer when something changed. **CPU sharing** (threads, CPU %, memory, the kinds of CPU work: lab games, ranking games, reference
-games, and whether its games pause while its own model works) is sent and acknowledged the same way; the CPU work
-itself starts with a later 0.1.6 package. Its limits are hard where the operating system allows, and the helper's own
-local settings always win.
+games, and whether its games pause while its own model works) is sent and acknowledged the same way, and the
+helper's job host plays the lab's games under it ([below](#lending-cpu-what-plays-on-it-and-for-whom)). The helper's
+own local settings always win: the dialog shows what is **in effect** (the threads, the CPU share and the memory, each
+limit **hard** or **soft** as the machine's operating system holds it, the memory each game may use, and what the
+helper's own ceiling capped), or **"not lent by this machine's owner"** when the helper's own switch is off, and the
+grants on the machine's group that lend it for **Lab (CPU work)**. The helper card on the Servers page shows the same
+line.
 
 **What the helper's report changes.** Each time it connects, the helper reports the machine's hardware (its scan, the
 file given with `--hardware FILE`, or nothing with `--no-hardware`) and the models its model server lists, with which
@@ -168,8 +174,10 @@ and apply.
 
 **Class and trust.** The machine's **hardware class** prices its work in the compute ledger
 ([Configuration](../CONFIGURATION.md#credits-and-hardware-classes)): it follows the hardware details unless an
-administrator **pins** it, here. Its **trust tier** (new, provisional, trusted, quarantined) is set by administrators;
-today it is a label, which a later version sets by itself and acts on. Both are shown to the machine's owner. An
+administrator **pins** it, here. Its **trust tier** (new, provisional, trusted, quarantined) is set by administrators.
+Until the server checks helpers' results by itself (a later 0.1.6 package), only a machine an administrator set
+**trusted** is offered CPU work, and its results are accepted as **unverified**. Both are shown to the machine's
+owner. An
 administrator also sees, here and on the card, when its helper has **over-reported** its generation time (more than the
 server observed, by over 10% and a second, three times within an hour): its work is credited the time the server
 observed whatever it reports.
@@ -333,6 +341,44 @@ question, `"cpu": {"enabled": true}` in `helper.json`, or `--cpu` for one run. A
 and the server's machine dialog shows "not lent by this machine's owner". The `cpu` figures are a
 ceiling: the helper takes the smaller of each of the server's figures and yours, and tells the
 server what it will actually do.
+
+### Lending CPU: what plays on it, and for whom
+
+A machine whose owner lends its CPU (the switch above) plays the lab's games in its helper's job host, under the CPU
+settings in effect. The server offers it, one game a thread:
+
+- **its owner's own experiments**;
+- **the experiments of members a grant on its group lends it to for Lab (CPU work)**: the grant must tick that
+  purpose. A grant with nothing ticked covers every kind of *model* work but never lends the CPU, and an
+  administrator's own experiments need such a grant too (an administrator's bypass of grants covers model work only);
+- **the server's own ranking and reference games** (its collection), when the machine's CPU settings list those kinds.
+
+It offers nothing while the machine is in its quiet hours, while a benchmark holds it, to a helper whose jobs build
+differs from the server's (both sides must compute a game alike), or a game whose memory is more than the job host
+gives each game; a game no machine can take waits on the Lab page, saying why. A member's experiment played under a
+grant counts against the grant's budget like any other work, and each game is entered in the compute ledger with
+**the machine's owner as the provider** and the experiment's owner as the user.
+
+**Pauses.** With **"Pause its games while its own model works"** on (the default), the helper holds its games at their
+next step while a request runs on its model, and lets them go when the request ends, so lending the CPU never slows
+the model. A benchmark on the machine pauses them whatever that says, until it ends (if the helper's connection drops
+meanwhile, its games go on, and the server pauses them again when it reconnects while the benchmark lasts). Paused
+time does not count against a game's deadline (up to twice the deadline in all); a game the helper's own pauses held
+past that is played elsewhere, not on that machine again for an hour.
+
+**Results are kept until the server has them.** A finished game's result is signed with the machine key and kept in
+the helper's `helper/results/` until the server acknowledges it; a helper that loses its connection sends it again
+when it reconnects, and the server takes each result once. A helper stopped mid-game ends its games, and the server
+plays them again elsewhere, offering that machine nothing until its helper connects again. A game the helper does not
+answer within 30 seconds of its offer (it answers one waiting for its job host to start before then), or one silent
+for five minutes, is taken back and offered again; a machine that keeps abandoning games is offered none for an hour.
+A helper that refuses a game's spec, or fails a game as one no machine could play, is counted against its machine
+(the server checked the game itself) and the game is played elsewhere. When you change the machine's CPU settings
+while games play, the helper starts its job host again under the new figures once they finish, and tells the server
+the memory each game now has.
+
+**What the owner sees.** `GET /api/machines/{id}/jobs` lists the machine's recent runs (each game, its state, its CPU
+and paused time, and its verification once settled), what it lends now and its trust counters.
 
 ### CPU limits, per operating system
 

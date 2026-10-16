@@ -101,7 +101,7 @@ fn scenario(before: &[Listed], after: &[Listed]) -> Transcript {
     });
     let t = json!({
         "name": "real-binary-loopback",
-        "about": "The real binary on loopback: key, settings capped by its ceiling, catalog on change, shutdown.",
+        "about": "The real binary on loopback: key, settings capped by its ceiling (its job host started under them), catalog on change, shutdown.",
         "refs": ["P4.3.3"],
         "plays": {"helper": "4-03", "hub": null},
         "one_side": "a scenario of the real binary's test, not a shared transcript",
@@ -112,7 +112,7 @@ fn scenario(before: &[Listed], after: &[Listed]) -> Transcript {
                      "machine": {"public_key": "<id:key>"},
                      "llm": {"enabled": true, "provider": "lmstudio", "slots": 2, "stream": true,
                              "models": models_json(before)},
-                     "cpu": {"enabled": false,
+                     "cpu": {"enabled": true, "verifiable": true,
                              "ceiling": {"threads": 2, "cpu_percent": 25, "memory_mb": 512, "work": ["lab_game"]}},
                      "running": [], "results": []},
              "within_s": 20},
@@ -124,8 +124,11 @@ fn scenario(before: &[Listed], after: &[Listed]) -> Transcript {
                                    "cpu": {"enabled": true, "threads": 2, "cpu_percent": 25, "memory_mb": 512,
                                            "work": ["lab_game"], "yield_to_llm": true}},
                      "capped": ["llm.slots", "cpu.threads", "cpu.work"],
-                     "limits": {"cpu": "soft", "memory": "soft"}},
-             "within_s": 5},
+                     // CPU work is on in effect: the acknowledgement waits for the job host it
+                     // starts (this binary as `job-host`, under the effective limits), and carries
+                     // its figures.
+                     "limits": "<any>", "memory_per_run_mb": "<int:1..512>"},
+             "within_s": 15},
             {"endpoint": {"models": models_json(after)}},
             {"h2s": {"t": "catalog", "models": models_json(after)}, "within_s": 35},
             {"s2h": {"t": "shutdown", "reason": "the token was revoked", "code": "revoked"}},

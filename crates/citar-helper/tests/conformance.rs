@@ -6,7 +6,8 @@
 //! `FakeEndpoint` over HTTP on loopback, since a paused clock would fire the helper's timers while
 //! the endpoint's bytes are on their way, and since what they check is the real connection to the
 //! endpoint (its client gone within 1 s of a cancel). The hub's side plays the same files from 4-05
-//! on (`tests/test_helper_conformance.py`).
+//! on (`tests/test_helper_conformance.py`). From 4-10 the in-process helper plays CPU jobs on
+//! `common`'s fake job host, its results kept in a home of its own.
 
 mod common;
 
@@ -15,9 +16,11 @@ use std::time::Duration;
 
 use citar_helper::clock::Clock;
 use citar_helper::config::{Config, LocalCpu, Machine};
+use citar_helper::conformance::matcher::Committed;
 use citar_helper::conformance::transcript::{Action, Transcript};
 use citar_helper::conformance::{canonical_examples, transcripts};
 use citar_helper::http1;
+use citar_helper::jobs::{JobSetup, JobState, Snapshot};
 use citar_helper::key::MachineKey;
 use citar_helper::llm::{BoxFuture, Endpoint, HttpEndpoint, Listed, SharedEndpoint};
 use citar_helper::log::Log;
@@ -27,13 +30,14 @@ use citar_helper::proxy::InFlight;
 use citar_helper::quiet::{self, Quiet};
 use citar_helper::session::{Exit, Facts, Helper, Sensors};
 use common::{
-    FakeEndpoint, FixedPower, FixedScanner, Models, Pipe, Player, UnderTest, listed, test_scan,
+    FakeEndpoint, FakeHosts, FixedPower, FixedScanner, Models, Pipe, Player, UnderTest,
+    held_result, listed, test_scan,
 };
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 /// The packages whose helper-side transcripts this crate plays (it refuses what it cannot do).
-const PLAYED_THROUGH: &str = "4-06";
+const PLAYED_THROUGH: &str = "4-10";
 
 /// The fake clock's start: Wednesday 2026-10-14, 12:00 UTC, outside any transcript's quiet hours.
 const START_UNIX: f64 = 1_791_979_200.0;
@@ -46,6 +50,9 @@ struct InProcess {
     in_flight: InFlight,
     /// What Ctrl-C or the service manager would set.
     stop: watch::Sender<bool>,
+    /// The fake job host, and what the helper's job side holds.
+    hosts: FakeHosts,
+    jobs: JobState,
 }
 
 impl UnderTest for InProcess {
@@ -84,6 +91,18 @@ impl UnderTest for InProcess {
             }
             other => panic!("this player cannot yet act {other:?} around the helper"),
         }
+    }
+
+    fn jobs(&self) -> Option<Snapshot> {
+        Some(self.jobs.snapshot())
+    }
+
+    fn host(
+        &mut self,
+        step: &serde_json::Map<String, Value>,
+        golden: &Committed,
+    ) -> Result<(), String> {
+        self.hosts.step(step, golden)
     }
 }
 
@@ -249,8 +268,48 @@ fn play_sensed(
     sensors: Sensors,
 ) -> Result<(), String> {
     for key in t.setup_helper.keys() {
-        if !["config", "clock", "service", "endpoint"].contains(&key.as_str()) {
+        if !["config", "clock", "service", "endpoint", "host", "home"].contains(&key.as_str()) {
             return Err(format!("{}: this player cannot yet set up the helper's {key:?}", t.name));
+        }
+    }
+    let hosts = FakeHosts::from_setup(t.setup_helper.get("host"))?;
+    // Its home's results folder, with what a previous run of the helper left there.
+    let results = std::env::temp_dir().join(format!(
+        "citar-helper-conf-{}-{}-{}",
+        t.name,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let _fresh = std::fs::remove_dir_all(&results);
+    if let Some(home) = t.setup_helper.get("home").and_then(Value::as_object) {
+        for (k, v) in home {
+            match k.as_str() {
+                "results" => {
+                    std::fs::create_dir_all(&results).map_err(|e| e.to_string())?;
+                    let golden = Committed::load()?;
+                    for r in v.as_array().into_iter().flatten() {
+                        let name = r
+                            .as_str()
+                            .and_then(|s| s.strip_prefix("<id:"))
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or_default();
+                        let run = t.values.get(name).and_then(Value::as_str).ok_or_else(|| {
+                            format!("{}: setup.helper.home.results names no value {r}", t.name)
+                        })?;
+                        let doc = held_result(run, &golden, &t.values);
+                        std::fs::write(results.join(format!("{run}.json")), doc.to_string())
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "{}: this player cannot yet set up the helper's home {other:?}",
+                        t.name
+                    ));
+                }
+            }
         }
     }
     let live = runs_completions(t);
@@ -273,7 +332,7 @@ fn play_sensed(
         }
         tweak(&mut cfg);
         let (conns_tx, conns_rx) = mpsc::unbounded_channel();
-        let key = MachineKey::generate()?;
+        let key = Arc::new(MachineKey::generate()?);
         let log = Log::memory();
         // In real time too, the fake wall clock starts at START_UNIX and can jump.
         let clock = Clock::fake(START_UNIX);
@@ -288,6 +347,7 @@ fn play_sensed(
             }
         };
         let ceiling = cfg.ceiling(Machine { logical_cpus: 8, memory_mb: 16_384 });
+        let jobs = JobState::default();
         let quiet = Quiet(cfg.quiet.clone());
         let in_flight = InFlight::default();
         let mut player = Player::new(t, conns_rx, models, canonical.clone());
@@ -310,6 +370,14 @@ fn play_sensed(
             stop: stop_rx,
             in_flight: in_flight.clone(),
             sensors,
+            jobs: JobSetup {
+                // A transcript named `jobless-…` plays a helper with no job hosts (no jobs build).
+                hosts: (!t.name.starts_with("jobless-"))
+                    .then(|| Arc::new(hosts.clone()) as Arc<dyn citar_helper::jobs::Hosts>),
+                key: Some(Arc::clone(&key)),
+                results: Some(results.clone()),
+                state: jobs.clone(),
+            },
         };
         let task = tokio::spawn(async move { helper.run().await });
         let mut under = InProcess {
@@ -319,11 +387,14 @@ fn play_sensed(
             quiet,
             in_flight,
             stop: stop_tx,
+            hosts,
+            jobs,
         };
         let result = player.play(&mut under).await;
         if let Some(task) = under.task.take() {
             task.abort();
         }
+        let _cleaned = std::fs::remove_dir_all(&results);
         result.map_err(|e| format!("{e}\n  the helper's log:\n    {}", log.lines().join("\n    ")))
     })
 }
@@ -336,7 +407,11 @@ fn the_helper_plays_its_transcripts() {
         .iter()
         .filter(|t| t.plays.helper.as_deref().is_some_and(|p| p <= PLAYED_THROUGH))
         .collect();
-    assert_eq!(mine.len(), 49, "4-03, 4-04 and 4-06 play 49 transcripts from the helper's side");
+    assert_eq!(
+        mine.len(),
+        75,
+        "4-03, 4-04, 4-06 and 4-10 play 75 transcripts from the helper's side"
+    );
     let (live, paused): (Vec<&Transcript>, Vec<&Transcript>) =
         mine.iter().partition(|t| runs_completions(t));
     assert_eq!(live.len(), 15, "4-04's 15 run completions");
@@ -461,7 +536,7 @@ fn a_hardware_file_is_reported_in_the_hello_and_again_on_rescan() {
 }
 
 #[test]
-fn until_its_jobs_exist_the_helper_refuses_offers_and_bad_requests_as_the_protocol_says() {
+fn a_helper_without_job_hosts_refuses_offers_and_bad_requests_as_the_protocol_says() {
     let canonical = canonical_examples().expect("the canonical examples read");
     let request = |id: &str, messages: Value| {
         serde_json::json!({"t": "request", "id": id, "model": "model-a", "messages": messages,
@@ -484,14 +559,14 @@ fn until_its_jobs_exist_the_helper_refuses_offers_and_bad_requests_as_the_protoc
         .expect("read"),
     )
     .expect("json");
-    v["name"] = Value::from("refusals-before-4-10");
+    v["name"] = Value::from("jobless-refusals");
     let steps = v["steps"].as_array_mut().expect("steps");
     steps.extend([
         // A request whose id can be read but that fails its checks: bad_request (the
         // completions themselves are the transcripts' and tests/proxy.rs's).
         serde_json::json!({"s2h": request("r2", serde_json::json!([])), "invalid": "value"}),
         serde_json::json!({"h2s": {"t": "error", "id": "r2", "code": "bad_request", "retryable": false}, "within_s": 2}),
-        // An offer: no jobs build yet, so none is this helper's build (4-10 runs jobs).
+        // An offer: no job hosts, no jobs build, so none is this helper's build.
         serde_json::json!({"s2h": offer("cr_one", &"6".repeat(64))}),
         serde_json::json!({"h2s": {"t": "job_reject", "run": "cr_one", "reason": "build"}, "within_s": 2}),
         // An offer whose run can be read but that fails its checks: bad_spec.

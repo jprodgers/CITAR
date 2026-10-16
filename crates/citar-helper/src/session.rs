@@ -18,8 +18,11 @@
 //!   when the endpoint's models or loaded set change (polled every 30 s; a listing that fails is
 //!   not a change until [`FAILED_LISTINGS`] fail in a row); `status` when the local quiet hours
 //!   begin or end or the completions in flight change (at most every 5 s); `hardware` when the
-//!   machine's scan changed and after every `rescan`; `power` once a minute (below). Until 4-10 it
-//!   takes no job (`job_reject` `build`: it has no jobs build).
+//!   machine's scan changed and after every `rescan`; `power` once a minute (below).
+//! - **CPU jobs** ([`crate::jobs`]): the job frames go to the job side, which runs the job host,
+//!   relays what it says, and sends the acknowledgement of settings that start one once the host is
+//!   ready; what it hands back is sent from here. A helper with no job hosts (a test's) has no jobs
+//!   build and refuses every offer `build`.
 //! - **The hardware report** (P4.3.5, package 4-06): the owner's file (`--hardware FILE`, read
 //!   again at each connection and on `rescan`), nothing (`--no-hardware`), or the machine's own
 //!   scan ([`crate::scan`]). A scan younger than [`SCAN_EVERY`] by the wall clock serves a hello
@@ -61,6 +64,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::clock::Clock;
 use crate::config::{Ceiling, Config};
+use crate::jobs::{JobSetup, JobSide, Welcomed};
 use crate::llm::{self, Listed, SharedEndpoint};
 use crate::log::{Level, Log, clip};
 use crate::net::{Dialer, Ws};
@@ -130,10 +134,6 @@ pub const SERVER_TEXT: usize = 300;
 /// The most characters of a frame type the helper does not know quoted in a log line.
 pub const TYPE_SHOWN: usize = 64;
 
-/// Until 4-10 the helper runs no job: its hello's `cpu.enabled` is false (it has no jobs build,
-/// so it is never offered one), whatever the machine's own switch says.
-pub const RUNS_JOBS: bool = false;
-
 /// How the helper ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
@@ -190,6 +190,8 @@ pub struct Helper {
     pub in_flight: InFlight,
     /// What scans the machine and measures its power.
     pub sensors: Sensors,
+    /// What plays CPU jobs: the job hosts, the key that signs results, where results wait.
+    pub jobs: JobSetup,
 }
 
 /// What scans the machine and measures its power: the machine's own ([`crate::scan::SystemScanner`],
@@ -478,15 +480,16 @@ fn describe(e: &ProtocolError) -> String {
 }
 
 impl Helper {
-    /// The model side as this helper allows it.
-    fn local(&self) -> Local {
+    /// The model side as this helper allows it, and how hard its last job host said its limits
+    /// hold.
+    fn local(&self, jobs: Option<&JobSide>) -> Local {
         let slots = if self.config.no_llm { 0 } else { self.config.max_concurrent };
         Local {
             serves_llm: !self.config.no_llm,
             slots,
             cpu_enabled: self.config.cpu.enabled,
             ceiling: self.ceiling.clone(),
-            limits: settings::UNTIL_THE_JOB_HOST,
+            limits: jobs.and_then(|j| j.snapshot().limits).unwrap_or(settings::UNTIL_THE_JOB_HOST),
         }
     }
 
@@ -677,16 +680,17 @@ impl Helper {
         )
     }
 
-    fn hello(&self, models: Vec<Model>, report: Report) -> protocol::Hello {
+    fn hello(&self, models: Vec<Model>, report: Report, jobs: Option<&JobSide>) -> protocol::Hello {
         let f = &self.facts;
         let llm_on = !self.config.no_llm;
+        let snap = jobs.map(JobSide::snapshot).unwrap_or_default();
         protocol::Hello {
             protocol: protocol::PROTOCOL,
             token: self.config.token.clone(),
             helper: HelperInfo {
                 version: f.version.clone(),
                 build: f.build.clone(),
-                jobs_build: None,
+                jobs_build: jobs.map(|j| j.jobs_build().to_owned()),
                 target: f.target.clone(),
                 label: cut(&f.label, 200),
             },
@@ -706,21 +710,22 @@ impl Helper {
                 models,
             },
             cpu: CpuInfo {
-                enabled: RUNS_JOBS && self.config.cpu.enabled,
+                enabled: jobs.is_some() && self.config.cpu.enabled,
                 ceiling: WireCeiling {
                     threads: self.ceiling.threads,
                     cpu_percent: self.ceiling.cpu_percent,
                     memory_mb: self.ceiling.memory_mb,
                     work: self.ceiling.work.clone(),
                 },
-                limits: settings::UNTIL_THE_JOB_HOST,
-                verifiable: false,
+                limits: snap.limits.clone().unwrap_or(settings::UNTIL_THE_JOB_HOST),
+                verifiable: snap.verifiable,
                 bots: f.bots.clone(),
                 ruleset: f.ruleset.clone(),
+                memory_per_run_mb: snap.memory_per_run_mb,
             },
             report,
-            running: Vec::new(),
-            results: Vec::new(),
+            running: snap.running,
+            results: snap.held,
             updates: self.config.updates,
             quiet_until: self.quiet_until(),
         }
@@ -748,6 +753,19 @@ impl Helper {
         let mut first = true;
         let mut catalog = Catalog::new(self.config.models.clone());
         let mut scans = self.load_scans().await;
+        // The job side outlives each connection: runs go on across a lost one.
+        let jobs = match &self.jobs.hosts {
+            Some(hosts) => Some(
+                JobSide::start(
+                    &self.jobs,
+                    Arc::clone(hosts),
+                    self.config.cpu.enabled,
+                    self.log.clone(),
+                )
+                .await,
+            ),
+            None => None,
+        };
         loop {
             if self.stopped() {
                 return Exit::Stopped;
@@ -768,7 +786,9 @@ impl Helper {
                 () = stop_signal(self.stop.clone()) => return Exit::Stopped,
             };
             let end = match dialled {
-                Ok(ws) => self.connection(ws, &mut catalog, &mut scans, report).await,
+                Ok(ws) => {
+                    self.connection(ws, &mut catalog, &mut scans, report, jobs.as_ref()).await
+                }
                 Err(e) => {
                     let d = backoff.delay();
                     self.log.warn(format!(
@@ -836,11 +856,13 @@ impl Helper {
         catalog: &mut Catalog,
         scans: &mut Scans,
         report: Report,
+        jobs: Option<&JobSide>,
     ) -> End {
         let (mut tx, mut rx) = ws.split();
         let n = catalog.models.len();
-        let hello = self.hello(catalog.models.clone(), report);
+        let hello = self.hello(catalog.models.clone(), report, jobs);
         let quiet_until = hello.quiet_until;
+        let (listed_running, listed_results) = (hello.running.clone(), hello.results.clone());
         if self.send(&mut tx, HelperFrame::Hello(hello)).await.is_err() {
             return End::Reconnect { welcomed: false };
         }
@@ -856,26 +878,60 @@ impl Helper {
             self.config.max_concurrent,
             if self.config.max_concurrent == 1 { "" } else { "s" }
         ));
-        for (what, runs) in [
-            ("keep", &welcome.jobs.keep),
-            ("drop", &welcome.jobs.drop),
-            ("resend", &welcome.jobs.resend),
-        ] {
-            if !runs.is_empty() {
-                // This helper plays no job before 4-10, so it holds none to keep or send.
-                self.log.warn(format!(
-                    "the welcome names {} run{} to {what} that this helper does not hold: {}",
-                    runs.len(),
-                    if runs.len() == 1 { "" } else { "s" },
-                    clip(&runs.join(" "), SERVER_TEXT)
-                ));
+        let mut job_frames = None;
+        match jobs {
+            Some(j) => {
+                if let Some(theirs) = &welcome.server.jobs_build
+                    && theirs != j.jobs_build()
+                {
+                    self.log.warn(format!(
+                        "the server's jobs build is {}, this helper's {}: it offers this helper no \
+                         CPU job until the two match (the same version, built the same way)",
+                        clip(theirs, 64),
+                        j.jobs_build()
+                    ));
+                }
+                let (out, frames) = mpsc::unbounded_channel();
+                j.connected(out, welcome.machine.id.clone());
+                job_frames = Some(frames);
+                // The acknowledgement goes from the job side (once the job host it starts is
+                // ready), and the welcome's jobs follow it.
+                j.settings(self.settings_ack(&welcome.settings, jobs));
+                j.welcome(Welcomed {
+                    keep: welcome.jobs.keep.clone(),
+                    drop: welcome.jobs.drop.clone(),
+                    resend: welcome.jobs.resend.clone(),
+                    running: listed_running,
+                    results: listed_results,
+                });
+            }
+            None => {
+                for (what, runs) in [
+                    ("keep", &welcome.jobs.keep),
+                    ("drop", &welcome.jobs.drop),
+                    ("resend", &welcome.jobs.resend),
+                ] {
+                    if !runs.is_empty() {
+                        // A helper with no job hosts holds no run to keep or result to send.
+                        self.log.warn(format!(
+                            "the welcome names {} run{} to {what} that this helper does not hold: {}",
+                            runs.len(),
+                            if runs.len() == 1 { "" } else { "s" },
+                            clip(&runs.join(" "), SERVER_TEXT)
+                        ));
+                    }
+                }
+                if self.ack(&mut tx, &welcome.settings, None).await.is_err() {
+                    return End::Reconnect { welcomed: true };
+                }
             }
         }
-        if self.ack(&mut tx, &welcome.settings).await.is_err() {
-            return End::Reconnect { welcomed: true };
-        }
-        let mut steady = Steady::new(self, catalog, scans, quiet_until);
+        let mut steady = Steady::new(self, catalog, scans, quiet_until, jobs, job_frames);
         let end = steady.serve(&mut tx, &mut rx).await;
+        if let Some(j) = jobs {
+            j.disconnected();
+            j.llm_busy(false);
+        }
         // However the connection ended, nothing it started outlives it: every completion still in
         // flight is dropped with its connection to the endpoint (P4.2.4), and its slot is free
         // before the next connection's first request.
@@ -890,13 +946,27 @@ impl Helper {
         end
     }
 
-    async fn ack(&self, tx: &mut Sink, site: &Settings) -> Result<(), ()> {
-        let ack = settings::ack(site, &self.local());
+    /// The acknowledgement of `site` by this machine (its `limits` the last job host's).
+    fn settings_ack(&self, site: &Settings, jobs: Option<&JobSide>) -> protocol::SettingsAck {
+        let ack = settings::ack(site, &self.local(jobs));
         if !ack.capped.is_empty() {
             let names: Vec<&str> = ack.capped.iter().map(|c| c.as_str()).collect();
             self.log.info(format!("the machine's own limits apply to {}", names.join(", ")));
         }
-        self.send(tx, HelperFrame::SettingsAck(ack)).await
+        ack
+    }
+
+    /// Acknowledges `site`: through the job side when there is one (it sends it once the job host
+    /// it asks for is ready), else at once.
+    async fn ack(&self, tx: &mut Sink, site: &Settings, jobs: Option<&JobSide>) -> Result<(), ()> {
+        let ack = self.settings_ack(site, jobs);
+        match jobs {
+            Some(j) => {
+                j.settings(ack);
+                Ok(())
+            }
+            None => self.send(tx, HelperFrame::SettingsAck(ack)).await,
+        }
     }
 
     async fn send(&self, tx: &mut Sink, frame: HelperFrame) -> Result<(), ()> {
@@ -1234,6 +1304,11 @@ fn read_hardware_file(path: &std::path::Path) -> Result<Map<String, Value>, Stri
 /// The connection after its welcome.
 struct Steady<'a> {
     h: &'a Helper,
+    /// The job side, when the helper plays jobs, and the frames it hands back for the server.
+    jobs: Option<&'a JobSide>,
+    job_frames: Option<mpsc::UnboundedReceiver<HelperFrame>>,
+    /// Whether a completion was in flight, as the job side was last told (`yield_to_llm`).
+    llm_busy: bool,
     catalog: &'a mut Catalog,
     scans: &'a mut Scans,
     last_rx: Instant,
@@ -1304,6 +1379,8 @@ impl<'a> Steady<'a> {
         catalog: &'a mut Catalog,
         scans: &'a mut Scans,
         quiet_until: Option<f64>,
+        jobs: Option<&'a JobSide>,
+        job_frames: Option<mpsc::UnboundedReceiver<HelperFrame>>,
     ) -> Steady<'a> {
         let now = Instant::now();
         let (readings, meter) = match &h.sensors.power {
@@ -1331,6 +1408,9 @@ impl<'a> Steady<'a> {
         };
         Steady {
             h,
+            jobs,
+            job_frames,
+            llm_busy: false,
             catalog,
             scans,
             last_rx: now,
@@ -1392,11 +1472,23 @@ impl<'a> Steady<'a> {
 
     /// The figures a `status` would carry now.
     fn fresh_status(&self) -> Status {
+        let jobs = self.jobs.map(JobSide::snapshot).unwrap_or_default();
         Status {
             quiet_until: self.h.quiet_until(),
             llm_in_flight: u32::try_from(self.flights.len()).unwrap_or(u32::MAX),
-            jobs_running: 0,
-            jobs_paused: 0,
+            jobs_running: jobs.jobs_running,
+            jobs_paused: jobs.jobs_paused,
+        }
+    }
+
+    /// Tells the job side whether a completion is in flight, when that changed (`yield_to_llm`).
+    fn tell_llm_busy(&mut self) {
+        let busy = !self.flights.is_empty();
+        if busy != self.llm_busy {
+            self.llm_busy = busy;
+            if let Some(j) = self.jobs {
+                j.llm_busy(busy);
+            }
         }
     }
 
@@ -1452,7 +1544,19 @@ impl<'a> Steady<'a> {
                 }
             };
             let finished = self.flights.next();
+            let job_frames = &mut self.job_frames;
+            let job_frame = async {
+                match job_frames.as_mut() {
+                    Some(r) => r.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
+                Some(frame) = job_frame => {
+                    if self.h.send(tx, frame).await.is_err() {
+                        return End::Reconnect { welcomed: true };
+                    }
+                }
                 m = rx.next() => {
                     let msg = match m {
                         None | Some(Err(_)) => return self.h.closed(None, "", true),
@@ -1493,6 +1597,7 @@ impl<'a> Steady<'a> {
                     if self.finished(tx, id, how).await.is_err() {
                         return End::Reconnect { welcomed: true };
                     }
+                    self.tell_llm_busy();
                     self.note_status(Instant::now());
                 }
                 done = scanned => {
@@ -1519,8 +1624,17 @@ impl<'a> Steady<'a> {
                 }
                 () = stop_signal(self.h.stop.clone()) => {
                     // Each completion in flight is stopped, and the server told so, before the
-                    // close: it can give them to another machine at once.
+                    // close: it can give them to another machine at once. So is each job run.
                     let ids = self.flights.stop(CLOSE_SEND).await;
+                    let mut job_frames = Vec::new();
+                    if let Some(j) = self.jobs {
+                        j.stop(CLOSE_SEND).await;
+                        if let Some(r) = self.job_frames.as_mut() {
+                            while let Ok(f) = r.try_recv() {
+                                job_frames.push(f);
+                            }
+                        }
+                    }
                     let h = self.h;
                     let answered = async {
                         for id in ids {
@@ -1531,6 +1645,11 @@ impl<'a> Steady<'a> {
                                 retryable: true,
                             };
                             if h.send(tx, HelperFrame::Error(e)).await.is_err() {
+                                return;
+                            }
+                        }
+                        for f in job_frames {
+                            if h.send(tx, f).await.is_err() {
                                 return;
                             }
                         }
@@ -1587,7 +1706,7 @@ impl<'a> Steady<'a> {
     async fn frame(&mut self, tx: &mut Sink, f: ServerFrame) -> Result<(), ()> {
         match f {
             ServerFrame::Ping(_) => self.h.send(tx, HelperFrame::Pong(protocol::Pong {})).await,
-            ServerFrame::Settings(s) => self.h.ack(tx, &s).await,
+            ServerFrame::Settings(s) => self.h.ack(tx, &s, self.jobs).await,
             ServerFrame::Rescan(_) => {
                 // Made or read off this task (it may take up to its timeout), and sent from the
                 // loop when it is done; a rescan while one is under way is that one's.
@@ -1614,14 +1733,46 @@ impl<'a> Steady<'a> {
                 }
                 Ok(())
             }
-            ServerFrame::JobOffer(o) => {
-                // Jobs are 4-10's: this helper has no jobs build, so no offer is its build.
-                let r = JobReject { run: o.run, reason: RejectReason::Build };
-                self.h.send(tx, HelperFrame::JobReject(r)).await
+            ServerFrame::JobOffer(o) => match self.jobs {
+                Some(j) => {
+                    j.offer(o, self.h.quiet_until().is_some());
+                    Ok(())
+                }
+                None => {
+                    // No job hosts, no jobs build: no offer is this helper's build.
+                    let r = JobReject { run: o.run, reason: RejectReason::Build };
+                    self.h.send(tx, HelperFrame::JobReject(r)).await
+                }
+            },
+            ServerFrame::JobAbort(a) => {
+                if let Some(j) = self.jobs {
+                    j.abort(a);
+                }
+                Ok(())
+            }
+            ServerFrame::JobResultAck(r) => {
+                if let Some(j) = self.jobs {
+                    j.result_ack(r.run);
+                }
+                Ok(())
+            }
+            ServerFrame::JobsPause(p) => {
+                if let Some(j) = self.jobs {
+                    self.h
+                        .log
+                        .info(format!("the server pauses the games: {}", clip(&p.reason, 200)));
+                    j.benchmark(true);
+                }
+                Ok(())
+            }
+            ServerFrame::JobsResume(_) => {
+                if let Some(j) = self.jobs {
+                    j.benchmark(false);
+                }
+                Ok(())
             }
             other => {
-                // job_result_ack, job_abort, jobs_pause, jobs_resume (no runs), update (4-13),
-                // pong, and a second welcome.
+                // update (4-13), pong, and a second welcome.
                 self.h.log.debug(format!("nothing to do for {}", other.type_name()));
                 Ok(())
             }
@@ -1671,6 +1822,7 @@ impl<'a> Steady<'a> {
             clip(&r.model, llm::MAX_KEY)
         ));
         self.flights.start(ep, r, self.h.config.stream, self.h.log.clone());
+        self.tell_llm_busy();
         self.note_status(Instant::now());
         Ok(())
     }

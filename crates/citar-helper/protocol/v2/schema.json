@@ -334,6 +334,16 @@
                   "hex": 64
                 },
                 false
+              ],
+              [
+                "memory_per_run_mb",
+                {
+                  "int": [
+                    0,
+                    16777216
+                  ]
+                },
+                true
               ]
             ]
           },
@@ -550,6 +560,21 @@
             ]
           },
           false
+        ],
+        [
+          "memory_per_run_mb",
+          {
+            "int": [
+              0,
+              16777216
+            ]
+          },
+          true
+        ],
+        [
+          "again",
+          "bool",
+          true
         ]
       ]
     },
@@ -1084,6 +1109,11 @@
             ]
           },
           false
+        ],
+        [
+          "paused",
+          "bool",
+          true
         ]
       ]
     },

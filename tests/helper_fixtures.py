@@ -396,12 +396,13 @@ HUB_MACHINE = ("settings", "key", "trust")
 HELPER_ACTS = ("quiet_begins", "stop")
 HUB_ACTS = ("submit_request", "force_request", "cancel_request", "drop_connection", "queue_job", "force_offer",
             "lab_stop", "abort_run", "expire_run", "set_settings", "rescan", "reset_key", "revoke_token",
-            "disable_machine", "second_connection", "benchmark_start", "benchmark_end", "manifest_arrives")
+            "disable_machine", "second_connection", "benchmark_start", "benchmark_end", "manifest_arrives",
+            "delete_experiment")
 HELPER_STATE = ("in_flight", "exit", "held_results", "running", "downloads", "logged")
 HUB_STATE = ("slot_free", "draining", "flags", "step", "requeued", "request", "llm_slots", "cpu_threads", "cpu_percent",
              "memory_mb", "work", "cpu_enabled", "quiet", "models", "loaded", "last_report", "power_rows", "key",
              "audit", "token_lookups", "audit_rows", "rate_count", "run", "job", "result_lines", "backoff",
-             "mem_mb_raised", "claim_failures", "events", "update_status")
+             "mem_mb_raised", "claim_failures", "events", "update_status", "memory_per_run_mb")
 ACTS = {"helper": HELPER_ACTS, "hub": HUB_ACTS}
 STATES = {"helper": HELPER_STATE, "hub": HUB_STATE}
 #: The longest close reason, in bytes (a WebSocket close frame's limit).

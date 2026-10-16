@@ -1,7 +1,8 @@
 // The machine settings dialog (design/phase3-features.md P3.8): "Machine settings…" on a machine's card on the Servers
 // page (pool.js), for its owner and administrators. Three tabs:
 // - Capabilities: whether it takes model work, its LLM slots, whether pooled prompts may make it swap models, and its
-//   CPU sharing for the CPU jobs of CITAR's next helper;
+//   CPU sharing (its helper's job host plays the lab's games under these limits, capped by its own ceiling: what is in
+//   effect, each limit hard or soft, whether its owner lent it at all, and the grants that lend it for lab runs);
 // - Hardware, models and power: for each, auto or manual (what its helper's report may change), the last report with
 //   its time and how the configuration differs from it, Apply (copy it in, whatever the mode), and Rescan now (its
 //   connected helper scans the machine again and sends the scan, which the dialog shows when it comes);
@@ -11,8 +12,8 @@
 import { el, clear, toast, modal } from "./util.js";
 import { call, may } from "./servers.js";
 import {
-  MODE_TEXT, RESCAN_LOOK_MS, RESCAN_WAIT_MS, SECTIONS, classText, inEffectText, rescanned, settingsBody, sharesCpu,
-  wholeIn,
+  MODE_TEXT, RESCAN_LOOK_MS, RESCAN_WAIT_MS, SECTIONS, classText, cpuInEffectText, inEffectText, labGrantsText,
+  rescanned, settingsBody, sharesCpu, wholeIn,
 } from "./machines.js";
 
 const NAMES = { hardware: "Hardware", models: "Models", power: "Power" };
@@ -120,6 +121,9 @@ export async function openMachineSettings(m, onSaved) {
         el("h3", {}, "CPU sharing"),
         check(cpu, "enabled", host ? "Play the lab's games on this server's CPU" : "Share its CPU for CITAR's CPU work"),
         inputs,
+        host ? null : check(cpu, "yield_to_llm", "Pause its games while its own model works",
+          "On: while a model request runs on this machine its games hold at their next step, and go on after it, so "
+          + "lending the CPU never slows the model. A benchmark on it pauses them whatever this says."),
         el("div", { class: "field" }, el("label", {}, "The kinds of work it takes"),
           ...current.cpu_work.map((kind) => el("label", { class: "checkrow" },
             el("input", { type: "checkbox", checked: cpu.work.includes(kind), onchange: (e) => {
@@ -129,9 +133,11 @@ export async function openMachineSettings(m, onSaved) {
           ? "This is the server's own machine: the server's job host plays the lab's games under these limits (one "
             + "game a thread), restarting with new figures once the games it is playing finish. The limits are hard "
             + "where the operating system allows; the Lab page shows how they hold."
-          : "These take effect with the 0.1.6 helper, which runs CPU work; the helper of "
-            + "this version (worker protocol 1) is sent none of them. The limits are hard where the operating system "
-            + "allows, and the helper's own local settings always win.")));
+          : "Its helper's job host plays the lab's games under these limits (one game a thread), capped by the "
+            + "machine's own ceiling: the helper's local settings always win, and it lends nothing until its owner "
+            + "turns CPU lending on in the helper itself. The limits are hard where the operating system allows."),
+        host ? null : el("p", { class: "small" }, cpuInEffectText(current.cpu_helper)),
+        host ? null : el("p", { class: "muted small" }, labGrantsText(current.lab_grants))));
     }
     return box;
   }

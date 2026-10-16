@@ -469,8 +469,15 @@ def worker_status(server_id: str, request: Request, p: Principal = Depends(princ
                                                   "connected_at")} if block else None,
             "key": {"fingerprint": fingerprint(server.public_key or "") or None,
                     "registered_at": server.key_at.isoformat() if server.key_at else None},
+            # what it lends of its CPU in effect, each limit hard or soft (package 4-10)
+            "cpu": _helper_cpu(server),
             "tokens": tokens_out,
             "command": _worker_command(server), "args": _worker_args(server)}
+
+
+def _helper_cpu(server) -> Optional[dict]:
+    from ..machine_settings import helper_cpu
+    return helper_cpu(server)
 
 
 def _worker_args(server) -> str:

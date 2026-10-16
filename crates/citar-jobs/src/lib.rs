@@ -12,7 +12,9 @@
 //!   wall-clock budget, a panic its crash outcome; [`run`] plays one to its end under a
 //!   [`Control`] that may stop it between seat steps;
 //! - [`hash`]: [`result_hash`] over the typed deterministic result and [`chain_check`] over the
-//!   chain (P4.4.4; claims and signatures are 4-11's);
+//!   chain (P4.4.4);
+//! - [`claim`](mod@claim): the [`Claim`] a helper signs over a run's result, and the bytes it
+//!   signs (4-10; the server's check of the signature is 4-11's);
 //! - [`fit`]: [`result_fits`], whether a result answers its spec (what the spec decides of it,
 //!   its turns against the chain's rounds), and [`rebased`], a golden result under this build's
 //!   id;
@@ -37,6 +39,7 @@
 
 pub mod build;
 pub mod canary;
+pub mod claim;
 pub mod fit;
 pub mod golden;
 pub mod hash;
@@ -50,6 +53,7 @@ pub mod sys;
 
 pub use self::build::{Flavour, jobs_build, jobs_build_of};
 pub use self::canary::{CanaryFailure, Inject, canary, canary_injected, self_check};
+pub use self::claim::{CLAIM_DOMAIN, Claim};
 pub use self::fit::{FitError, rebased, result_fits, result_fits_value};
 pub use self::hash::{
     Chain, ChainError, JobResult, ResultError, chain_check, chain_check_value, result_hash,

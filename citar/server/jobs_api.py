@@ -2,6 +2,8 @@
 administrators.
 
     GET  /api/lab/jobs?exp=NAME     VIEW on the experiment: its games' jobs and their accepted runs
+    GET  /api/machines/{id}/jobs    MANAGE on the machine (its owner, administrators): its recent CPU runs, what its
+                                    helper lends in effect, and its trust counters
     GET  /api/admin/jobs            administrators: the dispatcher, queued jobs by experiment, runs per executor
     POST /api/admin/jobs/pause      administrators: the Lab page's Stop (``citar lab stop``): no new game starts
     POST /api/admin/jobs/resume     administrators: start new games again (``citar lab resume``)
@@ -134,6 +136,84 @@ def lab_jobs(request: Request, exp: str = Query(..., min_length=1, max_length=12
 
 def _iso(t) -> Optional[str]:
     return t.isoformat(timespec="seconds") if t is not None else None
+
+
+#: The most runs ``GET /api/machines/{id}/jobs`` lists.
+MACHINE_RUNS = 200
+
+
+@router.get("/api/machines/{sid}/jobs")
+def machine_jobs(sid: str, request: Request, limit: int = Query(50, ge=1, le=MACHINE_RUNS),
+                 p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
+    """A machine's CPU runs, for its owner and administrators (MANAGE on its row: anyone a group lends it to gets 403,
+    anyone else 404, a visitor 401): its recent runs, newest first (state, kind, the run's role, times and figures; a
+    run's verdict only once its job settled, P4.5.8 rule 2), each experiment named where the caller may view it ("a
+    member's experiment" otherwise); what its helper lends now (the CPU in effect, each limit hard or soft, the memory
+    a run may use, or why it lends nothing); and its trust counters (an administrator also sees the last claim
+    failure). Replicas, from 4-11, are administrators' alone."""
+    from sqlalchemy import select
+    from ..auth.deps import require_user
+    from ..db.models import CpuJob, CpuJobRun
+    from ..jobs import remote
+    from ..server.workers import hub
+    me = require_user(request, p)
+    row = s.get(Server, sid) if isinstance(sid, str) else None
+    if row is None:
+        raise HTTPException(404, "No such server.")
+    access.on(s, me, row).require(access.MANAGE)
+    admin = me.role == "admin"
+    q = (select(CpuJobRun, CpuJob).join(CpuJob, CpuJob.id == CpuJobRun.job_id)
+         .where(CpuJobRun.machine_id == sid).order_by(CpuJobRun.offered_at.desc()).limit(limit))
+    pairs = list(s.execute(q))
+    seen: dict = {}
+
+    def experiment(job) -> str:
+        ref = job.item_ref or ""
+        if ref not in seen:
+            _row, perms = items.resolve(s, "lab_experiment", ref, me)
+            seen[ref] = ref if (admin or perms.can(access.VIEW)) else "a member's experiment"
+        return seen[ref]
+    runs = []
+    for run, job in pairs:
+        if run.role != "primary" and not admin:
+            continue
+        settled = job.state in ("accepted", "crashed", "withdrawn")
+        entry = {"run": run.id, "kind": job.kind, "state": run.state, "experiment": experiment(job),
+                 "game": _game(job.ref), "offered": _iso(run.offered_at), "started": _iso(run.started_at),
+                 "ended": _iso(run.ended_at), "cpu_s": round(run.cpu_s or 0.0, 2),
+                 "wall_s": round(run.wall_s or 0.0, 2), "paused_s": round(run.paused_s or 0.0, 2),
+                 "peak_mb": round(run.peak_mb or 0.0, 1)}
+        if settled or admin:
+            entry["verdict"] = run.verdict
+        if admin:
+            entry.update({"role": run.role, "job_state": job.state, "error": run.error})
+        runs.append(entry)
+    trust = dict(row.trust or {})
+    counters = {k: trust.get(k, 0) for k in ("verified", "streak", "mismatches", "abandons", "claim_failures",
+                                             "helper_faults")}
+    if admin:
+        counters.update({k: trust.get(k) for k in ("last_mismatch", "last_claim_failure", "last_helper_fault", "since",
+                                                    "verifier", "speed")})
+    conn = hub().get(sid)
+    executor = remote.registry().find(sid)
+    lends = None
+    if conn is not None:
+        eff = conn.effective() or {}
+        lends = {"cpu": eff.get("cpu"), "limits": (conn.ack or {}).get("limits"),
+                 "memory_per_run_mb": conn.memory_per_run_mb,
+                 "lent": bool((conn.hello.get("cpu") or {}).get("enabled")),
+                 "verifiable": bool((conn.hello.get("cpu") or {}).get("verifiable")),
+                 "jobs_build": conn.jobs_build,
+                 "state": executor.state if executor is not None else "off",
+                 "why": (executor.reason if executor is not None
+                         else "its helper plays no CPU job (a build without jobs)") or None}
+    return {"machine": {"id": row.id, "name": row.name, "trust_tier": row.trust_tier or "new"},
+            "online": conn is not None, "lends": lends, "trust": counters, "runs": runs}
+
+
+def _game(ref: str) -> Optional[int]:
+    from ..jobs import store
+    return store.game_of(ref or "")
 
 
 @router.get("/api/admin/jobs")

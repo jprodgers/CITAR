@@ -1,6 +1,7 @@
 // Lab page: live view of the bot-tuning lab (citar.lab), played inside the server by its job dispatcher
 // (citar/jobs/dispatcher.py, design/phase4-helper.md P4.5.5): the dispatcher's health and its executors (this server's
-// job host, under the host machine's CPU settings), experiment progress and ETAs, each experiment's games with the
+// job host, under the host machine's CPU settings, and the helper machines whose owners lend their CPU, under each
+// machine's own), experiment progress and ETAs, each experiment's games with the
 // executor that played them and their verification, games in flight with their round, side runs (LLM benchmark jobs)
 // and the dispatcher's log. Administrators stop and resume the lab here.
 import { api } from "./api.js";
@@ -104,7 +105,8 @@ function drawTop(card, d, rules, refresh) {
       " ", executorText(e),
       e.verifiable === false ? el("span", { class: "muted", title: e.verify_reason || "" }, " · its self-check failed: it plays its own lab and verifies nobody") : null))),
     el("p", { class: "muted small" }, "Each game is a bot-vs-bot job the server plays on its own job host, under the host's CPU settings "
-      + "(Servers page, Machine settings: threads, CPU share, memory). This page refreshes every 5 seconds; "
+      + "(Servers page, Machine settings: threads, CPU share, memory), or offers to a machine whose owner lends its CPU "
+      + "through the CITAR helper, under that machine's own. This page refreshes every 5 seconds; "
       + "ETAs assume later turns are slower (more cities and units) and firm up as each experiment finishes games."));
 }
 

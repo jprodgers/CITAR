@@ -458,7 +458,7 @@ def grant_to_client(session, grant: AccessGrant, viewer: Optional[User]) -> dict
         "subject": subject.public(viewer) if subject else None,
         "purposes": grant.purposes or [],
         "purpose_label": (", ".join(admission.PURPOSE_LABELS.get(p, p) for p in grant.purposes)
-                          if grant.purposes else "any kind of work"),
+                          if grant.purposes else "any kind of model work (not lab runs)"),
         "concurrency": grant.concurrency,
         "priority": grant.priority,
         "enabled": grant.enabled,

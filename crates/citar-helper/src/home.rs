@@ -71,6 +71,12 @@ impl Home {
     pub fn scan_file(&self) -> PathBuf {
         self.state_dir().join("scan.json")
     }
+
+    /// `helper/results/`: each run's result not yet acknowledged, as `<run>.json` (P4.2.5).
+    #[must_use]
+    pub fn results_dir(&self) -> PathBuf {
+        self.state_dir().join("results")
+    }
 }
 
 /// Reads one environment variable; tests pass their own.

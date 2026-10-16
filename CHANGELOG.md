@@ -208,6 +208,28 @@ that means for an existing install:
   is what games are matched to. A game that runs out of memory ends the host and is classified
   `memory`, having reported its peak as it grew. `citar-helper --self-test` runs the checks.
   [docs/server/WORKERS.md](docs/server/WORKERS.md#cpu-limits-per-operating-system).
+- **Helpers play the lab's games** (design/phase4-helper.md P4.3.6, P4.5.5-P4.5.7): a machine whose owner
+  lends its CPU in the helper's own settings (off until they say so) plays, in its helper's job host
+  under the CPU settings in effect, its owner's experiments, those of members a grant on its group lends
+  it to for **Lab (CPU work)** (a grant with no purposes never lends the CPU; an administrator's own
+  experiments need such a grant too) and, where its settings list them, the server's ranking and
+  reference games. Each game's event names the machine's owner as the provider and counts against the
+  grant's budget. The helper holds its games while its own model works (`yield_to_llm`, on by default)
+  and while a benchmark holds the machine, signs each result with the machine key and keeps it in
+  `helper/results/` until the server acknowledges it, sending it again after a reconnect; the server
+  takes back an offer unanswered in 30 s and a game silent for 5 minutes, backs off a machine that
+  refuses or abandons games, and checks eligibility (jobs build, kinds, memory a game, quiet hours,
+  benchmarks, grants). No helper can keep a game from the other machines: a spec it refuses or a game
+  it fails as one no machine could play is played elsewhere and counted against its machine, a stopped
+  helper is offered nothing until it reconnects, and a game its own pauses held past its deadline goes
+  elsewhere for an hour. A grant's budget with no room holds its member's games back without charging
+  the lender. When the machine's CPU settings change while games play, the helper restarts its job
+  host once they end and tells the server the memory a game now has. Until helpers' results are verified (a later 0.1.6 package) only machines an
+  administrator trusted take CPU work, their results entered as unverified. The machine settings
+  dialog and the helper card show the CPU in effect, each limit hard or soft, "not lent by this
+  machine's owner", and the grants that lend it; the dialog gains "Pause its games while its own model
+  works". New route: `GET /api/machines/{id}/jobs`. `scripts/qa_phase4.py remote` (and `--wsl`, the
+  server in WSL). [docs/server/WORKERS.md](docs/server/WORKERS.md#lending-cpu-what-plays-on-it-and-for-whom).
 
 **Chat** ([docs/PLAYING.md](docs/PLAYING.md), [docs/AI_PLAYERS.md](docs/AI_PLAYERS.md)):
 

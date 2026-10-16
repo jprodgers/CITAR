@@ -103,6 +103,7 @@ fn start(cfg: Config, endpoint: Option<SharedEndpoint>, clock: Clock) -> Run {
         stop: stop_rx,
         in_flight: Default::default(),
         sensors: citar_helper::session::Sensors::none(),
+        jobs: citar_helper::jobs::JobSetup::default(),
     };
     let task = tokio::spawn(async move { helper.run().await });
     Run { conns, log, clock, stop, task }

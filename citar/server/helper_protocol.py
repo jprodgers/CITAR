@@ -533,7 +533,7 @@ HELLO = Struct(
                         Field("ceiling", Struct(Field("threads", THREADS), Field("cpu_percent", PERCENT),
                                                 Field("memory_mb", MEMORY_MB), Field("work", KINDS))),
                         Field("limits", LIMITS), Field("verifiable", Bool()), Field("bots", BOTS),
-                        Field("ruleset", HEX64))),
+                        Field("ruleset", HEX64), opt("memory_per_run_mb", MEMORY_MB))),
     Field("report", Struct(Field("hardware", Nullable(Obj())),
                            Field("hardware_source", OneOf("scan", "file", "none")))),
     Field("running", RUNS),
@@ -560,6 +560,8 @@ SETTINGS_ACK = Struct(
                               Field("cpu", SITE_CPU))),
     Field("capped", List(OneOf(*CAPPED), 0, 7)),
     Field("limits", LIMITS),
+    opt("memory_per_run_mb", MEMORY_MB),
+    opt("again", Bool()),
 )
 EMPTY = Struct()
 
@@ -598,7 +600,7 @@ RUN_REF = Struct(Field("run", RUN))
 JOB_REJECT = Struct(Field("run", RUN), Field("reason", OneOf("busy", "build", "kind", "quiet", "disabled", "limits",
                                                              "memory", "bad_spec", "unverifiable")))
 JOB_PROGRESS = Struct(Field("run", RUN), Field("round", INT), Field("of", INT), Field("elapsed_s", NUM),
-                      Field("cpu_s", NUM), Field("paused_s", NUM), Field("peak_mb", NUM))
+                      Field("cpu_s", NUM), Field("paused_s", NUM), Field("peak_mb", NUM), opt("paused", Bool()))
 CLAIM = Closed(
     Field("v", Exactly(1)), Field("job", JOB), Field("run", RUN), Field("machine", ID), Field("kind", KIND),
     Field("spec_hash", HEX64), Field("jobs_build", HEX12), Field("bots", BOTS), Field("result_hash", HEX64),

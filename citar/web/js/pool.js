@@ -14,7 +14,7 @@ import { el, clear, toast, modal, confirmBox, keepPlace } from "./util.js";
 import { pageHeader } from "./nav.js";
 import { helperCard } from "./helper.js";
 import { openMachineSettings } from "./machine_settings.js";
-import { poolTarget } from "./machines.js";
+import { cpuInEffectText, poolTarget } from "./machines.js";
 import {
   KIND, KEYED, PROVIDER, addDirectMachine, call, describeConn, describeQuiet, loadRegistry, may, money, openConnection,
   openCosts, openHardware, openKey, openPlans, openQuietHours, openSettings, viewer,
@@ -27,7 +27,7 @@ const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 // hybrid seat's diplomacy)
 const PURPOSES = [
   ["game", "Ordinary games"], ["pooled", "Pooled prompts"], ["benchmark", "Benchmarks"], ["probe", "Probes"],
-  ["scenario", "Scenarios"], ["lab", "Lab runs"],
+  ["scenario", "Scenarios"], ["lab", "Lab (CPU work)"],
 ];
 const ICON = { owned: "🖥", leased: "☁", api: "🔑", test: "🧪" };
 
@@ -179,7 +179,9 @@ function grantDialog(group, existing, onSaved) {
       el("div", { class: "field" },
         el("span", { class: "field-label" }, "What they may run"),
         el("div", { class: "col" }, ...purposeBoxes.map((p) => p.node)),
-        el("span", { class: "muted small" }, "Nothing ticked means every kind of work.")),
+        el("span", { class: "muted small" }, "Nothing ticked means every kind of model work. Lab (CPU work) is lent "
+          + "only when it is ticked: the lab's games then run on these machines' CPUs, within each machine's own CPU "
+          + "settings, for the accounts this grant names.")),
       el("div", { class: "field" },
         el("span", { class: "field-label" }, "Allowed hours"), windows.node),
       el("label", { class: "field" },
@@ -212,6 +214,7 @@ function helperFacts(info, m, refresh) {
     rows.push(el("span", { class: "muted small" },
       `CITAR helper ${h.version || "?"} · protocol ${h.protocol || 2} · build ${h.build || "?"}`
       + (h.target ? ` · ${h.target}` : "")));
+    rows.push(el("span", { class: "muted small" }, `CPU: ${cpuInEffectText(info.cpu)}`));
   }
   rows.push(el("div", { class: "row gap wrap" },
     el("span", { class: "muted small" }, key.fingerprint

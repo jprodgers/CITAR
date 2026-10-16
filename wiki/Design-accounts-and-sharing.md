@@ -85,7 +85,7 @@ Roles are coarse. Fine-grained things are per-account capability flags an admin 
 | `run_reports` | build reports | yes |
 | `run_benchmarks` | save benchmark suites and start runs | yes |
 | `run_probes` | save probes and run them | yes |
-| `run_lab` | queue lab experiments, which run on the server's own CPU | no |
+| `run_lab` | queue lab experiments, which run on the server's own CPU and on machines whose owners lend theirs ([Workers](Workers#lending-cpu-what-plays-on-it-and-for-whom)) | no |
 | `edit_bots` | create, fork and edit bot profiles, which benchmarks are measured against | no |
 | `full_llm` | seat a model that plays every turn (an LLM seat) | yes |
 | `partial_llm` | use pooled prompts (a report's written analysis, a probe's offers and messages, the Servers page's test, a hybrid seat's diplomacy) | yes |
@@ -380,7 +380,9 @@ list of **grants**.
 A **grant** gives a subject (a user, or everyone) permission to use a group, optionally narrowed by:
 
 - **purpose** — normal games (a model seat that plays every turn), pooled prompts (a report's written analysis, a
-  probe's offers and messages, a machine test, a hybrid seat's diplomacy), benchmarks, probes, scenarios, lab runs
+  probe's offers and messages, a machine test, a hybrid seat's diplomacy), benchmarks, probes, scenarios, and **Lab
+  (CPU work)**: the lab's games played on the machines' CPUs ([Workers](Workers#lending-cpu-what-plays-on-it-and-for-whom)).
+  Nothing ticked means every kind of model work; the CPU is lent only by a grant that ticks Lab (CPU work)
 - **window** — which hours, which weekdays
 - **budget** — a spend cap per period
 - **concurrency** — how many of the subject's requests may run on one of the group's machines at once, its seats' and
@@ -423,6 +425,11 @@ per day, week, month or in total, in the machine owner's time zone (a "month" en
 - **The grant, not the budget it had.** A game's seats and a pooled prompt are bound to the grant that admitted them,
   and each request is held to the budget that grant has when the request runs: a budget added to a grant, changed,
   replaced or removed holds the work already running under it from its next request.
+- **A lab game** played on a member's machine under a grant that lends its CPU reserves the game's expected credits (its
+  reference cost at the machine's CPU class's rate, at least 1) when the server picks it for the machine; a hard
+  budget with no room for it holds that member's games back from the machine (they wait, and nothing is counted
+  against the machine that would have played them), and its credits are settled when its result is taken, a game
+  still playing when the server restarted included.
 - **Settle.** Each step's credits, priced as the step ends, are counted against the budget at once, and written to the
   budget's entry for that activity and period (with the step's event); the reservation goes.
 - **Soft** budgets only warn: the request that takes one past its amount is let through, the game's log says so (once

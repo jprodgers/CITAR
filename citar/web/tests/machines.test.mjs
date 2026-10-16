@@ -5,8 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  GATES, MODE_TEXT, RESCAN_LOOK_MS, RESCAN_WAIT_MS, SECTIONS, classText, inEffectText, legacyServersTarget, mayCall,
-  poolLink, poolTarget, rescanned, settingsBody, sharesCpu, wholeIn,
+  GATES, MODE_TEXT, RESCAN_LOOK_MS, RESCAN_WAIT_MS, SECTIONS, classText, cpuInEffectText, inEffectText, labGrantsText,
+  legacyServersTarget, mayCall, poolLink, poolTarget, rescanned, settingsBody, sharesCpu, wholeIn,
 } from "../js/machines.js";
 
 test("the old Servers page's addresses lead to the Servers page", () => {
@@ -239,6 +239,30 @@ test("what is in effect, in a line", () => {
     "In effect now: 1 request at once; pooled prompts may make it swap models.");
   assert.match(inEffectText({ known: true, llm: true, capacity: null, slots: 2, helper_slots: null }),
     /no requests until its helper connects/);
+});
+
+test("the CPU a helper lends, in a line (4-10)", () => {
+  assert.match(cpuInEffectText(null), /No CITAR helper of this version/);
+  const base = { plays_jobs: true, lent: true, verifiable: true, limits: { cpu: "hard", memory: "hard" },
+                 memory_per_run_mb: 460, capped: [],
+                 effective: { enabled: true, threads: 2, cpu_percent: 20, memory_mb: 512, work: ["lab_game"] } };
+  assert.equal(cpuInEffectText(base),
+    "In effect: 2 threads, 20% of the CPU (hard), 512 MB (hard); 460 MB a run.");
+  assert.match(cpuInEffectText({ ...base, lent: false }), /^Not lent by this machine's owner/);
+  assert.match(cpuInEffectText({ ...base, plays_jobs: false }), /plays no CPU job/);
+  assert.match(cpuInEffectText({ ...base, verifiable: false }), /canary or self-check/);
+  assert.match(cpuInEffectText({ ...base, effective: { ...base.effective, enabled: false } }), /no CPU work/);
+  assert.equal(cpuInEffectText({ ...base, limits: { cpu: "soft", memory: "hard" }, memory_per_run_mb: null,
+                                 capped: ["cpu.threads", "cpu.work"],
+                                 effective: { ...base.effective, threads: 1 } }),
+    "In effect: 1 thread, 20% of the CPU (soft), 512 MB (hard). Its own ceiling capped threads, the kinds of work.");
+});
+
+test("the grants that lend a machine's CPU, in a line", () => {
+  assert.match(labGrantsText([]), /No grant on its group lists Lab \(CPU work\)/);
+  assert.equal(labGrantsText([{ subject: "bob", group: "Alice's" }, { subject: "everyone", group: "Alice's" },
+                              { subject: "bob", group: "Alice's" }]),
+    "Lent for lab runs (CPU work) to bob, everyone, by grants on “Alice's”.");
 });
 
 test("a class in a line", () => {

@@ -393,13 +393,59 @@ its standard input and output (`citar-jobs`).
   connected (the clock restarts at each connection and at the server's start), outside a pause the
   helper reported, is expired and its job queued again; a late `job_result` for it is acknowledged
   and dropped: not counted, not credited.
+- **An expired run is aborted.** The server sends `job_abort` for each run it expires (an offer
+  unanswered, a silent run, a run past its deadline's backstop) to a connected helper, so a helper
+  that still holds it lets it go; one whose result crossed the abort sends it, and it is acknowledged
+  and dropped. So is a result that crossed the abort of a run whose job was cancelled (its
+  experiment deleted from the queue).
+- **A helper's word is not the game's fault.** The server checks every spec itself and offers a job
+  only to a helper of its own jobs build, so a `bad_spec` reject or a `job_failed` with `retryable`
+  false from a helper queues the job again (an attempt) and counts against the machine; a
+  `job_aborted` the server never asked for is an abandon. A helper that stops (`aborted_locally`)
+  gives its games back at no cost and is offered nothing until its next `hello`.
 - **Re-offers back off** per machine and reject reason: 2 s doubling to 10 minutes. `busy` and
-  `quiet` clear on a `status` that shows room; `build`, `kind`, `disabled`, `limits` and
-  `unverifiable` on the next `settings_ack` or `hello`.
-- **Paused time is reported** (`paused_s`, from `yield_to_llm` and `jobs_pause`) and extends the
-  run's deadline on both sides, up to twice the deadline. The helper aborts a run past its deadline
-  itself (`job_failed` `deadline`), not counting paused time; the server's own timeout, extended the
-  same way, is the backstop.
+  `quiet` clear on a `status` that shows room; `build`, `kind`, `disabled`, `limits`, `memory` and
+  `unverifiable` on the next `settings_ack` (one sent `again` too) or `hello`; a helper that
+  stopped, on its next `hello`; `bad_spec` and a failure it said no machine could recover from,
+  only with time.
+- **Paused time is reported** (`paused_s`, from `yield_to_llm` and `jobs_pause`, and `paused` while a
+  pause holds the run) and extends the run's deadline on both sides, up to twice the deadline. The
+  helper aborts a run past its deadline itself (`job_failed` `deadline`), not counting paused time;
+  the server's own timeout, extended the same way, is the backstop.
+- **The job host and the acknowledgement.** The helper runs its games in a job host, a child
+  process started when CPU work is on in effect (the site's settings and the machine's own switch
+  both say so) under the effective limits, and started again (between runs) when they change. A
+  `settings_ack` that turns CPU work on, or changes its limits, is sent once that host is `ready`
+  (or could not start, or 10 s have passed), so its `limits` and `memory_per_run_mb` are the host's
+  own; the dispatcher matches a job's `mem_mb` to `memory_per_run_mb`, and an acknowledgement
+  without it says no host runs for those settings yet. A `settings` that comes while a host starts
+  is applied once that start is over, in turn. **And again when the job host's figures change:**
+  when a host becomes ready after the last acknowledgement went without its figures (it was ready
+  after the 10 s, or was started again under new limits once the runs of the old one ended), that
+  acknowledgement is sent again with them and `again: true`; it answers no `settings` frame, and
+  the server holds it to the settings its first sending answered. A host that could not start
+  under the limits makes the helper refuse offers `limits` until one does.
+- **Offers are answered in time.** An offer that waits for a job host's start is answered within
+  its `offer_ttl_s`: refused `limits` 5 s before it ends (half way, for a shorter one) when the
+  host is still not ready; one the server withdraws meanwhile (`job_abort`) is dropped unanswered,
+  and a helper that stops refuses those waiting `disabled`.
+- **A connection's own.** What a connection's server asked and was not answered when it ended (the
+  acknowledgements and offers waiting for a job host's start) goes with it; the next connection's
+  hello and welcome say again what holds. So does a `jobs_pause`: the helper's games go on when the
+  connection that paused them ends, and the server sends `jobs_pause` again right after the next
+  welcome while its benchmark lasts.
+- **The helper's own checks of an offer**, in this order: `disabled` (CPU work is off in effect),
+  `quiet` (its local quiet hours), `unverifiable`, `build`, `kind` (not among the effective work
+  kinds), `bad_spec` (the spec's checks or its hash, by the helper's own copy of `citar-jobs`),
+  `limits` (no job host could be started), `memory` (`mem_mb` above the host's
+  `memory_per_run_mb`), `busy` (as many runs as the effective threads); the job host checks the
+  offer again and may refuse it itself.
+- **Pauses.** The helper holds every running game (the job host's `pause`) while a completion is in
+  flight and `cpu.yield_to_llm` is on, and between `jobs_pause` and `jobs_resume` whatever
+  `yield_to_llm` says; `status.jobs_paused` counts the runs held.
+- **Results are signed:** `signature` is ed25519 by the machine key over `CITAR-CLAIM-V1`, a zero
+  byte, and the claim's bytes: the claim as compact JSON (no spaces) with its fields in the order of
+  its table, `bots` sorted. The helper writes the whole `job_result` to its home before it sends it.
 - **A lost connection does not stop a run.** The next `hello` lists it in `running`, and the welcome
   says whether to keep it.
 - **Frames name only the helper's own runs.** A job frame naming a run that was not offered to this
@@ -538,9 +584,12 @@ ceiling of concurrent requests, the configured `max_concurrent`; 0 with `--no-ll
 says); `loaded` `bool`.
 
 **Cpu:** `enabled` `bool` (the machine's own switch: off unless its owner turned it on); `ceiling`
-Ceiling (the local ceiling); `limits` Limits (how hard this OS holds each limit); `verifiable`
-`bool` (the canary and the self-check passed); `bots` `[string 1..64] ≤64` (the bot versions compiled
-in); `ruleset` `hex64` (the ruleset's id).
+Ceiling (the local ceiling); `limits` Limits (how hard this OS holds each limit, as the helper's last
+job host said in its `ready`; `soft` for both before any host has said); `verifiable` `bool` (the
+canary and the self-check passed, run by the helper when it starts and again by each job host);
+`bots` `[string 1..64] ≤64` (the bot versions compiled in); `ruleset` `hex64` (the ruleset's id);
+`memory_per_run_mb` `int 0..16777216` *optional* (the memory each run may use on the helper's last
+job host, as its `ready` said; left out while no host has said).
 
 **Ceiling:** `threads` `int 0..1024`; `cpu_percent` `int 0..100`; `memory_mb` `int 0..16777216`;
 `work` `[kind] ≤3`.
@@ -599,6 +648,8 @@ file); `hardware_source` `"scan" | "file" | "none"`.
 | `effective` | `{llm: {enabled: bool, slots: int 0..16}, cpu: SiteCpu}` | what the helper will do |
 | `capped` | `[Capped] ≤7` | where its ceiling won |
 | `limits` | Limits | how hard this OS holds them |
+| `memory_per_run_mb` | `int 0..16777216` *optional* | the memory each run may use on the job host running for these settings (its `ready`'s); left out when none runs |
+| `again` | `bool` *optional* | true on an acknowledgement sent again with the job host's figures, which came after it; it answers no `settings` frame (left out otherwise) |
 
 **Capped:** one of `"llm.enabled"`, `"llm.slots"`, `"cpu.enabled"`, `"cpu.threads"`,
 `"cpu.cpu_percent"`, `"cpu.memory_mb"`, `"cpu.work"`, listed in this order.
@@ -737,6 +788,7 @@ it is not valid JSON).
 | `cpu_s` | `number` | CPU seconds it used |
 | `paused_s` | `number` | seconds it was paused |
 | `peak_mb` | `number` | its peak memory, counted |
+| `paused` | `bool` *optional* | whether it is held by a pause now (the server counts its pause on from this report) |
 
 ### `job_result` (helper)
 
@@ -975,7 +1027,9 @@ yet do rather than skip it):
   machine's settings change on the site), `rescan` (the dialog's "Rescan now"), `reset_key` (the
   owner resets the machine's key), `revoke_token`, `disable_machine`, `second_connection` (another
   process presents the machine's token), `benchmark_start` and `benchmark_end` (a benchmark lease
-  on the machine goes live and ends), `manifest_arrives` (the server learns of a signed manifest).
+  on the machine goes live and ends), `manifest_arrives` (the server learns of a signed manifest),
+  `delete_experiment` (the experiment whose job the dispatcher offered is deleted from the lab's
+  queue: its runs are aborted).
 
 **State expectations** (`state.expect`'s keys), the whole vocabulary (both loaders refuse any
 other):
@@ -994,7 +1048,8 @@ other):
   `cpu_job_runs` state), `job` (the job's state), `result_lines` (lines in the results file for
   the job), `backoff` (the reject reason the dispatcher backs off for the machine),
   `mem_mb_raised`, `claim_failures`, `events` (ledger events for the run), `update_status` (the
-  last one reported).
+  last one reported), `memory_per_run_mb` (the machine's memory a run as the dispatcher matches
+  jobs to it, from its helper's last acknowledgement).
 
 ### The matcher language
 

@@ -102,9 +102,13 @@ time counted afresh.
 
 ## Shared machines (new in 0.1.6)
 
-**CPU sharing waits for the next helper.** The machine settings dialog keeps a machine's CPU limits
-(threads, CPU share, memory, the kinds of work), but nothing runs CPU work on members' machines yet: only the
-host's CPU sharing is used, by the server's own job host, which plays the lab.
+**A Mac holds its CPU limits softly.** A helper on macOS plays the lab's games in the background priority band with
+as many games as its threads, and a watchdog ends its job host past its memory: the operating system offers no hard CPU
+cap to an ordinary program, so the machine settings dialog shows both limits "soft". Lend fewer threads for a tighter
+hold.
+
+**Helpers' results are not checked yet.** Until the server verifies helpers' results by itself (a later 0.1.6
+package), CPU work goes only to machines an administrator set trusted, and their games are entered as unverified.
 
 **A group's visibility shares nothing yet.** A group's machines are listed and lent through its
 grants only; making a group visible to members or published lists nothing more.

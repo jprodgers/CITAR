@@ -1,5 +1,5 @@
-"""Protocol 2's conformance transcripts from the hub's side (design/phase4-helper.md P4.2.9; packages 4-05's gate 1
-and 4-06's).
+"""Protocol 2's conformance transcripts from the hub's side (design/phase4-helper.md P4.2.9; packages 4-05's gate 1,
+4-06's and 4-10's gate 1).
 
 Every transcript whose ``plays.hub`` is 4-05 or 4-06 is played against the real hub (the app under uvicorn, a real
 WebSocket) by ``tests/helperfake.HubPlayer``: the handshake with every ``refused`` code and the v1 refusal, settings
@@ -7,10 +7,15 @@ WebSocket) by ``tests/helperfake.HubPlayer``: the handshake with every ``refused
 unchanged machine sending none), power (a minute's samples written as the machine's power row), status, completions
 (streamed, not streamed, usage absent, busy, closed, unknown model, an endpoint error, a timeout, a broken ``done``, a
 stopping helper), cancel (before the first token, mid-stream, after ``done``, never acknowledged), the lost connection,
-keep-alive and shutdown. Each is a test of its own, named after its file. The helper's side plays the same files
+keep-alive and shutdown, and the jobs (4-10: an offer to its acknowledgement, every reject reason, abort, a deadline,
+memory and host failures, reconnects keeping and dropping a run, a reconnect after a sent result, a lost
+acknowledgement, a held result not wanted, a duplicate result, a lost offer, a silent run, re-offers backing off, a
+malformed job frame, a benchmark's pause, and from 4-10's fix round a pause across a reconnect (its lease ended, and
+live), a stopping helper's runs, a job host's figures acknowledged again, and a result that crossed its experiment's
+deletion), each against a job dispatcher of its own whose one executor is the helper. Each is a test of its own, named after its file. The helper's side plays the same files
 (``crates/citar-helper/tests/conformance.rs``).
 
-A transcript of a later package (4-10, 4-13) is not played here; ``test_the_package_plays_its_transcripts`` holds the
+A transcript of a later package (4-13) is not played here; ``test_the_package_plays_its_transcripts`` holds the
 count, and the player refuses any act or state word it cannot do rather than skip it.
 """
 from __future__ import annotations
@@ -31,7 +36,7 @@ from tests import helperfake as H
 _TMP = Path(tempfile.mkdtemp(prefix="citar_conformance_"))
 _URL = "sqlite:///" + (_TMP / "test.db").as_posix()
 
-TRANSCRIPTS = H.hub_transcripts("4-05") + H.hub_transcripts("4-06")
+TRANSCRIPTS = H.hub_transcripts("4-05") + H.hub_transcripts("4-06") + H.hub_transcripts("4-10")
 
 
 def setUpModule():
@@ -63,15 +68,16 @@ class Transcripts(unittest.TestCase):
         H.HubPlayer(self.server, t).play()
 
     def test_the_package_plays_its_transcripts(self):
-        """The 40 transcripts 4-05 plays from the hub's side and 4-06's 3 are all here, and the player knows every word
-        they use."""
-        self.assertEqual(len(TRANSCRIPTS), 43)
+        """The 40 transcripts 4-05 plays from the hub's side, 4-06's 3 and 4-10's 30 are all here, and the player knows
+        every word they use."""
+        self.assertEqual(len(TRANSCRIPTS), 73)
+        self.assertEqual(sum(1 for t in TRANSCRIPTS if t.plays.get("hub") == "4-10"), 30)
         self.assertEqual(sorted(t.name for t in TRANSCRIPTS if t.plays.get("hub") == "4-06"),
                          ["hardware-rescan", "hardware-unchanged", "power-minute"])
         for t in TRANSCRIPTS:
             self.assertIs(H.played(t), True, t.name)
         # a word of a later package is refused, not skipped
-        later = next(t for t in F.transcripts() if t.plays.get("hub") == "4-10")
+        later = next(t for t in F.transcripts() if t.plays.get("hub") == "4-13")
         self.assertIsNot(H.played(later), True)
 
 

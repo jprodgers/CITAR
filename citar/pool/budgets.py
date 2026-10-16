@@ -449,10 +449,12 @@ class Keeper:
             return a.key
 
     def reserve(self, budget_id: Optional[str], activity: Optional[str], consumer: Optional[str], estimate: float,
-                *, unpriced: bool = False) -> Optional[Reservation]:
+                *, unpriced: bool = False, force: bool = False) -> Optional[Reservation]:
         """Hold ``estimate`` credits (at least ``MIN_RESERVE``) of a budget for one request, or raise
         ``BudgetExceeded`` when a hard budget's spent plus reserved would pass its amount (or ``unpriced``: an API
-        model with no price, which a hard budget cannot keep). None when there is no such budget."""
+        model with no price, which a hard budget cannot keep). None when there is no such budget. ``force`` never
+        refuses: the hold of work already done (a CPU run carried across the server's restart, whose hold was in
+        memory), so its credits are settled into the budget all the same."""
         if not budget_id:
             return None
         with self.lock:
@@ -462,7 +464,7 @@ class Keeper:
             self._turn(a)
             amount = max(MIN_RESERVE, float(estimate or 0.0))
             committed = a.spent + a.reserved()
-            hard = a.behavior == "hard" and a.amount > 0
+            hard = a.behavior == "hard" and a.amount > 0 and not force
             if hard and unpriced:
                 raise BudgetExceeded(f"The budget for “{a.group}” cannot be kept: this model has no price, so its "
                                      "budget cannot be kept.", budget_id=a.budget_id, key=a.key)
