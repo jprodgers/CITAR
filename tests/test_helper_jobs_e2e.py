@@ -25,6 +25,7 @@ import tests  # noqa: F401  (temporary saves folder and server registry; must be
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -82,6 +83,11 @@ def setUpModule():
     db.create_all()
     servers.invalidate()
     S.reset()
+
+
+def tearDownModule():
+    db.dispose()
+    shutil.rmtree(_TMP, ignore_errors=True)
 
 
 def _until(check, limit: float = 10.0, step: float = 0.02):
@@ -200,7 +206,7 @@ class Lending(unittest.TestCase):
     def helper(self, sid: str, token: str, endpoint) -> H.RealHelper:
         """The real helper for ``sid``, its owner's ``CEILING`` in its home's ``helper.json``; once its executor is
         ready (its job host's self-test passed)."""
-        home = Path(tempfile.mkdtemp(prefix="citar-helper-jobs-"))
+        home = Path(tempfile.mkdtemp(prefix="helper-", dir=_TMP))
         (home / "helper.json").write_text(json.dumps({"cpu": CEILING}), encoding="utf-8")
         helper = H.RealHelper(self.server.base, token, endpoint.url, name=f"jobs {sid}", home=home)
         self.addCleanup(helper.stop)
