@@ -13,7 +13,7 @@ the module layout::
     citar bench …             command-line model benchmark
     citar sim …               one headless bot-vs-bot game in the console
     citar balance …           parallel bot games, for balancing the scripted bot
-    citar lab …               the long-running bot experiment runner
+    citar lab …               queue bot experiments, which the CITAR server plays
     citar ruleset check DIR   check a modded ruleset before playing it (CITAR_RULESET_DIR)
     citar where               print every directory CITAR reads or writes
 
@@ -40,7 +40,7 @@ DELEGATES = {
     "bench": ("citar.bench", "main", "benchmark models from the command line"),
     "sim": ("citar.sim", "main", "play one headless bot-vs-bot game"),
     "balance": ("citar.balance", "main", "run many bot games and report on balance"),
-    "lab": ("citar.lab", "main", "queue and run long bot experiments"),
+    "lab": ("citar.lab", "main", "queue bot experiments (the server plays them)"),
 }
 
 

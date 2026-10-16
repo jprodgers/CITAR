@@ -308,14 +308,24 @@ over before it, a model that is not loaded (with nothing sent to it) and one unl
 `scan` runs a helper that scans and measures, with `citar-fake-probe` as its `nvidia-smi` (below): its
 hello's scan as the machine's last report, Rescan now within 5 s, a minute of samples as one power
 row, costing measuring the machine's energy from it, every reading a call in the fake's log, and a
-`--no-hardware --no-power` helper sending neither.
+`--no-hardware --no-power` helper sending neither. `lab` plays the lab inside the QA server on its own job host
+(the host's CPU set to two threads, two cores' worth at most and 400 MB): a member's six duels to their end with
+their lines, events, ratings and `GET /api/lab/jobs`; an administrator's ranking and reference runs through
+`citar lab submit`; Stop and Resume; the server killed twice with two games playing (each seat step slowed by the
+test build's `CITAR_JOBS_TEST_STEP_MS`), playing exactly those two again; the Queue page's CPU card.
 
 ```bash
 python scripts/qa_phase4.py helper --dir C:/dev/qa-phase4             # about 20 s; a free port
 python scripts/qa_phase4.py llm-real --dir C:/dev/qa-phase4           # the model loaded in LM Studio first
 python scripts/qa_phase4.py llm-real --stand-in --dir C:/dev/qa-phase4
 python scripts/qa_phase4.py scan --dir C:/dev/qa-phase4               # about 80 s: a minute of samples
+python scripts/qa_phase4.py lab --dir C:/dev/qa-phase4                # about 60 s
 ```
+
+**The suite's servers play no lab.** `tests/__init__.py` sets `CITAR_TEST_NO_DISPATCHER`, so an app a test
+module starts runs no job dispatcher (the modules share one saves folder, whose lab queue may hold another test's
+experiment). `tests/test_dispatcher.py` makes and ticks its own, with small limits; the QA script clears the
+switch for its server.
 
 **Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
 fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of

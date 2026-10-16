@@ -46,8 +46,21 @@ Parts:
   a second machine's helper with ``--no-hardware --no-power`` reports no scan and writes no row. With ``--keep`` the
   scanned machine's helper stays connected, for the browser checklist's H2 (the dialog's Rescan now).
 
-``all`` runs every part written so far; later packages add ``lab`` (4-09), ``remote`` (4-10), ``verify`` (4-11,
-4-12), ``update`` (4-13), ``service`` (4-14), ``exit`` and ``real`` (4-15).
+- ``lab`` (4-09): the lab played inside the server by its job dispatcher on its own job host (the local executor),
+  the host machine's CPU set in its machine settings (two threads, two cores' worth at most, 400 MB): bob, given
+  ``run_lab``, queues six 30-round duels from the A/B route, which run to their end and move to done/ (six lines, each
+  with ``executor.machine`` the host and ``verification: reference``; six ``cpu`` events used by bob and given by
+  nobody, each observed at least as long as its job host measured it and counted whole; the ratings include them;
+  ``GET /api/lab/jobs`` shows them done on "this server" to bob and "not found" to alice); ``citar lab submit`` refuses a member's ranking run and queues an administrator's ranking and reference runs
+  as the server's own collection (no consumer), the reference lines read by ``summarize.py``; Stop holds a new
+  experiment ("the lab is paused") and Resume plays it; the server killed twice with two games playing (each seat step
+  slowed by the test build's ``CITAR_JOBS_TEST_STEP_MS``) plays exactly those two again, each game in the results
+  once, and the Queue page's CPU card names bob's games to him and "someone's lab game" to alice; a game whose job host
+  is killed three times fails, and an administrator's retry (``POST /api/admin/jobs/retry``) plays it to its end (a
+  member's is 404); the administrators' view of the dispatcher; no traceback.
+
+``all`` runs every part written so far; later packages add ``remote`` (4-10), ``verify`` (4-11, 4-12), ``update``
+(4-13), ``service`` (4-14), ``exit`` and ``real`` (4-15).
 """
 from __future__ import annotations
 
@@ -76,7 +89,7 @@ q3 = _phase3()
 Harness, Helper, FakeEndpoint, wait_until = q3.Harness, q3.Helper, q3.FakeEndpoint, q3.wait_until
 
 #: Parts a later package writes (P4.7.6): asked for now, the harness says so and refuses.
-LATER = {"lab": "4-09", "remote": "4-10", "verify": "4-11, 4-12", "update": "4-13", "service": "4-14",
+LATER = {"remote": "4-10", "verify": "4-11, 4-12", "update": "4-13", "service": "4-14",
          "exit": "4-15", "real": "4-15"}
 #: The v1 refusal's words (``citar.server.helper_protocol.V1_REFUSAL_MESSAGE``), as a 0.1.5 worker prints them.
 V1_START = "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2)."
@@ -747,9 +760,308 @@ def part_scan(h) -> None:
             scripted.close()
 
 
+# ---------------------------------------------------------------------------- lab (4-09)
+
+#: The instance's lab, its jobs, its events and its ratings, read in a child with the instance's environment (its
+#: database and saves folder): ``python -c LAB_STATE <experiment names...>``.
+LAB_STATE = """
+import json, sys
+from sqlalchemy import select
+from citar import db
+from citar.bots import ratings
+from citar.db.models import ComputeEvent, CpuJob, CpuJobRun
+db.configure()
+names = sys.argv[1:]
+out = {}
+with db.session() as s:
+    for name in names:
+        jobs = [j for j in s.scalars(select(CpuJob).where(CpuJob.item_ref == name))]
+        runs = {}
+        for r in s.scalars(select(CpuJobRun).where(CpuJobRun.job_id.in_([j.id for j in jobs] or ["-"]))):
+            runs.setdefault(r.job_id, []).append({"id": r.id, "state": r.state, "verdict": r.verdict,
+                                                   "error": (r.error or {}).get("code"), "machine": r.machine_id,
+                                                   "executor": r.executor, "offered": r.offered_at.isoformat()})
+        events = [{"activity": e.activity, "consumer": e.consumer_id, "provider": e.provider_id,
+                   "machine": e.machine_id, "cpu": e.cpu_core_s, "observed": e.observed_s,
+                   "reported": e.reported_s, "flags": e.flags or {},
+                   "verification": e.verification, "request": e.request_id}
+                  for e in s.scalars(select(ComputeEvent).where(ComputeEvent.activity.like(f"lab:{name}:%")))]
+        out[name] = {"jobs": [{"id": j.id, "ref": j.ref, "state": j.state, "owner": j.owner_id, "kind": j.kind,
+                                "runs": sorted(runs.get(j.id, []), key=lambda r: r["offered"])} for j in jobs],
+                     "events": events}
+games, entries = ratings.collect()
+out["_rated"] = sorted({x for e in entries.values() for x in e["experiments"]})
+print(json.dumps(out, default=str))
+"""
+
+
+def _lab_state(h, *names: str) -> dict:
+    import subprocess
+    got = subprocess.run([sys.executable, "-c", LAB_STATE, *names], cwd=str(ROOT), env=h.server.env,
+                         capture_output=True, text=True, timeout=120)
+    try:
+        return json.loads(got.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"_error": got.stderr[-500:]}
+
+
+def _lines(h, name: str, folder: str = "results") -> list:
+    path = h.server.state / "saves" / "lab" / folder / f"{name}.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+
+def _lab_view(who, name: str) -> dict:
+    got = who.get("/api/lab")
+    if got.status_code != 200:
+        return {}
+    return next((e for e in got.json().get("experiments", []) if e.get("name") == name), {})
+
+
+def part_lab(h) -> None:
+    """The ``lab`` part (the module's doc)."""
+    import subprocess
+    r = h.report
+    admin, alice, bob = h.accounts["admin"], h.accounts["alice"], h.accounts["bob"]
+    data = r.data.setdefault("lab", {})
+    host = "sv_qa_host"
+    share = max(1, min(100, 200 // (os.cpu_count() or 1)))
+    tag = h.tag
+
+    # ---- the host's CPU, set as its machine settings (P4.5.6), within two cores' worth and 400 MB (P4.7.1)
+    cpu = {"enabled": True, "threads": 2, "cpu_percent": share, "memory_mb": 400,
+           "work": ["lab_game", "ranking_game", "reference_game"]}
+    put = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": cpu}})
+    read = admin.get(f"/api/machines/{host}/settings")
+    caps = (read.json().get("capabilities") or {}).get("cpu") if read.status_code == 200 else {}
+    r.check("the host's CPU sharing is set in its machine settings (2 threads, two cores' worth at most, 400 MB, "
+            "every kind of work), and the dialog reads it back",
+            put.status_code == 200 and {k: caps.get(k) for k in cpu} == cpu,
+            json.dumps({"put": put.status_code, "cpu": caps}))
+
+    # ---- bob, given run_lab, queues six 30-round duels from the Bots page's A/B route
+    bob_id = bob.get("/api/auth/me").json()["user"]["id"]
+    admin.patch(f"/api/admin/users/{bob_id}", json={"caps": {"run_lab": True}})
+    duels = f"qa-duels-{tag}"
+    queued = bob.post("/api/bots/experiments", json={
+        "profiles": ["standard", "classic-production"], "name": duels, "players": 2, "games": 6, "seed": 6100,
+        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": 30})
+    r.check("bob (given run_lab) queues six 30-round duels from the Bots page's A/B route",
+            queued.status_code == 200, queued.text[:300])
+    t0 = time.perf_counter()
+    done = wait_until(lambda: _lab_view(bob, duels).get("state") == "complete" and time.perf_counter(), 180, 0.5)
+    took = round(done - t0, 1) if done else None
+    lines = _lines(h, duels)
+    r.check("the experiment runs to its end on the local executor and moves to done/: six result lines, each "
+            "with executor.machine the host and verification reference, each game once",
+            bool(done) and sorted(x.get("i") for x in lines) == list(range(6))
+            and all((x.get("executor") or {}).get("machine") == host
+                    and (x.get("executor") or {}).get("verification") == "reference" for x in lines)
+            and (h.server.state / "saves" / "lab" / "done" / f"{duels}.json").exists(),
+            json.dumps({"seconds": took, "lines": len(lines),
+                        "executors": sorted({json.dumps(x.get("executor", {}).get("machine")) for x in lines})}),
+            seconds=took)
+    events = []
+    state: dict = {}
+
+    def settled():
+        nonlocal state, events
+        state = _lab_state(h, duels)
+        events = (state.get(duels) or {}).get("events") or []
+        return len(events) >= 6
+    wait_until(settled, 30, 1.0)
+    runs = {x["executor"]["run"] for x in lines if x.get("executor")}
+    played = {x["executor"]["run"]: x.get("seconds") or 0.0 for x in lines if x.get("executor")}
+    # what the server observed is each run's time from its accept's arrival to its result's (never when the
+    # dispatcher read them): at least the time its job host measured, so an honest run's CPU is counted whole
+    timed = all(e["observed"] >= 0.9 * played.get(e["request"], 0.0) - 0.1 and not e["flags"].get("overreported_cpu")
+                and e["cpu"] == round(e["reported"], 6) for e in events)
+    r.check("six cpu events with bob as the consumer and no provider, on the host, verified, one a run, each "
+            "timed by its frames (observed at least the time its host measured) and counted whole",
+            len(events) == 6 and {(e["consumer"], e["provider"], e["machine"], e["verification"]) for e in events}
+            == {(bob_id, None, host, "verified")} and {e["request"] for e in events} == runs and timed,
+            json.dumps([{**{k: e[k] for k in ("cpu", "reported", "observed", "flags")},
+                         "seconds": played.get(e["request"])} for e in events][:3])[:500])
+    r.check("the ratings include its games", duels in (state.get("_rated") or []), str(state.get("_rated"))[:300])
+    mine = bob.get("/api/lab/jobs", params={"exp": duels})
+    jobs = mine.json().get("jobs", []) if mine.status_code == 200 else []
+    stranger = alice.get("/api/lab/jobs", params={"exp": duels})
+    r.check("GET /api/lab/jobs: bob sees his six games done on this server, their verification reference; alice, "
+            "who may not see the experiment, gets 404",
+            len(jobs) == 6 and {(j["state"], (j.get("executor") or {}).get("name"), j.get("verification"))
+                                for j in jobs} == {("done", "this server", "reference")}
+            and stranger.status_code == 404,
+            json.dumps({"jobs": jobs[:1], "alice": stranger.status_code})[:400])
+    data.update(duels=duels, duels_seconds=took)
+
+    # ---- an administrator's ranking and reference runs (citar lab submit): the server's own collection
+    ladder, base = f"qa-ladder-{tag}", f"qa-reference-{tag}"
+    specs = h.server.state / f"qa-lab-{tag}.json"
+    specs.write_text(json.dumps([
+        {"name": ladder, "kind": "ranking", "games": 2, "seed": 6200, "size": "duel", "maps": ["pangaea"],
+         "turns": 30, "seats": [{"profile": "standard"}, {"profile": "classic-production"}]},
+        {"name": base, "kind": "reference", "games": 2, "seed": 6300, "size": "duel", "maps": ["pangaea"],
+         "turns": 40}]), encoding="utf-8")
+    refused = subprocess.run([sys.executable, "-m", "citar.lab", "submit", str(specs), "--owner", alice.handle],
+                             cwd=str(ROOT), env=h.server.env, capture_output=True, text=True, timeout=120)
+    submitted = subprocess.run([sys.executable, "-m", "citar.lab", "submit", str(specs), "--owner", admin.handle],
+                               cwd=str(ROOT), env=h.server.env, capture_output=True, text=True, timeout=120)
+    r.check("citar lab submit refuses a ranking run of a member (exit 2), and queues an administrator's ranking and "
+            "reference runs as the server's own collection",
+            refused.returncode == 2 and "is an administrator's" in refused.stderr and submitted.returncode == 0
+            and submitted.stdout.count("as the server's own collection") == 2,
+            json.dumps({"refused": refused.stderr.strip()[-200:], "out": submitted.stdout.strip()[-300:]}))
+    both = wait_until(lambda: all((h.server.state / "saves" / "lab" / "done" / f"{n}.json").exists()
+                                  for n in (ladder, base)), 180, 0.5)
+    ref_path = h.server.state / "saves" / "lab" / "reference" / f"{base}.jsonl"
+    summed = subprocess.run([sys.executable, str(ROOT / "scripts" / "refcheck" / "summarize.py"), str(ref_path),
+                             "--json"], cwd=str(ROOT), capture_output=True, text=True, timeout=120)
+    try:
+        summary = json.loads(summed.stdout) if summed.returncode == 0 else {}
+    except ValueError:
+        summary = {}
+    state = {}
+
+    def written():
+        state.clear()
+        state.update(_lab_state(h, ladder, base))
+        return all(len((state.get(n) or {}).get("events") or []) >= 2 for n in (ladder, base))
+    wait_until(written, 30, 1.0)
+    collection = [e for n in (ladder, base) for e in (state.get(n) or {}).get("events") or []]
+    r.check("both run to their end: the ranking games in results/ and rated, the reference lines in reference/ "
+            "(read by summarize.py as a baseline's), every event with no consumer",
+            bool(both) and len(_lines(h, ladder)) == 2 and len(_lines(h, base, "reference")) == 2
+            and not _lines(h, base) and summed.returncode == 0 and bool(summary)
+            and len(collection) == 4 and {(e["consumer"], e["provider"]) for e in collection} == {(None, None)}
+            and ladder in (state.get("_rated") or []),
+            json.dumps({"summarize": summed.returncode, "keys": sorted(summary)[:6],
+                        "events": len(collection)})[:400])
+
+    # ---- the lab paused (the Lab page's Stop) and resumed
+    paused = f"qa-paused-{tag}"
+    stop = admin.post("/api/admin/jobs/pause")
+    bob.post("/api/bots/experiments", json={
+        "profiles": ["standard", "standard"], "name": paused, "players": 2, "games": 2, "seed": 6400,
+        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": 30})
+    time.sleep(5.0)         # two of the dispatcher's ticks: nothing may start
+    held = admin.get("/api/admin/jobs").json()
+    waiting = [q.get("waiting") for q in (held.get("queued") or {}).get(paused, [])]
+    still = _lab_view(bob, paused)
+    resumed = admin.post("/api/admin/jobs/resume")
+    finished = wait_until(lambda: _lab_view(bob, paused).get("state") == "complete", 120, 0.5)
+    r.check("Stop pauses the lab (an experiment queued meanwhile waits, \"the lab is paused\"), and Resume plays it "
+            "to its end; a member may not stop it (404)",
+            stop.status_code == 200 and (held.get("paused") or {}).get("by") == admin.handle
+            and still.get("done") == 0 and waiting and set(waiting) == {"the lab is paused"}
+            and resumed.status_code == 200 and bool(finished)
+            and bob.post("/api/admin/jobs/pause").status_code == 404,
+            json.dumps({"waiting": waiting, "done_while_paused": still.get("done")}))
+
+    # ---- the server killed with two games playing: exactly those two again, each game once
+    killed = f"qa-killed-{tag}"
+    # each seat step slowed (a test build's switch): a game of 60 rounds lasts about 7 s, so it is still playing when
+    # the dispatcher's view (published every tick, 2 s) shows it accepted
+    h.server.env["CITAR_JOBS_TEST_STEP_MS"] = "60"
+    h.server.restart()
+    for who in h.accounts.values():
+        who.reconnect()
+    bob.post("/api/bots/experiments", json={
+        "profiles": ["standard", "classic-production"], "name": killed, "players": 2, "games": 4, "seed": 6500,
+        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": 60})
+
+    def playing():
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("running") or {}).get(host, []) if got.status_code == 200 else []
+        rows = [x for x in rows if x.get("exp") == killed and x.get("state") == "running"]
+        return rows if len(rows) == 2 else None
+    two = wait_until(playing, 120, 0.25) or []
+    names = {g["label"] for g in (bob.get("/api/queue").json()["cpu"]["executors"] or [{}])[0].get("games", [])}
+    others = {g["label"] for g in (alice.get("/api/queue").json()["cpu"]["executors"] or [{}])[0].get("games", [])}
+    r.check("the Queue page's CPU card: bob's games named, the same games \"someone's lab game\" to alice",
+            len(two) == 2 and any(n.startswith(killed) for n in names) and others == {"someone's lab game"},
+            json.dumps({"bob": sorted(names), "alice": sorted(others)}))
+    jobs_then = sorted(x["job"] for x in two)
+    h.server.restart()
+    for who in h.accounts.values():
+        who.reconnect()
+    end = wait_until(lambda: _lab_view(bob, killed).get("state") == "complete", 180, 0.5)
+    after = (_lab_state(h, killed).get(killed) or {}).get("jobs") or []
+    by_id = {j["id"]: j for j in after}
+    again = [by_id.get(j, {}).get("runs") or [] for j in jobs_then]
+    lines = _lines(h, killed)
+    r.check("the server killed with two games playing comes back and plays exactly those two again (their first "
+            "runs aborted at the restart), and each game is in the results once",
+            bool(end) and len(jobs_then) == 2
+            and all(len(rs) == 2 and rs[0]["state"] == "aborted" and rs[0]["error"] == "restart"
+                    and rs[1]["state"] == "done" for rs in again)
+            and all(len(j["runs"]) == 1 for j in after if j["id"] not in jobs_then)
+            and sorted(x["i"] for x in lines) == [0, 1, 2, 3],
+            json.dumps({"again": again, "lines": len(lines)}, default=str)[:600])
+    del h.server.env["CITAR_JOBS_TEST_STEP_MS"]
+
+    # ---- the dispatcher as administrators see it; nothing went wrong in the server
+    view = admin.get("/api/admin/jobs").json()
+    executor = ((view.get("dispatcher") or {}).get("executors") or [{}])[0]
+    # ---- a game whose job host dies three times fails, and an administrator's retry plays it again (still slowed:
+    # the server was started with the test build's switch)
+    import signal
+    flaky = f"qa-flaky-{tag}"
+    bob.post("/api/bots/experiments", json={
+        "profiles": ["standard", "standard"], "name": flaky, "players": 2, "games": 1, "seed": 6600,
+        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": 60})
+
+    def host_playing():
+        got = admin.get("/api/admin/jobs")
+        if got.status_code != 200:
+            return None
+        body = got.json()
+        ex = ((body.get("dispatcher") or {}).get("executors") or [{}])[0]
+        rows = [x for x in (body.get("running") or {}).get(host, []) if x.get("exp") == flaky
+                and x.get("state") == "running"]
+        return ex.get("pid") if rows and ex.get("state") == "ready" else None
+    kills = []
+    for _ in range(3):
+        pid = wait_until(host_playing, 90, 0.25)
+        if not pid:
+            break
+        try:
+            os.kill(int(pid), signal.SIGTERM)       # this server's own job host (the server's child), ended by hand
+            kills.append(pid)
+        except OSError:
+            break
+        wait_until(lambda pid=pid: host_playing() != pid, 30, 0.25)
+    stalled = wait_until(lambda: (_lab_view(bob, flaky).get("failing") == [0]) and _lab_view(bob, flaky), 60, 0.5)
+    retry_gone = admin.post("/api/admin/jobs/retry", params={"exp": duels})
+    retry_bob = bob.post("/api/admin/jobs/retry", params={"exp": flaky})
+    retry = admin.post("/api/admin/jobs/retry", params={"exp": flaky})
+    replayed = wait_until(lambda: _lab_view(bob, flaky).get("state") == "complete", 120, 0.5)
+    flaky_runs = [x for j in ((_lab_state(h, flaky).get(flaky) or {}).get("jobs") or []) for x in j["runs"]]
+    r.check("a game whose job host is killed three times fails (the experiment stalled, its game listed failed); an "
+            "administrator's retry (POST /api/admin/jobs/retry) plays it to its end, its line written once; a "
+            "member's retry is 404, and so is one of an experiment no longer queued",
+            len(kills) == 3 and bool(stalled) and stalled.get("state") == "stalled" and retry.status_code == 200
+            and retry_bob.status_code == 404 and retry_gone.status_code == 404 and bool(replayed)
+            and [(x["state"], x["error"]) for x in flaky_runs] == [("failed", "host")] * 3 + [("done", None)]
+            and len(_lines(h, flaky)) == 1,
+            json.dumps({"kills": len(kills), "stalled": (stalled or {}).get("state"),
+                        "retry": [retry.status_code, retry_bob.status_code, retry_gone.status_code],
+                        "runs": [(x["state"], x["error"]) for x in flaky_runs]}))
+    r.check("GET /api/admin/jobs: the dispatcher alive, the host's job host ready under its settings (held hard on "
+            "Windows, the CPU soft without a user manager on Linux) and verifiable; a member gets 404",
+            (view.get("dispatcher") or {}).get("alive") is True and executor.get("machine") == host
+            and executor.get("threads") == 2 and executor.get("memory_mb") == 400
+            and executor.get("verifiable") in (True, None) and bob.get("/api/admin/jobs").status_code == 404,
+            json.dumps({k: executor.get(k) for k in ("state", "threads", "cpu_percent", "memory_mb", "held",
+                                                     "verifiable")}))
+    data.update(executor={k: executor.get(k) for k in ("threads", "cpu_percent", "memory_mb", "held")})
+    r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
+
+
 # ---------------------------------------------------------------------------- the run
 
-PARTS: dict[str, Callable] = {"helper": part_helper, "llm-real": part_llm_real, "scan": part_scan}
+PARTS: dict[str, Callable] = {"helper": part_helper, "llm-real": part_llm_real, "scan": part_scan,
+                              "lab": part_lab}
 
 
 def main(argv=None) -> int:
@@ -769,6 +1081,8 @@ def main(argv=None) -> int:
                     help="llm-real: play LM Studio with the scripted endpoint (to check the part without the model)")
     ap.add_argument("--wsl", action="store_true", help="the server in WSL (the remote and exit parts: 4-10, 4-15)")
     args = ap.parse_args(argv)
+    # the instance's server plays the lab (the lab part): the test suite's switch, if this runs under it, stays off
+    os.environ.pop("CITAR_TEST_NO_DISPATCHER", None)
     global LLM_URL, STAND_IN
     LLM_URL, STAND_IN = args.llm_url, args.stand_in
     q3.HELPER_BIN = args.helper_bin

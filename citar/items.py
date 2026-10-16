@@ -499,36 +499,71 @@ def adopt_orphans(session, owner: User) -> dict:
     return counts
 
 
-def register_offline(kind: str, ref: str, name: str, path, owner_handle: Optional[str] = None) -> str:
-    """Register an item a command-line tool just wrote (``citar lab submit``), owned by ``owner_handle`` or else the
-    first administrator, when the server's database is there to write to; returns what was done, for the tool to
-    print. The database is opened only when it already exists with this version's tables: a tool never creates,
-    migrates or renames one, which is the server's business at its start. Anything not registered here is adopted
-    at the server's next start (``adopt_orphans``, to the owner its file records)."""
+def _offline_db() -> Optional[str]:
+    """Open the server's database for a command-line tool, when it already exists with this version's tables: a tool
+    never creates, migrates or renames one, which is the server's business at its start. None when it is open, else
+    why not."""
     from sqlalchemy import inspect
     from . import settings
+    if not db.configured():
+        url = settings.get().db_url
+        if url.startswith("sqlite"):
+            file = url.split("///", 1)[-1]
+            if not file or file == ":memory:" or not Path(file).exists():
+                return "there is no server database here yet (the server adopts it when it starts)"
+        db.configure(url)
+    if "owned_items" not in inspect(db.engine()).get_table_names():
+        return "the server database is from another version (the server adopts it when it starts)"
+    return None
+
+
+def _offline_owner(s, owner_handle: Optional[str]):
+    """The account a command-line tool's item belongs to: ``owner_handle``'s, else the first administrator's; a
+    reason (text) when there is none."""
+    if owner_handle:
+        from .auth import accounts
+        owner = accounts.by_handle(s, owner_handle)
+        return owner if owner is not None else f"no account '{owner_handle}'"
+    owner = first_admin(s)
+    return owner if owner is not None else "the server has no administrator yet (it adopts this once one is made)"
+
+
+def offline_admin_refusal(owner_handle: Optional[str] = None) -> str:
+    """Why an item that must be an administrator's (a ranking or reference experiment of the lab, design/
+    phase4-helper.md P4.4.1) cannot be ``owner_handle``'s: '' when that account (or, by default, the first
+    administrator) is an administrator, or when there is no server database to ask yet (the first administrator
+    adopts it when the server starts)."""
     try:
-        if not db.configured():
-            url = settings.get().db_url
-            if url.startswith("sqlite"):
-                file = url.split("///", 1)[-1]
-                if not file or file == ":memory:" or not Path(file).exists():
-                    return "not registered: there is no server database here yet (the server adopts it when it starts)"
-            db.configure(url)
-        if "owned_items" not in inspect(db.engine()).get_table_names():
-            return "not registered: the server database is from another version (the server adopts it when it starts)"
+        if _offline_db() is not None:
+            return ""
         with db.session() as s:
-            owner = None
-            if owner_handle:
-                from .auth import accounts
-                owner = accounts.by_handle(s, owner_handle)
-                if owner is None:
-                    return f"not registered: no account '{owner_handle}'"
-            owner = owner or first_admin(s)
-            if owner is None:
-                return "not registered: the server has no administrator yet (it adopts this once one is made)"
-            register(s, kind, ref, owner, name, path=path)
-            return f"registered to {owner.handle}"
+            owner = _offline_owner(s, owner_handle)
+            if isinstance(owner, str):
+                return owner if owner_handle else ""
+            return "" if owner.role == "admin" else f"{owner.handle} is not an administrator"
+    except Exception as e:      # nothing to check against: the server's adoption decides
+        log.warning("could not check the owner %s", owner_handle, exc_info=True)
+        return "" if not owner_handle else f"could not check {owner_handle} ({type(e).__name__}: {e})"
+
+
+def register_offline(kind: str, ref: str, name: str, path, owner_handle: Optional[str] = None, *,
+                     collection: bool = False) -> str:
+    """Register an item a command-line tool just wrote (``citar lab submit``), owned by ``owner_handle`` or else the
+    first administrator, when the server's database is there to write to; returns what was done, for the tool to
+    print. ``collection`` marks it the server's own data collection (a ranking or reference experiment: nobody's
+    credits pay for its compute). The database is opened only when it already exists with this version's tables
+    (:func:`_offline_db`). Anything not registered here is adopted at the server's next start (``adopt_orphans``, to
+    the owner its file records)."""
+    try:
+        why = _offline_db()
+        if why is not None:
+            return f"not registered: {why}"
+        with db.session() as s:
+            owner = _offline_owner(s, owner_handle)
+            if isinstance(owner, str):
+                return f"not registered: {owner}"
+            register(s, kind, ref, owner, name, path=path, collection=collection)
+            return f"registered to {owner.handle}" + (" as the server's own collection" if collection else "")
     except Exception as e:      # the file is written; registering it is a convenience the next start repeats
         log.warning("could not register %s %s", kind, ref, exc_info=True)
         return f"not registered ({type(e).__name__}: {e}); the server adopts it when it starts"

@@ -272,9 +272,12 @@ class GivenAndUsed(World):
     def test_consumer_provider_and_credits_for_every_activity_on_every_machine(self):
         table = self.the_table()
         self.write(*[row[0] for row in table])
-        self.assertEqual(ledger.ingest_lab(self.led, self.lab), 1, "the lab's one finished game; the crash none")
-        self.assertEqual(ledger.ingest_lab(self.led, self.lab), 0, "and only once")
-        self.assertEqual(ledger.ingest_lab(None, self.lab), 0, "even when its file is read again")
+        # a lab game played by the server's own job host: the job dispatcher's event of its run (P4.5.7)
+        from citar.jobs import dispatcher as jobs_dispatcher
+        self.led.events([jobs_dispatcher.Dispatcher._event_row(
+            "cr_exp1run0", "lab:exp1:0", self.ids["alice"], "sv_host", "local", "primary", 100.0, 120.0, None,
+            datetime(2026, 10, 12, 10, 0, tzinfo=UTC))])
+        self.led.drain()
         got = self.events()
         self.assertEqual(len(got), len(table) + 1)
         for (src, consumer, provider, kind, akind, credits, self_use), ev in zip(table, got):
@@ -289,8 +292,8 @@ class GivenAndUsed(World):
         lab = got[-1]
         self.assertEqual((lab.activity, lab.consumer_id, lab.provider_id, lab.kind, lab.cpu_core_s, lab.credits,
                           lab.machine_id, lab.request_id, lab.observed_s),
-                         ("lab:exp1:0", self.ids["alice"], None, "cpu", 100.0, 5.0, "sv_host", "lab:exp1:0", 120.0),
-                         "its observed time the game's wall time, which costing spreads its CPU over")
+                         ("lab:exp1:0", self.ids["alice"], None, "cpu", 100.0, 5.0, "sv_host", "cr_exp1run0", 120.0),
+                         "its observed time the run's, which costing spreads its CPU over; its request the run")
         api = got[6]
         self.assertEqual((api.tokens_in, api.tokens_out, api.tokens_cache_read), (1_000_000, 100_000, 2_000_000))
 
@@ -1026,39 +1029,26 @@ class Costing(World):
         self.assertGreater(x_old["busy_h"], x_new["busy_h"])
         self.assertAlmostEqual(x_old["depreciation"], x_new["depreciation"], places=9, msg="what was held is unchanged")
 
-    def test_a_past_lab_game_is_priced_once_and_its_cpu_over_its_whole_run(self):
-        """The lab's results are read into the compute ledger (``ingest_lab``), its past games' too, whose usage spans
-        (written before 3-10) carry their own CPU: each is priced once. And a lab game's CPU is spread over its run,
-        not crammed into its last minute: an hour's game of 3,600 core-seconds costs the energy it cost before."""
-        results = _TMP / f"lab-{secrets.token_hex(3)}"
-        results.mkdir()
-        self.addCleanup(shutil.rmtree, results, True)
+    def test_a_lab_games_cpu_is_priced_over_its_whole_run(self):
+        """A lab game's ``cpu`` event (the job dispatcher's, one a run, P4.5.7) carries the time the server observed
+        the run (``observed_s``), and costing spreads its CPU over it rather than cramming it into its last minute: an
+        hour's game of 3,600 core-seconds costs the energy it cost when its usage span carried its CPU."""
+        from citar.jobs import dispatcher as jobs_dispatcher
         fin = datetime(2025, 11, 3, 12, 0, 0)              # local and naive, as lab.py writes it
         t1 = fin.timestamp()
-        old = [{"k": "act", "id": "lab:old:0", "kind": "lab", "name": "old #0", "t": t1,
-                "parent": {"kind": "lab_experiment", "id": "old", "name": "old"}, "ref": {"exp": "old", "i": 0}},
-               {"k": "span", "act": "lab:old:0", "srv": "sv_host", "t0": t1 - 600, "t1": t1, "held": 600.0,
-                "cpu": 600.0, "busy": 0.0, "est_cpu": False}]
         new = usage.lab_game_rows("new", 0, {"seconds": 3600, "cpu_s": 3600.0, "finished": fin.isoformat()}, "sv_host")
-        self.assertNotIn("cpu", new[1], "a lab game's span holds its held time only now")
+        self.assertNotIn("cpu", new[1], "a lab game's span holds its held time only")
         usage.USAGE_DIR.mkdir(parents=True, exist_ok=True)
         path = usage.USAGE_DIR / "lab-2025-11.jsonl"
-        path.write_text("".join(json.dumps(r) + chr(10) for r in old + new), encoding="utf-8")
+        path.write_text("".join(json.dumps(r) + chr(10) for r in new), encoding="utf-8")
         self.addCleanup(path.unlink, missing_ok=True)
-        for exp, seconds in (("old", 600), ("new", 3600)):
-            (results / f"{exp}.jsonl").write_text(json.dumps(
-                {"exp": exp, "i": 0, "cpu_s": float(seconds), "seconds": seconds,
-                 "finished": fin.isoformat(timespec="seconds")}) + chr(10), encoding="utf-8")
+        self.led.events([jobs_dispatcher.Dispatcher._event_row(
+            "cr_new0", "lab:new:0", None, "sv_host", "local", "primary", 3600.0, 3600.0, None,
+            datetime.fromtimestamp(t1, UTC))])
+        self.led.drain()
         since, until = t1 - 7200, t1 + 7200
         reg = servers.with_pooled()
-        before = costing.compute(since, until, reg, usage.read(since, until, work=True))
-        self.assertEqual(ledger.ingest_lab(self.led, results), 2, "both games read, the past one too")
         after = costing.compute(since, until, reg, usage.read(since, until, work=True))
-        was, now = before["acts"]["lab:old:0"]["total"], after["acts"]["lab:old:0"]["total"]
-        self.assertGreater(was["cpu_h"], 0)
-        for k in ("cpu_h", "kwh_dynamic", "energy_dynamic"):
-            with self.subTest(past_game=k):
-                self.assertAlmostEqual(now[k], was[k], places=9, msg="priced once")
         spread = costing.compute(since, until, reg, {"acts": {"lab:new:0": new[0]}, "power": {}, "work": [],
                                                      "spans": [dict(new[1], cpu=3600.0, busy=0.0)]})
         fresh, then = after["acts"]["lab:new:0"]["total"], spread["acts"]["lab:new:0"]["total"]
@@ -1381,29 +1371,25 @@ class ShortTransactions(World):
         self.assertEqual(len(self.events(activity="game:busy")), 1)
 
 
-class LabReaders(World):
+class DispatcherEvents(World):
     BACKGROUND = True
 
-    def test_concurrent_readers_write_each_lab_game_once_on_the_writer_thread(self):
-        """The rollup pass and every report read the lab's results; two at once each found the same games missing
-        and wrote them twice (review of 3-10). One reader at a time, its events written by the ledger's writer thread
-        (the one thread that inserts events) before the next reader looks."""
-        results = _TMP / f"lab-{secrets.token_hex(3)}"
-        results.mkdir()
-        self.addCleanup(shutil.rmtree, results, True)
-        (results / "exp1.jsonl").write_text("".join(json.dumps(
-            {"exp": "exp1", "i": i, "cpu_s": 10.0, "seconds": 12, "finished": "2026-10-12T10:00:00+00:00"}) + chr(10)
-            for i in range(30)), encoding="utf-8")
+    def test_the_dispatchers_events_are_written_once_by_the_writer_thread(self):
+        """The dispatcher's events (one ``cpu`` event a finished run, P4.5.7) go through the ledger's queue like every
+        other: written by its writer thread (the one thread that inserts events, so their ids commit in order), each
+        once, from however many threads they come."""
+        from citar.jobs import dispatcher as jobs_dispatcher
         writers = set()
         self.led.listeners.append(lambda rows: writers.add(threading.current_thread().name)
                                   if any(r["activity_kind"] == "lab" for r in rows) else None)
-        go = threading.Barrier(8)
-        got = []
+        go = threading.Barrier(6)
 
-        def read(with_ledger):
+        def put(k):
             go.wait()
-            got.append(ledger.ingest_lab(self.led if with_ledger else None, results))
-        threads = [threading.Thread(target=read, args=(i % 2 == 0,)) for i in range(8)]
+            self.led.events([jobs_dispatcher.Dispatcher._event_row(
+                f"cr_{k}_{i}", f"lab:exp1:{k * 5 + i}", self.ids["alice"], "sv_host", "local", "primary", 10.0,
+                12.0, None, datetime(2026, 10, 12, 10, 0, tzinfo=UTC)) for i in range(5)])
+        threads = [threading.Thread(target=put, args=(k,)) for k in range(6)]
         for th in threads:
             th.start()
         for th in threads:
@@ -1411,9 +1397,8 @@ class LabReaders(World):
         self.assertTrue(self.led.flush(10))
         lab = self.events(activity_kind="lab")
         self.assertEqual(len(lab), 30)
-        self.assertEqual(len({e.activity for e in lab}), 30, "each game once")
-        self.assertEqual(sum(got), 30)
-        self.assertLessEqual(writers, {"ledger-writer"}, "what the ledger's readers queued, its writer wrote")
+        self.assertEqual(len({e.request_id for e in lab}), 30, "each run once")
+        self.assertLessEqual(writers, {"ledger-writer"}, "what the dispatcher queued, the ledger's writer wrote")
 
 
 if __name__ == "__main__":

@@ -1,20 +1,21 @@
 //! The job host (design/phase4-helper.md P4.4.3): the one program that plays jobs under limits,
 //! for both parents, the helper (`citar-helper job-host`) and the server (`python -m citar.jobs
-//! host`). It replaces 0.1.5's lab runner, its orphan adoption and its `taskkill`.
+//! host`). It replaces 0.1.5's lab runner, its orphan adoption and its killing of games by pid.
 //!
 //! **Its protocol** is JSON lines: one object a line, `t` its type, on its standard input (from
 //! the parent) and its standard output (to the parent); its standard error is its log, which the
 //! parent reads too ([`parent`]). They are the job frames of protocol 2 (PROTOCOL.md "Jobs")
 //! without what only the server and the helper share (the offer's time to live, the claim, the
 //! signature, the acknowledgement), and these:
-//! - **`limits`** (parent, first and once): `{jobs_build, threads, cpu_percent, memory_mb}`. A
-//!   host whose own jobs build differs refuses to start (`fatal` `build`), so a host left from
-//!   before a binary swap never computes with the old code; so does one whose limits the OS will
-//!   not put in place (`fatal` `limits`; [`crate::limits`]).
+//! - **`limits`** (parent, first and once): `{jobs_build, threads, cpu_percent, memory_mb,
+//!   play_unverifiable?}`. A host whose own jobs build differs refuses to start (`fatal`
+//!   `build`), so a host left from before a binary swap never computes with the old code; so does
+//!   one whose limits the OS will not put in place (`fatal` `limits`; [`crate::limits`]).
+//!   `play_unverifiable` is the server's own executor's ([`LimitsFrame::play_unverifiable`]).
 //! - **`ready`** (host, once): `{limits: {cpu, memory}, verifiable, jobs_build, threads, reason?,
 //!   memory_per_run_mb, own_mb, cgroup, cpu_s, pid, counting, notes}`: how hard each limit holds;
 //!   whether the canary and the self-check passed (`reason` says what failed: the host then refuses
-//!   every job, `unverifiable`); its jobs build, which the parent holds to its own; the memory each
+//!   every job, `unverifiable`, unless its parent plays its own work); its jobs build, which the parent holds to its own; the memory each
 //!   run may use, which is what a parent matches jobs to, and the host's own memory that it leaves
 //!   out ([`crate::limits::memory_per_run_mb`]); its cgroup (Linux), whose memory events the parent
 //!   reads when it dies; its CPU seconds so far; whether its memory is counted
@@ -107,6 +108,21 @@ pub struct LimitsFrame {
     pub threads: u32,
     pub cpu_percent: u32,
     pub memory_mb: u64,
+    /// The parent takes this host's results as its own work and compares them with no other
+    /// machine's: the server's local executor (design/phase4-helper.md P4.5.6; package 4-09),
+    /// which is trusted by definition. Such a host plays its jobs even when its canary or its
+    /// self-check failed (a server on a ruleset of its own, whose games the golden set does not
+    /// hold), and its `ready` still says it is not verifiable, so the server never verifies
+    /// another machine's results with it. A helper's parent never sets it: a helper's results
+    /// are compared with the server's, and a host that computes differently must refuse.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub play_unverifiable: bool,
+}
+
+/// Serde's test for a flag left out of a frame when it is off.
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde passes the field by reference")]
+const fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl LimitsFrame {
@@ -540,6 +556,8 @@ pub(crate) struct Shared {
     pub(crate) closing: AtomicBool,
     /// The canary and the self-check passed (and every run thread's canary since).
     pub(crate) verifiable: AtomicBool,
+    /// The parent plays its own work, verifiable or not ([`LimitsFrame::play_unverifiable`]).
+    pub(crate) play_unverifiable: bool,
     pub(crate) canary: Inject,
     pub(crate) step_delay: Duration,
     pub(crate) runs: Mutex<BTreeMap<String, Arc<run::RunState>>>,
@@ -742,6 +760,7 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         wake: Condvar::new(),
         closing: AtomicBool::new(false),
         verifiable: AtomicBool::new(check.is_ok()),
+        play_unverifiable: asked.play_unverifiable,
         canary: setup.canary,
         step_delay: setup.step_delay,
         runs: Mutex::new(BTreeMap::new()),
@@ -880,7 +899,7 @@ fn offer(shared: &Arc<Shared>, o: Offer) {
         reject(out, &o.run, RejectReason::BadSpec, "the run's id is not an id".to_owned());
         return;
     }
-    if !shared.verifiable.load(Ordering::SeqCst) {
+    if !shared.verifiable.load(Ordering::SeqCst) && !shared.play_unverifiable {
         let why = "this host failed its canary or its self-check".to_owned();
         reject(out, &o.run, RejectReason::Unverifiable, why);
         return;

@@ -108,8 +108,18 @@ class ItemCase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        from citar.pool import queue as work_queue
         from citar.server import reports_api
         cls.app.scheduler, cls.app._probe_runner, reports_api._runner = cls.saved
+        # this module's scheduler and probe runner registered themselves with the shared queue; put back the
+        # producers of the ones restored (or none, so the next one made registers its own), or their waiting runs
+        # stay listed for every later test (a module that had made the app's scheduler first left it so)
+        for kind, saved in (("benchmark", cls.saved[0]), ("probe", cls.saved[1])):
+            if saved is not None:
+                work_queue.register(kind, saved.queue_items, saved.running_items)
+            else:
+                work_queue._providers.pop(kind, None)
+                work_queue._running.pop(kind, None)
         for p in reversed(cls.patches):
             p.stop()
         for sid in list(cls.manager.sessions):
@@ -332,6 +342,7 @@ ROUTES = {
     ("POST", "/api/probe-runs/{rid}/open/{case}/{rep}"): ("use", "probe_run", None),
     ("GET", "/api/lab"): ("list", "lab_experiment", None),
     ("GET", "/api/lab/report/{name}"): ("read", "lab_experiment", None),
+    ("GET", "/api/lab/jobs"): ("read", "lab_experiment", None),       # ?exp=NAME (``_path``)
     ("GET", "/api/bots/profiles"): ("list", "bot_profile", None),
     ("POST", "/api/bots/profiles"): ("create", "bot_profile", None),
     ("GET", "/api/bots/profiles/{pid}"): ("read", "bot_profile", None),
@@ -402,6 +413,8 @@ class Table(ItemCase):
 
     # ---------------------------------------------------------------- the callers
     def _path(self, path, kind, ref):
+        if path == "/api/lab/jobs":
+            return f"{path}?exp={ref}"         # the experiment in the query: P4.5.10's ``GET /api/lab/jobs?exp=NAME``
         return (path.replace("{kind}", kind or "").replace("{ref}", ref)
                 .replace("{suite_id}", ref).replace("{run_id}", ref).replace("{map_id}", ref)
                 .replace("{sid}", ref).replace("{pid}", ref).replace("{rid}", ref).replace("{name}", ref)

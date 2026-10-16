@@ -82,7 +82,24 @@ fn mine() -> String {
 }
 
 fn limits(threads: u32) -> ToHost {
-    ToHost::Limits(LimitsFrame { jobs_build: mine(), threads, cpu_percent: 100, memory_mb: 4096 })
+    ToHost::Limits(LimitsFrame {
+        jobs_build: mine(),
+        threads,
+        cpu_percent: 100,
+        memory_mb: 4096,
+        play_unverifiable: false,
+    })
+}
+
+/// The server's own executor's limits: it plays its own work, verifiable or not.
+fn own_work(threads: u32) -> ToHost {
+    ToHost::Limits(LimitsFrame {
+        jobs_build: mine(),
+        threads,
+        cpu_percent: 100,
+        memory_mb: 4096,
+        play_unverifiable: true,
+    })
 }
 
 impl Played {
@@ -191,6 +208,7 @@ fn a_host_refuses_another_build_and_a_bad_start() {
         threads: 1,
         cpu_percent: 10,
         memory_mb: 100,
+        play_unverifiable: false,
     });
     let p = Played::start(&other, setup);
     let FromHost::Fatal(f) = p.next() else { panic!("fatal") };
@@ -208,6 +226,7 @@ fn a_host_refuses_another_build_and_a_bad_start() {
         threads: 0,
         cpu_percent: 10,
         memory_mb: 100,
+        play_unverifiable: false,
     });
     let p = Played::start(&zero, setup);
     let FromHost::Fatal(f) = p.next() else { panic!("fatal") };
@@ -220,6 +239,7 @@ fn a_host_refuses_another_build_and_a_bad_start() {
         threads: 2,
         cpu_percent: 10,
         memory_mb: 2,
+        play_unverifiable: false,
     });
     let p = Played::start(&starved, setup);
     let FromHost::Fatal(f) = p.next() else { panic!("fatal") };
@@ -395,6 +415,36 @@ fn a_host_whose_canary_fails_refuses_every_job() {
     let FromHost::JobReject(j) = p.about("cr_x") else { panic!("refused") };
     assert_eq!(j.reason, RejectReason::Unverifiable);
     assert_eq!(p.close(), 0);
+}
+
+#[test]
+fn a_host_playing_its_parents_own_work_plays_when_it_is_not_verifiable() {
+    // The server's executor (P4.5.6): a failed canary or self-check is reported, and the jobs
+    // still play, to the same results (the injected values fail the check, not the game).
+    let flushed = Inject { halved: Some(0.0), ..Inject::default() };
+    for setup in [
+        Setup { canary: flushed, ..Setup::default() },
+        Setup { fail_self_check: true, ..Setup::default() },
+    ] {
+        let p = Played::start(&own_work(1), setup);
+        let FromHost::Ready(r) = p.next() else { panic!("ready") };
+        assert!(!r.verifiable && r.reason.is_some(), "{r:?}");
+        let (o, want, head) = golden(SELF_CHECK);
+        p.send(&o);
+        let r = loop {
+            match p.about("cr_duel_a") {
+                FromHost::JobAccept(_) | FromHost::JobProgress(_) => {}
+                FromHost::JobResult(r) => break r,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!((r.outcome.result_hash, r.outcome.chain.head), (want, head));
+        assert_eq!(p.close(), 0);
+    }
+    // A helper's host is not told so, and refuses (a_host_whose_canary_fails_refuses_every_job).
+    let line = limits(1).line();
+    assert!(!line.contains("play_unverifiable"), "left out when off: {line}");
+    assert!(own_work(1).line().contains("\"play_unverifiable\":true"));
 }
 
 #[test]

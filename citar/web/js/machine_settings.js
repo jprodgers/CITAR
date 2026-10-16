@@ -108,22 +108,30 @@ export async function openMachineSettings(m, onSaved) {
           + "a model the machine has loaded, or one a game is using there. On: it may make the machine load another."),
         el("p", { class: "muted small" }, inEffectText(current.in_effect))));
     if (sharesCpu(current.kind)) {
+      // the host's CPU plays the lab's games on the server's own job host (design/phase4-helper.md P4.5.6): on by
+      // default, and a 0 there is the server's default, not the helper's
+      const host = current.host_cpu;
+      const zero = host ? "0 uses the server's default" : "0 leaves it to the helper";
       const inputs = el("div", { class: "grid2" },
-        number(cpu, "threads", "Threads", 0, 1024, "0 leaves it to the helper"),
-        number(cpu, "cpu_percent", "CPU %", 0, 100, "0 leaves it to the helper"),
-        number(cpu, "memory_mb", "Memory (MB)", 0, 16 * 1024 * 1024, "0 leaves it to the helper"));
+        number(cpu, "threads", "Threads", 0, 1024, host ? `${zero} (${host.threads})` : zero),
+        number(cpu, "cpu_percent", "CPU %", 0, 100, host ? `${zero} (${host.cpu_percent}%)` : zero),
+        number(cpu, "memory_mb", "Memory (MB)", 0, 16 * 1024 * 1024, host ? `${zero} (${host.memory_mb} MB)` : zero));
       box.appendChild(el("div", { class: "card inner" },
         el("h3", {}, "CPU sharing"),
-        check(cpu, "enabled", "Share its CPU for CITAR's CPU work"),
+        check(cpu, "enabled", host ? "Play the lab's games on this server's CPU" : "Share its CPU for CITAR's CPU work"),
         inputs,
         el("div", { class: "field" }, el("label", {}, "The kinds of work it takes"),
           ...current.cpu_work.map((kind) => el("label", { class: "checkrow" },
             el("input", { type: "checkbox", checked: cpu.work.includes(kind), onchange: (e) => {
               cpu.work = current.cpu_work.filter((k) => (k === kind ? e.target.checked : cpu.work.includes(k)));
             } }), WORK[kind] || kind))),
-        el("p", { class: "muted small" }, "These take effect with the 0.1.6 helper, which runs CPU work; the helper of "
-          + "this version (worker protocol 1) is sent none of them. The limits are hard where the operating system "
-          + "allows, and the helper's own local settings always win.")));
+        el("p", { class: "muted small" }, host
+          ? "This is the server's own machine: the server's job host plays the lab's games under these limits (one "
+            + "game a thread), restarting with new figures once the games it is playing finish. The limits are hard "
+            + "where the operating system allows; the Lab page shows how they hold."
+          : "These take effect with the 0.1.6 helper, which runs CPU work; the helper of "
+            + "this version (worker protocol 1) is sent none of them. The limits are hard where the operating system "
+            + "allows, and the helper's own local settings always win.")));
     }
     return box;
   }

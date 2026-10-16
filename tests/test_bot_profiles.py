@@ -6,16 +6,13 @@ no engine.
 """
 import tests  # noqa: F401  (temporary saves folder; must be imported before citar)
 import contextlib
-import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
-from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -460,9 +457,9 @@ lab.main(sys.argv[1:])
 
 
 class LabCommandTests(unittest.TestCase):
-    """`citar lab run` and `submit` stop at once, exit 2, when the engine does not load (a CITAR_RULESET_DIR that does
-    not load, the extension missing). The runner never imports the engine itself, each game being a process of its
-    own: without the check it started every queued game three times to crash, then waited for ever."""
+    """`citar lab submit` stops at once, exit 2, when the engine does not load (a CITAR_RULESET_DIR that does not load,
+    the extension missing); `citar lab run`, the runner 0.1.6 retired (the lab plays inside the server), says so and
+    exits 2 whatever the engine."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="citar-lab-cmd-"))
@@ -484,14 +481,11 @@ class LabCommandTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((self.lab / "queue" / "queued.json").exists())
         broken = {"CITAR_RULESET_DIR": str(ruleset_copy(self.tmp, {"ruleset/buildings.json": unknown_unique}))}
-        started = time.monotonic()
         r = self.lab_command("-m", "citar.lab", "run", "--workers", "1", "--exit-when-idle", env=broken)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertLess(time.monotonic() - started, 30, "the runner stops before its first pass")
-        self.assertIn("citar lab run: the engine does not load: CITAR_RULESET_DIR=", r.stderr)
-        self.assertIn("Makes every turn a Tuesday", r.stderr)
+        self.assertIn("citar lab run: the lab now runs inside the CITAR server", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
-        # no game was started, so none crashed, and the experiment waits in the queue for a runner that can play it
+        # nothing was played, and the experiment waits in the queue for the server
         self.assertFalse((self.lab / "crashes.log").exists())
         self.assertFalse((self.lab / "lab.log").exists())
         self.assertTrue((self.lab / "queue" / "queued.json").exists())
@@ -502,37 +496,14 @@ class LabCommandTests(unittest.TestCase):
         self.assertFalse((self.lab / "queue" / "queued.json").exists())
 
     def test_run_and_submit_stop_without_the_extension(self):
-        for argv in (["run", "--exit-when-idle"], ["submit", str(self.spec)]):
-            r = self.lab_command("-c", _NO_EXTENSION, *argv)
-            self.assertEqual(r.returncode, 2, argv)
-            self.assertIn(f"citar lab {argv[0]}: the engine does not load: cannot import name '_engine'", r.stderr)
+        r = self.lab_command("-c", _NO_EXTENSION, "run", "--exit-when-idle")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("citar lab run: the lab now runs inside the CITAR server", r.stderr)
+        r = self.lab_command("-c", _NO_EXTENSION, "submit", str(self.spec))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("citar lab submit: the engine does not load: cannot import name '_engine'", r.stderr)
         self.assertFalse((self.lab / "queue" / "queued.json").exists())
         self.assertFalse((self.lab / "crashes.log").exists())
-
-    def test_a_runner_left_with_games_it_gave_up_on_exits_when_idle(self):
-        """A runner tries a game three times; once every game left has crashed three times, `--exit-when-idle`
-        exits rather than wait for ever (the next runner tries them again)."""
-        from citar import lab
-        own = {name: self.lab / name.lower() for name in ("QUEUE", "RESULTS", "DONE", "JOBS")}
-        own["JOBS"].mkdir(parents=True)
-        with mock.patch.multiple(lab, LAB=self.lab, **own), mock.patch.object(lab, "quiet_now", return_value=False), \
-                mock.patch("subprocess.Popen", side_effect=AssertionError("no game may start")):
-            spec = lab.submit({"name": "gave-up", "games": 2, "size": "duel", "seats": [{"bot": "basic"}] * 2})
-            (lab.RESULTS / "gave-up.jsonl").write_text(json.dumps({"i": 0}) + "\n", encoding="utf-8")
-            gave_up = Counter({(spec["name"], 1): 3})
-            args = SimpleNamespace(workers=1, night_workers=1, exit_when_idle=True, max_minutes=1)
-            # without the flag the runner keeps going, and the experiment stays queued
-            self.assertFalse(lab._runner_step(SimpleNamespace(**{**vars(args), "exit_when_idle": False}), {},
-                                              gave_up, [], 0, 1))
-            with contextlib.redirect_stdout(io.StringIO()):     # log() prints each line too
-                self.assertTrue(lab._runner_step(args, {}, gave_up, [], 0, 1))
-            self.assertIn("nothing left to play: 1 game(s) crashed for good or three times (gave-up #1)",
-                          (self.lab / "lab.log").read_text(encoding="utf-8"))
-            self.assertTrue((own["QUEUE"] / "gave-up.json").exists())
-            # a game it has yet to give up on keeps it waiting (here: one it would start, which this test refuses)
-            with self.assertRaisesRegex(AssertionError, "no game may start"):
-                lab._runner_step(args, {}, Counter({(spec["name"], 1): 2}), [], 0, 1)
-
 
 class RatingTests(unittest.TestCase):
     @staticmethod

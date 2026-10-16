@@ -33,10 +33,8 @@ import statistics
 import tempfile
 import time
 import unittest
-from collections import Counter
 from contextlib import redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 from citar import engine_api, lab
@@ -154,14 +152,14 @@ class Parity(unittest.TestCase):
         duel = quiet(lab.play, lab.game_spec(lab.normalize(exps[0]), 0))
         self.assertEqual(duel["players"]["0"]["params"]["policy_order_peaceful"], ["Liberty", "Tradition", "Honor"])
 
-    def test_the_lab_prints_its_progress_and_writes_a_crash_as_the_runner_reads_it(self):
+    def test_a_crash_is_written_as_a_crash_line_reads_it(self):
+        """The runner's progress lines went with it (4-09: the job host reports a run's rounds); a crash's line
+        keeps its shape."""
         spec = recorded()[0][1]["spec"]
         buf = io.StringIO()
         with redirect_stdout(buf):
             lab.play(spec)
-        lines = [ln for ln in buf.getvalue().splitlines() if ln.startswith("PROGRESS ")]
-        self.assertEqual([ln.split()[1] for ln in lines], [str(t) for t in range(1, 41)])
-        self.assertEqual({ln.split()[2] for ln in lines}, {"40"})
+        self.assertNotIn("PROGRESS ", buf.getvalue())
         self.assertEqual(lab.crash_text({"turn": 4, "player": 1, "label": "b", "message": "boom"}),
                          "T4 P1 b: panic: boom")
         self.assertEqual(lab.crash_text({"turn": 0, "player": None, "label": None, "message": "boom"}),
@@ -443,25 +441,19 @@ class Refusals(unittest.TestCase):
 
 
 class Queue(unittest.TestCase):
-    """The lab's queue and runner on jobs: an experiment is checked game by game as jobs when it is queued; one queued
-    before (or that a newer build's bounds refuse) is shown as unplayable, once, and none of its games starts; and a
-    crash, the same every time it is played, is not played again by the runner that saw it."""
+    """The lab's queue on jobs: an experiment is checked game by game as jobs when it is queued, and a spec a job
+    refuses played in this process is a final crash. The dispatcher's side of it (an experiment queued before its
+    games were checked shown as unplayable and never started; a crash, a final result) is tests/test_dispatcher.py's."""
 
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="citar-jobs-lab-"))
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
-        for name, sub in (("LAB", ""), ("QUEUE", "queue"), ("DONE", "done"), ("RESULTS", "results"), ("JOBS", "jobs")):
+        for name, sub in (("LAB", ""), ("QUEUE", "queue"), ("DONE", "done"), ("RESULTS", "results"),
+                          ("REFERENCE", "reference")):
             patcher = mock.patch.object(lab, name, self.dir / sub)
             patcher.start()
             self.addCleanup(patcher.stop)
-        for patcher in (mock.patch.object(lab, "quiet_now", return_value=False),
-                        mock.patch.object(lab, "_told", set()),
-                        mock.patch.object(lab, "_pid_alive", return_value=True),
-                        mock.patch("subprocess.Popen", side_effect=AssertionError("no game may start"))):
-            patcher.start()
-            self.addCleanup(patcher.stop)
         lab._dirs()
-        lab.JOBS.mkdir(parents=True, exist_ok=True)
 
     def refused(self, exp: dict, reason: str):
         with self.assertRaises(ValueError) as cm:
@@ -506,64 +498,11 @@ class Queue(unittest.TestCase):
                               "seats": [{"bot": "basic"}, {"bot": "basic"}], **over})
         return exp
 
-    def test_a_queued_experiment_that_cannot_be_played_is_shown_so_and_never_started(self):
-        exp = self.queue_as_before("old-long", turns=500)
-        self.assertIn("past the speed's last turn", lab.refusal(exp))
-        args = SimpleNamespace(workers=1, night_workers=1, exit_when_idle=False, max_minutes=60)
-        with redirect_stdout(io.StringIO()):
-            self.assertFalse(lab._runner_step(args, {}, Counter(), [], 0, 1))     # Popen would fail the test
-            self.assertFalse(lab._runner_step(args, {}, Counter(), [], 0, 1))
-        log = (lab.LAB / "lab.log").read_text(encoding="utf-8")
-        self.assertEqual(log.count("experiment old-long cannot be played"), 1, log)
-        self.assertIn("none of its games starts (delete the experiment and queue it again)", log)
-        self.assertFalse((lab.LAB / "crashes.log").exists(), "no game was played to be refused")
-        shown = {e["name"]: e for e in lab.overview()["experiments"]}["old-long"]
-        self.assertEqual(shown["state"], "refused")
-        self.assertIn("past the speed's last turn", shown["refused"])
-        self.assertEqual(shown["remaining_minutes"], 0)
-        # with nothing else to play, a runner that exits when idle exits, saying why
-        with redirect_stdout(io.StringIO()):
-            self.assertTrue(lab._runner_step(SimpleNamespace(**{**vars(args), "exit_when_idle": True}), {},
-                                             Counter(), [], 0, 1))
-        self.assertIn("nothing left to play: 1 experiment(s) cannot be played (old-long)",
-                      (lab.LAB / "lab.log").read_text(encoding="utf-8"))
-        # an experiment that can be played still is, beside it
-        good = self.queue_as_before("good")
-        self.assertEqual(lab.refusal(good), "")
-        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, "no game may start"):
-            lab._runner_step(args, {}, Counter(), [], 0, 1)
-
     def test_a_refused_spec_played_is_a_final_crash(self):
         exp = self.queue_as_before("old-seat", seats=[{"bot": "basic", "label": "x" * 300}, {"bot": "basic"}])
         line = quiet(lab.play, lab.game_spec(exp, 0))
         self.assertEqual((sorted(line), line["final"]), (["crash", "exp", "final", "finished", "i"], True))
         self.assertTrue(line["crash"].startswith("JobRefused (bad_spec): seat 0: label is 300 characters"), line)
-
-    def test_a_final_crash_is_not_played_again(self):
-        """The runner records a final crash once and does not start the game again (three attempts are for a game
-        process that died), and the Lab page counts it as given up on."""
-        exp = self.queue_as_before("crashing")
-        lab.RESULTS.mkdir(parents=True, exist_ok=True)
-        (lab.RESULTS / "crashing.jsonl").write_text(json.dumps({"i": 0}) + "\n", encoding="utf-8")
-        _, res_p, _ = lab._job_paths("crashing", 1)
-        res_p.write_text(json.dumps({"exp": "crashing", "i": 1, "crash": "T6 P1 b: panic: boom", "final": True}),
-                         encoding="utf-8")
-        attempts = Counter({("crashing", 1): 1})
-        running = {("crashing", 1): (SimpleNamespace(poll=lambda: 0, returncode=0), time.time())}
-        args = SimpleNamespace(workers=1, night_workers=1, exit_when_idle=False, max_minutes=60)
-        with redirect_stdout(io.StringIO()):
-            self.assertFalse(lab._runner_step(args, running, attempts, [], 0, 1))     # Popen would fail the test
-            self.assertEqual((running, attempts[("crashing", 1)]), ({}, lab.ATTEMPTS))
-            self.assertTrue(lab._runner_step(SimpleNamespace(**{**vars(args), "exit_when_idle": True}), {},
-                                             attempts, [], 0, 1))
-        text = (lab.LAB / "lab.log").read_text(encoding="utf-8")
-        self.assertIn("crashing #1 crashed (final: not played again): T6 P1 b: panic: boom", text)
-        self.assertIn("nothing left to play: 1 game(s) crashed for good or three times (crashing #1)", text)
-        self.assertRegex((lab.LAB / "crashes.log").read_text(encoding="utf-8"), r"--- .* crashing #1 final\n")
-        self.assertEqual(lab._crash_counts()[("crashing", 1)], lab.ATTEMPTS)
-        shown = {e["name"]: e for e in lab.overview()["experiments"]}["crashing"]
-        self.assertEqual((shown["state"], shown["failing"], shown["games"]), ("stalled", [1], exp["games"]))
-
 
 class Speed(unittest.TestCase):
     def test_a_lab_duel_through_run_job_is_no_slower_than_through_the_old_play(self):

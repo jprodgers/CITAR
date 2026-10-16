@@ -170,6 +170,18 @@ follow the helper and the power figures are yours). Its helper's last report is 
 (`hardware_detected`, `detected_at`) whatever those say. Its `trust_tier` and pinned hardware classes are an
 administrator's to set there.
 
+**The host's CPU** plays the lab's games (the server's own job host, [Bots: the lab](Scripted-bots#the-lab)): the host
+machine's CPU sharing is what that job host runs under, and it is on by default, unlike any other machine's. Its
+defaults: in local mode half the logical CPUs as threads (one game each) and that share of the machine, with a
+quarter of the memory up to 512 MB a thread (at least 256 MB); in server mode one thread, half the machine and
+min(1,024 MB, a quarter of the memory), about 240 MB on a one-vCPU box of 961 MB, below what the OOM killer would
+take from the server itself. A figure left at 0 there is the default's (the job host is always given concrete
+limits), and the kinds of work it takes default to all three (`lab_game`, `ranking_game`, `reference_game`). Turn
+CPU sharing off in its dialog to stop the server playing the lab at all; change the figures and the job host
+restarts with them once the games it is playing finish. The limits hold hard where the operating system allows (a
+Job Object on Windows; a `systemd --user` scope on Linux where the user's manager makes one, else `RLIMIT_DATA` and
+`nice`, the CPU soft; on macOS both soft), as the Lab page shows.
+
 ### API keys for models
 
 Not environment variables by default — they go to the OS credential store through the Servers page.

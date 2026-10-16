@@ -410,6 +410,9 @@ pub fn spawn(
         threads: limits.threads,
         cpu_percent: limits.cpu_percent,
         memory_mb: limits.memory_mb,
+        // A helper's results are compared with the server's: a host that computes differently
+        // refuses its jobs.
+        play_unverifiable: false,
     });
     // A host that is gone already shows below, as its death.
     let _sent = host.send(&first);

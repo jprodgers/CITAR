@@ -94,19 +94,105 @@ def _whole(v, lo: int, hi: int) -> int:
     return int(max(lo, min(hi, x)))
 
 
-def capabilities(raw) -> dict:
+def capabilities(raw, host_cpu: Optional[dict] = None) -> dict:
     """A machine's capabilities, complete: what ``Server.capabilities`` holds, the defaults filled in (LLM on, swaps off,
-    CPU sharing off)."""
+    CPU sharing off). ``host_cpu`` is the host machine's CPU defaults (:func:`host_cpu_defaults`): the host's CPU runs
+    the lab's games (the server's local executor, design/phase4-helper.md P4.5.6), on unless its row says otherwise,
+    and every figure it leaves at 0 is the default's (its job host is given concrete limits, never a 0)."""
     raw = raw if isinstance(raw, dict) else {}
     llm = raw.get("llm") if isinstance(raw.get("llm"), dict) else {}
     cpu = raw.get("cpu") if isinstance(raw.get("cpu"), dict) else {}
-    work = cpu.get("work") if isinstance(cpu.get("work"), (list, tuple)) else []
-    return {"llm": {"enabled": bool(llm.get("enabled", True)), "allow_swaps": bool(llm.get("allow_swaps", False))},
-            "cpu": {"enabled": bool(cpu.get("enabled", False)), "threads": _whole(cpu.get("threads"), 0, THREADS_MAX),
-                    "cpu_percent": _whole(cpu.get("cpu_percent"), 0, 100),
-                    "memory_mb": _whole(cpu.get("memory_mb"), 0, MEMORY_MB_MAX),
-                    "work": [w for w in CPU_WORK if w in work],
-                    "yield_to_llm": bool(cpu.get("yield_to_llm", True))}}
+    base = host_cpu or {}
+    work = cpu.get("work") if isinstance(cpu.get("work"), (list, tuple)) else base.get("work", [])
+    out = {"llm": {"enabled": bool(llm.get("enabled", True)), "allow_swaps": bool(llm.get("allow_swaps", False))},
+           "cpu": {"enabled": bool(cpu.get("enabled", base.get("enabled", False))),
+                   "threads": _whole(cpu.get("threads"), 0, THREADS_MAX),
+                   "cpu_percent": _whole(cpu.get("cpu_percent"), 0, 100),
+                   "memory_mb": _whole(cpu.get("memory_mb"), 0, MEMORY_MB_MAX),
+                   "work": [w for w in CPU_WORK if w in work],
+                   "yield_to_llm": bool(cpu.get("yield_to_llm", True))}}
+    if host_cpu:
+        for k in ("threads", "cpu_percent", "memory_mb"):
+            if not out["cpu"][k]:
+                out["cpu"][k] = int(host_cpu[k])
+    return out
+
+
+def total_ram_mb() -> Optional[int]:
+    """This computer's memory in MB, or None when it cannot be read (standard library only: ``/proc/meminfo`` on
+    Linux, ``GlobalMemoryStatusEx`` on Windows, ``sysctl hw.memsize`` on macOS)."""
+    import os
+    import sys
+    try:
+        if sys.platform.startswith("linux"):
+            with open("/proc/meminfo", encoding="ascii") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        return int(line.split()[1]) // 1024
+        elif os.name == "nt":
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = MemoryStatus()
+            m.dwLength = ctypes.sizeof(MemoryStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return int(m.ullTotalPhys // (1 << 20))
+        elif sys.platform == "darwin":
+            import subprocess
+            out = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout
+            return int(out.strip()) // (1 << 20)
+    except Exception:       # a file, a call or a command that is not there: the defaults do without
+        log.debug("could not read this computer's memory", exc_info=True)
+    return None
+
+
+#: What a host machine's CPU defaults take its memory to be when it cannot be read.
+RAM_UNKNOWN_MB = 4096
+_HOST_CPU: dict = {}
+
+
+def host_cpu_defaults(mode: Optional[str] = None, cpus: Optional[int] = None,
+                      ram_mb: Optional[int] = None) -> dict:
+    """The host machine's CPU sharing by default (design/phase4-helper.md P4.5.6), which its job host plays the lab's
+    games under: **local mode** on, half the logical CPUs as threads (one game each) and that share of the machine,
+    a quarter of the memory up to 512 MB a thread; **server mode** on, one thread, half the machine (the VPS has one
+    vCPU) and min(1,024 MB, a quarter of the memory), below what the OOM killer would take from the server itself.
+    Every kind of work. An administrator changes them in the host's machine settings."""
+    import os
+    if mode is None:
+        from . import settings
+        try:
+            mode = settings.get().mode
+        except Exception:
+            mode = "local"
+    key = (mode, cpus, ram_mb)
+    if key in _HOST_CPU:
+        return dict(_HOST_CPU[key])
+    n = cpus or os.cpu_count() or 1
+    ram = ram_mb or total_ram_mb() or RAM_UNKNOWN_MB
+    if mode == "server":
+        out = {"enabled": True, "threads": 1, "cpu_percent": 50, "memory_mb": max(64, min(1024, ram // 4))}
+    else:
+        threads = max(1, n // 2)
+        out = {"enabled": True, "threads": threads, "cpu_percent": max(1, min(100, round(100 * threads / n))),
+               "memory_mb": max(256, min(threads * 512, ram // 4))}
+    out["work"] = list(CPU_WORK)
+    _HOST_CPU[key] = out
+    return dict(out)
+
+
+def host_defaults_for(row_or_facts) -> Optional[dict]:
+    """:func:`host_cpu_defaults` for the host machine's row (or its cached facts), None for any other machine."""
+    if isinstance(row_or_facts, dict):
+        is_host = row_or_facts.get("is_host")
+    else:
+        is_host = getattr(row_or_facts, "is_host", False)
+    return host_cpu_defaults() if is_host else None
 
 
 def modes(row) -> dict:
@@ -149,7 +235,7 @@ def update(row, body) -> dict:
     each in part) and ``modes`` (any of the three). Checks everything before changing anything (a ``SettingsError``
     leaves the row as it was). Returns what changed, ``{field: {"from", "to"}}``, for the audit row."""
     body = _object(body, "The settings", ("slots", "capabilities", "modes"))
-    caps = capabilities(row.capabilities)
+    caps = capabilities(row.capabilities, host_defaults_for(row))
     new_caps = copy.deepcopy(caps)
     slots = None
     if "slots" in body:
@@ -568,7 +654,8 @@ def client(session, row, viewer, *, in_effect: Optional[dict] = None) -> dict:
         "id": row.id, "name": row.name, "kind": row.kind, "provider": row.provider, "reach": row.reach or "worker",
         "is_host": bool(row.is_host), "enabled": bool(row.enabled),
         "slots": row.max_concurrent or 1, "slots_max": SLOTS_MAX,
-        "capabilities": capabilities(row.capabilities), "cpu_work": list(CPU_WORK),
+        "capabilities": capabilities(row.capabilities, host_defaults_for(row)), "cpu_work": list(CPU_WORK),
+        "host_cpu": host_defaults_for(row),
         "modes": modes(row), "in_effect": in_effect,
         "report": {
             "at": _when(row.detected_at), "helper": detected.get("helper") or None,
