@@ -74,8 +74,14 @@ LONG = {"size": "huge", "maps": ["pangaea"], "turns": 300,
         "seats": [{"label": f"s{i}", "bot": "basic"} for i in range(12)]}
 
 
+#: The environment this module changes, as it was: given back at its end, so a module run after it in the same process
+#: finds its own database again.
+_SAVED: dict = {}
+
+
 def setUpModule():
     H.require_helper_binary("the helper's CPU job tests")       # skips locally without one; fails on CI
+    _SAVED.update({k: os.environ.get(k) for k in ("CITAR_DATA_DIR", "CITAR_DB_URL")})
     os.environ["CITAR_DATA_DIR"] = str(_TMP)
     os.environ["CITAR_DB_URL"] = _URL
     settings.reset()
@@ -89,6 +95,13 @@ def setUpModule():
 
 def tearDownModule():
     db.dispose()
+    for k, v in _SAVED.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    settings.reset()
+    servers.invalidate()
     shutil.rmtree(_TMP, ignore_errors=True)
 
 
