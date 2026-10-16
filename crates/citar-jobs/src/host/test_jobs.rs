@@ -8,7 +8,8 @@
 //!   `hold_s` seconds (at most [`MAX_SECONDS`]), then frees it.
 //!
 //! Each asks its control between steps (every 10 ms, or each step), so abort, pause and deadlines
-//! act on it as on a game. Their specs are typed and closed and hashed as a job's are (P4.4.1's
+//! act on it as on a game. A burn's rounds are its whole seconds; an `alloc` is round 0 of 1 while
+//! it allocates and 1 of 1 while it holds, so what reports its growth is its peak alone. Their specs are typed and closed and hashed as a job's are (P4.4.1's
 //! formula with the test kind's name); their results are `{kind, seconds}` and `{kind, mb}`,
 //! hashed by P4.4.4's formula, with a chain of no rounds.
 
@@ -201,7 +202,8 @@ fn alloc(a: &AllocSpec, control: &mut dyn Control) -> Result<(), RunError> {
     let mut held: Vec<Vec<u8>> = Vec::new();
     let mut have = 0u64;
     while have < total {
-        ask(control, &at(have >> 20, a.mb, true))?;
+        // Its steps are not rounds: a growing peak is reported for itself, as a game's is.
+        ask(control, &at(0, 1, false))?;
         let n = usize::try_from(step.min(total - have))
             .map_err(|e| RunError::Internal(e.to_string()))?;
         held.push(black_box(vec![0xA5u8; n]));
@@ -210,7 +212,7 @@ fn alloc(a: &AllocSpec, control: &mut dyn Control) -> Result<(), RunError> {
     let hold = Duration::from_secs_f64(a.hold_s);
     let t = Instant::now();
     loop {
-        ask(control, &at(a.mb, a.mb, false))?;
+        ask(control, &at(1, 1, false))?;
         if t.elapsed() >= hold {
             break;
         }

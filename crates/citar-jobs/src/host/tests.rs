@@ -36,10 +36,15 @@ impl Read for In {
     }
 }
 
+/// What a test does with each frame as the host writes it, inside the host's write (so the
+/// thread that sends it waits for it).
+type Hook = Box<dyn FnMut(&FromHost) + Send>;
+
 /// The host's standard output, read back frame by frame.
 struct OutPipe {
     tx: Sender<FromHost>,
     pending: Vec<u8>,
+    hook: Option<Hook>,
 }
 
 impl Write for OutPipe {
@@ -49,6 +54,9 @@ impl Write for OutPipe {
             let line: Vec<u8> = self.pending.drain(..=i).collect();
             let text = String::from_utf8_lossy(&line);
             let frame = FromHost::read(text.trim()).expect("the host writes its frames");
+            if let Some(hook) = &mut self.hook {
+                hook(&frame);
+            }
             let _gone = self.tx.send(frame);
         }
         Ok(b.len())
@@ -63,6 +71,8 @@ struct Played {
     to: Option<Sender<Vec<u8>>>,
     from: Receiver<FromHost>,
     done: JoinHandle<i32>,
+    /// Its `ready`, once [`Played::ready`] read it.
+    ready: Option<Ready>,
 }
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -77,21 +87,37 @@ fn limits(threads: u32) -> ToHost {
 
 impl Played {
     fn start(first: &ToHost, setup: Setup) -> Self {
+        Self::hooked(first, setup, |_| None)
+    }
+
+    /// Started with a hook on its output, made with a sender of its input (which the hook must
+    /// drop once done with it: the host ends only when its input closes).
+    fn hooked(
+        first: &ToHost,
+        setup: Setup,
+        hook: impl FnOnce(Sender<Vec<u8>>) -> Option<Hook>,
+    ) -> Self {
         let (to, rx) = channel();
         let (tx, from) = channel();
+        let hook = hook(to.clone());
         let done = std::thread::spawn(move || {
             let input = BufReader::new(In { rx, buf: Vec::new(), at: 0 });
-            serve(input, OutPipe { tx, pending: Vec::new() }, setup)
+            serve(input, OutPipe { tx, pending: Vec::new(), hook }, setup)
         });
-        let p = Self { to: Some(to), from, done };
+        let p = Self { to: Some(to), from, done, ready: None };
         p.send(first);
         p
     }
 
     fn ready(threads: u32) -> Self {
-        let p = Self::start(&limits(threads), Setup::default());
+        Self::ready_with(threads, |_| None)
+    }
+
+    fn ready_with(threads: u32, hook: impl FnOnce(Sender<Vec<u8>>) -> Option<Hook>) -> Self {
+        let mut p = Self::hooked(&limits(threads), Setup::default(), hook);
         let FromHost::Ready(r) = p.next() else { panic!("a ready host") };
         assert!(r.verifiable, "{r:?}");
+        p.ready = Some(r);
         p
     }
 
@@ -187,6 +213,19 @@ fn a_host_refuses_another_build_and_a_bad_start() {
     let FromHost::Fatal(f) = p.next() else { panic!("fatal") };
     assert_eq!(f.code, FatalCode::Limits, "{f:?}");
     assert_eq!(p.close(), EXIT_REFUSED);
+
+    // A memory limit that leaves a run less than a megabyte, once the host's own is counted.
+    let starved = ToHost::Limits(LimitsFrame {
+        jobs_build: mine(),
+        threads: 2,
+        cpu_percent: 10,
+        memory_mb: 2,
+    });
+    let p = Played::start(&starved, setup);
+    let FromHost::Fatal(f) = p.next() else { panic!("fatal") };
+    assert_eq!(f.code, FatalCode::Limits, "{f:?}");
+    assert!(f.message.contains("leaves its 2 runs nothing"), "{f:?}");
+    assert_eq!(p.close(), EXIT_REFUSED);
 }
 
 #[test]
@@ -250,9 +289,13 @@ fn offers_are_refused_with_their_reasons() {
     assert_eq!(reason(&p, "cr bad id"), RejectReason::BadSpec);
     p.send_raw(r#"{"t": "job_offer", "run": "cr_u", "kind": "lab_game"}"#);
     assert_eq!(reason(&p, "cr_u"), RejectReason::BadSpec);
+    // A host inside its parent holds no limit, so nothing of its own is counted: 90% of its 4,096
+    // MB is a run's, and an offer above that is refused, though it is under memory_mb.
+    let per_run = p.ready.as_ref().map(|r| r.memory_per_run_mb);
+    assert_eq!(per_run, Some(3686), "{:?}", p.ready);
     let mut big = offer("cr_m", "lab_game", spec.clone(), &hash, 60.0);
     if let ToHost::JobOffer(o) = &mut big {
-        o.mem_mb = 4097;
+        o.mem_mb = 3687;
     }
     p.send(&big);
     assert_eq!(reason(&p, "cr_m"), RejectReason::Memory);
@@ -270,6 +313,74 @@ fn offers_are_refused_with_their_reasons() {
     p.send_raw("not json");
     p.send(&ToHost::JobAbort(Abort { run: "cr_one".to_owned(), reason: "test".to_owned() }));
     assert!(matches!(p.about("cr_one"), FromHost::JobAborted(_)));
+    assert_eq!(p.close(), 0);
+}
+
+/// A run's end is sent once its thread is free: a parent that offers the next run the moment it
+/// reads the end (here inside the host's own write of it, which waits while the host reads and
+/// checks that offer) finds the host's one thread free, never `busy`.
+#[test]
+fn a_runs_end_is_sent_once_its_thread_is_free() {
+    let (spec, hash) = duel(10);
+    let mut next = offer("cr_next", "lab_game", spec.clone(), &hash, 60.0).line().into_bytes();
+    next.push(b'\n');
+    let p = Played::ready_with(1, move |to| {
+        let mut to = Some(to);
+        Some(Box::new(move |f: &FromHost| {
+            if matches!(f, FromHost::JobResult(r) if r.run == "cr_first")
+                && let Some(to) = to.take()
+            {
+                to.send(next.clone()).expect("the host reads");
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        }))
+    });
+    p.send(&offer("cr_first", "lab_game", spec, &hash, 60.0));
+    let ended = |p: &Played, run: &str| loop {
+        match p.about(run) {
+            FromHost::JobAccept(_) | FromHost::JobProgress(_) => {}
+            other => break other,
+        }
+    };
+    assert!(matches!(ended(&p, "cr_first"), FromHost::JobResult(_)));
+    assert!(matches!(ended(&p, "cr_next"), FromHost::JobResult(_)));
+    assert_eq!(p.close(), 0);
+}
+
+#[test]
+fn a_peak_step_is_an_eighth_of_a_run_within_its_bounds() {
+    const MB: u64 = 1 << 20;
+    assert_eq!(peak_step(160), 20 * MB);
+    assert_eq!(peak_step(3686), 32 * MB, "at most 32 MiB");
+    assert_eq!(peak_step(4), MB, "at least 1 MiB");
+    assert_eq!(peak_step(u64::MAX), 32 * MB);
+}
+
+/// A run reports its peak as it grows, though no round passes: an `alloc` of 100 MB, whose steps
+/// are not rounds, reports its peak at each 32 MiB of growth (an eighth of a run's 3,686 MB is
+/// more), so the last report before a death says nearly how much the run reached.
+#[cfg(feature = "test-jobs")]
+#[test]
+fn a_runs_peak_is_reported_as_it_grows() {
+    let p = Played::ready(1);
+    let (spec, hash) =
+        test_jobs::hashed(test_jobs::ALLOC, &json!({"mb": 100, "step_mb": 4})).expect("an alloc");
+    p.send(&offer("cr_grow", test_jobs::ALLOC, spec, &hash, 60.0));
+    let mut peaks = Vec::new();
+    let result = loop {
+        match p.about("cr_grow") {
+            FromHost::JobAccept(_) => {}
+            FromHost::JobProgress(g) => peaks.push(g.peak_mb),
+            FromHost::JobResult(r) => break r,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(peaks.len(), 3, "{peaks:?}");
+    for (n, peak) in peaks.iter().enumerate() {
+        let want = 32.0 * (n as f64 + 1.0);
+        assert!(*peak >= want && *peak < want + 4.5, "{peaks:?}");
+    }
+    assert!((result.outcome.peak_mb - 100.0).abs() < 1.0, "{:?}", result.outcome);
     assert_eq!(p.close(), 0);
 }
 

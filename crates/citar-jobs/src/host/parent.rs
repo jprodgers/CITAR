@@ -8,16 +8,21 @@
 //!   the kernel holds them; then the `limits` frame with the parent's jobs build, and the host's
 //!   `ready`, whose jobs build must be the parent's: a host of another build (one left from before
 //!   a binary swap) is ended, never used.
-//! - **Its frames** ([`Host::next`]), and which runs are still in flight on it.
+//! - **Its frames** ([`Host::next`]), which runs are still in flight on it, and the largest peak
+//!   each has reported ([`Host::peak_mb`]), which is all a parent learns of a run that dies.
 //! - **Its death** ([`Host::death`], [`classify`]): a memory death ends the whole host, and every
 //!   run of it fails `memory` ([`Host::failures`]); it shows as the allocation-failure line on
 //!   the host's standard error (`memory allocation of N bytes failed`: a Job Object's limit or
-//!   `RLIMIT_DATA` refused a commit), as the `oom_kill` count of the scope's parent cgroup rising
-//!   (the kernel killed it at the scope's `MemoryMax`; the parent's count, since the scope's own
-//!   cgroup goes with it), or as the macOS watchdog's line or exit code. Any other death fails its
-//!   runs `host`, and both are retried elsewhere.
+//!   `RLIMIT_DATA` refused a commit), as a host started under the scope killed by `SIGKILL` while
+//!   the `oom_kill` count of the scope's parent cgroup rose (the kernel killed it at the scope's
+//!   `MemoryMax`; the parent's count, since the scope's own cgroup goes with it), or as the macOS
+//!   watchdog's line or exit code. Any other death fails its runs `host`, and both are retried
+//!   elsewhere. The parent cgroup holds other units too, so its count alone never decides: a
+//!   host that died otherwise (an abort's signal, an exit) while a neighbour was killed is not a
+//!   memory death, and a host started directly has no such evidence at all (its cgroup is its
+//!   parent's).
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
@@ -168,6 +173,38 @@ impl std::fmt::Display for Death {
     }
 }
 
+/// The signal the kernel's OOM killer ends a process with.
+pub const SIGKILL: i32 = 9;
+
+/// How a host's process ended, as [`classify`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exit {
+    /// Its exit code, when it exited.
+    pub code: Option<i32>,
+    /// The signal that ended it (Unix).
+    pub signal: Option<i32>,
+}
+
+impl From<ExitStatus> for Exit {
+    fn from(status: ExitStatus) -> Self {
+        #[cfg(unix)]
+        let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+        #[cfg(not(unix))]
+        let signal = None;
+        Self { code: status.code(), signal }
+    }
+}
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.code, self.signal) {
+            (Some(code), _) => write!(f, "exit code {code}"),
+            (None, Some(signal)) => write!(f, "signal {signal}"),
+            (None, None) => f.write_str("an exit that says nothing"),
+        }
+    }
+}
+
 /// Whether `line` is Rust's report of an allocation that failed.
 #[must_use]
 pub fn is_allocation_failure(line: &str) -> bool {
@@ -175,11 +212,13 @@ pub fn is_allocation_failure(line: &str) -> bool {
     l.starts_with("memory allocation of ") && l.ends_with(" bytes failed")
 }
 
-/// Why a host ended, from its exit `status`, the last lines of its log, its scope parent's
-/// `oom_kill` count before and after (Linux), and the `fatal` frame it sent, if any.
+/// Why a host ended, from how it `exit`ed, the last lines of its log, its scope parent's
+/// `oom_kill` count before and after (Linux, a host started under the scope only), and the
+/// `fatal` frame it sent, if any. The count is evidence only beside a `SIGKILL`, the OOM
+/// killer's signal: the parent cgroup counts its other units' kills too.
 #[must_use]
 pub fn classify(
-    status: Option<ExitStatus>,
+    exit: Option<Exit>,
     tail: &[String],
     oom: Option<(u64, u64)>,
     fatal: Option<&Fatal>,
@@ -187,22 +226,25 @@ pub fn classify(
     if let Some(line) = tail.iter().find(|l| is_allocation_failure(l)) {
         return Death::Memory(format!("an allocation failed: \"{}\"", line.trim()));
     }
+    let killed = exit.is_some_and(|e| e.signal == Some(SIGKILL));
     if let Some((before, after)) = oom
         && after > before
+        && killed
     {
-        return Death::Memory(format!("the cgroup's oom_kill count rose from {before} to {after}"));
+        return Death::Memory(format!(
+            "SIGKILL, as the cgroup's oom_kill count rose from {before} to {after}"
+        ));
     }
     if let Some(line) = tail.iter().find(|l| l.contains(WATCHDOG_LINE)) {
         return Death::Memory(format!("its watchdog: \"{}\"", line.trim()));
     }
-    if status.and_then(|s| s.code()) == Some(EXIT_MEMORY) && fatal.is_none() {
+    if exit.and_then(|e| e.code) == Some(EXIT_MEMORY) && fatal.is_none() {
         return Death::Memory(format!("its exit code {EXIT_MEMORY} (the memory watchdog's)"));
     }
     if let Some(f) = fatal {
         return Death::Refused(f.clone());
     }
-    let exit =
-        status.map_or_else(|| "it did not exit, and was ended".to_owned(), |s| s.to_string());
+    let exit = exit.map_or_else(|| "it did not exit, and was ended".to_owned(), |e| e.to_string());
     let last = tail.last().map(|l| format!("; its log's last line: {}", clip(l.trim(), 300)));
     Death::Other(format!("{exit}{}", last.unwrap_or_default()))
 }
@@ -245,9 +287,11 @@ pub struct Host {
     tail: Arc<Mutex<VecDeque<String>>>,
     log: Arc<Mutex<VecDeque<String>>>,
     ready: Ready,
-    /// The scope's parent cgroup and its `oom_kill` count at `ready` (Linux).
+    /// The scope's parent cgroup and its `oom_kill` count at `ready` (Linux, under the scope).
     oom: Option<(String, u64)>,
     in_flight: BTreeSet<String>,
+    /// The largest `peak_mb` each run in flight has reported.
+    peaks: BTreeMap<String, f64>,
     fatal: Option<Fatal>,
     /// The thread reading its log, which ends when the log closes.
     log_reader: Option<std::thread::JoinHandle<()>>,
@@ -347,6 +391,8 @@ pub fn spawn(
             threads: 0,
             reason: None,
             cgroup: None,
+            memory_per_run_mb: 0,
+            own_mb: 0.0,
             cpu_s: 0.0,
             pid: 0,
             counting: false,
@@ -354,6 +400,7 @@ pub fn spawn(
         },
         oom: None,
         in_flight: BTreeSet::new(),
+        peaks: BTreeMap::new(),
         fatal: None,
         log_reader,
     };
@@ -373,7 +420,9 @@ pub fn spawn(
                 host.end(Duration::ZERO);
                 return Err(SpawnError::Build { want: jobs_build.to_owned(), got });
             }
-            host.oom = r.cgroup.as_deref().and_then(|c| {
+            // Only a scope is the host's alone; a host started directly shares its parent's
+            // cgroup, whose parent's count is anyone's.
+            host.oom = r.cgroup.as_deref().filter(|_| wrapper == Wrapper::Scope).and_then(|c| {
                 let parent = c.rsplit_once('/').map(|(p, _)| p.to_owned())?;
                 let n = cgroup::oom_kills(&parent)?;
                 Some((parent, n))
@@ -423,6 +472,17 @@ impl Host {
         &self.in_flight
     }
 
+    /// The largest peak, in MB, that `run` (in flight) has reported in its `job_progress`, or
+    /// `None` when it reported none: what a dispatcher raises a job's `mem_mb` to when the run
+    /// failed `memory` beside [`Host::failures`]. A run reports its peak as it grows (by
+    /// [`super::peak_step`]), so this is near what it reached unless it died before its first
+    /// look (in its game's setup); then nothing says how much it needed beyond its executor's
+    /// `memory_per_run_mb`.
+    #[must_use]
+    pub fn peak_mb(&self, run: &str) -> Option<f64> {
+        self.peaks.get(run).copied()
+    }
+
     /// Sends a frame.
     ///
     /// # Errors
@@ -453,7 +513,12 @@ impl Host {
                 | FromHost::JobAborted(_) => {
                     if let Some(run) = f.run() {
                         self.in_flight.remove(run);
+                        self.peaks.remove(run);
                     }
+                }
+                FromHost::JobProgress(p) if self.in_flight.contains(&p.run) => {
+                    let peak = self.peaks.entry(p.run.clone()).or_insert(0.0);
+                    *peak = peak.max(p.peak_mb);
                 }
                 FromHost::Fatal(fatal) => self.fatal = Some(fatal.clone()),
                 _ => {}
@@ -500,11 +565,12 @@ impl Host {
             .oom
             .as_ref()
             .and_then(|(parent, before)| cgroup::oom_kills(parent).map(|after| (*before, after)));
-        classify(status, &tail, oom, self.fatal.as_ref())
+        classify(status.map(Exit::from), &tail, oom, self.fatal.as_ref())
     }
 
     /// A `job_failed` for each run still in flight on a host that died of `death`: `memory` for
-    /// a memory death, `host` otherwise; each retryable.
+    /// a memory death, `host` otherwise; each retryable. Each run's last reported peak is
+    /// [`Host::peak_mb`]'s.
     #[must_use]
     pub fn failures(&self, death: &Death) -> Vec<FromHost> {
         let code =
@@ -560,8 +626,22 @@ mod tests {
         let lines = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let alloc = lines(&["citar job host: ready", "memory allocation of 8388608 bytes failed"]);
         assert!(matches!(classify(None, &alloc, None, None), Death::Memory(_)));
-        assert!(matches!(classify(None, &[], Some((2, 3)), None), Death::Memory(_)));
-        assert!(matches!(classify(None, &[], Some((3, 3)), None), Death::Other(_)));
+        // The OOM killer's evidence: SIGKILL while the scope's parent counted a kill.
+        let sigkill = Some(Exit { code: None, signal: Some(SIGKILL) });
+        let oom = classify(sigkill, &[], Some((2, 3)), None);
+        assert!(matches!(&oom, Death::Memory(why) if why.contains("oom_kill")), "{oom:?}");
+        assert!(matches!(classify(sigkill, &[], Some((3, 3)), None), Death::Other(_)));
+        // A neighbour's kill in the same parent cgroup is no evidence for a host that ended
+        // otherwise: an abort (SIGABRT), an exit, a death not seen.
+        let abort = Some(Exit { code: None, signal: Some(6) });
+        assert!(matches!(classify(abort, &[], Some((2, 3)), None), Death::Other(_)));
+        let exited = Some(Exit { code: Some(1), signal: None });
+        assert!(matches!(classify(exited, &[], Some((2, 3)), None), Death::Other(_)));
+        assert!(matches!(classify(None, &[], Some((2, 3)), None), Death::Other(_)));
+        let watchdog = Some(Exit { code: Some(EXIT_MEMORY), signal: None });
+        assert!(matches!(classify(watchdog, &[], None, None), Death::Memory(_)));
+        assert_eq!(sigkill.map(|e| e.to_string()).as_deref(), Some("signal 9"));
+        assert_eq!(exited.map(|e| e.to_string()).as_deref(), Some("exit code 1"));
         let watch = lines(&[&format!("{WATCHDOG_LINE}: 300 MB of 200 MB")]);
         assert!(matches!(classify(None, &watch, None, None), Death::Memory(_)));
         // A game's panic quoting the words is not an allocation that failed.

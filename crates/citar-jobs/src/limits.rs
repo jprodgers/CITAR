@@ -14,6 +14,15 @@
 //! never a host running without it: on Windows any failed call; on Linux an `RLIMIT_DATA` the
 //! kernel refuses. A lowered priority that the OS refuses is only noted.
 //!
+//! **Memory per run.** The memory limit holds the host's own memory as well as its runs': its
+//! program (a Python interpreter and the extension, or the helper), and where the limit is
+//! `RLIMIT_DATA` every run thread's whole stack, which counts as private writable memory however
+//! little of it is touched. So the host measures itself at `ready` as the limit counts it
+//! ([`footprint`]) and offers each run [`memory_per_run_mb`]: what is left, a tenth kept spare
+//! (the allocator's own overhead, which a run's counted peak leaves out), shared by the threads.
+//! An offer whose `mem_mb` is above it is refused `memory`, and the parents match jobs to that
+//! figure, never to `memory_mb / threads`.
+//!
 //! **Memory deaths.** Past a hard memory limit an allocation fails (a Job Object's limit,
 //! `RLIMIT_DATA`), Rust prints `memory allocation of N bytes failed` and aborts; or the kernel
 //! kills the host (a cgroup's `memory.max`, its `oom_kill` count rising); or, on macOS, the
@@ -89,17 +98,57 @@ impl Requested {
         self.memory_mb.saturating_mul(1 << 20)
     }
 
-    /// The memory each run may use: the limit shared by the threads, in MB.
-    #[must_use]
-    pub fn memory_per_thread_mb(&self) -> u64 {
-        self.memory_mb / u64::from(self.threads.max(1))
-    }
-
     /// The share as cores of a machine with `cpus` logical CPUs.
     #[must_use]
     pub fn cores(&self, cpus: u32) -> f64 {
         f64::from(self.cpu_percent) * f64::from(cpus) / 100.0
     }
+}
+
+/// What holds a host's memory, which says how its own memory counts against the limit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryBy {
+    /// A Job Object's `JobMemoryLimit` (Windows): the committed private bytes of the processes
+    /// in the job, which is the host alone.
+    JobObject,
+    /// A cgroup's `memory.max` (Linux): the cgroup at this path, the tightest over the host's own
+    /// and its ancestors, whose `memory.current` it holds.
+    Cgroup(String),
+    /// `RLIMIT_DATA` (Linux's fallback): the process's private writable mappings (`VmData`), each
+    /// thread's whole stack among them.
+    DataLimit,
+    /// The macOS watchdog: the resident size.
+    Resident,
+    /// Nothing: a host inside its parent's process, or an OS without a memory limit.
+    Nothing,
+}
+
+/// A host's own memory as its limit counts it, measured at `ready`, and what each run thread adds
+/// to it besides what the run allocates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Footprint {
+    /// The host's own bytes: its program, its threads, what its self-check left behind.
+    pub own_bytes: u64,
+    /// What each run's thread costs beside the run's allocations: its whole stack where the
+    /// limit counts a mapping as soon as it is made (`RLIMIT_DATA`), else [`TOUCHED_STACK`].
+    pub per_thread_bytes: u64,
+}
+
+/// What a run thread's stack is charged where only its touched pages count (a Job Object's
+/// commit, a cgroup's charge, the resident size): a game's call chains touch far less.
+pub const TOUCHED_STACK: u64 = 1 << 20;
+
+/// The memory each run of a host holding `req` may use, in MB, its own memory being `own`: the
+/// limit less the host's own bytes and every run thread's charge, a tenth of the rest kept spare
+/// (a run's counted peak is what it asked for, not what the allocator's bookkeeping adds), shared
+/// by the threads. Zero when nothing is left: the host then refuses to start (`limits`).
+#[must_use]
+pub fn memory_per_run_mb(req: &Requested, own: &Footprint) -> u64 {
+    let threads = u64::from(req.threads.max(1));
+    let charged = own.own_bytes.saturating_add(own.per_thread_bytes.saturating_mul(threads));
+    let left = req.memory_bytes().saturating_sub(charged);
+    let usable = left - left / 10;
+    (usable / threads) >> 20
 }
 
 /// The limits in place: how hard each holds, and what was done.
@@ -110,6 +159,62 @@ pub struct Applied {
     pub notes: Vec<String>,
     /// The host's cgroup (Linux), which the parent reads the memory events of.
     pub cgroup: Option<String>,
+    /// What holds the memory: how the host's own memory is measured against it ([`footprint`]).
+    pub memory_by: MemoryBy,
+}
+
+/// This process's own memory as `by` counts it, and each run thread's charge (`run_stack` is a
+/// run thread's stack size): what [`memory_per_run_mb`] leaves out.
+///
+/// # Errors
+/// The OS would not say: the host then refuses to start (`limits`), since it cannot tell what
+/// its runs may use.
+pub fn footprint(by: &MemoryBy, run_stack: u64) -> Result<Footprint, String> {
+    let touched = |own_bytes| Footprint { own_bytes, per_thread_bytes: TOUCHED_STACK };
+    match by {
+        MemoryBy::Nothing => Ok(Footprint { own_bytes: 0, per_thread_bytes: 0 }),
+        MemoryBy::JobObject => own_committed().map(touched),
+        MemoryBy::Cgroup(path) => cgroup::memory_current(path)
+            .map(touched)
+            .ok_or_else(|| format!("the memory.current of cgroup {path} cannot be read")),
+        MemoryBy::DataLimit => {
+            let text = std::fs::read_to_string("/proc/self/status")
+                .map_err(|e| format!("/proc/self/status: {e}"))?;
+            let kb =
+                parse_status_kb(&text, "VmData").ok_or("/proc/self/status has no VmData line")?;
+            Ok(Footprint { own_bytes: kb.saturating_mul(1024), per_thread_bytes: run_stack })
+        }
+        MemoryBy::Resident => own_resident().map(touched),
+    }
+}
+
+/// A `<key>:  <n> kB` figure of a `/proc/<pid>/status` text, in kB.
+#[must_use]
+pub fn parse_status_kb(text: &str, key: &str) -> Option<u64> {
+    text.lines().find_map(|l| {
+        let rest = l.strip_prefix(key)?.strip_prefix(':')?;
+        rest.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()
+    })
+}
+
+#[cfg(windows)]
+fn own_committed() -> Result<u64, String> {
+    crate::sys::committed_bytes().map_err(|e| format!("the committed memory: {e}"))
+}
+
+#[cfg(not(windows))]
+fn own_committed() -> Result<u64, String> {
+    Err("no Job Object off Windows".to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn own_resident() -> Result<u64, String> {
+    crate::sys::resident_bytes().map_err(|e| format!("the resident size: {e}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn own_resident() -> Result<u64, String> {
+    Err("no resident-size watchdog off macOS".to_owned())
 }
 
 /// What must live as long as the process: on Windows the Job Object, whose last handle closing
@@ -181,6 +286,7 @@ fn apply_here(req: &Requested) -> Result<Applied, String> {
             req.cpu_percent, req.memory_mb
         )],
         cgroup: None,
+        memory_by: MemoryBy::JobObject,
     })
 }
 
@@ -194,6 +300,7 @@ fn apply_here(req: &Requested) -> Result<Applied, String> {
     let cgroup = cgroup::own();
     let cpus = machine_cpus();
     let (mut cpu, mut memory) = (Hardness::Soft, Hardness::Soft);
+    let mut memory_by = MemoryBy::DataLimit;
     if let Some(path) = &cgroup {
         if let Some(cores) = cgroup::cpu_cores(path)
             && cores <= req.cores(cpus) * 1.01 + 0.01
@@ -201,11 +308,12 @@ fn apply_here(req: &Requested) -> Result<Applied, String> {
             cpu = Hardness::Hard;
             notes.push(format!("cgroup {path}: CPU held to {cores:.2} cores"));
         }
-        if let Some(max) = cgroup::memory_max(path)
+        if let Some((level, max)) = cgroup::memory_limit(path)
             && max <= req.memory_bytes()
         {
             memory = Hardness::Hard;
-            notes.push(format!("cgroup {path}: memory held to {} MB", max >> 20));
+            notes.push(format!("cgroup {level}: memory held to {} MB", max >> 20));
+            memory_by = MemoryBy::Cgroup(level);
         }
     }
     if cpu == Hardness::Soft {
@@ -221,7 +329,7 @@ fn apply_here(req: &Requested) -> Result<Applied, String> {
         notes.push(format!("RLIMIT_DATA {} MB", cap >> 20));
     }
     let _kept = KEPT.set(());
-    Ok(Applied { held: Held { cpu, memory }, notes, cgroup })
+    Ok(Applied { held: Held { cpu, memory }, notes, cgroup, memory_by })
 }
 
 #[cfg(target_os = "macos")]
@@ -243,7 +351,12 @@ fn apply_here(req: &Requested) -> Result<Applied, String> {
         WATCHDOG_EVERY.as_millis()
     ));
     let _kept = KEPT.set(());
-    Ok(Applied { held: Held { cpu: Hardness::Soft, memory: Hardness::Soft }, notes, cgroup: None })
+    Ok(Applied {
+        held: Held { cpu: Hardness::Soft, memory: Hardness::Soft },
+        notes,
+        cgroup: None,
+        memory_by: MemoryBy::Resident,
+    })
 }
 
 /// The macOS watchdog: past `limit` resident bytes, the host ends, as a Job Object's limit ends a
@@ -269,6 +382,7 @@ fn apply_here(_req: &Requested) -> Result<Applied, String> {
         held: Held { cpu: Hardness::Soft, memory: Hardness::Soft },
         notes: vec!["no limits on this OS: the thread cap only".to_owned()],
         cgroup: None,
+        memory_by: MemoryBy::Nothing,
     })
 }
 
@@ -350,7 +464,27 @@ pub mod cgroup {
     /// The tightest memory limit over `path` and its ancestors, in bytes.
     #[must_use]
     pub fn memory_max(path: &str) -> Option<u64> {
-        levels(path).iter().filter_map(|p| parse_memory_max(&read(p, "memory.max")?)).min()
+        memory_limit(path).map(|(_, max)| max)
+    }
+
+    /// The cgroup holding the tightest memory limit over `path` and its ancestors (the nearest of
+    /// equal ones), and that limit in bytes.
+    #[must_use]
+    pub fn memory_limit(path: &str) -> Option<(String, u64)> {
+        levels(path)
+            .into_iter()
+            .filter_map(|p| {
+                let max = parse_memory_max(&read(&p, "memory.max")?)?;
+                Some((p, max))
+            })
+            .reduce(|near, far| if far.1 < near.1 { far } else { near })
+    }
+
+    /// The memory the cgroup at `path` holds now (`memory.current`: its descendants' included), in
+    /// bytes.
+    #[must_use]
+    pub fn memory_current(path: &str) -> Option<u64> {
+        read(path, "memory.current")?.trim().parse::<u64>().ok()
     }
 
     /// The `oom_kill` count of the cgroup at `path` (hierarchical: its descendants' kills
@@ -395,7 +529,6 @@ mod tests {
         let ok = Requested { threads: 2, cpu_percent: 10, memory_mb: 200 };
         assert_eq!(ok.check(), Ok(()));
         assert_eq!(ok.memory_bytes(), 200 << 20);
-        assert_eq!(ok.memory_per_thread_mb(), 100);
         assert!((ok.cores(12) - 1.2).abs() < 1e-9);
         for bad in [
             Requested { threads: 0, ..ok },
@@ -407,6 +540,53 @@ mod tests {
         ] {
             assert!(bad.check().is_err(), "{bad:?}");
             assert!(apply(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// A run gets what the host's own memory and its threads' charge leave, less a tenth: the
+    /// review's cases, where `memory_mb / threads` let a run kill its host.
+    #[test]
+    fn a_run_gets_what_the_host_leaves() {
+        const MB: u64 = 1 << 20;
+        let req = |threads, memory_mb| Requested { threads, cpu_percent: 10, memory_mb };
+        let touched = |own_mb: u64| Footprint { own_bytes: own_mb * MB, per_thread_bytes: MB };
+        // Nothing held: 90% of the limit, shared.
+        let none = Footprint { own_bytes: 0, per_thread_bytes: 0 };
+        assert_eq!(memory_per_run_mb(&req(1, 200), &none), 180);
+        assert_eq!(memory_per_run_mb(&req(4, 4096), &none), 921);
+        // A Python host of 35 MB in a Job Object of 200 MB: 164 MB left, 147 MB a run.
+        assert_eq!(memory_per_run_mb(&req(1, 200), &touched(35)), 147);
+        // RLIMIT_DATA: 33 MB of VmData and a 16 MiB stack a thread.
+        let data = Footprint { own_bytes: 33 * MB, per_thread_bytes: 16 * MB };
+        assert_eq!(memory_per_run_mb(&req(1, 240), &data), 171);
+        assert_eq!(memory_per_run_mb(&req(2, 300), &data), 105);
+        assert_eq!(memory_per_run_mb(&req(4, 256), &data), 35);
+        // Nothing left, or less than a megabyte a run: zero, which the host refuses to start on.
+        assert_eq!(memory_per_run_mb(&req(1, 30), &touched(35)), 0);
+        assert_eq!(memory_per_run_mb(&req(8, 160), &data), 0);
+        let huge = Footprint { own_bytes: u64::MAX, per_thread_bytes: u64::MAX };
+        assert_eq!(memory_per_run_mb(&req(MAX_THREADS, MAX_MEMORY_MB), &huge), 0);
+        assert_eq!(footprint(&MemoryBy::Nothing, 16 * MB), Ok(none));
+    }
+
+    #[test]
+    fn the_status_file_reads_as_the_kernel_writes_it() {
+        let status =
+            "Name:\tpython3\nVmPeak:\t  412000 kB\nVmData:\t   32852 kB\nVmStk:\t 132 kB\n";
+        assert_eq!(parse_status_kb(status, "VmData"), Some(32_852));
+        assert_eq!(parse_status_kb(status, "VmStk"), Some(132));
+        assert_eq!(parse_status_kb(status, "VmSwap"), None);
+        assert_eq!(parse_status_kb("VmDataX:\t1 kB\n", "VmData"), None);
+        assert_eq!(parse_status_kb("VmData:\t1 MB\n", "VmData"), None);
+        #[cfg(target_os = "linux")]
+        {
+            let own = footprint(&MemoryBy::DataLimit, 16 << 20).expect("this process's VmData");
+            assert!(own.own_bytes > 0 && own.per_thread_bytes == 16 << 20, "{own:?}");
+        }
+        #[cfg(windows)]
+        {
+            let own = footprint(&MemoryBy::JobObject, 16 << 20).expect("this process's commit");
+            assert!(own.own_bytes > 0 && own.per_thread_bytes == TOUCHED_STACK, "{own:?}");
         }
     }
 

@@ -10,13 +10,15 @@
 //! - `limits::*`: the CPU held to its share (by the host's own process CPU time, within its share
 //!   x 1.15 + 0.05 cores and at least 40% of it), and a memory death classified, the host started
 //!   again and its next job played (gates 1 and 2); what `ready` says holds, per OS (gates 1, 2
-//!   and 8);
+//!   and 8), and on Linux under the scope as far as the user's manager delegates the controllers;
 //! - `results::*`: the golden jobs give their committed hashes in a host capped at 10% and paused
 //!   twice, and in one uncapped (gate 3);
 //! - `ending::*`: a pause holds a game's round and extends its deadline, an abort ends a run
 //!   within a second, a deadline ends one, and a host whose parent died is gone within two
 //!   seconds (gate 4);
-//! - `memory::*`: a run's peak is counted within 10%, two runs' apart (gate 5);
+//! - `memory::*`: a run's peak is counted within 10%, two runs' apart (gate 5); the memory each run
+//!   may use by `ready` holds, every thread using it at once, and an offer above it is refused
+//!   `memory` with no death (per OS and, on Linux, per wrapper);
 //! - `builds::*`: another jobs build refused on both sides, and a host whose canary fails refuses
 //!   every job (gate 6);
 //! - `fuzz::*`: 2,000 mutated lab and ranking specs and 2,000 mutated reference specs through a
@@ -197,12 +199,30 @@ fn gone(pid: u32, wait: Duration) -> bool {
     }
 }
 
-/// What `ready` must say holds on this OS, started as `wrapper`.
+/// Whether the user's service manager can hold `controller` in the scopes it makes: whether
+/// `user@<uid>.service`'s cgroup lists it among its controllers (Linux).
+fn user_manager_delegates(controller: &str) -> bool {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return false };
+    let Some(uid) = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|rest| rest.split_whitespace().next())
+    else {
+        return false;
+    };
+    let path =
+        format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers");
+    std::fs::read_to_string(path).is_ok_and(|t| t.split_whitespace().any(|c| c == controller))
+}
+
+/// What `ready` must say holds on this OS, started as `wrapper`: on Linux under the scope, the CPU
+/// is hard where the user's manager delegates the cpu controller (else `nice` holds it, softly),
+/// and the memory hard either way (the scope's `MemoryMax`, else `RLIMIT_DATA`).
 fn expected_held(wrapper: Wrapper) -> (Hardness, Hardness) {
     if cfg!(windows) {
         (Hardness::Hard, Hardness::Hard)
     } else if cfg!(target_os = "linux") {
-        if wrapper == Wrapper::Scope {
+        if wrapper == Wrapper::Scope && user_manager_delegates("cpu") {
             (Hardness::Hard, Hardness::Hard)
         } else {
             (Hardness::Soft, Hardness::Hard)
@@ -210,6 +230,17 @@ fn expected_held(wrapper: Wrapper) -> (Hardness, Hardness) {
     } else {
         (Hardness::Soft, Hardness::Soft)
     }
+}
+
+/// Whether a host started as `wrapper` has its memory held by the scope's cgroup (Linux).
+fn memory_by_the_scope(wrapper: Wrapper) -> bool {
+    cfg!(target_os = "linux") && wrapper == Wrapper::Scope && user_manager_delegates("memory")
+}
+
+/// The share for the CPU test: 10% of the machine, or less where that is over two cores' worth
+/// (P4.7.1: more than 20 logical CPUs).
+fn cpu_test_percent(cpus: u32) -> u32 {
+    (200 / cpus.max(1)).clamp(1, 10)
 }
 
 /// Gate 2's run requires the scope.
@@ -234,6 +265,10 @@ fn ready_says_how_the_limits_hold() -> Outcome {
     ensure(r.verifiable && r.counting && r.jobs_build == mine() && r.threads == 1, || {
         format!("{r:?}")
     })?;
+    // The host's own memory is measured and left out of what a run may use.
+    ensure(r.own_mb > 0.0 && r.memory_per_run_mb > 0 && r.memory_per_run_mb < 300, || {
+        format!("{r:?}")
+    })?;
     println!("{w:?}: {:?}, {}", r.limits, r.notes.join("; "));
     if cfg!(target_os = "linux") && w == Wrapper::Scope {
         ensure(r.cgroup.as_deref().is_some_and(|c| c.ends_with(".scope")), || format!("{r:?}"))?;
@@ -255,8 +290,9 @@ fn ready_says_how_the_limits_hold() -> Outcome {
     Ok(())
 }
 
-/// Gate 1 (and 2's first check): two burning runs in a host given 10% of the machine use, by the
-/// host's own CPU time, at most that share x 1.15 + 0.05 cores and at least 40% of it.
+/// Gate 1 (and 2's first check): two burning runs in a host given 10% of the machine (less on a
+/// machine of more than 20 CPUs, to stay within two cores) use, by the host's own CPU time, at
+/// most that share x 1.15 + 0.05 cores and at least 40% of it.
 fn cpu_is_held_to_its_share() -> Outcome {
     scope_required()?;
     let w = wrapper();
@@ -265,9 +301,9 @@ fn cpu_is_held_to_its_share() -> Outcome {
         return Ok(());
     }
     let cpus = machine_cpus();
-    let req = Requested { threads: 2, cpu_percent: 10, memory_mb: 512 };
+    let req = Requested { threads: 2, cpu_percent: cpu_test_percent(cpus), memory_mb: 512 };
     let share = req.cores(cpus);
-    ensure(share <= 2.0, || format!("10% of {cpus} CPUs is over two cores"))?;
+    ensure(share <= 2.0, || format!("{}% of {cpus} CPUs is over two cores", req.cpu_percent))?;
     let mut host = start_with(req, w, &[])?;
     let burn = json!({"seconds": 8.0});
     send(&mut host, &test_offer("cr_burn_1", BURN, &burn, 60.0)?)?;
@@ -357,7 +393,7 @@ fn memory_death(w: Wrapper) -> Outcome {
     println!("{w:?}: {why}");
     let wanted = if cfg!(target_os = "macos") {
         "watchdog"
-    } else if cfg!(target_os = "linux") && w == Wrapper::Scope {
+    } else if memory_by_the_scope(w) {
         "oom_kill"
     } else {
         "allocation failed"
@@ -371,6 +407,13 @@ fn memory_death(w: Wrapper) -> Outcome {
         ),
         || format!("{failures:?}"),
     )?;
+    // The run reported its peak as it grew, so its parent knows nearly how much it reached.
+    let per_run = host.ready().memory_per_run_mb;
+    #[allow(clippy::cast_precision_loss, reason = "a few hundred MB")]
+    let half = per_run as f64 / 2.0;
+    let peak = host.peak_mb("cr_big");
+    println!("{w:?}: its last reported peak {peak:?} MB, {per_run} MB a run");
+    ensure(peak.is_some_and(|p| p >= half), || format!("{w:?}: peak {peak:?}, {per_run} a run"))?;
     // The parent starts a host again, and the next job runs.
     let mut again = start_with(req, w, &[])?;
     send(&mut again, &test_offer("cr_next", ALLOC, &json!({"mb": 50}), 60.0)?)?;
@@ -641,6 +684,74 @@ fn peaks_are_counted_per_run() -> Outcome {
     ensure(near(peaks["cr_60"], 60.0) && near(peaks["cr_150"], 150.0), || format!("{peaks:?}"))
 }
 
+/// The memory each run may use, by `ready`, holds: one or three runs each allocating
+/// `memory_per_run_mb` less 8 at once (held a second, so they overlap and the macOS watchdog sees
+/// them) all finish, and an offer above the figure is refused `memory`, the host living on and
+/// playing the next job. On Linux under the scope, the fallback (`RLIMIT_DATA`, which counts each
+/// run thread's whole stack) is checked too.
+fn every_run_gets_its_share_at_once() -> Outcome {
+    scope_required()?;
+    let mut wrappers = vec![wrapper()];
+    if cfg!(target_os = "linux") && wrappers[0] == Wrapper::Scope {
+        wrappers.push(Wrapper::Direct);
+    }
+    for w in wrappers {
+        for (threads, memory_mb) in [(1, 200), (3, 300)] {
+            share_holds(w, threads, memory_mb)?;
+        }
+    }
+    Ok(())
+}
+
+fn with_mem(mut o: ToHost, mb: u64) -> ToHost {
+    if let ToHost::JobOffer(offer) = &mut o {
+        offer.mem_mb = mb;
+    }
+    o
+}
+
+fn share_holds(w: Wrapper, threads: u32, memory_mb: u64) -> Outcome {
+    let req = Requested { threads, cpu_percent: two_cores_percent(), memory_mb };
+    let mut host = start_with(req, w, &[])?;
+    let r = host.ready().clone();
+    let per_run = r.memory_per_run_mb;
+    println!("{w:?}, {threads} x {memory_mb} MB: own {} MB, {per_run} MB a run", r.own_mb);
+    ensure(r.own_mb > 0.0 && per_run > 8 && per_run < memory_mb / u64::from(threads), || {
+        format!("{w:?}: {r:?}")
+    })?;
+    let mb = per_run - 8;
+    let hold = json!({"mb": mb, "hold_s": 1.0});
+    for i in 0..threads {
+        send(&mut host, &with_mem(test_offer(&format!("cr_share_{i}"), ALLOC, &hold, 60.0)?, mb))?;
+    }
+    let mut peaks = BTreeMap::new();
+    while peaks.len() < usize::try_from(threads).unwrap_or(usize::MAX) {
+        match frame(&mut host)?.0 {
+            FromHost::JobResult(done) => {
+                peaks.insert(done.run.clone(), done.outcome.peak_mb);
+            }
+            f @ (FromHost::JobFailed(_) | FromHost::JobReject(_)) => {
+                return fail(format!("{w:?}, {threads} x {memory_mb} MB: {f:?}"));
+            }
+            _ => {}
+        }
+    }
+    #[allow(clippy::cast_precision_loss, reason = "a few hundred MB")]
+    let want = mb as f64;
+    ensure(peaks.values().all(|p| (p - want).abs() <= want * 0.1 + 1.0), || {
+        format!("{w:?}: {peaks:?}, each {mb} MB")
+    })?;
+    let over = with_mem(test_offer("cr_over", ALLOC, &json!({"mb": 1}), 60.0)?, per_run + 1);
+    send(&mut host, &over)?;
+    match about(&mut host, "cr_over")?.0 {
+        FromHost::JobReject(Reject { reason: RejectReason::Memory, .. }) => {}
+        other => return fail(format!("{w:?}: over {per_run} MB: {other:?}")),
+    }
+    let last = with_mem(test_offer("cr_last", ALLOC, &json!({"mb": mb}), 60.0)?, mb);
+    send(&mut host, &last)?;
+    result_of(&until_end(&mut host, "cr_last")?).map(|_| ())
+}
+
 // --- builds -------------------------------------------------------------------------------------
 
 /// The child mode `fake-ready`: a host of another jobs build, as far as `ready` goes.
@@ -795,6 +906,7 @@ fn main() -> ExitCode {
             a_host_whose_parent_dies_is_gone_within_two_seconds,
         ),
         t("memory::peaks_are_counted_per_run", peaks_are_counted_per_run),
+        t("memory::every_run_gets_its_share_at_once", every_run_gets_its_share_at_once),
         t(
             "builds::other_builds_and_a_failed_canary_are_refused",
             other_builds_and_a_failed_canary_are_refused,

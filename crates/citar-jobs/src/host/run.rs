@@ -1,7 +1,11 @@
 //! One run of the job host (P4.4.3), on a thread of its own: its memory counted apart, the
 //! canary checked on its thread, its game played a seat step at a time under [`Watch`], which
 //! between steps stops it for an abort, a deadline or the host closing, holds it while the host is
-//! paused, and reports its progress.
+//! paused, and reports its progress (and its peak, as it grows).
+//!
+//! **A run's end** (its result, its failure, its abort, a late refusal) is sent only once the run
+//! has left the host's list of runs and given back its tally: a parent that offers the next run as
+//! soon as it reads the end finds the thread free, never `busy`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
@@ -10,8 +14,8 @@ use std::time::{Duration, Instant};
 use cpu_time::ThreadTime;
 
 use super::{
-    FailCode, Failed, FromHost, Outcome, PROGRESS_EVERY, PROGRESS_ROUNDS, ProgressFrame,
-    RejectReason, ResultFrame, RunRef, Shared, Work, log, reject,
+    FailCode, Failed, FromHost, Outcome, PROGRESS_EVERY, PROGRESS_ROUNDS, ProgressFrame, Reject,
+    RejectReason, ResultFrame, RunRef, Shared, Work, log,
 };
 use crate::canary::canary_injected;
 use crate::job::{Control, Flow, Job, Progress, RunError};
@@ -60,6 +64,8 @@ pub(crate) struct Watch<'a> {
     cpu0: Option<Duration>,
     reported_at: Instant,
     reported_round: i32,
+    /// The peak, in bytes, its last report gave.
+    reported_peak: u64,
     /// The test switch's wait before each seat step of a game ([`super::Setup::step_delay`]).
     delay: Duration,
     pub(crate) stop: Option<Stopped>,
@@ -81,6 +87,7 @@ impl<'a> Watch<'a> {
             cpu0: thread_cpu(),
             reported_at: now,
             reported_round: 0,
+            reported_peak: 0,
             delay,
             stop: None,
         }
@@ -91,9 +98,13 @@ impl<'a> Watch<'a> {
         (self.paused + held).as_secs_f64()
     }
 
+    fn peak_bytes(&self) -> u64 {
+        self.tally.map_or(0, |t| t.peak_bytes())
+    }
+
     fn peak_mb(&self) -> f64 {
         #[allow(clippy::cast_precision_loss, reason = "bytes well under 2^52")]
-        let mb = self.tally.map_or(0.0, |t| t.peak_bytes() as f64 / f64::from(1 << 20));
+        let mb = self.peak_bytes() as f64 / f64::from(1 << 20);
         (mb * 1000.0).round() / 1000.0
     }
 
@@ -103,6 +114,7 @@ impl<'a> Watch<'a> {
     }
 
     fn report(&mut self, at: &Progress, held: Option<Duration>) {
+        self.reported_peak = self.peak_bytes();
         self.shared.out.send(&FromHost::JobProgress(ProgressFrame {
             run: self.run.id.clone(),
             round: i64::from(at.round),
@@ -186,8 +198,10 @@ impl Control for Watch<'_> {
             return Flow::Stop;
         }
         let rounds = at.round.saturating_sub(self.reported_round);
+        let grown = self.peak_bytes().saturating_sub(self.reported_peak) >= self.shared.peak_step;
         if (at.new_round && rounds >= PROGRESS_ROUNDS)
             || self.reported_at.elapsed() >= PROGRESS_EVERY
+            || grown
         {
             self.report(at, None);
         }
@@ -198,27 +212,35 @@ impl Control for Watch<'_> {
     }
 }
 
-/// Plays one run to its end and leaves the host's list of runs.
+/// Plays one run to its end, leaves the host's list of runs, then sends the run's end.
 pub(crate) fn play(shared: &Arc<Shared>, run: &Arc<RunState>, work: Work) {
     let tally = Tally::claim();
     if tally.is_none() {
         log(&format!("run {}: no memory tally free; its peak is not counted", run.id));
     }
     let reader = tally.as_ref().map(Tally::reader);
-    play_counted(shared, run, work, reader);
+    let end = play_counted(shared, run, work, reader);
     drop(tally);
     shared.runs.lock().unwrap_or_else(PoisonError::into_inner).remove(&run.id);
+    if let Some(end) = end {
+        shared.out.send(&end);
+    }
     shared.heartbeat();
 }
 
-fn play_counted(shared: &Shared, run: &RunState, work: Work, tally: Option<Reader>) {
+/// Plays the run; its end frame, for [`play`] to send (none when the host is closing).
+fn play_counted(
+    shared: &Shared,
+    run: &RunState,
+    work: Work,
+    tally: Option<Reader>,
+) -> Option<FromHost> {
     // FTZ and DAZ are per thread: this one must compute as the self-check's did.
     if let Err(e) = canary_injected(&shared.canary) {
         shared.verifiable.store(false, Ordering::SeqCst);
         log(&format!("run {}: the canary failed on its thread ({e}); no more jobs", run.id));
         let why = format!("the canary failed on the run's thread: {e}");
-        reject(&shared.out, &run.id, RejectReason::Unverifiable, why);
-        return;
+        return Some(refused(run, RejectReason::Unverifiable, why));
     }
     match work {
         Work::Game(checked) => game(shared, run, &checked, tally),
@@ -227,12 +249,16 @@ fn play_counted(shared: &Shared, run: &RunState, work: Work, tally: Option<Reade
             accept(shared, run);
             let mut watch = Watch::new(shared, run, tally, Duration::ZERO);
             match super::test_jobs::play(&t, &mut watch) {
-                Ok(out) => send_result(shared, run, &watch, out),
-                Err(RunError::Stopped) => stopped(shared, run, watch.stop.take()),
-                Err(e) => failed(shared, run, FailCode::Internal, e.to_string()),
+                Ok(out) => Some(result(run, &watch, out)),
+                Err(RunError::Stopped) => stopped(run, watch.stop.take()),
+                Err(e) => Some(failed(run, FailCode::Internal, e.to_string())),
             }
         }
     }
+}
+
+fn refused(run: &RunState, reason: RejectReason, message: String) -> FromHost {
+    FromHost::JobReject(Reject { run: run.id.clone(), reason, message })
 }
 
 fn accept(shared: &Shared, run: &RunState) {
@@ -240,24 +266,18 @@ fn accept(shared: &Shared, run: &RunState) {
     shared.heartbeat();
 }
 
-fn failed(shared: &Shared, run: &RunState, code: FailCode, message: String) {
+fn failed(run: &RunState, code: FailCode, message: String) -> FromHost {
     log(&format!("run {}: {message}", run.id));
-    shared.out.send(&FromHost::JobFailed(Failed {
-        run: run.id.clone(),
-        code,
-        message,
-        retryable: true,
-    }));
+    FromHost::JobFailed(Failed { run: run.id.clone(), code, message, retryable: true })
 }
 
-fn stopped(shared: &Shared, run: &RunState, why: Option<Stopped>) {
+/// A stopped run's end: none when the host is closing.
+fn stopped(run: &RunState, why: Option<Stopped>) -> Option<FromHost> {
     match why {
-        Some(Stopped::Aborted) => {
-            shared.out.send(&FromHost::JobAborted(RunRef { run: run.id.clone() }));
-        }
-        Some(Stopped::Deadline(why)) => failed(shared, run, FailCode::Deadline, why),
-        Some(Stopped::Closing) => {}
-        None => failed(shared, run, FailCode::Internal, "stopped for no reason".to_owned()),
+        Some(Stopped::Aborted) => Some(FromHost::JobAborted(RunRef { run: run.id.clone() })),
+        Some(Stopped::Deadline(why)) => Some(failed(run, FailCode::Deadline, why)),
+        Some(Stopped::Closing) => None,
+        None => Some(failed(run, FailCode::Internal, "stopped for no reason".to_owned())),
     }
 }
 
@@ -270,8 +290,10 @@ pub(crate) struct Played {
     pub(crate) cpu_s: f64,
 }
 
-fn send_result(shared: &Shared, run: &RunState, watch: &Watch<'_>, out: Played) {
-    shared.out.send(&FromHost::JobResult(Box::new(ResultFrame {
+/// A finished run's `job_result`, its peak and paused time read from `watch` (before its tally is
+/// given back).
+fn result(run: &RunState, watch: &Watch<'_>, out: Played) -> FromHost {
+    FromHost::JobResult(Box::new(ResultFrame {
         run: run.id.clone(),
         outcome: Outcome {
             result: out.result,
@@ -282,55 +304,53 @@ fn send_result(shared: &Shared, run: &RunState, watch: &Watch<'_>, out: Played) 
             paused_s: watch.paused_s(Duration::ZERO),
             peak_mb: watch.peak_mb(),
         },
-    })));
+    }))
 }
 
-fn game(shared: &Shared, run: &RunState, checked: &Checked, tally: Option<Reader>) {
+fn game(
+    shared: &Shared,
+    run: &RunState,
+    checked: &Checked,
+    tally: Option<Reader>,
+) -> Option<FromHost> {
     let mut job = match Job::start(shared.rules, checked) {
         Ok(j) => j,
-        Err(RunError::Spec(e)) => {
-            reject(&shared.out, &run.id, RejectReason::BadSpec, e.0);
-            return;
-        }
+        Err(RunError::Spec(e)) => return Some(refused(run, RejectReason::BadSpec, e.0)),
         Err(e) => {
             accept(shared, run);
-            failed(shared, run, FailCode::Internal, e.to_string());
-            return;
+            return Some(failed(run, FailCode::Internal, e.to_string()));
         }
     };
     accept(shared, run);
     let mut watch = Watch::new(shared, run, tally, shared.step_delay);
     while !job.is_over() {
         if watch.between(&job.progress()) == Flow::Stop {
-            stopped(shared, run, watch.stop.take());
-            return;
+            return stopped(run, watch.stop.take());
         }
         if let Err(e) = job.step() {
-            failed(shared, run, FailCode::Internal, e.to_string());
-            return;
+            return Some(failed(run, FailCode::Internal, e.to_string()));
         }
     }
-    match job.finish() {
+    Some(match job.finish() {
         Ok(out) => {
             if let Some(trace) = &out.trace {
                 log(&format!("run {}: its game crashed\n{trace}", run.id));
             }
             match serde_json::to_value(&out.result) {
-                Ok(result) => send_result(
-                    shared,
+                Ok(value) => result(
                     run,
                     &watch,
                     Played {
-                        result,
+                        result: value,
                         result_hash: out.result_hash,
                         chain: out.chain,
                         wall_s: out.wall_s,
                         cpu_s: out.cpu_s,
                     },
                 ),
-                Err(e) => failed(shared, run, FailCode::Internal, format!("the result: {e}")),
+                Err(e) => failed(run, FailCode::Internal, format!("the result: {e}")),
             }
         }
-        Err(e) => failed(shared, run, FailCode::Internal, e.to_string()),
-    }
+        Err(e) => failed(run, FailCode::Internal, e.to_string()),
+    })
 }

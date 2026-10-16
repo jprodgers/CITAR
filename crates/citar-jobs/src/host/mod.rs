@@ -12,20 +12,25 @@
 //!   before a binary swap never computes with the old code; so does one whose limits the OS will
 //!   not put in place (`fatal` `limits`; [`crate::limits`]).
 //! - **`ready`** (host, once): `{limits: {cpu, memory}, verifiable, jobs_build, threads, reason?,
-//!   cgroup, cpu_s, pid, counting, notes}`: how hard each limit holds; whether the canary and the
-//!   self-check passed (`reason` says what failed: the host then refuses every job,
-//!   `unverifiable`); its jobs build, which the parent holds to its own; its cgroup (Linux), whose
-//!   memory events the parent reads when it dies; its CPU seconds so far; whether its memory is
-//!   counted ([`crate::sys::alloc`]); how its limits are held, a line each, for the log.
+//!   memory_per_run_mb, own_mb, cgroup, cpu_s, pid, counting, notes}`: how hard each limit holds;
+//!   whether the canary and the self-check passed (`reason` says what failed: the host then refuses
+//!   every job, `unverifiable`); its jobs build, which the parent holds to its own; the memory each
+//!   run may use, which is what a parent matches jobs to, and the host's own memory that it leaves
+//!   out ([`crate::limits::memory_per_run_mb`]); its cgroup (Linux), whose memory events the parent
+//!   reads when it dies; its CPU seconds so far; whether its memory is counted
+//!   ([`crate::sys::alloc`]); how its limits are held, a line each, for the log.
 //! - **`fatal`** (host, in place of `ready`): `{code: build | limits | protocol, message}`, then it
-//!   exits with [`EXIT_REFUSED`].
+//!   exits with [`EXIT_REFUSED`]. `limits` is also a memory limit that leaves the runs nothing
+//!   once the host's own memory is counted.
 //! - **`job_offer`** (parent): `{run, job?, kind, spec, spec_hash, jobs_build, deadline_s, mem_mb,
 //!   priority?}`; answered `job_accept {run}` or `job_reject {run, reason, message}`, `reason` one
-//!   of `unverifiable`, `build`, `bad_spec`, `memory` (`mem_mb` above `memory_mb / threads`) and
-//!   `busy` (`threads` runs already), checked in that order.
+//!   of `unverifiable`, `build`, `bad_spec`, `memory` (`mem_mb` above `ready`'s
+//!   `memory_per_run_mb`) and `busy` (`threads` runs already), checked in that order.
 //! - **`job_progress`** (host): `{run, round, of, elapsed_s, cpu_s, paused_s, peak_mb, paused}`,
-//!   every [`PROGRESS_EVERY`] or [`PROGRESS_ROUNDS`] rounds, and when the run is held by a pause
-//!   and let go again.
+//!   every [`PROGRESS_EVERY`] or [`PROGRESS_ROUNDS`] rounds, when the run is held by a pause and
+//!   let go again, and whenever its peak has grown by [`peak_step`] since its last report: a run
+//!   that dies of memory has told its parent nearly how much it reached, which is all the parent
+//!   learns of it (its `job_failed` carries no peak).
 //! - **`job_result`** (host): `{run, outcome: {result, result_hash, chain, cpu_s, wall_s,
 //!   paused_s, peak_mb}}`: a crash is a result (P4.4.2), whose trace goes to the log.
 //! - **`job_failed`** (host): `{run, code: deadline | internal, message, retryable}`; the parent
@@ -71,7 +76,7 @@ use serde_json::Value;
 
 use crate::canary::{Inject, SelfCheck, canary_injected, self_check};
 use crate::hash::Chain;
-use crate::limits::{self, Held, Requested};
+use crate::limits::{self, Held, MemoryBy, Requested};
 use crate::spec::{Checked, Kind, check_spec, clip};
 use crate::sys::alloc;
 
@@ -204,6 +209,14 @@ pub struct Ready {
     pub threads: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The memory each run may use, in MB: what the parent matches jobs to, and the most `mem_mb`
+    /// an offer may carry ([`limits::memory_per_run_mb`]).
+    #[serde(default)]
+    pub memory_per_run_mb: u64,
+    /// The host's own memory at `ready` as its limit counts it, in MB, which that figure leaves
+    /// out.
+    #[serde(default)]
+    pub own_mb: f64,
     #[serde(default)]
     pub cgroup: Option<String>,
     pub cpu_s: f64,
@@ -516,6 +529,10 @@ pub(crate) struct Shared {
     pub(crate) rules: &'static Ruleset,
     pub(crate) jobs_build: String,
     pub(crate) limits: Requested,
+    /// The memory each run may use, in MB (`ready`'s `memory_per_run_mb`).
+    pub(crate) per_run_mb: u64,
+    /// How much a run's peak grows between two reports of it, at most ([`peak_step`]).
+    pub(crate) peak_step: u64,
     /// The pause, and the condition its waiters (and the runs' aborts) wake on.
     pub(crate) paused: Mutex<bool>,
     pub(crate) wake: Condvar,
@@ -545,6 +562,17 @@ impl Shared {
             cpu_s: process_cpu_s(),
         }));
     }
+}
+
+/// How much a run's counted peak may grow, in bytes, before it reports it again: an eighth of what
+/// a run may use, at most 32 MiB and at least 1 MiB. A run that dies of memory has then reported a
+/// peak within that of what it reached (short of what its last step asked for).
+#[must_use]
+pub const fn peak_step(per_run_mb: u64) -> u64 {
+    let eighth = per_run_mb.saturating_mul(1 << 20) / 8;
+    let at_most = 32 << 20;
+    let step = if eighth < at_most { eighth } else { at_most };
+    if step < 1 << 20 { 1 << 20 } else { step }
 }
 
 /// This process's CPU seconds so far.
@@ -649,16 +677,13 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         None
     };
     citar_sim::panics::install();
-    let (held, cgroup, notes) = applied.as_ref().map_or_else(
+    let (held, cgroup, mut notes, memory_by) = applied.map_or_else(
         || {
             let soft = Held { cpu: limits::Hardness::Soft, memory: limits::Hardness::Soft };
-            (
-                soft,
-                None,
-                vec!["no limits put on this process (a host inside its parent)".to_owned()],
-            )
+            let note = "no limits put on this process (a host inside its parent)".to_owned();
+            (soft, None, vec![note], MemoryBy::Nothing)
         },
-        |a| (a.held, a.cgroup.clone(), a.notes.clone()),
+        |a| (a.held, a.cgroup, a.notes, a.memory_by),
     );
     let check = if setup.fail_self_check {
         Err("the self-check: failed on purpose (a test switch)".to_owned())
@@ -668,11 +693,41 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
     if let Err(why) = &check {
         log(&format!("not verifiable: {why}"));
     }
+    // Measured after the self-check, which leaves what a run's thread leaves (its arena, a cached
+    // stack): what is left of the limit is what the runs get.
+    let stack = u64::try_from(RUN_STACK).unwrap_or(u64::MAX);
+    let own = match limits::footprint(&memory_by, stack) {
+        Ok(own) => own,
+        Err(e) => return fatal(FatalCode::Limits, format!("the host's own memory: {e}")),
+    };
+    let per_run_mb = limits::memory_per_run_mb(&req, &own);
+    #[allow(clippy::cast_precision_loss, reason = "bytes well under 2^52")]
+    let own_mb = ((own.own_bytes as f64 / f64::from(1 << 20)) * 10.0).round() / 10.0;
+    let per_thread_mb = own.per_thread_bytes >> 20;
+    if per_run_mb == 0 {
+        return fatal(
+            FatalCode::Limits,
+            format!(
+                "memory_mb {} leaves its {} runs nothing: the host itself holds {own_mb} MB, and \
+                 each run's thread {per_thread_mb} MB",
+                req.memory_mb, req.threads
+            ),
+        );
+    }
+    let note = format!(
+        "{own_mb} MB of the host's own and {per_thread_mb} MB a run's thread, measured at ready: \
+         {per_run_mb} MB a run, {} at once",
+        req.threads
+    );
+    log(&note);
+    notes.push(note);
     let shared = Arc::new(Shared {
         out: out.clone(),
         rules,
         jobs_build: mine.clone(),
         limits: req,
+        per_run_mb,
+        peak_step: peak_step(per_run_mb),
         paused: Mutex::new(false),
         wake: Condvar::new(),
         closing: AtomicBool::new(false),
@@ -687,6 +742,8 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         jobs_build: mine,
         threads: req.threads,
         reason: check.err(),
+        memory_per_run_mb: per_run_mb,
+        own_mb,
         cgroup,
         cpu_s: process_cpu_s(),
         pid: std::process::id(),
@@ -843,9 +900,11 @@ fn offer(shared: &Arc<Shared>, o: Offer) {
             return;
         }
     };
-    let per_thread = shared.limits.memory_per_thread_mb();
-    if o.mem_mb > per_thread {
-        let why = format!("the job needs {} MB, and a run here has {per_thread} MB", o.mem_mb);
+    if o.mem_mb > shared.per_run_mb {
+        let why = format!(
+            "the job needs {} MB, and a run here may use {} MB (memory_per_run_mb)",
+            o.mem_mb, shared.per_run_mb
+        );
         reject(out, &o.run, RejectReason::Memory, why);
         return;
     }
