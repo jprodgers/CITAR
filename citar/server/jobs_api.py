@@ -5,17 +5,21 @@ administrators.
     GET  /api/admin/jobs            administrators: the dispatcher, queued jobs by experiment, runs per executor
     POST /api/admin/jobs/pause      administrators: the Lab page's Stop (``citar lab stop``): no new game starts
     POST /api/admin/jobs/resume     administrators: start new games again (``citar lab resume``)
+    POST /api/admin/jobs/retry      administrators: an experiment's failed games (``?exp=NAME``; every queued
+                                    experiment's without it) played again, their attempts back to 0
 
 **Who sees what** (P4.5.8 rule 2, P3.9.1): an executor is named where the caller may view its machine (the server's
-own job host is "this server"), "a member's machine" otherwise; a job is ``done`` from the moment its primary's result
-is committed, whatever verification follows (replicas and the ``settling`` state are administrators' alone: 4-11), and
-``crashed`` when its result is a crash. An experiment the caller may not see is "not found", as its report is.
+own job host is "this server", its machine's name and id administrators'), "a member's machine" otherwise, in the
+dispatcher's executors and in why a game waits (:func:`told_executor`, :func:`told_waiting`); a job is ``done`` from
+the moment its primary's result is committed, whatever verification follows (replicas and the ``settling`` state are
+administrators' alone: 4-11), and ``crashed`` when its result is a crash. An experiment the caller may not see is "not
+found", as its report is.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from .. import items, lab
@@ -57,6 +61,32 @@ def _namer(s: Session, viewer: Optional[User]):
             cache[machine] = label
         return {"name": cache[machine], "kind": executor}
     return name
+
+
+#: What a member is told of an executor (P4.5.10: the dispatcher's health; the hosts' details, their machines' ids,
+#: their notes and their logs are administrators').
+EXECUTOR_TOLD = ("name", "kind", "on", "state", "threads", "running", "paused", "benchmark", "available")
+#: What a member is told of a job host that stopped (its death's words quote its log).
+HOST_STOPPED = "its job host stopped; it starts again shortly"
+
+
+def told_executor(e: dict, name) -> dict:
+    """An executor of the dispatcher's view as a member is told it: named by ``name`` (``_namer``'s: "this server"
+    for the server's own job host), without its machine's id, its host's notes, or why its host stopped."""
+    out = {k: e.get(k) for k in EXECUTOR_TOLD}
+    out["name"] = name(e.get("machine"), e.get("kind"))["name"]
+    if e.get("state") == "failed" and out.get("available"):
+        out["available"] = HOST_STOPPED
+    return out
+
+
+def told_waiting(exp: dict, name) -> Optional[str]:
+    """Why an experiment's games wait, each executor named by ``name`` as the viewer may be told it (the
+    dispatcher's ``waiting_on``); its words as they are when no executor is named in them."""
+    parts = exp.get("waiting_on") or []
+    if not parts:
+        return exp.get("waiting")
+    return "; ".join(f"{name(p.get('machine'), p.get('kind'))['name']}: {p.get('why')}" for p in parts)
 
 
 @router.get("/api/lab/jobs")
@@ -149,4 +179,21 @@ def admin_jobs_resume(me: User = Depends(require_admin_hidden), s: Session = Dep
         audit.record(s, "lab.resumed", actor=me)
     jobs_dispatcher.poke()
     return {"paused": None, "was_paused": was}
+
+
+@router.post("/api/admin/jobs/retry")
+def admin_jobs_retry(exp: Optional[str] = Query(None, min_length=1, max_length=120),
+                     me: User = Depends(require_admin_hidden), s: Session = Depends(get_db, scope="function")):
+    """Play an experiment's failed games again (every queued experiment's without ``exp``), their attempts back to 0:
+    a game fails for good after three retryable failures (a host's death, a deadline a sleeping machine passed), and
+    otherwise only a restart of the server tries it again. The dispatcher does it at its next tick, on its thread."""
+    from ..jobs import dispatcher as jobs_dispatcher
+    if exp is not None and not (lab.QUEUE / f"{exp}.json").is_file():
+        raise HTTPException(404, "No queued experiment of that name.")
+    d = jobs_dispatcher.current()
+    if d is None:
+        raise HTTPException(409, "The lab's dispatcher is not running in this server.")
+    d.retry(exp)
+    audit.record(s, "lab.retried", actor=me, exp=exp)
+    return {"requested": True, "exp": exp}
 

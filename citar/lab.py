@@ -716,6 +716,8 @@ def overview() -> dict:
             "minutes_per_game": round(per_game, 1) if per_game else None, "remaining_minutes": round(left, 1),
             "submitted": exp.get("submitted"), "finished": fig["finished"],
             "refused": why or None, "waiting": info.get("waiting") or None,
+            # each executor's reason, for the routes to name each one as the viewer may be told it
+            "waiting_on": info.get("waiting_on") or [],
         })
     for exp in experiments:
         if exp["state"] in ("queued", "running"):

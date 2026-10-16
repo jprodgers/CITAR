@@ -2059,24 +2059,23 @@ def probe_run_open(rid: str, case: str, rep: int, request: Request, me=Depends(r
 # ----------------------------------------------------------------------------
 # the lab and the work queue
 # ----------------------------------------------------------------------------
-#: What a member is told of the dispatcher's executors (P4.5.10: the dispatcher's health; its log and the hosts'
-#: details are administrators').
-_EXECUTOR_SHOWN = ("machine", "name", "kind", "on", "state", "threads", "running", "paused", "benchmark", "available")
-
-
 @app.get("/api/lab")
 def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
     """What the bot lab is doing: the dispatcher's health and its executors, experiments, per-game progress and the
     log. A member sees the experiments they may see and the games of those playing; the log, the side runs and the
-    job hosts' details, which name every experiment and the server's own jobs, are an administrator's."""
+    job hosts' details (their machines' names and ids among them), which name every experiment and the server's own
+    jobs, are an administrator's."""
     from .. import lab
-    from .jobs_api import _namer
+    from .jobs_api import _namer, told_executor, told_waiting
     out = lab.overview()
-    # a playing game's machine as the caller may be told it (the games table's words): "this server" for the
-    # server's own job host, a helper machine's name only where the caller may see that machine
+    # a machine as the caller may be told it (the games table's words): "this server" for the server's own job host,
+    # a helper machine's name only where the caller may see that machine
     name = _namer(sdb, me)
     for r in out.get("running") or []:
         r["executor"] = name(r.get("machine"), r.get("executor_kind"))["name"]
+    for e in out.get("experiments") or []:
+        e["waiting"] = told_waiting(e, name)
+        e.pop("waiting_on", None)
     key = _share_key(request)
     seen = items.listed(sdb, "lab_experiment", me, slug=key)
     if seen is None:
@@ -2087,7 +2086,7 @@ def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = De
     out["running"] = [{k: v for k, v in r.items() if k != "machine"} for r in out.get("running", [])
                       if r.get("exp") in seen]
     disp = dict(out.get("dispatcher") or {})
-    disp["executors"] = [{k: e.get(k) for k in _EXECUTOR_SHOWN} for e in disp.get("executors") or []]
+    disp["executors"] = [told_executor(e, name) for e in disp.get("executors") or []]
     out["dispatcher"] = disp
     out["log"] = []
     out["side_runs"] = []
@@ -2188,6 +2187,11 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db, s
         overview = {"experiments": [], "runner": {}}
     experiments = sorted([e for e in overview.get("experiments", []) if e.get("state") != "complete"],
                          key=lambda e: (-(e.get("priority") or 0), e.get("submitted") or ""))
+    from .jobs_api import _namer, told_waiting
+    machine_name = _namer(sdb, me)
+    for e in experiments:
+        e["waiting"] = told_waiting(e, machine_name)
+        e.pop("waiting_on", None)
     if not admin:
         shown = []
         for e in experiments:
@@ -2201,7 +2205,7 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db, s
         experiments = shown
     cpu = {"cpus": os.cpu_count(), "load": [round(x, 2) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None,
            "dispatcher": {k: (overview.get("dispatcher") or {}).get(k) for k in ("alive", "paused", "queued")},
-           "executors": _cpu_executors(sdb, me, overview, admin, cache),
+           "executors": _cpu_executors(sdb, me, overview, admin, cache, machine_name),
            "experiments": experiments}
     return {"machines": machines, "others_busy": others, "cpu": cpu}
 
@@ -2210,11 +2214,13 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db, s
 SOMEONES_CPU = "someone's lab game"
 
 
-def _cpu_executors(sdb: DbSession, user, overview: dict, admin: bool, cache: dict) -> list:
+def _cpu_executors(sdb: DbSession, user, overview: dict, admin: bool, cache: dict, name) -> list:
     """The Queue page's CPU jobs per executor (P4.5.11): each executor the caller may see (the server's own job host
     for everyone), its state and figures, and its games playing, each named where the caller may see its experiment
-    and "someone's lab game" otherwise."""
+    and "someone's lab game" otherwise. A member is told an executor as ``jobs_api.told_executor`` tells it: no
+    machine id, no host's details."""
     from ..db.models import Server
+    from .jobs_api import HOST_STOPPED
     out = []
     for e in (overview.get("dispatcher") or {}).get("executors") or []:
         if e.get("kind") != "local" and not admin:
@@ -2233,11 +2239,17 @@ def _cpu_executors(sdb: DbSession, user, overview: dict, admin: bool, cache: dic
                           "exp": r["exp"] if seen else None, "turn": r.get("turn"), "limit": r.get("limit"),
                           "paused": r.get("paused"), "minutes": r.get("minutes"),
                           "can_manage": bool(seen and (admin or access.MANAGE in cache[key]))})
-        out.append({"machine": e.get("machine"), "name": "this server" if e.get("kind") == "local" else e.get("name"),
-                    "kind": e.get("kind"), "on": e.get("on"), "state": e.get("state"),
-                    "threads": e.get("threads"), "cpu_percent": e.get("cpu_percent"),
-                    "memory_mb": e.get("memory_mb"), "held": e.get("held") if admin else None,
-                    "available": e.get("available"), "benchmark": e.get("benchmark"), "games": games})
+        available = e.get("available")
+        if not admin and e.get("state") == "failed" and available:
+            available = HOST_STOPPED
+        entry = {"name": name(e.get("machine"), e.get("kind"))["name"],
+                 "kind": e.get("kind"), "on": e.get("on"), "state": e.get("state"),
+                 "threads": e.get("threads"), "cpu_percent": e.get("cpu_percent"),
+                 "memory_mb": e.get("memory_mb"), "held": e.get("held") if admin else None,
+                 "available": available, "benchmark": e.get("benchmark"), "games": games}
+        if admin:
+            entry["machine"] = e.get("machine")
+        out.append(entry)
     return out
 
 

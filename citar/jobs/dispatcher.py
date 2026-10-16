@@ -2,10 +2,17 @@
 their results into the lab, the ratings and the ledger.
 
 **One thread per server process** (``citar-jobs-dispatcher``), like the prompt scheduler and the ledger's writer: it
-wakes every ``TICK_SECONDS`` and whenever something happens (``poke``: a job frame, an executor's change, a benchmark
-lease, a new experiment), survives an exception in its loop, and is started again if it dies (``ensure_thread``). It is
+wakes every ``TICK_SECONDS`` and whenever something happens (``poke``: a run starting or ending on an executor, which
+every executor is given through its ``bind``, an executor's change, a benchmark lease, the pause and an
+administrator's retry), survives an exception in its loop, and is started again if it dies (``ensure_thread``). It is
 the only writer of ``cpu_jobs`` and ``cpu_job_runs`` and of the lab's results files (P4.7.4); its state is the
-database, and its view in memory is rebuilt when the server starts (``recover``).
+database, and its view in memory is rebuilt when the server starts (``recover``), which also queues again the games
+that failed for want of attempts (0.1.5's "the next runner tries them again"). Its view in memory changes once the
+database has taken the change (a new job, an offer, an owner found), or is rebuilt from the database when the database
+refused a change it had already made in memory (``_reset``: the runs' frames, the expiries).
+
+**Timing:** a run is timed by when its frames arrived (each stamped by its executor's reader, ``host.RX``), never by
+when the dispatcher read them, which can be a tick later: its start, its end and so what the server observed of it.
 
 **A tick** (:meth:`Dispatcher.tick`):
 
@@ -16,14 +23,21 @@ database, and its view in memory is rebuilt when the server starts (``recover``)
    (``lab.job_of``, checked and hashed by the jobs crate), with ``mem_mb`` from the cost table
    (:class:`~citar.jobs.store.Costs`); at most ``WINDOW`` x the executors' threads wait at once, taken in the order
    they would run (priority, then round-robin across owners), so a 10,000-game experiment does not become 10,000 rows
-   and a new owner's work is never stuck behind another's window. A game a job refuses makes its experiment
-   ``refused``, with the reason.
+   and a new owner's work is never stuck behind another's window. Only jobs some executor would take count in the
+   window: a game no executor would take as it is set now (more memory a run than any has, a kind none plays) gets
+   no row, its experiment saying why, so it never holds the places of the games behind it. A game a job refuses makes
+   its experiment ``refused``, with the reason. A member's experiment with no owned item yet waits up to
+   ``OWNER_SECONDS`` for it (``citar lab submit`` and the A/B route write the queue's file before their item is
+   committed), so its games are never charged to nobody.
 3. **Executors** (``citar.jobs.local``'s, and the helpers' from 4-10) refresh their settings and hand over their
    frames: accepts, progress, results, failures, aborts. A host that died fails its runs ``memory`` or ``host``.
 4. **Expiry** (``_expire``): an offer unanswered after ``OFFER_TTL_SECONDS``, a run past its deadline plus
    ``EXPIRY_GRACE_SECONDS`` (paused time extending it, up to twice), and a run silent for ``SILENT_SECONDS`` while its
    executor is there and not paused, are ``expired`` and their jobs queued again; an expiry its pause caused counts
-   neither as an attempt nor as an abandon.
+   neither as an attempt nor as an abandon, and nor does an executor's own ``deadline`` failure its pause caused (the
+   job host ends a run held past twice its deadline itself, before the server's backstop). A run's paused time is
+   what it reported, with the time since a report that said it was held, or the time a benchmark held its executor,
+   whichever is more (``_paused``).
 5. **Benchmarks:** while a benchmark lease is live on an executor's machine it is offered nothing and its games are
    paused (``pause``, whatever ``yield_to_llm`` says), and resumed at the lease's end (P3.3.6, P4.5.5).
 6. **Matching** (``_match``), unless the lab is paused (``citar lab stop``, the Lab page's Stop: running games
@@ -39,16 +53,21 @@ result held to its spec: ``engine_api.job_result_fits``), then **committed first
 run), then the run's stored result pruned. When the server starts, every active experiment's results file is
 reconciled with the database (``_reconcile``): an accepted job with no line gets one, a line whose run's job is not
 accepted with that run is removed, a line cut short by a crash is dropped. A crash between the commit and the append
-therefore leaves exactly one line after the restart. Each finished run writes one ``cpu`` event through the ledger's
-writer: the executor's machine and its owner (none for the host) as the provider, the job's owner as the consumer (none
-for the server's own collection, ranking and reference runs), its CPU the executor's report bounded by what the server
-observed (``observed x 1.05 + 1`` seconds: a game is one thread). The usage ledger gets the game's activity and the
-time its machine held it, as the runner wrote them.
+therefore leaves exactly one line after the restart. Each step after the commit stands alone: a line the results file
+refused (a sync client's lock past ``fsutil.retry``) waits and is tried again each tick, while the run's event, its
+cost and its usage rows are written all the same; the game counts as settled once its line is written. Each finished
+run writes one ``cpu`` event through the ledger's writer: the executor's machine and its owner (none for the host) as
+the provider, the job's owner as the consumer (none for the server's own collection, ranking and reference runs), its
+CPU the executor's report bounded by what the server observed (``observed x 1.05 + 1`` seconds: a game is one
+thread). The usage ledger gets the game's activity and the time its machine held it, as the runner wrote them.
 
 **Failures** (``_failed``): a retryable one queues the job again, at most ``MAX_ATTEMPTS`` times (then ``failed``,
-shown on the Lab page); a ``memory`` one (the run's host died of memory) raises the job's ``mem_mb`` to the peak its run
-reported, past the executor's memory a run when it reported none or was its host's only run (then it alone needed more
-than the host had), and does not count as an attempt: it changes where the job may run.
+shown on the Lab page, and queued again at the next start or by an administrator's retry); a ``memory`` one (the
+run's host died of memory) raises the job's ``mem_mb`` to the peak its run reported, past the executor's memory a run
+when it reported none or was its host's only run (then it alone needed more than the host had), and does not count as
+an attempt: it changes where the job may run. Memory figures are the dispatcher's own where an executor's could lie: a
+remote run's peak raises a job at most past that executor's memory a run, only the reference machines' peaks enter
+the cost table, and every figure is held under ``MEM_MAX``.
 
 Replaces: 0.1.5's lab runner (``lab.run``), a separate Windows-only process that spawned one Python process per game,
 kept a job file per game and a status file, adopted the games an earlier runner left through PowerShell and killed
@@ -69,7 +88,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from citar import engine_api, fsutil, lab
-from citar.jobs import store
+from citar.jobs import host as H, store
 
 log = logging.getLogger("citar.jobs.dispatcher")
 
@@ -93,8 +112,12 @@ ABANDONS, ABANDON_WINDOW = 3, 3600.0
 OBSERVED_FACTOR, OBSERVED_SLACK = 1.05, 1.0
 #: A CPU job is worth at most this many times its reference cost (P4.5.7).
 REFERENCE_CAP = 1.5
-#: How often an experiment with no owner is looked up again (its item registered just after its file was written).
+#: How long a member's experiment with no owned item waits for one before its games start (its item is committed just
+#: after its file is written), looked up every tick meanwhile; then how often it is looked up again.
 OWNER_SECONDS = 10.0
+#: The most memory, in MB, any figure the dispatcher keeps may say (a terabyte): an executor's report beyond it is
+#: not a figure (and would not fit the database's integer).
+MEM_MAX = 1 << 20
 #: An executor that refused a job for a reason that holds for every job is offered nothing for a while: 2 s,
 #: doubling to 10 minutes (P4.2.5's re-offer backoff).
 REJECT_FIRST, REJECT_MAX = 2.0, 600.0
@@ -190,9 +213,12 @@ class Run:
     of: Optional[int] = None
     cpu_s: float = 0.0
     wall_s: float = 0.0
-    paused_s: float = 0.0
+    paused_s: float = 0.0           # as its last report gave it
     peak_mb: float = 0.0
-    paused: bool = False
+    paused: bool = False            # its last report said it was held
+    held_since: Optional[float] = None      # when that report arrived (its pause goes on from there)
+    bench_since: Optional[float] = None     # when a benchmark began holding its executor, while it does
+    bench_s: float = 0.0                    # the benchmarks' holds before that
 
 
 @dataclass
@@ -211,10 +237,18 @@ class Exp:
     refused: str = ""
     lines: dict = field(default_factory=dict)       # run -> game, for the lines with an executor
     owner_checked: float = 0.0                      # when an experiment with no owner was last looked up
+    owner_known: bool = False                       # its item was found (an owner, or the server's collection)
+    first_seen: float = 0.0                         # when the dispatcher first read it
+    probe: Optional["Job"] = None                   # its next game, which no executor would take now (no row)
 
     @property
     def kind(self) -> str:
         return lab.kind_of(self.spec)
+
+    def in_grace(self, now: float) -> bool:
+        """A member's experiment whose item is not found yet, read within ``OWNER_SECONDS``: its games wait for it."""
+        return (self.owner_id is None and not self.owner_known and self.kind not in lab.COLLECTION_KINDS
+                and now - self.first_seen < OWNER_SECONDS)
 
     @property
     def job_kind(self) -> str:
@@ -273,9 +307,15 @@ class Dispatcher:
         self._started = False
         self._prune: list = []
         self._lines: dict = {}          # results path -> set of (game, run) in the file
+        self._pending: list = []        # (exp, line, game, run): accepted results whose line the file refused
         self._rejects: dict = {}        # executor -> (offered nothing until, the wait, why)
+        self._requests: deque = deque()     # administrators' retries, served at the next tick
         self.jobs_build = engine_api.jobs_build()
         self.started_at = utcnow()
+        for e in self.executors:
+            bind = getattr(e, "bind", None)
+            if bind is not None:
+                bind(self.poke)
 
     # -------------------------------------------------------------- the thread
     def start(self) -> "Dispatcher":
@@ -309,12 +349,13 @@ class Dispatcher:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            # cleared before the tick, so a poke while it runs (a frame) brings the next one at once
+            self._wake.clear()
             try:
                 self.tick()
             except Exception:
                 log.exception("the job dispatcher's tick failed; it carries on")
             self._wake.wait(TICK_SECONDS)
-            self._wake.clear()
 
     def stop(self, timeout: float = 10.0) -> None:
         """Stop the thread and close the executors (the local host ends its runs; the next start plays them again)."""
@@ -346,6 +387,7 @@ class Dispatcher:
             if not self.recovered:
                 self.recover()
             self._sync_queue(now)
+            self._serve()
             self._owners(now)
             self._fill(now)
             for e in self.executors:
@@ -365,9 +407,11 @@ class Dispatcher:
     def recover(self) -> None:
         """At the server's start: the cost table (seeded where it lacks the committed cells), the local executor's
         runs that were in flight when the last process ended (its host died with it) aborted and their jobs queued
-        again, the queued jobs given this build's jobs build (a queued job has no result to compare yet), every queued
-        experiment loaded and its results file reconciled with the database, and the ledger's events of the last
-        runs written where a crash lost them."""
+        again, the games that failed for want of attempts queued again with their attempts back to 0 (their failures
+        were all retryable: a host's death, a deadline a sleeping laptop passed; 0.1.5's runner too tried them again
+        at its next start), the queued jobs given this build's jobs build (a queued job has no result to compare yet),
+        every queued experiment loaded and its results file reconciled with the database, and the ledger's events of
+        the last runs written where a crash lost them."""
         from sqlalchemy import select, update
         from citar import db
         from citar.db.models import CpuJob, CpuJobRun
@@ -383,12 +427,20 @@ class Dispatcher:
                 job = s.get(CpuJob, run.job_id)
                 if job is not None and job.state == "running":
                     job.state = "queued"
+            # a job fails for good only past MAX_ATTEMPTS retryable failures; one refused for its spec, or failed
+            # for good by its executor, fails with fewer and stays failed
+            again = s.execute(update(CpuJob).where(CpuJob.state == "failed", CpuJob.item_kind == "lab_experiment",
+                                                   CpuJob.attempts >= MAX_ATTEMPTS)
+                              .values(state="queued", attempts=0)).rowcount
             s.execute(update(CpuJob).where(CpuJob.state == "queued", CpuJob.jobs_build != self.jobs_build)
                       .values(jobs_build=self.jobs_build))
+        if again:
+            lab.log(f"{again} game(s) that had failed {MAX_ATTEMPTS} times are queued again (the server started)")
         self._sync_queue(self.clock(), force=True)
         with db.session() as s:
-            # an experiment deleted from the queue while the server was down: its waiting jobs go with it
-            gone = s.execute(update(CpuJob).where(CpuJob.state == "queued", CpuJob.item_kind == "lab_experiment",
+            # an experiment deleted from the queue while the server was down: its waiting and failed jobs go with it
+            gone = s.execute(update(CpuJob).where(CpuJob.state.in_(("queued", "failed")),
+                                                  CpuJob.item_kind == "lab_experiment",
                                                   CpuJob.item_ref.not_in(list(self.exps) or [""]))
                              .values(state="cancelled")).rowcount
         if gone:
@@ -456,24 +508,27 @@ class Dispatcher:
                 if not (lab.QUEUE / f"{name}.json").exists():
                     self._deleted(s, self.exps.pop(name))
 
-    def _owner(self, s, spec: dict) -> Optional[str]:
-        """The consumer of an experiment's jobs: its owned item's owner, or nobody for the server's own collection (a
-        ranking or reference run, or an item an administrator marked ``collection``) and for an experiment no item
-        registers (queued by hand, adopted by the server's first administrator when it starts)."""
+    def _owner(self, s, spec: dict) -> tuple:
+        """(the consumer of an experiment's jobs, whether that is known): its owned item's owner, or nobody for the
+        server's own collection (a ranking or reference run, or an item an administrator marked ``collection``); not
+        known while no item registers it (being registered, or queued by hand: then adopted by the server's first
+        administrator at its next start)."""
         from citar import items
         if lab.kind_of(spec) in lab.COLLECTION_KINDS:
-            return None
+            return None, True
         row = items.get(s, "lab_experiment", spec["name"])
-        if row is None or row.collection:
-            return None
-        return row.owner_id
+        if row is None:
+            return None, False
+        return (None if row.collection else row.owner_id), True
 
     def _load(self, s, spec: dict) -> None:
         """An experiment newly in the queue (or every one, at the start): its jobs and its results file."""
         from sqlalchemy import select
         from citar.db.models import CpuJob
-        exp = Exp(name=spec["name"], spec=spec, owner_id=self._owner(s, spec), games=int(spec.get("games") or 0),
-                  priority=int(spec.get("priority") or 0), submitted=str(spec.get("submitted") or ""))
+        owner, known = self._owner(s, spec)
+        exp = Exp(name=spec["name"], spec=spec, owner_id=owner, games=int(spec.get("games") or 0),
+                  priority=int(spec.get("priority") or 0), submitted=str(spec.get("submitted") or ""),
+                  owner_known=known, first_seen=self.clock(), owner_checked=self.clock())
         self.exps[exp.name] = exp
         for job in s.scalars(select(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
                                                  CpuJob.state.not_in(("cancelled", "withdrawn")))):
@@ -481,6 +536,8 @@ class Dispatcher:
             if i is None:
                 continue
             exp.has_job.add(i)
+            if owner is not None and job.owner_id is None and job.state in store.LIVE:
+                job.owner_id = owner        # made before its item was found (a process that ended meanwhile)
             if job.state in store.SETTLED:
                 exp.settled.add(i)
             elif job.state == "failed":
@@ -497,7 +554,7 @@ class Dispatcher:
         exp.advance()
 
     def _view(self, job, exp: Exp) -> Job:
-        created = job.created_at.timestamp() if job.created_at else time.time()
+        created = _utc_ts(job.created_at) if job.created_at else time.time()
         return Job(id=job.id, kind=job.kind, ref=job.ref, exp=exp.name, i=store.game_of(job.ref) or 0,
                    owner_id=job.owner_id, spec=dict(job.spec or {}), spec_hash=job.spec_hash,
                    jobs_build=job.jobs_build, priority=job.priority, mem_mb=int(job.mem_mb or 0), state=job.state,
@@ -519,7 +576,9 @@ class Dispatcher:
                                            CpuJob.state.in_(store.LIVE)).values(priority=priority))
 
     def _deleted(self, s, exp: Exp) -> None:
-        """An experiment deleted from the queue: its waiting jobs cancelled, its running ones aborted."""
+        """An experiment deleted from the queue: its waiting and failed jobs cancelled (so one queued again under its
+        name plays its failed games again), its running ones aborted."""
+        from sqlalchemy import update
         from citar.db.models import CpuJob
         for j in [j for j in self.jobs.values() if j.exp == exp.name]:
             row = s.get(CpuJob, j.id)
@@ -529,6 +588,8 @@ class Dispatcher:
                 run = self.runs[j.run]
                 run.executor.abort(run.id, "its experiment was deleted")
             self.jobs.pop(j.id, None)
+        s.execute(update(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
+                                       CpuJob.state == "failed").values(state="cancelled"))
         lab.log(f"experiment {exp.name} left the queue: its waiting games were cancelled")
 
     # -------------------------------------------------------------- results files
@@ -611,16 +672,21 @@ class Dispatcher:
                         "played again")
                 continue
             line = self._line(job.kind, exp.name, store.game_of(job.ref) or 0, job.spec or {}, run.result,
-                              run.machine_id, run.id, run.executor, run.cpu_s, run.wall_s, run.started_at,
-                              run.ended_at)
-            self._append(exp, line, store.game_of(job.ref) or 0, run.id)
-            self._prune.append(run.id)
+                              run.machine_id, run.id, run.executor, run.cpu_s, run.wall_s,
+                              run.started_at or run.offered_at, run.ended_at)
+            exp.settled.discard(store.game_of(job.ref))      # until its line is written
+            self._settle_line(exp, line, store.game_of(job.ref) or 0, run.id)
             lab.log(f"{exp.name} #{store.game_of(job.ref)}: its accepted result's line written at the start")
 
     @staticmethod
     def _line(kind: str, exp: str, i: int, spec: dict, result: dict, machine: str, run: str, executor: str,
               cpu_s: float, wall_s: float, started, ended) -> dict:
-        started_ts = started.timestamp() if isinstance(started, datetime) else started
+        if isinstance(started, datetime):
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)     # the database's times are UTC
+            started_ts = started.timestamp()
+        else:
+            started_ts = started
         if isinstance(ended, datetime):
             if ended.tzinfo is None:
                 ended = ended.replace(tzinfo=timezone.utc)
@@ -638,11 +704,36 @@ class Dispatcher:
         have = self._lines.setdefault(str(path), set())
         if (i, run) in have:
             return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(line) + "\n")
+        self._write_line(path, json.dumps(line) + "\n")
         have.add((i, run))
         exp.lines[run] = i
+        return True
+
+    @staticmethod
+    def _write_line(path: Path, text: str) -> None:
+        """One line onto a results file, in one write, retried while Windows says the file is locked (a sync client
+        or a reader holding it a moment, ``fsutil.retry``)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        def write():
+            with open(path, "a", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        fsutil.retry(write)
+
+    def _settle_line(self, exp: Exp, line: dict, i: int, run: str) -> bool:
+        """An accepted result's line written: its game settled and its run's stored result pruned. A line the file
+        refused waits on ``_pending``, tried again each tick (``_flush``): its game settles only once it is there, so
+        its experiment never moves to done/ without it, and its result is kept meanwhile."""
+        try:
+            self._append(exp, line, i, run)
+        except Exception:
+            log.warning("%s #%s: its result's line could not be written; trying again each tick", exp.name, i,
+                        exc_info=True)
+            if not any(p[3] == run for p in self._pending):
+                self._pending.append((exp, line, i, run))
+            return False
+        exp.settled.add(i)
+        self._prune.append(run)
         return True
 
     # -------------------------------------------------------------- jobs from the queue
@@ -663,50 +754,85 @@ class Dispatcher:
         return out
 
     def _owners(self, now: float) -> None:
-        """Look again, every ``OWNER_SECONDS``, for the owner of a member's experiment that had none when it was
-        loaded: ``citar lab submit`` registers its item just after it writes the queue's file, and an experiment read
-        in between would otherwise be nobody's for good. Its waiting jobs take the owner found."""
+        """Look for the owned item of a member's experiment that had none when it was read: every tick within
+        ``OWNER_SECONDS`` of first reading it (its games wait meanwhile: ``citar lab submit`` and the A/B route write
+        the queue's file just before their item is committed), every ``OWNER_SECONDS`` after (an experiment queued by
+        hand, adopted at the next start). Its live jobs, waiting or playing, take the owner found; the view in memory
+        changes once the database has."""
         from sqlalchemy import update
         from citar import db
         from citar.db.models import CpuJob
-        due = [exp for exp in self.exps.values() if exp.owner_id is None and exp.kind not in lab.COLLECTION_KINDS
-               and now - exp.owner_checked >= OWNER_SECONDS]
+        due = [exp for exp in self.exps.values() if not exp.owner_known and exp.kind not in lab.COLLECTION_KINDS
+               and (exp.in_grace(now) or now - exp.owner_checked >= OWNER_SECONDS)]
         if not due:
             return
+        found = []
         with db.session() as s:
             for exp in due:
                 exp.owner_checked = now
-                owner = self._owner(s, exp.spec)
-                if owner is None:
+                owner, known = self._owner(s, exp.spec)
+                if not known:
                     continue
-                exp.owner_id = owner
-                for j in self.jobs.values():
-                    if j.exp == exp.name and j.state == "queued":
-                        j.owner_id = owner
-                s.execute(update(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
-                                               CpuJob.state == "queued").values(owner_id=owner))
+                found.append((exp, owner))
+                if owner is not None:
+                    s.execute(update(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
+                                                   CpuJob.state.in_(store.LIVE)).values(owner_id=owner))
+        for exp, owner in found:
+            exp.owner_id, exp.owner_known = owner, True
+            for j in self.jobs.values():
+                if j.exp == exp.name:
+                    j.owner_id = owner
+
+    def _takeable(self, job: Job, cache: dict) -> bool:
+        """Whether an executor that is on would play ``job`` as things are set now (``refuses``: another jobs build, a
+        kind its settings leave out, more memory a run than it has: refusals that last until an administrator changes
+        something, unlike a busy thread or a benchmark). With no executor on, every job is (nothing plays, and the
+        window fills as it would for one). Cached per tick in ``cache`` by what an executor's ``refuses`` may look at
+        (the executor interface: a job's kind, jobs build, memory and owner), so a tick with thousands of jobs of a
+        few shapes asks each executor a few times."""
+        key = (job.kind, job.jobs_build, job.mem_mb, job.owner_id)
+        hit = cache.get(key)
+        if hit is None:
+            on = [e for e in self.executors if getattr(e, "want", {}).get("enabled", True)]
+            hit = cache[key] = not on or any(e.refuses(job) is None for e in on)
+        return hit
+
+    @staticmethod
+    def _games(exps: list, now: float, stuck: set):
+        """An owner's games next in line: each experiment's missing games, oldest experiment first, leaving out an
+        experiment that waits for its owner, one a job refuses and one whose next game no executor would take."""
+        for e in exps:
+            if e.in_grace(now):
+                continue
+            for i in e.missing():
+                if e.refused or e.name in stuck:
+                    break
+                yield e, i
 
     def _fill(self, now: float) -> None:
-        """Make jobs of the games next in line (the window, P4.5.5)."""
+        """Make jobs of the games next in line (the window, P4.5.5). Only the jobs an executor would take hold a
+        place: a job no executor would take (its memory raised past every executor's by a death) keeps its row and
+        waits, saying why, but the games behind it take its place; a game no executor would take gets no row (its
+        experiment's ``probe`` says why, and its later games wait behind it). The view in memory takes the rows once
+        the database has them."""
         cap = WINDOW * max(1, self._threads())
-        queued: dict = defaultdict(lambda: defaultdict(list))
+        cache: dict = {}
+        queued: dict = defaultdict(lambda: defaultdict(int))
         n = 0
         for j in self.jobs.values():
-            if j.state == "queued":
-                queued[j.priority][j.owner_id or ""].append(j)
+            if j.state == "queued" and self._takeable(j, cache):
+                queued[j.priority][j.owner_id or ""] += 1
                 n += 1
         if n >= 2 * cap:
             return
         budget = 2 * cap - n
-        pos, made = 0, []
+        pos, made, stuck, probes = 0, [], set(), {}
         from citar import db
         with db.session() as s:
             for p, owners in self._order():
                 iters = []
                 for owner, exps in owners:
-                    have = len(queued[p].get(owner, []))
-                    games = ((e, i) for e in exps for i in e.missing())
-                    iters.append([have, games])
+                    iters.append([queued[p].get(owner, 0), self._games(exps, now, stuck)])
                 while iters and pos < cap and budget > 0:
                     for it in list(iters):
                         if pos >= cap or budget <= 0:
@@ -720,17 +846,31 @@ class Dispatcher:
                             iters.remove(it)
                             continue
                         exp, i = nxt
-                        job = self._new_job(s, exp, i)
-                        if job is not None:
-                            made.append(job)
-                            pos += 1
-                            budget -= 1
+                        made_job = self._new_job(exp, i)
+                        if made_job is None:
+                            continue
+                        job, row = made_job
+                        if not self._takeable(job, cache):
+                            stuck.add(exp.name)
+                            probes[exp.name] = job
+                            continue
+                        s.add(row)
+                        made.append((exp, job))
+                        pos += 1
+                        budget -= 1
                 if pos >= cap or budget <= 0:
                     break
-        for job in made:
+        for exp, job in made:
             self.jobs[job.id] = job
+            exp.has_job.add(job.i)
+            exp.advance()
+            exp.probe = None
+        for name, job in probes.items():
+            self.exps[name].probe = job
 
-    def _new_job(self, s, exp: Exp, i: int) -> Optional[Job]:
+    def _new_job(self, exp: Exp, i: int) -> Optional[tuple]:
+        """A job of game ``i`` and its row, not yet added to the database (None for a game a job refuses: its
+        experiment is then ``refused``, saying why)."""
         from citar.db.models import CpuJob, new_id
         kind, spec = lab.job_of(exp.spec, i)
         try:
@@ -746,16 +886,15 @@ class Dispatcher:
                 lab.log(exp.refused)
             return None
         cost = self.costs.of(kind, checked["spec"])
+        mem = min(MEM_MAX, int(math.ceil(cost["peak_mb"])))
         row = CpuJob(id=new_id("cj_"), kind=kind, ref=f"lab:{exp.name}:{i}"[:160], item_kind="lab_experiment",
                      item_ref=exp.name[:120], owner_id=exp.owner_id, spec=checked["spec"],
                      spec_hash=checked["spec_hash"], jobs_build=self.jobs_build, priority=exp.priority,
-                     mem_mb=int(math.ceil(cost["peak_mb"])), state="queued", attempts=0, created_at=utcnow())
-        s.add(row)
-        exp.has_job.add(i)
-        exp.advance()
-        return Job(id=row.id, kind=kind, ref=row.ref, exp=exp.name, i=i, owner_id=exp.owner_id, spec=row.spec,
-                   spec_hash=row.spec_hash, jobs_build=row.jobs_build, priority=row.priority, mem_mb=row.mem_mb,
-                   state="queued", attempts=0, created=time.time())
+                     mem_mb=mem, state="queued", attempts=0, created_at=utcnow())
+        job = Job(id=row.id, kind=kind, ref=row.ref, exp=exp.name, i=i, owner_id=exp.owner_id, spec=row.spec,
+                  spec_hash=row.spec_hash, jobs_build=row.jobs_build, priority=row.priority, mem_mb=mem,
+                  state="queued", attempts=0, created=time.time())
+        return job, row
 
     # -------------------------------------------------------------- frames
     def _drain(self, now: float) -> None:
@@ -793,27 +932,33 @@ class Dispatcher:
             if t == "job_result":
                 log.info("a late result for run %s on %s, dropped", run_id, e.id)
             return
+        # when the frame arrived, in the dispatcher's clock and as a wall time: it may be read a tick later
+        at = H.arrived(f, now)
+        wall = time.time() - (now - at)
         if t == "job_accept":
-            run.state, run.started_at, run.started_wall, run.last_progress = "running", now, time.time(), now
+            run.state, run.started_at, run.started_wall, run.last_progress = "running", at, wall, at
             row = self._run_row(s, run)
-            row.state, row.started_at = "running", utcnow()
+            row.state, row.started_at = "running", _utc(wall)
         elif t == "job_progress":
-            run.last_progress = now
+            run.last_progress = at
             run.round, run.of = f.get("round"), f.get("of")
             for k in ("cpu_s", "paused_s", "peak_mb"):
                 if isinstance(f.get(k), (int, float)):
-                    setattr(run, k, max(getattr(run, k), float(f[k])) if k == "peak_mb" else float(f[k]))
+                    v = max(0.0, float(f[k]))
+                    setattr(run, k, max(run.peak_mb, min(v, float(MEM_MAX))) if k == "peak_mb" else v)
             if isinstance(f.get("elapsed_s"), (int, float)):
                 run.wall_s = float(f["elapsed_s"])
             run.paused = bool(f.get("paused"))
+            # a report that says it is held covers its pause up to its arrival; the pause goes on from there
+            run.held_since = at if run.paused else None
         elif t == "job_result":
-            self._accept(s, e, run, f, now, after)
+            self._accept(s, e, run, f, at, wall, after)
         elif t == "job_failed":
-            self._failed(s, e, run, f, now)
+            self._failed(s, e, run, f, at, wall)
         elif t == "job_reject":
-            self._rejected(s, e, run, f)
+            self._rejected(s, e, run, f, wall)
         elif t == "job_aborted":
-            self._end(s, run, "aborted", {"code": "aborted", "message": "aborted"})
+            self._end(s, run, "aborted", {"code": "aborted", "message": "aborted"}, wall)
             self._requeue(s, run, attempt=False)
 
     def _run_row(self, s, run: Run):
@@ -823,13 +968,26 @@ class Dispatcher:
             raise RuntimeError(f"run {run.id} has no row")
         return row
 
-    def _end(self, s, run: Run, state: str, error: Optional[dict]) -> None:
+    def _end(self, s, run: Run, state: str, error: Optional[dict], wall: Optional[float] = None) -> None:
+        """A run's row ended at ``wall`` (when its end arrived; now when not given)."""
         row = self._run_row(s, run)
-        row.state, row.ended_at = state, utcnow()
+        row.state, row.ended_at = state, _utc(wall) if wall is not None else utcnow()
         row.cpu_s, row.wall_s, row.paused_s, row.peak_mb = run.cpu_s, run.wall_s, run.paused_s, run.peak_mb
         if error is not None:
             row.error = error
         self.runs.pop(run.id, None)
+
+    @staticmethod
+    def _paused(run: Run, at: float) -> float:
+        """How long ``run`` has been paused by ``at``: what it reported, with the time since a report that said it was
+        held (a pause going on: the job host reports a held run only every ten seconds), or how long benchmarks held
+        its executor, whichever is more. A run held past its deadline then has its pause counted though no report
+        said so (P4.5.5: an expiry its pause caused never counts)."""
+        reported = run.paused_s
+        if run.paused and run.held_since is not None:
+            reported += max(0.0, at - run.held_since)
+        bench = run.bench_s + (max(0.0, at - run.bench_since) if run.bench_since is not None else 0.0)
+        return max(reported, bench)
 
     def _requeue(self, s, run: Run, *, attempt: bool, mem_mb: Optional[int] = None) -> None:
         """A run ended without a result: its job waits again (``failed`` past ``MAX_ATTEMPTS`` when ``attempt``)."""
@@ -856,27 +1014,31 @@ class Dispatcher:
             return
         job.state = row.state = "queued"
 
-    def _failed(self, s, e, run: Run, f: dict, now: float) -> None:
+    def _failed(self, s, e, run: Run, f: dict, at: float, wall: Optional[float] = None) -> None:
         code = str(f.get("code") or "internal")
         message = str(f.get("message") or "")[:1000]
+        local = e.kind == "local"
         if isinstance(f.get("peak_mb"), (int, float)):
-            run.peak_mb = max(run.peak_mb, float(f["peak_mb"]))
-        self._end(s, run, "failed", {"code": code, "message": message})
+            run.peak_mb = max(run.peak_mb, min(max(0.0, float(f["peak_mb"])), float(MEM_MAX)))
+        paused = self._paused(run, at)
+        run.paused_s = max(run.paused_s, paused)
+        caused = (code == "deadline" and run.started_at is not None
+                  and pause_caused(run.started_at, run.deadline_s, paused, at))
+        error = {"code": code, "message": message}
+        if caused:
+            error["pause_caused"] = True
+        self._end(s, run, "failed", error, wall)
         job = self.jobs.get(run.job)
         if code == "memory":
-            per_run = int(f.get("per_run_mb") or e.memory_per_run_mb or 0)
-            # the largest peak the run reported, in its progress or its failure (a run that died before its first
-            # look reported none)
-            peak = run.peak_mb if run.peak_mb > 0 else None
-            want = int(math.ceil(peak)) if peak is not None else per_run + 1
-            if f.get("alone"):
-                want = max(want, per_run + 1)       # its host's only run: it alone needed more than the host had
-            # not an attempt while it teaches the job how much it needs; one that teaches nothing is, so a job that
-            # dies of memory without saying how much cannot go round for ever
-            grew = job is not None and want > job.mem_mb
-            self._requeue(s, run, attempt=not grew, mem_mb=want)
-            log.info("run %s of %s died of memory (peak %s MB); its job now needs %s MB a run", run.id,
-                     job.ref if job else run.job, peak, want)
+            self._memory_death(s, e, run, f, job, local)
+            return
+        if caused:
+            # the job host ends a run held past twice its deadline itself, before the server's backstop: its pause
+            # (a benchmark's) ran it out of time, not its play, so neither an attempt nor an abandon (P4.5.5)
+            self._requeue(s, run, attempt=False)
+            if job is not None:
+                lab.log(f"{job.exp} #{job.i} on {e.name}: held by a pause past its deadline ({message}); queued "
+                        "again, not counted as an attempt")
             return
         retryable = bool(f.get("retryable", True))
         if retryable:
@@ -894,9 +1056,32 @@ class Dispatcher:
         if job is not None:
             lab.log(f"{job.exp} #{job.i} failed on {e.name} ({code}): {message.splitlines()[0] if message else ''}")
 
-    def _rejected(self, s, e, run: Run, f: dict) -> None:
+    def _memory_death(self, s, e, run: Run, f: dict, job: Optional[Job], local: bool) -> None:
+        """A run whose host died of memory: its job's ``mem_mb`` raised to the largest peak the run reported (its
+        progress, its failure), and past the executor's memory a run when it reported none or was its host's only
+        run (then it alone needed more than the host had, P4.4.3). The executor's memory a run is the dispatcher's
+        own figure for it; only the local executor's frames say which runs shared a dead host (``alone``,
+        ``per_run_mb``: its host is gone, and with it the figure). A remote run's peak is its helper's word, so it
+        raises its job at most past that executor's memory a run: a helper cannot price a job out of every machine.
+        Not an attempt while it raises ``mem_mb``; one that raises nothing is, so a job cannot go round for ever."""
+        own = e.memory_per_run_mb
+        per_run = int((f.get("per_run_mb") if local else None) or own or 0)
+        peak = run.peak_mb if run.peak_mb > 0 else None
+        want = int(math.ceil(peak)) if peak is not None else per_run + 1
+        if local and f.get("alone"):
+            want = max(want, per_run + 1)
+        if not local and own:
+            want = min(want, int(own) + 1)
+        want = max(0, min(want, MEM_MAX))
+        grew = job is not None and want > job.mem_mb
+        self._requeue(s, run, attempt=not grew, mem_mb=want)
+        log.info("run %s of %s died of memory (peak %s MB); its job now needs %s MB a run", run.id,
+                 job.ref if job else run.job, peak, max(want, job.mem_mb if job else 0))
+
+    def _rejected(self, s, e, run: Run, f: dict, wall: Optional[float] = None) -> None:
         reason = str(f.get("reason") or "")
-        self._end(s, run, "failed", {"code": "rejected", "reason": reason, "message": str(f.get("message"))[:1000]})
+        self._end(s, run, "failed", {"code": "rejected", "reason": reason, "message": str(f.get("message"))[:1000]},
+                  wall)
         job = self.jobs.get(run.job)
         if reason not in ("busy", "memory", "bad_spec"):
             # the executor refuses every job for now (unverifiable, another build): offered nothing for a while,
@@ -918,9 +1103,10 @@ class Dispatcher:
             return
         self._requeue(s, run, attempt=False)
 
-    def _accept(self, s, e, run: Run, f: dict, now: float, after: list) -> None:
+    def _accept(self, s, e, run: Run, f: dict, at: float, wall: float, after: list) -> None:
         """A result: checked, committed (the job accepted), then its line appended once, the run's stored result
-        pruned, its ledger event, its cost and its usage rows (P4.5.7)."""
+        pruned, its ledger event, its cost and its usage rows (P4.5.7). ``wall`` is when it arrived: the end of what
+        the server observed of the run, from its accept's arrival (its offer's, when no accept was seen)."""
         from citar.db.models import CpuJob
         job = self.jobs.get(run.job)
         row = s.get(CpuJob, run.job)
@@ -928,9 +1114,10 @@ class Dispatcher:
         result, chain = outcome.get("result"), outcome.get("chain") or {}
         for k in ("cpu_s", "wall_s", "paused_s", "peak_mb"):
             if isinstance(outcome.get(k), (int, float)):
-                setattr(run, k, max(run.peak_mb, float(outcome[k])) if k == "peak_mb" else float(outcome[k]))
+                v = max(0.0, float(outcome[k]))
+                setattr(run, k, max(run.peak_mb, min(v, float(MEM_MAX))) if k == "peak_mb" else v)
         if job is None or row is None or row.state == "cancelled":
-            self._end(s, run, "done", None)
+            self._end(s, run, "done", None, wall)
             return
         try:
             if not isinstance(result, dict):
@@ -943,12 +1130,12 @@ class Dispatcher:
             # a correct executor never sends one: an internal fault of the local executor's, played again
             log.error("run %s of %s on %s gave a result that does not check: %s", run.id, job.ref, e.id, err)
             self._failed(s, e, run, {"code": "internal", "message": f"its result does not check: {err}",
-                                     "retryable": True}, now)
+                                     "retryable": True}, at, wall)
             return
         crash = "crash" in result
         local = e.kind == "local"
         rrow = self._run_row(s, run)
-        rrow.state, rrow.ended_at = "done", utcnow()
+        rrow.state, rrow.ended_at = "done", _utc(wall)
         rrow.cpu_s, rrow.wall_s, rrow.paused_s, rrow.peak_mb = run.cpu_s, run.wall_s, run.paused_s, run.peak_mb
         rrow.result, rrow.result_hash = result, outcome.get("result_hash")
         rrow.chain_head, rrow.rounds = chain.get("head"), chain.get("rounds")
@@ -959,7 +1146,7 @@ class Dispatcher:
         self.jobs.pop(job.id, None)
         ended = rrow.ended_at
         started_wall = run.started_wall or run.offered_wall
-        observed = max(0.0, time.time() - started_wall)
+        observed = max(0.0, wall - started_wall)
         exp = self.exps.get(job.exp)
         line = self._line(job.kind, job.exp, job.i, job.spec, result, run.machine, run.id, e.kind, run.cpu_s,
                           run.wall_s, started_wall, ended)
@@ -967,29 +1154,38 @@ class Dispatcher:
                                 None if local else self.costs.of(job.kind, job.spec)["cpu_s"], ended)
         self._rejects.pop(e.id, None)
 
-        def written():
-            hook = self.hooks.get("after_commit")
-            if hook is not None:
-                hook(job.id)
-            if exp is not None:
-                self._append(exp, line, job.i, run.id)
-                exp.settled.add(job.i)
-            self._prune.append(run.id)
-            _ledger().events([event])
-            self.costs.record(job.kind, job.spec, cpu_s=run.cpu_s if local else None, peak_mb=run.peak_mb or None)
-            self.finished.append(time.time())
-            self._usage(job, line, run.machine)
-            if crash:
-                text = line.get("crash") or ""
-                with open(lab.LAB / "crashes.log", "a", encoding="utf-8") as fh:
-                    fh.write(f"--- {datetime.now():%Y-%m-%d %H:%M} {job.exp} #{job.i} final\n{text}\n")
-                lab.log(f"{job.exp} #{job.i} crashed (final: not played again): {str(text).splitlines()[0]}")
-            elif job.kind == "reference_game":
+        def crash_log():
+            text = line.get("crash") or ""
+            with open(lab.LAB / "crashes.log", "a", encoding="utf-8") as fh:
+                fh.write(f"--- {datetime.now():%Y-%m-%d %H:%M} {job.exp} #{job.i} final\n{text}\n")
+            lab.log(f"{job.exp} #{job.i} crashed (final: not played again): {str(text).splitlines()[0]}")
+
+        def played_log():
+            if job.kind == "reference_game":
                 lab.log(f"{job.exp} #{job.i}: T{result.get('turns')} {result.get('victory')} "
                         f"({run.wall_s:.0f}s on {e.name})")
             else:
                 lab.log(f"{job.exp} #{job.i}: T{result.get('turns')} {result.get('victory')} won by "
                         f"{result.get('winner_label')} ({run.wall_s:.0f}s on {e.name})")
+
+        def written():
+            hook = self.hooks.get("after_commit")
+            if hook is not None:
+                hook(job.id)        # a test's crash here leaves everything below undone, as a dead server would
+            # each step alone: a line the file refuses waits for the next tick, and the rest is written all the same
+            if exp is not None:
+                self._settle_line(exp, line, job.i, run.id)
+            else:
+                self._prune.append(run.id)
+            _step(f"{job.ref}'s CPU event", lambda: _ledger().events([event]))
+            # a counted peak enters the cost table from a reference machine only, as its CPU does: a helper's figures
+            # are its own word (4-11 adds the verifiers')
+            _step(f"{job.ref}'s cost", lambda: self.costs.record(
+                job.kind, job.spec, cpu_s=run.cpu_s if local else None,
+                peak_mb=(run.peak_mb or None) if local else None))
+            self.finished.append(time.time())
+            _step(f"{job.ref}'s usage rows", lambda: self._usage(job, line, run.machine))
+            _step(f"{job.ref}'s log", crash_log if crash else played_log)
         # after the commit (the session's end): the order of writing
         after.append(written)
 
@@ -1033,11 +1229,13 @@ class Dispatcher:
             if run.state == "offered" and now - run.offered_at > OFFER_TTL_SECONDS:
                 expired.append((run, "no answer to its offer within 30 s", True))
             elif run.state == "running" and run.started_at is not None:
-                if now > expires_at(run.started_at, run.deadline_s, run.paused_s):
-                    caused = pause_caused(run.started_at, run.deadline_s, run.paused_s, now)
+                paused = self._paused(run, now)
+                if now > expires_at(run.started_at, run.deadline_s, paused):
+                    caused = pause_caused(run.started_at, run.deadline_s, paused, now)
+                    run.paused_s = max(run.paused_s, paused)
                     expired.append((run, "past its deadline" + (" (its pauses)" if caused else ""), not caused))
-                elif (getattr(e, "online", True) and not run.paused and run.last_progress is not None
-                      and now - run.last_progress > SILENT_SECONDS):
+                elif (getattr(e, "online", True) and not run.paused and run.bench_since is None
+                      and run.last_progress is not None and now - run.last_progress > SILENT_SECONDS):
                     expired.append((run, "no progress for 5 minutes", True))
         if not expired:
             return
@@ -1119,10 +1317,17 @@ class Dispatcher:
             if live and e.id not in self._paused_exec:
                 self._paused_exec.add(e.id)
                 e.pause()
+                for run in self.runs.values():
+                    if run.executor is e and run.bench_since is None:
+                        run.bench_since = now
                 lab.log(f"a benchmark holds {e.name}: its games are paused")
             elif not live and e.id in self._paused_exec:
                 self._paused_exec.discard(e.id)
                 e.resume()
+                for run in self.runs.values():
+                    if run.executor is e and run.bench_since is not None:
+                        run.bench_s += max(0.0, now - run.bench_since)
+                        run.bench_since = None
                 lab.log(f"the benchmark on {e.name} ended: its games go on")
 
     def _match(self, now: float) -> None:
@@ -1146,9 +1351,13 @@ class Dispatcher:
             return
         from citar import db
         from citar.db.models import CpuJob, CpuJobRun, new_id
-        made = []
+        made, gone = [], []
         with db.session() as s:
             for e, job in offers:
+                row = s.get(CpuJob, job.id)
+                if row is None:
+                    gone.append(job)
+                    continue
                 cost = self.costs.of(job.kind, job.spec)["cpu_s"]
                 dl = deadline_s(cost, e.cpu_percent, e.cpus, e.threads, e.speed)
                 run = Run(id=new_id("cr_"), job=job.id, executor=e, machine=e.id, role="primary", state="offered",
@@ -1157,13 +1366,19 @@ class Dispatcher:
                 s.add(CpuJobRun(id=run.id, job_id=job.id, machine_id=e.id[:40], executor=e.kind, role="primary",
                                 state="offered", offered_at=at,
                                 deadline_at=datetime.fromtimestamp(at.timestamp() + dl, timezone.utc)))
-                row = s.get(CpuJob, job.id)
                 row.state = "running"
-                job.state, job.run = "running", run.id
                 made.append((e, job, run))
+        # committed: the view in memory takes the offers, and only then do the executors get them (a database that
+        # refused them leaves every job waiting, as it was)
+        for job in gone:
+            self.jobs.pop(job.id, None)
         for e, job, run in made:
+            job.state, job.run = "running", run.id
             self.runs[run.id] = run
-            e.offer(run.id, job, run.deadline_s)
+            try:
+                e.offer(run.id, job, run.deadline_s)
+            except Exception:       # never answered: it expires after OFFER_TTL_SECONDS, and the others still go
+                log.exception("offering run %s to executor %s failed", run.id, getattr(e, "id", "?"))
 
     def _pick(self, e, levels: dict) -> Optional[Job]:
         for p in sorted(levels, reverse=True):
@@ -1178,21 +1393,36 @@ class Dispatcher:
                         return job
         return None
 
+    @staticmethod
+    def label(e) -> str:
+        """An executor as the dispatcher's words name it: the server's own job host is "this server" (its machine's
+        name is administrators'), a helper by its machine's name (the routes rename it for each viewer, from
+        ``waiting_on``)."""
+        return "this server" if e.kind == "local" else e.name
+
     def waiting(self, job: Job, now: Optional[float] = None) -> str:
         """Why a queued job is not playing: each executor's reason, or that it is next in line."""
+        return self._waiting(job, now)[0]
+
+    def _waiting(self, job: Job, now: Optional[float] = None) -> tuple:
+        """(``waiting``'s words, the executors' reasons as ``{machine, kind, why}`` for the routes to name each
+        executor as the viewer may be told it)."""
         now = self.clock() if now is None else now
         if lab.paused() is not None:
-            return "the lab is paused"
-        reasons = []
+            return "the lab is paused", []
+        parts = []
         for e in self.executors:
             why = self._available(e, now) or e.refuses(job)
             if why is None and e.free <= 0:
                 why = "every thread is playing"
             if why is not None:
-                reasons.append(f"{e.name}: {why}")
-        if len(reasons) < len(self.executors):
-            return "next in line"
-        return "; ".join(reasons) if reasons else "no executor takes CPU work"
+                parts.append((e, why))
+        if len(parts) < len(self.executors):
+            return "next in line", []
+        if not parts:
+            return "no executor takes CPU work", []
+        return ("; ".join(f"{self.label(e)}: {why}" for e, why in parts),
+                [{"machine": e.id, "kind": e.kind, "why": why} for e, why in parts])
 
     # -------------------------------------------------------------- completion
     def _complete(self) -> None:
@@ -1210,18 +1440,65 @@ class Dispatcher:
                 lab.log(f"experiment {name} complete")
 
     def _flush(self) -> None:
-        """What the tick leaves to write: the stored results of runs whose lines are written (pruned) and the cost
-        cells that changed."""
+        """What the tick leaves to write: the lines a results file refused, tried again; the stored results of runs
+        whose lines are written (pruned); and the cost cells that changed."""
+        if self._pending:
+            pending, self._pending = self._pending, []
+            for exp, line, i, run in pending:
+                if self._settle_line(exp, line, i, run):
+                    lab.log(f"{exp.name} #{i}: its result's line is written")
         if not self._prune and not self.costs._dirty:
             return
         from sqlalchemy import update
         from citar import db
         from citar.db.models import CpuJobRun
         prune, self._prune = self._prune, []
+        try:
+            with db.session() as s:
+                if prune:
+                    s.execute(update(CpuJobRun).where(CpuJobRun.id.in_(prune)).values(result=None, digests=None))
+                self.costs.write(s)
+        except Exception:
+            self._prune = prune + self._prune       # tried again at the next tick (the cells stay changed too)
+            raise
+
+    # -------------------------------------------------------------- administrators' requests
+    def retry(self, exp: Optional[str] = None) -> None:
+        """An administrator's word (``POST /api/admin/jobs/retry``) that the failed games of ``exp``, or of every
+        queued experiment, are to be played again, their attempts back to 0: done at the next tick, on the
+        dispatcher's thread (the only writer of the jobs)."""
+        self._requests.append(("retry", exp))
+        self.poke()
+
+    def _serve(self) -> None:
+        """The administrators' requests since the last tick."""
+        while self._requests:
+            what, exp = self._requests.popleft()
+            if what == "retry":
+                self._retry_failed([exp] if exp else list(self.exps))
+
+    def _retry_failed(self, names: list) -> int:
+        """The failed jobs of these queued experiments queued again, their attempts back to 0 (whatever failed them:
+        the administrator may have changed what did)."""
+        from sqlalchemy import select
+        from citar import db
+        from citar.db.models import CpuJob
+        names = [n for n in names if n in self.exps]
+        if not names:
+            return 0
+        views = []
         with db.session() as s:
-            if prune:
-                s.execute(update(CpuJobRun).where(CpuJobRun.id.in_(prune)).values(result=None, digests=None))
-            self.costs.write(s)
+            for row in s.scalars(select(CpuJob).where(CpuJob.item_kind == "lab_experiment",
+                                                     CpuJob.item_ref.in_(names), CpuJob.state == "failed")):
+                row.state, row.attempts, row.jobs_build = "queued", 0, self.jobs_build
+                views.append(self._view(row, self.exps[row.item_ref]))
+        for job in views:
+            self.jobs[job.id] = job
+            self.exps[job.exp].failed.discard(job.i)
+        if views:
+            lab.log(f"{len(views)} failed game(s) of {', '.join(sorted({j.exp for j in views}))} queued again "
+                    "(an administrator's retry)")
+        return len(views)
 
     # -------------------------------------------------------------- what others read
     def _publish(self, now: float) -> None:
@@ -1253,8 +1530,17 @@ class Dispatcher:
             info = dict(per_exp.get(name, {"queued": 0, "running": 0}))
             info.update({"settled": len(exp.settled), "failed": sorted(exp.failed), "refused": exp.refused or None,
                          "owner": exp.owner_id, "job_kind": exp.job_kind})
-            if name in firsts and not info["running"]:
-                info["waiting"] = self.waiting(firsts[name], now)
+            if not info["running"]:
+                text, parts = None, []
+                if name in firsts:
+                    text, parts = self._waiting(firsts[name], now)
+                elif exp.in_grace(now):
+                    text = "looking up its owner"
+                elif exp.probe is not None:
+                    # its next game, which no executor would take: why (fresh, so a change of settings shows)
+                    text, parts = self._waiting(exp.probe, now)
+                if text:
+                    info["waiting"], info["waiting_on"] = text, parts
             exps[name] = info
         executors = []
         for e in self.executors:
@@ -1279,6 +1565,24 @@ class Dispatcher:
             return [{"job": j.id, "exp": j.exp, "i": j.i, "kind": j.kind, "priority": j.priority,
                      "owner": j.owner_id, "mem_mb": j.mem_mb, "attempts": j.attempts,
                      "waiting": self.waiting(j, now)} for j in jobs]
+
+
+def _utc(wall: float) -> datetime:
+    """A wall time as the database keeps times (UTC)."""
+    return datetime.fromtimestamp(wall, timezone.utc)
+
+
+def _utc_ts(t: datetime) -> float:
+    """A database time as a wall time: a naive one (SQLite gives them so) is UTC."""
+    return (t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t).timestamp()
+
+
+def _step(what: str, fn: Callable[[], Any]) -> None:
+    """One step of a result's writing after its commit, alone: its failure is logged and the next step still runs."""
+    try:
+        fn()
+    except Exception:
+        log.exception("writing %s failed", what)
 
 
 def _observed(run) -> float:

@@ -50,6 +50,7 @@ os.environ["CITAR_REQUIRE_HTTPS"] = "0"
 os.environ["CITAR_BEHIND_PROXY"] = "0"
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from citar import db, engine_api, items, lab, ledger, servers, settings
 from citar.auth import accounts, policy, sessions
@@ -257,6 +258,7 @@ class Lab(unittest.TestCase):
         with db.session() as s:
             return [{"activity": e.activity, "consumer": e.consumer_id, "provider": e.provider_id,
                      "machine": e.machine_id, "cpu": e.cpu_core_s, "observed": e.observed_s,
+                     "reported": e.reported_s, "flags": dict(e.flags or {}),
                      "verification": e.verification, "request": e.request_id, "kind": e.kind, "task": e.task_class}
                     for e in s.scalars(select(ComputeEvent).order_by(ComputeEvent.id))]
 
@@ -360,25 +362,50 @@ class Experiments(Lab):
             lab.normalize({"name": "x", "kind": "tournament", "seats": [{"bot": "basic"}]})
 
     def test_an_experiment_registered_after_its_file_takes_its_owner(self):
-        """``citar lab submit`` writes the queue's file, then registers its item: an experiment read in between is
-        looked up again, and its waiting jobs take the owner found (their events then name the consumer)."""
+        """``citar lab submit`` and the A/B route write the queue's file, then commit its item: an experiment read in
+        between makes no job until its item is found (looked up every tick for ``OWNER_SECONDS``), so no game of it
+        is ever charged to nobody."""
         lab.submit(duels("late", 3))
         clock = Clock()
         fake = Fake()
         d = self.dispatcher([fake], clock=clock)
         d.tick()
-        self.assertEqual({j[4] for j in self.jobs()}, {None})
+        self.assertEqual(self.jobs(), [], "no job while its owner may still be registering it")
+        self.assertEqual(d.published["experiments"]["late"]["waiting"], "looking up its owner")
         with db.session() as s:
             items.register(s, "lab_experiment", "late", s.get(User, self.ids["alice"]), "late",
                            path=lab.QUEUE / "late.json")
+        clock.t += 1.0
         d.tick()
-        self.assertEqual({j[4] for j in self.jobs()}, {None}, "looked up again only every OWNER_SECONDS")
+        self.assertEqual({j[4] for j in self.jobs()}, {self.ids["alice"]}, "found within the grace: every job hers")
+        self.assertEqual(len(fake.offers), 1)
+
+    def test_an_experiment_no_item_registers_plays_after_the_grace_and_takes_an_owner_found_later(self):
+        """Queued by hand (no item until the next start adopts it): its games start once ``OWNER_SECONDS`` have
+        passed, as nobody's; an owner found later reaches its live jobs, the one playing too, whose event then names
+        the consumer."""
+        lab.submit(duels("by-hand", 2))
+        clock = Clock()
+        fake = Fake()
+        d = self.dispatcher([fake], clock=clock)
+        d.tick()
+        self.assertEqual(self.jobs(), [])
+        clock.t += D.OWNER_SECONDS
+        self.until(d, lambda: fake.offers)
+        self.assertEqual({j[4] for j in self.jobs()}, {None})
+        with db.session() as s:
+            items.register(s, "lab_experiment", "by-hand", s.get(User, self.ids["bob"]), "by-hand",
+                           path=lab.QUEUE / "by-hand.json")
+        d.tick()
+        self.assertEqual({j[4] for j in self.jobs()}, {None}, "looked up again only every OWNER_SECONDS past the grace")
         clock.t += D.OWNER_SECONDS
         d.tick()
-        with db.session() as s:
-            owners = {j.ref: j.owner_id for j in s.scalars(select(CpuJob)) if j.state == "queued"}
-        self.assertEqual(set(owners.values()), {self.ids["alice"]})
-        self.assertEqual(len(owners), 2)
+        self.assertEqual({j[4] for j in self.jobs()}, {self.ids["bob"]}, "the playing job and the waiting one")
+        fake.auto = True
+        fake.play(fake.offers[0][0])
+        self.until(d, lambda: (lab.DONE / "by-hand.json").exists())
+        events = [e for e in self.events() if e["activity"].startswith("lab:by-hand:")]
+        self.assertEqual([e["consumer"] for e in events], [self.ids["bob"]] * 2)
 
     def test_a_queued_experiment_a_job_refuses_is_shown_so_and_never_started(self):
         with mock.patch.object(lab, "check_games"):
@@ -514,6 +541,13 @@ class Restart(Lab):
         lines = self.lines("crash-commit")
         self.assertEqual(sorted(r["i"] for r in lines),
                          sorted(int(j[0].rsplit(":", 1)[1]) for j in accepted), "written at the start, once")
+        with db.session() as s:
+            started = {r.id: D._utc_ts(r.started_at or r.offered_at) for r in s.scalars(select(CpuJobRun))
+                       if r.state == "done"}
+        for r in lines:
+            # the database's times are UTC, naive as SQLite gives them: never read as local time
+            self.assertAlmostEqual(r["started_ts"], started[r["executor"]["run"]], delta=1.0)
+            self.assertLess(abs(r["started_ts"] - time.time()), 600)
         self.until(d2, lambda: (lab.DONE / "crash-commit.json").exists())
         lines = self.lines("crash-commit")
         self.assertEqual(sorted(r["i"] for r in lines), [0, 1, 2])
@@ -670,7 +704,8 @@ class Memory(Lab):
         self.assertEqual([r["i"] for r in self.lines("big")], [1], "the job that fits played; the other waits")
         self.assertIn(first.id, d.jobs)
         why = d.waiting(first)
-        self.assertRegex(why, r"^Test host: it needs 900 MB a run, and this server's job host leaves each run \d+ MB$")
+        self.assertRegex(why, r"^this server: it needs 900 MB a run, and this server's job host leaves each run "
+                              r"\d+ MB$")
         self.assertIn(why, json.dumps(d.queued_view()))
         exp = {e["name"]: e for e in lab.overview()["experiments"]}["big"]
         self.assertEqual(exp["waiting"], why, "the Lab page says why")
@@ -924,6 +959,23 @@ class Routes(Lab):
         self.assertEqual(self.call("zara", "POST", "/api/admin/jobs/resume").json()["was_paused"], True)
         self.assertIsNone(lab.paused())
 
+    def test_the_retry_of_failed_games_is_administrators(self):
+        from citar.db.models import AuditLog
+        path = "/api/admin/jobs/retry?exp=mine"
+        self.assertEqual(self.call(None, "POST", path).status_code, 401)
+        for who in ("alice", "bob", "mona"):
+            self.assertEqual(self.call(who, "POST", path).status_code, 404, f"{who}: even the experiment's owner")
+        no_csrf = {k: v for k, v in self.headers["zara"].items() if k != sessions.CSRF_HEADER}
+        self.assertEqual(self.client.post(path, headers=no_csrf).status_code, 403)
+        self.assertEqual(self.call("zara", "POST", "/api/admin/jobs/retry?exp=nobodys").status_code, 404)
+        r = self.call("zara", "POST", path)
+        self.assertEqual((r.status_code, r.json()), (200, {"requested": True, "exp": "mine"}), r.text)
+        self.assertEqual(self.call("zara", "POST", "/api/admin/jobs/retry").json()["exp"], None, "every experiment")
+        with db.session() as s:
+            rows = [(a.action, (a.detail or {}).get("exp")) for a in s.scalars(select(AuditLog))
+                    if a.action == "lab.retried"]
+        self.assertEqual((len(rows), set(rows)), (2, {("lab.retried", "mine"), ("lab.retried", None)}))
+
     def test_the_lab_and_queue_pages_name_only_what_the_caller_may_see(self):
         lab_view = self.call("bob", "GET", "/api/lab").json()
         self.assertEqual(lab_view["experiments"], [])
@@ -1044,6 +1096,379 @@ class Costs(Lab):
             from citar.db.models import JobCost
             row = s.get(JobCost, ("lab_game", "duel", 2, 0))
         self.assertEqual(row.samples, 3 + 3, "the committed samples and the three runs")
+
+
+# ---------------------------------------------------------------------------------------------------------- 4-09's review
+
+class Timing(Lab):
+    """A run is timed by when its frames arrived, never by when the dispatcher read them (the review's first finding:
+    a game shorter than a tick had its accept and its result read together, so the server "observed" it for a few
+    milliseconds and flagged its honest CPU ``overreported_cpu``)."""
+
+    def test_a_run_read_late_is_timed_by_its_frames(self):
+        self.host_cpu(threads=1)
+        self.submit("alice", duels("timed", 1, turns=300))         # about a second of CPU here
+        local = self.local()
+        d = self.dispatcher([local])
+        self.until(d, lambda: d.runs)
+        # nothing reads the host's frames until its game is over: its accept and its result are read in one tick
+        deadline = time.perf_counter() + 120
+        while True:
+            with local.host._frames.mutex:
+                frames = list(local.host._frames.queue)
+            if any(f.get("t") == "job_result" for f in frames):
+                break
+            self.assertLess(time.perf_counter(), deadline, "the game did not end")
+            time.sleep(0.05)
+        d.tick()
+        (ev,) = [e for e in self.events() if e["activity"].startswith("lab:timed:")]
+        with db.session() as s:
+            (run,) = s.scalars(select(CpuJobRun)).all()
+            span = (D._utc_ts(run.ended_at) - D._utc_ts(run.started_at))
+            wall = run.wall_s
+        print(f"\na late-read run: host wall {wall:.2f} s, observed {ev['observed']:.2f} s, reported CPU "
+              f"{ev['reported']:.2f} s, counted {ev['cpu']:.2f} s")
+        self.assertGreaterEqual(ev["observed"], 0.9 * wall - 0.05, "observed from its accept's arrival to its result's")
+        self.assertAlmostEqual(span, ev["observed"], delta=0.05, msg="the run's row is timed by its frames too")
+        self.assertNotIn("overreported_cpu", ev["flags"])
+        self.assertGreaterEqual(ev["observed"], ev["reported"] / D.OBSERVED_FACTOR - D.OBSERVED_SLACK)
+        self.assertEqual(ev["cpu"], round(ev["reported"], 6), "an honest run's CPU is counted whole")
+
+
+class Wake(Lab):
+    def test_a_run_ending_wakes_the_dispatcher(self):
+        """P4.5.5: the dispatcher wakes on a job frame, not only every two seconds. With its timer at 30 s, twelve
+        short duels on two threads (six offers each) end within seconds: each end, and the host's start, poke it."""
+        self.submit("alice", duels("quick", 12))
+        with mock.patch.object(D, "TICK_SECONDS", 30.0):
+            d = self.dispatcher()
+            t0 = time.perf_counter()
+            d.start()
+            bound = 20.0 * (3 if ON_CI else 1)
+            while not (lab.DONE / "quick.json").exists():
+                self.assertLess(time.perf_counter() - t0, bound, "the games waited for the dispatcher's timer: "
+                                + lab._tail(lab.LAB / "lab.log", 2000))
+                time.sleep(0.05)
+            took = time.perf_counter() - t0
+        print(f"\ntwelve 30-round duels on two threads, the timer at 30 s: {took:.1f} s")
+        self.assertEqual(sorted(r["i"] for r in self.lines("quick")), list(range(12)))
+
+
+class PausedDeadlines(Lab):
+    def test_a_deadline_failure_its_pause_caused_is_neither_an_attempt_nor_an_abandon(self):
+        """The job host ends a run held past twice its deadline itself (``job_failed`` ``deadline``), before the
+        server's backstop: when its active time was within its deadline its pause caused it, so it is no attempt and
+        no abandon, its paused time counted from the report that said it was held. A deadline its play passed is."""
+        with db.session() as s:
+            s.add(Server(id="sv_box", owner_id=self.ids["bob"], name="Bob box", kind="owned", provider="dryrun",
+                         reach="worker", max_concurrent=1, config={}))
+        servers.invalidate()
+        clock = Clock()
+        self.submit("alice", duels("held", 1))
+        fake = Fake("sv_box", name="Bob box", kind="remote", threads=1)
+        d = self.dispatcher([fake], clock=clock)
+        self.until(d, lambda: fake.offers)
+        d.tick()                                                 # its accept, at 1000
+        run, job, dl = fake.offers[0]
+        clock.t += 1.0
+        fake.progress(run, round=3, of=30, elapsed_s=1.0, cpu_s=0.5, paused_s=0.0, peak_mb=1.0, paused=True)
+        d.tick()                                                 # held from 1001; no report after it
+        clock.t = 1000.0 + 2 * dl + 1
+        fake.fail(run, "deadline", message=f"{2 * dl + 1:.1f} s in all, passed twice its deadline of {dl:.1f} s")
+        d.tick()
+        self.assertEqual({j[0]: j[3] for j in self.jobs()}[job.ref], 0, "no attempt")
+        with db.session() as s:
+            row = s.get(CpuJobRun, run)
+            self.assertEqual((row.state, row.error["code"], row.error.get("pause_caused")), ("failed", "deadline", True))
+            self.assertGreaterEqual(row.paused_s, 2 * dl - 1, "its pause counted though no report said so")
+            self.assertFalse((s.get(Server, "sv_box").trust or {}).get("abandons"), "no abandon")
+        self.assertIn("held by a pause past its deadline", (lab.LAB / "lab.log").read_text(encoding="utf-8"))
+        # played again; this time its play passes its deadline: an attempt
+        self.until(d, lambda: len(fake.offers) == 2)
+        d.tick()
+        run2 = fake.offers[1][0]
+        clock.t += dl + 1
+        fake.fail(run2, "deadline", message=f"{dl + 1:.1f} s of play passed its deadline of {dl:.1f} s")
+        d.tick()
+        self.assertEqual({j[0]: j[3] for j in self.jobs()}[job.ref], 1, "a deadline its play passed is an attempt")
+
+    def test_a_benchmark_held_past_twice_the_deadline_costs_the_game_no_attempt(self):
+        """The same with the real job host and a benchmark lease (the review's probe): held past twice its deadline,
+        the host fails it ``deadline``; queued again with no attempt, it plays to its end once the lease ends."""
+        if not has_test_ops():
+            self.skipTest("the extension has no test operations (a slowed game)")
+        self.host_cpu(threads=1)
+        self.submit("alice", duels("bench-held", 1, turns=40))
+        d = self.dispatcher([self.local({"CITAR_JOBS_TEST_STEP_MS": "20"})])
+        sched = S.get()
+        with mock.patch.object(D, "DEADLINE_MIN", 3.0):
+            self.until(d, lambda: any((r.round or 0) >= 2 for r in d.runs.values()))
+            (run,) = d.runs.values()
+            self.assertEqual(run.deadline_s, 3.0)
+            lease = sched.lease("sv_host", "dry-run", kind="benchmark", label="benchmark run")
+            try:
+                failed = self.until(d, lambda: self._failed_run(), timeout=30, step=0.1)
+            finally:
+                lease.release()
+            self.until(d, lambda: (lab.DONE / "bench-held.json").exists(), timeout=60)
+        self.assertEqual((failed.error["code"], failed.error.get("pause_caused")), ("deadline", True), failed.error)
+        self.assertIn("twice its deadline", failed.error["message"])
+        self.assertEqual([j[3] for j in self.jobs()], [0], "no attempt")
+        self.assertEqual(len(self.lines("bench-held")), 1)
+
+    def _failed_run(self):
+        with db.session() as s:
+            return next(iter(s.scalars(select(CpuJobRun).where(CpuJobRun.state == "failed"))), None)
+
+
+class FailedGames(Lab):
+    def _fail_three_times(self, d, fake):
+        for n in range(D.MAX_ATTEMPTS):
+            self.until(d, lambda n=n: len(fake.offers) == n + 1)
+            fake.fail(fake.offers[n][0], "host")
+            d.tick()
+
+    def test_a_game_failed_three_times_is_played_again_at_the_next_start(self):
+        """0.1.5's runner tried a failed game again at its next start; the dispatcher does too, its attempts back to
+        0. One refused for its spec stays failed."""
+        self.submit("alice", duels("flaky", 2))
+        fake = Fake(threads=1)
+        d = self.dispatcher([fake])
+        self._fail_three_times(d, fake)
+        jobs = {j[0]: j for j in self.jobs()}
+        self.assertEqual((jobs["lab:flaky:0"][1], jobs["lab:flaky:0"][3]), ("failed", 3))
+        with db.session() as s:          # the other refused for its spec (failed for good, with fewer attempts)
+            row = s.scalars(select(CpuJob).where(CpuJob.ref == "lab:flaky:1")).one()
+            row.state = "failed"
+        d.stop()
+        fake2 = Fake(threads=1, auto=True)
+        d2 = self.dispatcher([fake2])
+        self.until(d2, lambda: self.lines("flaky"))
+        for _ in range(3):
+            d2.tick()
+        self.assertEqual([r["i"] for r in self.lines("flaky")], [0], "played again, its attempts back to 0")
+        self.assertEqual({j[0]: j[1] for j in self.jobs()}, {"lab:flaky:0": "accepted", "lab:flaky:1": "failed"})
+        self.assertIn("1 game(s) that had failed 3 times are queued again", (lab.LAB / "lab.log").read_text("utf-8"))
+
+    def test_an_experiment_deleted_and_queued_again_plays_its_failed_games(self):
+        self.submit("alice", duels("redo", 1))
+        fake = Fake(threads=1)
+        d = self.dispatcher([fake])
+        self._fail_three_times(d, fake)
+        self.assertEqual([j[1] for j in self.jobs()], ["failed"])
+        (lab.QUEUE / "redo.json").unlink()
+        d.tick()
+        self.assertEqual([j[1] for j in self.jobs()], ["cancelled"], "a deleted experiment's failed games go with it")
+        lab.submit(duels("redo", 1))
+        fake.auto = True
+        self.until(d, lambda: (lab.DONE / "redo.json").exists())
+        self.assertEqual([r["i"] for r in self.lines("redo")], [0])
+
+    def test_an_administrators_retry_plays_the_failed_games_again(self):
+        self.submit("alice", duels("again", 1))
+        fake = Fake(threads=1)
+        d = self.dispatcher([fake])
+        self._fail_three_times(d, fake)
+        for _ in range(2):
+            d.tick()
+        self.assertEqual(len(fake.offers), 3, "failed: not offered again")
+        self.assertEqual(d.published["experiments"]["again"]["failed"], [0])
+        fake.auto = True
+        d.retry("again")
+        self.until(d, lambda: (lab.DONE / "again.json").exists())
+        self.assertEqual(len(fake.offers), 4)
+        self.assertIn("1 failed game(s) of again queued again (an administrator's retry)",
+                      (lab.LAB / "lab.log").read_text(encoding="utf-8"))
+
+
+class Window(Lab):
+    """Jobs no executor would take hold no place in the window (the review's probe: a one-thread executor's window
+    of four filled by an experiment whose games need more memory than it has, the same owner's next experiment got
+    no job for 30 ticks and said nothing)."""
+
+    def test_games_no_executor_would_take_never_hold_the_window(self):
+        self.submit("alice", duels("huge", 6, turns=200))
+        self.submit("alice", duels("small", 2))
+        fake = Fake(threads=1, per_run=100, auto=True)
+        d = self.dispatcher([fake])
+        real = d.costs.of
+        d.costs.of = lambda kind, spec: ({"cpu_s": 1.0, "peak_mb": 500.0, "exact": True}
+                                         if spec.get("turns") == 200 else real(kind, spec))
+        self.until(d, lambda: (lab.DONE / "small.json").exists(), timeout=60)
+        self.assertEqual({j[0].split(":")[1] for j in self.jobs()}, {"small"}, "no row for a game nobody would take")
+        info = d.published["experiments"]["huge"]
+        self.assertEqual(info["waiting"], "this server: it needs 500 MB a run, and this server's job host leaves "
+                                          "each run 100 MB")
+        shown = {e["name"]: e for e in lab.overview()["experiments"]}["huge"]
+        self.assertEqual(shown["waiting"], info["waiting"], "the Lab page says why")
+        # the executor given more memory: the experiment's games are made and played
+        fake.memory_per_run_mb = 600
+        self.until(d, lambda: (lab.DONE / "huge.json").exists(), timeout=60)
+
+    def test_jobs_raised_past_every_executor_wait_without_holding_places(self):
+        """Rows made, then raised past the only executor's memory a run (as memory deaths on a one-thread machine
+        raise them): they wait, saying why, and the same owner's next experiment plays."""
+        self.submit("alice", duels("a-raised", 4))                # the older by its name: first in line
+        self.submit("alice", duels("b-next", 2))
+        fake = Fake(threads=1, per_run=100)
+        fake.state = "starting"                                  # rows made, nothing offered yet
+        d = self.dispatcher([fake])
+        d.tick()
+        raised = [j for j in d.jobs.values() if j.exp == "a-raised"]
+        self.assertEqual(len(raised), 4, "the window of one thread: four")
+        with db.session() as s:
+            for j in raised:
+                s.get(CpuJob, j.id).mem_mb = j.mem_mb = 900
+        fake.state, fake.auto = "ready", True
+        self.until(d, lambda: (lab.DONE / "b-next.json").exists(), timeout=60)
+        self.assertEqual({j.exp for j in d.jobs.values()}, {"a-raised"})
+        self.assertIn("it needs 900 MB a run", d.published["experiments"]["a-raised"]["waiting"])
+
+
+class Writing(Lab):
+    def test_a_line_the_results_file_refuses_is_written_at_the_next_tick_and_the_rest_meanwhile(self):
+        """Each step after a result's commit stands alone: the line refused once (a sync client's lock past the
+        retry) waits for the next tick while the run's event, its cost and its usage rows are written; its game
+        settles, and its result is pruned, only once its line is there."""
+        self.submit("alice", duels("locked", 1))
+        fake = Fake(threads=1, auto=True)
+        d = self.dispatcher([fake])
+        real = D.Dispatcher._write_line
+        calls = []
+
+        def flaky(path, text):
+            calls.append(path)
+            if len(calls) <= 2:         # at its commit, and again at that tick's end
+                raise PermissionError(13, "the file is locked (a test)")
+            real(path, text)
+        samples = lambda: next(c for c in d.costs.rows() if (c["kind"], c["size"], c["rounds"]) ==  # noqa: E731
+                               ("lab_game", "duel", 0))["samples"]
+        with mock.patch.object(D.Dispatcher, "_write_line", staticmethod(flaky)):
+            d.tick()
+            before = samples()
+            with self.assertLogs("citar.jobs.dispatcher", "WARNING"):
+                self.until(d, lambda: calls)
+            self.assertEqual(self.lines("locked"), [])
+            self.assertEqual(len([e for e in self.events() if e["activity"] == "lab:locked:0"]), 1, "its event")
+            self.assertEqual(samples(), before + 1, "its cost")
+            self.assertTrue((lab.QUEUE / "locked.json").exists(), "not complete without its line")
+            with db.session() as s:
+                self.assertIsNotNone(s.scalars(select(CpuJobRun)).one().result, "its result kept")
+            self.until(d, lambda: (lab.DONE / "locked.json").exists())
+        self.assertEqual(len(self.lines("locked")), 1)
+        with db.session() as s:
+            self.assertIsNone(s.scalars(select(CpuJobRun)).one().result, "pruned once its line is written")
+
+
+class Commits(Lab):
+    """The view in memory changes only once the database has taken the change: a commit refused (SQLite still locked
+    past its busy timeout) leaves every job as it was, to be offered at the next tick."""
+
+    def _refusing(self, cls):
+        from sqlalchemy.orm import Session as SASession
+        real = SASession.commit
+
+        def commit(session):
+            if any(isinstance(o, cls) for o in list(session.new) + list(session.dirty)):
+                raise OperationalError("COMMIT", {}, Exception("database is locked (a test)"))
+            return real(session)
+        return mock.patch.object(SASession, "commit", commit)
+
+    def test_an_offer_the_database_refuses_leaves_the_job_waiting(self):
+        self.submit("alice", duels("locked-offer", 2))
+        fake = Fake(threads=2)
+        fake.state = "starting"
+        d = self.dispatcher([fake])
+        d.tick()
+        fake.state = "ready"
+        with self._refusing(CpuJobRun), self.assertRaises(OperationalError):
+            d.tick()
+        self.assertEqual(fake.offers, [])
+        self.assertEqual(d.runs, {})
+        self.assertEqual({j.state for j in d.jobs.values()}, {"queued"})
+        fake.auto = True
+        self.until(d, lambda: (lab.DONE / "locked-offer.json").exists())
+        self.assertEqual(len(fake.offers), 2, "each offered once")
+
+    def test_jobs_the_database_refuses_are_made_again(self):
+        self.submit("alice", duels("locked-fill", 2))
+        fake = Fake(threads=1, auto=True)
+        d = self.dispatcher([fake])
+        with self._refusing(CpuJob), self.assertRaises(OperationalError):
+            d.tick()
+        self.assertEqual(d.jobs, {})
+        self.assertEqual(d.exps["locked-fill"].has_job, set(), "the games have no job: made again")
+        self.until(d, lambda: (lab.DONE / "locked-fill.json").exists())
+        self.assertEqual(sorted(r["i"] for r in self.lines("locked-fill")), [0, 1])
+
+
+class MemoryBounds(Lab):
+    def test_a_helpers_memory_figures_are_bounded_by_the_dispatchers_own(self):
+        """A remote run's peak is its helper's word: a memory death raises its job at most past that executor's
+        memory a run (the frame's ``per_run_mb`` and ``alone`` ignored), so no helper prices a job out of every
+        machine; its peak never enters the cost table; no figure passes ``MEM_MAX``."""
+        with db.session() as s:
+            s.add(Server(id="sv_box", owner_id=self.ids["bob"], name="Bob box", kind="owned", provider="dryrun",
+                         reach="worker", max_concurrent=1, config={}))
+        servers.invalidate()
+        self.submit("alice", duels("bounded", 2))
+        fake = Fake("sv_box", name="Bob box", kind="remote", threads=1, per_run=100)
+        d = self.dispatcher([fake])
+        self.until(d, lambda: fake.offers)
+        run, job, _ = fake.offers[0]
+        fake.progress(run, round=1, of=30, elapsed_s=0.1, cpu_s=0.1, paused_s=0.0, peak_mb=1e15, paused=False)
+        d.tick()
+        self.assertEqual(d.runs[run].peak_mb, D.MEM_MAX)
+        fake.fail(run, "memory", per_run_mb=10 ** 9, alone=True)
+        d.tick()
+        self.assertEqual({j[0]: j[2] for j in self.jobs()}[job.ref], 101, "past this executor's memory a run, no more")
+        before = {(c["kind"], c["size"], c["rounds"]): c["peak_mb"] for c in d.costs.rows()}
+        fake.memory_per_run_mb = 5000
+        self.until(d, lambda: len(fake.offers) >= 2)
+        run2 = fake.offers[1][0]
+        fake.play(run2, peak=4000.0)
+        d.tick()
+        after = {(c["kind"], c["size"], c["rounds"]): c["peak_mb"] for c in d.costs.rows()}
+        self.assertEqual(after[("lab_game", "duel", 0)], before[("lab_game", "duel", 0)],
+                         "a helper's peak is not the cost table's")
+
+
+class Naming(Lab):
+    """A member is never told the host machine's name or id (the review: ``/api/lab`` carried the host row's name and
+    id in its executors, and why a game waits named it), with the real local executor's naming."""
+
+    def test_a_member_is_never_told_the_host_machines_name_or_id(self):
+        from fastapi.testclient import TestClient
+        from citar.server import app as appmod
+        client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(client.close)
+        self.host_cpu(threads=1, memory_mb=200)
+        self.submit("alice", duels("named", 2))
+        local = self.local()
+        d = self.dispatcher([local])
+        d.tick()
+        (first,) = [j for j in d.jobs.values() if j.i == 0]
+        with db.session() as s:
+            s.get(CpuJob, first.id).mem_mb = first.mem_mb = 900
+        self.until(d, lambda: len(self.lines("named")) == 1)
+        d.tick()
+        with db.session() as s:
+            host_name = s.get(Server, "sv_host").name
+        self.assertEqual(local.name, host_name, "the executor's own name is the host row's")
+        for who in ("alice", "bob"):
+            lab_view = client.get("/api/lab", headers=self.headers[who]).json()
+            queue = client.get("/api/queue", headers=self.headers[who]).json()["cpu"]
+            text = json.dumps([lab_view, queue])
+            for secret in (host_name, "sv_host"):
+                self.assertNotIn(secret, text, f"{who} is told {secret}")
+            self.assertEqual([e["name"] for e in lab_view["dispatcher"]["executors"]], ["this server"])
+            self.assertEqual([e["name"] for e in queue["executors"]], ["this server"])
+        shown = {e["name"]: e for e in client.get("/api/lab", headers=self.headers["alice"]).json()["experiments"]}
+        self.assertRegex(shown["named"]["waiting"], r"^this server: it needs 900 MB a run")
+        admin = client.get("/api/lab", headers=self.headers["zara"]).json()
+        self.assertIn(host_name, json.dumps(admin), "an administrator is told it")
+        self.assertRegex({e["name"]: e for e in admin["experiments"]}["named"]["waiting"],
+                         rf"^this server \({host_name}\): it needs 900 MB a run")
 
 
 if __name__ == "__main__":

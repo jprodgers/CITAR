@@ -8,7 +8,8 @@ dispatcher (:mod:`citar.jobs.dispatcher`) is the only writer of the jobs and the
 **The cost table** (:class:`Costs`, the ``job_costs`` rows): per kind of job, map size, seat count and bucket of
 ``ROUND_BUCKET`` rounds of its turn limit, ``cpu_s`` (the median CPU seconds of the reference machines' runs: the local
 executor's and the verifiers'; the **reference cost** a deadline is computed from and a credit is bounded by, P4.5.5,
-P4.5.7) and ``peak_mb`` (the 95th percentile of every run's counted peak: the memory a new job is offered with). It is
+P4.5.7) and ``peak_mb`` (the 95th percentile of the same machines' counted peaks: the memory a new job is offered with;
+a helper's peak is its own word, and a few inflated ones would price a shape out of every machine). It is
 seeded from ``citar/jobs/costs.json``, measured on this repository's golden jobs and a set of full games per map size
 (``scripts/measure_job_costs.py``), so the first jobs already have an estimate; each finished run then adds its figures
 (the median and the percentile over the cell's last ``SAMPLES`` runs, the stored figure counting as one when the
@@ -182,8 +183,8 @@ class Costs:
         return self.estimate(*shape(kind, spec))
 
     def record(self, kind: str, spec: dict, *, cpu_s: Optional[float], peak_mb: Optional[float]) -> None:
-        """A finished run's figures into its cell: ``cpu_s`` from a reference machine's run only (the local executor,
-        a verifier), ``peak_mb`` from any (a counted peak is the same wherever it ran)."""
+        """A finished run's figures into its cell, from a reference machine's run only (the local executor, a
+        verifier: the dispatcher passes None for the others' figures, which are their own word)."""
         k, size, seats, rounds = shape(kind, spec)
         key = (k, size, seats, bucket(rounds))
         with self._lock:
