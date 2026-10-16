@@ -242,9 +242,15 @@ the machine and min(1,024 MB, a quarter of the memory)), held hard by a Job Obje
 a `systemd --user` scope on Linux where the user's service manager makes one. Higher priority goes
 first, and owners take turns within a priority. A game whose experiment is deleted from the queue
 stops. Restricted hours of the host start nothing new (the games playing finish), and a benchmark
-on the host pauses its games until it ends. A failed game (its job host died, it passed its
-deadline) is played again, three times at most; one whose host died of memory is offered only to
-an executor with more memory a run. Each finished game's line names its executor: `executor`
+on the host pauses its games until it ends (a game held past its deadline by it is played again,
+and that costs it no attempt). A failed game (its job host died, it passed its deadline) is played
+again, three times at most; one that failed three times is played again when the server next
+starts, or at once by an administrator's **Retry** on the Lab page. One whose host died of memory is
+offered only to an executor with more memory a run, and a game no executor would take (more memory
+than any has) waits, saying why, without holding up the games behind it. A finished game wakes the
+dispatcher at once, so short games follow each other without waiting for its next tick. A member's
+experiment starts once its owner is known (within seconds of queuing it), so its games are always
+charged to it. Each finished game's line names its executor: `executor`
 `{machine, run, verification}`, `reference` for the server's own (from 0.1.6's next packages,
 helpers lending their CPU play games too, and their results are verified). The result is committed
 to the server's database before its line is written, and the two are reconciled when the server
@@ -271,7 +277,8 @@ experiment. A long run you cannot see the progress of is a long run you will res
 
 Every finished game writes one `cpu` event to the compute ledger: its machine's owner gives it (the
 server's own job host is nobody's), the experiment's owner uses it (nobody for ranking and reference
-runs), and its CPU seconds are the job host's own, bounded by the time the server watched it play.
+runs), and its CPU seconds are the job host's own, bounded by the time the server watched it play
+(from its start's arrival to its result's, never when the server got round to reading them).
 Experiments are costed like anything else.
 
 ---

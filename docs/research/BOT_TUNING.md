@@ -52,7 +52,8 @@ Targets for four equal **Prince** bots on a Small map at Quick speed:
 - Results are appended per game to `saves/lab/results/NAME.jsonl`, each once (the dispatcher commits a game's
   result to the server's database first, then writes its line, and reconciles the two when the server starts), so
   nothing is lost if the server stops. **To resume after a restart,** start the server: unfinished games are played
-  again.
+  again, and so are games that had failed three times (the Lab page's **Retry**, an administrator's, does that
+  without a restart).
 - `python -m citar.lab stop` pauses the lab (the games playing finish, nothing new starts) and `resume` ends the
   pause; the Lab page's Stop and Resume do the same.
 - **Factorial experiments** (`"factors": {"knob": [level0, level1], ...}`, `"base_params"`, `"players": 4`): every
