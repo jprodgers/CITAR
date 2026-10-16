@@ -285,6 +285,27 @@ class Builds(HostCase):
         self.assertIn("ffffffffffff", str(caught.exception))
 
 
+    @unittest.skipUnless(has_test_ops(), "the self-check's test switch needs a build with the test operations")
+    def test_the_servers_own_host_plays_when_its_self_check_fails_and_says_so(self):
+        """The local executor's host (4-09) is told it plays its parent's own work: a failed self-check (a server on
+        a ruleset of its own) is reported, and its jobs still play, to the result this process computes; a helper's
+        host is not told so, and refuses them ``unverifiable``."""
+        spec = duel_spec(30, seed=9600)
+        checked = engine_api.check_job_spec("lab_game", spec)
+        want = engine_api.run_job("lab_game", spec)["result_hash"]
+        env = {"CITAR_JOBS_TEST_SELF_CHECK": "fail"}
+        own = self.start(env=env, play_unverifiable=True)
+        self.assertFalse(own.ready["verifiable"])
+        self.assertIn("self-check", own.ready.get("reason") or "")
+        own.offer("cr_own", "lab_game", checked["spec"], checked["spec_hash"], 600)
+        end = H.run_until(own, "cr_own", 120)[-1]
+        self.assertEqual((end["t"], end["outcome"]["result_hash"]), ("job_result", want))
+        helper = self.start(env=env)
+        helper.offer("cr_theirs", "lab_game", checked["spec"], checked["spec_hash"], 600)
+        end = H.run_until(helper, "cr_theirs", 60)[-1]
+        self.assertEqual((end["t"], end.get("reason")), ("job_reject", "unverifiable"))
+
+
 class Ending(HostCase):
     def test_a_host_whose_input_closes_is_gone_within_two_seconds(self):
         host = self.start()
