@@ -180,6 +180,14 @@ class jobs:
     @staticmethod
     def jobs_build() -> str:
         """This build's jobs build: 12 hex digits."""
+    @staticmethod
+    def host_main() -> int:
+        """The job host on this process's standard input and output until its input closes (python -m citar.jobs
+        host); its exit code, 0 or 2 (it refused to start)."""
+    @staticmethod
+    def test_job_spec(kind: str, spec_json: bytes) -> bytes:
+        """A test job's spec (burn or alloc; a build with test operations only), written back and hashed:
+        {spec, spec_hash}; JobRefused (bad_spec)."""
 
 
 # ---------------------------------------------------------------------------- saves v2 (package 2-11)

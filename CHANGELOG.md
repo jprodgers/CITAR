@@ -168,6 +168,18 @@ that means for an existing install:
   build, the compatibility key; in Python `engine_api.check_job_spec`, `run_job`, `job_result_hash`,
   `job_result_fits`, `job_chain_check` and `jobs_build`. A `jobs` golden set holds every target to
   the same results (`determinism.yml`).
+- **The job host** (design/phase4-helper.md P4.4.3): one program that plays CPU jobs under limits,
+  for a helper (`citar-helper job-host`, its child) and for the server (`python -m citar.jobs host`,
+  started by `citar.jobs.host`). It holds its CPU share and its memory hard on Windows (a Job
+  Object) and on Linux under a `systemd --user` scope, its memory hard and its CPU soft on other
+  Linux machines (`RLIMIT_DATA`, `nice`), and both soft on macOS (the background band and a
+  watchdog), and says which; it counts each game's peak memory, pauses and resumes its games,
+  extends their deadlines by the time paused, refuses work when the canary or its self-check
+  fails, and ends its games within two seconds of its parent going. It measures its own memory
+  when it starts and offers each game what its memory limit leaves (`memory_per_run_mb`), which
+  is what games are matched to. A game that runs out of memory ends the host and is classified
+  `memory`, having reported its peak as it grew. `citar-helper --self-test` runs the checks.
+  [docs/server/WORKERS.md](docs/server/WORKERS.md#cpu-limits-per-operating-system).
 
 **Chat** ([docs/PLAYING.md](docs/PLAYING.md), [docs/AI_PLAYERS.md](docs/AI_PLAYERS.md)):
 

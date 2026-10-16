@@ -56,7 +56,7 @@ __all__ = [
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
-    "jobs_build",
+    "jobs_build", "run_job_host",
     "build_info", "key_fingerprint",
     "DEBUG_ACTIONS", "EngineGame",
     "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
@@ -535,6 +535,14 @@ def jobs_build() -> str:
     """This build's jobs build (P4.4.5): 12 hex digits over the build id, the runner's and the jobs crate's code and
     the build's flavour (a ci and a release build differ). Results are only compared within one jobs build."""
     return _E.jobs.jobs_build()
+
+
+def run_job_host() -> int:
+    """The job host (P4.4.3) on this process's standard input and output until its input closes, under the limits
+    its first frame gives, which it puts on this process: ``python -m citar.jobs host``, which
+    :mod:`citar.jobs.host` starts. The same Rust as the helper's ``citar-helper job-host``. Returns its exit code: 0
+    when its input closed, 2 when it refused to start (another jobs build, limits it could not hold)."""
+    return _E.jobs.host_main()
 
 
 # ----------------------------------------------------------------------------

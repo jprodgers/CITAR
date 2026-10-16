@@ -2,7 +2,9 @@
 //!
 //! - **`unsafe` stays in one module.** The workspace denies `unsafe_code`; Phase 4's only
 //!   exception is citar-jobs' `src/sys/windows.rs` and `src/sys/unix.rs`, the OS calls no safe
-//!   wrapper makes (Job Objects, `setpriority`, `setrlimit`, owner-only DACLs). An `unsafe` token
+//!   wrapper makes (Job Objects, `setpriority`, `setrlimit`, owner-only DACLs), and
+//!   `src/sys/alloc.rs`, the job host's counting allocator (4-08: `GlobalAlloc` is an unsafe
+//!   trait, and its one implementation is the same on every OS). An `unsafe` token
 //!   anywhere else in citar-jobs, or anywhere in citar-helper (sources, tests, build script), is
 //!   refused, whatever lint allowance the file carries: the helper calls the module's safe
 //!   functions. A crate that does not exist yet (citar-jobs before 4-03) is skipped.
@@ -38,7 +40,7 @@ pub const HELPER_DIR: &str = "crates/citar-helper";
 /// The jobs crate.
 pub const JOBS_DIR: &str = "crates/citar-jobs";
 /// The files of citar-jobs that may hold `unsafe`, relative to its crate.
-pub const JOBS_SYS: &[&str] = &["src/sys/windows.rs", "src/sys/unix.rs"];
+pub const JOBS_SYS: &[&str] = &["src/sys/windows.rs", "src/sys/unix.rs", "src/sys/alloc.rs"];
 
 /// The crates whose test features are checked.
 pub const HELPER_CRATES: &[&str] = &["citar-helper", "citar-jobs"];
@@ -297,6 +299,7 @@ mod tests {
             files: vec![
                 SourceFile::under(JOBS_DIR, "src/sys/windows.rs", "unsafe { f() }"),
                 SourceFile::under(JOBS_DIR, "src/sys/unix.rs", "unsafe fn g() {}"),
+                SourceFile::under(JOBS_DIR, "src/sys/alloc.rs", "unsafe impl GlobalAlloc for C {}"),
                 SourceFile::under(JOBS_DIR, "src/sys/mod.rs", "unsafe impl Send for X {}"),
                 SourceFile::under(JOBS_DIR, "src/host.rs", "#![allow(unsafe_code)]\nunsafe {}"),
             ],

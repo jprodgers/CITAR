@@ -6,9 +6,10 @@
 //! argparse allowed. The flags work before or after the command; `run` is the default command.
 //!
 //! New in protocol 2: `--home`, `--no-llm`, `--cpu`, `--ca-file`, `--no-power`, `--updates`,
-//! `--service`, and the `setup` and `scan [FILE]` commands. They make a few prefixes ambiguous
-//! that were not (`--serv`, `--no`, `--c`), which are refused as argparse refuses an ambiguous
-//! one. `service`, `update`, `job-host` and `--self-test` arrive with packages 4-08 to 4-14.
+//! `--service`, `--self-test`, and the `setup`, `scan [FILE]` and (internal) `job-host` commands.
+//! They make a few prefixes ambiguous that were not (`--serv`, `--no`, `--c`, `--se`), which are
+//! refused as argparse refuses an ambiguous one. `service` and `update` arrive with packages 4-13
+//! and 4-14.
 
 use std::path::PathBuf;
 
@@ -45,6 +46,10 @@ pub enum Command {
         /// Where to write the report (default: print it).
         file: Option<PathBuf>,
     },
+    /// The job host (internal: the helper runs it as its child, P4.4.3): reads job frames as JSON
+    /// lines on its standard input and plays them under the limits it is given.
+    #[command(name = "job-host", hide = true)]
+    JobHost,
 }
 
 /// The flags, each also accepted after the command.
@@ -131,6 +136,10 @@ pub struct Options {
     /// Print the version, the build, the target, the protocol and the machine key's fingerprint.
     #[arg(short = 'V', long, global = true)]
     pub version: bool,
+    /// Check that this machine computes jobs as every other does (the canary and the self-check,
+    /// the job host's own), print the build, and exit 0 when it does.
+    #[arg(long = "self-test", global = true)]
+    pub self_test: bool,
 }
 
 #[cfg(test)]
@@ -185,6 +194,8 @@ mod tests {
             Some(Command::Scan { file: Some(PathBuf::from("hw.json")) })
         );
         assert!(parse(&["-V"]).opts.version);
+        assert!(parse(&["--self-test"]).opts.self_test);
+        assert_eq!(parse(&["job-host"]).command, Some(Command::JobHost));
         for bad in
             [&["--provider", "vllm"][..], &["--max-concurrent", "two"], &["--no"], &["bogus"]]
         {

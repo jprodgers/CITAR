@@ -1,7 +1,9 @@
 //! What the binary does with its command line (design/phase4-helper.md P4.3.2): `--version`,
-//! `scan [FILE]` (the standalone collector: it reads the helper's settings for its model endpoint,
-//! writes only FILE and dials nothing but that endpoint, for its runtimes), `setup`, and `run`
-//! (the default) with
+//! `--self-test` (the job host's canary and self-check, P4.4.3), `job-host` (the job host itself,
+//! on its standard input and output: the helper's child, which reads no settings, writes no file
+//! and dials nothing), `scan [FILE]` (the standalone collector: it reads the helper's settings for
+//! its model endpoint, writes only FILE and dials nothing but that endpoint, for its runtimes),
+//! `setup`, and `run` (the default) with
 //! every check in front of it, in this order, so that nothing is written or dialled before it is
 //! allowed:
 //! 1. the development guard (`dev-guard` builds, and every build with a test feature): an
@@ -19,6 +21,8 @@
 
 use std::path::Path;
 use std::sync::Arc;
+
+use citar_engine::rules::Ruleset;
 
 use crate::cli::{Cli, Command};
 use crate::clock::Clock;
@@ -90,8 +94,14 @@ fn run(cli: &Cli) -> Result<u8, Stop> {
         println!("{}", version_line(cli));
         return Ok(0);
     }
+    if opts.self_test {
+        return Ok(self_test());
+    }
     if let Some(Command::Scan { file }) = &cli.command {
         return scan(cli, file.as_deref());
+    }
+    if cli.command == Some(Command::JobHost) {
+        return Ok(job_host());
     }
     if DEV_GUARD {
         home::guard(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?;
@@ -101,7 +111,37 @@ fn run(cli: &Cli) -> Result<u8, Stop> {
     match cli.command.clone().unwrap_or(Command::Run) {
         Command::Setup => setup(cli, &home),
         Command::Run | Command::Scan { .. } => serve(cli, &home, log),
+        Command::JobHost => Ok(job_host()),
     }
+}
+
+/// `citar-helper --self-test`: the build, then the canary and the self-check a job host runs
+/// before it takes work (P4.4.3), on a thread made as its run threads are. 0 when both pass, 1
+/// when either fails: this machine would refuse every job (`unverifiable`).
+fn self_test() -> u8 {
+    println!("{}", version::build_info().line());
+    match citar_jobs::host::self_test(Ruleset::shared(), citar_jobs::canary::Inject::default()) {
+        Ok(c) => {
+            println!("canary: ok");
+            println!(
+                "self-check: ok ({}: {} rounds, chain {}, result {}, {:.2} s)",
+                c.job, c.rounds, c.chain_head, c.result_hash, c.wall_s
+            );
+            println!("self-test: passed");
+            0
+        }
+        Err(why) => {
+            println!("self-test: FAILED: {why}");
+            1
+        }
+    }
+}
+
+/// `citar-helper job-host`: the job host on this process's standard input and output, under the
+/// limits its first frame gives (P4.4.3); its exit code is the host's.
+fn job_host() -> u8 {
+    let code = citar_jobs::host::main(std::io::stdin().lock(), std::io::stdout());
+    u8::try_from(code).unwrap_or(1)
 }
 
 /// How long `scan` waits for its model endpoint's list.

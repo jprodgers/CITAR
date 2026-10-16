@@ -340,10 +340,12 @@ dependencies = [
  "citar-engine",
  "citar-sim",
  "cpu-time",
+ "libc",
  "libtest-mimic",
  "proptest",
  "serde",
  "serde_json",
+ "sysinfo",
  "thiserror",
  "windows-sys 0.61.2",
 ]

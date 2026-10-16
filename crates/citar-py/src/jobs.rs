@@ -1,6 +1,6 @@
 //! `citar._engine.jobs`: the jobs crate for the server (design/phase4-helper.md P4.4), which the
-//! facade's `engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_chain_check` and
-//! `jobs_build` wrap. The server never hashes or checks a job's bytes in Python: the same Rust as
+//! facade's `engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_chain_check`,
+//! `jobs_build` and `run_job_host` wrap. The server never hashes or checks a job's bytes in Python: the same Rust as
 //! the helper's reads the spec, plays the game, hashes the result and folds the chain (P4.4.4).
 //!
 //! Every value crosses as JSON bytes, as the rest of the module's do. A refusal is `JobRefused`
@@ -283,6 +283,31 @@ pub fn jobs_build(py: Python<'_>) -> PyResult<String> {
     Ok(guarded(py, || Ok(citar_jobs::jobs_build(crate::rules::rules())))?)
 }
 
+/// The job host (P4.4.3) on this process's standard input and output, until its input closes:
+/// `python -m citar.jobs host`, the server's job host, which `citar/jobs/host.py` starts. It puts
+/// the limits its first frame gives on this process, plays the jobs it is offered on threads of
+/// its own (the GIL released throughout), and returns its exit code: 0 when its input closed, 2
+/// when it refused to start. Its runs' memory is counted by this module's allocator.
+#[pyfunction]
+pub fn host_main(py: Python<'_>) -> PyResult<i32> {
+    let code = detached(py, || {
+        caught(|| citar_jobs::host::main(std::io::stdin().lock(), std::io::stdout()))
+    });
+    Ok(code.map_err(Failure::Crash)?)
+}
+
+/// A test job's spec (`burn` or `alloc`, a build with the test operations only), written back
+/// and hashed as a job's: `{spec, spec_hash}` as JSON bytes, for the tests' offers to a host.
+#[cfg(feature = "test-ops")]
+#[pyfunction]
+pub fn test_job_spec(kind: &str, spec_json: &[u8]) -> PyResult<Bytes> {
+    let spec = read(spec_json, "The test job's spec", "bad_spec")?;
+    let (spec, hash) =
+        citar_jobs::host::test_jobs::hashed(kind, &spec).map_err(|e| refused("bad_spec", e))?;
+    let out = json!({"spec": spec, "spec_hash": hash});
+    Ok(Bytes(serde_json::to_vec(&out).map_err(|e| Failure::Runtime(e.to_string()))?))
+}
+
 /// The submodule `citar._engine.jobs`.
 pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     let m = PyModule::new(py, "jobs")?;
@@ -293,6 +318,9 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_function(wrap_pyfunction!(result_fits, &m)?)?;
     m.add_function(wrap_pyfunction!(chain_check, &m)?)?;
     m.add_function(wrap_pyfunction!(jobs_build, &m)?)?;
+    m.add_function(wrap_pyfunction!(host_main, &m)?)?;
+    #[cfg(feature = "test-ops")]
+    m.add_function(wrap_pyfunction!(test_job_spec, &m)?)?;
     m.add("KINDS", pyo3::types::PyTuple::new(py, Kind::ALL.iter().map(|k| k.name()))?)?;
     Ok(m)
 }

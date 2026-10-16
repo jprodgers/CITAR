@@ -1,7 +1,10 @@
 //! The operating-system calls of Phase 4 that no safe wrapper makes (design/phase4-helper.md
 //! P4.3.1), behind safe functions: the only module of the helper crates allowed `unsafe`, in its
-//! two per-OS files. In 4-03 it holds the machine key's file permissions (P4.3.7); the job host's
-//! limits (Job Objects, `setrlimit`, `setpriority`) join it in 4-08.
+//! two per-OS files and [`alloc`]. It holds the machine key's file permissions (P4.3.7, 4-03), the
+//! job host's limits (P4.3.6, 4-08: a Job Object and the process's committed memory on Windows;
+//! `setpriority` and `RLIMIT_DATA` on Linux; the background band and the resident size on macOS),
+//! and the job host's counting allocator ([`alloc`], P4.4.3), whose `GlobalAlloc` implementation
+//! is unsafe by the trait's definition. [`crate::limits`] decides what to hold and calls these.
 //!
 //! **Owner-only files.** The helper's machine key (and, in 4-14, the Windows service's home) must
 //! be readable by the account that runs the helper and nobody else:
@@ -17,14 +20,21 @@
 use std::io;
 use std::path::Path;
 
+#[allow(unsafe_code)]
+pub mod alloc;
 #[cfg(unix)]
+#[allow(unsafe_code)]
 mod unix;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
 
+#[cfg(target_os = "macos")]
+pub use self::unix::{background, resident_bytes};
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use self::unix::{limit_data, nice};
 #[cfg(windows)]
-pub use self::windows::{Ace, AceKind, Dacl, current_user_sid, dacl};
+pub use self::windows::{Ace, AceKind, Dacl, JobObject, committed_bytes, current_user_sid, dacl};
 
 /// Who besides the file's owner can reach a file that should be owner-only, and how to fix it.
 #[derive(Clone, Debug, PartialEq, Eq)]

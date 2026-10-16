@@ -18,10 +18,11 @@ doctest = false
 
 [features]
 # The engine's test operations (api::testops, api::inspect), for the Python suite's builds
-# (`cargo xtask develop`, CI's build-ext job). It only forwards: cargo xtask check refuses any
-# other way to turn them on, and pyproject.toml's maturin features never list it, so no shipped
-# wheel has them.
-test-ops = ["citar-engine/test-ops"]
+# (`cargo xtask develop`, CI's build-ext job), and the jobs crate's test jobs (`burn`, `alloc`),
+# which the server's job host takes in those builds only. It only forwards: cargo xtask check
+# refuses any other way to turn them on, and pyproject.toml's maturin features never list it, so
+# no shipped wheel has them.
+test-ops = ["citar-engine/test-ops", "citar-jobs/test-jobs"]
 
 # cargo xtask check: the engine, the bot, the runner, the store and the jobs crate (DESIGN.md
 # P2.2, design/phase4-helper.md P4.3.1).

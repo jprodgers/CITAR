@@ -9,6 +9,11 @@ use std::process::ExitCode;
 
 use clap::Parser as _;
 
+/// The job host's counting allocator (P4.4.3): `citar-helper job-host` reports each run's peak
+/// memory from it. Every other command pays one thread-local read per allocation for it.
+#[global_allocator]
+static COUNTING: citar_jobs::Counting = citar_jobs::Counting;
+
 fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let bare = args.len() <= 1;

@@ -29,14 +29,21 @@ cpu-time.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The owner-only DACL of the helper's machine key (P4.3.7), written and read back: the security
-# descriptor calls, the process token's user, and LocalFree for what they allocate. The job limits
-# (Job Objects, 4-08) add their features here.
+# descriptor calls, the process token's user, and LocalFree for what they allocate; and the job
+# host's limits (P4.3.6): the Job Object it puts itself in, its priority class, and its own
+# committed memory, which the Job Object's limit counts beside its runs'.
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_System_JobObjects",
+    "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+# The job host's limits (P4.3.6): setpriority, RLIMIT_DATA, and on macOS the resident size.
+libc.workspace = true
 
 # build.rs hashes the sources and the golden set into CITAR_JOBS_CODE, which the jobs build covers
 # (P4.4.5).
@@ -47,14 +54,24 @@ blake3.workspace = true
 # The specs' robustness: mutated specs never panic the parser (tests/specs.rs, P4.6).
 proptest.workspace = true
 # The `jobs` golden set's own test binary (tests/golden.rs): its jobs by name, and a child mode
-# that plays one in a second process.
+# that plays one in a second process; the job host's (tests/host.rs), whose children are hosts.
 libtest-mimic.workspace = true
+# The host tests' check that a host whose parent died left no process, by its pid.
+sysinfo.workspace = true
 
 # The `jobs` golden set (P4.4.5), with its own harness: run it in the ci and the release
 # profiles (`cargo nextest run -p citar-jobs`, and with `--cargo-profile release`).
 [[test]]
 name = "golden"
 harness = false
+
+# The job host and its limits per OS (4-08), with the test jobs (`burn`, `alloc`): its own
+# harness, since the binary is also the host its tests start (and their parent, for the test of a
+# parent that dies), with the counting allocator a host has.
+[[test]]
+name = "host"
+harness = false
+required-features = ["test-jobs"]
 
 [lints]
 workspace = true
