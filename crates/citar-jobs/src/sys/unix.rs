@@ -55,6 +55,7 @@ pub fn nice(n: i32) -> io::Result<()> {
 #[cfg(not(target_os = "macos"))]
 #[allow(
     clippy::unnecessary_fallible_conversions,
+    clippy::useless_conversion,
     reason = "rlim_t is u64 on the 64-bit targets CITAR ships for, and narrower on others"
 )]
 pub fn limit_data(bytes: u64) -> io::Result<u64> {
