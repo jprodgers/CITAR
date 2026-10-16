@@ -94,6 +94,8 @@ ABANDONS, ABANDON_WINDOW = 3, 3600.0
 OBSERVED_FACTOR, OBSERVED_SLACK = 1.05, 1.0
 #: A CPU job is worth at most this many times its reference cost (P4.5.7).
 REFERENCE_CAP = 1.5
+#: How often an experiment with no owner is looked up again (its item registered just after its file was written).
+OWNER_SECONDS = 10.0
 #: An executor that refused a job for a reason that holds for every job is offered nothing for a while: 2 s,
 #: doubling to 10 minutes (P4.2.5's re-offer backoff).
 REJECT_FIRST, REJECT_MAX = 2.0, 600.0
@@ -209,7 +211,7 @@ class Exp:
     cursor: int = 0                                 # every game below has a job or settled
     refused: str = ""
     lines: dict = field(default_factory=dict)       # run -> game, for the lines with an executor
-    finished_at: list = field(default_factory=list)
+    owner_checked: float = 0.0                      # when an experiment with no owner was last looked up
 
     @property
     def kind(self) -> str:
@@ -343,6 +345,7 @@ class Dispatcher:
             if not self.recovered:
                 self.recover()
             self._sync_queue(now)
+            self._owners(now)
             self._fill(now)
             for e in self.executors:
                 e.refresh(wanted=bool(self.jobs) or bool(e.in_flight))
@@ -648,6 +651,30 @@ class Dispatcher:
             out.append((p, [(o, sorted(levels[p][o], key=lambda e: (e.submitted, e.name))) for o in owners]))
         return out
 
+    def _owners(self, now: float) -> None:
+        """Look again, every ``OWNER_SECONDS``, for the owner of a member's experiment that had none when it was
+        loaded: ``citar lab submit`` registers its item just after it writes the queue's file, and an experiment read
+        in between would otherwise be nobody's for good. Its waiting jobs take the owner found."""
+        from sqlalchemy import update
+        from citar import db
+        from citar.db.models import CpuJob
+        due = [exp for exp in self.exps.values() if exp.owner_id is None and exp.kind not in lab.COLLECTION_KINDS
+               and now - exp.owner_checked >= OWNER_SECONDS]
+        if not due:
+            return
+        with db.session() as s:
+            for exp in due:
+                exp.owner_checked = now
+                owner = self._owner(s, exp.spec)
+                if owner is None:
+                    continue
+                exp.owner_id = owner
+                for j in self.jobs.values():
+                    if j.exp == exp.name and j.state == "queued":
+                        j.owner_id = owner
+                s.execute(update(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
+                                               CpuJob.state == "queued").values(owner_id=owner))
+
     def _fill(self, now: float) -> None:
         """Make jobs of the games next in line (the window, P4.5.5)."""
         cap = WINDOW * max(1, self._threads())
@@ -931,7 +958,6 @@ class Dispatcher:
             if exp is not None:
                 self._append(exp, line, job.i, run.id)
                 exp.settled.add(job.i)
-                exp.finished_at.append(time.time())
             self._prune.append(run.id)
             _ledger().events([event])
             self.costs.record(job.kind, job.spec, cpu_s=run.cpu_s if local else None, peak_mb=run.peak_mb or None)

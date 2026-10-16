@@ -359,6 +359,27 @@ class Experiments(Lab):
         with self.assertRaisesRegex(ValueError, "kind is one of"):
             lab.normalize({"name": "x", "kind": "tournament", "seats": [{"bot": "basic"}]})
 
+    def test_an_experiment_registered_after_its_file_takes_its_owner(self):
+        """``citar lab submit`` writes the queue's file, then registers its item: an experiment read in between is
+        looked up again, and its waiting jobs take the owner found (their events then name the consumer)."""
+        lab.submit(duels("late", 3))
+        clock = Clock()
+        fake = Fake()
+        d = self.dispatcher([fake], clock=clock)
+        d.tick()
+        self.assertEqual({j[4] for j in self.jobs()}, {None})
+        with db.session() as s:
+            items.register(s, "lab_experiment", "late", s.get(User, self.ids["alice"]), "late",
+                           path=lab.QUEUE / "late.json")
+        d.tick()
+        self.assertEqual({j[4] for j in self.jobs()}, {None}, "looked up again only every OWNER_SECONDS")
+        clock.t += D.OWNER_SECONDS
+        d.tick()
+        with db.session() as s:
+            owners = {j.ref: j.owner_id for j in s.scalars(select(CpuJob)) if j.state == "queued"}
+        self.assertEqual(set(owners.values()), {self.ids["alice"]})
+        self.assertEqual(len(owners), 2)
+
     def test_a_queued_experiment_a_job_refuses_is_shown_so_and_never_started(self):
         with mock.patch.object(lab, "check_games"):
             self.submit("alice", duels("old-long", 2, turns=500))
