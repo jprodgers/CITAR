@@ -251,8 +251,13 @@ than any has) waits, saying why, without holding up the games behind it. A finis
 dispatcher at once, so short games follow each other without waiting for its next tick. A member's
 experiment starts once its owner is known (within seconds of queuing it), so its games are always
 charged to it. Each finished game's line names its executor: `executor`
-`{machine, run, verification}`, `reference` for the server's own (from 0.1.6's next packages,
-helpers lending their CPU play games too, and their results are verified). The result is committed
+`{machine, run, verification}`, `reference` for the server's own and `unverified` for a helper machine's.
+**Helpers lending their CPU** play games too: a machine whose owner turned CPU lending on in its CITAR helper
+takes its owner's experiments, those of members a grant on its group lends it to for Lab (CPU work), and the
+server's ranking and reference games where its CPU settings list them, holding its games while its own model
+works or a benchmark holds it ([Workers](Workers#lending-cpu-what-plays-on-it-and-for-whom)); until the
+server verifies helpers' results (a later 0.1.6 package) only machines an administrator trusted take them. The
+result is committed
 to the server's database before its line is written, and the two are reconciled when the server
 starts, so a crash never leaves a game twice or not at all; a server stopped with games playing
 plays exactly those again when it starts.

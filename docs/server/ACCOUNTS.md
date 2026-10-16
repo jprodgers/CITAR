@@ -380,7 +380,9 @@ list of **grants**.
 A **grant** gives a subject (a user, or everyone) permission to use a group, optionally narrowed by:
 
 - **purpose** — normal games (a model seat that plays every turn), pooled prompts (a report's written analysis, a
-  probe's offers and messages, a machine test, a hybrid seat's diplomacy), benchmarks, probes, scenarios, lab runs
+  probe's offers and messages, a machine test, a hybrid seat's diplomacy), benchmarks, probes, scenarios, and **Lab
+  (CPU work)**: the lab's games played on the machines' CPUs ([Workers](WORKERS.md#lending-cpu-what-plays-on-it-and-for-whom)).
+  Nothing ticked means every kind of model work; the CPU is lent only by a grant that ticks Lab (CPU work)
 - **window** — which hours, which weekdays
 - **budget** — a spend cap per period
 - **concurrency** — how many of the subject's requests may run on one of the group's machines at once, its seats' and
