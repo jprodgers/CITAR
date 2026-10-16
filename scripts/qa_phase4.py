@@ -953,18 +953,20 @@ def part_lab(h) -> None:
 
     # ---- the server killed with two games playing: exactly those two again, each game once
     killed = f"qa-killed-{tag}"
-    h.server.env["CITAR_JOBS_TEST_STEP_MS"] = "40"      # each seat step slowed (a test build's switch): 2.4 s a game
+    # each seat step slowed (a test build's switch): a game of 60 rounds lasts about 7 s, so it is still playing when
+    # the dispatcher's view (published every tick, 2 s) shows it accepted
+    h.server.env["CITAR_JOBS_TEST_STEP_MS"] = "60"
     h.server.restart()
     for who in h.accounts.values():
         who.reconnect()
     bob.post("/api/bots/experiments", json={
         "profiles": ["standard", "classic-production"], "name": killed, "players": 2, "games": 4, "seed": 6500,
-        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": 30})
+        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": 60})
 
     def playing():
         got = admin.get("/api/admin/jobs")
         rows = (got.json().get("running") or {}).get(host, []) if got.status_code == 200 else []
-        rows = [x for x in rows if x.get("exp") == killed and (x.get("turn") or 0) >= 2]
+        rows = [x for x in rows if x.get("exp") == killed and x.get("state") == "running"]
         return rows if len(rows) == 2 else None
     two = wait_until(playing, 120, 0.25) or []
     names = {g["label"] for g in (bob.get("/api/queue").json()["cpu"]["executors"] or [{}])[0].get("games", [])}
