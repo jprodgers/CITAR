@@ -1205,9 +1205,11 @@ class PausedDeadlines(Lab):
         self.submit("alice", duels("bench-held", 1, turns=40))
         d = self.dispatcher([self.local({"CITAR_JOBS_TEST_STEP_MS": "20"})])
         sched = S.get()
-        # 3 s of play on the laptop; CI's three-core macOS runner played 3 s without reaching round 2 (test.yml run
-        # 38933789735: three deadline failures, given up), so CI's is 10 s, and the wait for the held run scales with it
-        deadline = 10.0 if os.environ.get("CI") else 3.0
+        # 3 s of play on the laptop. CI's three-core macOS runner played 3 s without reaching round 2 (test.yml run
+        # 38933789735: three deadline failures, given up), and with 10 s it passed the deadline twice when the game was
+        # replayed after the hold (run 38937992921: two attempts where none were due); so CI's is 30 s, and the wait
+        # for the held run scales with it. The game stays 40 turns: a shorter one ended before the hold began.
+        deadline = 30.0 if os.environ.get("CI") else 3.0
         with mock.patch.object(D, "DEADLINE_MIN", deadline):
             self.until(d, lambda: any((r.round or 0) >= 2 for r in d.runs.values()))
             (run,) = d.runs.values()

@@ -524,12 +524,16 @@ fn results_do_not_depend_on_the_limits() -> Outcome {
 /// paused time reported; a burn paused past its deadline in wall time finishes (the deadline
 /// counts no paused time), one without a pause past its deadline fails.
 fn a_pause_holds_a_run_and_extends_its_deadline() -> Outcome {
+    const BURN_DEADLINE_S: f64 = 2.5;
     let req = Requested { threads: 2, cpu_percent: two_cores_percent(), memory_mb: 512 };
     let mut host = start(req, &[("CITAR_JOBS_TEST_STEP_MS", "20")])?;
     let set = GoldenSet::committed()?;
     let job = &set.jobs[SELF_CHECK];
     send(&mut host, &offer("cr_game", "lab_game", &job.spec, &job.spec_hash, 600.0))?;
-    send(&mut host, &test_offer("cr_ok", BURN, &json!({"seconds": 2.0}), 3.0)?)?;
+    // A 1 s burn against 2.5 s: its play stays under the deadline on a slow runner (a 2 s burn played
+    // 3.2 s beside the game on CI's three-core macOS runner, rust.yml at a46e83b), while the 2 s pause
+    // takes its wall time past it.
+    send(&mut host, &test_offer("cr_ok", BURN, &json!({"seconds": 1.0}), BURN_DEADLINE_S)?)?;
     accepted(&mut host, "cr_game")?;
     std::thread::sleep(Duration::from_millis(400));
     send(&mut host, &ToHost::Pause)?;
@@ -581,7 +585,7 @@ fn a_pause_holds_a_run_and_extends_its_deadline() -> Outcome {
     let FromHost::JobResult(burn) = &ends["cr_ok"] else {
         return fail(format!("the paused burn: {:?}", ends["cr_ok"]));
     };
-    ensure(burn.outcome.paused_s >= 1.9 && burn.outcome.wall_s > 3.0, || {
+    ensure(burn.outcome.paused_s >= 1.9 && burn.outcome.wall_s > BURN_DEADLINE_S, || {
         format!("{:?}", burn.outcome)
     })?;
     // No pause: the deadline holds.

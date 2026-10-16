@@ -1089,6 +1089,18 @@ class Frames(_Live):
             pass
         return time.perf_counter() - t0
 
+    def least_stall(self, run, bound: float, tries: int = 3) -> float:
+        """The loop's longest stall during ``run``, the least over up to ``tries`` runs, stopping at the first under
+        ``bound``: a CI runner can stop the whole process for longer than a parse (windows / Python 3.12 once stalled
+        0.46 s against a 0.40 s parse, test.yml run 38937992921), while a parse on the loop stalls it in every try."""
+        best = None
+        for _ in range(tries):
+            longest = self.stalls(run)
+            best = longest if best is None else min(best, longest)
+            if best < bound:
+                break
+        return best
+
     def refused_unread(self, raw: str) -> H.Closed:
         """Send ``raw`` as a first frame; the close it got (after the v1 refusal's frame, for a hello that names no
         protocol)."""
@@ -1144,8 +1156,8 @@ class Frames(_Live):
             with self.subTest(name):
                 bound = max(0.05, self.parse_seconds(raw) / 3) * (3 if CI else 1)
                 closed: list = []
-                longest = self.stalls(functools.partial(lambda text, out: out.append(self.refused_unread(text)),
-                                                        raw, closed))
+                longest = self.least_stall(functools.partial(lambda text, out: out.append(self.refused_unread(text)),
+                                                             raw, closed), bound)
                 self.assertIn(closed[0].code, (4400, 4426))
                 print(f"\n{name}: the loop's longest stall {longest * 1000:.1f} ms (bound {bound * 1000:.0f} ms)")
                 self.assertLess(longest, bound)
@@ -1159,7 +1171,7 @@ class Frames(_Live):
             helper.send_text(raw)
             helper.send("ping")
             self.assertEqual(helper.recv(timeout=20, skip=())["t"], "pong", "the connection carries on")
-        longest = self.stalls(send_and_settle)
+        longest = self.least_stall(send_and_settle, bound)
         print(f"a welcomed helper's 8 MiB bad frame: the loop's longest stall {longest * 1000:.1f} ms "
               f"(bound {bound * 1000:.0f} ms)")
         self.assertLess(longest, bound)
