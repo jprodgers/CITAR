@@ -561,6 +561,7 @@ SETTINGS_ACK = Struct(
     Field("capped", List(OneOf(*CAPPED), 0, 7)),
     Field("limits", LIMITS),
     opt("memory_per_run_mb", MEMORY_MB),
+    opt("again", Bool()),
 )
 EMPTY = Struct()
 

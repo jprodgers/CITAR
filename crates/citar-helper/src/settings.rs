@@ -91,6 +91,7 @@ pub fn ack(site: &Settings, local: &Local) -> SettingsAck {
         limits: local.limits.clone(),
         // The job side fills it in from the job host that runs for these figures (4-10).
         memory_per_run_mb: None,
+        again: None,
     }
 }
 

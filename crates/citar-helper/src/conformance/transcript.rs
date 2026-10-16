@@ -130,6 +130,7 @@ pub const HUB_ACTS: &[&str] = &[
     "benchmark_start",
     "benchmark_end",
     "manifest_arrives",
+    "delete_experiment",
 ];
 /// What a `state` step may expect of the helper.
 pub const HELPER_STATE: &[&str] =
@@ -166,6 +167,7 @@ pub const HUB_STATE: &[&str] = &[
     "claim_failures",
     "events",
     "update_status",
+    "memory_per_run_mb",
 ];
 /// The longest close reason, in bytes (a WebSocket close frame's limit).
 pub const MAX_CLOSE_REASON: usize = 123;

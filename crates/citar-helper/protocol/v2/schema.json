@@ -570,6 +570,11 @@
             ]
           },
           true
+        ],
+        [
+          "again",
+          "bool",
+          true
         ]
       ]
     },

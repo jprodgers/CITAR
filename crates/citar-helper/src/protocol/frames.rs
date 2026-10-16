@@ -377,6 +377,11 @@ object! {
         /// no host runs for them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         memory_per_run_mb: Option<u64> = opt(MEMORY_MB),
+        /// True on the last acknowledgement sent again with the job host's figures, which came
+        /// after it (the host was ready late, or started again under new limits once its runs
+        /// ended): it answers no `settings` frame. Left out on every other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        again: Option<bool> = opt(Ty::Bool),
     }
 }
 
