@@ -4,7 +4,7 @@
 //! its `ready` held to this binary's jobs build.
 //!
 //! The parent side is blocking (pipes and a thread per stream), so each host gets a thread of its
-//! own that owns it ([`bridge`]): it passes the helper's frames to the host and the host's to the
+//! own that owns it (`bridge`): it passes the helper's frames to the host and the host's to the
 //! helper's job side ([`crate::jobs`]) over channels, and when the host's output ends it classifies
 //! the death and fails its runs (`memory` or `host`, with each run's last reported peak). Dropping
 //! the job side's handle ends the host: its standard input closes, it ends its runs and exits
