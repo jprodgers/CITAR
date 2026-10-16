@@ -176,20 +176,6 @@ def _in_scope(a: dict, info: dict, scope: dict, servers_by_id: dict) -> bool:
     return True
 
 
-def _lab_results() -> None:
-    """The lab's finished games into the compute ledger now (``ledger.ingest_lab``, which its rollup pass does every
-    few minutes), so a report built just after a lab game prices its CPU."""
-    from .. import db
-    if not db.configured():
-        return
-    try:
-        from .. import ledger as compute
-        compute.ingest_lab(compute.current())
-    except Exception:
-        import logging
-        logging.getLogger("citar.reports").warning("could not read the lab's results into the ledger", exc_info=True)
-
-
 def gather(spec: dict, progress=lambda msg: None, *, reach: Optional[Reach] = None) -> dict:
     """Collect everything a report needs from the ledger and the run records, as far as ``reach`` goes (the report
     owner's: everything for an administrator's report and by default).
@@ -207,7 +193,6 @@ def gather(spec: dict, progress=lambda msg: None, *, reach: Optional[Reach] = No
     basis = (spec.get("options") or {}).get("electricity_basis", "full")
     pooling = spec.get("pooling") or "own"
     progress("Reading the usage ledger")
-    _lab_results()
     ledger = U.read(since, until, work=True)
     seen = reach.ledger(ledger)
     if since is None:       # "all time": from the first recorded use

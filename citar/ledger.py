@@ -21,8 +21,10 @@ core-seconds, the tokens, and the **credits** they are worth, priced when writte
 
 **Writers.** The prompt scheduler's listener (``listener``, every model step: ``gpu`` or ``api``), the usage
 tracker's flush (``cpu``: the host's CPU measured per unit of work, ``cpu_unit``, one event per activity a minute,
-``observed_s`` the window it was measured over), and the lab's results (``ingest_lab``: one ``cpu`` event per lab game,
-``observed_s`` the game's wall time). The listener prices each step and settles its budget hold in memory at once
+``observed_s`` the window it was measured over), and the job dispatcher (``events``: one ``cpu`` event per finished
+run of a CPU job, made whole by ``citar.jobs.dispatcher``: the executor's machine and its owner as the provider, the
+job's owner as the consumer, its CPU bounded by what the server observed; design/phase4-helper.md P4.5.7). The
+listener prices each step and settles its budget hold in memory at once
 (``pool.budgets.Keeper.settle``); events go through a queue to **one writer thread**, the only one in the process that
 inserts them (so their ids commit in order, which the rollups' watermark relies on), in batches (every
 ``BATCH_SECONDS`` or ``BATCH_EVENTS``), never on a game's lock, writing each settled step's budget entry in the same
@@ -34,8 +36,8 @@ thread recomputes, every ``ROLLUP_SECONDS``, each hour an event landed in since 
 watermark, ``settings_kv.ledger_rollups``), deleting and inserting the hour's rows in one transaction, at most
 ``ROLLUP_CHUNK`` hours a transaction (the watermark moves after the last). Totals (``totals``) read the rollups for
 complete hours and the raw events for the rest (the current hour, the range's first partial hour, and any hour not
-rolled up yet), so a total never waits for the pass and always equals the raw sums. The same pass reads the lab's new
-results and the budgets' grants again (``pool.budgets.Keeper.sync``).
+rolled up yet), so a total never waits for the pass and always equals the raw sums. The same pass reads the budgets'
+grants again (``pool.budgets.Keeper.sync``).
 
 The ratio is given credits over used credits (``ratio``); ``/api/ledger/me``, ``/api/users/{handle}/ratio`` and the
 administrators' pages read it (``citar/server/ledger_api.py``).
@@ -45,7 +47,6 @@ from here (``work``), and ``pool.budgets``' reservations against an hourly cost 
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import queue as _queue
@@ -62,7 +63,7 @@ log = logging.getLogger("citar.ledger")
 #: The writer inserts what it has every BATCH_SECONDS, or as soon as it has BATCH_EVENTS.
 BATCH_EVENTS = 200
 BATCH_SECONDS = 2.0
-#: How often the rollup thread recomputes the hours touched since its last pass (and reads the lab's results).
+#: How often the rollup thread recomputes the hours touched since its last pass.
 ROLLUP_SECONDS = 300.0
 #: How long the hardware classes and the activities' owners are kept before they are read again.
 CLASS_SECONDS = 5.0
@@ -90,8 +91,6 @@ REPRICE_PAGE = 5000
 #: its busy timeout), and the wait before the next try (doubling).
 WRITE_TRIES = 4
 WRITE_BACKOFF = 0.5
-#: How long ``ingest_lab`` waits for the writer to write the lab's events it queued.
-LAB_WRITE_SECONDS = 60.0
 
 
 def utcnow() -> datetime:
@@ -323,7 +322,6 @@ class Ledger:
         self._classes: Optional[list] = None
         self._classes_at = 0.0
         self._means: dict = {}                # (machine, model) -> mean credits per step
-        self._lab_seen: dict = {}             # results file -> (mtime, size) when last read
         self._failed_at = 0.0
         self.written = 0
         self.failures = 0
@@ -389,6 +387,13 @@ class Ledger:
         self._put(("cpu", {"activity": activity, "seconds": float(seconds), "at": at if at is not None else self.clock(),
                            "machine": machine, "request_id": request_id,
                            "window": float(window) if window and window > 0 else None}))
+
+    def events(self, rows: list) -> None:
+        """Events made whole by their writer: the job dispatcher's, one ``cpu`` event per finished run of a CPU job
+        (P4.5.7), each a ``compute_events`` row's columns. Written by the writer thread like every other event (one
+        inserting thread: the ids commit in order, which the rollups' watermark relies on)."""
+        if rows:
+            self._put(("rows", [dict(r) for r in rows], None))
 
     def _put(self, item) -> None:
         with self._lock:
@@ -512,17 +517,13 @@ class Ledger:
                 log.exception("the ledger's rollup pass failed; it carries on")
 
     def pass_once(self) -> int:
-        """One rollup pass, the lab's new results, and the budgets' grants read again (``Keeper.sync``: an
-        administrator's repair from another process lands here): what the rollup thread does every
-        ``ROLLUP_SECONDS``. Returns the hours recomputed."""
+        """One rollup pass, and the budgets' grants read again (``Keeper.sync``: an administrator's repair from
+        another process lands here): what the rollup thread does every ``ROLLUP_SECONDS``. Returns the hours
+        recomputed."""
         from . import db
         from .pool import budgets
         if not db.configured():
             return 0
-        try:
-            ingest_lab(self)
-        except Exception:
-            log.warning("could not read the lab's results into the ledger", exc_info=True)
         try:
             with db.session() as s:
                 budgets.keeper().sync(s)
@@ -602,7 +603,7 @@ class Ledger:
                 if r is not None:
                     settled.append((r, priced["credits"]))
             elif item[0] == "rows":
-                rows.extend(dict(r) for r in item[1])        # made whole by their writer (``ingest_lab``)
+                rows.extend(dict(r) for r in item[1])        # made whole by their writer (``events``)
             else:
                 row = self._cpu_row(session, item[1], classes, host)
                 if row is not None:
@@ -1130,115 +1131,3 @@ def reprice(session, since: datetime, until: Optional[datetime] = None, *, ledge
     if ledger is not None:
         ledger.invalidate_classes()
     return {"events": n, "changed": changed, "hours": len(touched)}
-
-
-# ---------------------------------------------------------------------------- the lab's results
-
-_LAB_LOCK = threading.Lock()
-
-
-def ingest_lab(ledger: Optional[Ledger] = None, results_dir=None) -> int:
-    """Each finished lab game's ``cpu_s`` (its result line, ``lab.py``) as one ``cpu`` event on the host, its
-    experiment's owner the consumer (P3.4.3), its ``observed_s`` the game's wall time (``seconds``: costing spreads the
-    CPU over the game, not over a minute). The lab runner is a process of its own, often without the server's database;
-    the server reads its results files here (the rollup thread's pass, and a report before it gathers), each game once
-    (its activity and ``request_id`` are ``lab:<experiment>:<game>``).
-
-    One reader at a time (``_LAB_LOCK``), in a transaction of its own begun under that lock: the games already in the
-    ledger are read after the last reader's events were written, so none is written twice. With a ``ledger`` its
-    writer thread writes the events, as it writes every other (one inserting thread: the ids commit in order, which the
-    rollups' watermark relies on), and the reader waits for them; without one they are inserted here. Returns the
-    events written."""
-    from pathlib import Path
-    from sqlalchemy import insert
-    from . import db, paths
-    from .db.models import ComputeEvent
-    folder = Path(results_dir) if results_dir is not None else paths.saves_path("lab", "results")
-    if not db.configured() or not folder.is_dir():
-        return 0
-    seen = ledger._lab_seen if ledger is not None else {}
-    with _LAB_LOCK:
-        with db.session() as s:
-            rows, stamps = _lab_rows(s, ledger, folder, seen)
-        if rows and ledger is not None and not ledger._stop.is_set():
-            done = []
-            for i in range(0, len(rows), BATCH_EVENTS):
-                ev = threading.Event()
-                done.append(ev)
-                ledger._put(("rows", rows[i:i + BATCH_EVENTS], ev))
-            if not ledger.background:
-                ledger.drain()
-            deadline = time.monotonic() + LAB_WRITE_SECONDS
-            for ev in done:
-                if not ev.wait(max(0.0, deadline - time.monotonic())):
-                    # not written yet (the writer is far behind): the files are read again next time, and whatever the
-                    # writer has written by then is not written twice
-                    log.warning("the ledger's writer has not written the lab's events yet")
-                    return 0
-        elif rows:
-            with db.session() as s:
-                s.execute(insert(ComputeEvent.__table__), rows)
-        seen.update(stamps)
-    return len(rows)
-
-
-def _lab_rows(session, ledger: Optional[Ledger], folder, seen: dict) -> tuple:
-    """``ingest_lab``'s events of the results files changed since they were last read, and those files' stamps."""
-    from sqlalchemy import select
-    from . import servers
-    from .db.models import ComputeEvent, HardwareClass
-    classes = (ledger.classes(session) if ledger is not None else
-               [class_dict(c) for c in session.scalars(select(HardwareClass))])
-    host = servers.load().get("host_server_id") or HOST_UNKNOWN
-    facts = servers.machine_facts(host) or {}
-    cls = class_of(facts, "cpu", classes)
-    rate = cls["rate"] if cls else 0.0
-    rows, stamps = [], {}
-    for path in sorted(folder.glob("*.jsonl")):
-        try:
-            st = path.stat()
-        except OSError:
-            continue
-        stamp = (st.st_mtime, st.st_size)
-        if seen.get(str(path)) == stamp:
-            continue
-        exp = path.stem
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        pattern = "lab:" + exp.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ":%"
-        have = {act for (act,) in session.execute(select(ComputeEvent.activity).where(
-            ComputeEvent.activity_kind == "lab", ComputeEvent.activity.like(pattern, escape="\\")))}
-        consumer, _game_kind, _found = owner_of(session, f"lab:{exp}")
-        for line in lines:
-            try:
-                res = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(res, dict) or res.get("crash") or res.get("i") is None:
-                continue
-            # the usage ledger's activity of the game (``usage.lab_game_rows``), so costing joins its held time
-            activity = f"lab:{exp}:{res['i']}"[:160]
-            rid = activity[:64]
-            cpu_s = float(res.get("cpu_s") or res.get("seconds") or 0.0)
-            if activity in have or cpu_s <= 0:
-                continue
-            try:
-                at = datetime.fromisoformat(res["finished"]).astimezone(timezone.utc) if res.get("finished") else utcnow()
-            except (TypeError, ValueError):
-                at = utcnow()
-            try:
-                wall = float(res.get("seconds") or 0.0)
-            except (TypeError, ValueError):
-                wall = 0.0
-            rows.append({"at": at, "activity": activity[:160], "activity_kind": "lab", "task_class": "cpu",
-                         "consumer_id": consumer, "provider_id": None, "machine_id": host[:40], "kind": "cpu",
-                         "model": None, "gen_s": 0.0, "cpu_core_s": round(cpu_s, 6), "reported_s": None,
-                         "observed_s": round(wall, 3) if wall > 0 else None, "tokens_in": 0, "tokens_out": 0,
-                         "tokens_reasoning": 0, "tokens_cache_read": 0, "tokens_cache_write": 0,
-                         "credits": round(credits_for("cpu", cpu_core_s=cpu_s, rate=rate), 6), "flags": {},
-                         "self_use": consumer is None, "verification": "verified", "request_id": rid})
-            have.add(activity)
-        stamps[str(path)] = stamp
-    return rows, stamps

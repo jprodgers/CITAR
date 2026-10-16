@@ -778,11 +778,11 @@ def machine_settings(server_id: Optional[str]) -> Optional[dict]:
     ``cpu_percent``, ``memory_mb``, ``work``; ``citar.machine_settings.capabilities``), with the row's ``enabled``,
     ``reach``, ``provider``, ``kind`` and ``name``. None for no such machine. The prompt scheduler reads its slots and
     swaps here; Phase 4's welcome and settings frames will carry the slots, the swaps and the CPU limits."""
-    from .machine_settings import capabilities
+    from .machine_settings import capabilities, host_defaults_for
     m = _state()[1].get(server_id or "")
     if not m:
         return None
-    caps = capabilities(m.get("capabilities"))
+    caps = capabilities(m.get("capabilities"), host_defaults_for(m))
     try:
         slots = max(1, int(m.get("max_concurrent") or 1))
     except (TypeError, ValueError):

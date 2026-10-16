@@ -1,13 +1,20 @@
-"""CITAR lab: a long-running, resumable queue of bot-vs-bot experiments for tuning the scripted bots.
+"""CITAR lab: a resumable queue of bot-vs-bot experiments for tuning the scripted bots, played inside the CITAR server.
 
-    python -m citar.lab run [--workers N] [--night-workers M]   # the runner: keep it going for days; safe to restart
-    python -m citar.lab submit SPEC.json [...]                   # queue experiments (bot versions pinned at submit)
-    python -m citar.lab status                                   # what is running, progress per experiment
-    python -m citar.lab report NAME [NAME ...]                   # results, per seat label and head to head
-    python -m citar.lab stop                                     # ask the runner to exit (running games are redone later)
+    python -m citar.lab submit SPEC.json [...]      # queue experiments (bot versions pinned at submit)
+    python -m citar.lab status                      # what is queued and playing, from the server's database
+    python -m citar.lab report NAME [NAME ...]      # results, per seat label and head to head
+    python -m citar.lab stop                        # pause: running games finish, nothing new starts
+    python -m citar.lab resume                      # start new games again
 
-Everything lives in saves/lab/: queue/NAME.json (experiments), results/NAME.jsonl (one line per finished game),
-status.json and lab.log describe the runner.
+Everything lives in saves/lab/: queue/NAME.json (experiments waiting or playing), results/NAME.jsonl (one line per
+finished game), reference/NAME.jsonl (a reference run's games, the statistical baseline's lines), done/NAME.json
+(finished experiments), lab.log (what the dispatcher did) and crashes.log (games that crashed, with their traces).
+
+**The games are played by the server** (design/phase4-helper.md P4.5.5-P4.5.7): its job dispatcher
+(``citar.jobs.dispatcher``) turns each game of a queued experiment into a CPU job and offers it to an executor, the
+server's own job host (``citar.jobs.local``, under the host machine's CPU settings) and, from 0.1.6's next package on,
+helpers lending their CPU. ``python -m citar.lab run`` and ``citar lab run``, the separate runner process of 0.1.5,
+are retired: they say so and exit 2. Start the server (local or server mode) and the lab plays.
 
 An experiment is a JSON object:
 
@@ -18,6 +25,12 @@ An experiment is a JSON object:
                {"label": "old", "bot": "basic-1"}, {"profile": "my-profile"}, ...],
      "rotate": true}
 
+``kind`` says what it is (P4.4.1): ``lab`` (the default; a member's or an administrator's experiment), ``ranking``
+(a game of the site's own ladder) or ``reference`` (a run of the statistical baseline the bots are compared against:
+no seats, the baseline's own, with ``params`` overriding every seat's bot; ``turns`` its turn limit). The last two are
+an administrator's, and the server's own data collection: nobody's credits pay for them (``citar lab submit``
+registers them so, and refuses an owner who is not an administrator).
+
 A seat names a bot version ("bot": "basic" for the latest, "basic-N", "idle") with parameter overrides, or a bot
 profile ("profile": id; see citar.bots.profiles): the profile's engine, overrides and aggression are resolved into
 the experiment when it is submitted, so later edits to the profile don't change a queued experiment. "params" on such
@@ -26,12 +39,10 @@ way.
 
 Bot versions are pinned when an experiment is submitted: "basic" becomes the version it names then (basic-1), so a
 newer version compiled in later does not mix into a queued experiment (use "live" to opt out and play the latest
-version at play time). The engine compiles its versions in, so nothing is copied: 0.1.5 froze a copy of its Python
-bot instead, and a seat naming one of those snapshots is refused, the snapshots having been archived with 0.1.5.
-Every result records, per seat, what played: the build id (the engine's and the bot's code and the ruleset), the bot
-version, the profile and its revision, the overrides, the fixed aggression as the bot played it and the fingerprint,
-all taken when the game is played, so a game of a queued experiment that a newer build plays is labelled with that
-build. A seat queued as {"profile": "best"} is recorded as the profile "best" stood for at submission.
+version at play time). Every result records, per seat, what played: the build id (the engine's and the bot's code and
+the ruleset), the bot version, the profile and its revision, the overrides, the fixed aggression as the bot played it
+and the fingerprint, all taken when the game is played. A seat queued as {"profile": "best"} is recorded as the
+profile "best" stood for at submission.
 
 Optional map generation keys pass straight to the generator: "map_edges" (ice_caps, wrap_x, wrap_y, wrap_both,
 boxed), "river_density" (1 = normal) and "resources" (densities and per-resource rules; see mapgen.MapOptions).
@@ -41,49 +52,60 @@ start position. "turns" 0 plays to the speed's time-victory turn, and a limit pa
 unless its profile fixes one (or the seat does, with "aggression", held to 0..1 at submission), comes from its start
 position and the seed, so rotation evens it out.
 
-Every game is played as a job (``engine_api.run_job``, design/phase4-helper.md P4.4), so ``submit`` checks the
-experiment's games as jobs and refuses one that a job would refuse (a turn limit past the speed's, a seed past
-2^53 - 1, a label or a name of more than 200 characters, an override the bot does not take), saying which game and
-why, rather than queue games that can never be played. A game that crashes (a panic of the engine or a bot) crashes
-the same way every time it is played, so its crash is final: the runner that saw it does not play it again.
-During the restricted hours of the CITAR host server (Servers page) the runner uses --night-workers (fan noise).
-Every finished game is written to the usage ledger (saves/usage/lab-*.jsonl) so reports can cost experiments.
+Every game is played as a job (``engine_api.run_job``'s Rust, P4.4), so ``submit`` checks the experiment's games as
+jobs and refuses one that a job would refuse (a turn limit past the speed's, a seed past 2^53 - 1, a label or a name of
+more than 200 characters, an override the bot does not take), saying which game and why. A game that crashes (a panic
+of the engine or a bot) crashes the same way every time it is played, so its crash is its result: written to the
+results file as a crash line, to crashes.log with its trace, and never played again.
 
-``run`` and ``submit`` load the engine before anything else and stop with exit 2 when it does not load (the extension
-missing or out of date, or a ``CITAR_RULESET_DIR`` that does not load): every game would fail the same way.
+A finished game's line is its job's result plus the times its executor measured (``seconds``, ``started_ts``,
+``cpu_s``, ``finished``) and ``executor``: ``{"machine", "run", "verification"}``. The dispatcher writes it once
+(P4.5.7: the job is committed first, the line appended after, and the two reconciled when the server starts).
+
+``submit`` loads the engine before anything else and stops with exit 2 when it does not load (the extension missing or
+out of date, or a ``CITAR_RULESET_DIR`` that does not load): every game would fail the same way.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
-import os
 import statistics
 import sys
 import time
-import traceback
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-from .fsutil import newest_first as _fs_newest, read_text as _fs_read, replace as _fs_replace, write_text as _fs_write
+from .fsutil import newest_first as _fs_newest, read_text as _fs_read, write_text as _fs_write
 from . import paths
 
+_log = logging.getLogger("citar.lab")
+
 LAB = paths.saves_path("lab")
-QUEUE, RESULTS, DONE = LAB / "queue", LAB / "results", LAB / "done"
+QUEUE, RESULTS, DONE, REFERENCE = LAB / "queue", LAB / "results", LAB / "done", LAB / "reference"
+#: The pause (``citar lab stop``, the Lab page's Stop): while it exists the dispatcher starts no game.
+PAUSED_NAME = "PAUSED"
+
+#: An experiment's kind and the kind of job each of its games is (design/phase4-helper.md P4.4.1).
+JOB_KINDS = {"lab": "lab_game", "ranking": "ranking_game", "reference": "reference_game"}
+#: The kinds only an administrator queues, which are the server's own data collection: nobody's credits pay for them.
+COLLECTION_KINDS = ("ranking", "reference")
 
 
 def _dirs():
     """Create the lab's directories if they do not exist."""
-    for d in (QUEUE, RESULTS, DONE):
+    for d in (QUEUE, RESULTS, DONE, REFERENCE):
         d.mkdir(parents=True, exist_ok=True)
 
 
 def log(msg: str):
-    """Append to the lab log, and print it. The Lab page reads this file."""
+    """Append to the lab log (the Lab page shows its last lines) and to the server's log."""
     _dirs()
     line = f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}"
-    print(line, flush=True)
+    _log.info("%s", msg)
     with open(LAB / "lab.log", "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
@@ -97,11 +119,61 @@ def engine_hash() -> str:
 
 
 # ----------------------------------------------------------------------------
+# the pause
+# ----------------------------------------------------------------------------
+def paused() -> Optional[dict]:
+    """The pause, ``{"at", "by"}``, while the lab is paused (``citar lab stop`` or the Lab page's Stop): the dispatcher
+    offers no game, and running ones finish. None otherwise."""
+    try:
+        text = _fs_read(LAB / PAUSED_NAME)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"at": None, "by": None}
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def pause(by: str = "citar lab stop") -> dict:
+    """Pause the lab: the dispatcher starts no new game (running ones finish) until :func:`resume`."""
+    _dirs()
+    data = {"at": datetime.now().isoformat(timespec="seconds"), "by": by}
+    _fs_write(LAB / PAUSED_NAME, json.dumps(data))
+    return data
+
+
+def resume() -> bool:
+    """End the pause; whether there was one."""
+    try:
+        (LAB / PAUSED_NAME).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+# ----------------------------------------------------------------------------
 # experiments
 # ----------------------------------------------------------------------------
 DEFAULTS = {"priority": 0, "games": 12, "seed": 1000, "size": "small", "maps": ["continents", "pangaea", "fractal"],
             "speed": "Quick", "turns": 0, "difficulty": "Prince", "barbarians": "normal", "barbarian_difficulty": None,
             "nation": "BenchmarkCiv", "city_states": None, "rotate": True}
+#: A reference run's defaults: the baseline's game, which seats its own bots (P4.4.1).
+REFERENCE_DEFAULTS = {"priority": 0, "games": 12, "seed": 1000, "size": "small",
+                      "maps": ["continents", "pangaea", "fractal"], "speed": "Quick", "turns": 0,
+                      "barbarians": "normal", "params": None}
+
+
+def kind_of(exp: dict) -> str:
+    """An experiment's kind: ``lab`` (also for one queued before kinds existed), ``ranking`` or ``reference``."""
+    return exp.get("kind") or "lab"
+
+
+def job_kind(exp: dict) -> str:
+    """The kind of job each game of the experiment is (``lab_game``, ``ranking_game``, ``reference_game``)."""
+    return JOB_KINDS[kind_of(exp)]
 
 
 def _resolve_seat(seat: dict) -> dict:
@@ -134,8 +206,14 @@ def _pin(bot) -> str:
 
 def normalize(spec: dict) -> dict:
     """Validate an experiment and fill in its defaults, pinning the bot versions it names."""
+    kind = kind_of(spec)
+    if kind not in JOB_KINDS:
+        raise ValueError(f"An experiment's kind is one of {', '.join(JOB_KINDS)}, not {kind!r}.")
+    if kind == "reference":
+        return _normalize_reference(spec)
     s = dict(DEFAULTS)
     s.update(spec)
+    s["kind"] = kind
     if not s.get("name"):
         raise ValueError("An experiment needs a name.")
     if s.get("factors"):
@@ -175,13 +253,31 @@ def normalize(spec: dict) -> dict:
     return s
 
 
+def _normalize_reference(spec: dict) -> dict:
+    """A reference run (P4.4.1): the baseline's games, which seat the baseline's own bots, ``params`` overriding every
+    seat's (a profile's overrides, cleaned by the latest version), ``turns`` the turn limit (0: the speed's)."""
+    from .bots import profiles
+    s = dict(REFERENCE_DEFAULTS)
+    s.update(spec)
+    s["kind"] = "reference"
+    if not s.get("name"):
+        raise ValueError("An experiment needs a name.")
+    if s.get("seats") or s.get("factors"):
+        raise ValueError("A reference run has no seats or factors: it plays the baseline's own seats.")
+    if s.get("params"):
+        s["params"] = profiles.clean_params(profiles.LATEST, s["params"])
+    s["submitted"] = s.get("submitted") or datetime.now().isoformat(timespec="seconds")
+    check_games(s)
+    return s
+
+
 #: The most games of one experiment checked one by one as jobs (a tenth of a millisecond each); past it, the last
 #: game is checked too, whose seed is the largest.
 CHECK_GAMES = 5000
 
 
 def check_games(exp: dict):
-    """Refuse (ValueError) an experiment whose games a lab job would refuse: each game's spec through the jobs crate's
+    """Refuse (ValueError) an experiment whose games a job would refuse: each game's spec through the jobs crate's
     own check (``engine_api.check_job_spec``), which holds the bounds of design/phase4-helper.md P4.4.1 (the turn limit
     within the speed's, the seed within 2^53 - 1, text of 200 characters at most, overrides the bot takes, settings the
     engine knows). Every game is checked, as a factorial experiment's labels and overrides differ from game to game; an
@@ -193,41 +289,14 @@ def check_games(exp: dict):
         games.append(n - 1)
     for i in games:
         try:
-            engine_api.check_job_spec("lab_game", job_spec(game_spec(exp, i)))
+            engine_api.check_job_spec(*job_of(exp, i))
         except engine_api.JobRefused as e:
             raise ValueError(f"Game {i} of experiment {exp.get('name')} cannot be played: {e}") from None
 
 
-#: How many times one runner plays a game that crashed in a way that might not happen again (a game process that
-#: died). A game whose crash is final, a panic of the engine or a bot (the same game always crashes the same way) or a
-#: spec the jobs crate refuses, is not played again by the runner that saw it.
-ATTEMPTS = 3
-
-#: Why a queued experiment cannot be played, by the experiment as queued (its priority aside): the runner and the Lab
-#: page ask about every queued experiment on every pass, and the answer for one experiment never changes.
-_REFUSALS: dict[str, str] = {}
-
-
-def refusal(exp: dict) -> str:
-    """Why a queued experiment cannot be played ('' if it can): one queued before its games were checked as jobs, and
-    one that a newer build's bounds refuse. Its games would each be refused when played."""
-    key = json.dumps({k: v for k, v in exp.items() if k != "priority"}, sort_keys=True, default=str)
-    if key not in _REFUSALS:
-        if len(_REFUSALS) > 1000:
-            _REFUSALS.clear()
-        try:
-            check_games(exp)
-            _REFUSALS[key] = ""
-        except ValueError as e:
-            _REFUSALS[key] = str(e)
-        except Exception:       # an experiment too broken to make specs of: its games crash and say why
-            _REFUSALS[key] = ""
-    return _REFUSALS[key]
-
-
 def submit(spec: dict) -> dict:
     """Queue an experiment, refusing to overwrite one of the same name. Written whole (a temporary file, then a
-    rename): the runner and the Lab page list the queue whenever they like, and must never read half of it."""
+    rename): the dispatcher and the Lab page list the queue whenever they like, and must never read half of it."""
     _dirs()
     s = normalize(spec)
     path = QUEUE / f"{s['name']}.json"
@@ -239,8 +308,7 @@ def submit(spec: dict) -> dict:
 
 def load_queue() -> list[dict]:
     """Every queued experiment, most important first. A file read while the server changes its priority
-    (``set_priority``) is waited for: one skipped would leave its games unstarted, and an idle runner whose only
-    experiment it was would think the queue empty and exit."""
+    (``set_priority``) is waited for: one skipped would leave its games unstarted."""
     _dirs()
     out = []
     for p in QUEUE.glob("*.json"):
@@ -254,7 +322,8 @@ def load_queue() -> list[dict]:
 
 def set_priority(name: str, priority: int) -> int:
     """Change a queued experiment's priority (the Queue page), held to -100..100; returns it. The file is replaced
-    while the runner may be reading it, so both sides retry."""
+    while the dispatcher may be reading it, so both sides retry; the dispatcher gives its queued games the new
+    priority within a tick."""
     path = QUEUE / f"{name}.json"
     spec = json.loads(_fs_read(path))
     spec["priority"] = max(-100, min(100, int(priority)))
@@ -289,9 +358,15 @@ def complete_players(exp: dict, r: dict) -> dict:
     return r
 
 
-def load_results(name: str) -> list[dict]:
-    """Every finished game of an experiment."""
-    path = RESULTS / f"{name}.jsonl"
+def results_path(name: str, kind: str = "lab") -> Path:
+    """Where an experiment's finished games are: results/NAME.jsonl, or reference/NAME.jsonl for a reference run
+    (``scripts/refcheck/summarize.py`` reads those as it reads a baseline's)."""
+    return (REFERENCE if kind == "reference" else RESULTS) / f"{name}.jsonl"
+
+
+def load_results(name: str, kind: str = "lab") -> list[dict]:
+    """Every finished game of an experiment, crash lines included (each says ``crash``)."""
+    path = results_path(name, kind)
     if not path.exists():
         return []
     out = []
@@ -348,8 +423,25 @@ def game_spec(exp: dict, i: int) -> dict:
             **{k: exp[k] for k in ("map_edges", "river_density", "resources") if exp.get(k) is not None}}
 
 
+def reference_spec(exp: dict, i: int) -> dict:
+    """Game *i* of a reference run as a reference job's spec (``citar_jobs::ReferenceSpec``): its seed, map size and
+    type, barbarians, speed, turn limit (None: the speed's) and the overrides of every seat's bot."""
+    maps = exp.get("maps") or ["continents"]
+    return {"i": i, "seed": exp["seed"] + i, "size": exp["size"], "map_type": maps[i % len(maps)],
+            "barbarians": exp.get("barbarians") or "normal", "speed": exp["speed"],
+            "turn_limit": exp.get("turns") or None, "params": exp.get("params") or None}
+
+
+def job_of(exp: dict, i: int) -> tuple[str, dict]:
+    """Game *i* of an experiment as a job: (its kind, its spec)."""
+    kind = job_kind(exp)
+    if kind == "reference_game":
+        return kind, reference_spec(exp, i)
+    return kind, job_spec(game_spec(exp, i))
+
+
 # ----------------------------------------------------------------------------
-# one game (runs in a worker process)
+# one game, in this process (tests, and the lab's own checks): the server plays them through its dispatcher
 # ----------------------------------------------------------------------------
 def make_bot(seat: dict, aggression: float):
     """The bot a seat calls for: its version with its overrides, playing the seat's fixed aggression if it has one
@@ -392,7 +484,7 @@ def job_spec(spec: dict) -> dict:
 
 def crash_text(crash: dict) -> str:
     """A lab job's crash outcome (``{"turn", "player", "label", "message"}``) as a crash line: ``T<turn> P<player>
-    <label>: panic: <message>``, the runner's shape."""
+    <label>: panic: <message>``."""
     where = f"T{crash.get('turn')}"
     if crash.get("player") is not None:
         where += f" P{crash['player']}"
@@ -402,24 +494,18 @@ def crash_text(crash: dict) -> str:
 
 
 def play(spec: dict) -> dict:
-    """Play one lab game to the end and return its result line.
+    """Play one lab game to the end in this process and return its result line (the tests', and a check by hand: the
+    server plays the lab's games through its dispatcher and its job hosts).
 
-    The game is a job (``engine_api.run_job``, the jobs crate: the same Rust a helper plays one with), and its result
+    The game is a job (``engine_api.run_job``, the jobs crate: the same Rust a job host plays it with), and its result
     is the job's, built in Rust from the game: the deterministic part a result hash covers (design/phase4-helper.md
     P4.4.2), with the times added here, outside it (``seconds``, ``started_ts``, ``cpu_s``, ``finished``). A game that
-    panics comes back as ``{"exp", "i", "crash", "final", "finished"}``: its turn, seat and message, and where it
-    happened, for crashes.log; ``final``, because the same game always crashes the same way, so no runner plays it
-    again. A spec the jobs crate refuses comes back so too, its reason the crash. Prints the runner's PROGRESS lines as
-    each turn begins."""
+    panics comes back as ``{"exp", "i", "crash", "final", "finished"}``: its turn, seat and message (and its trace).
+    A spec the jobs crate refuses comes back so too, its reason the crash."""
     from . import engine_api
     t0 = time.time()
-
-    def progress(info):
-        """The runner reads these lines from the game's process to show how far it has got."""
-        print(f"PROGRESS {info['turn']} {info['turn_limit'] or 0} {time.time() - t0:.0f}", flush=True)
-
     try:
-        out = engine_api.run_job("lab_game", job_spec(spec), on_round=progress)
+        out = engine_api.run_job("lab_game", job_spec(spec))
     except engine_api.JobRefused as e:
         return {"exp": spec["exp"], "i": spec["i"], "crash": f"JobRefused ({e.code}): {e}", "final": True,
                 "finished": datetime.now().isoformat(timespec="seconds")}
@@ -434,336 +520,42 @@ def play(spec: dict) -> dict:
             "cpu_s": round(out["cpu_s"], 1), "finished": finished}
 
 
-def _play_safe(spec: dict) -> dict:
-    """Play a game, returning a crash record instead of raising.
-
-    One bad game must not end a run that has been going for two days.
-    """
-    try:
-        return play(spec)
-    except Exception as e:
-        return {"exp": spec["exp"], "i": spec["i"], "crash": f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=8)}",
-                "finished": datetime.now().isoformat(timespec="seconds")}
-
-
 # ----------------------------------------------------------------------------
-# the runner
+# a finished job as a results line (the dispatcher writes it)
 # ----------------------------------------------------------------------------
-def quiet_now() -> bool:
-    """True during the restricted hours of the CITAR host server (the machine the lab games run on)."""
-    try:
-        from . import servers
-        return servers.restricted(servers.host()) is not None
-    except Exception:
-        return False
+#: The keys that name one reference game, as the baseline's lines carry them (``summarize.py``'s IDENTITY).
+REFERENCE_IDENTITY = ("i", "seed", "size", "map_type", "barbarians", "speed", "turn_limit")
 
 
-def lab_config(args) -> dict:
-    """The runner's configuration, from arguments and the config file."""
-    cfg = {"workers": args.workers, "night_workers": args.night_workers}
-    try:
-        cfg.update(json.loads((LAB / "config.json").read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError):
-        pass
-    return cfg
-
-
-JOBS = LAB / "jobs"          # per-game spec/result/log files of games in flight
-
-
-def _job_paths(name: str, i: int):
-    """The spec, result and log paths for one game of an experiment."""
-    base = JOBS / f"{name}__{i}"
-    return base.with_suffix(".spec.json"), base.with_suffix(".result.json"), base.with_suffix(".log")
-
-
-def _record(name: str, i: int, res: dict, finished_times: list):
-    """Append a finished game's result, or its crash, to the experiment's results."""
-    if res.get("crash"):
-        final = " (final: not played again)" if res.get("final") else ""
-        log(f"{name} #{i} crashed{final}: {res['crash'].splitlines()[0]}")
-        with open(LAB / "crashes.log", "a", encoding="utf-8") as f:
-            f.write(f"--- {datetime.now():%Y-%m-%d %H:%M} {name} #{i}{' final' if final else ''}\n{res['crash']}\n")
-        return
-    if i in {r["i"] for r in load_results(name)}:
-        return
-    with open(RESULTS / f"{name}.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(res) + "\n")
-    finished_times.append(time.time())
-    try:
-        from . import servers, usage
-        usage.append("lab", usage.lab_game_rows(name, i, res, servers.load().get("host_server_id")))
-    except Exception:
-        log("could not write the usage ledger: " + traceback.format_exc(limit=2).replace("\n", " | "))
-    if res.get("errors"):
-        with open(LAB / "crashes.log", "a", encoding="utf-8") as f:
-            f.write(f"--- {datetime.now():%Y-%m-%d %H:%M} {name} #{i} bot errors\n" + "\n".join(res["errors"][:3]) + "\n")
-    log(f"{name} #{i}: T{res['turns']} {res['victory']} won by {res['winner_label']} "
-        f"({res['seconds']:.0f}s{', ' + str(len(res['errors'])) + ' bot errors' if res['errors'] else ''})")
-
-
-def _retry(fn, tries: int = 20, delay: float = 0.25):
-    """Windows refuses to replace or delete a file another process has open (the web Lab page reading status.json,
-    OneDrive syncing); such locks last milliseconds, so retry instead of dying."""
-    for k in range(tries):
-        try:
-            return fn()
-        except PermissionError:
-            if k == tries - 1:
-                raise
-            time.sleep(delay)
-
-
-def _unlink(path: Path):
-    """Delete a file, ignoring the failure if it is not there or is locked."""
-    try:
-        _retry(lambda: path.unlink(missing_ok=True))
-    except OSError:
-        pass
-
-
-class _Adopted:
-    """A game subprocess started by an earlier runner that is still playing; polled by pid."""
-
-    def __init__(self, pid: int):
-        self.pid = pid
-        self.returncode = None
-
-    def poll(self):
-        """Whether the adopted process is still running."""
-        if _pid_alive(self.pid):
-            return None
-        self.returncode = 0
-        return 0
-
-    def kill(self):
-        """Stop an adopted process."""
-        import subprocess
-        subprocess.run(["taskkill", "/F", "/PID", str(self.pid)], capture_output=True)
-
-    terminate = kill
-
-
-def _find_running_games() -> dict:
-    """(experiment, game) -> (pid, start time) for `citar.lab play` processes already running (Windows)."""
-    import subprocess
-    if os.name != "nt":
-        return {}
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -like '*citar.lab play*' } | "
-          "ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId, [int64](($_.CreationDate.ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds), $_.CommandLine }")
-    try:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=60).stdout
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    found = {}
-    for line in out.splitlines():
-        try:
-            pid, started, cmd = line.split("|", 2)
-            res = cmd.strip().split()[-1].strip('"')
-            name, _, i = Path(res).name[: -len(".result.json")].rpartition("__")
-            found[(name, int(i))] = (int(pid), float(started))
-        except ValueError:
-            continue
-    return found
-
-
-def _collect_orphans(finished_times: list):
-    """Results written by games whose runner has gone (a previous runner that was stopped or crashed)."""
-    for res_path in JOBS.glob("*.result.json"):
-        name, _, i = res_path.name[: -len(".result.json")].rpartition("__")
-        try:
-            res = json.loads(res_path.read_text(encoding="utf-8"))
-            _record(name, int(i), res, finished_times)
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-        for q in _job_paths(name, int(i)):
-            _unlink(q)
-
-
-def run(args):
-    """Each game is an independent subprocess (`python -m citar.lab play SPEC OUT`), so a hung or crashed game can't
-    take the runner down, every game runs the code on disk when it starts, and games that finish after the runner
-    exits are collected by the next runner."""
-    import subprocess
-    _dirs()
-    JOBS.mkdir(parents=True, exist_ok=True)
-    (LAB / "STOP").unlink(missing_ok=True)
-    max_workers = max(args.workers, args.night_workers, 1)
-    log(f"runner started (pid {os.getpid()}, up to {max_workers} workers)")
-    try:
-        from . import usage
-        usage.start_power_sampler()        # samples this machine's power unless the CITAR server already does
-    except Exception:
-        pass
-    running = {}           # (exp, i) -> (Popen, started)
-    attempts = Counter()
-    finished_times: list = []
-    _collect_orphans(finished_times)
-    for key, (pid, started) in _find_running_games().items():
-        running[key] = (_Adopted(pid), started)
-        attempts[key] += 1
-        log(f"adopted {key[0]} #{key[1]} (pid {pid}, running {(time.time() - started) / 60:.0f} min)")
-    for stale in JOBS.glob("*.spec.json"):
-        name, _, i = stale.name[: -len(".spec.json")].rpartition("__")
-        if (name, int(i) if i.isdigit() else -1) not in running:
-            _unlink(stale)
-    flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
-    while True:
-        try:
-            if _runner_step(args, running, attempts, finished_times, flags, max_workers):
-                return
-        except Exception:
-            # never let one bad pass (a locked file, a malformed spec) kill a multi-day runner
-            log("runner error (continuing): " + traceback.format_exc(limit=4).replace("\n", " | "))
-        time.sleep(5)
-
-
-def _runner_step(args, running, attempts, finished_times, flags, max_workers) -> bool:
-    """One pass of the runner loop. Returns True when the runner should exit."""
-    import subprocess
-    if True:
-        if (LAB / "STOP").exists():
-            log("stop requested: exiting (unfinished games will be replayed by the next runner)")
-            for (name, i), (proc, _) in running.items():
-                proc.terminate()
-            _unlink(LAB / "STOP")
-            _write_status(running, finished_times, 0, stopped=True)
-            return True
-        # finished games
-        for key in list(running):
-            proc, started = running[key]
-            if proc.poll() is None:
-                if time.time() - started > args.max_minutes * 60:
-                    proc.kill()
-                    log(f"{key[0]} #{key[1]} killed after {args.max_minutes} min")
-                continue
-            del running[key]
-            name, i = key
-            spec_p, res_p, log_p = _job_paths(name, i)
-            try:
-                res = json.loads(res_p.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                tail = log_p.read_text(encoding="utf-8", errors="replace")[-3000:] if log_p.exists() else ""
-                res = {"exp": name, "i": i, "crash": f"exit code {proc.returncode}\n{tail}"}
-            _record(name, i, res, finished_times)
-            if res.get("crash") and res.get("final"):
-                attempts[key] = max(attempts[key], ATTEMPTS)
-            for q in (spec_p, res_p, log_p):
-                _unlink(q)
-        # start new games
-        cfg = lab_config(args)
-        quiet = quiet_now() and not cfg.get("ignore_quiet_hours")
-        target = int(cfg["night_workers"] if quiet else cfg["workers"])
-        target = max(0, min(target, max_workers))
-        queue = load_queue()
-        for exp in queue:
-            if len(running) >= target:
-                break
-            why = refusal(exp)
-            if why:
-                if exp["name"] not in _told:
-                    _told.add(exp["name"])
-                    log(f"{why}; none of its games starts (delete the experiment and queue it again)")
-                continue
-            done = {r["i"] for r in load_results(exp["name"])}
-            if len(done) >= exp["games"]:
-                if not any(k[0] == exp["name"] for k in running):
-                    # a rename, also over an earlier experiment of the name in done/ (`lab submit` may reuse a
-                    # finished one's), where a move would copy over it in place, readable half written
-                    _fs_replace(QUEUE / f"{exp['name']}.json", DONE / f"{exp['name']}.json")
-                    log(f"experiment {exp['name']} complete")
-                continue
-            for i in range(exp["games"]):
-                if len(running) >= target:
-                    break
-                if i in done or (exp["name"], i) in running or attempts[(exp["name"], i)] >= ATTEMPTS:
-                    continue
-                attempts[(exp["name"], i)] += 1
-                spec_p, res_p, log_p = _job_paths(exp["name"], i)
-                spec_p.write_text(json.dumps(game_spec(exp, i)), encoding="utf-8")
-                _unlink(res_p)
-                with open(log_p, "w", encoding="utf-8") as lf:
-                    # Started from the directory that contains the package, so that `-m citar.lab`
-                    # resolves to this copy of CITAR rather than to some other one on the path.
-                    proc = subprocess.Popen([sys.executable, "-m", "citar.lab", "play", str(spec_p), str(res_p)],
-                                            cwd=str(paths.ROOT), stdout=lf, stderr=subprocess.STDOUT,
-                                            creationflags=flags)
-                running[(exp["name"], i)] = (proc, time.time())
-        _write_status(running, finished_times, target)
-        if not running and args.exit_when_idle:
-            queue = load_queue()
-            if not queue:
-                log("queue empty: exiting")
-                return True
-            # A runner tries a game three times, and a game whose crash is final once, so once every game left has
-            # crashed for good or three times (or belongs to an experiment that cannot be played) nothing will start
-            # again here, and waiting would be for ever. The next runner tries them again.
-            refused = [exp["name"] for exp in queue if refusal(exp)]
-            left = [(exp["name"], i) for exp in queue if exp["name"] not in refused for i in _unplayed(exp)]
-            if (left or refused) and all(attempts[key] >= ATTEMPTS for key in left):
-                why = []
-                if left:
-                    named = ", ".join(f"{n} #{i}" for n, i in left[:6]) + (", ..." if len(left) > 6 else "")
-                    why.append(f"{len(left)} game(s) crashed for good or three times ({named})")
-                if refused:
-                    named = ", ".join(refused[:6]) + (", ..." if len(refused) > 6 else "")
-                    why.append(f"{len(refused)} experiment(s) cannot be played ({named})")
-                log(f"nothing left to play: {'; '.join(why)}; exiting "
-                    "(crashes.log and lab.log say why; the next runner tries them again)")
-                return True
-    return False
-
-
-#: The experiments this process has logged as unplayable, so the runner says so once.
-_told: set[str] = set()
-
-
-def _unplayed(exp: dict) -> list[int]:
-    """The games of a queued experiment with no result yet."""
-    done = {r["i"] for r in load_results(exp["name"])}
-    return [i for i in range(exp["games"]) if i not in done]
-
-
-def cmd_play(spec_path: str, out_path: str):
-    """Play one game as a subprocess. The entry point the runner spawns.
-
-    A subprocess per game, rather than a process pool: the pool deadlocked on Windows under Python
-    3.14, and a separate process also means a game that hangs or crashes cannot take the runner with
-    it.
-    """
-    import faulthandler
-    faulthandler.enable()       # a hard crash leaves a stack trace in the job log
-    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
-    res = _play_safe(spec)
-    tmp = Path(out_path + ".tmp")
-    tmp.write_text(json.dumps(res), encoding="utf-8")
-    _fs_replace(tmp, out_path)
-
-
-def _write_status(running, finished_times, target, stopped=False):
-    """Write the runner's status file, which the Lab page polls."""
-    now = time.time()
-    recent = [t for t in finished_times if now - t < 3600]
-    exps = {}
-    for exp in load_queue():
-        exps[exp["name"]] = [len({r["i"] for r in load_results(exp["name"])}), exp["games"]]
-    st = {"pid": os.getpid(), "updated": datetime.now().isoformat(timespec="seconds"), "stopped": stopped,
-          "quiet_hours": quiet_now(), "target_workers": target,
-          "running": [{"exp": e, "i": i, "minutes": round((now - st) / 60, 1)} for (e, i), (_, st) in running.items()],
-          "games_last_hour": len(recent), "queue": exps}
-    tmp = LAB / "status.json.tmp"
-    try:
-        tmp.write_text(json.dumps(st, indent=1), encoding="utf-8")
-        _fs_replace(tmp, LAB / "status.json")
-    except OSError:
-        pass            # the next pass writes it again
+def result_line(kind: str, exp: str, i: int, spec: dict, result: dict, *, wall_s: float, cpu_s: float,
+                started_ts: Optional[float], finished: str, executor: dict) -> dict:
+    """A job's result as its line in the results file (P4.5.7): the deterministic result with the times its executor
+    measured and ``executor`` ({"machine", "run", "verification"}). A crash is a line too, final: a lab or ranking
+    game's ``{"exp", "i", "crash": "T<turn> P<player> <label>: panic: <message>", "final": true, ...}``, a reference
+    game's the baseline's crash line, its identity and ``crash``."""
+    if kind == "reference_game":
+        if "crash" in result:
+            line = {k: spec.get(k) for k in REFERENCE_IDENTITY}
+            line["crash"] = str(result["crash"])
+        else:
+            line = dict(result)
+        line.update({"seconds": round(wall_s, 3), "cpu_s": round(cpu_s, 3), "finished": finished,
+                     "executor": executor})
+        return line
+    if "crash" in result:
+        crash = result["crash"]
+        return {"exp": exp, "i": i, "crash": crash_text(crash) if isinstance(crash, dict) else str(crash),
+                "final": True, "finished": finished, "executor": executor}
+    return {**result, "seconds": round(wall_s, 1),
+            "started_ts": round(started_ts, 1) if started_ts is not None else None,
+            "cpu_s": round(cpu_s, 1), "finished": finished, "executor": executor}
 
 
 # ----------------------------------------------------------------------------
 # overview for the web Lab page
 # ----------------------------------------------------------------------------
 def _tail(path: Path, nbytes: int = 4000) -> str:
-    """The last few kilobytes of a file, for showing a game's recent output."""
+    """The last few kilobytes of a file, for showing a log's recent lines."""
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -774,41 +566,18 @@ def _tail(path: Path, nbytes: int = 4000) -> str:
         return ""
 
 
-def _runner_started() -> str:
-    """Start time ("YYYY-MM-DD HH:MM") of the latest runner, from lab.log; attempts are counted per runner."""
-    for line in reversed(_tail(LAB / "lab.log", 200_000).splitlines()):
-        if " runner started " in line:
-            return line[:16]
-    return ""
-
-
-def _crash_counts(since: str = "") -> Counter:
-    """How many times each game crashed, by (experiment, game), for the status display: a final crash (its header
-    ends ``final``) counts as all of a runner's attempts, since it is not played again."""
-    counts = Counter()
-    for line in _tail(LAB / "crashes.log", 200_000).splitlines():
-        if line.startswith("--- ") and not line.endswith("bot errors") and line[4:20] >= since:
-            parts = line.split()
-            final = parts[-1] == "final"
-            if final:
-                parts = parts[:-1]
-            if len(parts) >= 5 and parts[-1].startswith("#"):
-                counts[(parts[-2], int(parts[-1][1:]))] += ATTEMPTS if final else 1
-    return counts
-
-
 TURN_GROWTH = 2.5   # elapsed time grows about as turn ** 2.5: late turns have many more cities and units
 
 
 def _projected_total(r: dict):
-    """Projected length in minutes of a running game from its turn progress, or None if it is too early to tell."""
+    """Projected length in minutes of a running game from its round progress, or None if it is too early to tell."""
     if r.get("turn") and r.get("limit") and r["turn"] / r["limit"] > 0.1:
         return r["minutes"] * (r["limit"] / r["turn"]) ** TURN_GROWTH
     return None
 
 
 def _game_left(r: dict, per_game: float) -> float:
-    """Minutes a running game still needs: from its turn progress when it reports turns, otherwise from the median
+    """Minutes a running game still needs: from its round progress when it reports rounds, otherwise from the median
     game length (never less than a tenth of it, since a slow game past the median is still running)."""
     total = _projected_total(r)
     if total is not None:
@@ -831,7 +600,7 @@ def _folders_now() -> list:
 
 def _experiment_specs(tries: int = 5) -> list[tuple[dict, str]]:
     """Every experiment as (spec, "queued" or "complete"), the queue's first, then done/'s newest first, as one
-    reading of the two folders. The runner moves a finished experiment's file to done/ (a rename) whenever it
+    reading of the two folders. The dispatcher moves a finished experiment's file to done/ (a rename) whenever it
     finishes, and the Queue page replaces a queued one's: an experiment moved after its queue file was read and before
     done/ is listed would show twice, so a reading the folders changed under is taken again. Not merged by name
     instead: ``lab submit`` may queue an experiment under a finished one's name, and both are shown. A folder still
@@ -857,56 +626,73 @@ def _experiment_specs(tries: int = 5) -> list[tuple[dict, str]]:
     return specs
 
 
-def overview() -> dict:
-    """Everything the web Lab page shows: runner health, per-experiment progress and ETA, running games with their
-    current turn, recent log lines and the side runs (citar.bench jobs writing saves/lab/*.out)."""
-    _dirs()
-    now = time.time()
-    try:
-        st = json.loads(_fs_read(LAB / "status.json"))     # replaced by the runner every pass
-    except (OSError, json.JSONDecodeError):
-        st = {}
-    alive = bool(st.get("pid")) and _pid_alive(st["pid"]) and not st.get("stopped")
-    try:
-        updated_age = now - datetime.fromisoformat(st["updated"]).timestamp()
-    except (KeyError, ValueError):
-        updated_age = None
-    workers = max(1, int(st.get("target_workers") or 1))
-    crashes = _crash_counts(_runner_started())
+#: Each results file's figures by its (mtime, size), so a page polled every few seconds reads a file once a change.
+_FIGURES: dict = {}
 
+
+def results_figures(name: str, kind: str = "lab") -> dict:
+    """An experiment's results file in figures: the games it holds (``done``, each once, crash lines included), the
+    crashed ones, the median minutes and turns of the finished ones and when the last finished. Read again only when
+    the file changed."""
+    path = results_path(name, kind)
+    try:
+        st = path.stat()
+    except OSError:
+        return {"done": 0, "games": set(), "crashed": [], "per_game": None, "median_turns": None, "finished": None}
+    key = str(path)
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _FIGURES.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    res = load_results(name, kind)
+    games = {r.get("i") for r in res if isinstance(r.get("i"), int)}
+    mins = [r["seconds"] / 60 for r in res if not r.get("crash") and r.get("seconds")]
+    turns = [r["turns"] for r in res if not r.get("crash") and r.get("turns")]
+    figures = {"done": len(games), "games": games,
+               "crashed": sorted({r["i"] for r in res if r.get("crash") and isinstance(r.get("i"), int)}),
+               "per_game": statistics.median(mins) if mins else None,
+               "median_turns": statistics.median(turns) if turns else None,
+               "finished": max((r.get("finished") or "" for r in res), default=None) or None}
+    if len(_FIGURES) > 2000:
+        _FIGURES.clear()
+    _FIGURES[key] = (stamp, figures)
+    return figures
+
+
+def overview() -> dict:
+    """Everything the web Lab page shows: the dispatcher's health and its executors, per-experiment progress and
+    ETA, the games playing with their round, recent log lines and the side runs (citar.bench jobs writing
+    saves/lab/*.out). The live part is the dispatcher's (``citar.jobs.dispatcher.view``): a process with no dispatcher
+    (a command, a test) shows the files alone, nothing playing."""
+    _dirs()
+    from .jobs import dispatcher as jobs_dispatcher
+    live = jobs_dispatcher.view()
+    disp = live.get("dispatcher") or {}
+    threads = max(1, sum(int(e.get("threads") or 0) for e in disp.get("executors") or [] if e.get("on")))
     running = []
-    for r in st.get("running", []):
-        _, _, log_p = _job_paths(r["exp"], r["i"])
-        turn = limit = None
-        for line in reversed(_tail(log_p, 2000).splitlines()):
-            if line.startswith("PROGRESS "):
-                bits = line.split()
-                turn, limit = int(bits[1]), int(bits[2]) or None
-                break
-        running.append({"exp": r["exp"], "i": r["i"], "minutes": r["minutes"], "turn": turn, "limit": limit,
-                        "attempt": crashes.get((r["exp"], r["i"]), 0) + 1})
+    for r in live.get("running") or []:
+        running.append({**r, "minutes": round(r.get("minutes") or 0.0, 1)})
+    exps_live = live.get("experiments") or {}
 
     experiments = []
-    specs = _experiment_specs()
     remaining_minutes = 0.0
     for r in running:
         total = _projected_total(r)
         r["left_minutes"] = round(total - r["minutes"], 1) if total is not None else None
-    for exp, state in specs:
-        res = load_results(exp["name"])
-        done = len({r["i"] for r in res})
-        mins = [r["seconds"] / 60 for r in res if r.get("seconds")]
-        per_game = statistics.median(mins) if mins else None
-        turns = [r["turns"] for r in res if r.get("turns")]
+    for exp, state in _experiment_specs():
+        kind = kind_of(exp)
+        fig = results_figures(exp["name"], kind)
+        info = exps_live.get(exp["name"], {}) if state == "queued" else {}
+        done = fig["done"]
+        per_game = fig["per_game"]
         mine = [r for r in running if r["exp"] == exp["name"]]
-        failing = sorted(i for (e, i), n in crashes.items() if e == exp["name"] and n >= ATTEMPTS
-                         and i not in {r["i"] for r in res} and i not in {r["i"] for r in mine})
-        why = refusal(exp) if state == "queued" and not mine else ""
+        failing = sorted(set(info.get("failed") or []) - fig["games"])
+        why = info.get("refused") or ""
         if why:
             state, left = "refused", 0.0
         elif state == "queued":
             if per_game is None:
-                # no finished game yet: project the running ones from their turn progress
+                # no finished game yet: project the running ones from their round progress
                 proj = [t for t in map(_projected_total, mine) if t is not None]
                 per_game = statistics.median(proj) if proj else 30.0 if not exp.get("turns") else 30.0 * exp["turns"] / 330
             todo = exp["games"] - done - len(mine) - len(failing)
@@ -920,26 +706,27 @@ def overview() -> dict:
             left = 0.0
         experiments.append({
             "name": exp["name"], "state": state, "games": exp["games"], "done": done, "running": len(mine),
-            "failing": failing, "priority": exp.get("priority", 0), "note": exp.get("note") or exp.get("description"),
-            "kind": "factorial" if exp.get("factors") else "seats",
+            "failing": failing, "crashed": fig["crashed"], "priority": exp.get("priority", 0),
+            "note": exp.get("note") or exp.get("description"),
+            "kind": "reference" if kind == "reference" else "factorial" if exp.get("factors") else "seats",
+            "job_kind": job_kind(exp),
             "factors": list((exp.get("factors") or {}).keys()),
             "seats": [s.get("label") for s in exp.get("seats", [])] if not exp.get("factors") else [],
-            "turns": exp.get("turns") or None, "median_turns": statistics.median(turns) if turns else None,
+            "turns": exp.get("turns") or None, "median_turns": fig["median_turns"],
             "minutes_per_game": round(per_game, 1) if per_game else None, "remaining_minutes": round(left, 1),
-            "submitted": exp.get("submitted"),
-            "finished": max((r.get("finished") or "" for r in res), default=None),
-            "refused": why or None,
+            "submitted": exp.get("submitted"), "finished": fig["finished"],
+            "refused": why or None, "waiting": info.get("waiting") or None,
         })
     for exp in experiments:
         if exp["state"] in ("queued", "running"):
             exp["eta_minutes"] = None     # filled in below by simulating the queue order
-    # queue simulation: the runner fills free workers in priority order, so estimate each experiment's finish
-    # as the cumulative work ahead of it divided by the worker count
+    # the dispatcher fills free threads in priority order, so estimate each experiment's finish as the cumulative work
+    # ahead of it divided by the threads
     order = sorted([e for e in experiments if e["state"] in ("queued", "running")], key=lambda e: -e["priority"])
     acc = 0.0
     for e in order:
         acc += e["remaining_minutes"]
-        e["eta_minutes"] = round(acc / workers, 1)
+        e["eta_minutes"] = round(acc / threads, 1)
 
     side = []
     for out, out_st in _fs_newest(LAB.glob("*.out")):
@@ -947,28 +734,18 @@ def overview() -> dict:
             continue
         text = _tail(out, 6000)
         lines = [ln for ln in text.splitlines() if ln.strip()]
-        age = now - out_st.st_mtime
+        age = time.time() - out_st.st_mtime
         side.append({"name": out.stem, "modified": datetime.fromtimestamp(out_st.st_mtime).isoformat(timespec="seconds"),
                      "active": age < 900 and not any("Report written" in ln or "stopping" in ln for ln in lines[-6:]),
                      "tail": lines[-12:]})
 
     return {
         "now": datetime.now().isoformat(timespec="seconds"),
-        "runner": {"pid": st.get("pid"), "alive": alive, "updated": st.get("updated"), "updated_age": updated_age,
-                   "workers": st.get("target_workers"), "games_last_hour": st.get("games_last_hour"),
-                   "quiet_hours": st.get("quiet_hours"), "config": lab_config_file()},
-        "remaining_minutes": round(remaining_minutes, 1), "eta_minutes": round(remaining_minutes / workers, 1),
+        "dispatcher": {**disp, "paused": paused()},
+        "remaining_minutes": round(remaining_minutes, 1), "eta_minutes": round(remaining_minutes / threads, 1),
         "running": sorted(running, key=lambda r: (r["exp"], r["i"])), "experiments": experiments,
         "log": _tail(LAB / "lab.log", 6000).splitlines()[-40:], "side_runs": side,
     }
-
-
-def lab_config_file() -> dict:
-    """The lab's configuration file, if it exists."""
-    try:
-        return json.loads((LAB / "config.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
 
 
 def report_text(name: str) -> str:
@@ -1011,6 +788,7 @@ def summarize(results: list[dict]) -> dict:
            "median_end_turn": statistics.median([r["turns"] for r in res]) if res else None,
            "avg_minutes": round(_mean([r["seconds"] for r in res]) / 60, 1) if res else None,
            "bot_errors": sum(len(r.get("errors") or []) for r in res),
+           "crashed": sum(1 for r in results if r.get("crash")),
            "engines": dict(Counter(r.get("engine") for r in res))}
     by_label = defaultdict(list)
     for r in res:
@@ -1067,7 +845,7 @@ def print_report(name: str, s: dict, exp: dict | None = None):
     """Print an experiment's summary."""
     print(f"=== {name}: {s['games']} games" + (f" of {exp['games']}" if exp else "") +
           f" | victories {s['victories']} | median end T{s['median_end_turn']} | {s['avg_minutes']} min/game"
-          f" | bot errors {s['bot_errors']}")
+          f" | bot errors {s['bot_errors']}" + (f" | crashed {s['crashed']}" if s.get("crashed") else ""))
     if len(s["engines"]) > 1:
         print(f"  ! games ran on {len(s['engines'])} engine versions: {s['engines']}")
     for lab, d in s["labels"].items():
@@ -1114,6 +892,13 @@ def cmd_report(names):
         exp = queue.get(name)
         if exp is None and (DONE / f"{name}.json").exists():
             exp = json.loads(_fs_read(DONE / f"{name}.json"))      # replaced when a re-queued name finishes
+        if exp and kind_of(exp) == "reference":
+            res = load_results(name, "reference")
+            crashed = sum(1 for r in res if r.get("crash"))
+            print(f"=== {name} (reference): {len(res) - crashed} games of {exp['games']}"
+                  + (f" | crashed {crashed}" if crashed else "")
+                  + f" | the baseline's lines: python scripts/refcheck/summarize.py {results_path(name, 'reference')}")
+            continue
         results = [complete_players(exp, r) for r in load_results(name)]
         if exp and exp.get("factors"):
             s = summarize(results)
@@ -1131,40 +916,34 @@ def cmd_report(names):
 
 
 def cmd_status():
-    """Print what the runner is doing, or say that it is not running."""
-    try:
-        st = json.loads(_fs_read(LAB / "status.json"))
-    except (OSError, json.JSONDecodeError):
-        print("no status (runner never started?)")
-        return
-    alive = _pid_alive(st.get("pid"))
-    print(f"runner pid {st.get('pid')} {'ALIVE' if alive else 'NOT RUNNING'} | updated {st['updated']} | "
-          f"quiet {st['quiet_hours']} | workers {st['target_workers']} | games last hour {st['games_last_hour']}")
-    for r in st["running"]:
-        print(f"  running {r['exp']} #{r['i']} for {r['minutes']} min")
-    for name, (d, n) in st["queue"].items():
-        print(f"  queued {name}: {d}/{n}")
+    """Print what is queued and playing, from the server's database (the dispatcher's jobs), and the pause."""
+    p = paused()
+    if p is not None:
+        print(f"PAUSED since {p.get('at')} by {p.get('by')}: running games finish, nothing new starts "
+              "(citar lab resume)")
+    from .jobs import store
+    status = store.offline_status()
+    if status is None:
+        print("no server database here yet: the lab plays inside the CITAR server, which keeps its jobs there")
+    for name, n in status.get("experiments", {}).items() if status else ():
+        print(f"  {name}: " + ", ".join(f"{k} {v}" for k, v in sorted(n.items())))
+    for r in (status or {}).get("running", []):
+        print(f"  playing {r['ref']} on {r['machine']} since {r['started_at']}")
+    for exp in load_queue():
+        fig = results_figures(exp["name"], kind_of(exp))
+        print(f"queued {exp['name']} ({kind_of(exp)}): {fig['done']}/{exp['games']} finished, priority "
+              f"{exp.get('priority', 0)}")
 
 
-def _pid_alive(pid) -> bool:
-    """Whether a process id is still running."""
-    if not pid:
-        return False
-    if os.name == "nt":
-        import subprocess
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
-        return str(pid) in out
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+#: What ``citar lab run`` says now.
+RETIRED = ("citar lab run: the lab now runs inside the CITAR server (local or server mode): start the server and it "
+           "plays the queued experiments under the host machine's CPU settings (Servers page, Machine settings). "
+           "Queue experiments with `citar lab submit`, pause and resume with `citar lab stop` and `resume`.")
 
 
 def _need_engine(cmd: str):
-    """Exit 2, saying why, unless the engine loads. The runner itself never imports it (each game is a process of
-    its own), so without this a runner whose engine cannot load would start each queued game three times to crash
-    and then wait for ever, and ``submit`` would end in a traceback."""
+    """Exit 2, saying why, unless the engine loads: ``submit`` checks every game as a job, and without the engine it
+    would end in a traceback."""
     try:
         from . import engine_api
         engine_api.build_info()
@@ -1173,53 +952,65 @@ def _need_engine(cmd: str):
         raise SystemExit(2) from None
 
 
+def _submit_one(path, spec: dict, owner: Optional[str]) -> None:
+    """``submit`` of one experiment: refused (exit 2, one line) when a job would refuse a game, or when a ranking or
+    reference run's owner is not an administrator; registered as an owned item where the server's database is."""
+    from . import items
+    kind = kind_of(spec)
+    collection = kind in COLLECTION_KINDS
+    if collection:
+        why = items.offline_admin_refusal(owner)
+        if why:
+            print(f"citar lab submit: {path}: a {kind} experiment is an administrator's: {why}", file=sys.stderr)
+            raise SystemExit(2)
+    try:
+        s = submit(spec)
+    except ValueError as e:      # refused, saying why: a game a job would refuse, a profile, a name
+        print(f"citar lab submit: {path}: {e}", file=sys.stderr)
+        raise SystemExit(2) from None
+    if kind == "reference":
+        print(f"queued {s['name']} (reference): {s['games']} games of the baseline, {s['size']} maps")
+    else:
+        print(f"queued {s['name']}{f' ({kind})' if kind != 'lab' else ''}: {s['games']} games, "
+              f"seats {[x['label'] + '=' + x['bot'] for x in s['seats']]}")
+    # an owned item (design/phase3-features.md P3.2.4), registered when the server's database is here
+    print(f"  {items.register_offline('lab_experiment', s['name'], s['name'], QUEUE / (s['name'] + '.json'), owner, collection=collection)}")
+
+
 def main(argv=None):
     """The ``citar lab`` command line."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run")
-    r.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
-    r.add_argument("--night-workers", type=int, default=2)
-    r.add_argument("--exit-when-idle", action="store_true")
-    r.add_argument("--max-minutes", type=float, default=150, help="kill a game that runs longer than this")
-    pl = sub.add_parser("play")
-    pl.add_argument("spec")
-    pl.add_argument("out")
+    sub.add_parser("run", help="retired: the lab runs inside the CITAR server")
     s = sub.add_parser("submit")
     s.add_argument("specs", nargs="+")
     s.add_argument("--owner", default=None, help="the account the experiments belong to (default: the first admin)")
     rep = sub.add_parser("report")
     rep.add_argument("names", nargs="+")
     sub.add_parser("status")
-    sub.add_parser("stop")
-    args = ap.parse_args(argv)
-    if args.cmd in ("run", "submit"):
-        _need_engine(args.cmd)
+    sub.add_parser("stop", help="pause: running games finish, nothing new starts")
+    sub.add_parser("resume", help="start new games again after a stop")
+    args, extra = ap.parse_known_args(argv)
     if args.cmd == "run":
-        run(args)
-    elif args.cmd == "play":
-        cmd_play(args.spec, args.out)
-    elif args.cmd == "submit":
+        print(RETIRED, file=sys.stderr)
+        raise SystemExit(2)
+    if extra:
+        ap.error(f"unrecognized arguments: {' '.join(extra)}")
+    if args.cmd == "submit":
+        _need_engine(args.cmd)
         for path in args.specs:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             for spec in (data if isinstance(data, list) else [data]):
-                try:
-                    s = submit(spec)
-                except ValueError as e:      # refused, saying why: a game a job would refuse, a profile, a name
-                    print(f"citar lab submit: {path}: {e}", file=sys.stderr)
-                    raise SystemExit(2) from None
-                print(f"queued {s['name']}: {s['games']} games, seats {[x['label'] + '=' + x['bot'] for x in s['seats']]}")
-                # an owned item (design/phase3-features.md P3.2.4), registered when the server's database is here
-                from . import items
-                print(f"  {items.register_offline('lab_experiment', s['name'], s['name'], QUEUE / (s['name'] + '.json'), args.owner)}")
+                _submit_one(path, spec, args.owner)
     elif args.cmd == "report":
         cmd_report(args.names)
     elif args.cmd == "status":
         cmd_status()
     elif args.cmd == "stop":
-        _dirs()
-        (LAB / "STOP").write_text("stop", encoding="utf-8")
-        print("stop requested")
+        pause("citar lab stop")
+        print("paused: running games finish and nothing new starts until `citar lab resume`")
+    elif args.cmd == "resume":
+        print("resumed" if resume() else "the lab was not paused")
 
 
 if __name__ == "__main__":

@@ -538,9 +538,10 @@ def start_power_sampler(follow_host: bool = False):
     return _sampler
 
 
-# ----------------------------------------------------------------------------- lab (separate process)
+# ----------------------------------------------------------------------------- lab games (the job dispatcher)
 def lab_game_rows(exp: str, i: int, res: dict, host_id: Optional[str], labels: Optional[list] = None) -> list[dict]:
-    """Ledger rows for one finished lab game (called by the lab runner)."""
+    """Usage rows for one finished lab game, its activity and the time its executor's machine held it (written by the
+    job dispatcher, ``citar.jobs.dispatcher``, as each game's result is accepted)."""
     fin = res.get("finished")
     try:
         t1 = datetime.fromisoformat(fin).timestamp() if fin else time.time()
@@ -555,7 +556,7 @@ def lab_game_rows(exp: str, i: int, res: dict, host_id: Optional[str], labels: O
              "turns": res.get("turns"), "winner_label": res.get("winner_label"), "victory": res.get("victory"),
              "ended": t1, "crash": bool(res.get("crash"))}]
     if host_id and secs > 0:
-        # its CPU seconds are the compute ledger's (the server reads the lab's results: ``ledger.ingest_lab``)
+        # its CPU seconds are the compute ledger's (the dispatcher's event for the run, P4.5.7)
         rows.append({"k": "span", "act": act, "srv": host_id, "t0": round(t0, 1), "t1": round(t1, 1),
                      "held": round(secs, 1)})
     return rows

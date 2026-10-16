@@ -135,6 +135,20 @@ EWMA_ALPHA = 0.3
 #: Over-reporting (P3.3.4): reported > observed * RATIO + SLACK, COUNT times within WINDOW seconds.
 OVERREPORT_RATIO, OVERREPORT_SLACK, OVERREPORT_COUNT, OVERREPORT_WINDOW = 1.10, 1.0, 3, 3600.0
 
+#: Called with a machine's id whenever a benchmark lease on it becomes live or is released, on the caller's thread
+#: and outside every lock: the job dispatcher pauses the machine's CPU jobs while a benchmark holds it
+#: (design/phase4-helper.md P4.5.5), so running games never contaminate a benchmark's timing. A listener must not
+#: block.
+benchmark_listeners: list = []
+
+
+def _benchmark_changed(server_id: Optional[str]) -> None:
+    for fn in list(benchmark_listeners):
+        try:
+            fn(server_id)
+        except Exception:
+            log.exception("a benchmark listener failed")
+
 
 # ---------------------------------------------------------------------------- errors
 
@@ -512,6 +526,8 @@ class Lease(Binding):
         if self.machine is not None:
             self.machine.release_lease(self)
         self.released = True
+        if self.kind == "benchmark" and self.machine is not None:
+            _benchmark_changed(self.machine.id)
 
     def client(self) -> dict:
         """The lease as a status listing shows it."""
@@ -1523,7 +1539,20 @@ class Scheduler:
                     conv.close()
                 except Exception:
                     log.debug("closing a cancelled ticket's conversation failed", exc_info=True)
+            if kind == "benchmark":
+                _benchmark_changed(m.id)
         return lease
+
+    def benchmark_live(self, server_id: Optional[str]) -> bool:
+        """Whether a benchmark holds the machine now: a live benchmark lease, or a request of one still in flight
+        (non-blocking beyond the machine's lock). The dispatcher offers it no CPU job and pauses its running ones
+        meanwhile (P4.5.5)."""
+        with self._lock:
+            m = self.machines.get(server_id or "")
+        if m is None:
+            return False
+        with m.lock:
+            return m._bench_live()
 
     def ticket(self, server_id: Optional[str], model: str = "", *, cls: str, activity: Optional[str] = None,
                consumer: Optional[str] = None, label: str = "", priority: int = 0,

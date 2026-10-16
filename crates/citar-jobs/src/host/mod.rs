@@ -1,6 +1,6 @@
 //! The job host (design/phase4-helper.md P4.4.3): the one program that plays jobs under limits,
 //! for both parents, the helper (`citar-helper job-host`) and the server (`python -m citar.jobs
-//! host`). It replaces 0.1.5's lab runner, its orphan adoption and its `taskkill`.
+//! host`). It replaces 0.1.5's lab runner, its orphan adoption and its killing of games by pid.
 //!
 //! **Its protocol** is JSON lines: one object a line, `t` its type, on its standard input (from
 //! the parent) and its standard output (to the parent); its standard error is its log, which the

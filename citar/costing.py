@@ -188,8 +188,8 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
     buckets: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0])))   # srv -> m -> act -> [held, busy, cpu]
     known = ledger["acts"]
     # an activity whose spans carry their own work (written before 3-10: ``busy``, ``cpu``, tokens) is priced from them
-    # up to the last such span's end, and from the compute ledger only after it: the lab's past games, read into the
-    # compute ledger from their results (``ledger.ingest_lab``), and a game played across the upgrade are counted once
+    # up to the last such span's end, and from the compute ledger only after it: a game played across the upgrade is
+    # counted once
     legacy: dict = {}
     for sp in ledger["spans"]:
         if "busy" in sp or "cpu" in sp or any(f in sp for f in U.TOKEN_FIELDS):
