@@ -76,16 +76,27 @@ that means for an existing install:
   [docs/server/WORKERS.md](docs/server/WORKERS.md#moving-from-015).
 - **The lab plays each game as a job,** built in Rust by the jobs crate (`crates/citar-jobs`, the code
   a helper lending its CPU will run): the result line holds what 0.1.5's did, with `seconds`,
-  `started_ts`, `cpu_s` and `finished` added outside the result's hash. A bot that panics now ends
-  its game as a crash in `crashes.log` (the turn, the seat, its label and the message), where 0.1.5
-  wrote a result whose `errors` carried the trace, so `errors` is always empty; and a crash is final:
-  the runner does not play the game again (a runner started later plays it once more). An experiment
+  `started_ts`, `cpu_s` and `finished` added outside the result's hash, and `executor` (the machine
+  and run that played it). A bot that panics now ends its game as a crash: a crash line in the results
+  file and in `crashes.log` (the turn, the seat, its label and the message), where 0.1.5 wrote a result
+  whose `errors` carried the trace, so `errors` is always empty; and a crash is final, never played
+  again. An experiment
   is checked game by game as jobs when it is queued (`citar lab submit`, the A/B form): a turn limit
   past the speed's last turn, a seed past 2^53 − 1, a label or a name of more than 200 characters or
   an override the bot does not take is refused, saying which game and why (`citar lab submit` exits
   2; the A/B form's turn limit stops at the chosen speed's last turn). One queued before that a job
   refuses is shown on the Lab page as one that cannot be played, and none of its games starts.
   [docs/BOTS.md](docs/BOTS.md).
+- **The lab runs inside the CITAR server.** Its job dispatcher plays the queued experiments on the
+  server's own job host, under the host machine's CPU settings (on by default: in local mode half the
+  logical CPUs, in server mode one thread and min(1,024 MB, a quarter of the memory)); `citar lab run`,
+  0.1.5's separate Windows-only runner with its process per game and its orphan adoption, says so and
+  exits 2, and `deploy/citar-lab.service` is gone (disable a 0.1.5 one: `sudo systemctl disable --now
+  citar-lab`). `citar lab stop` now pauses the lab (the games playing finish, nothing new starts) and
+  `citar lab resume` ends the pause; `saves/lab/config.json`'s `workers` and `night_workers`, the job
+  files and `status.json` are no longer read. The lab's CPU is in the compute ledger as one event a
+  game, used by the experiment's owner (it was charged to the host as `verified`, whoever played it, by
+  reading the results files). [docs/BOTS.md](docs/BOTS.md#the-lab).
 - **API changes.** The report sharing routes under `/api/shared/reports` moved to the owned items'
   routes (`/api/items/report/{id}/sharing`) and `/r/{slug}`; `replay_data("full")` and a replay asked
   for in it are refused (the recap reads the `delta` frames); a seat's view no longer carries
@@ -168,6 +179,18 @@ that means for an existing install:
   build, the compatibility key; in Python `engine_api.check_job_spec`, `run_job`, `job_result_hash`,
   `job_result_fits`, `job_chain_check` and `jobs_build`. A `jobs` golden set holds every target to
   the same results (`determinism.yml`).
+- **The job dispatcher** (design/phase4-helper.md P4.5.5-P4.5.7): the lab's games as CPU jobs inside
+  the server, by priority and round-robin across owners, with deadlines from a cost table seeded from a
+  committed measurement (`citar/jobs/costs.json`) and learned from every run, retries, memory failures
+  offered only to an executor with more room, a benchmark on the host pausing its games, restricted hours
+  starting nothing new, and each result committed before its line is written and the two reconciled at
+  the start (a server stopped with games playing plays exactly those again, each game written once).
+  Experiments gain a `kind`: `lab`, `ranking` (the site's ladder) and `reference` (the statistical
+  baseline, its lines in `saves/lab/reference/` for `summarize.py`), the last two an administrator's and
+  the server's own collection. The Lab page shows the dispatcher, its executors and each game's machine
+  and verification, and administrators' Stop and Resume; the Queue page's CPU card each executor's
+  games. New routes: `GET /api/lab/jobs?exp=NAME`, `GET /api/admin/jobs`, `POST /api/admin/jobs/pause`
+  and `/resume`. `scripts/qa_phase4.py lab`.
 - **The job host** (design/phase4-helper.md P4.4.3): one program that plays CPU jobs under limits,
   for a helper (`citar-helper job-host`, its child) and for the server (`python -m citar.jobs host`,
   started by `citar.jobs.host`). It holds its CPU share and its memory hard on Windows (a Job

@@ -103,7 +103,8 @@ time counted afresh.
 ## Shared machines (new in 0.1.6)
 
 **CPU sharing waits for the next helper.** The machine settings dialog keeps a machine's CPU limits
-(threads, CPU share, memory, the kinds of work), but nothing runs CPU work on members' machines yet.
+(threads, CPU share, memory, the kinds of work), but nothing runs CPU work on members' machines yet: only the
+host's CPU sharing is used, by the server's own job host, which plays the lab.
 
 **A group's visibility shares nothing yet.** A group's machines are listed and lent through its
 grants only; making a group visible to members or published lists nothing more.
