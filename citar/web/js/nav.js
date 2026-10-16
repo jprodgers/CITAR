@@ -46,7 +46,7 @@ export function pageHeader(active) {
       if (s.active_jobs) badge.append(el("span", { class: "pill live" }, `● ${s.active_jobs} benchmark game${s.active_jobs > 1 ? "s" : ""} running`));
       else if (s.queued_jobs) badge.append(el("span", { class: "pill" }, `${s.queued_jobs} queued`));
       const lab = await api.lab();
-      if (lab.runner.alive && lab.running.length) badge.append(el("a", { class: "pill live", href: "#/lab" }, `lab: ${lab.running.length} games running`));
+      if (lab.dispatcher && lab.dispatcher.alive && lab.running.length) badge.append(el("a", { class: "pill live", href: "#/lab" }, `lab: ${lab.running.length} games playing`));
     } catch (e) { /* server restarting */ }
   };
   const timer = setInterval(update, 5000);

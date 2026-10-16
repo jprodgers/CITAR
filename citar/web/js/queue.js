@@ -3,11 +3,14 @@
 // (leases), its jobs (benchmark jobs and probe runs, from one queue: citar.pool.queue) and its pooled prompts (reports'
 // written analyses, probes' offers and messages, machine tests: the prompt scheduler's tickets), each list in the order
 // it will run. Other members' work you may not see is "someone's ..." with no name; machines you may not see are only
-// counted. This server's CPU takes the lab's experiments. Higher priority goes first; equal priorities go in the order
-// they were queued (and pooled prompts take turns between members).
+// counted. The CPU jobs card shows each executor of the lab's games (this server's own job host) with its games
+// playing, each named where you may see its experiment and "someone's lab game" otherwise, then the lab's experiments
+// in the order they run. Higher priority goes first; equal priorities go in the order they were queued (and pooled
+// prompts take turns between members).
 import { getCsrfToken } from "./api.js";
 import { el, clear, toast } from "./util.js";
 import { pageHeader, bar } from "./nav.js";
+import { executorText, gameLine } from "./labrules.js";
 
 async function get(url) {
   const res = await fetch(url, { credentials: "same-origin" });
@@ -157,17 +160,22 @@ function machineCard(m, refresh) {
 function cpuCard(cpu, refresh) {
   const card = el("div", { class: "card" });
   const load = cpu.load ? cpu.load[0] / (cpu.cpus || 1) : null;
-  const runner = cpu.lab_runner || {};
-  card.append(el("div", { class: "row" }, el("h3", { style: { margin: 0 } }, "This server's CPU — the lab"),
-    el("span", { class: `pill ${runner.alive ? "live" : ""}` }, runner.alive ? `runner on · ${runner.workers || "?"} at a time` : "runner stopped"),
+  const disp = cpu.dispatcher || {};
+  card.append(el("div", { class: "row" }, el("h3", { style: { margin: 0 } }, "CPU jobs — the lab"),
+    el("span", { class: `pill ${disp.alive && !disp.paused ? "live" : disp.paused ? "warn" : ""}` },
+      !disp.alive ? "the dispatcher is not running" : disp.paused ? "paused" : "playing"),
     el("span", { class: "grow" }),
     cpu.load ? el("span", { class: "muted" }, `load ${cpu.load.join(" · ")} on ${cpu.cpus} CPU${cpu.cpus === 1 ? "" : "s"}`) : null));
   if (load != null) card.append(el("div", { class: "q-load" }, bar(Math.min(1, load), `${Math.round(load * 100)}% of the CPU (1-minute average)`,
     load > 0.9 ? "bad" : load > 0.7 ? "" : "good")));
-  card.append(el("p", { class: "muted small" }, "The lab plays bot-only games on this server, so it shares the CPU with every game here; ",
-    "games spend most of their time waiting for model machines, so there is usually room."));
-  if ((cpu.lab_running || []).length) {
-    card.append(el("div", {}, el("b", {}, "Playing now: "), cpu.lab_running.map((r) => `${r.exp} #${r.i}${r.turn ? ` (turn ${r.turn}${r.limit ? "/" + r.limit : ""})` : ""}`).join(", ")));
+  card.append(el("p", { class: "muted small" }, "The lab's bot-only games run as CPU jobs on this server's own job host, under the host's CPU ",
+    "settings, so they share the CPU with every game here; games spend most of their time waiting for model machines, so there is usually room."));
+  for (const e of cpu.executors || []) {
+    const games = e.games || [];
+    card.append(el("div", { class: "q-machine-cpu" },
+      el("div", { class: "row" }, el("b", {}, e.name), el("span", { class: "muted small" }, executorText(e))),
+      games.length ? el("ul", { class: "q-list" }, ...games.map((g) => el("li", {}, gameLine(g))))
+        : el("p", { class: "muted small" }, "No game playing.")));
   }
   if (!cpu.experiments.length) { card.append(el("p", { class: "muted" }, "No experiments queued.")); return card; }
   const table = el("table", { class: "q-table" }, el("tr", {}, el("th", {}, "#"), el("th", {}, "Experiment"), el("th", {}, "Games"),
