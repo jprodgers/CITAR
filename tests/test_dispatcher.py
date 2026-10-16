@@ -521,6 +521,20 @@ class Restart(Lab):
         self.assertEqual(len(events), 3, "the lost events written at the start too, one a run")
         self.assertEqual(len({e["request"] for e in events}), 3)
 
+    def test_an_experiment_deleted_while_the_server_was_down_has_its_games_cancelled(self):
+        self.submit("alice", duels("gone", 3))
+        fake = Fake()
+        d = self.dispatcher([fake])
+        self.until(d, lambda: fake.offers)
+        d.stop()
+        (lab.QUEUE / "gone.json").unlink()
+        d2 = self.dispatcher([Fake(auto=True)])
+        d2.tick()
+        self.assertEqual({j[1] for j in self.jobs()}, {"cancelled"})
+        self.assertEqual(d2.jobs, {})
+        self.assertIn("3 waiting game(s) of experiments no longer queued were cancelled",
+                      (lab.LAB / "lab.log").read_text(encoding="utf-8"))
+
     def test_a_line_whose_job_is_not_accepted_is_removed_at_the_start(self):
         self.submit("alice", duels("stale", 2))
         fake = Fake()

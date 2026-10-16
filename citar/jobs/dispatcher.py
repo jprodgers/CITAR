@@ -385,6 +385,13 @@ class Dispatcher:
             s.execute(update(CpuJob).where(CpuJob.state == "queued", CpuJob.jobs_build != self.jobs_build)
                       .values(jobs_build=self.jobs_build))
         self._sync_queue(self.clock(), force=True)
+        with db.session() as s:
+            # an experiment deleted from the queue while the server was down: its waiting jobs go with it
+            gone = s.execute(update(CpuJob).where(CpuJob.state == "queued", CpuJob.item_kind == "lab_experiment",
+                                                  CpuJob.item_ref.not_in(list(self.exps) or [""]))
+                             .values(state="cancelled")).rowcount
+        if gone:
+            lab.log(f"{gone} waiting game(s) of experiments no longer queued were cancelled")
         self._repair_events()
         self.recovered = True
 
