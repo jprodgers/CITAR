@@ -108,8 +108,18 @@ class ItemCase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        from citar.pool import queue as work_queue
         from citar.server import reports_api
         cls.app.scheduler, cls.app._probe_runner, reports_api._runner = cls.saved
+        # this module's scheduler and probe runner registered themselves with the shared queue; put back the
+        # producers of the ones restored (or none, so the next one made registers its own), or their waiting runs
+        # stay listed for every later test (a module that had made the app's scheduler first left it so)
+        for kind, saved in (("benchmark", cls.saved[0]), ("probe", cls.saved[1])):
+            if saved is not None:
+                work_queue.register(kind, saved.queue_items, saved.running_items)
+            else:
+                work_queue._providers.pop(kind, None)
+                work_queue._running.pop(kind, None)
         for p in reversed(cls.patches):
             p.stop()
         for sid in list(cls.manager.sessions):
