@@ -424,7 +424,7 @@ class Transcripts(unittest.TestCase):
               "settings": ("set_settings",), "rescan": ("rescan",), "update": ("manifest_arrives",),
               "jobs_pause": ("benchmark_start",), "jobs_resume": ("benchmark_end",),
               "shutdown": ("revoke_token", "disable_machine", "second_connection"),
-              "job_offer": ("queue_job", "force_offer"), "job_abort": ("abort_run",)}
+              "job_offer": ("queue_job", "force_offer"), "job_abort": ("abort_run", "expire_run")}
 
     @staticmethod
     def _cause(steps, i):
@@ -438,8 +438,9 @@ class Transcripts(unittest.TestCase):
     def test_every_frame_the_hub_starts_has_its_act(self):
         """The hub's side can drive every transcript it plays: a frame the server starts (a request, a cancel, a job
         offer, a pushed setting...) and a connection the server drops are each caused by a hub act just before them.
-        A later offer of a job already offered is the dispatcher's own re-offer, and a job_abort may answer a late
-        job_accept."""
+        A later offer of a job already offered is the dispatcher's own re-offer, a job_abort may answer a late
+        job_accept, and one right after a wait is the dispatcher's own expiry of a run (PROTOCOL.md: "An expired run
+        is aborted")."""
         checked = 0
         for t in F.transcripts():
             if t.plays["hub"] is None:
@@ -462,6 +463,8 @@ class Transcripts(unittest.TestCase):
                         offered.add(job)
                     if t_ == "job_abort" and cause is not None and cause.action == "h2s" \
                             and cause.body["t"] == "job_accept":
+                        continue
+                    if t_ == "job_abort" and t.steps[i - 1].action == "wait":
                         continue
                     self.assertIn(word, self.CAUSES[t_], f"{t_} needs one of {self.CAUSES[t_]} before it")
                     checked += 1
