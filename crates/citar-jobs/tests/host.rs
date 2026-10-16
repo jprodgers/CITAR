@@ -664,7 +664,8 @@ fn fake_ready() -> ExitCode {
 }
 
 /// Gate 6: a host told another jobs build refuses to start; a parent refuses a `ready` of another
-/// build; a host whose canary is forced off says it is not verifiable and refuses every job.
+/// build; a host whose canary (either check) or self-check is forced off says it is not
+/// verifiable and refuses every job.
 fn other_builds_and_a_failed_canary_are_refused() -> Outcome {
     let req = Requested { threads: 1, cpu_percent: two_cores_percent(), memory_mb: 300 };
     let refused = parent::spawn(&program(&[]), wrapper(), &req, "000000000000", WAIT);
@@ -678,10 +679,14 @@ fn other_builds_and_a_failed_canary_are_refused() -> Outcome {
         Err(SpawnError::Build { got, .. }) if got == "ffffffffffff" => {}
         other => return fail(format!("a ready of another build: {other:?}")),
     }
-    for injected in ["flushed", "read_as_zero"] {
-        let mut host = start(req, &[("CITAR_JOBS_TEST_CANARY", injected)])?;
+    for (switch, injected, named) in [
+        ("CITAR_JOBS_TEST_CANARY", "flushed", "canary"),
+        ("CITAR_JOBS_TEST_CANARY", "read_as_zero", "canary"),
+        ("CITAR_JOBS_TEST_SELF_CHECK", "fail", "self-check"),
+    ] {
+        let mut host = start(req, &[(switch, injected)])?;
         let r = host.ready().clone();
-        ensure(!r.verifiable && r.reason.as_deref().is_some_and(|w| w.contains("canary")), || {
+        ensure(!r.verifiable && r.reason.as_deref().is_some_and(|w| w.contains(named)), || {
             format!("{injected}: {r:?}")
         })?;
         send(&mut host, &test_offer("cr_x", BURN, &json!({"seconds": 1.0}), 60.0)?)?;

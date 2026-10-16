@@ -211,7 +211,13 @@ fn a_ready_host_plays_the_golden_jobs_to_their_committed_hashes() {
         let Some(FromHost::JobResult(r)) = frames.last() else { panic!("{run}: {frames:?}") };
         assert_eq!(r.outcome.result_hash, want, "{run}");
         assert_eq!(r.outcome.chain.head, head, "{run}");
-        assert!(r.outcome.peak_mb > 0.0, "the run's memory is counted: {r:?}");
+        // Counted, frees included: a short game holds a few MB at most, though it allocates far
+        // more over its rounds.
+        assert!(
+            r.outcome.peak_mb > 0.0 && r.outcome.peak_mb < 64.0,
+            "{run}: {}",
+            r.outcome.peak_mb
+        );
         assert!(r.outcome.paused_s.abs() < 1e-9 && r.outcome.wall_s > 0.0, "{r:?}");
     }
     assert_eq!(p.close(), 0);

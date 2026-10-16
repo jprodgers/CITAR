@@ -446,34 +446,44 @@ pub struct Setup {
     /// short game last long enough to pause it (a result never depends on it, 4-07's gate 3).
     /// The test jobs keep their own pace.
     pub step_delay: Duration,
+    /// The self-check fails whatever it computes: nothing outside the tests, where it shows
+    /// that a failed self-check alone refuses every job (the canary still passes on each run's
+    /// thread).
+    pub fail_self_check: bool,
 }
 
 impl Setup {
-    /// A host process's: the limits applied, the canary as this machine computes it and no
-    /// delay, except in a build with the test jobs, where `CITAR_JOBS_TEST_CANARY=flushed` or
-    /// `read_as_zero` fails one of the canary's checks on purpose and `CITAR_JOBS_TEST_STEP_MS`
+    /// A host process's: the limits applied, the canary and the self-check as this machine
+    /// computes them and no delay, except in a build with the test jobs, where
+    /// `CITAR_JOBS_TEST_CANARY=flushed` or `read_as_zero` fails one of the canary's checks on
+    /// purpose, `CITAR_JOBS_TEST_SELF_CHECK=fail` the self-check, and `CITAR_JOBS_TEST_STEP_MS`
     /// slows every seat step.
     #[must_use]
     pub fn process() -> Self {
-        let (canary, step_delay) = test_switches();
-        Self { apply_limits: true, canary, step_delay }
+        test_switches(Self { apply_limits: true, ..Self::default() })
     }
 }
 
 #[cfg(feature = "test-jobs")]
-fn test_switches() -> (Inject, Duration) {
-    let canary = match std::env::var("CITAR_JOBS_TEST_CANARY").as_deref() {
-        Ok("flushed") => Inject { halved: Some(0.0), ..Inject::default() },
-        Ok("read_as_zero") => Inject { restored: Some(0.0), ..Inject::default() },
+fn test_switches(setup: Setup) -> Setup {
+    let var = |name: &str| std::env::var(name).ok();
+    let canary = match var("CITAR_JOBS_TEST_CANARY").as_deref() {
+        Some("flushed") => Inject { halved: Some(0.0), ..Inject::default() },
+        Some("read_as_zero") => Inject { restored: Some(0.0), ..Inject::default() },
         _ => Inject::default(),
     };
-    let ms = std::env::var("CITAR_JOBS_TEST_STEP_MS").ok().and_then(|v| v.parse::<u64>().ok());
-    (canary, Duration::from_millis(ms.unwrap_or(0).min(1000)))
+    let ms = var("CITAR_JOBS_TEST_STEP_MS").and_then(|v| v.parse::<u64>().ok());
+    Setup {
+        canary,
+        step_delay: Duration::from_millis(ms.unwrap_or(0).min(1000)),
+        fail_self_check: var("CITAR_JOBS_TEST_SELF_CHECK").as_deref() == Some("fail"),
+        ..setup
+    }
 }
 
 #[cfg(not(feature = "test-jobs"))]
-fn test_switches() -> (Inject, Duration) {
-    (Inject::default(), Duration::ZERO)
+const fn test_switches(setup: Setup) -> Setup {
+    setup
 }
 
 /// Where frames go: the parent's pipe, one line each, whole.
@@ -650,7 +660,11 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         },
         |a| (a.held, a.cgroup.clone(), a.notes.clone()),
     );
-    let check = self_test(rules, setup.canary).map(|_| ());
+    let check = if setup.fail_self_check {
+        Err("the self-check: failed on purpose (a test switch)".to_owned())
+    } else {
+        self_test(rules, setup.canary).map(|_| ())
+    };
     if let Err(why) = &check {
         log(&format!("not verifiable: {why}"));
     }

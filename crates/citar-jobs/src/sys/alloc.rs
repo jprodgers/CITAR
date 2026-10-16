@@ -207,3 +207,32 @@ pub fn installed() -> bool {
     drop(black_box(probe));
     seen
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MB: usize = 1 << 20;
+
+    /// The unit tests run under this allocator (lib.rs): a tally counts what its thread holds at
+    /// most, frees included, apart from every other thread's.
+    #[test]
+    fn a_tally_keeps_its_threads_peak_with_frees_counted() {
+        assert!(installed());
+        let t = Tally::claim().expect("a free slot");
+        assert!(Tally::claim().is_none(), "one tally a thread");
+        for _ in 0..3 {
+            let block = black_box(vec![1u8; 10 * MB]);
+            drop(black_box(block));
+        }
+        let peak = t.peak_bytes();
+        assert!((10 * MB..11 * MB).contains(&usize::try_from(peak).unwrap_or(0)), "{peak}");
+        assert!(t.reader().live_bytes() < MB as u64, "freed: {}", t.reader().live_bytes());
+        // Another thread's allocations are not this tally's.
+        let reader = t.reader();
+        std::thread::spawn(|| drop(black_box(vec![1u8; 30 * MB]))).join().expect("joined");
+        assert_eq!(reader.peak_bytes(), peak);
+        drop(t);
+        assert!(Tally::claim().is_some(), "the slot and the thread are free again");
+    }
+}
