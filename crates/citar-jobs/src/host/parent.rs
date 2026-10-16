@@ -2,7 +2,8 @@
 //! host with (the server's is `citar/jobs/host.py`, the same rules in Python).
 //!
 //! - **Starting a host** ([`spawn`]): the program (the helper's own binary with `job-host`), its
-//!   pipes, and on Linux, when the user's service manager answers ([`Wrapper::detect`]), under
+//!   pipes, and on Linux, when the user's service manager answers and makes a trial scope
+//!   ([`Wrapper::detect`]), under
 //!   `systemd-run --user --scope` with the limits as the scope's properties ([`scope_args`]), so
 //!   the kernel holds them; then the `limits` frame with the parent's jobs build, and the host's
 //!   `ready`, whose jobs build must be the parent's: a host of another build (one left from before
@@ -78,8 +79,12 @@ fn answer(cmd: &mut Command, wait: Duration) -> Option<String> {
     }
 }
 
-/// Whether this machine can start a host under a `systemd --user` scope: Linux, `systemd-run`
-/// present, and the user's service manager answering.
+/// Whether this machine can start a host under a `systemd --user` scope: Linux, the user's service
+/// manager answering, and a trial scope (`systemd-run --user --scope --quiet --collect -- true`)
+/// made and ended within [`PROBE_WAIT`]. The trial is what a host's start does, so a manager that
+/// answers but will not make this user a scope (no session bus for `systemd-run`, a container's
+/// manager without delegation) leaves hosts started directly, under the fallback's limits, rather
+/// than never started at all.
 #[must_use]
 pub fn scope_available() -> bool {
     if !cfg!(target_os = "linux") {
@@ -90,8 +95,11 @@ pub fn scope_available() -> bool {
         PROBE_WAIT,
     );
     manager.is_some_and(|v| !v.trim().is_empty())
-        && answer(Command::new("systemd-run").arg("--version"), PROBE_WAIT).is_some()
+        && answer(Command::new("systemd-run").args(SCOPE_TRIAL), PROBE_WAIT).is_some()
 }
+
+/// `systemd-run`'s arguments for the trial scope [`scope_available`] makes.
+pub const SCOPE_TRIAL: [&str; 6] = ["--user", "--scope", "--quiet", "--collect", "--", "true"];
 
 /// `systemd-run`'s arguments for a host holding `req` on a machine of `cpus` logical CPUs:
 /// `CPUQuota` the share of the whole machine (`cpu_percent x cpus`%), `MemoryMax` the memory
@@ -541,6 +549,10 @@ mod tests {
         assert!(at("CPUQuota=120%") && at("MemoryMax=200M"), "{args:?}");
         assert!(at("MemorySwapMax=0") && at("TasksMax=18"), "{args:?}");
         assert_eq!(args.last().map(String::as_str), Some("--"));
+        // The trial scope is made as a host's is.
+        for flag in ["--user", "--scope", "--quiet", "--collect", "--"] {
+            assert!(at(flag) && SCOPE_TRIAL.contains(&flag), "{flag}");
+        }
     }
 
     #[test]

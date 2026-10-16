@@ -99,14 +99,20 @@ def _answers(args: list) -> Optional[str]:
     return r.stdout if r.returncode == 0 else None
 
 
+#: ``systemd-run``'s arguments for the trial scope :func:`scope_available` makes (``citar_jobs``' ``SCOPE_TRIAL``).
+SCOPE_TRIAL = ("--user", "--scope", "--quiet", "--collect", "--", "true")
+
+
 def scope_available() -> bool:
-    """Whether a host can be started under a ``systemd --user`` scope: Linux, ``systemd-run`` present, and the
-    user's service manager answering. Not on a VPS's system service with no user manager: there the host holds its
-    memory by ``RLIMIT_DATA`` and its CPU softly (``nice`` and its threads)."""
+    """Whether a host can be started under a ``systemd --user`` scope: Linux, the user's service manager answering,
+    and a trial scope made and ended within :data:`PROBE_WAIT` (what a host's start does, so a manager that answers
+    but will not make this user a scope leaves hosts started directly rather than never started). Not on a VPS's
+    system service with no user manager: there the host holds its memory by ``RLIMIT_DATA`` and its CPU softly
+    (``nice`` and its threads)."""
     if not sys.platform.startswith("linux"):
         return False
     version = _answers(["systemctl", "--user", "show", "-p", "Version", "--value"])
-    return bool(version and version.strip()) and _answers(["systemd-run", "--version"]) is not None
+    return bool(version and version.strip()) and _answers(["systemd-run", *SCOPE_TRIAL]) is not None
 
 
 def scope_args(threads: int, cpu_percent: int, memory_mb: int, cpus: int) -> list:

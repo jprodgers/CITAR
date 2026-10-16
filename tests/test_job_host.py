@@ -210,6 +210,11 @@ class ParentRules(unittest.TestCase):
                   "TasksMax=18"):
             self.assertIn(p, args)
         self.assertEqual(args[-1], "--")
+        # The trial scope is made as a host's is; there is none off Linux.
+        for flag in ("--user", "--scope", "--quiet", "--collect", "--"):
+            self.assertIn(flag, H.SCOPE_TRIAL)
+        if not sys.platform.startswith("linux"):
+            self.assertFalse(H.scope_available())
 
     def test_cpu_lists_count_as_the_kernel_writes_them(self):
         self.assertEqual(H.parse_cpu_list("0-11\n"), 12)
