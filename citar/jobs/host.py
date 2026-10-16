@@ -287,26 +287,28 @@ class JobHost:
         raise HostError("protocol", f"the job host sent {t or first} before ready")
 
     def _read_frames(self) -> None:
-        out = self._proc.stdout
-        for raw in out:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line:
-                continue
-            try:
-                frame = json.loads(line)
-                if not isinstance(frame, dict) or not isinstance(frame.get("t"), str):
-                    raise ValueError("not a frame")
-            except ValueError:
-                frame = {"t": "garbled", "line": line[:300]}
-            self._frames.put(frame)
+        # Each reader closes its pipe once the host has closed its end: nothing else reads it.
+        with self._proc.stdout as out:
+            for raw in out:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    frame = json.loads(line)
+                    if not isinstance(frame, dict) or not isinstance(frame.get("t"), str):
+                        raise ValueError("not a frame")
+                except ValueError:
+                    frame = {"t": "garbled", "line": line[:300]}
+                self._frames.put(frame)
         self._frames.put({"t": "gone"})
 
     def _read_log(self) -> None:
-        for raw in self._proc.stderr:
-            line = raw.decode("utf-8", "replace").rstrip("\r\n")[:2000]
-            self._tail.append(line)
-            self._log.append(line)
-            log.info("job host %s: %s", self._proc.pid, line)
+        with self._proc.stderr as err:
+            for raw in err:
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")[:2000]
+                self._tail.append(line)
+                self._log.append(line)
+                log.info("job host %s: %s", self._proc.pid, line)
 
     def _send(self, frame: dict) -> None:
         try:
