@@ -349,13 +349,20 @@ The lab's experiments (`citar/lab.py`'s queue of files) are played by the server
 P4.5.5-P4.5.7): there is no separate runner process.
 
 - **The dispatcher** (`citar/jobs/dispatcher.py`): one thread per server process, started with the server's other
-  workers, waking every 2 s and whenever something happens (a frame, a benchmark lease, a pause), surviving an
-  exception in its loop and started again if it dies. It is the only writer of `cpu_jobs` and `cpu_job_runs` and of
-  the lab's results files; its view in memory is rebuilt from the database when the server starts. Each tick reads
-  the queue's folder again when it changed; makes jobs of the games next in line (`lab.job_of`, checked and hashed
-  through the binding; a window of four a thread, taken in the order they run, so a 10,000-game experiment is not
-  10,000 rows and a new owner's work never waits behind another's window); reads the executors' frames; expires
-  offers, runs past their deadline (paused time extending it, up to twice) and silent runs; pauses an executor's
+  workers, waking every 2 s and whenever something happens (a run starting or ending: each executor is given the
+  dispatcher's `poke` through its `bind`; a host's start over, a benchmark lease, a pause, an administrator's retry),
+  surviving an exception in its loop and started again if it dies. It is the only writer of `cpu_jobs` and
+  `cpu_job_runs` and of the lab's results files; its view in memory changes only once the database has taken the
+  change, and is rebuilt from the database when the server starts (which also queues again the games that failed
+  three times). A run is timed by when its frames arrived (each stamped by its reader, `citar.jobs.host.RX`), never
+  by when a tick read them. Each tick reads the queue's folder again when it changed; makes jobs of the games next in
+  line (`lab.job_of`, checked and hashed through the binding; a window of four a thread, taken in the order they run,
+  so a 10,000-game experiment is not 10,000 rows and a new owner's work never waits behind another's window; only
+  jobs an executor would take hold a place, and a game none would take gets no row, its experiment saying why; a
+  member's experiment whose item is not committed yet waits up to 10 s for it, so no game is charged to nobody);
+  reads the executors' frames; expires
+  offers, runs past their deadline (paused time extending it, up to twice; a run held by a pause past its deadline,
+  which its job host ends itself, is no attempt) and silent runs; pauses an executor's
   games while a benchmark lease holds its machine (the prompt scheduler's `benchmark_listeners` wake it); and,
   unless the lab is paused (`saves/lab/PAUSED`: `citar lab stop`, the Lab page's Stop), offers each free thread the
   best queued job it does not refuse (another jobs build, a kind its settings leave out, more memory a run than it
@@ -374,7 +381,9 @@ P4.5.5-P4.5.7): there is no separate runner process.
   own) still plays its lab, and is never used to verify another machine.
 - **The order of writing** (P4.5.7): a result is checked through the binding (its hash recomputed, its chain
   folded, the result held to its spec), committed (the job `accepted`, or `crashed`: a crash is a final result),
-  then appended to the results file once per (experiment, game, run), then its stored copy pruned; at the start
+  then appended to the results file once per (experiment, game, run), then its stored copy pruned (each step after
+  the commit alone: a line the file refuses is tried again each tick, and the game settles once it is there); at
+  the start
   every active experiment's file is reconciled with the database (an accepted job with no line gets one, a line
   whose run's job is not accepted with it goes, a line cut short is dropped, a line from before jobs counts its game
   as done). So a crash between the two writes leaves exactly one line, and a server stopped with games playing

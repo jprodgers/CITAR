@@ -188,9 +188,14 @@ that means for an existing install:
   Experiments gain a `kind`: `lab`, `ranking` (the site's ladder) and `reference` (the statistical
   baseline, its lines in `saves/lab/reference/` for `summarize.py`), the last two an administrator's and
   the server's own collection. The Lab page shows the dispatcher, its executors and each game's machine
-  and verification, and administrators' Stop and Resume; the Queue page's CPU card each executor's
-  games. New routes: `GET /api/lab/jobs?exp=NAME`, `GET /api/admin/jobs`, `POST /api/admin/jobs/pause`
-  and `/resume`. `scripts/qa_phase4.py lab`.
+  and verification, and administrators' Stop, Resume and Retry (a game that failed three times is
+  played again; the server's next start does that too); the Queue page's CPU card each executor's
+  games. A finished game wakes the dispatcher, so short games follow each other at once; a run is timed
+  by its frames' arrival, so its CPU is never cut to a few milliseconds; a game held past its deadline
+  by a benchmark costs no attempt; a game no executor would take (more memory than any has) waits
+  without holding up the games behind it. New routes: `GET /api/lab/jobs?exp=NAME`,
+  `GET /api/admin/jobs`, `POST /api/admin/jobs/pause`, `/resume` and `/retry`.
+  `scripts/qa_phase4.py lab`.
 - **The job host** (design/phase4-helper.md P4.4.3): one program that plays CPU jobs under limits,
   for a helper (`citar-helper job-host`, its child) and for the server (`python -m citar.jobs host`,
   started by `citar.jobs.host`). It holds its CPU share and its memory hard on Windows (a Job
