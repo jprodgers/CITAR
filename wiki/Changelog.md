@@ -175,8 +175,10 @@ that means for an existing install:
   Linux machines (`RLIMIT_DATA`, `nice`), and both soft on macOS (the background band and a
   watchdog), and says which; it counts each game's peak memory, pauses and resumes its games,
   extends their deadlines by the time paused, refuses work when the canary or its self-check
-  fails, and ends its games within two seconds of its parent going. A game that runs out of
-  memory ends the host and is classified `memory`. `citar-helper --self-test` runs the checks.
+  fails, and ends its games within two seconds of its parent going. It measures its own memory
+  when it starts and offers each game what its memory limit leaves (`memory_per_run_mb`), which
+  is what games are matched to. A game that runs out of memory ends the host and is classified
+  `memory`, having reported its peak as it grew. `citar-helper --self-test` runs the checks.
   [docs/server/WORKERS.md](Workers#cpu-limits-per-operating-system).
 
 **Chat** ([docs/PLAYING.md](Playing-in-the-browser), [docs/AI_PLAYERS.md](AI-players)):

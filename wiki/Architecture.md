@@ -336,9 +336,12 @@ helper lending its CPU play with the same Rust, so their results can be compared
   on its standard input and output, refuses a parent of another jobs build, runs the canary and the self-check
   before its `ready`, plays each run on a thread of its own with its memory counted apart (the program's
   `#[global_allocator]` is `citar_jobs::Counting`), checks abort, pause and the deadline between seat steps, and
-  ends its runs when its input closes. Its parent (`citar_jobs::host::parent`, and the same rules in
-  `citar/jobs/host.py`) classifies its death: the allocation-failure line, the scope's `oom_kill` or the
-  watchdog's line make a `memory` death, which fails every run of it as `memory`.
+  ends its runs when its input closes. Its `ready` gives `memory_per_run_mb`: the memory limit less what the host
+  measures of itself as that limit counts it (`citar_jobs::limits::footprint`), a tenth spare, shared by the
+  threads; offers above it are refused, and the dispatcher matches jobs to it. Each run reports its peak as it
+  grows. Its parent (`citar_jobs::host::parent`, and the same rules in `citar/jobs/host.py`) classifies its
+  death: the allocation-failure line, a `SIGKILL` of a scope's host while its parent cgroup's `oom_kill` rose, or
+  the watchdog's line make a `memory` death, which fails every run of it as `memory`.
 
 ### Hybrid seats: the bot's turn, the model's diplomacy
 

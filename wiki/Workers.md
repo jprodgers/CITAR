@@ -352,11 +352,20 @@ helper reports which, and the server's machine dialog shows it:
 | Linux otherwise (a server's system service, a container) | `nice 10` and the number of threads | `RLIMIT_DATA` | soft, hard |
 | macOS | the background priority band (on Apple silicon, the efficiency cores) and the number of threads | a watchdog that ends the job host past the limit, checked twice a second | soft, soft |
 
-`threads` is the most games at once everywhere: the job host refuses more. A game that needs more
-memory than its share ends the whole job host: its games fail as `memory` and are played again
-elsewhere (the server learns how much they needed), and the helper starts a new job host for the
-next one. A job host that cannot put its limits in place refuses to start rather than run without
-them. If you need hard limits on a Mac, lend fewer threads.
+`threads` is the most games at once everywhere: the job host refuses more. **Memory per game:**
+`memory_mb` holds the job host's own memory too (its program, and on Linux without the scope
+every game thread's whole stack, which `RLIMIT_DATA` counts as soon as it is made). So the job
+host measures itself when it starts and offers each game what is left, less a tenth kept spare,
+shared by the threads: with one thread and 200 MB, about 170 MB a game on Windows and under the
+scope, and about 145 MB on Linux without it. The server only sends a machine the games that fit that figure, and the
+job host refuses one that does not; give it more memory, or fewer threads, to take bigger games. A
+job host whose memory leaves its games nothing refuses to start.
+
+A game that needs more memory than its share all the same ends the whole job host: its games fail
+as `memory` and are played again elsewhere (each game reports its memory as it grows, so the server
+learns about how much it needed), and the helper starts a new job host for the next one. A job host
+that cannot put its limits in place refuses to start rather than run without them. If you need
+hard limits on a Mac, lend fewer threads.
 
 Before it takes any work, the job host checks that this machine computes games as every other
 machine does: a floating-point check (some libraries switch the processor to a mode that rounds
