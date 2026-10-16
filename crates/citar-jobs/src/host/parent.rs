@@ -81,7 +81,7 @@ fn answer(cmd: &mut Command, wait: Duration) -> Option<String> {
 
 /// Whether this machine can start a host under a `systemd --user` scope: Linux, the user's service
 /// manager answering, and a trial scope (`systemd-run --user --scope --quiet --collect -- true`)
-/// made and ended within [`PROBE_WAIT`]. The trial is what a host's start does, so a manager that
+/// made and ended within five seconds. The trial is what a host's start does, so a manager that
 /// answers but will not make this user a scope (no session bus for `systemd-run`, a container's
 /// manager without delegation) leaves hosts started directly, under the fallback's limits, rather
 /// than never started at all.
