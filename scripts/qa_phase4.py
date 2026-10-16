@@ -55,9 +55,9 @@ Parts:
   as the server's own collection (no consumer), the reference lines read by ``summarize.py``; Stop holds a new
   experiment ("the lab is paused") and Resume plays it; the server killed twice with two games playing (each seat step
   slowed by the test build's ``CITAR_JOBS_TEST_STEP_MS``) plays exactly those two again, each game in the results
-  once, and the Queue page's CPU card names bob's games to him and "someone's lab game" to alice; an administrator's
-  retry (``POST /api/admin/jobs/retry``) taken, a member's 404; the administrators' view of the dispatcher; no
-  traceback.
+  once, and the Queue page's CPU card names bob's games to him and "someone's lab game" to alice; a game whose job host
+  is killed three times fails, and an administrator's retry (``POST /api/admin/jobs/retry``) plays it to its end (a
+  member's is 404); the administrators' view of the dispatcher; no traceback.
 
 ``all`` runs every part written so far; later packages add ``remote`` (4-10), ``verify`` (4-11, 4-12), ``update``
 (4-13), ``service`` (4-14), ``exit`` and ``real`` (4-15).
@@ -1003,13 +1003,50 @@ def part_lab(h) -> None:
     # ---- the dispatcher as administrators see it; nothing went wrong in the server
     view = admin.get("/api/admin/jobs").json()
     executor = ((view.get("dispatcher") or {}).get("executors") or [{}])[0]
+    # ---- a game whose job host dies three times fails, and an administrator's retry plays it again (still slowed:
+    # the server was started with the test build's switch)
+    import signal
+    flaky = f"qa-flaky-{tag}"
+    bob.post("/api/bots/experiments", json={
+        "profiles": ["standard", "standard"], "name": flaky, "players": 2, "games": 1, "seed": 6600,
+        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": 60})
+
+    def host_playing():
+        got = admin.get("/api/admin/jobs")
+        if got.status_code != 200:
+            return None
+        body = got.json()
+        ex = ((body.get("dispatcher") or {}).get("executors") or [{}])[0]
+        rows = [x for x in (body.get("running") or {}).get(host, []) if x.get("exp") == flaky
+                and x.get("state") == "running"]
+        return ex.get("pid") if rows and ex.get("state") == "ready" else None
+    kills = []
+    for _ in range(3):
+        pid = wait_until(host_playing, 90, 0.25)
+        if not pid:
+            break
+        try:
+            os.kill(int(pid), signal.SIGTERM)       # this server's own job host (the server's child), ended by hand
+            kills.append(pid)
+        except OSError:
+            break
+        wait_until(lambda pid=pid: host_playing() != pid, 30, 0.25)
+    stalled = wait_until(lambda: (_lab_view(bob, flaky).get("failing") == [0]) and _lab_view(bob, flaky), 60, 0.5)
     retry_gone = admin.post("/api/admin/jobs/retry", params={"exp": duels})
-    retry_all = admin.post("/api/admin/jobs/retry")
-    retry_bob = bob.post("/api/admin/jobs/retry")
-    r.check("POST /api/admin/jobs/retry: an administrator's retry of every queued experiment is taken, of one no "
-            "longer queued is 404; a member's is 404",
-            (retry_gone.status_code, retry_all.status_code, retry_bob.status_code) == (404, 200, 404),
-            json.dumps([retry_gone.status_code, retry_all.status_code, retry_bob.status_code]))
+    retry_bob = bob.post("/api/admin/jobs/retry", params={"exp": flaky})
+    retry = admin.post("/api/admin/jobs/retry", params={"exp": flaky})
+    replayed = wait_until(lambda: _lab_view(bob, flaky).get("state") == "complete", 120, 0.5)
+    flaky_runs = [x for j in ((_lab_state(h, flaky).get(flaky) or {}).get("jobs") or []) for x in j["runs"]]
+    r.check("a game whose job host is killed three times fails (the experiment stalled, its game listed failed); an "
+            "administrator's retry (POST /api/admin/jobs/retry) plays it to its end, its line written once; a "
+            "member's retry is 404, and so is one of an experiment no longer queued",
+            len(kills) == 3 and bool(stalled) and stalled.get("state") == "stalled" and retry.status_code == 200
+            and retry_bob.status_code == 404 and retry_gone.status_code == 404 and bool(replayed)
+            and [(x["state"], x["error"]) for x in flaky_runs] == [("failed", "host")] * 3 + [("done", None)]
+            and len(_lines(h, flaky)) == 1,
+            json.dumps({"kills": len(kills), "stalled": (stalled or {}).get("state"),
+                        "retry": [retry.status_code, retry_bob.status_code, retry_gone.status_code],
+                        "runs": [(x["state"], x["error"]) for x in flaky_runs]}))
     r.check("GET /api/admin/jobs: the dispatcher alive, the host's job host ready under its settings (held hard on "
             "Windows, the CPU soft without a user manager on Linux) and verifiable; a member gets 404",
             (view.get("dispatcher") or {}).get("alive") is True and executor.get("machine") == host
