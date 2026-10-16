@@ -1228,9 +1228,28 @@ LONG_GAME = {"players": 8, "size": "huge", "maps": ["pangaea"], "speed": "Quick"
              "profiles": ["standard", "classic-production"]}
 
 
-def _saves(h) -> Path:
-    """The instance's saves folder as this process reads it (the WSL server's through its UNC path)."""
-    return getattr(h.server, "saves", None) or h.server.state / "saves"
+def _saves_text(h, rel: str) -> Optional[str]:
+    """A file of the instance's saves folder (``rel`` under it), or None when it is not there: through WSL for a WSL
+    server."""
+    reader = getattr(h.server, "read", None)
+    if reader is not None:
+        return reader(f"saves/{rel}")
+    try:
+        return (h.server.state / "saves" / rel).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _saves_remove(h, rel: str) -> None:
+    """Delete a file of the instance's saves folder (an experiment's queue file, as its owner deleting it would)."""
+    remover = getattr(h.server, "remove", None)
+    if remover is not None:
+        remover(f"saves/{rel}")
+        return
+    try:
+        (h.server.state / "saves" / rel).unlink()
+    except OSError:
+        pass
 
 
 def _server_python(h, code: str, *args: str) -> str:
@@ -1455,11 +1474,7 @@ def part_remote(h) -> None:
         watch = CpuWatch(helper.proc.pid).start()
         time.sleep(8.0)
         share = watch.stop()
-        queue_file = _saves(h) / "lab" / "queue" / f"{held5}.json"
-        try:
-            queue_file.unlink()
-        except OSError:
-            pass
+        _saves_remove(h, f"lab/queue/{held5}.json")
         playing5 = poller.playing(held5)
         ended = wait_until(lambda: not [s for s in poller.samples[-1:] for x in s["runs"] if x["exp"] == held5],
                            30, 0.25)
@@ -1568,11 +1583,7 @@ def part_remote(h) -> None:
 
 
 def _lab_lines(h, name: str, folder: str = "results") -> list:
-    path = _saves(h) / "lab" / folder / f"{name}.jsonl"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return []
+    text = _saves_text(h, f"lab/{folder}/{name}.jsonl") or ""
     return [json.loads(x) for x in text.splitlines() if x.strip()]
 
 
@@ -1587,9 +1598,10 @@ class WslServer:
     started from ``root`` (a checkout in WSL) with ``python`` (its venv's, the extension ``cargo xtask develop`` built
     there), its state in ``~/citar-qa/<the directory's name>`` inside WSL (emptied first), its log and the helpers'
     homes in the Windows directory. It binds ``0.0.0.0`` inside WSL only when WSL's networking is NAT (the Linux VM's
-    own interface, reached from Windows only through ``localhost``), else ``127.0.0.1``. ``admin_cli`` and the parts'
-    readers run in WSL with the instance's environment (``cli``, ``python``); ``saves`` is its saves folder as Windows
-    reads it (``\\wsl.localhost``)."""
+    own interface, reached from Windows only through ``localhost``), else ``127.0.0.1``. Everything in WSL goes
+    through ``wsl -u <user> -e`` (no shell, and as the user whose home it is: WSL's default user may not read it):
+    ``admin_cli`` and the parts' readers with the instance's environment (``cli``, ``python``), and its files
+    (``read``, ``remove``, written with ``_put``), each as bytes so no line ending is changed on the way."""
 
     topology = "wsl"
 
@@ -1598,8 +1610,6 @@ class WslServer:
         self.state, self.port = state, port
         self.distro, self.user, self.root, self.python_bin = distro, user, root, python
         self.remote = posixpath.join("/home", user, "citar-qa", state.name)
-        self.unc = Path(rf"\\wsl.localhost\{distro}" + self.remote.replace("/", "\\"))
-        self.saves = self.unc / "saves"
         self.base = f"http://127.0.0.1:{port}"
         self.public = f"http://localhost:{port}"
         self.env: dict = {}
@@ -1609,14 +1619,32 @@ class WslServer:
         self.host = "0.0.0.0" if self.mode == "nat" else "127.0.0.1"
 
     def _wsl(self, *args: str, stdin: Optional[str] = None, timeout: float = 180):
+        """``args`` run in WSL as its user, with no shell; ``stdin`` and the output as UTF-8 bytes on the way, so a
+        line ending is never translated."""
         import subprocess
-        return subprocess.run(["wsl", "-d", self.distro, "-u", self.user, "-e", *args], input=stdin,
-                              capture_output=True, text=True, timeout=timeout)
+        got = subprocess.run(["wsl", "-d", self.distro, "-u", self.user, "-e", *args],
+                             input=None if stdin is None else stdin.encode("utf-8"), capture_output=True,
+                             timeout=timeout)
+        return subprocess.CompletedProcess(got.args, got.returncode, got.stdout.decode("utf-8", "replace"),
+                                           got.stderr.decode("utf-8", "replace"))
+
+    def _put(self, rel: str, text: str) -> None:
+        """Write ``text`` to ``rel`` in the WSL state."""
+        done = self._wsl("bash", "-c", 'cat > "$1"', "put", f"{self.remote}/{rel}", stdin=text)
+        if done.returncode != 0:
+            raise q3.HarnessError(f"could not write {rel} in WSL: {done.stderr.strip()[-300:]}")
+
+    def read(self, rel: str) -> Optional[str]:
+        """A file of the WSL state (``saves/lab/results/x.jsonl``, say), or None when it is not there."""
+        got = self._wsl("cat", f"{self.remote}/{rel}", timeout=60)
+        return got.stdout if got.returncode == 0 else None
+
+    def remove(self, rel: str) -> None:
+        self._wsl("rm", "-f", f"{self.remote}/{rel}", timeout=60)
 
     def _scripts(self) -> None:
-        """``run.sh`` (the instance's environment, then the venv's Python with the arguments) and ``stop.sh`` (the
-        server's process signalled), written into the WSL state through its UNC path: a script file, since a command
-        line given to ``wsl --`` has its ``$`` expanded by the login shell first (each call here is ``wsl -e``, no shell)."""
+        """``run.sh`` (the instance's environment, then the venv's Python with the arguments), ``serve.sh`` (the
+        server, its process id kept) and ``stop.sh`` (that process signalled), in the WSL state."""
         import posixpath
         dev = _dev_server_module()
         env = dev.instance_env(_PosixBase(self.remote), self.port, host=self.host, server=True,
@@ -1624,23 +1652,21 @@ class WslServer:
         lines = ["#!/bin/bash", f"cd '{self.root}'"]
         lines += [f"export {k}='{v}'" for k, v in sorted(env.items())]
         lines += ["export PYTHONUNBUFFERED=1", f"exec '{self.python_bin}' \"$@\""]
-        (self.unc / "run.sh").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        self._put("run.sh", "\n".join(lines) + "\n")
         pid = posixpath.join(self.remote, "server.pid")
-        (self.unc / "stop.sh").write_text(
-            "#!/bin/bash\n"
-            f"p=$(cat '{pid}' 2>/dev/null) || exit 0\n"
-            "kill -\"${1:-TERM}\" \"$p\" 2>/dev/null\n"
-            "for i in $(seq 1 100); do kill -0 \"$p\" 2>/dev/null || exit 0; sleep 0.1; done\n"
-            "kill -KILL \"$p\" 2>/dev/null; exit 0\n", encoding="utf-8", newline="\n")
-        (self.unc / "serve.sh").write_text(
-            "#!/bin/bash\n"
-            f"echo $$ > '{pid}'\n"
-            f"exec bash '{self.remote}/run.sh' scripts/dev_server.py --server --registration invite "
-            f"--host {self.host} --port {self.port} --dir '{self.remote}'\n", encoding="utf-8", newline="\n")
+        self._put("stop.sh", "#!/bin/bash\n"
+                  f"p=$(cat '{pid}' 2>/dev/null) || exit 0\n"
+                  "kill -\"${1:-TERM}\" \"$p\" 2>/dev/null\n"
+                  "for i in $(seq 1 100); do kill -0 \"$p\" 2>/dev/null || exit 0; sleep 0.1; done\n"
+                  "kill -KILL \"$p\" 2>/dev/null; exit 0\n")
+        self._put("serve.sh", "#!/bin/bash\n"
+                  f"echo $$ > '{pid}'\n"
+                  f"exec bash '{self.remote}/run.sh' scripts/dev_server.py --server --registration invite "
+                  f"--host {self.host} --port {self.port} --dir '{self.remote}'\n")
 
     def prepare(self) -> None:
         """The WSL state emptied and made, and the scripts written."""
-        made = self._wsl("bash", "-c", f"rm -rf '{self.remote}' && mkdir -p '{self.remote}/config'")
+        made = self._wsl("bash", "-c", 'rm -rf "$1" && mkdir -p "$1/config"', "prepare", self.remote)
         if made.returncode != 0:
             raise q3.HarnessError(f"the WSL state {self.remote} could not be made: {made.stderr.strip()[-300:]}")
         self._scripts()
@@ -1651,7 +1677,7 @@ class WslServer:
         import httpx
         local = self.state / "config" / "servers.json"
         if local.exists():
-            (self.unc / "config" / "servers.json").write_bytes(local.read_bytes())
+            self._put("config/servers.json", local.read_text(encoding="utf-8"))
         out = open(self.log, "w", encoding="utf-8")
         self.proc = subprocess.Popen(["wsl", "-d", self.distro, "-u", self.user, "-e", "bash",
                                       f"{self.remote}/serve.sh"], stdout=out, stderr=subprocess.STDOUT,
@@ -1684,13 +1710,12 @@ class WslServer:
         return self._wsl("bash", f"{self.remote}/run.sh", "-m", "citar.server.admin_cli", *args, stdin=stdin)
 
     def python(self, *args: str):
-        """``python args`` in WSL with the instance's environment; ``-c CODE`` goes through a file (a program's text
-        is safer as a file than as an argument across ``wsl``)."""
+        """``python args`` in WSL with the instance's environment; ``-c CODE`` goes through a file in the WSL state."""
         import hashlib
         args = list(args)
         if len(args) >= 2 and args[0] == "-c":
             name = f"qa-snippet-{hashlib.sha256(args[1].encode()).hexdigest()[:12]}.py"
-            (self.unc / name).write_text(args[1], encoding="utf-8", newline="\n")
+            self._put(name, args[1])
             args = [f"{self.remote}/{name}", *args[2:]]
         return self._wsl("bash", f"{self.remote}/run.sh", *args)
 
@@ -1796,6 +1821,10 @@ def main(argv=None) -> int:
         return 2
     if args.wsl and not (args.wsl_root and args.wsl_python):
         print("refused: --wsl needs --wsl-root (a checkout in WSL) and --wsl-python (its venv's Python)", flush=True)
+        return 2
+    if args.wsl and not all(p.startswith("/") and ":" not in p for p in (args.wsl_root, args.wsl_python)):
+        print("refused: --wsl-root and --wsl-python are absolute paths inside WSL (from Git Bash, set "
+              "MSYS_NO_PATHCONV=1, or it rewrites them as Windows paths)", flush=True)
         return 2
     # the harness's own run, on this script's parts
     q3.PARTS, q3.LATER = PARTS, LATER
