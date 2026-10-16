@@ -237,7 +237,11 @@ class RemoteExecutor:
                     hit = ("its machine is gone", None)
                 else:
                     d = admission.check(s, user, server, "lab", online=self.online)
-                    budget = d.budget.budget.id if d.allowed and d.budget is not None and d.budget.budget else None
+                    budget = None
+                    if d.allowed and d.grant is not None:
+                        # its budget's account loaded and followed by the keeper, as a lease's is
+                        from citar.pool import budgets
+                        budget = budgets.keeper().handle(s, d.grant)
                     hit = (None if d.allowed else (d.reason or "no grant lends it for lab runs"), budget)
         except Exception:
             log.warning("could not check %s's grants for %s", self.id, user_id, exc_info=True)

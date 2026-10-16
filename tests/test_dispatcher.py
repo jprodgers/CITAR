@@ -1473,3 +1473,230 @@ class Naming(Lab):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------------------------------------- 4-10
+
+class Remote(Lab):
+    """Remote executors (package 4-10, its gate 4: P4.5.5's eligibility). Bob's machine, in a group of his, trusted by
+    an administrator, lends one thread through its helper (a connection with no socket that records what the hub sends
+    it); each refusal leaves the job queued, and once a machine that takes it appears (a stand-in for the host's own
+    executor), the job is offered there."""
+
+    def setUp(self):
+        super().setUp()
+        from citar.db.models import ServerGroup
+        from citar.jobs import remote
+        remote.forget_owner_tiers()
+        self.addCleanup(remote.forget_owner_tiers)
+        self.registry = remote.Remotes()
+        with db.session() as s:
+            group = ServerGroup(owner_id=self.ids["bob"], name="Bob's machines", slug="bobs-machines")
+            s.add(group)
+            s.flush()
+            row = Server(owner_id=self.ids["bob"], name="Bob's PC", kind="owned", provider="lmstudio", reach="worker",
+                         max_concurrent=1, group_id=group.id, trust_tier="trusted",
+                         capabilities={"cpu": {"enabled": True, "threads": 1, "cpu_percent": 50, "memory_mb": 1024,
+                                               "work": ["lab_game", "ranking_game"], "yield_to_llm": True}})
+            s.add(row)
+            s.flush()
+            self.sid, self.group_id = row.id, group.id
+        servers.invalidate()
+
+    def grant(self, who: str, purposes: list) -> None:
+        from citar import pool
+        from citar.db.models import ServerGroup
+        with db.session() as s:
+            pool.create_grant(s, s.get(User, self.ids["bob"]), s.get(ServerGroup, self.group_id),
+                              subject_type="user", subject_handle=who, purposes=purposes)
+
+    def connect(self, *, lent: bool = True, verifiable: bool = True, jobs_build=None, site_cpu: bool = True,
+                work=("lab_game", "ranking_game"), per_run: int = 500, quiet_until=None, threads: int = 1):
+        """Bob's helper connected: its hello (CPU lent or not, its canary's verdict, its jobs build) and its
+        acknowledgement of the site's settings."""
+        from tests.helperfake import StubConnection, hello, settings as site_settings
+        site = site_settings(llm=False)
+        site["cpu"] = {"enabled": site_cpu, "threads": threads, "cpu_percent": 50, "memory_mb": 1024,
+                       "work": list(work), "yield_to_llm": True}
+        conn = StubConnection(self.sid, site=site)
+        h = hello(hostname="bob-pc", llm=False, quiet_until=quiet_until)
+        h["helper"]["jobs_build"] = jobs_build or engine_api.jobs_build()
+        h["cpu"] = {"enabled": lent, "ceiling": {"threads": threads, "cpu_percent": 50, "memory_mb": 1024,
+                                                  "work": list(work)},
+                    "limits": {"cpu": "hard", "memory": "hard"}, "verifiable": verifiable, "bots": [],
+                    "ruleset": "0" * 64}
+        conn.hello, conn.jobs_build, conn.memory_per_run_mb = h, h["helper"]["jobs_build"], per_run
+        conn.quiet_until = quiet_until
+        conn.acknowledge({"effective": {"llm": {"enabled": False, "slots": 0},
+                                        "cpu": {**site["cpu"], "enabled": site_cpu and lent}},
+                          "capped": [] if lent else ["cpu.enabled"], "limits": {"cpu": "hard", "memory": "hard"},
+                          "memory_per_run_mb": per_run})
+        e = self.registry.get(self.sid, "Bob's PC")
+        e.connected(conn)
+        return e, conn
+
+    def offers(self, conn) -> list:
+        return [f for f in conn.frames if f.get("t") == "job_offer"]
+
+    def refused(self, who: str, spec: dict, why: str, *, connect: bool = True, **kw):
+        """``who``'s experiment is not offered to bob's helper, saying ``why``; the job stays queued, and a machine
+        that takes it gets it."""
+        conn = None
+        if connect:
+            _e, conn = self.connect(**kw)
+        self.submit(who, spec)
+        d = self.dispatcher([], remotes=self.registry)
+        for _ in range(3):
+            d.tick()
+        if conn is not None:
+            self.assertEqual(self.offers(conn), [], "the helper was offered the job")
+        # its game waits (a job no executor would take gets no row: its experiment says why), saying why
+        self.assertTrue(all(j.state == "queued" for j in d.jobs.values()))
+        waiting = d.published["experiments"][spec["name"]].get("waiting") or ""
+        self.assertIn(why, waiting)
+        other = Fake("sv_host", name="this server")
+        d._own.append(other)
+        d.tick()
+        self.assertEqual(len(other.offers), 1, "a machine that takes it gets it")
+        return d
+
+    def test_offline(self):
+        e, conn = self.connect()
+        e.disconnected(conn)                # its helper went: the executor stays, offered nothing
+        self.refused("bob", duels("off-line", 1), "its helper is not connected", connect=False)
+        self.assertEqual(self.offers(conn), [])
+
+    def test_cpu_off_on_the_site(self):
+        self.refused("bob", duels("site-off", 1), "CPU work is off in its machine settings", site_cpu=False)
+
+    def test_cpu_off_on_the_machine(self):
+        self.refused("bob", duels("not-lent", 1), "not lent by this machine's owner", lent=False)
+
+    def test_a_kind_not_opted_in(self):
+        self.refused("bob", duels("not-this-kind", 1), "leave out lab games", work=("ranking_game",))
+
+    def test_another_jobs_build(self):
+        self.refused("bob", duels("other-build", 1), "its helper's is 000000000000", jobs_build="000000000000")
+
+    def test_not_enough_memory_a_run(self):
+        with mock.patch.object(store.Costs, "of", lambda self, kind, spec: {"cpu_s": 0.2, "peak_mb": 100.0}):
+            self.refused("bob", duels("too-big", 1), "its job host leaves each run 50 MB", per_run=50)
+
+    def test_a_quarantined_owner(self):
+        with db.session() as s:
+            s.get(User, self.ids["bob"]).trust_tier = "quarantined"
+        self.refused("bob", duels("quarantined", 1), "its owner is quarantined")
+
+    def test_a_machine_not_trusted_until_verification_arrives(self):
+        with db.session() as s:
+            s.get(Server, self.sid).trust_tier = "new"
+        servers.invalidate()
+        self.refused("bob", duels("untrusted", 1), "only a machine an administrator trusted")
+
+    def test_its_helpers_quiet_hours(self):
+        self.refused("bob", duels("quiet", 1), "its helper's own quiet hours", quiet_until=time.time() + 3600)
+
+    def test_a_live_benchmark_lease(self):
+        _e, conn = self.connect()
+        lease = S.get().lease(self.sid, "dry-run", kind="benchmark", label="benchmark run")
+        self.addCleanup(lease.release)
+        self.refused("bob", duels("benchmark", 1), "a benchmark holds its machine", connect=False)
+        self.assertEqual(self.offers(conn), [])
+
+    def test_no_grant(self):
+        self.refused("alice", duels("no-grant", 1), "You do not have permission")
+
+    def test_a_grant_without_lab(self):
+        self.grant("alice", ["game", "pooled"])
+        self.refused("alice", duels("no-lab", 1), "limited to")
+
+    def test_a_grant_with_no_purposes_never_lends_the_cpu(self):
+        self.grant("alice", [])
+        self.refused("alice", duels("empty-purposes", 1), "does not include lab runs")
+
+    def test_an_administrators_own_experiment_needs_a_grant_too(self):
+        self.refused("zara", duels("admins-own", 1), "You do not have permission")
+
+    def test_a_grant_listing_lab_its_owners_own_and_the_collection_are_offered(self):
+        """What is lent: a member's experiment under a grant listing ``lab``, the machine owner's own, and the server's
+        own ranking games (its work lists them); the offer carries the job's figures."""
+        self.grant("alice", ["lab"])
+        _e, conn = self.connect(threads=3)
+        self.submit("alice", duels("granted", 1))
+        self.submit("bob", duels("bobs-own", 1))
+        self.submit("zara", duels("ladder", 1, kind="ranking"))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        offers = self.offers(conn)
+        self.assertEqual(sorted(f["spec"]["exp"] for f in offers), ["bobs-own", "granted", "ladder"])
+        for offer in offers:
+            self.assertEqual(offer["jobs_build"], engine_api.jobs_build())
+            self.assertEqual(offer["offer_ttl_s"], 30)
+            self.assertGreaterEqual(offer["deadline_s"], D.DEADLINE_MIN)
+        self.assertEqual({f["kind"] for f in offers}, {"lab_game", "ranking_game"})
+
+    def test_a_helpers_result_is_acknowledged_lined_and_credited_to_its_owner(self):
+        """A helper's result into the lab and the ledger (P4.5.7): its line names the machine and ``unverified``, its
+        event is given by the machine's owner and used by the experiment's owner, its CPU bounded by 1.5 times the
+        reference cost; it is acknowledged once committed."""
+        self.grant("alice", ["lab"])
+        e, conn = self.connect()
+        self.submit("alice", duels("credited", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
+        e.frame({"t": "job_accept", "run": offer["run"]})
+        e.frame({"t": "job_result", "run": offer["run"], "outcome": {
+            "result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"], "cpu_s": 3600.0,
+            "wall_s": out["wall_s"], "paused_s": 0.0, "peak_mb": 3.5}, "claim": {}, "signature": ""})
+        d.tick()
+        self.led.flush()
+        self.assertIn({"t": "job_result_ack", "run": offer["run"]},
+                      [{k: v for k, v in f.items() if k != "ts"} for f in conn.frames])
+        (line,) = lab.load_results("credited")
+        self.assertEqual(line["executor"], {"machine": self.sid, "run": offer["run"], "verification": "unverified"})
+        with db.session() as s:
+            (ev,) = s.scalars(select(ComputeEvent).where(ComputeEvent.request_id == offer["run"])).all()
+            self.assertEqual((ev.provider_id, ev.consumer_id), (self.ids["bob"], self.ids["alice"]))
+            self.assertEqual(ev.verification, "unverified")
+            cost = d.costs.of("lab_game", offer["spec"])["cpu_s"]
+            self.assertLessEqual(ev.cpu_core_s, 1.5 * cost + 1e-6, "bounded by 1.5 x the reference cost")
+            self.assertTrue(ev.flags.get("overreported_cpu") or ev.flags.get("capped_cpu"), ev.flags)
+            run = s.get(CpuJobRun, offer["run"])
+            self.assertEqual((run.state, run.executor, run.verdict), ("done", "remote", "unchecked"))
+
+    def test_a_run_under_a_grant_with_a_budget_settles_its_credits_into_the_budget(self):
+        """A member's run under a grant with a budget holds the budget from its offer and settles the run's credits
+        into it with its event (P4.5.7), as a model step does."""
+        from citar import pool
+        from citar.db.models import BudgetEntry, ServerGroup
+        from citar.pool import budgets
+        budgets.reset_keeper()
+        self.addCleanup(budgets.reset_keeper)
+        with db.session() as s:
+            pool.create_grant(s, s.get(User, self.ids["bob"]), s.get(ServerGroup, self.group_id),
+                              subject_type="user", subject_handle="alice", purposes=["lab"],
+                              budget={"period": "month", "amount": 1000, "unit": "credits", "behavior": "hard"})
+        with db.session() as s:
+            budgets.keeper().sync(s)
+        e, conn = self.connect()
+        self.submit("alice", duels("budgeted", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        self.assertIn(offer["run"], e.holds, "the offer holds the budget")
+        out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
+        e.frame({"t": "job_accept", "run": offer["run"]})
+        e.frame({"t": "job_result", "run": offer["run"], "outcome": {
+            "result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"],
+            "cpu_s": out["cpu_s"], "wall_s": out["wall_s"], "paused_s": 0.0, "peak_mb": 3.5},
+            "claim": {}, "signature": ""})
+        d.tick()
+        self.led.flush()
+        self.assertNotIn(offer["run"], e.holds)
+        with db.session() as s:
+            (ev,) = s.scalars(select(ComputeEvent).where(ComputeEvent.request_id == offer["run"])).all()
+            (entry,) = s.scalars(select(BudgetEntry)).all()
+            self.assertAlmostEqual(entry.actual, ev.credits, places=6)
+            self.assertEqual(entry.user_id, self.ids["alice"])
