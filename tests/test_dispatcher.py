@@ -953,6 +953,59 @@ class Speed(Lab):
         self.assertLess(median, 0.050 * (3 if ON_CI else 1))
 
 
+class HostDefaults(Lab):
+    """The host machine's CPU sharing (P4.5.6): on by default with the mode's figures, a 0 the default's, so its job
+    host is always given concrete limits; any other machine's off by default."""
+
+    def test_the_modes_figures(self):
+        from citar import machine_settings as M
+        vps = M.host_cpu_defaults("server", cpus=1, ram_mb=961)
+        self.assertEqual({k: vps[k] for k in ("enabled", "threads", "cpu_percent", "memory_mb")},
+                         {"enabled": True, "threads": 1, "cpu_percent": 50, "memory_mb": 240})
+        self.assertEqual(M.host_cpu_defaults("server", cpus=4, ram_mb=16384)["memory_mb"], 1024, "1,024 MB at most")
+        laptop = M.host_cpu_defaults("local", cpus=12, ram_mb=32768)
+        self.assertEqual({k: laptop[k] for k in ("threads", "cpu_percent", "memory_mb")},
+                         {"threads": 6, "cpu_percent": 50, "memory_mb": 3072})
+        self.assertEqual(laptop["work"], list(CPU_WORK))
+        self.assertEqual(M.host_cpu_defaults("local", cpus=1, ram_mb=1024)["threads"], 1)
+
+    def test_the_host_row_is_on_by_default_and_a_zero_is_the_default(self):
+        from citar import machine_settings as M
+        with db.session() as s:
+            s.get(Server, "sv_host").capabilities = {}
+        servers.invalidate()
+        host = servers.machine_settings("sv_host")["cpu"]
+        defaults = M.host_cpu_defaults()
+        self.assertTrue(host["enabled"])
+        self.assertEqual({k: host[k] for k in ("threads", "cpu_percent", "memory_mb")},
+                         {k: defaults[k] for k in ("threads", "cpu_percent", "memory_mb")})
+        self.assertFalse(servers.machine_settings("sv_gpu")["cpu"]["enabled"], "any other machine: off")
+        with db.session() as s:
+            row = s.get(Server, "sv_host")
+            changed = M.update(row, {"capabilities": {"llm": {"allow_swaps": True}}})
+            self.assertNotIn("cpu.enabled", changed, "a change of something else keeps the host's CPU on")
+            self.assertTrue(row.capabilities["cpu"]["enabled"])
+            M.update(row, {"capabilities": {"cpu": {"threads": 0, "enabled": False}}})
+        servers.invalidate()
+        off = servers.machine_settings("sv_host")["cpu"]
+        self.assertFalse(off["enabled"])
+        self.assertEqual(off["threads"], defaults["threads"], "a 0 is the default's")
+        f = L.figures(servers.machine_settings("sv_host"))
+        self.assertTrue(all(f[k] > 0 for k in ("threads", "cpu_percent", "memory_mb")), f)
+        self.assertTrue(all(L.figures(None)[k] > 0 for k in ("threads", "cpu_percent", "memory_mb")))
+
+    def test_an_executor_turned_off_plays_nothing(self):
+        self.host_cpu(enabled=False)
+        self.submit("alice", duels("off", 1))
+        local = self.local()
+        d = self.dispatcher([local])
+        for _ in range(3):
+            d.tick()
+        self.assertEqual((local.state, local.host), ("off", None))
+        (job,) = d.jobs.values()
+        self.assertIn("CPU work is off in the host's machine settings", d.waiting(job))
+
+
 class Costs(Lab):
     def test_the_cost_table_is_seeded_and_learns(self):
         d = self.dispatcher([Fake(auto=True)])
