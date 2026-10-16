@@ -361,14 +361,21 @@ grant counts against the grant's budget like any other work, and each game is en
 
 **Pauses.** With **"Pause its games while its own model works"** on (the default), the helper holds its games at their
 next step while a request runs on its model, and lets them go when the request ends, so lending the CPU never slows
-the model. A benchmark on the machine pauses them whatever that says, until it ends. Paused time does not count
-against a game's deadline (up to twice the deadline in all).
+the model. A benchmark on the machine pauses them whatever that says, until it ends (if the helper's connection drops
+meanwhile, its games go on, and the server pauses them again when it reconnects while the benchmark lasts). Paused
+time does not count against a game's deadline (up to twice the deadline in all); a game the helper's own pauses held
+past that is played elsewhere, not on that machine again for an hour.
 
 **Results are kept until the server has them.** A finished game's result is signed with the machine key and kept in
 the helper's `helper/results/` until the server acknowledges it; a helper that loses its connection sends it again
 when it reconnects, and the server takes each result once. A helper stopped mid-game ends its games, and the server
-plays them again elsewhere. A game the helper does not answer within 30 seconds of its offer, or one silent for five
-minutes, is taken back and offered again; a machine that keeps abandoning games is offered none for an hour.
+plays them again elsewhere, offering that machine nothing until its helper connects again. A game the helper does not
+answer within 30 seconds of its offer (it answers one waiting for its job host to start before then), or one silent
+for five minutes, is taken back and offered again; a machine that keeps abandoning games is offered none for an hour.
+A helper that refuses a game's spec, or fails a game as one no machine could play, is counted against its machine
+(the server checked the game itself) and the game is played elsewhere. When you change the machine's CPU settings
+while games play, the helper starts its job host again under the new figures once they finish, and tells the server
+the memory each game now has.
 
 **What the owner sees.** `GET /api/machines/{id}/jobs` lists the machine's recent runs (each game, its state, its CPU
 and paused time, and its verification once settled), what it lends now and its trust counters.

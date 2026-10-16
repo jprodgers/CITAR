@@ -219,7 +219,12 @@ that means for an existing install:
   `helper/results/` until the server acknowledges it, sending it again after a reconnect; the server
   takes back an offer unanswered in 30 s and a game silent for 5 minutes, backs off a machine that
   refuses or abandons games, and checks eligibility (jobs build, kinds, memory a game, quiet hours,
-  benchmarks, grants). Until helpers' results are verified (a later 0.1.6 package) only machines an
+  benchmarks, grants). No helper can keep a game from the other machines: a spec it refuses or a game
+  it fails as one no machine could play is played elsewhere and counted against its machine, a stopped
+  helper is offered nothing until it reconnects, and a game its own pauses held past its deadline goes
+  elsewhere for an hour. A grant's budget with no room holds its member's games back without charging
+  the lender. When the machine's CPU settings change while games play, the helper restarts its job
+  host once they end and tells the server the memory a game now has. Until helpers' results are verified (a later 0.1.6 package) only machines an
   administrator trusted take CPU work, their results entered as unverified. The machine settings
   dialog and the helper card show the CPU in effect, each limit hard or soft, "not lent by this
   machine's owner", and the grants that lend it; the dialog gains "Pause its games while its own model
