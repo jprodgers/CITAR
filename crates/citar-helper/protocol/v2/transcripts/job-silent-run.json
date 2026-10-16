@@ -1,6 +1,6 @@
 {
   "name": "job-silent-run",
-  "about": "A running run with no progress for 5 minutes while its helper is connected expires and its job is queued again; a late result for it is acknowledged and dropped. The dispatcher's offers are stopped after the first, so nothing is offered in between.",
+  "about": "A running run with no progress for 5 minutes while its helper is connected expires, its helper is told job_abort and its job is queued again; a late result for it (one that crossed the abort) is acknowledged and dropped. The dispatcher's offers are stopped after the first, so nothing is offered in between.",
   "refs": ["P4.2.5", "P4.5.5"],
   "plays": {"helper": null, "hub": "4-10"},
   "one_side": "scripts a helper that goes silent",
@@ -137,6 +137,7 @@
     {"h2s": {"t": "job_accept", "run": "<id:run>"}, "within_s": 2},
     {"act": {"side": "hub", "do": "lab_stop"}},
     {"wait": {"s": 301}},
+    {"s2h": {"t": "job_abort", "run": "<id:run>", "reason": "<string>"}, "note": "the server tells the helper to let the run go"},
     {"state": {"side": "hub", "expect": {"run": {"id": "<id:run>", "state": "expired"}, "job": "queued"}}},
     {
       "h2s": {

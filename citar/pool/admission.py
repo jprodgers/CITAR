@@ -43,8 +43,11 @@ PURPOSES = ("game", "pooled", "benchmark", "probe", "scenario", "lab")
 
 PURPOSE_LABELS = {
     "game": "ordinary games", "pooled": "pooled prompts", "benchmark": "benchmarks", "probe": "probes",
-    "scenario": "scenarios", "lab": "lab runs",
+    "scenario": "scenarios", "lab": "lab runs (CPU work)",
 }
+#: The purposes that are CPU work: lent only by a grant that lists them (design/phase4-helper.md P4.5.5), never by an
+#: empty list, and never by an administrator's own standing.
+CPU_PURPOSES = ("lab",)
 
 
 @dataclass
@@ -122,8 +125,11 @@ def grants_for(session, user: Optional[User], group_id: str) -> list:
 
 
 def _purpose_ok(grant: AccessGrant, purpose: str) -> bool:
-    """An empty purpose list means every purpose, which is the common case."""
+    """An empty purpose list means every model purpose, which is the common case, and never CPU work (``lab``): a
+    grant made to lend a GPU for games never lends the CPU (P4.5.5). CPU work is opt-in per grant."""
     allowed = grant.purposes or []
+    if purpose in CPU_PURPOSES:
+        return purpose in allowed
     return not allowed or purpose in allowed
 
 
@@ -152,8 +158,11 @@ def check(session, user: Optional[User], server: Server, purpose: str = "game", 
 
     # The owner may always use their own hardware, and administrators are not gated by grants. Both
     # still respect the server being switched off, above. The site's machines (the host, its online
-    # APIs) are no member's own, whoever imported them (access.is_site_machine).
-    if (server.owner_id == user.id and not access.is_site_machine(server)) or user.role == "admin":
+    # APIs) are no member's own, whoever imported them (access.is_site_machine). CPU work is the
+    # exception for administrators: an administrator's own lab experiment runs on a member's machine
+    # only under a grant listing ``lab``, as a member's does (P4.5.5).
+    own = server.owner_id == user.id and not access.is_site_machine(server)
+    if own or (user.role == "admin" and purpose not in CPU_PURPOSES):
         return _check_capacity(session, server, None, online=online, in_flight=in_flight, now=now)
 
     if not server.group_id:
@@ -208,6 +217,11 @@ def _check_grant(session, user: User, server: Server, grant: AccessGrant, purpos
     group_name = group.name if group else "that group"
 
     if not _purpose_ok(grant, purpose):
+        if not grant.purposes:
+            return _deny("purpose",
+                         f"Your access to “{group_name}” is for every kind of model work, which does not include "
+                         f"{PURPOSE_LABELS.get(purpose, purpose)}: its owner lends the CPU only with a grant that "
+                         "lists it.", grant=grant, server=server)
         allowed = ", ".join(PURPOSE_LABELS.get(p, p) for p in (grant.purposes or []))
         return _deny("purpose",
                      f"Your access to “{group_name}” is limited to {allowed}, "

@@ -51,6 +51,13 @@ difference it finds between what the site asks and what a helper was last sent (
 frees its slot. The scheduler drains the slot, and flags the machine ``cancel_unacked``, only when no answer came within
 ``CANCEL_ACK_SECONDS`` (``citar.pool.scheduler``).
 
+**CPU jobs** (P4.5.6, P4.2.5): a helper whose hello carries a jobs build is a remote executor of the job dispatcher
+(``citar.jobs.remote``): its welcome's ``jobs`` come from the dispatcher (``Dispatcher.welcome_jobs``: the runs it still
+holds for the machine are kept, the others dropped, and the held results it wants sent again), and its job frames
+(each stamped when it arrived), its ``status`` frames and its acknowledgements go to its executor, which the
+dispatcher's thread reads; the hub never handles a job on its loop. A job frame that does not read, whose run does,
+fails that run as a retryable ``internal`` failure would.
+
 A connection lasts only as long as what let it in: revoking its token, disabling or deleting its machine, or suspending
 the machine's owner drops it at once (``WorkerHub.drop``, ``shutdown`` with the matching code), and the keep-alive
 checks every connection again at each ping, so a change made elsewhere drops it within a ping (P3.2.8). The newest
@@ -104,10 +111,10 @@ _HELLO_PARSER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name
 #: connection it had, since a request sent over a socket that has gone can never be answered.
 _SERIALS = itertools.count(1)
 
-#: The frame types this package's hub does not act on yet (P4.11): jobs from 4-09 and 4-10, updates from 4-13. A job
-#: frame names a run, and no run is offered to any helper before 4-10, so each would be dropped anyway (PROTOCOL.md:
-#: frames name only the helper's own runs).
-NOT_YET = ("job_accept", "job_reject", "job_progress", "job_result", "job_failed", "job_aborted", "update_status")
+#: The frame types this package's hub does not act on yet (P4.11): updates, from 4-13.
+NOT_YET = ("update_status",)
+#: The job frames a helper sends, which go to its remote executor (``citar.jobs.remote``).
+JOB_FRAMES = ("job_accept", "job_reject", "job_progress", "job_result", "job_failed", "job_aborted")
 #: How often a helper takes a power reading (PROTOCOL.md: "samples taken every 10 s"): a frame's samples cover this
 #: long each.
 POWER_SAMPLE_SECONDS = 10.0
@@ -232,7 +239,7 @@ def clamp(site: dict, ack: dict) -> tuple[dict, list]:
 @functools.lru_cache(maxsize=1)
 def server_block() -> dict:
     """``welcome.server``: this server's version, its engine build id (the extension's, as the helper's ``--version``
-    prints its own) and its jobs build (none before package 4-07)."""
+    prints its own) and its jobs build (the extension's: a helper of another one is offered no CPU job)."""
     from .. import __version__
     try:
         from .. import engine_api
@@ -241,7 +248,14 @@ def server_block() -> dict:
         build = ""
     if len(build) != 12:
         build = "0" * 12
-    return {"version": str(__version__)[:64] or "unknown", "build": build, "jobs_build": None}
+    try:
+        from .. import engine_api
+        jobs_build = str(engine_api.jobs_build() or "") or None
+    except Exception:
+        jobs_build = None
+    if jobs_build is not None and len(jobs_build) != 12:
+        jobs_build = None
+    return {"version": str(__version__)[:64] or "unknown", "build": build, "jobs_build": jobs_build}
 
 
 # ---------------------------------------------------------------------------- the rate limit before the lookup
@@ -376,6 +390,12 @@ class WorkerConnection:
         report = hello.get("report") if isinstance(hello.get("report"), dict) else {}
         self.gpu_cap_w: Optional[float] = (gpu_draw_cap(report.get("hardware"))
                                            if report.get("hardware_source") == "scan" else None)
+        #: The machine's logical CPUs as its report says (a deadline's share of a core per game), or None.
+        self.cpu_threads: Optional[int] = cpu_threads_of(report.get("hardware"))
+        #: The memory each run may use on its job host (its hello's, then each acknowledgement's): what the dispatcher
+        #: matches a job's ``mem_mb`` to; None while its helper has not said.
+        cpu = hello.get("cpu") or {}
+        self.memory_per_run_mb: Optional[int] = cpu.get("memory_per_run_mb")
 
     # -------------------------------------------------------------- state
     @property
@@ -485,6 +505,7 @@ class WorkerConnection:
         """The helper as the Servers page shows it."""
         eff = self.effective()
         limits = (self.ack or {}).get("limits")
+        cpu = self.hello.get("cpu") or {}
         return {
             "server_id": self.server_id, "hostname": self.hostname, "provider": self.provider,
             "protocol": HP.PROTOCOL, "version": self.helper_version,
@@ -492,6 +513,8 @@ class WorkerConnection:
             "key_fingerprint": self.key_fingerprint(), "models": self.models,
             "slots": self.llm_slots, "in_flight": self.in_flight,
             "effective": eff, "capped": list((self.ack or {}).get("capped") or []), "limits": limits,
+            "cpu": {"lent": bool(cpu.get("enabled")), "verifiable": bool(cpu.get("verifiable")),
+                    "memory_per_run_mb": self.memory_per_run_mb, "ceiling": cpu.get("ceiling")},
             "quiet_until": self.quiet_until, "connected_at": self.connected_at, "last_seen": self.last_seen,
             "alive": self.alive, "uptime_seconds": round(self.clock.time() - self.connected_at),
         }
@@ -586,6 +609,44 @@ class WorkerConnection:
             item.error = WorkerError(message, refusal=refusal, retryable=retryable)
             item.event.set()
         self._settle_unacked()              # nobody waits for an acknowledgement that cannot come
+        executor = _executor(self.server_id)
+        if executor is not None:
+            executor.disconnected(self)     # its runs go on without it; nothing more is offered over it
+
+
+def _executor(server_id: str):
+    """The machine's remote executor (``citar.jobs.remote``), if its helper ever said it plays jobs."""
+    try:
+        from ..jobs import remote
+        return remote.registry().find(server_id)
+    except Exception:
+        return None
+
+
+def cpu_threads_of(scan) -> Optional[int]:
+    """A hardware report's logical CPUs (``cpu.threads``), or None."""
+    cpu = scan.get("cpu") if isinstance(scan, dict) else None
+    threads = cpu.get("threads") if isinstance(cpu, dict) else None
+    return threads if isinstance(threads, int) and not isinstance(threads, bool) and threads > 0 else None
+
+
+def welcome_jobs(server_id: str, server_name: str, hello: dict) -> tuple:
+    """The welcome's ``jobs`` for ``hello`` (P4.2.2): from the job dispatcher, which holds the machine's runs; with no
+    dispatcher (or a helper that plays no jobs) nothing is kept and no held result wanted. Off the event loop: it takes
+    the dispatcher's lock."""
+    running, results = list(hello.get("running") or []), list(hello.get("results") or [])
+    if (hello.get("helper") or {}).get("jobs_build") is None:
+        return [], running, []
+    from ..jobs import dispatcher as D, remote
+    remote.registry().get(server_id, server_name)
+    d = D.current()
+    if d is None:
+        return [], running, []
+    try:
+        return d.welcome_jobs(server_id, running, results)
+    except Exception:
+        log.exception("could not ask the job dispatcher about %s's runs", server_id)
+        return [], running, []
 
 
 def fingerprint(public_key: str) -> str:
@@ -1038,14 +1099,16 @@ def hub() -> WorkerHub:
 
 def _bad_frame_id(raw: str) -> tuple:
     """The type and the request id of a frame that failed its checks, when they can be read (PROTOCOL.md: a bad
-    ``done``, ``error`` or ``cancelled`` whose ``id`` reads fails its request)."""
+    ``done``, ``error`` or ``cancelled`` whose ``id`` reads fails its request); for a job frame, its ``run``'s (a bad
+    job frame whose run reads fails that run)."""
     try:
         data, t = HP.envelope(raw)
     except HP.ProtocolError:
         return "?", None
-    rid = data.get("id")
+    key, ty = ("run", HP.RUN) if t in JOB_FRAMES else ("id", HP.ID)
+    rid = data.get(key)
     try:
-        rid = HP.ID.read(rid, ("id",)) if isinstance(rid, str) else None
+        rid = ty.read(rid, (key,)) if isinstance(rid, str) else None
     except HP.ProtocolError:
         rid = None
     return t[:64], rid
@@ -1180,9 +1243,13 @@ async def serve(websocket) -> None:
         # now, right after the welcome
         if connection.push_settings(await asyncio.to_thread(site_settings, found.server_id))[1]:
             _helper_changed(found.server_id)
-        # no run is offered to a helper before package 4-10, so none it still plays is kept, and no held result wanted
+        # the runs it still plays that the dispatcher holds for it are kept, and the held results it wants sent again
+        keep, drop, resend = await asyncio.to_thread(welcome_jobs, found.server_id, found.server_name, hello)
+        executor = _executor(found.server_id) if (hello.get("helper") or {}).get("jobs_build") else None
+        if executor is not None:
+            executor.connected(connection)
         welcome = HP.welcome(found.server_id, found.server_name[:120], settings, max(5, min(300, int(the_hub.ping_s))),
-                             await asyncio.to_thread(server_block), None, [], list(hello.get("running") or []), [])
+                             await asyncio.to_thread(server_block), None, keep, drop, resend)
         # what was sent to it since it was registered (a request waiting for the machine) follows the welcome
         await connection.welcome(welcome)
         await asyncio.to_thread(record_hello, found.server_id, hello)
@@ -1221,6 +1288,12 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
             connection.resolve(rid, error=WorkerError(f"The helper's answer did not read ({exc.code} at "
                                                       f"{exc.path or 'the frame'}).", refusal="endpoint",
                                                       retryable=False))
+        elif t in JOB_FRAMES and rid:
+            # its run fails as a retryable internal failure would: the job is queued again (PROTOCOL.md)
+            executor = _executor(connection.server_id)
+            if executor is not None and executor.conn is connection:
+                executor.frame({"t": "job_failed", "run": rid, "code": "internal", "retryable": True,
+                                "message": f"its helper's {t} did not read ({exc.code} at {exc.path or 'the frame'})"})
         return
     if isinstance(data, HP.Ignored):
         connection.log_once(f"ignored:{data.t[:64]}", logging.DEBUG, "ignored a %s frame from the helper of %s",
@@ -1238,10 +1311,25 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
         # slot; one for a request still awaited (no cancel was sent: a helper misbehaving) fails it
         connection.resolve(data["id"], error=WorkerError("The helper stopped the request.", refusal="cancelled",
                                                          retryable=False))
+    elif t in JOB_FRAMES:
+        # to its executor, stamped when it came; the dispatcher's thread reads it (never handled on the loop)
+        executor = _executor(sid)
+        if executor is None or executor.conn is not connection:
+            connection.log_once(f"job:{t}", logging.WARNING, "the helper of %s sent %s, but it plays no job here: "
+                                "dropped", sid, t)
+            return
+        from ..jobs.host import RX
+        data[RX] = time.monotonic()
+        executor.frame(data)
     elif t == "settings_ack":
         # held to the settings frame it answers, not to newer ones it has not seen yet: an acknowledgement that
         # crossed a push is not an overclaim
+        if data.get("memory_per_run_mb") is not None:
+            connection.memory_per_run_mb = data["memory_per_run_mb"]
         over = connection.acknowledge(data)
+        executor = _executor(sid)
+        if executor is not None and executor.conn is connection:
+            executor.acknowledged()
         if over:
             connection.log_once("overclaim", logging.WARNING, "the helper of %s acknowledged more than the site "
                                 "asked (%s): held to the site's settings", sid, ", ".join(over))
@@ -1254,6 +1342,7 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
     elif t == "hardware":
         if data["source"] == "scan":
             connection.gpu_cap_w = gpu_draw_cap(data["scan"])
+        connection.cpu_threads = cpu_threads_of(data["scan"]) or connection.cpu_threads
         await asyncio.to_thread(record_report, sid, hardware=data["scan"])
     elif t == "power":
         now = connection.clock.time()
@@ -1272,6 +1361,9 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
         connection.status_frame = data
         connection.quiet_until = data["quiet_until"]
         _helper_changed(sid)
+        executor = _executor(sid)
+        if executor is not None and executor.conn is connection:
+            executor.status(data)
     elif t == "ping":
         await connection.send(HP.pong())
     elif t == "pong":
@@ -1418,7 +1510,8 @@ def record_hello(server_id: str, hello: dict) -> None:
              "hostname": machine.get("hostname"), "name": machine.get("name"), "os": machine.get("os"),
              "arch": machine.get("arch"), "key_fingerprint": fingerprint(str(machine.get("public_key") or "")),
              "llm": {k: llm.get(k) for k in ("enabled", "provider", "slots", "stream")},
-             "cpu": {k: cpu.get(k) for k in ("enabled", "ceiling", "limits", "verifiable", "bots", "ruleset")},
+             "cpu": {k: cpu.get(k) for k in ("enabled", "ceiling", "limits", "verifiable", "bots", "ruleset",
+                                             "memory_per_run_mb")},
              "updates": hello.get("updates"), "connected_at": datetime.now(timezone.utc).isoformat()}
     try:
         with db.session() as s:
@@ -1426,7 +1519,8 @@ def record_hello(server_id: str, hello: dict) -> None:
             if row is None:
                 return
             old = dict(row.helper) if isinstance(row.helper, dict) else {}
-            row.helper = {**block, **{k: old[k] for k in ("effective", "capped", "limits") if k in old}}
+            row.helper = {**block, **{k: old[k] for k in ("effective", "capped", "limits", "memory_per_run_mb")
+                                      if k in old}}
     except Exception:
         log.exception("could not keep the hello of %s's helper", server_id)
     report = hello.get("report") or {}
@@ -1445,7 +1539,8 @@ def record_ack(server_id: str, ack: dict) -> None:
             if row is None:
                 return
             block = dict(row.helper) if isinstance(row.helper, dict) else {}
-            block.update(effective=ack.get("effective"), capped=ack.get("capped"), limits=ack.get("limits"))
+            block.update(effective=ack.get("effective"), capped=ack.get("capped"), limits=ack.get("limits"),
+                         memory_per_run_mb=ack.get("memory_per_run_mb"))
             row.helper = block
     except Exception:
         log.exception("could not keep the settings acknowledgement of %s's helper", server_id)

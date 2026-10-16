@@ -12,8 +12,11 @@
 - ``HubPlayer``: plays a conformance transcript from the hub's side: the fake helper sends the transcript's ``h2s``
   frames (realized by ``tests/helper_fixtures``), checks every frame the hub sends against its ``s2h`` patterns, runs
   the hub's ``act`` words through the hub's own code (the routes' functions, the scheduler, ``WorkerHub``'s test
-  hooks) and checks its ``state`` words on the hub, its scheduler and the database. A word it cannot do yet (a later
-  package's) is refused, not skipped (PROTOCOL.md, "Actions").
+  hooks, the job dispatcher's) and checks its ``state`` words on the hub, its scheduler, its job dispatcher and the
+  database. A word it cannot do yet (a later package's) is refused, not skipped (PROTOCOL.md, "Actions"). A job
+  transcript (4-10) gets a job dispatcher of its own, with no local executor, so the machine's helper is its only
+  executor; its experiment is the golden ``duel-a``'s game (``crates/citar-jobs/golden/jobs.json``), so the offers
+  carry exactly the golden spec.
 
 Replaces protocol 1's test helpers (``tests/test_worker.py``'s connections and the real Python worker in threads).
 """
@@ -552,10 +555,16 @@ END_TURN = {"name": "end_turn", "description": "End your turn.",
             "input_schema": {"type": "object", "properties": {"note": {"type": "string"}}}}
 #: The hub's acts and state words this package plays (the others are later packages').
 ACTS_PLAYED = ("submit_request", "force_request", "cancel_request", "drop_connection", "set_settings", "rescan",
-               "reset_key", "revoke_token", "disable_machine", "second_connection")
+               "reset_key", "revoke_token", "disable_machine", "second_connection", "queue_job", "force_offer",
+               "lab_stop", "abort_run", "expire_run", "benchmark_start", "benchmark_end")
 STATES_PLAYED = ("slot_free", "draining", "flags", "step", "requeued", "request", "llm_slots", "cpu_threads",
                  "cpu_percent", "memory_mb", "work", "cpu_enabled", "quiet", "models", "loaded", "key", "audit",
-                 "token_lookups", "audit_rows", "rate_count", "last_report", "power_rows")
+                 "token_lookups", "audit_rows", "rate_count", "last_report", "power_rows", "run", "job",
+                 "result_lines", "backoff", "mem_mb_raised", "claim_failures", "events")
+#: The golden job a job transcript's experiment plays (its offers carry its spec).
+GOLDEN_JOB = "duel-a"
+#: The frames of the fake helper the hub hands to the machine's executor (which times them by the fake clock).
+JOB_SEEN = W.JOB_FRAMES + ("status", "settings_ack")
 #: A wait on the hub's fake clock longer than this, with the helper connected, moves the clock a keep-alive interval
 #: at a time (each answered ping is the hub's sign that it saw the clock move), rather than a second at a time: six
 #: hours in about ten seconds, not seven minutes.
@@ -603,6 +612,13 @@ class HubPlayer:
         hub = transcript.setup.get("hub") or {}
         self.answer_pings = hub.get("answer_pings", True)
         self.setup_hub = hub
+        self.golden = F.committed_golden()
+        #: The job dispatcher a job transcript plays against, its experiment's name, the job's first ``mem_mb`` and
+        #: the benchmark lease a ``benchmark_start`` takes.
+        self.dispatcher = None
+        self.exp_name = ""
+        self.mem0: Optional[int] = None
+        self.bench = None
         #: The machine's last report's time before the fake helper's ``hardware`` frame (``last_report``).
         self.report_before: Optional[str] = None
 
@@ -616,11 +632,12 @@ class HubPlayer:
         from citar.pool import scheduler as S
         hub_setup = self.setup_hub
         for k in hub_setup:
-            if k not in ("machine", "token", "rate", "clock", "ping_s", "answer_pings"):
+            if k not in ("machine", "token", "rate", "clock", "ping_s", "answer_pings", "local_executor",
+                         "verification", "jobs"):
                 raise Unsupported(f"setup.hub.{k} is a later package's")
+        if hub_setup.get("local_executor", False):
+            raise Unsupported("setup.hub.local_executor true: no transcript plays it")
         machine = hub_setup.get("machine") or {}
-        if "trust" in machine:
-            raise Unsupported("setup.hub.machine.trust is a later package's")
         site = machine.get("settings") or {"llm": {"enabled": False, "slots": 1, "allow_swaps": False},
                                            "cpu": {"enabled": False, "threads": 1, "cpu_percent": 10,
                                                    "memory_mb": 512, "work": ["lab_game"], "yield_to_llm": True}}
@@ -638,6 +655,8 @@ class HubPlayer:
                                                "allow_swaps": site["llm"]["allow_swaps"]},
                                        "cpu": dict(site["cpu"])},
                          config={"models": [{"key": "model-a"}]})
+            if machine.get("trust"):
+                row.trust_tier = machine["trust"]
             key = machine.get("key")
             if key == "registered":
                 row.public_key = values.get("key") or key_b64()
@@ -670,14 +689,75 @@ class HubPlayer:
             S.get()
         hub.ping_s = int(hub_setup.get("ping_s") or 20)
         hub.poke()
+        if self._plays_jobs():
+            self._prepare_jobs(owner_id=owner.id)
         self.lookups0 = hub.lookups
         self.audit0 = self._audit_count()
 
+    def _plays_jobs(self) -> bool:
+        return any(k in self.setup_hub for k in ("local_executor", "jobs")) or any(
+            st.action == "act" and F.act_word(st.body["do"]) in ("queue_job", "force_offer") for st in self.t.steps)
+
+    def _prepare_jobs(self, owner_id: str) -> None:
+        """A job dispatcher of the transcript's own (no local executor: the helper is the one executor), the lab's
+        folders and the jobs' tables empty, the hub's own jobs build bound for the hello, and the runs the setup says
+        the dispatcher already holds."""
+        from citar import db, engine_api, lab
+        from citar.db.models import CpuJob, CpuJobRun
+        from citar.jobs import dispatcher as D, remote
+        D.stop()
+        lab.resume()
+        lab._dirs()
+        for folder in (lab.QUEUE, lab.RESULTS, lab.DONE, lab.REFERENCE):
+            for f in folder.glob("*"):
+                f.unlink()
+        with db.session() as s:
+            s.query(CpuJobRun).delete()
+            s.query(CpuJob).delete()
+        remote.registry().clear()
+        remote.forget_owner_tiers()
+        clock = self.clock.monotonic if self.clock is not None else time.monotonic
+        self.dispatcher = D.start(D.Dispatcher(local=False, clock=clock))
+        self.bindings["jobs_build"] = engine_api.jobs_build()
+        self.owner_id = owner_id
+        job = self.golden("jobs", (GOLDEN_JOB,))
+        for held in self.setup_hub.get("jobs") or []:
+            run = F.realize(held["run"], self.bindings, self.t.values)
+            self._held_run(run, held["state"], job)
+
+    def _held_run(self, run: str, state: str, job: dict) -> None:
+        """A run the dispatcher holds from before (``setup.hub.jobs``): the golden job's, on this machine."""
+        from datetime import datetime, timezone
+        from citar import db
+        from citar.db.models import CpuJob, CpuJobRun, new_id
+        now = datetime.now(timezone.utc)
+        with db.session() as s:
+            job_id = new_id("cj_")
+            done = state == "done"
+            s.add(CpuJob(id=job_id, kind=job["kind"], ref=f"lab:held-{run}:0", item_kind="lab_experiment",
+                         item_ref=f"held-{run}"[:120], owner_id=self.owner_id, spec=job["spec"],
+                         spec_hash=job["spec_hash"], jobs_build=self.bindings["jobs_build"], priority=0, mem_mb=2,
+                         state="accepted" if done else "running", accepted_run=run if done else None,
+                         result_hash=job["result_hash"] if done else None, attempts=0, created_at=now))
+            s.add(CpuJobRun(id=run, job_id=job_id, machine_id=self.sid, executor="remote", role="primary",
+                            state=state, offered_at=now, started_at=now, ended_at=now if done else None,
+                            result_hash=job["result_hash"] if done else None,
+                            chain_head=job["chain_head"] if done else None, rounds=job["rounds"] if done else None))
+
     def close(self) -> None:
-        """End what the transcript left: the connections, the requests' threads."""
+        """End what the transcript left: the connections, the requests' threads, its job dispatcher."""
         for h in [self.helper, *self.others]:
             if h is not None:
                 h.close()
+        if self.bench is not None:
+            self.bench.release()
+            self.bench = None
+        if self.dispatcher is not None:
+            from citar import lab
+            from citar.jobs import dispatcher as D
+            D.stop()
+            lab.resume()
+            self.dispatcher = None
         for conv in self.convs:
             try:
                 conv.close()
@@ -692,6 +772,8 @@ class HubPlayer:
     def _advance(self, seconds: float) -> None:
         if self.clock is not None:
             self.clock.advance(seconds)
+            if self.dispatcher is not None:
+                self.dispatcher.poke()      # it times its runs and its backoff by the same clock
 
     def _wait_for(self, fn, within: Optional[float]):
         """``fn(timeout)`` until it returns something (not None), in real time, moving a fake clock forward in 1 s
@@ -761,7 +843,7 @@ class HubPlayer:
     def h2s(self, step: F.Step) -> None:
         pattern = step.body
         example = self.examples.get((HP.HELPER, pattern["t"]))
-        frame = F.realize(pattern, self.bindings, self.t.values, example=example)
+        frame = F.realize(pattern, self.bindings, self.t.values, self.golden, example=example)
         if pattern["t"] == "hardware":
             # what the hello's report left, once it is kept (off the hub's loop), for ``last_report``
             until(self._hardware_at, 2.0)
@@ -771,7 +853,19 @@ class HubPlayer:
         text = json.dumps(frame, separators=(",", ":"), ensure_ascii=False)
         if not step.invalid:
             HP.parse_helper_frame(text)     # a realized frame passes its checks (the fixtures' rule)
+        executor = self._executor() if pattern["t"] in JOB_SEEN else None
+        seen = executor.received if executor is not None else 0
         self._conn().send_text(text)
+        if executor is not None and self.clock is not None:
+            # the dispatcher times it by the fake clock as it arrives: the hub hands it over before the clock moves
+            until(lambda: executor.received > seen, 2.0, 0.002)
+
+    def _executor(self):
+        """The machine's remote executor, once its helper said it plays jobs."""
+        if self.dispatcher is None:
+            return None
+        from citar.jobs import remote
+        return remote.registry().find(self.sid)
 
     def _next_frame(self, wanted: str, timeout: float) -> Optional[dict]:
         """The hub's next frame for a step expecting ``wanted``: a kept one first; background frames of another type
@@ -797,9 +891,11 @@ class HubPlayer:
         wanted = pattern["t"]
         frame = self._wait_for(lambda timeout: self._next_frame(wanted, timeout), step.within_s)
         try:
-            F.matches(pattern, frame, self.bindings)
+            F.matches(pattern, frame, self.bindings, self.golden)
         except F.Mismatch as exc:
             raise AssertionError(f"the hub sent {json.dumps(frame)[:600]}, which does not match: {exc}") from None
+        if wanted == "job_offer" and self.mem0 is None:
+            self.mem0 = frame.get("mem_mb")
 
     def closed(self, body: dict, within: Optional[float]) -> None:
         conn = self._conn()
@@ -957,6 +1053,66 @@ class HubPlayer:
         th.start()
         self.threads.append(th)
         self.outcomes[rid] = out
+
+    def _next_offer(self) -> dict:
+        """The next ``job_offer`` step's frame, realized with what is bound so far (not binding its job and run, which
+        the hub's own frame binds)."""
+        for st in self.t.steps[self.index + 1:]:
+            if st.action == "s2h" and st.body.get("t") == "job_offer":
+                example = self.examples.get((HP.SERVER, "job_offer"))
+                return F.realize(st.body, dict(self.bindings), self.t.values, self.golden, example=example)
+        raise AssertionError("no job_offer step follows the act")
+
+    def act_queue_job(self, _arg) -> None:
+        """The dispatcher gets a job: an experiment of one game, the golden job's (written whole, as ``lab.submit``
+        writes one, its item the machine's owner's), offered as the dispatcher offers."""
+        from datetime import datetime
+        from citar import db, items, lab
+        from citar.db.models import User
+        spec = self.golden("jobs", (GOLDEN_JOB, "spec"))
+        name = spec["exp"]
+        exp = {"name": name, "kind": "lab", "priority": 0, "games": 1, "seed": spec["seed"], "size": spec["size"],
+               "maps": [spec["map_type"]], "speed": spec["speed"], "turns": spec["turns"],
+               "difficulty": spec["difficulty"], "barbarians": spec["barbarians"],
+               "barbarian_difficulty": spec["barbarian_difficulty"], "nation": spec["nation"],
+               "city_states": spec["city_states"], "ai_base_values": spec["ai_base_values"], "rotate": False,
+               "seats": [dict(seat) for seat in spec["seats"]],
+               "submitted": datetime.now().isoformat(timespec="seconds")}
+        lab._dirs()
+        path = lab.QUEUE / f"{name}.json"
+        with db.session() as s:
+            items.register(s, "lab_experiment", name, s.get(User, self.owner_id), name, path=path)
+        path.write_text(json.dumps(exp), encoding="utf-8")
+        self.exp_name = name
+        self.dispatcher.poke()
+
+    def act_force_offer(self, _arg) -> None:
+        offer = self._next_offer()
+        self.dispatcher.force_offer(self.sid, kind=offer["kind"], spec=offer["spec"], spec_hash=offer["spec_hash"],
+                                    jobs_build=offer["jobs_build"], mem_mb=int(offer["mem_mb"]),
+                                    owner=self.owner_id)
+
+    def act_lab_stop(self, _arg) -> None:
+        from citar import lab
+        lab.pause(by="a transcript")
+
+    def act_abort_run(self, _arg) -> None:
+        if not self.dispatcher.abort_run(self.bindings["run"], "the transcript's abort"):
+            raise AssertionError(f"run {self.bindings['run']} is not in flight to abort")
+        self.dispatcher.poke()
+
+    def act_expire_run(self, _arg) -> None:
+        if not self.dispatcher.expire(self.bindings["run"]):
+            raise AssertionError(f"run {self.bindings['run']} is not in flight to expire")
+
+    def act_benchmark_start(self, _arg) -> None:
+        from citar.pool import scheduler as S
+        self.bench = S.get().lease(self.sid, "dry-run", kind="benchmark", label=f"transcript {self.t.name}")
+
+    def act_benchmark_end(self, _arg) -> None:
+        if self.bench is not None:
+            self.bench.release()
+            self.bench = None
 
     def act_cancel_request(self, _arg) -> None:
         self.last_conv.close()
@@ -1178,6 +1334,55 @@ class HubPlayer:
             n = self._power_rows()
             if n != want:
                 raise AssertionError(f"{n} power rows for the machine, not {want}")
+        elif word in ("run", "job", "result_lines", "mem_mb_raised", "events"):
+            self._job_state(word, want, bound)
+        elif word == "backoff":
+            have = self.dispatcher.backoff(self.sid) if self.dispatcher is not None else []
+            if want not in have:
+                raise AssertionError(f"the dispatcher backs the machine off for {have}, not {want}")
+        elif word == "claim_failures":
+            from citar import db
+            from citar.db.models import Server
+            with db.session() as s:
+                n = int((s.get(Server, self.sid).trust or {}).get("claim_failures") or 0)
+            if n != want:
+                raise AssertionError(f"{n} claim failures on the machine, not {want}")
+
+    def _job_state(self, word: str, want, bound) -> None:
+        """The job dispatcher's state words: a run's state, the job's, its results' lines, whether its ``mem_mb``
+        rose, and the ledger's events of a run."""
+        from citar import db, lab
+        from citar.db.models import ComputeEvent, CpuJob, CpuJobRun
+        with db.session() as s:
+            if word == "run":
+                rid = bound(want["id"])
+                row = s.get(CpuJobRun, rid)
+                have = row.state if row is not None else None
+                if have != want["state"]:
+                    raise AssertionError(f"run {rid} is {have}, not {want['state']}")
+                return
+            if word == "events":
+                from citar import ledger
+                ledger.get().flush(5.0)
+                n = s.query(ComputeEvent).filter(ComputeEvent.request_id == self.bindings.get("run")).count()
+                if n != want:
+                    raise AssertionError(f"{n} events for run {self.bindings.get('run')}, not {want}")
+                return
+            job = s.get(CpuJob, self.bindings.get("job")) if self.bindings.get("job") else None
+            if job is None:
+                raise AssertionError("no job is bound yet")
+            if word == "job":
+                if job.state != want:
+                    raise AssertionError(f"job {job.id} is {job.state}, not {want}")
+            elif word == "mem_mb_raised":
+                raised = self.mem0 is not None and int(job.mem_mb or 0) > int(self.mem0)
+                if raised != bool(want):
+                    raise AssertionError(f"job {job.id}'s mem_mb is {job.mem_mb} (offered {self.mem0}): raised is "
+                                         f"{raised}, not {want}")
+            elif word == "result_lines":
+                lines = [ln for ln in lab.load_results(job.item_ref) if ln.get("i") == 0]
+                if len(lines) != want:
+                    raise AssertionError(f"{len(lines)} lines in {job.item_ref}'s results, not {want}")
 
 
 def hub_transcripts(package: str = "4-05") -> list:

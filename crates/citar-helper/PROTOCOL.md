@@ -393,6 +393,10 @@ its standard input and output (`citar-jobs`).
   connected (the clock restarts at each connection and at the server's start), outside a pause the
   helper reported, is expired and its job queued again; a late `job_result` for it is acknowledged
   and dropped: not counted, not credited.
+- **An expired run is aborted.** The server sends `job_abort` for each run it expires (an offer
+  unanswered, a silent run, a run past its deadline's backstop) to a connected helper, so a helper
+  that still holds it lets it go; one whose result crossed the abort sends it, and it is acknowledged
+  and dropped.
 - **Re-offers back off** per machine and reject reason: 2 s doubling to 10 minutes. `busy` and
   `quiet` clear on a `status` that shows room; `build`, `kind`, `disabled`, `limits` and
   `unverifiable` on the next `settings_ack` or `hello`.

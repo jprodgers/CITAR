@@ -388,12 +388,14 @@ class Ledger:
                            "machine": machine, "request_id": request_id,
                            "window": float(window) if window and window > 0 else None}))
 
-    def events(self, rows: list) -> None:
+    def events(self, rows: list, settled: Optional[list] = None) -> None:
         """Events made whole by their writer: the job dispatcher's, one ``cpu`` event per finished run of a CPU job
         (P4.5.7), each a ``compute_events`` row's columns. Written by the writer thread like every other event (one
-        inserting thread: the ids commit in order, which the rollups' watermark relies on)."""
+        inserting thread: the ids commit in order, which the rollups' watermark relies on). ``settled`` is the budget
+        holds the runs settled (``[(reservation, credits)]``, already settled in memory: ``Keeper.settle``), whose
+        entries are written in the same transaction as the events, as a model step's are (P4.5.7)."""
         if rows:
-            self._put(("rows", [dict(r) for r in rows], None))
+            self._put(("rows", [dict(r) for r in rows], None, list(settled or [])))
 
     def _put(self, item) -> None:
         with self._lock:
@@ -543,6 +545,7 @@ class Ledger:
         from sqlalchemy.exc import OperationalError
         keeper = budgets.keeper()
         holds = [getattr(item[1], "reservation", None) for item in batch if item[0] == "step"]
+        holds += [r for item in batch if item[0] == "rows" and len(item) > 3 for r, _credits in item[3]]
         keeper.writing()
         try:
             if not db.configured():
@@ -604,6 +607,8 @@ class Ledger:
                     settled.append((r, priced["credits"]))
             elif item[0] == "rows":
                 rows.extend(dict(r) for r in item[1])        # made whole by their writer (``events``)
+                if len(item) > 3:
+                    settled.extend(item[3])
             else:
                 row = self._cpu_row(session, item[1], classes, host)
                 if row is not None:

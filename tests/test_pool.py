@@ -349,14 +349,20 @@ class Admission(PoolFixtures):
             self.assertFalse(decision.allowed)
 
     def test_the_general_pool_example(self):
-        """'One user might add a server for the general pool available at all hours.'"""
+        """'One user might add a server for the general pool available at all hours.' A grant with no purposes lends
+        every kind of model work, and never CPU work (lab runs: design/phase4-helper.md P4.5.5)."""
         with db.session() as s:
             self._grant(s, concurrency=2)
         with db.session() as s:
             guest, server = s.get(User, self.guest_id), s.get(Server, self.server_id)
             for purpose in admission.PURPOSES:
-                self.assertTrue(admission.check(s, guest, server, purpose, in_flight=0).allowed,
-                                f"{purpose} should be allowed in the general pool")
+                allowed = admission.check(s, guest, server, purpose, in_flight=0)
+                if purpose in admission.CPU_PURPOSES:
+                    self.assertFalse(allowed.allowed, f"{purpose} needs a grant that lists it")
+                    self.assertEqual(allowed.code, "purpose")
+                    self.assertIn("lists it", allowed.reason)
+                else:
+                    self.assertTrue(allowed.allowed, f"{purpose} should be allowed in the general pool")
             # Two slots granted, so one in flight is still fine.
             self.assertTrue(admission.check(s, guest, server, in_flight=1).allowed)
             self.assertFalse(admission.check(s, guest, server, in_flight=2).allowed)

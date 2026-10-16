@@ -29,8 +29,11 @@ when the dispatcher read them, which can be a tick later: its start, its end and
    its experiment ``refused``, with the reason. A member's experiment with no owned item yet waits up to
    ``OWNER_SECONDS`` for it (``citar lab submit`` and the A/B route write the queue's file before their item is
    committed), so its games are never charged to nobody.
-3. **Executors** (``citar.jobs.local``'s, and the helpers' from 4-10) refresh their settings and hand over their
-   frames: accepts, progress, results, failures, aborts. A host that died fails its runs ``memory`` or ``host``.
+3. **Executors** (``citar.jobs.local``'s, and the connected helpers', ``citar.jobs.remote``) refresh their settings
+   and hand over their frames: accepts, progress, results, failures, aborts. A host that died fails its runs
+   ``memory`` or ``host``. A helper that reconnected says which of its runs it still plays (``welcome_jobs``, asked by
+   the hub for the welcome's ``jobs``): those the dispatcher holds go on, their silence counted from then; those it
+   holds that the helper no longer plays fail ``host``.
 4. **Expiry** (``_expire``): an offer unanswered after ``OFFER_TTL_SECONDS``, a run past its deadline plus
    ``EXPIRY_GRACE_SECONDS`` (paused time extending it, up to twice), and a run silent for ``SILENT_SECONDS`` while its
    executor is there and not paused, are ``expired`` and their jobs queued again; an expiry its pause caused counts
@@ -60,6 +63,15 @@ run writes one ``cpu`` event through the ledger's writer: the executor's machine
 the provider, the job's owner as the consumer (none for the server's own collection, ranking and reference runs), its
 CPU the executor's report bounded by what the server observed (``observed x 1.05 + 1`` seconds: a game is one
 thread). The usage ledger gets the game's activity and the time its machine held it, as the runner wrote them.
+
+**Helpers** (P4.5.6, P4.2.5): a remote run's result is acknowledged (``job_result_ack``) once it is committed; a
+second result for a settled run is acknowledged again when its hashes are the same and recorded as a claim failure on
+the machine when they differ; a late result (its run expired, failed or aborted) is acknowledged and dropped, neither
+counted nor credited; a late accept (its offer expired) is answered ``job_abort``. Re-offers to a helper back off per
+reject reason, 2 s doubling to 10 minutes: ``busy`` and ``quiet`` until a ``status`` shows room, the reasons its
+settings decide until its next ``settings_ack`` or hello. Its run's event is given by the machine's owner and, until
+replicas exist (4-11), ``unverified``, its CPU also bounded by 1.5 times the job's reference cost; a run under a grant
+with a budget settles its credits into that budget.
 
 **Failures** (``_failed``): a retryable one queues the job again, at most ``MAX_ATTEMPTS`` times (then ``failed``,
 shown on the Lab page, and queued again at the next start or by an administrator's retry); a ``memory`` one (the
@@ -279,12 +291,18 @@ class Dispatcher:
     result committed and its line not yet appended)."""
 
     def __init__(self, executors: Optional[list] = None, *, clock: Callable[[], float] = time.monotonic,
-                 local: bool = True):
+                 local: bool = True, remotes=None):
         self.clock = clock
         if executors is None:
+            from citar.jobs import remote
             from citar.jobs.local import LocalExecutor
             executors = [LocalExecutor()] if local else []
-        self.executors = list(executors)
+            if remotes is None:
+                remotes = remote.registry()
+        self._own = list(executors)
+        #: The helpers' executors (``citar.jobs.remote.Remotes``), which come and go with their connections; None for a
+        #: dispatcher of fixed executors (tests).
+        self.remotes = remotes
         self.costs = store.Costs()
         self.jobs: dict = {}            # job id -> Job (queued or running)
         self.runs: dict = {}            # run id -> Run
@@ -308,14 +326,25 @@ class Dispatcher:
         self._prune: list = []
         self._lines: dict = {}          # results path -> set of (game, run) in the file
         self._pending: list = []        # (exp, line, game, run): accepted results whose line the file refused
-        self._rejects: dict = {}        # executor -> (offered nothing until, the wait, why)
+        self._rejects: dict = {}        # executor -> (offered nothing until, the wait, why); a helper's: per reason
+        self._held_remote: dict = {}    # job -> a helper's run in flight when the server started (``recover``)
+        self._forced = 0
         self._requests: deque = deque()     # administrators' retries, served at the next tick
         self.jobs_build = engine_api.jobs_build()
         self.started_at = utcnow()
-        for e in self.executors:
+        for e in self._own:
             bind = getattr(e, "bind", None)
             if bind is not None:
                 bind(self.poke)
+        if self.remotes is not None:
+            self.remotes.bind(self.poke, self.clock)
+
+    @property
+    def executors(self) -> list:
+        """Every executor: the fixed ones (the local executor) and the helpers'."""
+        if self.remotes is None:
+            return self._own
+        return self._own + self.remotes.all()
 
     # -------------------------------------------------------------- the thread
     def start(self) -> "Dispatcher":
@@ -420,8 +449,12 @@ class Dispatcher:
             added = self.costs.load(s)
             if added:
                 log.info("the cost table: %d committed cell(s) added", added)
-            for run in s.scalars(select(CpuJobRun).where(CpuJobRun.state.in_(("offered", "running")),
-                                                         CpuJobRun.executor == "local")):
+            for run in s.scalars(select(CpuJobRun).where(CpuJobRun.state.in_(("offered", "running")))):
+                if run.executor != "local" and self.remotes is not None:
+                    # a helper's run goes on without the server: kept until its helper reconnects (its hello says
+                    # whether it still plays it) or its deadline passes
+                    self._held_remote[run.job_id] = self._held_run(run)
+                    continue
                 run.state, run.ended_at = "aborted", utcnow()
                 run.error = {"code": "restart", "message": "the server stopped while it played this run"}
                 job = s.get(CpuJob, run.job_id)
@@ -437,6 +470,18 @@ class Dispatcher:
         if again:
             lab.log(f"{again} game(s) that had failed {MAX_ATTEMPTS} times are queued again (the server started)")
         self._sync_queue(self.clock(), force=True)
+        if self._held_remote:
+            # a helper's run whose experiment left the queue while the server was down
+            with db.session() as s:
+                for job_id, run in self._held_remote.items():
+                    row = s.get(CpuJobRun, run.id)
+                    if row is not None:
+                        row.state, row.ended_at = "aborted", utcnow()
+                        row.error = {"code": "restart", "message": "its experiment left the queue"}
+                    job = s.get(CpuJob, job_id)
+                    if job is not None and job.state == "running":
+                        job.state = "cancelled"
+            self._held_remote = {}
         with db.session() as s:
             # an experiment deleted from the queue while the server was down: its waiting and failed jobs go with it
             gone = s.execute(update(CpuJob).where(CpuJob.state.in_(("queued", "failed")),
@@ -447,6 +492,30 @@ class Dispatcher:
             lab.log(f"{gone} waiting game(s) of experiments no longer queued were cancelled")
         self._repair_events()
         self.recovered = True
+
+    def _held_run(self, row) -> "Run":
+        """A helper's run in flight when the server started, as the view holds it: its times on the dispatcher's clock
+        (from the wall clock's), its silence counted from now (P4.2.5: the clock restarts at the server's start)."""
+        now, wall = self.clock(), time.time()
+
+        def mono(t):
+            return None if t is None else now - max(0.0, wall - _utc_ts(t))
+        offered = mono(row.offered_at) or now
+        deadline = DEADLINE_MIN
+        if row.deadline_at is not None and row.offered_at is not None:
+            deadline = max(1.0, _utc_ts(row.deadline_at) - _utc_ts(row.offered_at))
+        e = self.remotes.get(row.machine_id)
+        started = mono(row.started_at)
+        run = Run(id=row.id, job=row.job_id, executor=e, machine=row.machine_id, role=row.role or "primary",
+                  state="running" if row.state == "running" else "offered", offered_at=offered, deadline_s=deadline,
+                  offered_wall=_utc_ts(row.offered_at) if row.offered_at else wall, started_at=started,
+                  started_wall=_utc_ts(row.started_at) if row.started_at else None,
+                  last_progress=now if started is not None else None, cpu_s=float(row.cpu_s or 0.0),
+                  wall_s=float(row.wall_s or 0.0), paused_s=float(row.paused_s or 0.0),
+                  peak_mb=float(row.peak_mb or 0.0))
+        e.in_flight.add(run.id)
+        e._remember(run.id)
+        return run
 
     def _repair_events(self) -> None:
         """Write the ``cpu`` event of a recent finished run whose event never reached the ledger (the server ended
@@ -544,6 +613,12 @@ class Dispatcher:
                 exp.failed.add(i)
             elif job.state == "queued" and job.id not in self.jobs:
                 self.jobs[job.id] = self._view(job, exp)
+            elif job.state == "running" and job.id in self._held_remote and job.id not in self.jobs:
+                run = self._held_remote.pop(job.id)
+                view = self._view(job, exp)
+                view.run = run.id
+                self.jobs[job.id] = view
+                self.runs[run.id] = run
         self._reconcile(s, exp)
         for j in [j for j in self.jobs.values() if j.exp == exp.name and j.state == "queued" and j.i in exp.settled]:
             # a game with a line from before jobs (or a database started afresh) is played no more
@@ -927,13 +1002,24 @@ class Dispatcher:
 
     def _frame(self, s, e, f: dict, now: float, after: list) -> None:
         t, run_id = f.get("t"), f.get("run")
+        if t == "_reconnect":
+            self._reconnected(s, e, f, now)
+            return
         run = self.runs.get(run_id)
         if run is None or run.executor is not e:
-            if t == "job_result":
+            if e.kind != "local" and t == "job_result":
+                self._late_result(s, e, f, after)
+            elif e.kind != "local" and t == "job_accept" and getattr(e, "knows", lambda r: False)(run_id):
+                # its offer expired: the helper is told to let the run go (P4.2.5)
+                e.abort(run_id, "its offer expired before it was accepted")
+            elif t == "job_result":
                 log.info("a late result for run %s on %s, dropped", run_id, e.id)
+            else:
+                log.debug("a %s for run %s, which %s does not play now: dropped", t, run_id, e.id)
             return
-        # when the frame arrived, in the dispatcher's clock and as a wall time: it may be read a tick later
-        at = H.arrived(f, now)
+        # when the frame arrived, in the dispatcher's clock and as a wall time: it may be read a tick later (a helper's
+        # frame carries its arrival on the dispatcher's own clock)
+        at = f["_at"] if isinstance(f.get("_at"), (int, float)) else H.arrived(f, now)
         wall = time.time() - (now - at)
         if t == "job_accept":
             run.state, run.started_at, run.started_wall, run.last_progress = "running", at, wall, at
@@ -956,10 +1042,74 @@ class Dispatcher:
         elif t == "job_failed":
             self._failed(s, e, run, f, at, wall)
         elif t == "job_reject":
-            self._rejected(s, e, run, f, wall)
+            self._rejected(s, e, run, f, wall, at)
         elif t == "job_aborted":
             self._end(s, run, "aborted", {"code": "aborted", "message": "aborted"}, wall)
             self._requeue(s, run, attempt=False)
+
+    def _reconnected(self, s, e, f: dict, now: float) -> None:
+        """A helper reconnected: the runs its hello still plays and the dispatcher holds go on, their silence counted
+        from now (a run whose accept was lost with the connection is running); those it holds that the helper no longer
+        plays (nor holds a result of) fail ``host``, retryable (the helper restarted, or its job host died while it
+        was away)."""
+        at = f["_at"] if isinstance(f.get("_at"), (int, float)) else H.arrived(f, now)
+        wall = time.time() - (now - at)
+        for rid in f.get("keep") or []:
+            run = self.runs.get(rid)
+            if run is None or run.executor is not e:
+                continue
+            if run.state == "offered":
+                run.state, run.started_at, run.started_wall = "running", at, wall
+                row = self._run_row(s, run)
+                row.state, row.started_at = "running", _utc(wall)
+            run.last_progress = at
+        for rid in f.get("lost") or []:
+            run = self.runs.get(rid)
+            if run is None or run.executor is not e:
+                continue
+            self._failed(s, e, run, {"code": "host", "retryable": True,
+                                     "message": "its helper reconnected without it (it restarted, or its job host "
+                                                "ended while it was away)"}, at, wall)
+
+    def _late_result(self, s, e, f: dict, after: list) -> None:
+        """A helper's result for a run the dispatcher does not hold in flight (P4.2.5): for a run already settled,
+        acknowledged again when its hashes are the same, and a claim failure when they differ; for one that expired,
+        failed or was aborted, acknowledged and dropped (not counted, not credited); for a run never offered to this
+        machine, dropped (P4.7.3)."""
+        from citar.db.models import CpuJobRun
+        rid = f.get("run")
+        row = s.get(CpuJobRun, rid) if isinstance(rid, str) else None
+        if row is None or row.machine_id != str(e.id)[:40]:
+            log.warning("the helper of %s sent a result for run %s, which was not offered to it: dropped", e.id, rid)
+            return
+        outcome = f.get("outcome") or {}
+        if row.state == "done":
+            same = (outcome.get("result_hash") == row.result_hash
+                    and (outcome.get("chain") or {}).get("head") == row.chain_head)
+            if same:
+                after.append(lambda: e.ack(rid))
+                log.info("the helper of %s sent run %s's result again: acknowledged again", e.id, rid)
+            else:
+                self._claim_failure(s, e, rid, "a second result for a settled run, with other hashes")
+            return
+        after.append(lambda: e.ack(rid))
+        lab.log(f"run {rid} on {e.name}: its result came after it {row.state}; acknowledged and dropped")
+
+    def _claim_failure(self, s, e, rid: str, why: str) -> None:
+        """A helper's claim that does not hold (P4.5.8's ``claim`` verdict, 4-11 acts on it): counted on its machine's
+        row (``trust.claim_failures``, the last one's run and reason), the first one audited."""
+        from citar.auth import audit
+        from citar.db.models import Server
+        row = s.get(Server, e.id)
+        log.warning("claim failure on %s, run %s: %s", e.id, rid, why)
+        if row is None:
+            return
+        trust = dict(row.trust or {})
+        trust["claim_failures"] = int(trust.get("claim_failures") or 0) + 1
+        trust["last_claim_failure"] = {"run": rid, "why": why, "at": utcnow().isoformat()}
+        row.trust = trust
+        if trust["claim_failures"] == 1:
+            audit.record(s, "server.claim_failure", object_type="server", object_id=e.id, run=rid, why=why)
 
     def _run_row(self, s, run: Run):
         from citar.db.models import CpuJobRun
@@ -976,6 +1126,9 @@ class Dispatcher:
         if error is not None:
             row.error = error
         self.runs.pop(run.id, None)
+        release = getattr(run.executor, "release", None)
+        if release is not None:
+            release(run.id)
 
     @staticmethod
     def _paused(run: Run, at: float) -> float:
@@ -1078,12 +1231,20 @@ class Dispatcher:
         log.info("run %s of %s died of memory (peak %s MB); its job now needs %s MB a run", run.id,
                  job.ref if job else run.job, peak, max(want, job.mem_mb if job else 0))
 
-    def _rejected(self, s, e, run: Run, f: dict, wall: Optional[float] = None) -> None:
+    def _rejected(self, s, e, run: Run, f: dict, wall: Optional[float] = None, at: Optional[float] = None) -> None:
         reason = str(f.get("reason") or "")
         self._end(s, run, "failed", {"code": "rejected", "reason": reason, "message": str(f.get("message"))[:1000]},
                   wall)
         job = self.jobs.get(run.job)
-        if reason not in ("busy", "memory", "bad_spec"):
+        if e.kind != "local":
+            # a helper: offered nothing for a while, per reason, 2 s doubling to 10 minutes (P4.2.5), until what
+            # clears that reason comes (``_available``)
+            per = self._rejects.setdefault(e.id, {})
+            _until, wait, _why, _at = per.get(reason, (0.0, REJECT_FIRST / 2, "", 0.0))
+            wait = min(REJECT_MAX, wait * 2)
+            when = self.clock() if at is None else at
+            per[reason] = (when + wait, wait, f"its helper refused a job ({reason})", when)
+        elif reason not in ("busy", "memory", "bad_spec"):
             # the executor refuses every job for now (unverifiable, another build): offered nothing for a while,
             # 2 s doubling to 10 minutes (P4.2.5), until it sends a result
             _until, wait, _why = self._rejects.get(e.id, (0.0, REJECT_FIRST / 2, ""))
@@ -1127,10 +1288,16 @@ class Dispatcher:
                 raise engine_api.JobRefused(f"its result hashes to {got}, not {outcome.get('result_hash')}")
             engine_api.job_result_fits(job.kind, job.spec, result, chain, job.spec_hash)
         except (engine_api.JobRefused, ValueError) as err:
-            # a correct executor never sends one: an internal fault of the local executor's, played again
+            # a correct executor never sends one: an internal fault of the local executor's, played again; a helper's
+            # is acknowledged (decided on: it is not wanted again) and its claim counted as failed (4-11 judges it)
             log.error("run %s of %s on %s gave a result that does not check: %s", run.id, job.ref, e.id, err)
             self._failed(s, e, run, {"code": "internal", "message": f"its result does not check: {err}",
                                      "retryable": True}, at, wall)
+            if e.kind != "local":
+                self._claim_failure(s, e, run.id, f"a result that does not check: {err}"[:300])
+                ack = getattr(e, "ack", None)
+                if ack is not None:
+                    after.append(lambda: ack(run.id))
             return
         crash = "crash" in result
         local = e.kind == "local"
@@ -1140,6 +1307,11 @@ class Dispatcher:
         rrow.result, rrow.result_hash = result, outcome.get("result_hash")
         rrow.chain_head, rrow.rounds = chain.get("head"), chain.get("rounds")
         rrow.verdict = "reference" if local else "unchecked"
+        if not local:
+            # a helper's signed claim, its signature and its chain's digests (4-11 checks them, and keeps the digests
+            # as evidence)
+            rrow.claim, rrow.signature = f.get("claim"), f.get("signature")
+            rrow.digests = chain.get("digests")
         row.state = "crashed" if crash else "accepted"
         row.accepted_run, row.result_hash = run.id, outcome.get("result_hash")
         self.runs.pop(run.id, None)
@@ -1153,6 +1325,8 @@ class Dispatcher:
         event = self._event_row(run.id, job.ref, job.owner_id, run.machine, e.kind, run.role, run.cpu_s, observed,
                                 None if local else self.costs.of(job.kind, job.spec)["cpu_s"], ended)
         self._rejects.pop(e.id, None)
+        take = getattr(e, "hold", None)
+        hold = take(run.id) if take is not None else None
 
         def crash_log():
             text = line.get("crash") or ""
@@ -1168,7 +1342,19 @@ class Dispatcher:
                 lab.log(f"{job.exp} #{job.i}: T{result.get('turns')} {result.get('victory')} won by "
                         f"{result.get('winner_label')} ({run.wall_s:.0f}s on {e.name})")
 
+        def settle():
+            # the run's credits into its grant's budget, as a model step's are (P4.5.7): in memory now, its entry
+            # written with the event
+            if hold is None:
+                return []
+            from citar.pool import budgets
+            budgets.keeper().settle(hold, event["credits"])
+            return [(hold, event["credits"])]
+
         def written():
+            ack = None if local else getattr(e, "ack", None)
+            if ack is not None:
+                ack(run.id)         # committed: the helper may forget it (P4.2.5)
             hook = self.hooks.get("after_commit")
             if hook is not None:
                 hook(job.id)        # a test's crash here leaves everything below undone, as a dead server would
@@ -1177,7 +1363,7 @@ class Dispatcher:
                 self._settle_line(exp, line, job.i, run.id)
             else:
                 self._prune.append(run.id)
-            _step(f"{job.ref}'s CPU event", lambda: _ledger().events([event]))
+            _step(f"{job.ref}'s CPU event", lambda: _ledger().events([event], settled=settle()))
             # a counted peak enters the cost table from a reference machine only, as its CPU does: a helper's figures
             # are its own word (4-11 adds the verifiers')
             _step(f"{job.ref}'s cost", lambda: self.costs.record(
@@ -1218,7 +1404,9 @@ class Dispatcher:
                 "tokens_reasoning": 0, "tokens_cache_read": 0, "tokens_cache_write": 0,
                 "credits": round(compute.credits_for("cpu", cpu_core_s=cpu, rate=cls["rate"] if cls else 0.0), 6),
                 "flags": flags, "self_use": consumer == provider,
-                "verification": "verified" if executor == "local" else "pending",
+                # a helper's result is accepted without a replica until verification arrives (4-11, which writes
+                # ``pending`` for the runs it replicates)
+                "verification": "verified" if executor == "local" else "unverified",
                 "request_id": run_id[:64]}
 
     # -------------------------------------------------------------- expiry
@@ -1284,15 +1472,44 @@ class Dispatcher:
             row.trust = trust
 
     # -------------------------------------------------------------- availability and matching
+    #: What clears a helper's re-offer backoff (P4.2.5): a ``status`` that shows room, or its next acknowledgement of
+    #: settings (or hello).
+    ROOM_CLEARS = ("busy", "quiet")
+    ACK_CLEARS = ("build", "kind", "disabled", "limits", "unverifiable", "memory")
+
+    def _backed_off(self, e, now: float) -> Optional[str]:
+        """Why a helper is offered nothing for now after it refused a job (its reasons' backoff), dropping the reasons
+        cleared since."""
+        per = self._rejects.get(e.id)
+        if not isinstance(per, dict):
+            return None
+        room, ack = getattr(e, "last_room", 0.0), getattr(e, "last_ack", 0.0)
+        for reason, (until, _wait, why, at) in list(per.items()):
+            if (reason in self.ROOM_CLEARS and room > at) or (reason in self.ACK_CLEARS and ack > at):
+                del per[reason]
+            elif now < until:
+                return why
+        return None
+
+    def backoff(self, machine: str) -> list:
+        """The reasons a helper machine's re-offers are backed off for (tests, the administrators' view)."""
+        per = self._rejects.get(machine)
+        return sorted(per) if isinstance(per, dict) else []
+
     def _available(self, e, now: float) -> Optional[str]:
         """Why an executor is offered nothing now (None: it may be)."""
         if e.state != "ready":
             return e.reason or f"its job host is {e.state}"
         if e.id in self._paused_exec:
             return "a benchmark holds its machine"
-        until, _wait, why = self._rejects.get(e.id, (0.0, 0.0, ""))
-        if now < until:
-            return why
+        if e.kind != "local":
+            why = self._backed_off(e, now)
+            if why is not None:
+                return why
+        else:
+            until, _wait, why = self._rejects.get(e.id, (0.0, 0.0, ""))
+            if now < until:
+                return why
         from citar import servers
         try:
             end = servers.restricted_now(e.id)
@@ -1499,6 +1716,83 @@ class Dispatcher:
             lab.log(f"{len(views)} failed game(s) of {', '.join(sorted({j.exp for j in views}))} queued again "
                     "(an administrator's retry)")
         return len(views)
+
+    # -------------------------------------------------------------- the hub's questions
+    def welcome_jobs(self, machine: str, running: list, results: list) -> tuple:
+        """The welcome's ``jobs`` for a helper's hello (P4.2.2, P4.2.5): ``keep``, the runs of its ``running`` the
+        dispatcher still holds for that machine (the others are ``drop``: given elsewhere, or expired); ``resend``, the
+        runs of its ``results`` it still holds in flight (it wants their results). The rest of its held results it no
+        longer wants (settled, expired or never its). What changes (a kept run's silence counted from now, a held run
+        the helper no longer plays failed) is the dispatcher's thread's, at its next tick. Under the tick's lock: never
+        on the event loop."""
+        with self._tick_lock:
+            from citar import db
+            if db.configured() and not self.recovered:
+                self.recover()
+            if self.remotes is None:
+                return [], list(running), []
+            e = self.remotes.get(machine)
+            mine = {rid for rid, r in self.runs.items() if r.executor is e}
+            keep = [r for r in running if r in mine]
+            drop = [r for r in running if r not in mine]
+            resend = [r for r in results if r in mine]
+            lost = sorted(mine - set(running) - set(results))
+            e.frame({"t": "_reconnect", "keep": keep, "lost": lost})
+            return keep, drop, resend
+
+    # -------------------------------------------------------------- test hooks (the conformance transcripts' acts)
+    def force_offer(self, machine: str, *, kind: str, spec: dict, spec_hash: str, jobs_build: str, mem_mb: int,
+                    owner: Optional[str] = None) -> str:
+        """An offer to a helper past the dispatcher's own checks (a test hook: ``force_offer``, for the helper's refusal
+        of an offer a correct dispatcher never makes): a job of its own (``lab:forced-N:0``) and its run, offered at
+        once. Returns the run's id."""
+        from citar import db
+        from citar.db.models import CpuJob, CpuJobRun, new_id
+        with self._tick_lock:
+            e = self.remotes.get(machine)
+            self._forced += 1
+            now, at = self.clock(), utcnow()
+            job_id, run_id = new_id("cj_"), new_id("cr_")
+            with db.session() as s:
+                s.add(CpuJob(id=job_id, kind=kind, ref=f"lab:forced-{self._forced}:0", item_kind="lab_experiment",
+                             item_ref=f"forced-{self._forced}", owner_id=owner, spec=spec, spec_hash=spec_hash,
+                             jobs_build=jobs_build, priority=0, mem_mb=int(mem_mb), state="running", attempts=0,
+                             created_at=at))
+                s.add(CpuJobRun(id=run_id, job_id=job_id, machine_id=str(machine)[:40], executor=e.kind,
+                                role="primary", state="offered", offered_at=at,
+                                deadline_at=datetime.fromtimestamp(at.timestamp() + DEADLINE_MIN, timezone.utc)))
+            job = Job(id=job_id, kind=kind, ref=f"lab:forced-{self._forced}:0", exp=f"forced-{self._forced}", i=0,
+                      owner_id=owner, spec=spec, spec_hash=spec_hash, jobs_build=jobs_build, priority=0,
+                      mem_mb=int(mem_mb), state="running", attempts=0, created=time.time(), run=run_id)
+            self.jobs[job_id] = job
+            self.runs[run_id] = Run(id=run_id, job=job_id, executor=e, machine=machine, role="primary",
+                                    state="offered", offered_at=now, deadline_s=DEADLINE_MIN, offered_wall=time.time())
+            e.offer(run_id, job, DEADLINE_MIN)
+            return run_id
+
+    def expire(self, run_id: str, why: str = "past its deadline") -> bool:
+        """Expire a run as its deadline would (a test hook: ``expire_run``): it is aborted on its executor, ended
+        ``expired`` and its job queued again. Returns whether it was in flight."""
+        from citar import db
+        with self._tick_lock:
+            run = self.runs.get(run_id)
+            if run is None:
+                return False
+            with db.session() as s:
+                run.executor.abort(run.id, why)
+                self._end(s, run, "expired", {"code": "expired", "message": why})
+                self._requeue(s, run, attempt=True)
+            return True
+
+    def abort_run(self, run_id: str, why: str = "the server stopped it") -> bool:
+        """Ask a run's executor to stop it (a test hook: ``abort_run``); its ``job_aborted`` ends it and queues its job
+        again. Returns whether it was in flight."""
+        with self._tick_lock:
+            run = self.runs.get(run_id)
+            if run is None:
+                return False
+            run.executor.abort(run.id, why)
+            return True
 
     # -------------------------------------------------------------- what others read
     def _publish(self, now: float) -> None:
