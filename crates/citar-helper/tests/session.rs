@@ -365,14 +365,20 @@ fn never(dir: &std::path::Path) -> Never {
 #[cfg(unix)]
 impl Drop for Never {
     fn drop(&mut self) {
-        // A writer that opens and closes ends every blocked open with end of file; the runtime's
-        // shutdown waits for those reads, so this must happen before the FIFO is deleted. On a
-        // thread of its own (an open for writing blocks while no reader is left), waited for here
-        // at most 10 s.
+        // A writer that opens, waits and closes ends every blocked open with end of file; the
+        // runtime's shutdown waits for those reads, so this must happen before the FIFO is deleted.
+        // The writer stays open a moment: on macOS a reader woken by a writer that has already
+        // closed goes back to sleep in its open, and the test's runtime then waited for it for good
+        // (rust.yml at c9832b2, macOS only: nextest's 600 s timeout). On a thread of its own (an
+        // open for writing blocks while no reader is left), waited for here at most 10 s.
         let path = self.path.clone();
         let (done, opened) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _sent = done.send(std::fs::OpenOptions::new().write(true).open(path).is_ok());
+            let writer = std::fs::OpenOptions::new().write(true).open(path);
+            let ok = writer.is_ok();
+            std::thread::sleep(Duration::from_millis(500));
+            drop(writer);
+            let _sent = done.send(ok);
         });
         let released = opened.recv_timeout(Duration::from_secs(10));
         if !std::thread::panicking() {
