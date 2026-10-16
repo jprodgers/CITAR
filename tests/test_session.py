@@ -190,7 +190,10 @@ class SessionTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertGreaterEqual(s.game.turn, 2, "the turn should end when its time budget runs out")
             self.assertLess(time.time() - t0, 15, "a timed-out request must not be retried past the turn limit")
-        self.manager.delete(s.id)                   # stop its next turn, which has already started
+            # Stopped inside the patch: its next turn has already started, or starts any moment, and outside the
+            # patch it would make a real conversation for the "mock" provider and record that failure (CI, test.yml
+            # run 38871821775, macos / Python 3.12).
+            self.manager.delete(s.id)
         self.assertLessEqual(seen[0], 7)
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "time_limit")
