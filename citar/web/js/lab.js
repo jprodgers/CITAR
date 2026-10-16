@@ -98,7 +98,7 @@ function drawTop(card, d, rules, refresh) {
       stat("Experiments queued", active.length),
       stat("Queue finishes in", active.length ? eta(d.eta_minutes) : "queue empty",
         "Estimate: remaining games × median minutes per game for that experiment, spread over the threads."),
-      stalled.length ? stat("Stalled", stalled.map((e) => e.name).join(", "), "Games that failed three times, or an experiment that cannot be played; see the log.", "bad") : null),
+      stalled.length ? stat("Stalled", stalled.map((e) => e.name).join(", "), "Games that failed three times (an administrator's Retry, or the server's next start, plays them again), or an experiment that cannot be played; see the log.", "bad") : null),
     el("div", { class: "lab-executors" }, ...executors.map((e) => el("div", { class: "small" },
       el("span", { class: `pill ${e.state === "ready" && !e.available ? "live" : e.state === "failed" ? "bad" : ""}` }, e.kind === "local" ? "this server" : e.name),
       " ", executorText(e),
@@ -118,16 +118,25 @@ function drawExperiments(card, d, refresh) {
   const table = el("table", { class: "list jobs" }, el("tr", {},
     el("th", {}, "Experiment"), el("th", {}, "State"), el("th", { style: { minWidth: "180px" } }, "Progress"),
     el("th", {}, "Min / game"), el("th", {}, "Finishes"), el("th", {}, "What it tests"), el("th", {}, "")));
+  const admin = auth.isAdmin();
   for (const e of d.experiments) {
     const [cls, label] = STATE[e.state] || ["", e.state];
     const expanded = openReports.has(e.name);
     const shown = openGames.has(e.name);
     const what = e.kind === "factorial" ? `factors: ${e.factors.join(", ")}`
       : e.kind === "reference" ? "reference run (the baseline's own seats)" : `seats: ${e.seats.join(" / ")}`;
+    // an administrator plays a queued experiment's failed games again (otherwise only a restart of the server does)
+    const retry = admin && e.failing.length && e.state !== "complete"
+      ? el("button", { class: "small", title: "Play its failed games again, their attempts back to 0",
+        onclick: async (ev) => {
+          ev.stopPropagation();
+          try { await api.labRetry(e.name); toast(`${e.name}: its failed games are queued again`); refresh(); } catch (err) { toast(err.message, "error"); }
+        } }, "Retry")
+      : null;
     table.appendChild(el("tr", { class: "clickable", onclick: () => toggleReport(e.name, refresh) },
       el("td", {}, el("b", {}, e.name), e.note ? el("div", { class: "muted small" }, e.note) : null),
       el("td", {}, el("span", { class: `pill ${cls}` }, label),
-        e.failing.length ? el("div", { class: "bad small" }, `failed: #${e.failing.join(", #")}`) : null,
+        e.failing.length ? el("div", { class: "bad small" }, `failed: #${e.failing.join(", #")} `, retry) : null,
         e.crashed && e.crashed.length ? el("div", { class: "muted small" }, `crashed (final): #${e.crashed.join(", #")}`) : null,
         e.refused ? el("div", { class: "bad small" }, e.refused) : null,
         e.waiting && e.state === "queued" ? el("div", { class: "muted small" }, `waiting: ${e.waiting}`) : null),

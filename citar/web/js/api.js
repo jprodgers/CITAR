@@ -125,6 +125,7 @@ export const api = {
   adminJobs: () => request("GET", "/api/admin/jobs"),
   labPause: () => request("POST", "/api/admin/jobs/pause"),
   labResume: () => request("POST", "/api/admin/jobs/resume"),
+  labRetry: (name) => request("POST", `/api/admin/jobs/retry?exp=${encodeURIComponent(name)}`),
   botProfiles: () => request("GET", "/api/bots/profiles"),
   botProfile: (id) => request("GET", `/api/bots/profiles/${encodeURIComponent(id)}`),
   saveBotProfile: (id, body) => request("PUT", `/api/bots/profiles/${encodeURIComponent(id)}`, body),
