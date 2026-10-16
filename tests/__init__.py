@@ -16,6 +16,12 @@ os.environ.pop("CITAR_RULESET_DIR", None)
 # would wait for its machine with a game session's lock held raises instead, wherever in the suite it happens.
 os.environ.setdefault("CITAR_TEST_LOCKS", "1")
 
+# The suite's apps start no job dispatcher (citar/jobs/dispatcher.py, design/phase4-helper.md P4.5.5): every test
+# module's app shares the process's saves folder, where the lab's queue may hold another test's experiment, and a
+# dispatcher would play it on a job host of the host machine's figures. The dispatcher's own tests start theirs, with
+# small limits (tests/test_dispatcher.py).
+os.environ.setdefault("CITAR_TEST_NO_DISPATCHER", "1")
+
 # The API test modules each point CITAR_DATA_DIR and CITAR_DB_URL at their own temporary database. This default is
 # for a module run on its own that builds the app without doing so: without it, the app opens the per-user database.
 if not os.environ.get("CITAR_DATA_DIR"):

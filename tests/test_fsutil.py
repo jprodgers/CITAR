@@ -3,16 +3,12 @@ takes, the old file is pending deletion and opening it fails with PermissionErro
 a probe run's ``run.json`` read so (``test_pooled_work.Probes``), so a reader tries again, as the writer does. One test
 per family of such files: each reader is refused its file once and must read it again."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
-import collections
-import contextlib
 import gzip
-import io
 import json
 import os
 import secrets
 import shutil
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -122,29 +118,27 @@ class ProbeFiles(unittest.TestCase):
 
 
 class LabFiles(Refused):
-    """The runner replaces ``status.json`` every pass while the Lab page (``overview``) and ``lab status`` read it; the
-    server replaces a queued experiment's file when its priority changes (``set_priority``) while the runner, the Lab
-    and Bots pages and the ratings read it; ``submit`` writes it, and the runner moves it to done/ when it finishes."""
+    """The lab's pause is written by ``citar lab stop`` and the Lab page's Stop while the dispatcher and the Lab page
+    read it; the server replaces a queued experiment's file when its priority changes (``set_priority``) while the
+    dispatcher, the Lab and Bots pages and the ratings read it; ``submit`` writes it, and the dispatcher moves it to
+    done/ when it finishes."""
 
     def setUp(self):
         super().setUp()
-        for name, sub in (("LAB", ""), ("QUEUE", "queue"), ("DONE", "done"), ("RESULTS", "results"), ("JOBS", "jobs")):
+        for name, sub in (("LAB", ""), ("QUEUE", "queue"), ("DONE", "done"), ("RESULTS", "results"),
+                          ("REFERENCE", "reference")):
             patcher = mock.patch.object(lab, name, self.dir / sub)
             patcher.start()
             self.addCleanup(patcher.stop)
         lab._dirs()
 
-    def test_the_runner_status_read_while_the_runner_replaces_it(self):
-        fsutil.write_text(lab.LAB / "status.json", json.dumps({
-            "pid": 4242, "updated": "2026-10-12T00:00:00", "stopped": False, "quiet_hours": False,
-            "target_workers": 2, "running": [], "games_last_hour": 0, "queue": {}}))
-        with mock.patch.object(lab, "_pid_alive", return_value=True):
-            runner = self.read_refused_once("status.json", lab.overview)["runner"]
-            self.assertEqual((runner["pid"], runner["alive"], runner["workers"]), (4242, True, 2))
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                self.read_refused_once("status.json", lab.cmd_status)
-        self.assertIn("runner pid 4242 ALIVE", out.getvalue())
+    def test_the_pause_read_while_it_is_replaced(self):
+        lab.pause("fsutil")
+        got = self.read_refused_once(lab.PAUSED_NAME, lab.paused)
+        self.assertEqual(got["by"], "fsutil")
+        self.assertTrue(self.read_refused_once(lab.PAUSED_NAME, lab.overview)["dispatcher"]["paused"])
+        self.assertTrue(lab.resume())
+        self.assertIsNone(lab.paused())
 
     def test_a_queued_experiment_read_while_its_priority_changes(self):
         name = "fsutil-exp.json"
@@ -212,17 +206,19 @@ class LabFiles(Refused):
         self.assertEqual([e["name"] for e in lab.overview()["experiments"]], ["fsutil-exp"])
 
     def test_a_finished_experiment_is_renamed_over_a_done_one_of_its_name(self):
-        """The runner moves a finished experiment to done/ by a rename, also over an earlier experiment of its name
+        """The dispatcher moves a finished experiment to done/ by a rename, also over an earlier experiment of its name
         there (``lab submit`` may reuse a finished one's name), so a reader of done/ sees one whole file or the other.
         A move that met a file there copied over it in place, readable half written."""
+        from citar.jobs import dispatcher as jobs_dispatcher
         name = "fsutil-exp.json"
         spec = {"name": "fsutil-exp", "games": 1, "seats": []}
         fsutil.write_text(lab.DONE / name, json.dumps({**spec, "submitted": "2026-10-01T00:00:00"}))
         fsutil.write_text(lab.QUEUE / name, json.dumps({**spec, "submitted": "2026-10-12T00:00:00"}))
-        (lab.RESULTS / "fsutil-exp.jsonl").write_text(json.dumps({"i": 0}) + "\n", encoding="utf-8")
         finished = (lab.QUEUE / name).stat().st_ino
-        args = types.SimpleNamespace(workers=1, night_workers=1, max_minutes=60, exit_when_idle=False)
-        self.assertFalse(lab._runner_step(args, {}, collections.Counter(), [], 0, 1))
+        d = jobs_dispatcher.Dispatcher([])
+        d.exps["fsutil-exp"] = jobs_dispatcher.Exp(name="fsutil-exp", spec=spec, owner_id=None, games=1, priority=0,
+                                                   submitted="", settled={0})
+        d._complete()
         self.assertFalse((lab.QUEUE / name).exists())
         self.assertEqual(json.loads((lab.DONE / name).read_text(encoding="utf-8"))["submitted"], "2026-10-12T00:00:00")
         self.assertEqual((lab.DONE / name).stat().st_ino, finished, "copied over the done file, not renamed into place")

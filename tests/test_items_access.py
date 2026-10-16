@@ -332,6 +332,7 @@ ROUTES = {
     ("POST", "/api/probe-runs/{rid}/open/{case}/{rep}"): ("use", "probe_run", None),
     ("GET", "/api/lab"): ("list", "lab_experiment", None),
     ("GET", "/api/lab/report/{name}"): ("read", "lab_experiment", None),
+    ("GET", "/api/lab/jobs"): ("read", "lab_experiment", None),       # ?exp=NAME (``_path``)
     ("GET", "/api/bots/profiles"): ("list", "bot_profile", None),
     ("POST", "/api/bots/profiles"): ("create", "bot_profile", None),
     ("GET", "/api/bots/profiles/{pid}"): ("read", "bot_profile", None),
@@ -402,6 +403,8 @@ class Table(ItemCase):
 
     # ---------------------------------------------------------------- the callers
     def _path(self, path, kind, ref):
+        if path == "/api/lab/jobs":
+            return f"{path}?exp={ref}"         # the experiment in the query: P4.5.10's ``GET /api/lab/jobs?exp=NAME``
         return (path.replace("{kind}", kind or "").replace("{ref}", ref)
                 .replace("{suite_id}", ref).replace("{run_id}", ref).replace("{map_id}", ref)
                 .replace("{sid}", ref).replace("{pid}", ref).replace("{rid}", ref).replace("{name}", ref)
