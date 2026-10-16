@@ -931,6 +931,10 @@ class Routes(Lab):
         self.assertNotIn("notes", lab_view["dispatcher"]["executors"][0])
         mine = self.call("alice", "GET", "/api/lab").json()
         self.assertEqual([r["exp"] for r in mine["running"]], ["mine"])
+        self.assertEqual([r["executor"] for r in mine["running"]], ["this server"])
+        self.assertNotIn("machine", mine["running"][0])
+        admin = self.call("zara", "GET", "/api/lab").json()
+        self.assertEqual([r["executor"] for r in admin["running"]], ["this server (Test host)"])
         q = self.call("bob", "GET", "/api/queue").json()["cpu"]
         (host,) = q["executors"]
         self.assertEqual(host["name"], "this server")

@@ -2070,7 +2070,13 @@ def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = De
     log. A member sees the experiments they may see and the games of those playing; the log, the side runs and the
     job hosts' details, which name every experiment and the server's own jobs, are an administrator's."""
     from .. import lab
+    from .jobs_api import _namer
     out = lab.overview()
+    # a playing game's machine as the caller may be told it (the games table's words): "this server" for the
+    # server's own job host, a helper machine's name only where the caller may see that machine
+    name = _namer(sdb, me)
+    for r in out.get("running") or []:
+        r["executor"] = name(r.get("machine"), r.get("executor_kind"))["name"]
     key = _share_key(request)
     seen = items.listed(sdb, "lab_experiment", me, slug=key)
     if seen is None:
@@ -2078,7 +2084,8 @@ def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = De
     out["experiments"] = _with_perms(sdb, "lab_experiment", me,
                                      [e for e in out.get("experiments", []) if e.get("name") in seen], key="name",
                                      slug=key)
-    out["running"] = [r for r in out.get("running", []) if r.get("exp") in seen]
+    out["running"] = [{k: v for k, v in r.items() if k != "machine"} for r in out.get("running", [])
+                      if r.get("exp") in seen]
     disp = dict(out.get("dispatcher") or {})
     disp["executors"] = [{k: e.get(k) for k in _EXECUTOR_SHOWN} for e in disp.get("executors") or []]
     out["dispatcher"] = disp
