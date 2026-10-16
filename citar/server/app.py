@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 import traceback
 from contextlib import contextmanager
@@ -35,6 +36,7 @@ from .users_api import router as users_router
 from .admin_users_api import router as admin_users_router
 from .ledger_api import router as ledger_router
 from .machines_api import router as machines_router
+from .jobs_api import router as jobs_router
 from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
@@ -57,6 +59,7 @@ app.include_router(users_router)
 app.include_router(admin_users_router)
 app.include_router(ledger_router)
 app.include_router(machines_router)
+app.include_router(jobs_router)
 manager = SessionManager()
 scheduler: Optional[BenchmarkScheduler] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -117,6 +120,10 @@ async def _startup():
     usage.tracker().start()
     from .. import ledger
     ledger.get().ensure_threads()                 # the compute ledger's writer, and its rollups (a first pass now)
+    if not os.environ.get("CITAR_TEST_NO_DISPATCHER"):
+        from ..jobs import dispatcher as jobs_dispatcher
+        jobs_dispatcher.start()                   # the lab's games as CPU jobs, on this server's job host
+                                                  # (design/phase4-helper.md P4.5.5); the suite starts its own
 
 
 def _close_orphan_rows() -> list:
@@ -155,6 +162,11 @@ def _shutdown():
         usage.tracker().flush()
     except Exception:
         pass
+    try:
+        from ..jobs import dispatcher as jobs_dispatcher
+        jobs_dispatcher.stop()                    # the job host ends its games; the next start plays them again
+    except Exception:
+        traceback.print_exc()
     try:
         from .. import ledger
         ledger.get().stop(timeout=10.0)           # the writer drains what it has (the tracker's last CPU included)
@@ -2047,11 +2059,16 @@ def probe_run_open(rid: str, case: str, rep: int, request: Request, me=Depends(r
 # ----------------------------------------------------------------------------
 # the lab and the work queue
 # ----------------------------------------------------------------------------
+#: What a member is told of the dispatcher's executors (P4.5.10: the dispatcher's health; its log and the hosts'
+#: details are administrators').
+_EXECUTOR_SHOWN = ("machine", "name", "kind", "on", "state", "threads", "running", "paused", "benchmark", "available")
+
+
 @app.get("/api/lab")
 def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
-    """What the bot lab is doing: runner health, experiments, per-game progress and the log. A member sees the
-    experiments they may see; the log and the side runs, which name every experiment and the server's own jobs,
-    are an administrator's."""
+    """What the bot lab is doing: the dispatcher's health and its executors, experiments, per-game progress and the
+    log. A member sees the experiments they may see and the games of those playing; the log, the side runs and the
+    job hosts' details, which name every experiment and the server's own jobs, are an administrator's."""
     from .. import lab
     out = lab.overview()
     key = _share_key(request)
@@ -2062,6 +2079,9 @@ def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = De
                                      [e for e in out.get("experiments", []) if e.get("name") in seen], key="name",
                                      slug=key)
     out["running"] = [r for r in out.get("running", []) if r.get("exp") in seen]
+    disp = dict(out.get("dispatcher") or {})
+    disp["executors"] = [{k: e.get(k) for k in _EXECUTOR_SHOWN} for e in disp.get("executors") or []]
+    out["dispatcher"] = disp
     out["log"] = []
     out["side_runs"] = []
     return out
@@ -2100,8 +2120,10 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db, s
     (``scheduler.Machine.view``); what holds it (``busy_with``); and the benchmark jobs and probe runs the shared job
     queue has for it, best first (``citar.pool.queue``). Work the caller may not see is "someone's <kind>" (or
     "someone's <class>" for a prompt), with no name and no member (``work_access.binding_rights``); the other machines
-    in use are a count (``others_busy``), with no names or loads. Then this server's CPU: the lab's experiments, the
-    lab runner, and the load average, since the lab's bot games share the CPU with every game being played here.
+    in use are a count (``others_busy``), with no names or loads. Then the CPU jobs (P4.5.11):
+    each executor the caller may see (this server's own job host for everyone) with its games playing, each named
+    where the caller may see its experiment ("someone's lab game" otherwise), the lab's experiments in the order they
+    run, and the load average, since the lab's bot games share the CPU with every game being played here.
     """
     import os
     from .. import lab, servers as registry
@@ -2171,10 +2193,45 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db, s
                               "running": e.get("running"), "can_manage": False})
         experiments = shown
     cpu = {"cpus": os.cpu_count(), "load": [round(x, 2) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None,
-           "lab_runner": overview.get("runner"),
-           "lab_running": overview.get("running", []) if admin else [],
+           "dispatcher": {k: (overview.get("dispatcher") or {}).get(k) for k in ("alive", "paused", "queued")},
+           "executors": _cpu_executors(sdb, me, overview, admin, cache),
            "experiments": experiments}
     return {"machines": machines, "others_busy": others, "cpu": cpu}
+
+
+#: How a CPU job of work the viewer may not see is named on the Queue page (P3.2.4).
+SOMEONES_CPU = "someone's lab game"
+
+
+def _cpu_executors(sdb: DbSession, user, overview: dict, admin: bool, cache: dict) -> list:
+    """The Queue page's CPU jobs per executor (P4.5.11): each executor the caller may see (the server's own job host
+    for everyone), its state and figures, and its games playing, each named where the caller may see its experiment
+    and "someone's lab game" otherwise."""
+    from ..db.models import Server
+    out = []
+    for e in (overview.get("dispatcher") or {}).get("executors") or []:
+        if e.get("kind") != "local" and not admin:
+            row = sdb.get(Server, e.get("machine")) if e.get("machine") else None
+            if row is None or not pool.visible(sdb, user, row):
+                continue
+        games = []
+        for r in overview.get("running") or []:
+            if r.get("machine") != e.get("machine"):
+                continue
+            key = ("lab", r.get("exp"))
+            if key not in cache:
+                cache[key] = _queue_access(sdb, user, "lab", r.get("exp"))
+            seen = admin or access.VIEW in cache[key]
+            games.append({"label": f"{r['exp']} #{r['i']}" if seen else SOMEONES_CPU,
+                          "exp": r["exp"] if seen else None, "turn": r.get("turn"), "limit": r.get("limit"),
+                          "paused": r.get("paused"), "minutes": r.get("minutes"),
+                          "can_manage": bool(seen and (admin or access.MANAGE in cache[key]))})
+        out.append({"machine": e.get("machine"), "name": "this server" if e.get("kind") == "local" else e.get("name"),
+                    "kind": e.get("kind"), "on": e.get("on"), "state": e.get("state"),
+                    "threads": e.get("threads"), "cpu_percent": e.get("cpu_percent"),
+                    "memory_mb": e.get("memory_mb"), "held": e.get("held") if admin else None,
+                    "available": e.get("available"), "benchmark": e.get("benchmark"), "games": games})
+    return out
 
 
 def _occupants(sdb: DbSession, user, server_id: str, cache: dict) -> list:
