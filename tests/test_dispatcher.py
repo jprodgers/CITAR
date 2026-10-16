@@ -1762,3 +1762,28 @@ class Remote(Lab):
         W.record_hello(self.sid, conn.hello)
         with db.session() as s:
             self.assertFalse(M.client(s, s.get(Server, self.sid), None)["cpu_helper"]["lent"])
+
+    def test_a_helper_that_stops_gives_its_games_back_at_no_cost(self):
+        """A helper stopped by its owner fails its runs ``aborted_locally`` (PROTOCOL.md): each game is queued again
+        at once, neither an attempt nor an abandon, and offered again."""
+        self.grant("alice", ["lab"])
+        e, conn = self.connect()
+        self.submit("alice", duels("stopped-helper", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        e.frame({"t": "job_accept", "run": offer["run"]})
+        d.tick()
+        e.frame({"t": "job_failed", "run": offer["run"], "code": "aborted_locally",
+                 "message": "the helper is stopping", "retryable": True})
+        d.tick()
+        with db.session() as s:
+            run = s.get(CpuJobRun, offer["run"])
+            self.assertEqual((run.state, (run.error or {}).get("code")), ("failed", "aborted_locally"))
+            job = s.get(CpuJob, run.job_id)
+            self.assertEqual(job.attempts or 0, 0, "not an attempt")
+            self.assertEqual((s.get(Server, self.sid).trust or {}).get("abandons", 0), 0, "not an abandon")
+        again = self.offers(conn)
+        self.assertEqual(len(again), 2, "offered again")
+        self.assertEqual(again[1]["job"], offer["job"])
+

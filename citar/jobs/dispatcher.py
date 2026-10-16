@@ -1193,6 +1193,13 @@ class Dispatcher:
                 lab.log(f"{job.exp} #{job.i} on {e.name}: held by a pause past its deadline ({message}); queued "
                         "again, not counted as an attempt")
             return
+        if code == "aborted_locally":
+            # its helper stopped (its owner stopped lending the CPU): the game did nothing wrong, so it is played
+            # again elsewhere at once, neither an attempt nor an abandon
+            self._requeue(s, run, attempt=False)
+            if job is not None:
+                lab.log(f"{job.exp} #{job.i} on {e.name}: its helper stopped ({message}); queued again")
+            return
         retryable = bool(f.get("retryable", True))
         if retryable:
             self._requeue(s, run, attempt=True)

@@ -17,6 +17,8 @@ whose grant lists ``lab`` for alice, a member an administrator gave ``run_lab``;
   the same when held and when let go), and goes on within 2 s of the stream's end, with its paused time reported and
   the server's deadline pushed on by it; with ``yield_to_llm`` off a streamed request holds nothing, and a benchmark
   lease going live on the machine sends ``jobs_pause`` (the game holds) and its end ``jobs_resume``.
+- **A stop** (Linux and macOS: a signal the helper sees): its owner stopping the helper gives its game back at once,
+  failed ``aborted_locally``, queued again at no cost.
 """
 from __future__ import annotations
 
@@ -38,7 +40,7 @@ from sqlalchemy import select
 
 from citar import db, items, lab, ledger, servers, settings
 from citar.auth import accounts, tokens
-from citar.db.models import Base, ComputeEvent, CpuJobRun, Server, ServerGroup, User, WorkerToken
+from citar.db.models import Base, ComputeEvent, CpuJob, CpuJobRun, Server, ServerGroup, User, WorkerToken
 from citar.jobs import dispatcher as D, remote
 from citar.pool import scheduler as S
 from tests import helperfake as H
@@ -334,6 +336,38 @@ class Lending(unittest.TestCase):
         for run in runs.running():
             self.assertEqual(self.finished(run, 30).state, "aborted")
         print(f"\n[jobs e2e] a share of 5% held {limits}: CPU {json.dumps(cpu)}", file=sys.stderr)
+
+    @unittest.skipIf(sys.platform == "win32", "a test can end a Windows child only by TerminateProcess, which is no stop "
+                     "the helper sees (Ctrl-C and its service's stop are; the dispatcher's half is test_dispatcher's)")
+    def test_a_helper_stopped_by_its_owner_gives_its_game_back_at_once(self):
+        """Its owner stops the helper (SIGTERM, as Ctrl-C or the service manager asks) with a game playing: the
+        helper fails it ``aborted_locally`` before it goes, and the server queues the game again at once, neither an
+        attempt nor an abandon, rather than waiting five minutes for its silence."""
+        sid, token = self.machine("stopped")
+        helper = self.helper(sid, token, self.endpoint())
+        name = "given-back-by-a-stop"
+        runs, run = self.long_game(sid, name)
+
+        def gone():
+            try:
+                (lab.QUEUE / f"{name}.json").unlink()
+            except OSError:
+                pass
+            D.poke()
+        self.addCleanup(gone)           # its game must not wait for the next test's machine
+        t0 = time.monotonic()
+        helper.proc.terminate()
+        self.assertIsNotNone(helper.exited(15), "it stopped")
+        row = self.finished(run, 15)
+        took = time.monotonic() - t0
+        self.assertEqual((row.state, (row.error or {}).get("code")), ("failed", "aborted_locally"),
+                         helper.text()[-2000:])
+        self.assertLess(took, 10.0 * SLACK)
+        with db.session() as s:
+            job = s.get(CpuJob, row.job_id)
+            self.assertEqual((job.state, job.attempts or 0), ("queued", 0))
+            self.assertEqual((s.get(Server, sid).trust or {}).get("abandons", 0), 0)
+        print(f"\n[jobs e2e] stop: its game failed aborted_locally {took:.2f} s after the signal", file=sys.stderr)
 
     def _events(self, sid: str) -> list:
         self.led.flush()
