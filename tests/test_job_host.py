@@ -4,10 +4,16 @@ own (``citar_jobs::host::parent``). The limits themselves, per OS, are the jobs 
 here the server's side of them:
 
 - **Ready:** the host's jobs build is the extension's, its memory is counted, and it says how hard its limits hold as
-  P4.3.6's table says for this OS.
+  P4.3.6's table says for this OS (on Linux under the scope, as far as the user's manager delegates the controllers),
+  and how much memory each run may use, its own left out.
 - **A lab job** through the host gives exactly what ``engine_api.run_job`` gives in this process.
 - **A memory death:** a run past the host's memory ends it; the death is classified ``memory`` from what showed it,
-  every run in flight on it fails ``memory``, and a new host plays the next job.
+  every run in flight on it fails ``memory``, the parent knows nearly the peak it reached, and a new host plays the
+  next job.
+- **Memory per run:** every thread using ``memory_per_run_mb`` at once finishes, and an offer above it is refused
+  ``memory`` with no death (on Linux, with the scope and without it).
+- **Pause, resume, abort** from this side: a paused run reports its pause and finishes with its paused time; an
+  abort ends a run within a second and leaves nothing in flight.
 - **Builds:** a host told another jobs build refuses to start, and a ``ready`` of another build is refused.
 - **Ending:** a host whose input closes is gone within two seconds, its run in flight with it.
 - **Overhead** (P4.7.9): a 30-round duel through the host against ``run_job`` in this process, the same run,
@@ -31,6 +37,8 @@ from citar.jobs import host as H
 from tests import has_test_ops
 
 ON_CI = bool(os.environ.get("CI"))
+#: The frames that end a run.
+ENDS = ("job_reject", "job_result", "job_failed", "job_aborted")
 
 
 def two_cores() -> int:
@@ -49,12 +57,39 @@ def test_spec(kind: str, spec: dict) -> dict:
     return json.loads(_engine.jobs.test_job_spec(kind, json.dumps(spec).encode()))
 
 
+def user_manager_delegates(controller: str) -> bool:
+    """Whether the user's service manager can hold ``controller`` in the scopes it makes (Linux)."""
+    if not hasattr(os, "getuid"):
+        return False
+    uid = os.getuid()
+    try:
+        text = open(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers").read()
+    except OSError:
+        return False
+    return controller in text.split()
+
+
 def expected_held(scope: bool) -> tuple:
+    """P4.3.6's table for this OS; on Linux under the scope, the CPU is hard where the user's manager delegates the
+    cpu controller, and the memory hard either way (the scope's ``MemoryMax``, else ``RLIMIT_DATA``)."""
     if os.name == "nt":
         return ("hard", "hard")
     if sys.platform.startswith("linux"):
-        return ("hard", "hard") if scope else ("soft", "hard")
+        return ("hard", "hard") if scope and user_manager_delegates("cpu") else ("soft", "hard")
     return ("soft", "soft")
+
+
+def until(host: H.JobHost, run: str, want, timeout: float = 60.0) -> dict:
+    """The first frame about ``run`` that ``want`` takes, skipping the rest."""
+    deadline = time.monotonic() + timeout
+    while True:
+        frame = host.next(max(0.0, deadline - time.monotonic()))
+        if frame is None:
+            raise TimeoutError(f"run {run}: nothing wanted within {timeout} s")
+        if frame["t"] == "gone":
+            raise AssertionError(f"the host ended: {host.death()}")
+        if frame.get("run") == run and want(frame):
+            return frame
 
 
 class HostCase(unittest.TestCase):
@@ -74,6 +109,9 @@ class Ready(HostCase):
         self.assertTrue(r["counting"], "the extension counts each run's memory")
         self.assertEqual((r["limits"]["cpu"], r["limits"]["memory"]), expected_held(host.scope), r)
         self.assertTrue(r["notes"], "how the limits are held, for the log")
+        # Its own memory is measured and left out of what a run may use.
+        self.assertGreater(r["own_mb"], 0, r)
+        self.assertTrue(0 < host.memory_per_run_mb < 400, r)
         self.assertEqual(host.host_pid, r["pid"])
         if os.name != "nt" and not host.scope:
             self.assertEqual(r["pid"], host.pid, "the host is the child itself (a venv's launcher only on Windows)")
@@ -114,13 +152,15 @@ class Memory(HostCase):
         self.assertEqual(death.kind, "memory", death)
         if sys.platform == "darwin":
             wanted = "watchdog"
-        elif sys.platform.startswith("linux") and host.scope:
+        elif sys.platform.startswith("linux") and host.scope and user_manager_delegates("memory"):
             wanted = "oom_kill"
         else:
             wanted = "allocation failed"
         self.assertIn(wanted, death.why)
         failures = host.failures(death)
         self.assertEqual([(f["run"], f["code"], f["retryable"]) for f in failures], [("cr_big", "memory", True)])
+        # The run reported its peak as it grew, so this side knows nearly how much it reached.
+        self.assertGreaterEqual(host.peak_mb("cr_big") or 0, host.memory_per_run_mb / 2, host.ready)
         self.next_host_plays()
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux's fallback without the scope")
@@ -143,6 +183,86 @@ class Memory(HostCase):
         out = H.run_until(again, "cr_small")[-1]
         self.assertEqual(out["t"], "job_result", out)
         self.assertAlmostEqual(out["outcome"]["peak_mb"], 50, delta=5)
+
+
+@unittest.skipUnless(has_test_ops(), "the test jobs need a build with the test operations")
+class Share(HostCase):
+    def test_every_run_gets_its_share_at_once_and_an_offer_above_it_is_refused(self):
+        scopes = [None]
+        if sys.platform.startswith("linux") and H.scope_available():
+            scopes.append(False)    # RLIMIT_DATA too, which counts each run thread's whole stack
+        for scope in scopes:
+            for threads, memory_mb in ((1, 200), (3, 300)):
+                with self.subTest(scope=scope, threads=threads, memory_mb=memory_mb):
+                    self.share_holds(threads, memory_mb, scope)
+
+    def share_holds(self, threads: int, memory_mb: int, scope) -> None:
+        host = self.start(threads=threads, memory_mb=memory_mb, scope=scope)
+        per_run = host.memory_per_run_mb
+        self.assertGreater(host.ready["own_mb"], 0, host.ready)
+        self.assertTrue(8 < per_run < memory_mb // threads, host.ready)
+        mb = per_run - 8
+        # Held a second, so the runs overlap (and macOS's watchdog sees them).
+        spec = test_spec("alloc", {"mb": mb, "hold_s": 1.0})
+        runs = {f"cr_share_{i}" for i in range(threads)}
+        for run in sorted(runs):
+            host.offer(run, "alloc", spec["spec"], spec["spec_hash"], 60, mem_mb=mb)
+        ends = {}
+        deadline = time.monotonic() + 60
+        while len(ends) < threads:
+            frame = host.next(max(0.0, deadline - time.monotonic()))
+            self.assertIsNotNone(frame, f"the runs did not end: {ends}")
+            if frame["t"] == "gone":
+                self.fail(f"the host ended: {host.death()}")
+            if frame.get("run") in runs and frame["t"] in ENDS:
+                ends[frame["run"]] = frame
+        for end in ends.values():
+            self.assertEqual(end["t"], "job_result", end)
+            self.assertAlmostEqual(end["outcome"]["peak_mb"], mb, delta=mb * 0.1 + 1)
+        over = test_spec("alloc", {"mb": 1})
+        host.offer("cr_over", "alloc", over["spec"], over["spec_hash"], 60, mem_mb=per_run + 1)
+        refused = H.run_until(host, "cr_over")[-1]
+        self.assertEqual((refused["t"], refused.get("reason")), ("job_reject", "memory"), refused)
+        last = test_spec("alloc", {"mb": mb})
+        host.offer("cr_last", "alloc", last["spec"], last["spec_hash"], 60, mem_mb=mb)
+        self.assertEqual(H.run_until(host, "cr_last")[-1]["t"], "job_result")
+        self.assertEqual(host.in_flight, set())
+
+
+@unittest.skipUnless(has_test_ops(), "the test jobs need a build with the test operations")
+class PauseAndAbort(HostCase):
+    def test_a_paused_run_reports_its_pause_and_finishes_with_its_paused_time(self):
+        host = self.start()
+        burn = test_spec("burn", {"seconds": 2.0})
+        host.offer("cr_burn", "burn", burn["spec"], burn["spec_hash"], 60)
+        until(host, "cr_burn", lambda f: f["t"] == "job_accept")
+        host.pause()
+        held = until(host, "cr_burn", lambda f: f["t"] == "job_progress" and f["paused"])
+        self.assertLess(held["round"], 2, held)
+        time.sleep(1.0)     # the pause's length, which paused_s must then report
+        host.resume()
+        frames = H.run_until(host, "cr_burn")
+        self.assertTrue([f for f in frames if f["t"] == "job_progress" and not f["paused"]], frames)
+        end = frames[-1]
+        self.assertEqual(end["t"], "job_result", end)
+        self.assertGreaterEqual(end["outcome"]["paused_s"], 0.9, end)
+        self.assertGreaterEqual(end["outcome"]["wall_s"], 2.9, end)
+        self.assertEqual(host.in_flight, set())
+
+    def test_an_abort_ends_a_run_within_a_second(self):
+        host = self.start()
+        held = test_spec("alloc", {"mb": 8, "hold_s": 30.0})
+        host.offer("cr_hold", "alloc", held["spec"], held["spec_hash"], 60)
+        until(host, "cr_hold", lambda f: f["t"] == "job_accept")
+        self.assertEqual(host.in_flight, {"cr_hold"})
+        asked = time.perf_counter()
+        host.abort("cr_hold", "test")
+        end = H.run_until(host, "cr_hold", timeout=10)[-1]
+        took = time.perf_counter() - asked
+        self.assertEqual(end["t"], "job_aborted", end)
+        self.assertLess(took, 1.0 * (3 if ON_CI else 1))
+        self.assertEqual(host.in_flight, set())
+        self.assertIsNone(host.peak_mb("cr_hold"))
 
 
 class Builds(HostCase):
@@ -224,8 +344,14 @@ class ParentRules(unittest.TestCase):
 
     def test_deaths_are_classified_from_what_shows_them(self):
         self.assertEqual(H.classify(None, ["ready", "memory allocation of 8388608 bytes failed"]).kind, "memory")
-        self.assertEqual(H.classify(-9, [], oom=(2, 3)).kind, "memory")
+        oom = H.classify(-9, [], oom=(2, 3))
+        self.assertEqual(oom.kind, "memory")
+        self.assertIn("oom_kill", oom.why)
         self.assertEqual(H.classify(-9, [], oom=(3, 3)).kind, "other")
+        # A neighbour's kill in the same parent cgroup is no evidence for a host that ended otherwise.
+        self.assertEqual(H.classify(-6, [], oom=(2, 3)).kind, "other")
+        self.assertEqual(H.classify(1, [], oom=(2, 3)).kind, "other")
+        self.assertEqual(H.classify(None, [], oom=(2, 3)).kind, "other")
         self.assertEqual(H.classify(None, [f"{H.WATCHDOG_LINE}: 300 MB of 200 MB"]).kind, "memory")
         self.assertEqual(H.classify(H.EXIT_MEMORY, []).kind, "memory")
         quoted = ["thread panicked: memory allocation of 8 bytes failed, said the bot"]

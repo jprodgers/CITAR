@@ -8,13 +8,17 @@ hung game stays away from the server, and every OS has one process to put its li
 - **Starting a host** (:meth:`JobHost.start`): the child, its pipes, and on Linux, when the user's service manager
   answers (:func:`scope_available`), under ``systemd-run --user --scope`` with the limits as the scope's properties
   (:func:`scope_args`), so the kernel holds them; then the ``limits`` frame with the extension's jobs build, and the
-  host's ``ready``, whose jobs build must be the same: a host of another build is ended, never used.
-- **Its frames** (:meth:`JobHost.next`), as dicts with their ``t``, and which runs are still in flight on it.
+  host's ``ready``, whose jobs build must be the same: a host of another build is ended, never used. ``ready`` also
+  says how much memory each run may use (:attr:`JobHost.memory_per_run_mb`): the host's own memory and its threads'
+  stacks are left out of ``memory_mb``, and that figure, never ``memory_mb / threads``, is what jobs are matched to.
+- **Its frames** (:meth:`JobHost.next`), as dicts with their ``t``, which runs are still in flight on it, and the
+  largest peak each has reported (:meth:`JobHost.peak_mb`), which is all a parent learns of a run that dies.
 - **Its death** (:meth:`JobHost.death`, :func:`classify`): a memory death ends the whole host, and every run of it
   fails ``memory`` (:meth:`JobHost.failures`); it shows as Rust's ``memory allocation of N bytes failed`` on the
-  host's standard error (a Job Object's limit or ``RLIMIT_DATA`` refused a commit), as the ``oom_kill`` count of the
-  scope's parent cgroup rising (the kernel killed it at the scope's ``MemoryMax``), or as the macOS watchdog's line
-  or exit code. Any other death fails its runs ``host``; both are retried elsewhere.
+  host's standard error (a Job Object's limit or ``RLIMIT_DATA`` refused a commit), as a host started under the scope
+  killed by SIGKILL while the ``oom_kill`` count of the scope's parent cgroup rose (the kernel killed it at the
+  scope's ``MemoryMax``; that cgroup holds other units too, so the count alone never decides), or as the macOS
+  watchdog's line or exit code. Any other death fails its runs ``host``; both are retried elsewhere.
 
 The protocol (JSON lines; ``limits``, ``ready``, ``fatal``, the job frames, ``pause``, ``resume``, ``heartbeat``) is
 described in ``crates/citar-jobs/src/host/mod.rs``. The dispatcher and the local executor that use this are 4-09's.
@@ -53,6 +57,8 @@ EXIT_MEMORY = 3
 CGROUP_ROOT = "/sys/fs/cgroup"
 #: The frames that end a run.
 _ENDS = {"job_reject", "job_result", "job_failed", "job_aborted"}
+#: The signal the kernel's OOM killer ends a process with (``returncode`` -9 for a child it ended).
+SIGKILL = 9
 
 
 def command() -> list:
@@ -163,13 +169,15 @@ class Death:
 
 def classify(returncode: Optional[int], tail: list, oom: Optional[tuple] = None,
              fatal: Optional[dict] = None) -> Death:
-    """Why a host ended, from its exit code, the last lines of its log, its scope parent's ``oom_kill`` count before
-    and after (Linux), and the ``fatal`` frame it sent, if any: ``citar_jobs::host::parent::classify``'s rules."""
+    """Why a host ended, from its exit code (``-N`` for a signal), the last lines of its log, its scope parent's
+    ``oom_kill`` count before and after (Linux, a host started under the scope only), and the ``fatal`` frame it sent,
+    if any: ``citar_jobs::host::parent::classify``'s rules. The count is evidence only beside a SIGKILL, the OOM
+    killer's signal, since the parent cgroup counts its other units' kills too."""
     for line in tail:
         if is_allocation_failure(line):
             return Death("memory", f'an allocation failed: "{line.strip()}"')
-    if oom and oom[1] > oom[0]:
-        return Death("memory", f"the cgroup's oom_kill count rose from {oom[0]} to {oom[1]}")
+    if oom and oom[1] > oom[0] and returncode == -SIGKILL:
+        return Death("memory", f"SIGKILL, as the cgroup's oom_kill count rose from {oom[0]} to {oom[1]}")
     for line in tail:
         if WATCHDOG_LINE in line:
             return Death("memory", f'its watchdog: "{line.strip()}"')
@@ -216,6 +224,7 @@ class JobHost:
         self.argv = list(argv or command())
         self.ready: Optional[dict] = None
         self.in_flight: set = set()
+        self._peaks: dict = {}
         self.fatal: Optional[dict] = None
         self._proc: Optional[subprocess.Popen] = None
         self._frames: queue.Queue = queue.Queue()
@@ -234,6 +243,20 @@ class JobHost:
     def host_pid(self) -> Optional[int]:
         """The host's own process id, as its ``ready`` gave it."""
         return self.ready.get("pid") if self.ready else None
+
+    @property
+    def memory_per_run_mb(self) -> Optional[int]:
+        """The memory each run may use, in MB, as the host's ``ready`` gave it: ``memory_mb`` less the host's own
+        memory and its threads' stacks, a tenth kept spare, shared by the threads. A job whose ``mem_mb`` is above it
+        is refused ``memory``; 4-09's matching compares jobs with it."""
+        return self.ready.get("memory_per_run_mb") if self.ready else None
+
+    def peak_mb(self, run: str) -> Optional[float]:
+        """The largest peak, in MB, that ``run`` (in flight) has reported in its ``job_progress``, or None when it
+        reported none: what the dispatcher raises a job's ``mem_mb`` to when the run failed ``memory``, beside
+        :meth:`failures`. A run reports its peak as it grows, so this is near what it reached unless it died before
+        its first look (in its game's setup); then nothing says how much it needed beyond ``memory_per_run_mb``."""
+        return self._peaks.get(run)
 
     def _argv(self) -> list:
         if not self.scope:
@@ -267,7 +290,9 @@ class JobHost:
             log.info("job host %s ready: cpu %s, memory %s, verifiable %s; %s", first.get("pid"),
                      first.get("limits", {}).get("cpu"), first.get("limits", {}).get("memory"),
                      first.get("verifiable"), "; ".join(first.get("notes") or []))
-            cgroup = first.get("cgroup")
+            # Only a scope is the host's alone; a host started directly shares its parent's cgroup, whose parent's
+            # count is anyone's.
+            cgroup = first.get("cgroup") if self.scope else None
             if cgroup and "/" in cgroup.strip("/"):
                 parent = cgroup.rsplit("/", 1)[0]
                 before = oom_kills(parent)
@@ -346,6 +371,12 @@ class JobHost:
         t = frame.get("t")
         if t in _ENDS:
             self.in_flight.discard(frame.get("run"))
+            self._peaks.pop(frame.get("run"), None)
+        elif t == "job_progress" and frame.get("run") in self.in_flight:
+            peak = frame.get("peak_mb")
+            if isinstance(peak, (int, float)):
+                run = frame["run"]
+                self._peaks[run] = max(self._peaks.get(run, 0.0), float(peak))
         elif t == "fatal":
             self.fatal = frame
         elif t == "gone":
@@ -395,7 +426,7 @@ class JobHost:
 
     def failures(self, death: Death) -> list:
         """A ``job_failed`` for each run still in flight on a host that died of ``death``: ``memory`` for a memory
-        death, ``host`` otherwise; each retryable."""
+        death, ``host`` otherwise; each retryable. Each run's last reported peak is :meth:`peak_mb`'s."""
         code = "memory" if death.kind == "memory" else "host"
         return [{"t": "job_failed", "run": run, "code": code, "message": str(death), "retryable": True}
                 for run in sorted(self.in_flight)]
