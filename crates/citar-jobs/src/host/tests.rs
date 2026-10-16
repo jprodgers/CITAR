@@ -286,12 +286,19 @@ fn a_ready_host_plays_the_golden_jobs_to_their_committed_hashes() {
 fn offers_are_refused_with_their_reasons() {
     let p = Played::ready(1);
     let (spec, hash) = duel(40);
-    let reason = |p: &Played, run: &str| match p.about(run) {
-        FromHost::JobReject(r) => {
-            assert!(!r.message.is_empty(), "{r:?}");
-            r.reason
+    // A run that plays reports its progress every 25 rounds, from its own thread: a report may
+    // come before the answer to an offer that names it, or before its abort, when the host's
+    // reader is slow to get the CPU (it did on WSL, under nextest's other tests). The reports are
+    // skipped, as the abort test below skips them.
+    let reason = |p: &Played, run: &str| loop {
+        match p.about(run) {
+            FromHost::JobReject(r) => {
+                assert!(!r.message.is_empty(), "{r:?}");
+                break r.reason;
+            }
+            FromHost::JobProgress(_) => {}
+            other => panic!("{run}: {other:?}"),
         }
-        other => panic!("{run}: {other:?}"),
     };
     let mut other_build = offer("cr_b", "lab_game", spec.clone(), &hash, 60.0);
     if let ToHost::JobOffer(o) = &mut other_build {
@@ -332,7 +339,13 @@ fn offers_are_refused_with_their_reasons() {
     p.send_raw(r#"{"t": "something_new", "x": 1}"#);
     p.send_raw("not json");
     p.send(&ToHost::JobAbort(Abort { run: "cr_one".to_owned(), reason: "test".to_owned() }));
-    assert!(matches!(p.about("cr_one"), FromHost::JobAborted(_)));
+    loop {
+        match p.about("cr_one") {
+            FromHost::JobProgress(_) => {}
+            FromHost::JobAborted(_) => break,
+            other => panic!("{other:?}"),
+        }
+    }
     assert_eq!(p.close(), 0);
 }
 
