@@ -30,6 +30,9 @@
   energy from its rows (measured, not estimated). A ``rescan`` reaches the helper and its ``hardware`` frame is kept
   as the last report.
 - ``PooledWork`` and ``QuietHours``: what the old module held of pooled machines, unchanged.
+- ``JobsHandshake`` (4-10's fix round): a dispatcher that cannot say which runs it holds gets a helper no welcome
+  (1011), none in the process keeps every run and wants every result, and an acknowledgement sent ``again`` with its
+  job host's figures answers no settings frame.
 
 Replaces ``tests/test_worker.py`` (protocol 1, the Python worker); the real binary end to end is
 ``tests/test_helper_e2e.py``.
@@ -1714,6 +1717,85 @@ class QuietHours(unittest.TestCase):
         self.assertEqual((t.state, t.error.code), ("refused", "quiet_hours"))
         self.assertTrue(t.error.temporary)
         self.assertEqual(t.error.retry_at, datetime.fromtimestamp(end))
+
+
+class JobsHandshake(_Live):
+    """A helper that plays jobs (4-10's fix round): the welcome's ``jobs`` never throw its work away when the
+    dispatcher cannot answer, and an acknowledgement sent ``again`` with its job host's figures answers no settings
+    frame."""
+
+    def jobs_hello(self, token: str) -> dict:
+        fields = H.hello(token=token, models=[H.model(MODEL)], slots=4)
+        fields["helper"]["jobs_build"] = "0f1e2d3c4b5a"
+        fields["running"], fields["results"] = ["cr_playing"], ["cr_finished"]
+        return fields
+
+    def test_a_dispatcher_that_cannot_answer_gets_the_helper_no_welcome(self):
+        """The dispatcher failed (its database locked): a welcome then would drop the runs the helper plays and have it
+        delete the results it holds, so there is none; 1011 has it connect again with backoff, keeping both."""
+        from citar.jobs import dispatcher as D
+        sid, token, _tid = _machine(self.ids["lena"], "jobs box")
+
+        class Failing:
+            def welcome_jobs(self, *args):
+                raise RuntimeError("database is locked")
+        with mock.patch.object(D, "current", return_value=Failing()), \
+                self.assertLogs("citar.workers", level="ERROR"):
+            helper = H.FakeHelper(self.server.url)
+            self.addCleanup(helper.close)
+            helper.send("hello", **{k: v for k, v in self.jobs_hello(token).items() if k != "t"})
+            with self.assertRaises(H.Closed) as closed:
+                frame = helper.recv(timeout=10)
+                self.fail(f"a frame came before the close: {frame}")
+        self.assertEqual(closed.exception.code, HP.CLOSE_SERVER_ERROR)
+        self.assertTrue(H.until(lambda: W.hub().get(sid) is None, 5), "nothing stays registered")
+
+    def test_without_a_dispatcher_its_runs_are_kept_and_its_results_wanted(self):
+        """No dispatcher in the process (one not started yet, or stopping): nothing is decided about its runs, so the
+        welcome keeps every one and wants every held result."""
+        from citar.jobs import dispatcher as D
+        _sid, token, _tid = _machine(self.ids["lena"], "early box")
+        with mock.patch.object(D, "current", return_value=None):
+            helper = H.FakeHelper(self.server.url)
+            self.addCleanup(helper.close)
+            welcome = helper.handshake(self.jobs_hello(token))
+        self.assertEqual(welcome["jobs"], {"keep": ["cr_playing"], "drop": [], "resend": ["cr_finished"]})
+
+    def test_an_acknowledgement_sent_again_answers_no_settings_frame(self):
+        """A helper whose job host became ready sends its last acknowledgement again with the host's figures
+        (``again``) while a push is on its way: it settles nothing (the push is still unanswered), is held to what its
+        first sending answered (no overclaim), and its memory a run is the one the dispatcher matches jobs to; an
+        acknowledgement without one says no host runs for those settings yet."""
+        sid, token, _tid = _machine(self.ids["lena"], "again box", slots=3)
+        helper = H.FakeHelper(self.server.url)
+        self.addCleanup(helper.close)
+        helper.send("hello", **{k: v for k, v in H.hello(token=token, models=[H.model(MODEL)], slots=4).items()
+                                if k != "t"})
+        welcome = helper.recv()
+        site = welcome["settings"]
+
+        def ack(slots: int, **extra) -> None:
+            helper.send("settings_ack", effective={"llm": {"enabled": True, "slots": slots},
+                                                   "cpu": {**site["cpu"], "enabled": False}},
+                        capped=[], limits={"cpu": "soft", "memory": "soft"}, **extra)
+        ack(3, memory_per_run_mb=500)
+        self.assertTrue(H.until(lambda: W.hub().get(sid) is not None and W.hub().get(sid).ack is not None, 5))
+        self.assertEqual(W.hub().get(sid).memory_per_run_mb, 500)
+        with db.session() as s:
+            s.get(Server, sid).max_concurrent = 1
+        servers.invalidate()
+        self.assertFalse(W.hub().push_settings(sid), "nothing acknowledged yet")
+        self.assertEqual(helper.recv()["llm"]["slots"], 1)
+        ack(3, memory_per_run_mb=400, again=True)           # the welcome's again: 3 is what the welcome asked
+        self.assertTrue(H.until(lambda: W.hub().get(sid).memory_per_run_mb == 400, 5))
+        self.assertFalse(W.hub().push_settings(sid), "the push is still unanswered")
+        self.assertEqual(W.hub().get(sid).llm_slots, 1, "held to what the site asks now")
+        ack(1)                                              # the push's, no job host running for it yet
+        self.assertTrue(H.until(lambda: W.hub().push_settings(sid), 5), "every frame acknowledged")
+        self.assertIsNone(W.hub().get(sid).memory_per_run_mb)
+        time.sleep(0.3)
+        with db.session() as s:
+            self.assertNotIn("settings_overclaim", s.get(Server, sid).flags or {}, "an honest helper is not flagged")
 
 
 if __name__ == "__main__":

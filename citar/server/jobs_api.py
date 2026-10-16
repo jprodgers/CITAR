@@ -189,10 +189,11 @@ def machine_jobs(sid: str, request: Request, limit: int = Query(50, ge=1, le=MAC
             entry.update({"role": run.role, "job_state": job.state, "error": run.error})
         runs.append(entry)
     trust = dict(row.trust or {})
-    counters = {k: trust.get(k, 0) for k in ("verified", "streak", "mismatches", "abandons", "claim_failures")}
+    counters = {k: trust.get(k, 0) for k in ("verified", "streak", "mismatches", "abandons", "claim_failures",
+                                             "helper_faults")}
     if admin:
-        counters.update({k: trust.get(k) for k in ("last_mismatch", "last_claim_failure", "since", "verifier",
-                                                    "speed")})
+        counters.update({k: trust.get(k) for k in ("last_mismatch", "last_claim_failure", "last_helper_fault", "since",
+                                                    "verifier", "speed")})
     conn = hub().get(sid)
     executor = remote.registry().find(sid)
     lends = None

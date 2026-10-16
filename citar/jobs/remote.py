@@ -26,12 +26,19 @@ settings held to the machine's own ceiling, CPU work on only when both say so):
 **When it is offered nothing** (``state``): its helper not connected, CPU work off in effect (the site's or the
 machine's own switch: "not lent by this machine's owner"), its canary or self-check failed, its helper's own quiet
 hours. The dispatcher adds the site's restricted hours, a live benchmark lease, the re-offer backoff (P4.2.5: cleared
-for ``busy`` and ``quiet`` by a ``status`` that shows room, ``last_room``, and for the reasons of its settings by its
-next ``settings_ack`` or hello, ``last_ack``) and three expired runs within the hour.
+for ``busy`` and ``quiet`` by a ``status`` that shows room, ``last_room``; for the reasons of its settings by its
+next ``settings_ack`` or hello, ``last_ack``; for a helper that stopped by its next hello, ``last_hello``) and three
+expired runs within the hour.
 
-**A budget** of the grant a member's job runs under holds the job's estimated credits from its offer
-(``pool.budgets.Keeper.reserve``: a hard budget that would pass its amount refuses the offer) to its end, when the run's
-event settles it (``hold``) or it is let go.
+**What it reads is read once a tick** (``refresh``): the machine's facts (its trust tier, its owner) and its owner's
+tier; what its helper acknowledged is clamped once for each acknowledgement and settings it has (``_effective``). The
+dispatcher asks ``refuses`` of every queued job, so each answer costs a few lookups (P4.7.9's tick bound).
+
+**A budget** of the grant a member's job runs under holds the job's estimated credits (its reference cost at the
+machine's class rate, ``estimate``) from the moment the dispatcher picks the job for it (``reserve``: a hard budget that
+would pass its amount refuses it, and that owner's jobs go to it no more this tick) to its end, when the run's event
+settles it (``hold``) or it is let go. A run carried across the server's restart has no hold: its credits are settled
+into its grant's budget all the same (``late_hold``), the work being done.
 """
 from __future__ import annotations
 
@@ -71,11 +78,14 @@ class RemoteExecutor:
         self.offered: collections.OrderedDict = collections.OrderedDict()
         self.paused = False
         self._wake: Optional[Callable[[], None]] = None
-        #: When (the dispatcher's clock) a ``status`` last showed room, and a ``settings_ack`` or hello last came: what
-        #: clears the re-offer backoff (P4.2.5).
+        #: When (the dispatcher's clock) a ``status`` last showed room, a ``settings_ack`` or hello last came, and a hello
+        #: last came: what clears the re-offer backoff (P4.2.5).
         self.last_room = 0.0
         self.last_ack = 0.0
+        self.last_hello = 0.0
         self._decisions: dict = {}                      # owner -> (refusal or None, budget id), this tick
+        self._facts_now: Optional[dict] = None          # the machine's facts, this tick
+        self._eff: tuple = (None, None, None, None)     # (conn, its settings, its ack, their clamp's cpu)
         self._row: dict = {}
         self._row_at = -1e18
         self.holds: dict = {}                           # run -> its budget's hold
@@ -93,11 +103,20 @@ class RemoteExecutor:
             wake()
 
     def _effective(self) -> Optional[dict]:
+        """The CPU work its helper acknowledged, held to the site's settings (``WorkerConnection.effective``): clamped
+        again only when the connection, its settings or its acknowledgement is another object (each is replaced whole
+        when it changes, never changed in place)."""
         conn = self.conn
         if conn is None:
             return None
+        settings, ack = getattr(conn, "settings", None), getattr(conn, "ack", None)
+        c, s, a, cpu = self._eff
+        if c is conn and s is settings and a is ack:
+            return cpu
         eff = conn.effective()
-        return eff["cpu"] if eff is not None else None
+        cpu = eff["cpu"] if eff is not None else None
+        self._eff = (conn, settings, ack, cpu)
+        return cpu
 
     @property
     def online(self) -> bool:
@@ -184,16 +203,22 @@ class RemoteExecutor:
         return max(0, self.threads - len(self.in_flight))
 
     def refresh(self, wanted: bool) -> None:
-        """A tick begins: the grants' answers are read again (once a tick), and the machine's row now and then."""
+        """A tick begins: the grants' answers and the machine's facts are read again (once a tick), and the machine's
+        row now and then."""
         self._decisions = {}
+        self._facts_now = None
         now = self.clock()
         if now - self._row_at >= ROW_SECONDS:
             self._row_at = now
             self._row = _row_of(self.id)
 
     def _facts(self) -> dict:
-        from citar import servers
-        return servers.machine_facts(self.id) or {}
+        """The machine's facts (``servers.machine_facts``: its trust tier, its owner), read once a tick."""
+        facts = self._facts_now
+        if facts is None:
+            from citar import servers
+            facts = self._facts_now = servers.machine_facts(self.id) or {}
+        return facts
 
     def refuses(self, job) -> Optional[str]:
         """Why this executor will not play ``job`` (None: it will). It looks at nothing of a job but its kind, jobs
@@ -221,8 +246,9 @@ class RemoteExecutor:
         return self._grant(job.owner_id)[0]
 
     def _grant(self, user_id: str) -> tuple:
-        """(the refusal, or None, and the budget a run of ``user_id``'s holds), from the machine's grants for the lab
-        (``admission.check(..., purpose="lab")``), once a tick per owner."""
+        """(the refusal, or None, and the budget of the grant that decided it: the one a run of ``user_id``'s holds, or
+        the one whose budget refused it), from the machine's grants for the lab (``admission.check(...,
+        purpose="lab")``), once a tick per owner."""
         hit = self._decisions.get(user_id)
         if hit is not None:
             return hit
@@ -238,7 +264,7 @@ class RemoteExecutor:
                 else:
                     d = admission.check(s, user, server, "lab", online=self.online)
                     budget = None
-                    if d.allowed and d.grant is not None:
+                    if d.grant is not None:
                         # its budget's account loaded and followed by the keeper, as a lease's is
                         from citar.pool import budgets
                         budget = budgets.keeper().handle(s, d.grant)
@@ -248,6 +274,49 @@ class RemoteExecutor:
             hit = ("its grants could not be read", None)
         self._decisions[user_id] = hit
         return hit
+
+    def _budget_of(self, job) -> Optional[str]:
+        """The budget a run of ``job`` counts against on this machine: its owner's grant's, for a member's job on another
+        member's machine (none for the machine owner's own and the server's collection)."""
+        if job.owner_id is None or job.owner_id == self._facts().get("owner_id"):
+            return None
+        return self._grant(job.owner_id)[1]
+
+    def estimate(self, cost_cpu_s: float) -> float:
+        """The credits a run of a job whose reference cost is ``cost_cpu_s`` is expected to take on this machine (at its
+        CPU class's rate, as its event will be priced)."""
+        from citar import ledger as compute
+        cls = compute.class_of(self._facts(), "cpu", compute.get().classes())
+        return compute.credits_for("cpu", cpu_core_s=max(0.0, float(cost_cpu_s or 0.0)),
+                                   rate=cls["rate"] if cls else 0.0)
+
+    def reserve(self, job, cost_cpu_s: float):
+        """The budget hold of a run of ``job`` about to be offered here (None when it counts against no budget), or
+        ``BudgetExceeded`` when a hard budget has no room for it: then its owner is refused here for the rest of the
+        tick (``refuses`` says why)."""
+        budget = self._budget_of(job)
+        if not budget:
+            return None
+        from citar.pool import budgets
+        try:
+            return budgets.keeper().reserve(budget, job.ref, job.owner_id, self.estimate(cost_cpu_s))
+        except budgets.BudgetExceeded as exc:
+            self._decisions[job.owner_id] = (str(exc), budget)
+            raise
+
+    def adopt(self, run: str, hold) -> None:
+        """``run`` holds ``hold`` (its offer's, from ``reserve``) until its event settles it or it is let go."""
+        if hold is not None:
+            self.holds[run] = hold
+
+    def late_hold(self, job):
+        """A hold for a run that has none (it was carried across the server's restart, whose holds were in memory):
+        taken whatever the budget has left, since the work is done, so its credits still reach its grant's budget."""
+        budget = self._budget_of(job)
+        if not budget:
+            return None
+        from citar.pool import budgets
+        return budgets.keeper().reserve(budget, job.ref, job.owner_id, 0.0, force=True)
 
     def describe(self) -> dict:
         conn = self.conn
@@ -261,24 +330,18 @@ class RemoteExecutor:
                 "memory_per_run_mb": self.memory_per_run_mb, "jobs_build": self.jobs_build, "online": self.online}
 
     def offer(self, run: str, job, deadline_s: float) -> None:
+        """Sends ``run``'s ``job_offer``, or raises when its helper's connection is gone (the dispatcher then ends the
+        run at once: an offer never sent is nobody's abandon)."""
         from citar.server import helper_protocol as HP
         conn = self.conn
-        if conn is None:
+        if conn is None or getattr(conn, "closed", False):
             raise RuntimeError(f"{self.id}'s helper is not connected")
-        budget = None
-        if job.owner_id is not None and job.owner_id != self._facts().get("owner_id"):
-            budget = self._grant(job.owner_id)[1]
-        if budget:
-            from citar.pool import budgets
-            estimate = max(budgets.MIN_RESERVE, float(getattr(job, "estimate", 0.0) or 0.0))
-            hold = budgets.keeper().reserve(budget, job.ref, job.owner_id, estimate)   # BudgetExceeded refuses it
-            if hold is not None:
-                self.holds[run] = hold
+        frame = HP.job_offer(job.id, run, job.kind, job.spec, job.spec_hash, job.jobs_build,
+                             float(min(86400.0, max(1.0, deadline_s))), int(job.mem_mb),
+                             int(max(-100, min(100, job.priority))), OFFER_TTL)
+        conn.send_threadsafe(frame)
         self.in_flight.add(run)
         self._remember(run)
-        conn.send_threadsafe(HP.job_offer(job.id, run, job.kind, job.spec, job.spec_hash, job.jobs_build,
-                                          float(min(86400.0, max(1.0, deadline_s))), int(job.mem_mb),
-                                          int(max(-100, min(100, job.priority))), OFFER_TTL))
 
     def _remember(self, run: str) -> None:
         with self._lock:
@@ -296,7 +359,11 @@ class RemoteExecutor:
         return self.holds.pop(run, None)
 
     def release(self, run: str) -> None:
-        """``run`` ended without a result: its budget hold goes, nothing spent."""
+        """``run`` ended without a result: its budget hold goes, nothing spent, and its thread counts as free (a run
+        the dispatcher ended itself, expired or lost, may never be answered: its helper may not know it, or have let
+        it go silently as its welcome said; one it still plays answers its ``job_abort``, and an offer meanwhile is at
+        worst refused ``busy``)."""
+        self.in_flight.discard(run)
         hold = self.holds.pop(run, None)
         if hold is not None:
             from citar.pool import budgets
@@ -349,11 +416,12 @@ class RemoteExecutor:
     # -------------------------------------------------------------- the hub's side (its event loop: never blocks)
     def connected(self, conn) -> None:
         """Its helper connected (its welcome is on its way): offers go to it from now on; a pause in force is said
-        again."""
+        again, after the welcome (a helper's ``jobs_pause`` holds for the connection it came on: one that ended while
+        it was paused plays on, and is paused again here while the benchmark lasts)."""
         from citar.server import helper_protocol as HP
         self.conn = conn
         self.name = conn.server_name or self.name
-        self.last_ack = self.clock()
+        self.last_ack = self.last_hello = self.clock()
         if self.paused:
             conn.send_threadsafe(HP.jobs_pause("benchmark"))
         self._woken()

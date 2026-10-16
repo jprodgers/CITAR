@@ -1183,14 +1183,34 @@ class PausedDeadlines(Lab):
             self.assertGreaterEqual(row.paused_s, 2 * dl - 1, "its pause counted though no report said so")
             self.assertFalse((s.get(Server, "sv_box").trust or {}).get("abandons"), "no abandon")
         self.assertIn("held by a pause past its deadline", (lab.LAB / "lab.log").read_text(encoding="utf-8"))
-        # played again; this time its play passes its deadline: an attempt
+        # its own pauses held it (no benchmark): that machine does not get it again for the hour, so a helper's pauses
+        # cannot keep a game from the others; after the hour it does
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(len(fake.offers), 1, "not offered to the same machine within the hour")
+        clock.t += D.ABANDON_WINDOW
         self.until(d, lambda: len(fake.offers) == 2)
         d.tick()
         run2 = fake.offers[1][0]
-        clock.t += dl + 1
-        fake.fail(run2, "deadline", message=f"{dl + 1:.1f} s of play passed its deadline of {dl:.1f} s")
+        # its helper says a pause held it, and fails it at once: the server did not see it last twice its deadline, so
+        # it is an attempt
+        clock.t += 5.0
+        fake.progress(run2, round=3, of=30, elapsed_s=5.0, cpu_s=0.5, paused_s=4.0, peak_mb=1.0, paused=True)
         d.tick()
-        self.assertEqual({j[0]: j[3] for j in self.jobs()}[job.ref], 1, "a deadline its play passed is an attempt")
+        clock.t += 1.0
+        fake.fail(run2, "deadline", message="held past twice its deadline (a false word)")
+        d.tick()
+        self.assertEqual({j[0]: j[3] for j in self.jobs()}[job.ref], 1, "a deadline failure the server did not see")
+        with db.session() as s:
+            self.assertNotIn("pause_caused", s.get(CpuJobRun, run2).error)
+        # played again; this time its play passes its deadline: an attempt
+        self.until(d, lambda: len(fake.offers) == 3)
+        d.tick()
+        run3 = fake.offers[2][0]
+        clock.t += dl + 1
+        fake.fail(run3, "deadline", message=f"{dl + 1:.1f} s of play passed its deadline of {dl:.1f} s")
+        d.tick()
+        self.assertEqual({j[0]: j[3] for j in self.jobs()}[job.ref], 2, "a deadline its play passed is an attempt")
 
     def test_a_benchmark_held_past_twice_the_deadline_costs_the_game_no_attempt(self):
         """The same with the real job host and a benchmark lease (the review's probe): held past twice its deadline,
@@ -1765,7 +1785,9 @@ class Remote(Lab):
 
     def test_a_helper_that_stops_gives_its_games_back_at_no_cost(self):
         """A helper stopped by its owner fails its runs ``aborted_locally`` (PROTOCOL.md): each game is queued again
-        at once, neither an attempt nor an abandon, and offered again."""
+        at once, neither an attempt nor an abandon, and offered to another machine at once. The machine itself is
+        offered nothing until its helper's next hello (an honest helper closes its connection as it stops; one that
+        stays connected cannot take a game and give it back for ever)."""
         self.grant("alice", ["lab"])
         e, conn = self.connect()
         self.submit("alice", duels("stopped-helper", 1))
@@ -1783,7 +1805,378 @@ class Remote(Lab):
             job = s.get(CpuJob, run.job_id)
             self.assertEqual(job.attempts or 0, 0, "not an attempt")
             self.assertEqual((s.get(Server, self.sid).trust or {}).get("abandons", 0), 0, "not an abandon")
-        again = self.offers(conn)
-        self.assertEqual(len(again), 2, "offered again")
-        self.assertEqual(again[1]["job"], offer["job"])
+        self.assertEqual(d.backoff(self.sid), ["stopped"])
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(len(self.offers(conn)), 1, "not offered again over the same connection")
+        other = Fake("sv_host", name="this server")
+        d._own.append(other)
+        d.tick()
+        self.assertEqual([j.ref for _r, j, _dl in other.offers], [job.ref], "offered elsewhere at once")
+        d._own.remove(other)
+        # its next hello clears it
+        e.disconnected(conn)
+        _e, conn2 = self.connect()
+        self.submit("alice", duels("after-the-restart", 1))
+        d.tick()
+        d.tick()
+        self.assertEqual([f["spec"]["exp"] for f in self.offers(conn2)], ["after-the-restart"])
+        self.assertEqual(d.backoff(self.sid), [])
 
+
+    # ------------------------------------------------------------------ the review's findings (4-10's fix round)
+    def result(self, offer: dict) -> dict:
+        """A helper's ``job_result`` for ``offer``, played here."""
+        out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
+        return {"t": "job_result", "run": offer["run"], "outcome": {
+            "result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"], "cpu_s": out["cpu_s"],
+            "wall_s": out["wall_s"], "paused_s": 0.0, "peak_mb": 3.5}, "claim": {}, "signature": ""}
+
+    def budget(self, amount: float) -> None:
+        """Alice's grant on bob's group, listing ``lab``, with a hard monthly budget of ``amount`` credits."""
+        from citar import pool
+        from citar.db.models import ServerGroup
+        from citar.pool import budgets
+        budgets.reset_keeper()
+        self.addCleanup(budgets.reset_keeper)
+        with db.session() as s:
+            pool.create_grant(s, s.get(User, self.ids["bob"]), s.get(ServerGroup, self.group_id),
+                              subject_type="user", subject_handle="alice", purposes=["lab"],
+                              budget={"period": "month", "amount": amount, "unit": "credits", "behavior": "hard"})
+        with db.session() as s:
+            budgets.keeper().sync(s)
+
+    def trust(self) -> dict:
+        with db.session() as s:
+            return dict(s.get(Server, self.sid).trust or {})
+
+    def attempts(self) -> list:
+        return [j[3] for j in self.jobs()]
+
+    def test_a_budget_with_no_room_keeps_its_owners_jobs_from_the_machine_at_no_cost(self):
+        """A hard budget with room for two holds of a credit: the third job is not offered (no run is made for it, so
+        nothing expires as the lender's abandon or the job's attempt), and is once the two runs settled."""
+        self.budget(2.5)
+        clock = Clock()
+        e, conn = self.connect(threads=3)
+        self.submit("alice", duels("budget-three", 3))
+        d = self.dispatcher([], remotes=self.registry, clock=clock)
+        with self.assertNoLogs("citar.jobs.dispatcher", level="ERROR"):
+            d.tick()
+        offers = self.offers(conn)
+        self.assertEqual(len(offers), 2)
+        self.assertEqual(len(d.runs), 2, "no run for the third")
+        self.assertEqual(sorted(e.holds), sorted(o["run"] for o in offers), "each offer holds the budget")
+        for o in offers:
+            e.frame({"t": "job_accept", "run": o["run"]})
+        d.tick()
+        clock.t += D.OFFER_TTL_SECONDS + 1
+        d.tick()
+        self.assertEqual(len(self.offers(conn)), 2)
+        self.assertFalse(self.trust().get("abandons"), "the lender is not charged for the borrower's budget")
+        self.assertEqual(self.attempts(), [0, 0, 0])
+        with db.session() as s:
+            self.assertEqual(s.scalars(select(CpuJobRun).where(CpuJobRun.state != "running")).all(), [])
+        for o in offers:
+            e.frame(self.result(o))
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(len(self.offers(conn)), 3, "offered once the two runs settled a little of the budget")
+
+    def test_an_offer_never_sent_or_lost_with_its_connection_is_nobodys_abandon(self):
+        """An offer the executor could not send ends at once and its job waits again; one that went with its helper's
+        connection expires as lost: neither an attempt nor an abandon. A helper that reconnects without an offered run
+        has it offered again the same way."""
+        self.grant("alice", ["lab"])
+        clock = Clock()
+        e, conn = self.connect()
+        self.submit("alice", duels("unsent", 1))
+        d = self.dispatcher([], remotes=self.registry, clock=clock)
+        with mock.patch.object(e, "offer", side_effect=RuntimeError("its helper's connection closed")):
+            d.tick()
+        with db.session() as s:
+            (run,) = s.scalars(select(CpuJobRun)).all()
+            self.assertEqual((run.state, run.error["code"]), ("failed", "not_sent"))
+        self.assertEqual(d.runs, {})
+        d.tick()
+        (offer,) = self.offers(conn)
+        e.disconnected(conn)
+        clock.t += D.OFFER_TTL_SECONDS + 1
+        d.tick()
+        with db.session() as s:
+            row = s.get(CpuJobRun, offer["run"])
+            self.assertEqual(row.state, "expired")
+            self.assertIn("lost with its helper's connection", row.error["message"])
+        self.assertEqual(e.in_flight, set(), "a run the dispatcher ended holds none of its helper's threads")
+        _e, conn2 = self.connect()
+        d.tick()
+        (offer2,) = self.offers(conn2)
+        e.disconnected(conn2)
+        _e, conn3 = self.connect()
+        self.assertEqual(d.welcome_jobs(self.sid, [], []), ([], [], []))
+        d.tick()
+        with db.session() as s:
+            row = s.get(CpuJobRun, offer2["run"])
+            self.assertEqual((row.state, row.error["code"]), ("failed", "lost"))
+        self.assertEqual(len(self.offers(conn3)), 1, "offered again")
+        self.assertEqual(self.attempts(), [0])
+        self.assertFalse(self.trust().get("abandons"))
+
+    def test_a_job_aborted_nobody_asked_for_is_an_abandon_and_an_attempt(self):
+        """A correct helper answers ``job_aborted`` only to the server's ``job_abort``: one nobody asked for is an
+        abandon on the machine and an attempt of the job; one the dispatcher asked for is neither."""
+        self.grant("alice", ["lab"])
+        e, conn = self.connect()
+        self.submit("alice", duels("unasked", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        e.frame({"t": "job_accept", "run": offer["run"]})
+        d.tick()
+        e.frame({"t": "job_aborted", "run": offer["run"]})
+        d.tick()
+        with db.session() as s:
+            row = s.get(CpuJobRun, offer["run"])
+            self.assertEqual((row.state, row.error["code"]), ("aborted", "abandoned"))
+        self.assertEqual(self.attempts(), [1])
+        self.assertEqual(self.trust().get("abandons"), 1)
+        offer2 = self.offers(conn)[1]
+        e.frame({"t": "job_accept", "run": offer2["run"]})
+        d.tick()
+        self.assertTrue(d.abort_run(offer2["run"], "the test's abort"))
+        e.frame({"t": "job_aborted", "run": offer2["run"]})
+        d.tick()
+        with db.session() as s:
+            self.assertEqual(s.get(CpuJobRun, offer2["run"]).error["code"], "aborted")
+        self.assertEqual(self.attempts(), [1], "asked for: no attempt")
+        self.assertEqual(self.trust().get("abandons"), 1, "nor an abandon")
+
+    def test_a_helpers_bad_spec_is_its_fault_not_the_games(self):
+        """The server checked the spec, and offers a job only to a helper of its jobs build: a helper's ``bad_spec``
+        queues the job again (an attempt), counts a helper fault on its machine (audited the first time) and backs the
+        machine off; another machine plays the game."""
+        from citar.db.models import AuditLog
+        self.grant("alice", ["lab"])
+        e, conn = self.connect()
+        self.submit("alice", duels("bad-spec-liar", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        e.frame({"t": "job_reject", "run": offer["run"], "reason": "bad_spec"})
+        d.tick()
+        self.assertEqual([(j[1], j[3]) for j in self.jobs()], [("queued", 1)])
+        trust = self.trust()
+        self.assertEqual((trust["helper_faults"], trust["last_helper_fault"]["run"]), (1, offer["run"]))
+        with db.session() as s:
+            self.assertEqual(s.query(AuditLog).filter(AuditLog.action == "server.helper_fault").count(), 1)
+        self.assertIn("bad_spec", d.backoff(self.sid))
+        other = Fake("sv_host", name="this server")
+        d._own.append(other)
+        d.tick()
+        self.assertEqual(len(other.offers), 1, "played elsewhere")
+
+    def test_a_helpers_run_that_no_machine_could_play_is_its_fault_not_the_games(self):
+        """A helper's ``job_failed`` that is not retryable fails nothing for good: the job is queued again (an attempt),
+        a helper fault counted, the machine backed off."""
+        self.grant("alice", ["lab"])
+        e, conn = self.connect()
+        self.submit("alice", duels("not-retryable", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        e.frame({"t": "job_accept", "run": offer["run"]})
+        e.frame({"t": "job_failed", "run": offer["run"], "code": "internal", "message": "no machine could",
+                 "retryable": False})
+        d.tick()
+        self.assertEqual([(j[1], j[3]) for j in self.jobs()], [("queued", 1)])
+        self.assertEqual(self.trust()["helper_faults"], 1)
+        self.assertIn("fault", d.backoff(self.sid))
+        self.assertEqual(d.published["experiments"]["not-retryable"]["failed"], [])
+
+    def test_a_game_its_helpers_own_pauses_ran_out_of_time_goes_to_another_machine(self):
+        """A run held by its helper's own pauses past its deadline expires as no attempt and no abandon (P4.5.5), and
+        that machine is not offered the game again for the hour (another is at once): its helper's word cannot keep a
+        game from the others. A run a benchmark held is offered to its machine again."""
+        self.grant("alice", ["lab"])
+        clock = Clock()
+        e, conn = self.connect()
+        self.submit("alice", duels("held-by-its-helper", 1))
+        d = self.dispatcher([], remotes=self.registry, clock=clock)
+        d.tick()
+        (offer,) = self.offers(conn)
+        e.frame({"t": "job_accept", "run": offer["run"]})
+        d.tick()
+        clock.t += 1.0
+        e.frame({"t": "job_progress", "run": offer["run"], "round": 3, "of": 30, "elapsed_s": 1.0, "cpu_s": 0.5,
+                 "paused_s": 0.0, "peak_mb": 3.0, "paused": True})
+        d.tick()
+        clock.t += 2 * offer["deadline_s"] + D.EXPIRY_GRACE_SECONDS + 1
+        d.tick()
+        with db.session() as s:
+            row = s.get(CpuJobRun, offer["run"])
+            self.assertEqual((row.state, row.error["message"]), ("expired", "past its deadline (its pauses)"))
+        self.assertEqual(self.attempts(), [0])
+        self.assertFalse(self.trust().get("abandons"))
+        self.assertEqual(e.free, 1, "its thread is free for other games")
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(len(self.offers(conn)), 1, "not offered to the machine whose own pauses held it")
+        other = Fake("sv_host", name="this server")
+        d._own.append(other)
+        d.tick()
+        self.assertEqual(len(other.offers), 1, "another machine plays it at once")
+        other.play(other.offers[0][0])
+        d.tick()
+        self.assertEqual(len(self.lines("held-by-its-helper")), 1)
+        d._own.remove(other)
+        clock.t += D.ABANDON_WINDOW
+        # a benchmark's hold is the server's own: its machine gets the game again
+        self.submit("alice", duels("held-by-a-benchmark", 1))
+        d.tick()
+        offer2 = self.offers(conn)[1]
+        self.assertEqual(offer2["spec"]["exp"], "held-by-a-benchmark")
+        e.frame({"t": "job_accept", "run": offer2["run"]})
+        d.tick()
+        lease = S.get().lease(self.sid, "dry-run", kind="benchmark", label="benchmark run")
+        try:
+            d.tick()
+            clock.t += 2 * offer2["deadline_s"] + D.EXPIRY_GRACE_SECONDS + 1
+            d.tick()
+        finally:
+            lease.release()
+        d.tick()
+        with db.session() as s:
+            self.assertEqual(s.get(CpuJobRun, offer2["run"]).state, "expired")
+        self.assertEqual([f["spec"]["exp"] for f in self.offers(conn)][2:], ["held-by-a-benchmark"],
+                         "offered to its machine again")
+
+    def test_a_result_that_crossed_its_experiments_deletion_is_acknowledged_and_dropped(self):
+        """PROTOCOL.md: a run whose job is cancelled while it plays is aborted; a result that crossed the abort is
+        acknowledged (the helper forgets it) and dropped: no line, no event, the run ``aborted``."""
+        self.grant("alice", ["lab"])
+        e, conn = self.connect()
+        self.submit("alice", duels("deleted-mid-run", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        e.frame({"t": "job_accept", "run": offer["run"]})
+        d.tick()
+        (lab.QUEUE / "deleted-mid-run.json").unlink()
+        d.tick()
+        self.assertIn(offer["run"], [f["run"] for f in conn.frames if f.get("t") == "job_abort"])
+        e.frame(self.result(offer))
+        d.tick()
+        self.assertIn(offer["run"], [f["run"] for f in conn.frames if f.get("t") == "job_result_ack"])
+        with db.session() as s:
+            row = s.get(CpuJobRun, offer["run"])
+            self.assertEqual((row.state, row.error["code"], row.result_hash), ("aborted", "cancelled", None))
+        self.assertEqual(self.lines("deleted-mid-run"), [])
+        self.assertEqual(self.events(), [])
+        self.assertFalse(self.trust().get("abandons"))
+
+    def test_a_benchmark_that_ends_while_its_helper_is_away_leaves_nothing_paused(self):
+        """A helper's ``jobs_pause`` holds for its connection (PROTOCOL.md): a lease that ended while it was away sends
+        nothing at its return, and one still live pauses it again after its welcome."""
+        e, conn = self.connect()
+        d = self.dispatcher([], remotes=self.registry)
+
+        def told(c):
+            return [f["t"] for f in c.frames if f.get("t") in ("jobs_pause", "jobs_resume")]
+        lease = S.get().lease(self.sid, "dry-run", kind="benchmark", label="benchmark run")
+        d.tick()
+        self.assertEqual(told(conn), ["jobs_pause"])
+        e.disconnected(conn)
+        lease.release()
+        d.tick()
+        self.assertFalse(e.paused)
+        _e, conn2 = self.connect()
+        d.tick()
+        self.assertEqual(told(conn2), [])
+        lease = S.get().lease(self.sid, "dry-run", kind="benchmark", label="benchmark run")
+        self.addCleanup(lease.release)
+        d.tick()
+        self.assertEqual(told(conn2), ["jobs_pause"])
+        e.disconnected(conn2)
+        _e, conn3 = self.connect()
+        self.assertEqual(told(conn3), ["jobs_pause"], "paused again while the lease lasts")
+
+    def test_a_run_carried_across_a_restart_settles_its_credits_into_its_budget(self):
+        """The budget holds were the old process's: a run its helper still plays when the server comes back settles its
+        credits into its grant's budget all the same (P4.5.7)."""
+        from citar.db.models import BudgetEntry
+        from citar.jobs import remote
+        from citar.pool import budgets
+        self.budget(1000)
+        e, conn = self.connect()
+        self.submit("alice", duels("across-a-restart", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        e.frame({"t": "job_accept", "run": offer["run"]})
+        d.tick()
+        # the server restarts: a new process, with neither the old one's budget holds nor its executors
+        d.stop()
+        budgets.reset_keeper()
+        self.registry = remote.Remotes()
+        d2 = self.dispatcher([], remotes=self.registry)
+        e2, conn2 = self.connect()
+        self.assertEqual(d2.welcome_jobs(self.sid, [offer["run"]], []), ([offer["run"]], [], []))
+        d2.tick()
+        self.assertEqual(e2.holds, {})
+        e2.frame(self.result(offer))
+        d2.tick()
+        self.led.flush()
+        self.assertIn(offer["run"], [f["run"] for f in conn2.frames if f.get("t") == "job_result_ack"])
+        with db.session() as s:
+            (ev,) = s.scalars(select(ComputeEvent).where(ComputeEvent.request_id == offer["run"])).all()
+            (entry,) = s.scalars(select(BudgetEntry)).all()
+            self.assertAlmostEqual(entry.actual, ev.credits, places=6)
+            self.assertEqual(entry.user_id, self.ids["alice"])
+
+    def test_a_tick_with_2000_queued_jobs_and_ten_helpers_that_refuse_them(self):
+        """P4.7.9's tick bound with the executors being helpers (the review's probe): ten trusted helper machines of
+        bob's, each ready with a free thread, none of which may play alice's 2,000 queued jobs (no grant lends them to
+        her); the host's one thread busy. Under 50 ms a tick, the median of 100 (three times that on CI)."""
+        from tests.helperfake import StubConnection, hello, settings as site_settings
+        cpu = {"enabled": True, "threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"],
+               "yield_to_llm": True}
+        sids = []
+        with db.session() as s:
+            for k in range(10):
+                row = Server(owner_id=self.ids["bob"], name=f"Bob's PC {k}", kind="owned", provider="lmstudio",
+                             reach="worker", max_concurrent=1, group_id=self.group_id, trust_tier="trusted",
+                             capabilities={"cpu": dict(cpu)})
+                s.add(row)
+                s.flush()
+                sids.append(row.id)
+        servers.invalidate()
+        for sid in sids:
+            site = site_settings(llm=False)
+            site["cpu"] = dict(cpu)
+            conn = StubConnection(sid, site=site)
+            h = hello(hostname="bob-pc", llm=False)
+            h["helper"]["jobs_build"] = engine_api.jobs_build()
+            h["cpu"] = {"enabled": True, "ceiling": {"threads": 1, "cpu_percent": 50, "memory_mb": 1024,
+                                                      "work": ["lab_game"]},
+                        "limits": {"cpu": "hard", "memory": "hard"}, "verifiable": True, "bots": [],
+                        "ruleset": "0" * 64}
+            conn.hello, conn.jobs_build, conn.memory_per_run_mb = h, h["helper"]["jobs_build"], 500
+            conn.acknowledge({"effective": {"llm": {"enabled": False, "slots": 0}, "cpu": dict(cpu)},
+                              "capped": [], "limits": {"cpu": "hard", "memory": "hard"}, "memory_per_run_mb": 500})
+            self.registry.get(sid, sid).connected(conn)
+        self.submit("alice", duels("big", 2000))
+        busy = Fake("sv_host", name="this server", threads=1)      # takes every job, its one thread busy
+        d = self.dispatcher([busy], remotes=self.registry)
+        with mock.patch.object(D, "WINDOW", 1000):
+            d.tick()
+        self.assertGreaterEqual(sum(1 for j in d.jobs.values() if j.state == "queued"), 1990)
+        self.assertEqual(sum(1 for e in self.registry.all() if e.free > 0), 10, "ten helpers ready")
+        times = []
+        for _ in range(100):
+            t = time.perf_counter()
+            d.tick()
+            times.append(time.perf_counter() - t)
+        median = statistics.median(times)
+        print(f"\ndispatcher tick with ten refusing helpers: median {median * 1000:.1f} ms, p95 "
+              f"{sorted(times)[94] * 1000:.1f} ms over 100 ticks (2,000 jobs)")
+        self.assertLess(median, 0.050 * (3 if ON_CI else 1))

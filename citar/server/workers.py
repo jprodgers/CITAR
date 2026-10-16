@@ -362,6 +362,8 @@ class WorkerConnection:
         #: The site's settings it was last sent, and its last acknowledgement as it sent it.
         self.settings: Optional[dict] = settings
         self.ack: Optional[dict] = None
+        #: The settings its last acknowledgement answered (what an acknowledgement sent ``again`` repeats).
+        self.acked: Optional[dict] = None
         #: The ``settings`` frames sent and not yet acknowledged, oldest first: the helper answers them in order over
         #: its one socket, so each acknowledgement settles the oldest (``acknowledge``). Recorded and queued for
         #: sending under one lock, so this order is the order the frames go out in. Nothing else is done under it.
@@ -473,13 +475,19 @@ class WorkerConnection:
 
     def acknowledge(self, ack: dict) -> list:
         """Apply the helper's ``settings_ack``: it answers the oldest ``settings`` frame not yet answered, and is
-        held to what that frame asked. Returns the fields where it claimed more than that (a correct helper never
-        does). The scheduler reads the newest acknowledgement held to the site's newest settings (``effective``), and
-        is told before a caller waiting for this acknowledgement wakes (``WorkerHub.push_settings``), so what that
-        caller reads is in effect."""
+        held to what that frame asked; one sent ``again`` (its job host's figures, which came after it) answers none
+        and is held to what its first sending answered. Returns the fields where it claimed more than that (a correct
+        helper never does). The scheduler reads the newest acknowledgement held to the site's newest settings
+        (``effective``), and is told before a caller waiting for this acknowledgement wakes
+        (``WorkerHub.push_settings``), so what that caller reads is in effect."""
         with self._settings_lock:
-            entry = self._unacked.popleft() if self._unacked else None
-            asked = entry.settings if entry is not None else self.settings
+            if ack.get("again"):
+                entry = None
+                asked = self.acked if self.acked is not None else self.settings
+            else:
+                entry = self._unacked.popleft() if self._unacked else None
+                asked = entry.settings if entry is not None else self.settings
+                self.acked = asked
             self.ack = ack
         over = clamp(asked, ack)[1] if asked is not None else []
         _helper_changed(self.server_id)
@@ -630,10 +638,16 @@ def cpu_threads_of(scan) -> Optional[int]:
     return threads if isinstance(threads, int) and not isinstance(threads, bool) and threads > 0 else None
 
 
+class JobsUnknown(Exception):
+    """The job dispatcher could not say which of a helper's runs it holds (``welcome_jobs``)."""
+
+
 def welcome_jobs(server_id: str, server_name: str, hello: dict) -> tuple:
-    """The welcome's ``jobs`` for ``hello`` (P4.2.2): from the job dispatcher, which holds the machine's runs; with no
-    dispatcher (or a helper that plays no jobs) nothing is kept and no held result wanted. Off the event loop: it takes
-    the dispatcher's lock."""
+    """The welcome's ``jobs`` for ``hello`` (P4.2.2): from the job dispatcher, which holds the machine's runs. A helper
+    that plays no jobs holds none. With no dispatcher in this process (one not started yet, or stopping) nothing is
+    decided: its runs are kept and its held results wanted (they wait in its executor for a dispatcher). Raises
+    ``JobsUnknown`` when the dispatcher failed to answer: a welcome then would drop every run it plays and have it delete
+    every result it holds. Off the event loop: it takes the dispatcher's lock."""
     running, results = list(hello.get("running") or []), list(hello.get("results") or [])
     if (hello.get("helper") or {}).get("jobs_build") is None:
         return [], running, []
@@ -641,12 +655,12 @@ def welcome_jobs(server_id: str, server_name: str, hello: dict) -> tuple:
     remote.registry().get(server_id, server_name)
     d = D.current()
     if d is None:
-        return [], running, []
+        return running, [], results
     try:
         return d.welcome_jobs(server_id, running, results)
-    except Exception:
+    except Exception as exc:
         log.exception("could not ask the job dispatcher about %s's runs", server_id)
-        return [], running, []
+        raise JobsUnknown(str(exc)) from exc
 
 
 def fingerprint(public_key: str) -> str:
@@ -1243,8 +1257,14 @@ async def serve(websocket) -> None:
         # now, right after the welcome
         if connection.push_settings(await asyncio.to_thread(site_settings, found.server_id))[1]:
             _helper_changed(found.server_id)
-        # the runs it still plays that the dispatcher holds for it are kept, and the held results it wants sent again
-        keep, drop, resend = await asyncio.to_thread(welcome_jobs, found.server_id, found.server_name, hello)
+        # the runs it still plays that the dispatcher holds for it are kept, and the held results it wants sent again;
+        # when the dispatcher cannot say, no welcome (which would throw its work away): 1011 has the helper connect
+        # again with backoff, keeping its runs and its results (PROTOCOL.md, "Close codes")
+        try:
+            keep, drop, resend = await asyncio.to_thread(welcome_jobs, found.server_id, found.server_name, hello)
+        except JobsUnknown:
+            await websocket.close(code=HP.CLOSE_SERVER_ERROR)
+            return
         executor = _executor(found.server_id) if (hello.get("helper") or {}).get("jobs_build") else None
         if executor is not None:
             executor.connected(connection)
@@ -1323,9 +1343,10 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
         executor.frame(data)
     elif t == "settings_ack":
         # held to the settings frame it answers, not to newer ones it has not seen yet: an acknowledgement that
-        # crossed a push is not an overclaim
-        if data.get("memory_per_run_mb") is not None:
-            connection.memory_per_run_mb = data["memory_per_run_mb"]
+        # crossed a push is not an overclaim. Its memory a run is its job host's now: one without it says no host runs
+        # for these settings yet (the same acknowledgement comes ``again`` with it once one is ready), so the old
+        # figure is not kept
+        connection.memory_per_run_mb = data.get("memory_per_run_mb")
         over = connection.acknowledge(data)
         executor = _executor(sid)
         if executor is not None and executor.conn is connection:

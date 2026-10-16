@@ -66,12 +66,23 @@ thread). The usage ledger gets the game's activity and the time its machine held
 
 **Helpers** (P4.5.6, P4.2.5): a remote run's result is acknowledged (``job_result_ack``) once it is committed; a
 second result for a settled run is acknowledged again when its hashes are the same and recorded as a claim failure on
-the machine when they differ; a late result (its run expired, failed or aborted) is acknowledged and dropped, neither
-counted nor credited; a late accept (its offer expired) is answered ``job_abort``. Re-offers to a helper back off per
-reject reason, 2 s doubling to 10 minutes: ``busy`` and ``quiet`` until a ``status`` shows room, the reasons its
-settings decide until its next ``settings_ack`` or hello. Its run's event is given by the machine's owner and, until
-replicas exist (4-11), ``unverified``, its CPU also bounded by 1.5 times the job's reference cost; a run under a grant
-with a budget settles its credits into that budget.
+the machine when they differ; a late result (its run expired, failed or aborted, or its job cancelled while it played)
+is acknowledged and dropped, neither counted nor credited; a late accept (its offer expired) is answered ``job_abort``.
+Re-offers to a helper back off per reject reason, 2 s doubling to 10 minutes: ``busy`` and ``quiet`` until a
+``status`` shows room, the reasons its settings decide until its next ``settings_ack`` or hello. Its run's event is
+given by the machine's owner and, until replicas exist (4-11), ``unverified``, its CPU also bounded by 1.5 times the
+job's reference cost; a run under a grant with a budget holds the job's expected credits from the moment it is picked
+(a hard budget with no room keeps that owner's jobs from the machine for the tick) and settles its credits into that
+budget (a run carried across a restart too). An offer that could not be sent, or that went with its helper's
+connection, is nobody's abandon and no attempt.
+
+**A helper's word is not the game's fault** (P4.6): the server built and checked every spec and offers a job only to a
+helper of its own jobs build, so a helper's ``bad_spec`` or a run it fails as not retryable queues the job again (an
+attempt), counts ``trust.helper_faults`` on its machine and backs it off; a ``job_aborted`` the dispatcher never asked
+for is an abandon and an attempt; a helper that stops (``aborted_locally``) gives its games back at no cost and is
+offered nothing until its next hello; a run its own pauses ran out of time (no attempt, no abandon) is not offered to
+that machine again for an hour unless a benchmark's pause explains it, and a ``deadline`` failure is pause-caused only
+when the server saw the run last twice its deadline. So no helper can keep a game from the other machines.
 
 **Failures** (``_failed``): a retryable one queues the job again, at most ``MAX_ATTEMPTS`` times (then ``failed``,
 shown on the Lab page, and queued again at the next start or by an administrator's retry); a ``memory`` one (the
@@ -231,6 +242,7 @@ class Run:
     held_since: Optional[float] = None      # when that report arrived (its pause goes on from there)
     bench_since: Optional[float] = None     # when a benchmark began holding its executor, while it does
     bench_s: float = 0.0                    # the benchmarks' holds before that
+    conn: Any = None                        # a helper's connection its offer went over (an offer is lost with it)
 
 
 @dataclass
@@ -328,6 +340,8 @@ class Dispatcher:
         self._pending: list = []        # (exp, line, game, run): accepted results whose line the file refused
         self._rejects: dict = {}        # executor -> (offered nothing until, the wait, why); a helper's: per reason
         self._held_remote: dict = {}    # job -> a helper's run in flight when the server started (``recover``)
+        self._asked: set = set()        # the helpers' runs the dispatcher asked to stop (``job_abort``), in flight
+        self._shun: dict = {}           # (job, machine) -> until when the job is not offered to that machine again
         self._forced = 0
         self._requests: deque = deque()     # administrators' retries, served at the next tick
         self.jobs_build = engine_api.jobs_build()
@@ -661,7 +675,7 @@ class Dispatcher:
                 row.state = "cancelled"
             if j.run and j.run in self.runs:
                 run = self.runs[j.run]
-                run.executor.abort(run.id, "its experiment was deleted")
+                self._abort(run, "its experiment was deleted")
             self.jobs.pop(j.id, None)
         s.execute(update(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
                                        CpuJob.state == "failed").values(state="cancelled"))
@@ -1044,8 +1058,16 @@ class Dispatcher:
         elif t == "job_reject":
             self._rejected(s, e, run, f, wall, at)
         elif t == "job_aborted":
-            self._end(s, run, "aborted", {"code": "aborted", "message": "aborted"}, wall)
-            self._requeue(s, run, attempt=False)
+            if e.kind == "local" or run.id in self._asked:
+                self._end(s, run, "aborted", {"code": "aborted", "message": "aborted"}, wall)
+                self._requeue(s, run, attempt=False)
+            else:
+                # a helper stopped a run nobody asked it to stop: an abandon, and an attempt (a correct helper answers
+                # only the server's ``job_abort`` so, and lets a run go otherwise with ``job_failed``)
+                self._end(s, run, "aborted", {"code": "abandoned",
+                                              "message": "its helper stopped it though the server did not ask"}, wall)
+                self._requeue(s, run, attempt=True)
+                self._abandoned(s, run.machine, at)
 
     def _reconnected(self, s, e, f: dict, now: float) -> None:
         """A helper reconnected: the runs its hello still plays and the dispatcher holds go on, their silence counted
@@ -1066,6 +1088,13 @@ class Dispatcher:
         for rid in f.get("lost") or []:
             run = self.runs.get(rid)
             if run is None or run.executor is not e:
+                continue
+            if run.state == "offered":
+                # its offer went with the connection, unanswered: the game never started, so it is offered again as
+                # it was, neither an attempt nor an abandon
+                self._end(s, run, "failed", {"code": "lost", "message": "its offer was lost with its helper's "
+                                                                        "connection"}, wall)
+                self._requeue(s, run, attempt=False)
                 continue
             self._failed(s, e, run, {"code": "host", "retryable": True,
                                      "message": "its helper reconnected without it (it restarted, or its job host "
@@ -1126,6 +1155,7 @@ class Dispatcher:
         if error is not None:
             row.error = error
         self.runs.pop(run.id, None)
+        self._asked.discard(run.id)
         release = getattr(run.executor, "release", None)
         if release is not None:
             release(run.id)
@@ -1175,8 +1205,11 @@ class Dispatcher:
             run.peak_mb = max(run.peak_mb, min(max(0.0, float(f["peak_mb"])), float(MEM_MAX)))
         paused = self._paused(run, at)
         run.paused_s = max(run.paused_s, paused)
+        # a helper's word that its pause ran a run out of time holds only when the server saw it last that long: its job
+        # host ends a run held by a pause at twice its deadline in all (P4.3.6)
         caused = (code == "deadline" and run.started_at is not None
-                  and pause_caused(run.started_at, run.deadline_s, paused, at))
+                  and pause_caused(run.started_at, run.deadline_s, paused, at)
+                  and (local or at - run.started_at >= 2.0 * run.deadline_s - EXPIRY_GRACE_SECONDS))
         error = {"code": code, "message": message}
         if caused:
             error["pause_caused"] = True
@@ -1189,20 +1222,29 @@ class Dispatcher:
             # the job host ends a run held past twice its deadline itself, before the server's backstop: its pause
             # (a benchmark's) ran it out of time, not its play, so neither an attempt nor an abandon (P4.5.5)
             self._requeue(s, run, attempt=False)
+            self._shun_unless_benched(run, at)
             if job is not None:
                 lab.log(f"{job.exp} #{job.i} on {e.name}: held by a pause past its deadline ({message}); queued "
                         "again, not counted as an attempt")
             return
         if code == "aborted_locally":
             # its helper stopped (its owner stopped lending the CPU): the game did nothing wrong, so it is played
-            # again elsewhere at once, neither an attempt nor an abandon
+            # again elsewhere at once, neither an attempt nor an abandon; the machine is offered nothing until its
+            # helper's next hello (an honest one closes its connection as it stops)
             self._requeue(s, run, attempt=False)
+            if not local:
+                self._back_off(e, "stopped", at, "its helper stopped")
             if job is not None:
                 lab.log(f"{job.exp} #{job.i} on {e.name}: its helper stopped ({message}); queued again")
             return
         retryable = bool(f.get("retryable", True))
-        if retryable:
+        if retryable or not local:
             self._requeue(s, run, attempt=True)
+            if not retryable:
+                # the server built and checked the spec itself, and the helper has its jobs build: a run no machine
+                # could play is its fault (broken or lying), not the game's, which is played again elsewhere
+                self._helper_fault(s, e, run.id, f"it failed a run as not retryable ({code}): {message[:200]}")
+                self._back_off(e, "fault", at, "its helper failed a run it says no machine could play")
         else:
             from citar.db.models import CpuJob
             row = s.get(CpuJob, run.job)
@@ -1215,6 +1257,45 @@ class Dispatcher:
                     exp.failed.add(job.i)
         if job is not None:
             lab.log(f"{job.exp} #{job.i} failed on {e.name} ({code}): {message.splitlines()[0] if message else ''}")
+
+    def _shun_unless_benched(self, run: Run, at: float) -> None:
+        """A remote run that a pause ran out of time (no attempt, no abandon, P4.5.5): unless the server's own pause (a
+        benchmark's) explains it, its job is not offered to that machine again for ``ABANDON_WINDOW``, so a helper whose
+        own pauses hold a game (its model's work, or a helper that says so falsely) cannot keep it from other
+        machines."""
+        if run.executor.kind == "local" or run.started_at is None:
+            return
+        bench = run.bench_s + (max(0.0, at - run.bench_since) if run.bench_since is not None else 0.0)
+        if pause_caused(run.started_at, run.deadline_s, bench, at):
+            return
+        self._shun[(run.job, run.machine)] = at + ABANDON_WINDOW
+        log.info("job %s is not offered to %s again for an hour: its own pauses held it past its deadline", run.job,
+                 run.machine)
+
+    def _back_off(self, e, reason: str, at: float, why: str) -> None:
+        """A helper is offered nothing for a while for ``reason`` (P4.2.5's re-offer backoff): 2 s, doubling to 10
+        minutes while the reason recurs, until what clears it comes (``_backed_off``)."""
+        per = self._rejects.setdefault(e.id, {})
+        _until, wait, _why, _at = per.get(reason, (0.0, REJECT_FIRST / 2, "", 0.0))
+        wait = min(REJECT_MAX, wait * 2)
+        per[reason] = (at + wait, wait, why, at)
+
+    def _helper_fault(self, s, e, rid: str, why: str) -> None:
+        """A helper's word against the server's own checks (a spec it refused that the server checked with the same jobs
+        build, a run it says no machine could play): counted on its machine's row (``trust.helper_faults``, the last
+        one's run and reason), the first one audited, as a claim failure is."""
+        from citar.auth import audit
+        from citar.db.models import Server
+        row = s.get(Server, e.id)
+        log.warning("helper fault on %s, run %s: %s", e.id, rid, why)
+        if row is None:
+            return
+        trust = dict(row.trust or {})
+        trust["helper_faults"] = int(trust.get("helper_faults") or 0) + 1
+        trust["last_helper_fault"] = {"run": rid, "why": why, "at": utcnow().isoformat()}
+        row.trust = trust
+        if trust["helper_faults"] == 1:
+            audit.record(s, "server.helper_fault", object_type="server", object_id=e.id, run=rid, why=why)
 
     def _memory_death(self, s, e, run: Run, f: dict, job: Optional[Job], local: bool) -> None:
         """A run whose host died of memory: its job's ``mem_mb`` raised to the largest peak the run reported (its
@@ -1246,11 +1327,14 @@ class Dispatcher:
         if e.kind != "local":
             # a helper: offered nothing for a while, per reason, 2 s doubling to 10 minutes (P4.2.5), until what
             # clears that reason comes (``_available``)
-            per = self._rejects.setdefault(e.id, {})
-            _until, wait, _why, _at = per.get(reason, (0.0, REJECT_FIRST / 2, "", 0.0))
-            wait = min(REJECT_MAX, wait * 2)
-            when = self.clock() if at is None else at
-            per[reason] = (when + wait, wait, f"its helper refused a job ({reason})", when)
+            self._back_off(e, reason, self.clock() if at is None else at, f"its helper refused a job ({reason})")
+            if reason == "bad_spec":
+                # the server built and checked the spec itself, and offers a job only to a helper of its jobs build:
+                # a helper's ``bad_spec`` is the helper's fault (broken or lying), not the game's, which is played
+                # again elsewhere (an attempt, so a job cannot go round for ever)
+                self._helper_fault(s, e, run.id, "it refused a spec the server checked (bad_spec)")
+                self._requeue(s, run, attempt=True)
+                return
         elif reason not in ("busy", "memory", "bad_spec"):
             # the executor refuses every job for now (unverifiable, another build): offered nothing for a while,
             # 2 s doubling to 10 minutes (P4.2.5), until it sends a result
@@ -1258,6 +1342,7 @@ class Dispatcher:
             wait = min(REJECT_MAX, wait * 2)
             self._rejects[e.id] = (self.clock() + wait, wait, f"it refused a job ({reason}): {f.get('message')}")
         if reason == "bad_spec":
+            # the server's own job host refused a spec the server made: the game cannot be played
             from citar.db.models import CpuJob
             row = s.get(CpuJob, run.job)
             if row is not None:
@@ -1285,7 +1370,14 @@ class Dispatcher:
                 v = max(0.0, float(outcome[k]))
                 setattr(run, k, max(run.peak_mb, min(v, float(MEM_MAX))) if k == "peak_mb" else v)
         if job is None or row is None or row.state == "cancelled":
-            self._end(s, run, "done", None, wall)
+            # its job was cancelled while it played (its experiment deleted, its abort sent): a result that crossed the
+            # abort is acknowledged and dropped (PROTOCOL.md), neither lined nor credited
+            self._end(s, run, "aborted", {"code": "cancelled", "message": "its job was cancelled while it played"},
+                      wall)
+            ack = None if e.kind == "local" else getattr(e, "ack", None)
+            if ack is not None:
+                after.append(lambda: ack(run.id))
+            lab.log(f"run {run.id} on {e.name}: its result came after its job was cancelled; dropped")
             return
         try:
             if not isinstance(result, dict):
@@ -1351,12 +1443,17 @@ class Dispatcher:
 
         def settle():
             # the run's credits into its grant's budget, as a model step's are (P4.5.7): in memory now, its entry
-            # written with the event
-            if hold is None:
+            # written with the event; a run carried across the server's restart lost its hold with the old process, and
+            # takes one now, whatever the budget has left (the work is done)
+            h = hold
+            if h is None and not local:
+                late = getattr(e, "late_hold", None)
+                h = late(job) if late is not None else None
+            if h is None:
                 return []
             from citar.pool import budgets
-            budgets.keeper().settle(hold, event["credits"])
-            return [(hold, event["credits"])]
+            budgets.keeper().settle(h, event["credits"])
+            return [(h, event["credits"])]
 
         def written():
             ack = None if local else getattr(e, "ack", None)
@@ -1422,12 +1519,18 @@ class Dispatcher:
         for run in list(self.runs.values()):
             e = run.executor
             if run.state == "offered" and now - run.offered_at > OFFER_TTL_SECONDS:
-                expired.append((run, "no answer to its offer within 30 s", True))
+                if e.kind != "local" and (not getattr(e, "online", True) or getattr(e, "conn", None) is not run.conn):
+                    # its offer went with its helper's connection, unanswered: nobody's abandon, no attempt
+                    expired.append((run, "its offer was lost with its helper's connection", False))
+                else:
+                    expired.append((run, "no answer to its offer within 30 s", True))
             elif run.state == "running" and run.started_at is not None:
                 paused = self._paused(run, now)
                 if now > expires_at(run.started_at, run.deadline_s, paused):
                     caused = pause_caused(run.started_at, run.deadline_s, paused, now)
                     run.paused_s = max(run.paused_s, paused)
+                    if caused:
+                        self._shun_unless_benched(run, now)
                     expired.append((run, "past its deadline" + (" (its pauses)" if caused else ""), not caused))
                 elif (getattr(e, "online", True) and not run.paused and run.bench_since is None
                       and run.last_progress is not None and now - run.last_progress > SILENT_SECONDS):
@@ -1461,6 +1564,7 @@ class Dispatcher:
                 log.exception("closing executor %s failed", getattr(e, "id", "?"))
         self.jobs.clear()
         self.runs.clear()
+        self._asked.clear()
         self.exps.clear()
         self._lines.clear()
         self._queue_sig = None
@@ -1479,10 +1583,12 @@ class Dispatcher:
             row.trust = trust
 
     # -------------------------------------------------------------- availability and matching
-    #: What clears a helper's re-offer backoff (P4.2.5): a ``status`` that shows room, or its next acknowledgement of
-    #: settings (or hello).
+    #: What clears a helper's re-offer backoff (P4.2.5): a ``status`` that shows room, its next acknowledgement of
+    #: settings (or hello), or its next hello (a helper that stopped). The others (``bad_spec``, ``fault``: the helper's
+    #: word against the server's checks) only their time clears.
     ROOM_CLEARS = ("busy", "quiet")
     ACK_CLEARS = ("build", "kind", "disabled", "limits", "unverifiable", "memory")
+    HELLO_CLEARS = ("stopped",)
 
     def _backed_off(self, e, now: float) -> Optional[str]:
         """Why a helper is offered nothing for now after it refused a job (its reasons' backoff), dropping the reasons
@@ -1491,8 +1597,10 @@ class Dispatcher:
         if not isinstance(per, dict):
             return None
         room, ack = getattr(e, "last_room", 0.0), getattr(e, "last_ack", 0.0)
+        hello = getattr(e, "last_hello", 0.0)
         for reason, (until, _wait, why, at) in list(per.items()):
-            if (reason in self.ROOM_CLEARS and room > at) or (reason in self.ACK_CLEARS and ack > at):
+            if ((reason in self.ROOM_CLEARS and room > at) or (reason in self.ACK_CLEARS and ack > at)
+                    or (reason in self.HELLO_CLEARS and hello > at)):
                 del per[reason]
             elif now < until:
                 return why
@@ -1556,7 +1664,10 @@ class Dispatcher:
 
     def _match(self, now: float) -> None:
         """Offer queued jobs to executors with free threads: the highest priority first, round-robin across owners
-        within it, each executor the first job it does not refuse."""
+        within it, each executor the first job it does not refuse (and whose budget holds it, for a helper's). An offer
+        that could not be sent ends at once, its job waiting again, nobody's abandon."""
+        for key in [k for k, until in self._shun.items() if now >= until]:
+            del self._shun[key]
         ready = [e for e in self.executors if e.free > 0 and self._available(e, now) is None]
         queued = [j for j in self.jobs.values() if j.state == "queued"]
         if not ready or not queued:
@@ -1564,57 +1675,102 @@ class Dispatcher:
         levels: dict = defaultdict(lambda: defaultdict(list))
         for j in sorted(queued, key=lambda j: (j.created, j.i)):
             levels[j.priority][j.owner_id or ""].append(j)
-        offers = []
+        offers, memo = [], {}
         for e in ready:
             for _ in range(e.free):
-                job = self._pick(e, levels)
-                if job is None:
+                picked = self._pick(e, levels, memo, now)
+                if picked is None:
                     break
-                offers.append((e, job))
+                offers.append((e, *picked))
         if not offers:
             return
         from citar import db
         from citar.db.models import CpuJob, CpuJobRun, new_id
         made, gone = [], []
-        with db.session() as s:
-            for e, job in offers:
-                row = s.get(CpuJob, job.id)
-                if row is None:
-                    gone.append(job)
-                    continue
-                cost = self.costs.of(job.kind, job.spec)["cpu_s"]
-                dl = deadline_s(cost, e.cpu_percent, e.cpus, e.threads, e.speed)
-                run = Run(id=new_id("cr_"), job=job.id, executor=e, machine=e.id, role="primary", state="offered",
-                          offered_at=now, deadline_s=dl, offered_wall=time.time())
-                at = utcnow()
-                s.add(CpuJobRun(id=run.id, job_id=job.id, machine_id=e.id[:40], executor=e.kind, role="primary",
-                                state="offered", offered_at=at,
-                                deadline_at=datetime.fromtimestamp(at.timestamp() + dl, timezone.utc)))
-                row.state = "running"
-                made.append((e, job, run))
+        try:
+            with db.session() as s:
+                for e, job, hold in offers:
+                    row = s.get(CpuJob, job.id)
+                    if row is None:
+                        gone.append((e, job, hold))
+                        continue
+                    cost = self.costs.of(job.kind, job.spec)["cpu_s"]
+                    dl = deadline_s(cost, e.cpu_percent, e.cpus, e.threads, e.speed)
+                    run = Run(id=new_id("cr_"), job=job.id, executor=e, machine=e.id, role="primary", state="offered",
+                              offered_at=now, deadline_s=dl, offered_wall=time.time(), conn=getattr(e, "conn", None))
+                    at = utcnow()
+                    s.add(CpuJobRun(id=run.id, job_id=job.id, machine_id=e.id[:40], executor=e.kind, role="primary",
+                                    state="offered", offered_at=at,
+                                    deadline_at=datetime.fromtimestamp(at.timestamp() + dl, timezone.utc)))
+                    row.state = "running"
+                    made.append((e, job, run, hold))
+        except Exception:
+            for e, _job, hold in offers:
+                _let_go(hold)
+            raise
         # committed: the view in memory takes the offers, and only then do the executors get them (a database that
         # refused them leaves every job waiting, as it was)
-        for job in gone:
+        for _e, job, hold in gone:
             self.jobs.pop(job.id, None)
-        for e, job, run in made:
+            _let_go(hold)
+        unsent = []
+        for e, job, run, hold in made:
             job.state, job.run = "running", run.id
             self.runs[run.id] = run
+            adopt = getattr(e, "adopt", None)
+            if adopt is not None:
+                adopt(run.id, hold)
             try:
                 e.offer(run.id, job, run.deadline_s)
-            except Exception:       # never answered: it expires after OFFER_TTL_SECONDS, and the others still go
-                log.exception("offering run %s to executor %s failed", run.id, getattr(e, "id", "?"))
+            except Exception as exc:
+                log.warning("offering run %s to executor %s failed: %s", run.id, getattr(e, "id", "?"), exc)
+                unsent.append((run, exc))
+        if unsent:
+            try:
+                with db.session() as s:
+                    for run, exc in unsent:
+                        self._end(s, run, "failed", {"code": "not_sent",
+                                                     "message": f"its offer could not be sent: {exc}"[:1000]})
+                        self._requeue(s, run, attempt=False)
+            except Exception:
+                self._reset("the database refused the offers that could not be sent")
+                raise
 
-    def _pick(self, e, levels: dict) -> Optional[Job]:
+    def _pick(self, e, levels: dict, memo: dict, now: float) -> Optional[tuple]:
+        """The next job ``e`` takes and its budget hold (None for none), or None. ``memo`` keeps, for the tick, each
+        executor's ``refuses`` by what it may look at (a job's kind, jobs build, memory and owner), so a tick with
+        thousands of queued jobs asks each executor a few times, not thousands (P4.7.9)."""
+        from citar.pool.budgets import BudgetExceeded
+        reserve = getattr(e, "reserve", None)
         for p in sorted(levels, reverse=True):
             owners = sorted(levels[p], key=lambda o: self.served.get(o, -1))
             for owner in owners:
                 jobs = levels[p][owner]
                 for k, job in enumerate(jobs):
-                    if e.refuses(job) is None:
-                        del jobs[k]
-                        self._served_n += 1
-                        self.served[owner] = self._served_n
-                        return job
+                    key = (e.id, job.kind, job.jobs_build, job.mem_mb, job.owner_id)
+                    why = memo.get(key, _UNASKED)
+                    if why is _UNASKED:
+                        why = memo[key] = e.refuses(job)
+                    if why is not None:
+                        continue
+                    until = self._shun.get((job.id, e.id))
+                    if until is not None and now < until:
+                        continue
+                    hold = None
+                    if reserve is not None:
+                        try:
+                            hold = reserve(job, self.costs.of(job.kind, job.spec)["cpu_s"])
+                        except BudgetExceeded as exc:
+                            # its owner's budget on this machine has no room: none of their jobs goes to it this tick
+                            for other in [m for m in memo if m[0] == e.id and m[4] == job.owner_id]:
+                                memo[other] = str(exc)
+                            memo[key] = str(exc)
+                            log.info("%s's budget on %s has no room for another run: %s", job.owner_id, e.id, exc)
+                            continue
+                    del jobs[k]
+                    self._served_n += 1
+                    self.served[owner] = self._served_n
+                    return job, hold
         return None
 
     @staticmethod
@@ -1798,8 +1954,15 @@ class Dispatcher:
             run = self.runs.get(run_id)
             if run is None:
                 return False
-            run.executor.abort(run.id, why)
+            self._abort(run, why)
             return True
+
+    def _abort(self, run: Run, why: str) -> None:
+        """Ask a run's executor to stop it, the run kept until its ``job_aborted`` (or its result, which crossed the
+        abort) comes: a helper's answer it asked for."""
+        if run.executor.kind != "local":
+            self._asked.add(run.id)
+        run.executor.abort(run.id, why)
 
     # -------------------------------------------------------------- what others read
     def _publish(self, now: float) -> None:
@@ -1872,6 +2035,17 @@ class Dispatcher:
             return [{"job": j.id, "exp": j.exp, "i": j.i, "kind": j.kind, "priority": j.priority,
                      "owner": j.owner_id, "mem_mb": j.mem_mb, "attempts": j.attempts,
                      "waiting": self.waiting(j, now)} for j in jobs]
+
+
+#: ``_pick``'s memo: an executor not asked yet about a shape of job.
+_UNASKED = object()
+
+
+def _let_go(hold) -> None:
+    """A budget hold whose run was never made or offered: let go, nothing spent."""
+    if hold is not None:
+        from citar.pool import budgets
+        budgets.keeper().release(hold)
 
 
 def _utc(wall: float) -> datetime:
