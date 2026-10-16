@@ -396,10 +396,29 @@ its standard input and output (`citar-jobs`).
 - **Re-offers back off** per machine and reject reason: 2 s doubling to 10 minutes. `busy` and
   `quiet` clear on a `status` that shows room; `build`, `kind`, `disabled`, `limits` and
   `unverifiable` on the next `settings_ack` or `hello`.
-- **Paused time is reported** (`paused_s`, from `yield_to_llm` and `jobs_pause`) and extends the
-  run's deadline on both sides, up to twice the deadline. The helper aborts a run past its deadline
-  itself (`job_failed` `deadline`), not counting paused time; the server's own timeout, extended the
-  same way, is the backstop.
+- **Paused time is reported** (`paused_s`, from `yield_to_llm` and `jobs_pause`, and `paused` while a
+  pause holds the run) and extends the run's deadline on both sides, up to twice the deadline. The
+  helper aborts a run past its deadline itself (`job_failed` `deadline`), not counting paused time;
+  the server's own timeout, extended the same way, is the backstop.
+- **The job host and the acknowledgement.** The helper runs its games in a job host, a child
+  process started when CPU work is on in effect (the site's settings and the machine's own switch
+  both say so) under the effective limits, and started again (between runs) when they change. A
+  `settings_ack` that turns CPU work on, or changes its limits, is sent once that host is `ready`
+  (or could not start, or 10 s have passed), so its `limits` and `memory_per_run_mb` are the host's
+  own; the dispatcher matches a job's `mem_mb` to `memory_per_run_mb`. A host that could not start
+  under the limits makes the helper refuse offers `limits` until one does.
+- **The helper's own checks of an offer**, in this order: `disabled` (CPU work is off in effect),
+  `quiet` (its local quiet hours), `unverifiable`, `build`, `kind` (not among the effective work
+  kinds), `bad_spec` (the spec's checks or its hash, by the helper's own copy of `citar-jobs`),
+  `limits` (no job host could be started), `memory` (`mem_mb` above the host's
+  `memory_per_run_mb`), `busy` (as many runs as the effective threads); the job host checks the
+  offer again and may refuse it itself.
+- **Pauses.** The helper holds every running game (the job host's `pause`) while a completion is in
+  flight and `cpu.yield_to_llm` is on, and between `jobs_pause` and `jobs_resume` whatever
+  `yield_to_llm` says; `status.jobs_paused` counts the runs held.
+- **Results are signed:** `signature` is ed25519 by the machine key over `CITAR-CLAIM-V1`, a zero
+  byte, and the claim's bytes: the claim as compact JSON (no spaces) with its fields in the order of
+  its table, `bots` sorted. The helper writes the whole `job_result` to its home before it sends it.
 - **A lost connection does not stop a run.** The next `hello` lists it in `running`, and the welcome
   says whether to keep it.
 - **Frames name only the helper's own runs.** A job frame naming a run that was not offered to this
@@ -538,9 +557,12 @@ ceiling of concurrent requests, the configured `max_concurrent`; 0 with `--no-ll
 says); `loaded` `bool`.
 
 **Cpu:** `enabled` `bool` (the machine's own switch: off unless its owner turned it on); `ceiling`
-Ceiling (the local ceiling); `limits` Limits (how hard this OS holds each limit); `verifiable`
-`bool` (the canary and the self-check passed); `bots` `[string 1..64] ≤64` (the bot versions compiled
-in); `ruleset` `hex64` (the ruleset's id).
+Ceiling (the local ceiling); `limits` Limits (how hard this OS holds each limit, as the helper's last
+job host said in its `ready`; `soft` for both before any host has said); `verifiable` `bool` (the
+canary and the self-check passed, run by the helper when it starts and again by each job host);
+`bots` `[string 1..64] ≤64` (the bot versions compiled in); `ruleset` `hex64` (the ruleset's id);
+`memory_per_run_mb` `int 0..16777216` *optional* (the memory each run may use on the helper's last
+job host, as its `ready` said; left out while no host has said).
 
 **Ceiling:** `threads` `int 0..1024`; `cpu_percent` `int 0..100`; `memory_mb` `int 0..16777216`;
 `work` `[kind] ≤3`.
@@ -599,6 +621,7 @@ file); `hardware_source` `"scan" | "file" | "none"`.
 | `effective` | `{llm: {enabled: bool, slots: int 0..16}, cpu: SiteCpu}` | what the helper will do |
 | `capped` | `[Capped] ≤7` | where its ceiling won |
 | `limits` | Limits | how hard this OS holds them |
+| `memory_per_run_mb` | `int 0..16777216` *optional* | the memory each run may use on the job host running for these settings (its `ready`'s); left out when none runs |
 
 **Capped:** one of `"llm.enabled"`, `"llm.slots"`, `"cpu.enabled"`, `"cpu.threads"`,
 `"cpu.cpu_percent"`, `"cpu.memory_mb"`, `"cpu.work"`, listed in this order.
@@ -737,6 +760,7 @@ it is not valid JSON).
 | `cpu_s` | `number` | CPU seconds it used |
 | `paused_s` | `number` | seconds it was paused |
 | `peak_mb` | `number` | its peak memory, counted |
+| `paused` | `bool` *optional* | whether it is held by a pause now (the server counts its pause on from this report) |
 
 ### `job_result` (helper)
 

@@ -212,6 +212,10 @@ object! {
         verifiable: bool = req(Ty::Bool),
         bots: Vec<String> = req(BOTS),
         ruleset: String = req(HEX64),
+        /// The memory each run may use on its job host, in MB, as the host last said in its
+        /// `ready` (4-10); left out while no host has said.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory_per_run_mb: Option<u64> = opt(MEMORY_MB),
     }
 }
 
@@ -368,6 +372,11 @@ object! {
         effective: Effective = req(Effective::TY),
         capped: Vec<Capped> = req(Ty::List { of: &CAPPED, min: 0, max: 7 }),
         limits: Limits = req(Limits::TY),
+        /// The memory each run may use on the job host the helper runs for these settings, in MB
+        /// (its `ready`'s, 4-10): what the dispatcher matches a job's `mem_mb` to. Left out while
+        /// no host runs for them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory_per_run_mb: Option<u64> = opt(MEMORY_MB),
     }
 }
 
@@ -627,6 +636,10 @@ object! {
         cpu_s: f64 = req(NUM),
         paused_s: f64 = req(NUM),
         peak_mb: f64 = req(NUM),
+        /// Whether the run is held by a pause now (`yield_to_llm`, `jobs_pause`; 4-10): the server
+        /// counts a held run's pause on from this report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paused: Option<bool> = opt(Ty::Bool),
     }
 }
 

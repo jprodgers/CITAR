@@ -346,6 +346,17 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
     log.info(format!("  home   : {}", home.root().display()));
     log.info(format!("  key    : {}", machine_key.fingerprint()));
 
+    // CPU jobs: this binary's own job hosts as children (`job-host`), results signed by the
+    // machine key and kept in the home until acknowledged.
+    let machine_key = Arc::new(machine_key);
+    let jobs = crate::jobs::JobSetup {
+        hosts: Some(Arc::new(
+            crate::jobhost::ChildHosts::this_binary(log.clone()).map_err(|e| Stop(1, e))?,
+        ) as Arc<dyn crate::jobs::Hosts>),
+        key: Some(Arc::clone(&machine_key)),
+        results: Some(home.results_dir()),
+        state: crate::jobs::JobState::default(),
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -367,6 +378,7 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
             stop: stop_rx,
             in_flight: crate::proxy::InFlight::default(),
             sensors,
+            jobs,
         };
         helper.run().await.code()
     });

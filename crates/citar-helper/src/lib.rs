@@ -13,7 +13,9 @@
 //!   endpoint (discovery, and its completions); [`proxy`]: the completions the server asks for,
 //!   streamed, assembled raw and really cancelled; [`http1`]: one HTTP exchange on a connection
 //!   its task owns; [`quiet`]: local quiet hours; [`scan`]: the hardware scan (the `citar-hardware`
-//!   format, the power guess, the probe programs); [`power`]: the power readings;
+//!   format, the power guess, the probe programs); [`power`]: the power readings; [`jobs`]: CPU
+//!   jobs (the job host as a child, the job frames relayed, results signed and kept until
+//!   acknowledged), [`jobhost`]: the job host as this binary's child;
 //! - [`app`]: what the binary does with its command line; [`version`]: `--version`;
 //! - `conformance` (only with the `conformance` feature, or in this crate's own unit tests): the
 //!   shared fixtures under `protocol/v2/`, the matcher language of their transcripts, and
@@ -23,7 +25,7 @@
 //!
 //! A library, so that tests drive the helper in-process; `src/main.rs` is the binary. 4-03 adds
 //! the configuration, the connection, keys, settings and the catalog, 4-04 the proxy, 4-06 the
-//! scan and the power samples; jobs, updates and services arrive with 4-07 to 4-14.
+//! scan and the power samples, 4-10 the CPU jobs; updates and services arrive with 4-13 and 4-14.
 //! `src/bin/fake_probe.rs` is `citar-fake-probe`, a stand-in for the probe programs that only
 //! development and test builds make (`required-features = ["dev-guard"]`).
 
@@ -37,6 +39,8 @@ pub mod config;
 pub mod conformance;
 pub mod home;
 pub mod http1;
+pub mod jobhost;
+pub mod jobs;
 pub mod key;
 pub mod llm;
 pub mod log;

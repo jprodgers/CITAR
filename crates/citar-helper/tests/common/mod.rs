@@ -15,12 +15,16 @@
 //! model (`one_model`), it streams one answer at a time, as a server with one model loaded does,
 //! and can play a server that does not stop a generation when its client goes.
 //!
+//! [`FakeHosts`] is the fake job host (4-10): it accepts every offer the helper relays, lets an
+//! aborted run go (unless it hangs), and does what the transcript's `host` steps say: report a
+//! run's progress, end it with a golden job's outcome, die (of memory or otherwise), or hang.
+//!
 //! The rules it keeps: background frames (`ping`, `pong`, `status`, `power`) are skipped unless
 //! the next step expects their type, and the helper's own unscripted pings are answered; a
 //! `quiet` wait allows only background frames (not of the next step's type) and no new
 //! connection; any other frame a wait sees is kept for the steps after it; `within_s` is
 //! measured from the end of the previous step. A step this player cannot do yet (a later
-//! package's endpoint behaviour, the job host, held results) is refused, never skipped.
+//! package's) is refused, never skipped. Golden values are the committed `jobs` set's.
 
 #![allow(dead_code, clippy::missing_panics_doc)]
 
@@ -30,7 +34,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use citar_helper::conformance::matcher::{Bindings, NoGolden, matches, realize};
+use citar_helper::conformance::matcher::{Bindings, Committed, Golden, matches, realize};
 use citar_helper::conformance::transcript::{Action, BACKGROUND, Side, Step, Transcript};
 use citar_helper::llm::{BoxFuture, Endpoint, Listed};
 use citar_helper::net::Io;
@@ -46,6 +50,15 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 /// How long an `h2s` step without `within_s` waits for its frame.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(10);
+/// A step's `within_s` is inclusive: a frame due exactly at its end counts. On the paused clock a
+/// frame the helper times to the same instant as the step's end (a `status` 5 s after the last,
+/// in `jobs-pause`) would otherwise race the step's own timer.
+pub const WITHIN_SLACK: Duration = Duration::from_millis(10);
+
+/// How long a step may take: its `within_s` (inclusive), else [`DEFAULT_WAIT`].
+fn step_time(s: &Step) -> Duration {
+    s.within_s.map_or(DEFAULT_WAIT, |w| Duration::from_secs_f64(w) + WITHIN_SLACK)
+}
 
 /// The fake model endpoint's list, shared with whatever serves it; it can be told to fail its
 /// next listings.
@@ -145,6 +158,15 @@ pub trait UnderTest {
     }
     /// Something happens around the helper (an `act` with side `helper`).
     fn act(&mut self, what: &Value);
+    /// What the helper's job side holds (`held_results`, `running`), when the player can see it.
+    fn jobs(&self) -> Option<citar_helper::jobs::Snapshot> {
+        None
+    }
+    /// The fake job host's next behaviour (a `host` step), when the helper runs one.
+    fn host(&mut self, step: &Map<String, Value>, golden: &Committed) -> Result<(), String> {
+        let _unused = (step, golden);
+        Err("this player has no fake job host".to_owned())
+    }
 }
 
 /// Something the helper did on the wire.
@@ -189,6 +211,8 @@ pub struct Player<'t> {
     /// When the last `cancel` frame went to the helper.
     cancel_sent: Option<Instant>,
     last: Instant,
+    /// The committed golden sets the transcripts' `<golden:…>` values come from.
+    pub golden: Committed,
 }
 
 fn t_of(v: &Value) -> &str {
@@ -216,6 +240,7 @@ impl<'t> Player<'t> {
             responds: 0,
             cancel_sent: None,
             last: Instant::now(),
+            golden: Committed::load().expect("the golden sets read"),
         }
     }
 
@@ -282,7 +307,7 @@ impl<'t> Player<'t> {
     async fn h2s(&mut self, i: usize, s: &Step, pattern: &Value) -> Result<(), String> {
         self.ensure_conn(i).await?;
         let want = t_of(pattern).to_owned();
-        let until = self.last + s.within_s.map_or(DEFAULT_WAIT, Duration::from_secs_f64);
+        let until = self.last + step_time(s);
         loop {
             let ev = self.read(until).await.ok_or_else(|| {
                 self.fail(i, format!("no {want} from the helper within the step's time: {pattern}"))
@@ -302,7 +327,7 @@ impl<'t> Player<'t> {
                 }
                 continue;
             }
-            match matches(pattern, &v, &mut self.bindings, &NoGolden) {
+            match matches(pattern, &v, &mut self.bindings, &self.golden) {
                 Ok(()) => return Ok(()),
                 Err(_) if got == want && background => {}
                 Err(m) => {
@@ -316,7 +341,7 @@ impl<'t> Player<'t> {
         let t = t_of(pattern).to_owned();
         let example = self.canonical.get(&(Sender::Server, t.clone())).cloned();
         let frame =
-            realize(pattern, &mut self.bindings, &self.t.values, &NoGolden, example.as_ref())
+            realize(pattern, &mut self.bindings, &self.t.values, &self.golden, example.as_ref())
                 .map_err(|e| self.fail(i, e))?;
         if s.invalid.is_none() {
             parse_server_frame(&frame.to_string()).map_err(|e| {
@@ -397,7 +422,7 @@ impl<'t> Player<'t> {
     }
 
     async fn helper_closes(&mut self, i: usize, s: &Step, code: Option<u16>) -> Result<(), String> {
-        let until = self.last + s.within_s.map_or(DEFAULT_WAIT, Duration::from_secs_f64);
+        let until = self.last + step_time(s);
         loop {
             match self.read(until).await {
                 None if self.cur.is_none() => {
@@ -452,8 +477,7 @@ impl<'t> Player<'t> {
                 }
                 Action::Drop { by: Sender::Helper } => self.helper_closes(i, s, None).await?,
                 Action::Connect => {
-                    let until =
-                        self.last + s.within_s.map_or(DEFAULT_WAIT, Duration::from_secs_f64);
+                    let until = self.last + step_time(s);
                     let c = self.next_conn(until).await;
                     self.cur = Some(c.ok_or_else(|| {
                         self.fail(i, "the helper opened no new connection in time")
@@ -462,8 +486,8 @@ impl<'t> Player<'t> {
                 }
                 Action::Wait { s: secs, quiet } => self.wait(i, *secs, *quiet).await?,
                 Action::Endpoint(e) => self.endpoint_step(i, s, e).await?,
-                Action::Host(_) => {
-                    return Err(self.fail(i, "this player has no job host yet (4-10)"));
+                Action::Host(h) => {
+                    helper.host(h, &self.golden).map_err(|e| self.fail(i, e))?;
                 }
                 Action::Act { side: Side::Hub, .. } | Action::State { side: Side::Hub, .. } => {}
                 Action::Act { side: Side::Helper, what } => helper.act(what),
@@ -493,14 +517,14 @@ impl<'t> Player<'t> {
         let Some(ep) = self.endpoint.clone() else {
             return Err(self.fail(i, format!("this player has no endpoint to play {rest:?} with")));
         };
-        let until = self.last + s.within_s.map_or(DEFAULT_WAIT, Duration::from_secs_f64);
+        let until = self.last + step_time(s);
         if let Some(pattern) = e.get("expect_request") {
             let k = self.expect_cursor;
             self.expect_cursor += 1;
             let body = ep.request_body(k, until).await.ok_or_else(|| {
                 self.fail(i, format!("the endpoint saw no request {k} within the step's time"))
             })?;
-            matches(pattern, &body, &mut self.bindings, &NoGolden).map_err(|m| {
+            matches(pattern, &body, &mut self.bindings, &self.golden).map_err(|m| {
                 self.fail(i, format!("the endpoint's request: {m}\n  body    {body}"))
             })?;
             for key in e.get("absent").and_then(Value::as_array).into_iter().flatten() {
@@ -563,7 +587,7 @@ impl<'t> Player<'t> {
         for (k, v) in expect {
             match k.as_str() {
                 "exit" => {
-                    let within = s.within_s.map_or(DEFAULT_WAIT, Duration::from_secs_f64);
+                    let within = step_time(s);
                     let code = helper.exited(within).await;
                     let want = v.as_i64().map(|c| i32::try_from(c).unwrap_or(-1));
                     if code != want {
@@ -608,6 +632,28 @@ impl<'t> Player<'t> {
                         return Err(
                             self.fail(i, format!("the helper's log has no line with {text:?}"))
                         );
+                    }
+                }
+                "held_results" | "running" => {
+                    // The job side's state follows the frames it hands out: give it a moment.
+                    let until = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        let snap = helper.jobs().ok_or_else(|| {
+                            self.fail(i, "this player cannot see the helper's job side")
+                        })?;
+                        let have = if k == "held_results" { snap.held } else { snap.running };
+                        let have = Value::from(have);
+                        let mut b = self.bindings.clone();
+                        match matches(v, &have, &mut b, &self.golden) {
+                            Ok(()) => {
+                                self.bindings = b;
+                                break;
+                            }
+                            Err(m) if Instant::now() >= until => {
+                                return Err(self.fail(i, format!("the helper's {k}: {m}: {have}")));
+                            }
+                            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                        }
                     }
                 }
                 other => {
@@ -1265,4 +1311,272 @@ async fn write_whole<W: tokio::io::AsyncWrite + Unpin>(
     );
     w.write_all(resp.as_bytes()).await?;
     w.flush().await
+}
+
+// ------------------------------------------------------------------ the fake job host
+
+/// The fake job host's shared state: the host started last, its runs, its pause.
+#[derive(Default)]
+pub struct FakeCtl {
+    events: Option<mpsc::UnboundedSender<citar_helper::jobs::HostEvent>>,
+    /// The runs it plays, oldest first.
+    runs: Vec<String>,
+    hung: std::collections::BTreeSet<String>,
+    paused_since: Option<Instant>,
+    paused_s: f64,
+    /// The hosts started.
+    pub starts: u32,
+    /// The pauses and resumes it was told, in order.
+    pub pauses: Vec<bool>,
+}
+
+impl FakeCtl {
+    fn paused_total(&self) -> f64 {
+        self.paused_s + self.paused_since.map_or(0.0, |t| t.elapsed().as_secs_f64())
+    }
+}
+
+/// The fake job host (`setup.helper.host`): `verifiable` false fails its self-test, `start`
+/// `"limits"` cannot start under the limits.
+#[derive(Clone)]
+pub struct FakeHosts {
+    pub verifiable: bool,
+    pub start_fails: bool,
+    pub ctl: Arc<Mutex<FakeCtl>>,
+}
+
+impl FakeHosts {
+    /// A fake host as `setup.helper.host` describes it (`None`: the default, which works).
+    pub fn from_setup(setup: Option<&Value>) -> Result<FakeHosts, String> {
+        let setup = setup.and_then(Value::as_object).cloned().unwrap_or_default();
+        let start_fails = match setup.get("start").and_then(Value::as_str) {
+            None => false,
+            Some("limits") => true,
+            Some(other) => return Err(format!("setup.helper.host.start {other:?} is not known")),
+        };
+        Ok(FakeHosts {
+            verifiable: setup.get("verifiable").and_then(Value::as_bool).unwrap_or(true),
+            start_fails,
+            ctl: Arc::default(),
+        })
+    }
+
+    fn send(&self, ev: citar_helper::jobs::HostEvent) -> Result<(), String> {
+        let ctl = self.ctl.lock().expect("the fake host");
+        let tx = ctl.events.as_ref().ok_or("no fake job host runs")?;
+        tx.send(ev).map_err(|_| "the fake job host's helper is gone".to_owned())
+    }
+
+    fn current(&self) -> Result<String, String> {
+        let ctl = self.ctl.lock().expect("the fake host");
+        ctl.runs.last().cloned().ok_or_else(|| "the fake job host plays no run".to_owned())
+    }
+
+    /// A `host` step.
+    pub fn step(&self, step: &Map<String, Value>, golden: &Committed) -> Result<(), String> {
+        use citar_helper::jobs::HostEvent;
+        use citar_jobs::host::{FailCode, Failed, FromHost, Outcome, ProgressFrame, ResultFrame};
+        if let Some(p) = step.get("progress") {
+            let run = self.current()?;
+            let round = p.get("round").and_then(Value::as_i64).unwrap_or(1);
+            let (paused_s, paused) = {
+                let ctl = self.ctl.lock().expect("the fake host");
+                (ctl.paused_total(), ctl.paused_since.is_some())
+            };
+            self.send(HostEvent::Frame(FromHost::JobProgress(ProgressFrame {
+                run,
+                round,
+                of: 30,
+                elapsed_s: 1.5,
+                cpu_s: 1.25,
+                paused_s,
+                peak_mb: 12.5,
+                paused,
+            })))?;
+        }
+        if let Some(f) = step.get("finish") {
+            let name = f
+                .as_str()
+                .and_then(|s| s.strip_prefix("<golden:jobs/"))
+                .and_then(|s| s.strip_suffix('>'))
+                .ok_or_else(|| format!("finish {f} is no golden job"))?;
+            let job = golden
+                .value("jobs", &[name.to_owned()])
+                .ok_or_else(|| format!("no golden job {name}"))?;
+            let run = self.current()?;
+            let paused_s = self.ctl.lock().expect("the fake host").paused_total();
+            let digests: Vec<String> = serde_json::from_value(job["digests"].clone())
+                .map_err(|e| format!("the golden digests: {e}"))?;
+            let outcome = Outcome {
+                result: job["result"].clone(),
+                result_hash: job["result_hash"].as_str().unwrap_or_default().to_owned(),
+                chain: citar_jobs::Chain {
+                    head: job["chain_head"].as_str().unwrap_or_default().to_owned(),
+                    rounds: u32::try_from(job["rounds"].as_u64().unwrap_or(0)).unwrap_or(0),
+                    digests,
+                },
+                cpu_s: 0.5,
+                wall_s: 0.75 + paused_s,
+                paused_s,
+                peak_mb: 12.5,
+            };
+            self.ctl.lock().expect("the fake host").runs.retain(|r| *r != run);
+            self.send(HostEvent::Frame(FromHost::JobResult(Box::new(ResultFrame {
+                run,
+                outcome,
+            }))))?;
+        }
+        if let Some(c) = step.get("crash_host") {
+            let memory = match c.as_str() {
+                Some("memory") => true,
+                Some("other") => false,
+                _ => return Err(format!("crash_host {c} is not known")),
+            };
+            let (runs, tx) = {
+                let mut ctl = self.ctl.lock().expect("the fake host");
+                (std::mem::take(&mut ctl.runs), ctl.events.take())
+            };
+            let death = if memory {
+                "the memory limit ended the job host: an allocation failed (the fake host)"
+            } else {
+                "the job host ended: exit code 101 (the fake host)"
+            };
+            let failures = runs
+                .into_iter()
+                .map(|run| {
+                    let f = Failed {
+                        run,
+                        code: if memory { FailCode::Memory } else { FailCode::Host },
+                        message: death.to_owned(),
+                        retryable: true,
+                    };
+                    (f, Some(12.5))
+                })
+                .collect();
+            let tx = tx.ok_or("no fake job host runs")?;
+            tx.send(HostEvent::Died { death: death.to_owned(), failures })
+                .map_err(|_| "the fake job host's helper is gone".to_owned())?;
+        }
+        if step.get("hang").and_then(Value::as_bool) == Some(true) {
+            let run = self.current()?;
+            self.ctl.lock().expect("the fake host").hung.insert(run);
+        }
+        Ok(())
+    }
+}
+
+impl citar_helper::jobs::Hosts for FakeHosts {
+    fn self_test(&self) -> BoxFuture<'static, Result<(), String>> {
+        let ok = self.verifiable;
+        Box::pin(async move {
+            if ok { Ok(()) } else { Err("the fake job host's canary failed (setup)".to_owned()) }
+        })
+    }
+
+    fn start(
+        &self,
+        limits: citar_jobs::limits::Requested,
+        jobs_build: String,
+    ) -> BoxFuture<'static, Result<citar_helper::jobs::HostStart, citar_helper::jobs::StartFailure>>
+    {
+        use citar_helper::jobs::{HostEvent, HostStart, StartFailure};
+        use citar_jobs::host::{FromHost, Ready, RunRef, ToHost};
+        let fails = self.start_fails;
+        let verifiable = self.verifiable;
+        let ctl = Arc::clone(&self.ctl);
+        Box::pin(async move {
+            if fails {
+                return Err(StartFailure {
+                    limits: true,
+                    message: "the job host refused to start (Limits): the fake host holds no \
+                              limits (setup)"
+                        .to_owned(),
+                });
+            }
+            let (cmds_tx, mut cmds_rx) = mpsc::unbounded_channel::<ToHost>();
+            let (events_tx, events_rx) = mpsc::unbounded_channel();
+            {
+                let mut c = ctl.lock().expect("the fake host");
+                c.events = Some(events_tx.clone());
+                c.runs.clear();
+                c.starts += 1;
+            }
+            let held = Arc::clone(&ctl);
+            tokio::spawn(async move {
+                while let Some(cmd) = cmds_rx.recv().await {
+                    let mut c = held.lock().expect("the fake host");
+                    match cmd {
+                        ToHost::JobOffer(o) => {
+                            c.runs.push(o.run.clone());
+                            let _sent = events_tx
+                                .send(HostEvent::Frame(FromHost::JobAccept(RunRef { run: o.run })));
+                        }
+                        ToHost::JobAbort(a) => {
+                            if !c.hung.contains(&a.run) && c.runs.contains(&a.run) {
+                                c.runs.retain(|r| *r != a.run);
+                                let _sent = events_tx.send(HostEvent::Frame(FromHost::JobAborted(
+                                    RunRef { run: a.run },
+                                )));
+                            }
+                        }
+                        ToHost::Pause => {
+                            c.pauses.push(true);
+                            if c.paused_since.is_none() {
+                                c.paused_since = Some(Instant::now());
+                            }
+                        }
+                        ToHost::Resume => {
+                            c.pauses.push(false);
+                            if let Some(t) = c.paused_since.take() {
+                                c.paused_s += t.elapsed().as_secs_f64();
+                            }
+                        }
+                        ToHost::Limits(_) => {}
+                    }
+                }
+            });
+            let threads = limits.threads.max(1);
+            let ready = Ready {
+                limits: citar_jobs::Held {
+                    cpu: citar_jobs::Hardness::Hard,
+                    memory: citar_jobs::Hardness::Hard,
+                },
+                verifiable,
+                jobs_build,
+                threads,
+                reason: None,
+                memory_per_run_mb: limits.memory_mb * 9 / 10 / u64::from(threads),
+                own_mb: 5.0,
+                cgroup: None,
+                cpu_s: 0.0,
+                pid: 1,
+                counting: true,
+                notes: Vec::new(),
+            };
+            Ok(HostStart { ready, cmds: cmds_tx, events: events_rx })
+        })
+    }
+}
+
+/// A result file as a previous run of the helper left it in `helper/results/` (`setup.helper.home`):
+/// the golden `duel-a`'s outcome for `run`.
+pub fn held_result(run: &str, golden: &Committed, values: &Map<String, Value>) -> Value {
+    let job = golden.value("jobs", &["duel-a".to_owned()]).expect("the golden duel-a");
+    let v = |k: &str, d: &str| values.get(k).and_then(Value::as_str).unwrap_or(d).to_owned();
+    serde_json::json!({
+        "run": run,
+        "outcome": {
+            "result": job["result"], "result_hash": job["result_hash"],
+            "chain": {"head": job["chain_head"], "rounds": job["rounds"], "digests": job["digests"]},
+            "cpu_s": 0.5, "wall_s": 0.75, "paused_s": 0.0, "peak_mb": 12.5
+        },
+        "claim": {
+            "v": 1, "job": v("job", "cj_0123456789abcdef"), "run": run,
+            "machine": v("machine", "sv_0123456789abcdef"), "kind": "lab_game",
+            "spec_hash": job["spec_hash"], "jobs_build": v("jobs_build", "0f1e2d3c4b5a"),
+            "bots": job["bots"], "result_hash": job["result_hash"], "chain_head": job["chain_head"],
+            "rounds": job["rounds"], "key": v("key", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+        },
+        "signature": "A".repeat(86) + "=="
+    })
 }
