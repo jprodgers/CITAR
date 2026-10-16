@@ -238,9 +238,14 @@ fn play_counted(
     // FTZ and DAZ are per thread: this one must compute as the self-check's did.
     if let Err(e) = canary_injected(&shared.canary) {
         shared.verifiable.store(false, Ordering::SeqCst);
-        log(&format!("run {}: the canary failed on its thread ({e}); no more jobs", run.id));
-        let why = format!("the canary failed on the run's thread: {e}");
-        return Some(refused(run, RejectReason::Unverifiable, why));
+        if shared.play_unverifiable {
+            // The parent's own work (the server's executor), compared with nobody's: it plays.
+            log(&format!("run {}: the canary failed on its thread ({e}); playing on", run.id));
+        } else {
+            log(&format!("run {}: the canary failed on its thread ({e}); no more jobs", run.id));
+            let why = format!("the canary failed on the run's thread: {e}");
+            return Some(refused(run, RejectReason::Unverifiable, why));
+        }
     }
     match work {
         Work::Game(checked) => game(shared, run, &checked, tally),

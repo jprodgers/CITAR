@@ -21,7 +21,8 @@ hung game stays away from the server, and every OS has one process to put its li
   watchdog's line or exit code. Any other death fails its runs ``host``; both are retried elsewhere.
 
 The protocol (JSON lines; ``limits``, ``ready``, ``fatal``, the job frames, ``pause``, ``resume``, ``heartbeat``) is
-described in ``crates/citar-jobs/src/host/mod.rs``. The dispatcher and the local executor that use this are 4-09's.
+described in ``crates/citar-jobs/src/host/mod.rs``. The local executor (:mod:`citar.jobs.local`) drives one for the
+dispatcher (:mod:`citar.jobs.dispatcher`).
 """
 from __future__ import annotations
 
@@ -210,13 +211,17 @@ class JobHost:
 
     ``scope`` chooses the ``systemd --user`` wrapper (None: where :func:`scope_available` says; a test turns it off).
     ``jobs_build`` is the build the host must be (the extension's by default). ``env`` adds variables to the child's
-    environment (the test jobs' switches, in tests). Not thread-safe: one owner (4-09's local executor) drives it.
+    environment (the test jobs' switches, in tests). ``play_unverifiable`` is the server's local executor's
+    (:mod:`citar.jobs.local`): the server takes its host's results as its own work, compared with no other machine's,
+    so a host whose canary or self-check failed (a server on a ruleset of its own) still plays its jobs, its ``ready``
+    still saying it is not verifiable. Not thread-safe: one owner (the local executor) drives it.
     """
 
     def __init__(self, threads: int, cpu_percent: int, memory_mb: int, *, scope: Optional[bool] = None,
                  jobs_build: Optional[str] = None, env: Optional[dict] = None, ready_wait: float = READY_WAIT,
-                 argv: Optional[list] = None):
+                 argv: Optional[list] = None, play_unverifiable: bool = False):
         self.threads, self.cpu_percent, self.memory_mb = threads, cpu_percent, memory_mb
+        self.play_unverifiable = bool(play_unverifiable)
         self.scope = scope_available() if scope is None else scope
         self.jobs_build = jobs_build or engine_api.jobs_build()
         self.env = dict(env or {})
@@ -277,8 +282,11 @@ class JobHost:
         threading.Thread(target=self._read_frames, name="citar-host-frames", daemon=True).start()
         self._log_reader = threading.Thread(target=self._read_log, name="citar-host-log", daemon=True)
         self._log_reader.start()
-        self._send({"t": "limits", "jobs_build": self.jobs_build, "threads": self.threads,
-                    "cpu_percent": self.cpu_percent, "memory_mb": self.memory_mb})
+        limits = {"t": "limits", "jobs_build": self.jobs_build, "threads": self.threads,
+                  "cpu_percent": self.cpu_percent, "memory_mb": self.memory_mb}
+        if self.play_unverifiable:
+            limits["play_unverifiable"] = True
+        self._send(limits)
         first = self.next(self.ready_wait)
         t = first.get("t") if first else None
         if t == "ready":
