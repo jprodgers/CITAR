@@ -693,6 +693,16 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
     if let Err(why) = &check {
         log(&format!("not verifiable: {why}"));
     }
+    // The heartbeat's thread is made before the host measures itself, so its stack counts among
+    // the host's own (all of it, under RLIMIT_DATA); it beats once `ready` is out, and ends at
+    // once if the host refuses to start.
+    let (start_beating, beat_when) = std::sync::mpsc::channel::<Arc<Shared>>();
+    let _ticks =
+        std::thread::Builder::new().name("citar-host-heartbeat".to_owned()).spawn(move || {
+            if let Ok(shared) = beat_when.recv() {
+                beat(&shared);
+            }
+        });
     // Measured after the self-check, which leaves what a run's thread leaves (its arena, a cached
     // stack): what is left of the limit is what the runs get.
     let stack = u64::try_from(RUN_STACK).unwrap_or(u64::MAX);
@@ -750,10 +760,7 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         counting: alloc::installed(),
         notes,
     }));
-    let ticker = Arc::clone(&shared);
-    let _ticks = std::thread::Builder::new()
-        .name("citar-host-heartbeat".to_owned())
-        .spawn(move || beat(&ticker));
+    let _beating = start_beating.send(Arc::clone(&shared));
     let mut said_unknown = std::collections::BTreeSet::new();
     loop {
         match next_line(&mut input, &mut buf) {

@@ -31,6 +31,7 @@ import statistics
 import sys
 import time
 import unittest
+from pathlib import Path
 
 from citar import engine_api, lab
 from citar.jobs import host as H
@@ -63,7 +64,7 @@ def user_manager_delegates(controller: str) -> bool:
         return False
     uid = os.getuid()
     try:
-        text = open(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers").read()
+        text = Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers").read_text()
     except OSError:
         return False
     return controller in text.split()
