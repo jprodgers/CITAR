@@ -46,7 +46,13 @@ export async function renderLab(root, rules) {
   let data = null;
   const refresh = async () => {
     try { data = await api.lab(); } catch (e) { top.replaceChildren(el("p", { class: "bad" }, "Lab status unavailable: " + e.message)); return; }
-    for (const name of openGames.keys()) loadGames(name);
+    // an opened games table or report stays open while its experiment is listed (signing in as someone else, or
+    // an experiment deleted, closes it rather than asking for what the caller may no longer see)
+    const listed = new Set((data.experiments || []).map((e) => e.name));
+    for (const name of [...openReports.keys()]) if (!listed.has(name)) openReports.delete(name);
+    for (const name of [...openGames.keys()]) {
+      if (listed.has(name)) loadGames(name); else openGames.delete(name);
+    }
     keepPlace(top, () => drawTop(top, data, rules, refresh));
     keepPlace(exps, () => drawExperiments(exps, data, refresh));
     keepPlace(games, () => drawGames(games, data));
