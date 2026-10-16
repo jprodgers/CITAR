@@ -50,10 +50,9 @@ shown on the Lab page); a ``memory`` one (the run's host died of memory) raises 
 reported, past the executor's memory a run when it reported none or was its host's only run (then it alone needed more
 than the host had), and does not count as an attempt: it changes where the job may run.
 
-Replaces: ``lab.run``, its ``_runner_step``, ``_Adopted``, ``_find_running_games``, ``_collect_orphans``, ``cmd_play``,
-the per-game job files and the status file (the 0.1.5 runner: a separate Windows-only process that spawned one Python
-process per game, adopted orphans through PowerShell and killed them by pid); ``ledger.ingest_lab``, which charged all
-lab CPU to the host as ``verified`` whoever played it.
+Replaces: 0.1.5's lab runner (``lab.run``), a separate Windows-only process that spawned one Python process per game,
+kept a job file per game and a status file, adopted the games an earlier runner left through PowerShell and killed
+them by pid; and ``ledger.ingest_lab``, which charged all lab CPU to the host as ``verified`` whoever played it.
 """
 from __future__ import annotations
 
@@ -226,7 +225,9 @@ class Exp:
         return lab.results_path(self.name, self.kind)
 
     def missing(self):
-        """The games with no job and no line, lowest first."""
+        """The games with no job and no line, lowest first (the cursor first moved past those that have one, so a
+        long experiment is walked once, not every tick)."""
+        self.advance()
         i = self.cursor
         while i < self.games:
             if i not in self.has_job and i not in self.settled:
@@ -587,7 +588,10 @@ class Dispatcher:
                 if not run or run not in known:
                     exp.settled.add(obj["i"])
         if dropped or cut:
-            fsutil.write_text(path, "".join(t + "\n" for t in keep))
+            # rewritten whole (a temporary file, then a replace), its lines ending as the appended ones do
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_bytes("".join(t + "\n" for t in keep).encode("utf-8"))
+            fsutil.replace(tmp, path)
             lab.log(f"{exp.name}: {dropped} line(s) whose job was not accepted removed from its results"
                     + (" and a line cut short dropped" if cut else ""))
         self._lines[str(path)] = {(i, r) for r, i in exp.lines.items()}
@@ -861,11 +865,16 @@ class Dispatcher:
         job = self.jobs.get(run.job)
         if code == "memory":
             per_run = int(f.get("per_run_mb") or e.memory_per_run_mb or 0)
-            peak = f.get("peak_mb") if isinstance(f.get("peak_mb"), (int, float)) else None
+            # the largest peak the run reported, in its progress or its failure (a run that died before its first
+            # look reported none)
+            peak = run.peak_mb if run.peak_mb > 0 else None
             want = int(math.ceil(peak)) if peak is not None else per_run + 1
             if f.get("alone"):
                 want = max(want, per_run + 1)       # its host's only run: it alone needed more than the host had
-            self._requeue(s, run, attempt=False, mem_mb=want)
+            # not an attempt while it teaches the job how much it needs; one that teaches nothing is, so a job that
+            # dies of memory without saying how much cannot go round for ever
+            grew = job is not None and want > job.mem_mb
+            self._requeue(s, run, attempt=not grew, mem_mb=want)
             log.info("run %s of %s died of memory (peak %s MB); its job now needs %s MB a run", run.id,
                      job.ref if job else run.job, peak, want)
             return

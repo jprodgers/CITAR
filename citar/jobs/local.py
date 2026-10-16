@@ -18,7 +18,7 @@ Its report carries the extension's ``jobs_build`` (P4.4.5), so a server built in
 meets that helper's jobs.
 
 Replaces: the lab runner's ``workers`` and ``night_workers`` (``saves/lab/config.json``), its subprocess per game, its
-orphan adoption and its ``taskkill``.
+orphan adoption and its killing of games by pid.
 """
 from __future__ import annotations
 
