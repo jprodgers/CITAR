@@ -50,13 +50,14 @@ Parts:
   the host machine's CPU set in its machine settings (two threads, two cores' worth at most, 400 MB): bob, given
   ``run_lab``, queues six 30-round duels from the A/B route, which run to their end and move to done/ (six lines, each
   with ``executor.machine`` the host and ``verification: reference``; six ``cpu`` events used by bob and given by
-  nobody; the ratings include them; ``GET /api/lab/jobs`` shows them done on "this server" to bob and "not found" to
-  alice); ``citar lab submit`` refuses a member's ranking run and queues an administrator's ranking and reference runs
+  nobody, each observed at least as long as its job host measured it and counted whole; the ratings include them;
+  ``GET /api/lab/jobs`` shows them done on "this server" to bob and "not found" to alice); ``citar lab submit`` refuses a member's ranking run and queues an administrator's ranking and reference runs
   as the server's own collection (no consumer), the reference lines read by ``summarize.py``; Stop holds a new
   experiment ("the lab is paused") and Resume plays it; the server killed twice with two games playing (each seat step
   slowed by the test build's ``CITAR_JOBS_TEST_STEP_MS``) plays exactly those two again, each game in the results
-  once, and the Queue page's CPU card names bob's games to him and "someone's lab game" to alice; the administrators'
-  view of the dispatcher; no traceback.
+  once, and the Queue page's CPU card names bob's games to him and "someone's lab game" to alice; an administrator's
+  retry (``POST /api/admin/jobs/retry``) taken, a member's 404; the administrators' view of the dispatcher; no
+  traceback.
 
 ``all`` runs every part written so far; later packages add ``remote`` (4-10), ``verify`` (4-11, 4-12), ``update``
 (4-13), ``service`` (4-14), ``exit`` and ``real`` (4-15).
@@ -782,6 +783,7 @@ with db.session() as s:
                                                    "executor": r.executor, "offered": r.offered_at.isoformat()})
         events = [{"activity": e.activity, "consumer": e.consumer_id, "provider": e.provider_id,
                    "machine": e.machine_id, "cpu": e.cpu_core_s, "observed": e.observed_s,
+                   "reported": e.reported_s, "flags": e.flags or {},
                    "verification": e.verification, "request": e.request_id}
                   for e in s.scalars(select(ComputeEvent).where(ComputeEvent.activity.like(f"lab:{name}:%")))]
         out[name] = {"jobs": [{"id": j.id, "ref": j.ref, "state": j.state, "owner": j.owner_id, "kind": j.kind,
@@ -870,12 +872,17 @@ def part_lab(h) -> None:
         return len(events) >= 6
     wait_until(settled, 30, 1.0)
     runs = {x["executor"]["run"] for x in lines if x.get("executor")}
+    played = {x["executor"]["run"]: x.get("seconds") or 0.0 for x in lines if x.get("executor")}
+    # what the server observed is each run's time from its accept's arrival to its result's (never when the
+    # dispatcher read them): at least the time its job host measured, so an honest run's CPU is counted whole
+    timed = all(e["observed"] >= 0.9 * played.get(e["request"], 0.0) - 0.1 and not e["flags"].get("overreported_cpu")
+                and e["cpu"] == round(e["reported"], 6) for e in events)
     r.check("six cpu events with bob as the consumer and no provider, on the host, verified, one a run, each "
-            "bounded by what the server observed",
+            "timed by its frames (observed at least the time its host measured) and counted whole",
             len(events) == 6 and {(e["consumer"], e["provider"], e["machine"], e["verification"]) for e in events}
-            == {(bob_id, None, host, "verified")} and {e["request"] for e in events} == runs
-            and all(e["cpu"] <= e["observed"] * 1.05 + 1 for e in events),
-            json.dumps(events[:2])[:500])
+            == {(bob_id, None, host, "verified")} and {e["request"] for e in events} == runs and timed,
+            json.dumps([{**{k: e[k] for k in ("cpu", "reported", "observed", "flags")},
+                         "seconds": played.get(e["request"])} for e in events][:3])[:500])
     r.check("the ratings include its games", duels in (state.get("_rated") or []), str(state.get("_rated"))[:300])
     mine = bob.get("/api/lab/jobs", params={"exp": duels})
     jobs = mine.json().get("jobs", []) if mine.status_code == 200 else []
@@ -996,6 +1003,13 @@ def part_lab(h) -> None:
     # ---- the dispatcher as administrators see it; nothing went wrong in the server
     view = admin.get("/api/admin/jobs").json()
     executor = ((view.get("dispatcher") or {}).get("executors") or [{}])[0]
+    retry_gone = admin.post("/api/admin/jobs/retry", params={"exp": duels})
+    retry_all = admin.post("/api/admin/jobs/retry")
+    retry_bob = bob.post("/api/admin/jobs/retry")
+    r.check("POST /api/admin/jobs/retry: an administrator's retry of every queued experiment is taken, of one no "
+            "longer queued is 404; a member's is 404",
+            (retry_gone.status_code, retry_all.status_code, retry_bob.status_code) == (404, 200, 404),
+            json.dumps([retry_gone.status_code, retry_all.status_code, retry_bob.status_code]))
     r.check("GET /api/admin/jobs: the dispatcher alive, the host's job host ready under its settings (held hard on "
             "Windows, the CPU soft without a user manager on Linux) and verifiable; a member gets 404",
             (view.get("dispatcher") or {}).get("alive") is True and executor.get("machine") == host
