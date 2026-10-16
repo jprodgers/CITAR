@@ -1251,18 +1251,19 @@ class WriteVolume(World):
             t0 = time.perf_counter()
             for t in threads:
                 t.join()
-            self.assertTrue(self.led.flush(10))
+            self.assertTrue(self.led.flush(30 if os.environ.get("CI") else 10))
             took = time.perf_counter() - t0
         with db.session() as s:
             n = s.scalar(select(func.count()).select_from(ComputeEvent))
         print(f"\nledger: 10,000 events from 8 threads written in {took:.2f} s; slowest hand-off "
               f"{max(slowest) * 1000:.1f} ms")
         self.assertEqual(n, 10_000)
-        # 2 s is the laptop's budget; CI's shared runners get three times it, as the other timing tests do (windows /
-        # Python 3.12 took 2.44 s once, in a run whose whole suite took twice its usual time), and the producers'
-        # hand-off bound below too. A writer that waited on the session lock held above would not finish at all
-        # (flush's 10 s).
-        self.assertLess(took, 6.0 if os.environ.get("CI") else 2.0)
+        # 2 s is the laptop's budget (it writes them in 0.3 to 0.45 s). CI's shared runners get 20 s: the writes are
+        # the disk's, and windows / Python 3.12 took 2.44 s once and 7.35 s once (test.yml run 38883710874, a run whose
+        # whole suite took 879 s against its usual 500), ten and twenty times the laptop. What the bound is for still
+        # fails it there: a writer that committed each event alone (ten thousand commits) or that waited on the session
+        # lock held above (it would not finish at all: flush's 30 s). The producers' hand-off bound below holds too.
+        self.assertLess(took, 20.0 if os.environ.get("CI") else 2.0)
         self.assertLess(max(slowest), 1.5 if os.environ.get("CI") else 0.5, "a producer never waits on the database")
 
     def test_the_writer_drains_on_shutdown_and_survives_a_failed_batch(self):
