@@ -12,7 +12,11 @@ hung game stays away from the server, and every OS has one process to put its li
   says how much memory each run may use (:attr:`JobHost.memory_per_run_mb`): the host's own memory and its threads'
   stacks are left out of ``memory_mb``, and that figure, never ``memory_mb / threads``, is what jobs are matched to.
 - **Its frames** (:meth:`JobHost.next`), as dicts with their ``t``, which runs are still in flight on it, and the
-  largest peak each has reported (:meth:`JobHost.peak_mb`), which is all a parent learns of a run that dies.
+  largest peak each has reported (:meth:`JobHost.peak_mb`), which is all a parent learns of a run that dies. Each
+  frame carries when it arrived (``_rx``, :func:`time.monotonic`), since its reader may look at it seconds later: a
+  run's start and end are timed by its frames' arrival, never by when they are read (:func:`arrived`). The
+  ``on_frame`` callback hears each frame that starts or ends a run, and the host's end, as it arrives, so its reader
+  need not wait for its next look.
 - **Its death** (:meth:`JobHost.death`, :func:`classify`): a memory death ends the whole host, and every run of it
   fails ``memory`` (:meth:`JobHost.failures`); it shows as Rust's ``memory allocation of N bytes failed`` on the
   host's standard error (a Job Object's limit or ``RLIMIT_DATA`` refused a commit), as a host started under the scope
@@ -60,6 +64,21 @@ CGROUP_ROOT = "/sys/fs/cgroup"
 _ENDS = {"job_reject", "job_result", "job_failed", "job_aborted"}
 #: The signal the kernel's OOM killer ends a process with (``returncode`` -9 for a child it ended).
 SIGKILL = 9
+#: The frames ``on_frame`` hears as they arrive: a run's start and end, and the host's end.
+_WAKES = _ENDS | {"job_accept", "gone"}
+#: The key a frame's arrival is stamped under (:func:`time.monotonic`); never one of the protocol's.
+RX = "_rx"
+
+
+def arrived(frame: dict, now: float, clock_now: Optional[float] = None) -> float:
+    """When ``frame`` arrived, in the reader's clock, whose time is ``now``: ``now`` less the frame's age (by its
+    ``_rx`` stamp), or ``now`` for a frame with no stamp (one made by its reader). ``clock_now`` is
+    :func:`time.monotonic` now (taken when omitted)."""
+    rx = frame.get(RX)
+    if not isinstance(rx, (int, float)):
+        return now
+    age = (time.monotonic() if clock_now is None else clock_now) - float(rx)
+    return now - max(0.0, age)
 
 
 def command() -> list:
@@ -214,7 +233,9 @@ class JobHost:
     environment (the test jobs' switches, in tests). ``play_unverifiable`` is the server's local executor's
     (:mod:`citar.jobs.local`): the server takes its host's results as its own work, compared with no other machine's,
     so a host whose canary or self-check failed (a server on a ruleset of its own) still plays its jobs, its ``ready``
-    still saying it is not verifiable. Not thread-safe: one owner (the local executor) drives it.
+    still saying it is not verifiable. Not thread-safe: one owner (the local executor) drives it. ``on_frame``, when
+    set, is called on the frames' reader thread with each frame that starts or ends a run and with the host's end
+    (``gone``), as it arrives: it must not block (the local executor wakes the dispatcher with it).
     """
 
     def __init__(self, threads: int, cpu_percent: int, memory_mb: int, *, scope: Optional[bool] = None,
@@ -237,6 +258,7 @@ class JobHost:
         self._log: collections.deque = collections.deque(maxlen=1000)
         self._log_reader: Optional[threading.Thread] = None
         self._oom: Optional[tuple] = None
+        self.on_frame = None
 
     @property
     def pid(self) -> Optional[int]:
@@ -332,8 +354,18 @@ class JobHost:
                         raise ValueError("not a frame")
                 except ValueError:
                     frame = {"t": "garbled", "line": line[:300]}
-                self._frames.put(frame)
-        self._frames.put({"t": "gone"})
+                self._arrive(frame)
+        self._arrive({"t": "gone"})
+
+    def _arrive(self, frame: dict) -> None:
+        frame[RX] = time.monotonic()
+        self._frames.put(frame)
+        hear = self.on_frame
+        if hear is not None and frame.get("t") in _WAKES:
+            try:
+                hear(frame)
+            except Exception:
+                log.exception("the job host's frame callback failed")
 
     def _read_log(self) -> None:
         with self._proc.stderr as err:

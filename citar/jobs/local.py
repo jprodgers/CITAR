@@ -17,6 +17,11 @@ then verifies nobody, and its jobs build (which covers the ruleset) is shared by
 Its report carries the extension's ``jobs_build`` (P4.4.5), so a server built in another flavour than a helper never
 meets that helper's jobs.
 
+**It wakes the dispatcher** (``bind``) when a run starts or ends, when its host ends and when a host's start is over
+(P4.5.5's "on events": a job frame, an executor's change), so a thread whose game ended takes the next one at once
+rather than at the dispatcher's next tick; each frame is stamped when it arrived (``citar.jobs.host.RX``), so a run is
+timed by its frames, never by when the dispatcher read them.
+
 Replaces: the lab runner's ``workers`` and ``night_workers`` (``saves/lab/config.json``), its subprocess per game, its
 orphan adoption and its killing of games by pid.
 """
@@ -77,9 +82,21 @@ class LocalExecutor:
         self.restart_at = 0.0
         self.backoff = RESTART_FIRST
         self._starter: Optional[threading.Thread] = None
+        self._start_done = threading.Event()
         self._start_error: Optional[BaseException] = None
         self.deaths = 0
         self.jobs_build = engine_api.jobs_build()
+        self._wake: Optional[Callable[[], None]] = None
+
+    def bind(self, wake: Callable[[], None]) -> None:
+        """The dispatcher's ``poke``: called (from the host's reader thread, or its start's) when a run starts or
+        ends, when the host ends and when its start is over. It must not block."""
+        self._wake = wake
+
+    def _woken(self, _frame=None) -> None:
+        wake = self._wake
+        if wake is not None:
+            wake()
 
     # -------------------------------------------------------------- what the dispatcher reads
     @property
@@ -127,7 +144,9 @@ class LocalExecutor:
 
     def refuses(self, job) -> Optional[str]:
         """Why this executor will not play ``job`` (None: it will): another jobs build, a kind its settings leave
-        out, or more memory a run than its host leaves each (``memory_per_run_mb``, P4.3.6)."""
+        out, or more memory a run than its host leaves each (``memory_per_run_mb``, P4.3.6). An executor's
+        ``refuses`` looks at nothing of a job but its kind, jobs build, ``mem_mb`` and owner: the dispatcher caches
+        its answers by those within a tick."""
         if job.jobs_build != self.jobs_build:
             return f"the job is for jobs build {job.jobs_build}, this server's is {self.jobs_build}"
         if job.kind not in self.work:
@@ -188,20 +207,24 @@ class LocalExecutor:
     def _start(self, limits: dict) -> None:
         self.limits = dict(limits)
         self.host = self.host_factory(limits["threads"], limits["cpu_percent"], limits["memory_mb"])
+        self.host.on_frame = self._woken
         self.ready, self._start_error = None, None
         self.state, self.reason = "starting", "its job host is starting"
         host = self.host
+        done = self._start_done = threading.Event()
 
         def start():
             try:
                 host.start()
             except BaseException as e:          # reported by _finish_start on the dispatcher's thread
                 self._start_error = e
+            done.set()                          # before the wake: the tick it brings sees the start over
+            self._woken()                       # its runs may be offered now (or its failure seen)
         self._starter = threading.Thread(target=start, name="citar-local-host-start", daemon=True)
         self._starter.start()
 
     def _finish_start(self) -> None:
-        if self.state != "starting" or self._starter is None or self._starter.is_alive():
+        if self.state != "starting" or self._starter is None or not self._start_done.is_set():
             return
         self._starter = None
         err = self._start_error
@@ -265,7 +288,7 @@ class LocalExecutor:
                 return out
             t = frame.get("t")
             if t == "gone":
-                out.extend(self._died())
+                out.extend(self._died(frame.get(H.RX)))
                 return out
             if t in ("job_reject", "job_result", "job_failed", "job_aborted"):
                 self.in_flight.discard(frame.get("run"))
@@ -275,14 +298,16 @@ class LocalExecutor:
                 continue
             out.append(frame)
 
-    def _died(self) -> list:
+    def _died(self, rx: Optional[float] = None) -> list:
+        """The runs of a host that died, failed as its death says; each stamped with when the host's end arrived."""
         host = self.host
         per_run = host.memory_per_run_mb
         death = host.death()
         alone = len(host.in_flight) == 1
         failures = []
         for f in host.failures(death):
-            failures.append({**f, "peak_mb": host.peak_mb(f["run"]), "alone": alone, "per_run_mb": per_run})
+            failures.append({**f, "peak_mb": host.peak_mb(f["run"]), "alone": alone, "per_run_mb": per_run,
+                             **({H.RX: rx} if rx is not None else {})})
         self.deaths += 1
         self.in_flight.clear()
         self.host, self.ready, self.limits = None, None, None
