@@ -206,6 +206,41 @@ export function inEffectText(ie) {
   return `In effect now: ${capacity}${ceiling}; pooled prompts ${ie.allow_swaps ? "may" : "may not"} make it swap models.`;
 }
 
+const CAPPED_NAMES = { "cpu.enabled": "CPU lending", "cpu.threads": "threads", "cpu.cpu_percent": "CPU %",
+                       "cpu.memory_mb": "memory", "cpu.work": "the kinds of work" };
+
+/** What a machine's helper lends of its CPU in effect (the dialog's `cpu_helper`, the helper dialog's `cpu`: package
+ *  4-10), in a line: why it lends nothing, or its threads, CPU share and memory, each limit hard or soft as its job host
+ *  says it holds them, the memory a run may use, and what its own ceiling capped. */
+export function cpuInEffectText(c) {
+  if (!c) return "No CITAR helper of this version has connected for it yet: it takes no CPU work.";
+  if (!c.plays_jobs) return "Its helper plays no CPU job (a build without jobs).";
+  if (!c.lent) {
+    return "Not lent by this machine's owner: CPU lending is off in its helper's own settings (citar-helper setup "
+      + "asks, or --cpu turns it on for one run).";
+  }
+  if (!c.verifiable) return "Its helper failed its canary or self-check on this machine: it takes no CPU job.";
+  const e = c.effective;
+  if (!e || !e.enabled) return "In effect: no CPU work (it is off in these settings).";
+  const held = (k) => (c.limits && c.limits[k]) || "soft";
+  const perRun = c.memory_per_run_mb != null ? `; ${c.memory_per_run_mb} MB a run` : "";
+  const capped = (c.capped || []).filter((k) => k !== "cpu.enabled").map((k) => CAPPED_NAMES[k] || k);
+  return `In effect: ${e.threads} thread${e.threads === 1 ? "" : "s"}, ${e.cpu_percent}% of the CPU `
+    + `(${held("cpu")}), ${e.memory_mb} MB (${held("memory")})${perRun}.`
+    + (capped.length ? ` Its own ceiling capped ${capped.join(", ")}.` : "");
+}
+
+/** The grants that lend a machine's CPU for lab runs (the dialog's `lab_grants`), in a line: CPU work is lent only by a
+ *  grant that lists Lab (CPU work), never by one with no purposes (design/phase4-helper.md P4.5.5). */
+export function labGrantsText(grants) {
+  if (!grants || !grants.length) {
+    return "No grant on its group lists Lab (CPU work): only its owner's own experiments and the server's collection "
+      + "(the ranking and reference games it takes) run on it.";
+  }
+  const who = [...new Set(grants.map((g) => g.subject))];
+  return `Lent for lab runs (CPU work) to ${who.join(", ")}, by grants on “${grants[0].group}”.`;
+}
+
 /** A hardware class in a line: its name and rate (credits per generation-second for a GPU, per core-second for a CPU,
  *  per unit of token cost for an online API). */
 export function classText(c) {

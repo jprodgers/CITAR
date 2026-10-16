@@ -1700,3 +1700,65 @@ class Remote(Lab):
             (entry,) = s.scalars(select(BudgetEntry)).all()
             self.assertAlmostEqual(entry.actual, ev.credits, places=6)
             self.assertEqual(entry.user_id, self.ids["alice"])
+
+    def test_a_machines_jobs_are_its_owners_and_administrators(self):
+        """``GET /api/machines/{id}/jobs`` (P4.5.10, P4.7.3): a visitor 401; a stranger and a moderator "not found"; a
+        member a grant lends it to 403; its owner and an administrator 200, with its runs (an experiment its owner may
+        not view named "a member's experiment"), what its helper lends and its trust counters."""
+        from fastapi.testclient import TestClient
+        from citar.server import app as appmod
+        client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(client.close)
+        self.grant("alice", ["lab"])
+        e, conn = self.connect()
+        self.submit("alice", duels("lent", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        d.tick()
+        (offer,) = self.offers(conn)
+        path = f"/api/machines/{self.sid}/jobs"
+
+        def call(who):
+            return client.get(path, headers=self.headers.get(who, {"origin": "https://citar.test"}))
+        self.assertEqual(call(None).status_code, 401)
+        self.assertEqual(call("mona").status_code, 404, "a moderator is a member here")
+        self.assertEqual(call("alice").status_code, 403, "a grant lends it to her: she may see it, not manage it")
+        self.assertEqual(client.get("/api/machines/sv_nobody/jobs", headers=self.headers["zara"]).status_code, 404)
+        r = call("bob")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        (run,) = body["runs"]
+        self.assertEqual((run["run"], run["state"], run["kind"]), (offer["run"], "offered", "lab_game"))
+        self.assertEqual(run["experiment"], "a member's experiment", "alice's experiment is not bob's to see")
+        self.assertNotIn("verdict", run, "a verdict once its job settles")
+        self.assertIn("abandons", body["trust"])
+        admin = call("zara").json()
+        self.assertEqual(admin["runs"][0]["experiment"], "lent")
+        self.assertEqual(admin["runs"][0]["role"], "primary")
+
+    def test_the_dialog_says_what_is_lent_and_the_grants_that_lend_it(self):
+        """The machine settings dialog's read (P4.5.11): the CPU its helper lends in effect, each limit hard or soft,
+        from its last hello and acknowledgement; "not lent" when its own switch is off; and the grants that list
+        ``lab`` (one with no purposes is not among them)."""
+        from citar import machine_settings as M
+        from citar.server import workers as W
+        self.grant("alice", [])
+        with db.session() as s:
+            row = s.get(Server, self.sid)
+            self.assertIsNone(M.client(s, row, s.get(User, self.ids["bob"]))["cpu_helper"])
+            self.assertEqual(M.client(s, row, s.get(User, self.ids["bob"]))["lab_grants"], [])
+        self.grant("zara", ["lab", "game"])
+        e, conn = self.connect()
+        W.record_hello(self.sid, conn.hello)
+        W.record_ack(self.sid, conn.ack)
+        with db.session() as s:
+            out = M.client(s, s.get(Server, self.sid), s.get(User, self.ids["bob"]))
+        cpu = out["cpu_helper"]
+        self.assertTrue(cpu["lent"] and cpu["verifiable"] and cpu["plays_jobs"])
+        self.assertEqual(cpu["limits"], {"cpu": "hard", "memory": "hard"})
+        self.assertEqual(cpu["memory_per_run_mb"], 500)
+        self.assertEqual(cpu["effective"]["threads"], 1)
+        self.assertEqual(out["lab_grants"], [{"subject": "zara", "group": "Bob's machines"}])
+        _e, conn = self.connect(lent=False)
+        W.record_hello(self.sid, conn.hello)
+        with db.session() as s:
+            self.assertFalse(M.client(s, s.get(Server, self.sid), None)["cpu_helper"]["lent"])

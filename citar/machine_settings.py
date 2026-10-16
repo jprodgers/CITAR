@@ -617,6 +617,54 @@ def differences(config, detected) -> dict:
 
 # ---------------------------------------------------------------------------- the dialog's read
 
+def helper_cpu(row) -> Optional[dict]:
+    """What a machine's helper lends of its CPU, from its last hello and acknowledgement kept on its row
+    (``servers.helper``, package 4-10): whether its owner lent it there (``lent``: the helper's own switch), whether it
+    passed its canary and self-check, the CPU work in effect (the site's settings held to its own ceiling), how hard its
+    OS holds each limit, the memory each run may use on its job host, and which figures its ceiling capped. None for a
+    machine no protocol 2 helper has connected for."""
+    block = row.helper if isinstance(getattr(row, "helper", None), dict) else None
+    if not block or not block.get("protocol"):
+        return None
+    cpu = block.get("cpu") if isinstance(block.get("cpu"), dict) else {}
+    effective = block.get("effective") if isinstance(block.get("effective"), dict) else {}
+    return {"lent": bool(cpu.get("enabled")), "verifiable": bool(cpu.get("verifiable")),
+            "plays_jobs": bool(block.get("jobs_build")), "jobs_build": block.get("jobs_build"),
+            "effective": effective.get("cpu") if isinstance(effective.get("cpu"), dict) else None,
+            "limits": block.get("limits") if isinstance(block.get("limits"), dict) else cpu.get("limits"),
+            "memory_per_run_mb": block.get("memory_per_run_mb", cpu.get("memory_per_run_mb")),
+            "capped": [c for c in (block.get("capped") or []) if isinstance(c, str) and c.startswith("cpu.")],
+            "ceiling": cpu.get("ceiling") if isinstance(cpu.get("ceiling"), dict) else None}
+
+
+def lab_grants(session, row) -> list:
+    """The live grants on a machine's group whose purposes list ``lab`` (P4.5.5: CPU work is lent only by a grant that
+    lists it): each its subject (an account's handle, or everyone) and its group's name."""
+    from sqlalchemy import select
+
+    from .db.models import AccessGrant, ServerGroup, User
+    if not getattr(row, "group_id", None):
+        return []
+    group = session.get(ServerGroup, row.group_id)
+    if group is None or group.archived_at is not None:
+        return []
+    now = utcnow()
+    out = []
+    for g in session.scalars(select(AccessGrant).where(AccessGrant.group_id == group.id,
+                                                       AccessGrant.enabled.is_(True))):
+        expires = g.expires_at
+        if expires is not None and (expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)) <= now:
+            continue
+        if "lab" not in (g.purposes or []):
+            continue
+        subject = "everyone"
+        if g.subject_type == "user" and g.subject_user_id:
+            u = session.get(User, g.subject_user_id)
+            subject = u.handle if u is not None else "an account"
+        out.append({"subject": subject, "group": group.name})
+    return out
+
+
 def _when(v) -> Optional[str]:
     if isinstance(v, datetime):
         return (v if v.tzinfo else v.replace(tzinfo=timezone.utc)).isoformat()
@@ -676,6 +724,9 @@ def client(session, row, viewer, *, in_effect: Optional[dict] = None) -> dict:
                   "kinds": ["api"] if api else ["gpu", "cpu"]},
         "trust_tier": row.trust_tier or "new",
         "can_admin": admin,
+        # the CPU its helper lends in effect, and the grants that lend it for lab runs (package 4-10)
+        "cpu_helper": helper_cpu(row),
+        "lab_grants": lab_grants(session, row),
     }
     if admin:
         out["classes"] = [_class_entry(c) | {"is_default": c["is_default"]} for c in classes]
