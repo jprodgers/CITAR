@@ -724,7 +724,11 @@ class Memory(Lab):
         # the experiment's game becomes a job that allocates past the host's limit (the test jobs' alloc)
         (job,) = d.jobs.values()
         from citar import _engine
-        spec = {"mb": 400, "step_mb": 8, "hold_s": 0.0}
+        # held 1.5 s once allocated: macOS's limit is a watchdog that looks every 500 ms (limits::WATCHDOG_EVERY), and an
+        # allocation done at once could finish between two looks and return a result for the server to refuse (CI,
+        # test.yml run 38933789735, macos: two runs "internal" before the third died of memory). Windows and Linux end
+        # it as it allocates.
+        spec = {"mb": 400, "step_mb": 8, "hold_s": 1.5}
         checked = json.loads(_engine.jobs.test_job_spec("alloc", json.dumps(spec).encode()))
         with db.session() as s:
             row = s.get(CpuJob, job.id)
@@ -1201,13 +1205,16 @@ class PausedDeadlines(Lab):
         self.submit("alice", duels("bench-held", 1, turns=40))
         d = self.dispatcher([self.local({"CITAR_JOBS_TEST_STEP_MS": "20"})])
         sched = S.get()
-        with mock.patch.object(D, "DEADLINE_MIN", 3.0):
+        # 3 s of play on the laptop; CI's three-core macOS runner played 3 s without reaching round 2 (test.yml run
+        # 38933789735: three deadline failures, given up), so CI's is 10 s, and the wait for the held run scales with it
+        deadline = 10.0 if os.environ.get("CI") else 3.0
+        with mock.patch.object(D, "DEADLINE_MIN", deadline):
             self.until(d, lambda: any((r.round or 0) >= 2 for r in d.runs.values()))
             (run,) = d.runs.values()
-            self.assertEqual(run.deadline_s, 3.0)
+            self.assertEqual(run.deadline_s, deadline)
             lease = sched.lease("sv_host", "dry-run", kind="benchmark", label="benchmark run")
             try:
-                failed = self.until(d, lambda: self._failed_run(), timeout=30, step=0.1)
+                failed = self.until(d, lambda: self._failed_run(), timeout=3 * deadline + 10, step=0.1)
             finally:
                 lease.release()
             self.until(d, lambda: (lab.DONE / "bench-held.json").exists(), timeout=60)
