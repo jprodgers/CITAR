@@ -1807,12 +1807,18 @@ class Dispatcher:
                 continue
             per_exp[job.exp]["running"] += 1
             started = run.started_at if run.started_at is not None else run.offered_at
+            # its deadline, and how far its pauses have pushed the server's backstop on (P4.5.5: up to twice)
+            paused = self._paused(run, now)
+            extended = (expires_at(run.started_at, run.deadline_s, paused)
+                        - expires_at(run.started_at, run.deadline_s, 0.0)) if run.started_at is not None else 0.0
             running.append({"exp": job.exp, "i": job.i, "job": job.id, "run": run.id, "kind": job.kind,
                             "machine": run.machine, "executor": run.executor.name,
                             "executor_kind": run.executor.kind, "state": run.state,
                             "minutes": max(0.0, now - started) / 60.0, "turn": run.round, "limit": run.of,
                             "paused": run.paused, "attempt": job.attempts + 1, "owner": job.owner_id,
-                            "peak_mb": round(run.peak_mb, 1), "cpu_s": round(run.cpu_s, 1)})
+                            "peak_mb": round(run.peak_mb, 1), "cpu_s": round(run.cpu_s, 1),
+                            "deadline_s": round(run.deadline_s, 1), "paused_s": round(paused, 2),
+                            "extended_s": round(extended, 2)})
         firsts: dict = {}
         for j in self.jobs.values():
             if j.state == "queued":

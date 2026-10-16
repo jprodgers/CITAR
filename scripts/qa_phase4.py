@@ -3,6 +3,7 @@ down (design/phase4-helper.md P4.7.6).
 
     python scripts/qa_phase4.py <part>|all [--port N] [--dir D] [--keep] [--helper-bin PATH] [--skip PART]
                                 [--llm-url URL] [--stand-in]
+                                [--wsl --wsl-root PATH --wsl-python PATH [--wsl-distro NAME] [--wsl-user NAME]]
 
 It reuses ``scripts/qa_phase3.py``'s harness, imported rather than copied: its refusals (exit 2, touching nothing, for
 the dev server's port 8799, a port in use, a directory holding anything without the harness's marker, the owner's
@@ -59,8 +60,27 @@ Parts:
   is killed three times fails, and an administrator's retry (``POST /api/admin/jobs/retry``) plays it to its end (a
   member's is 404); the administrators' view of the dispatcher; no traceback.
 
-``all`` runs every part written so far; later packages add ``remote`` (4-10), ``verify`` (4-11, 4-12), ``update``
-(4-13), ``service`` (4-14), ``exit`` and ``real`` (4-15).
+- ``remote`` (4-10): the lab's games on a helper machine. Bob's machine, in a group of his and trusted by an
+  administrator, asks four threads, 50% and 1 GB in its machine settings; its real helper lends two threads, 20% of
+  the machine and 512 MB in its own ``helper.json`` (the owner's ceiling, which wins); the host lends nothing here.
+  Alice, given ``run_lab`` by an administrator and named by bob's grant listing Lab (CPU work), queues eight 30-round
+  duels from the A/B route: they play on bob's machine (eight lines with ``executor.machine`` his machine,
+  ``unverified`` until 4-11; eight events given by bob and used by alice); the dialog and the helper card show the CPU
+  in effect, hard on Windows, and the grant; the job host's CPU stays under its cap plus slack and every run's round
+  moves at least every 30 s; ``GET /api/machines/{id}/jobs`` is bob's (alice, a grantee, 403; a stranger 404). Where
+  the share binds (5% of the machine, pushed to the helper) two long games stay under it, and deleting their
+  experiment from the queue ends them on the helper. **Yield:** the Servers page's test streaming for 3 s holds the
+  game playing (its round the same when held and let go) and it goes on within 2 s of the ``[DONE]``, its paused time
+  reported and the server's deadline pushed on; with ``yield_to_llm`` off a request holds nothing, and a one-job
+  benchmark's lease sends ``jobs_pause`` and its end ``jobs_resume``. With ``--wsl`` the server runs in WSL (P4.7.6's
+  topology: ``--wsl-root``, a checkout there, and ``--wsl-python``, its venv's Python with the extension ``cargo xtask
+  develop`` built there; bound to ``0.0.0.0`` inside WSL when ``wslinfo --networking-mode`` says ``nat``, else
+  ``127.0.0.1``; its state in ``~/citar-qa/<the directory's name>``) and the Windows helper dials it through WSL's
+  localhost forwarding; when Windows cannot reach it the part says so and runs with the server on Windows (the
+  fallback), recorded in the evidence's ``remote.topology``.
+
+``all`` runs every part written so far; later packages add ``verify`` (4-11, 4-12), ``update`` (4-13), ``service``
+(4-14), ``exit`` and ``real`` (4-15).
 """
 from __future__ import annotations
 
@@ -89,8 +109,7 @@ q3 = _phase3()
 Harness, Helper, FakeEndpoint, wait_until = q3.Harness, q3.Helper, q3.FakeEndpoint, q3.wait_until
 
 #: Parts a later package writes (P4.7.6): asked for now, the harness says so and refuses.
-LATER = {"remote": "4-10", "verify": "4-11, 4-12", "update": "4-13", "service": "4-14",
-         "exit": "4-15", "real": "4-15"}
+LATER = {"verify": "4-11, 4-12", "update": "4-13", "service": "4-14", "exit": "4-15", "real": "4-15"}
 #: The v1 refusal's words (``citar.server.helper_protocol.V1_REFUSAL_MESSAGE``), as a 0.1.5 worker prints them.
 V1_START = "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2)."
 #: A protocol 1 hello, as a 0.1.5 worker sent it.
@@ -760,6 +779,139 @@ def part_scan(h) -> None:
             scripted.close()
 
 
+# ---------------------------------------------------------------------------- a process's CPU (4-10)
+
+def descendants(pid: int) -> list:
+    """The processes ``pid`` started and theirs (a helper's job host, and a wrapper's child on Linux), by their
+    parents' ids: Windows' process snapshot, Linux's ``/proc``; [] elsewhere (macOS: the CPU checks say so)."""
+    parents: dict = {}
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class Entry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return []
+        try:
+            e = Entry()
+            e.dwSize = ctypes.sizeof(Entry)
+            ok = k32.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                parents.setdefault(int(e.th32ParentProcessID), []).append(int(e.th32ProcessID))
+                ok = k32.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            k32.CloseHandle(snap)
+    elif sys.platform.startswith("linux"):
+        for d in Path("/proc").iterdir():
+            if not d.name.isdigit():
+                continue
+            try:
+                stat = (d / "stat").read_text()
+            except OSError:
+                continue
+            ppid = int(stat[stat.rindex(")") + 2:].split()[1])
+            parents.setdefault(ppid, []).append(int(d.name))
+    out, todo = [], [pid]
+    while todo:
+        for child in parents.get(todo.pop(), []):
+            if child not in out and child != pid:
+                out.append(child)
+                todo.append(child)
+    return out
+
+
+def cpu_seconds(pid: int) -> Optional[float]:
+    """The CPU time a process has used so far (user and kernel), or None when it is gone or cannot be read."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        handle = k32.OpenProcess(0x1000, False, int(pid))         # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not k32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+                return None
+            kernel, user = ((t.dwHighDateTime << 32) | t.dwLowDateTime for t in times[2:])
+            return (kernel + user) / 1e7
+        finally:
+            k32.CloseHandle(handle)
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{int(pid)}/stat").read_text()
+        except OSError:
+            return None
+        fields = stat[stat.rindex(")") + 2:].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    return None
+
+
+class CpuWatch:
+    """Samples the CPU of the processes a helper started (its job host) every ``every`` seconds on a thread of its
+    own, from ``start()`` to ``stop()``: ``summary()`` gives the busiest window of at least ``window`` seconds and the
+    whole span's mean, each as a percentage of the whole machine (all its logical CPUs, as a CPU limit is), or None
+    where a process's CPU cannot be read (macOS)."""
+
+    def __init__(self, pid: int, *, every: float = 0.25, window: float = 2.0):
+        self.pid, self.every, self.window = pid, every, window
+        self.samples: list = []         # (monotonic time, the descendants' CPU seconds so far)
+        self._seen: dict = {}           # descendant -> its last reading (one that ended keeps its last)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _read(self) -> Optional[float]:
+        for child in descendants(self.pid):
+            got = cpu_seconds(child)
+            if got is not None:
+                self._seen[child] = max(got, self._seen.get(child, 0.0))
+        return sum(self._seen.values()) if self._seen else None
+
+    def start(self) -> "CpuWatch":
+        def loop():
+            while not self._stop.is_set():
+                got = self._read()
+                if got is not None:
+                    self.samples.append((time.monotonic(), got))
+                self._stop.wait(self.every)
+        self._thread = threading.Thread(target=loop, name="qa-cpu-watch", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> dict:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(5)
+        return self.summary()
+
+    def summary(self) -> dict:
+        cpus = os.cpu_count() or 1
+        s = self.samples
+        if len(s) < 2 or s[-1][0] - s[0][0] <= 0:
+            return {"peak_pct": None, "mean_pct": None, "seconds": 0.0, "cpu_s": 0.0, "cpus": cpus}
+        peak = 0.0
+        j = 0
+        for i in range(len(s)):
+            while j < len(s) and s[j][0] - s[i][0] < self.window:
+                j += 1
+            if j >= len(s):
+                break
+            peak = max(peak, (s[j][1] - s[i][1]) / (s[j][0] - s[i][0]) / cpus * 100.0)
+        span = s[-1][0] - s[0][0]
+        used = s[-1][1] - s[0][1]
+        return {"peak_pct": round(peak, 2), "mean_pct": round(used / span / cpus * 100.0, 2),
+                "seconds": round(span, 2), "cpu_s": round(used, 3), "cpus": cpus}
+
+
 # ---------------------------------------------------------------------------- lab (4-09)
 
 #: The instance's lab, its jobs, its events and its ratings, read in a child with the instance's environment (its
@@ -780,7 +932,8 @@ with db.session() as s:
         for r in s.scalars(select(CpuJobRun).where(CpuJobRun.job_id.in_([j.id for j in jobs] or ["-"]))):
             runs.setdefault(r.job_id, []).append({"id": r.id, "state": r.state, "verdict": r.verdict,
                                                    "error": (r.error or {}).get("code"), "machine": r.machine_id,
-                                                   "executor": r.executor, "offered": r.offered_at.isoformat()})
+                                                   "executor": r.executor, "offered": r.offered_at.isoformat(),
+                                                   "paused_s": r.paused_s})
         events = [{"activity": e.activity, "consumer": e.consumer_id, "provider": e.provider_id,
                    "machine": e.machine_id, "cpu": e.cpu_core_s, "observed": e.observed_s,
                    "reported": e.reported_s, "flags": e.flags or {},
@@ -1058,10 +1211,557 @@ def part_lab(h) -> None:
     r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
 
 
+# ---------------------------------------------------------------------------- remote (4-10)
+
+#: What bob lends in his helper's own settings (``helper.json``, as ``citar-helper setup`` writes it once he says
+#: yes): gate 2's two threads, 20% of the machine and 512 MB.
+REMOTE_CEILING = {"enabled": True, "threads": 2, "cpu_percent": 20, "memory_mb": 512,
+                  "work": ["lab_game", "ranking_game"]}
+#: What his machine's settings ask: more, so the helper's own ceiling is what plays (and the dialog says it capped).
+REMOTE_SITE = {"enabled": True, "threads": 4, "cpu_percent": 50, "memory_mb": 1024,
+               "work": ["lab_game", "ranking_game"], "yield_to_llm": True}
+#: The Servers page's test prompt (``pool_api``'s), which the scripted endpoint streams over ``YIELD_S`` seconds.
+TEST_PROMPT = "Reply with exactly: CITAR OK"
+YIELD_S = 3.0
+#: A game long enough to be held and let go (about 9 s of one core here): eight seats on a huge map.
+LONG_GAME = {"players": 8, "size": "huge", "maps": ["pangaea"], "speed": "Quick", "turns": 330,
+             "profiles": ["standard", "classic-production"]}
+
+
+def _saves(h) -> Path:
+    """The instance's saves folder as this process reads it (the WSL server's through its UNC path)."""
+    return getattr(h.server, "saves", None) or h.server.state / "saves"
+
+
+def _server_python(h, code: str, *args: str) -> str:
+    """``python -c code args`` with the instance's environment (its database and saves): in WSL for a WSL server."""
+    import subprocess
+    runner = getattr(h.server, "python", None)
+    if runner is not None:
+        got = runner("-c", code, *args)
+    else:
+        got = subprocess.run([sys.executable, "-c", code, *args], cwd=str(ROOT), env=h.server.env,
+                             capture_output=True, text=True, timeout=120)
+    return got.stdout
+
+
+class JobsPoller:
+    """The administrators' view of the dispatcher (``GET /api/admin/jobs``) every 50 ms on a thread of its own: per
+    sample, ``time.time()``, the machine's runs (run, experiment, state, turn, paused, paused_s, extended_s) and
+    whether a benchmark holds its executor."""
+
+    def __init__(self, admin, machine: str):
+        import httpx
+        self.machine = machine
+        self.http = httpx.Client(base_url=admin.http.base_url, cookies=admin.http.cookies,
+                                 headers=admin.http.headers, timeout=10.0)
+        self.samples: list = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="qa-jobs-poller", daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                body = self.http.get("/api/admin/jobs").json()
+            except Exception:
+                body = None
+            if isinstance(body, dict):
+                ex = next((e for e in (body.get("dispatcher") or {}).get("executors") or []
+                           if e.get("machine") == self.machine), {})
+                rows = [{k: x.get(k) for k in ("run", "exp", "i", "state", "turn", "limit", "paused", "paused_s",
+                                               "extended_s", "deadline_s")}
+                        for x in (body.get("running") or {}).get(self.machine, [])]
+                self.samples.append({"t": time.time(), "runs": rows, "benchmark": bool(ex.get("benchmark")),
+                                     "executor": {k: ex.get(k) for k in ("state", "paused", "running")}})
+            self._stop.wait(0.05)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(5)
+        self.http.close()
+
+    def of(self, run: str) -> list:
+        """(t, turn, paused, paused_s, extended_s) of ``run`` in each sample that shows it."""
+        out = []
+        for s in self.samples:
+            for x in s["runs"]:
+                if x["run"] == run:
+                    out.append((s["t"], x["turn"], bool(x["paused"]), x.get("paused_s") or 0.0,
+                                x.get("extended_s") or 0.0))
+        return out
+
+    def playing(self, exp: str) -> list:
+        """The runs of ``exp`` seen running with a reported round."""
+        return sorted({x["run"] for s in self.samples for x in s["runs"]
+                       if x["exp"] == exp and x["state"] == "running" and x["turn"]})
+
+    def gaps(self, exp: str) -> dict:
+        """Each run's longest time between the samples that showed its round move (its first and last sample
+        counting as moves)."""
+        runs = {x["run"] for s in self.samples for x in s["runs"] if x["exp"] == exp}
+        out = {}
+        for run in runs:
+            rows = self.of(run)
+            moves = [rows[0][0]] + [b[0] for a, b in zip(rows, rows[1:]) if b[1] != a[1]] + [rows[-1][0]]
+            out[run] = round(max((b - a for a, b in zip(moves, moves[1:])), default=0.0), 2)
+        return out
+
+
+def part_remote(h) -> None:
+    """The ``remote`` part (the module's doc)."""
+    r = h.report
+    admin, alice, bob = h.accounts["admin"], h.accounts["alice"], h.accounts["bob"]
+    data = r.data.setdefault("remote", {"topology": getattr(h.server, "topology", "windows")})
+    tag = h.tag
+    host = "sv_qa_host"
+    scripted = FakeEndpoint(delay=0.05)
+    scripted.slow = {TEST_PROMPT: YIELD_S}
+    helpers: list = []
+    poller: Optional[JobsPoller] = None
+    try:
+        # ---- the host lends nothing in this part: every game goes to a helper
+        off = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {"enabled": False}}})
+        # ---- bob's machine in a group of his, trusted by an administrator; alice given run_lab, and bob's grant
+        # listing lab for her
+        group = bob.post("/api/pool/groups", json={"name": f"QA lenders {tag}"})
+        gid = group.json().get("id", "") if group.status_code == 200 else ""
+        made = bob.post("/api/pool/servers", json={"config": {"name": f"QA lender {tag}", "kind": "owned",
+                                                               "connection": {"provider": "openai_compatible",
+                                                                              "max_parallel": 1}},
+                                                    "reach": "worker", "group_id": gid})
+        hid = made.json().get("id", "") if made.status_code == 200 else ""
+        issued = bob.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa remote"}) if hid else None
+        token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
+        trusted = admin.put(f"/api/admin/machines/{hid}/trust", json={"trust_tier": "trusted"})
+        site = bob.put(f"/api/machines/{hid}/settings", json={"capabilities": {"cpu": REMOTE_SITE}})
+        alice_id = alice.get("/api/auth/me").json()["user"]["id"]
+        lab_cap = admin.patch(f"/api/admin/users/{alice_id}", json={"caps": {"run_lab": True}})
+        grant = bob.post(f"/api/pool/groups/{gid}/grants", json={"subject_type": "user", "handle": alice.handle,
+                                                                 "purposes": ["lab"]}) if gid else None
+        r.check("bob's helper machine in a group of his, trusted by an administrator, its CPU settings asking 4 "
+                "threads, 50% and 1 GB; alice given run_lab by an administrator, and bob's grant listing Lab (CPU "
+                "work) for her; the host lends no CPU in this part",
+                all(x is not None and x.status_code == 200 for x in (off, group, made, issued, trusted, site, lab_cap,
+                                                                     grant)) and bool(token),
+                json.dumps({"statuses": [getattr(x, "status_code", None) for x in (off, group, made, issued, trusted,
+                                                                                    site, lab_cap, grant)]}))
+        data.update(machine=hid, group=gid)
+
+        # ---- bob's helper, lending his CPU in its own settings (two threads, 20%, 512 MB)
+        home = h.server.state / "helper-home-qa-lender"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "helper.json").write_text(json.dumps({"cpu": REMOTE_CEILING}), encoding="utf-8")
+        helper = Helper(h, token, scripted, "qa-lender", machine="qa-lender")
+        helpers.append(helper)
+
+        def executor() -> dict:
+            got = admin.get("/api/admin/jobs")
+            return next((e for e in ((got.json().get("dispatcher") or {}).get("executors") or [])
+                         if e.get("machine") == hid), {}) if got.status_code == 200 else {}
+        ready = wait_until(lambda: executor().get("state") == "ready", 120, 0.25)
+        ex = executor()
+        jobs_view = admin.get("/api/admin/jobs")
+        server_build = ((jobs_view.json().get("dispatcher") or {}).get("jobs_build")
+                        if jobs_view.status_code == 200 else None)
+        dialog = bob.get(f"/api/machines/{hid}/settings")
+        lent = (dialog.json().get("cpu_helper") or {}) if dialog.status_code == 200 else {}
+        eff = lent.get("effective") or {}
+        grants = (dialog.json().get("lab_grants") or []) if dialog.status_code == 200 else []
+        card = (_workers(bob, hid).get("cpu") or {})
+        windows = os.name == "nt"
+        r.check("its helper connects and its job host is ready, on the server's jobs build; the machine settings "
+                "dialog shows the CPU in effect (two threads, 20%, 512 MB: its own ceiling capped the site's), each "
+                "limit hard on Windows (a Job Object), the memory a run may use, and the grant that lends it for lab "
+                "runs (alice); the helper card says the same",
+                bool(ready) and lent.get("lent") is True and lent.get("verifiable") is True
+                and bool(server_build) and ex.get("jobs_build") == server_build
+                and {k: eff.get(k) for k in ("threads", "cpu_percent", "memory_mb")}
+                == {"threads": 2, "cpu_percent": 20, "memory_mb": 512}
+                and {"cpu.threads", "cpu.cpu_percent", "cpu.memory_mb"} <= set(lent.get("capped") or [])
+                and (not windows or lent.get("limits") == {"cpu": "hard", "memory": "hard"})
+                and (lent.get("memory_per_run_mb") or 0) > 0
+                and [g.get("subject") for g in grants] == [alice.handle] and card.get("effective") == eff,
+                json.dumps({"executor": {k: ex.get(k) for k in ("state", "reason", "threads", "cpu_percent",
+                                                                 "memory_mb", "held", "memory_per_run_mb",
+                                                                 "jobs_build")},
+                            "dialog": lent, "grants": grants})[:700])
+        data.update(executor={k: ex.get(k) for k in ("threads", "cpu_percent", "memory_mb", "held",
+                                                      "memory_per_run_mb", "jobs_build")},
+                    server_jobs_build=server_build)
+
+        # ---- eight 30-round duels of alice's on bob's machine
+        poller = JobsPoller(admin, hid)
+        watch = CpuWatch(helper.proc.pid).start()
+        eight = f"qa-remote-{tag}"
+        queued = alice.post("/api/bots/experiments", json={
+            "profiles": ["standard", "classic-production"], "name": eight, "players": 2, "games": 8, "seed": 7100,
+            "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": 30})
+        t0 = time.perf_counter()
+        done = wait_until(lambda: _lab_view(alice, eight).get("state") == "complete" and time.perf_counter(),
+                          240, 0.25)
+        cpu = watch.stop()
+        took = round(done - t0, 1) if done else None
+        lines = _lab_lines(h, eight)
+        r.check("alice (given run_lab) queues eight 30-round duels from the A/B route; they play on bob's machine to "
+                "their end: eight lines with executor.machine his machine and verification unverified (until 4-11), "
+                "each game once",
+                queued.status_code == 200 and bool(done) and sorted(x.get("i") for x in lines) == list(range(8))
+                and {((x.get("executor") or {}).get("machine"), (x.get("executor") or {}).get("verification"))
+                     for x in lines} == {(hid, "unverified")},
+                json.dumps({"seconds": took, "lines": len(lines)}), seconds=took)
+        state: dict = {}
+
+        def settled():
+            state.clear()
+            state.update(json.loads((_server_python(h, LAB_STATE, eight) or "{}").strip().splitlines()[-1] or "{}"))
+            return len((state.get(eight) or {}).get("events") or []) >= 8
+        wait_until(settled, 30, 1.0)
+        events = (state.get(eight) or {}).get("events") or []
+        bob_id = bob.get("/api/auth/me").json()["user"]["id"]
+        runs = {(x.get("executor") or {}).get("run") for x in lines}
+        r.check("eight cpu events, each given by bob (the machine's owner) and used by alice (the experiment's), on "
+                "his machine, unverified, one a run",
+                len(events) == 8 and {(e["provider"], e["consumer"], e["machine"], e["verification"]) for e in events}
+                == {(bob_id, alice_id, hid, "unverified")} and {e["request"] for e in events} == runs,
+                json.dumps([{k: e[k] for k in ("cpu", "reported", "observed", "flags")} for e in events][:3])[:500])
+        gaps = poller.gaps(eight)
+        limits = lent.get("limits") or {}
+        bounded = cpu["peak_pct"] is None or limits.get("cpu") != "hard" or cpu["peak_pct"] <= 20 + 5
+        r.check("the job host's CPU over the run stays under its 20% plus slack (where it is held hard), and every "
+                "run's round advances at least every 30 s",
+                bounded and bool(gaps) and max(gaps.values()) <= 30.0,
+                json.dumps({"cpu": cpu, "limits": limits, "longest_gap_s": max(gaps.values()) if gaps else None}))
+        data.update(eight=eight, eight_seconds=took, eight_cpu=cpu)
+        mine = bob.get(f"/api/machines/{hid}/jobs")
+        jobs = mine.json() if mine.status_code == 200 else {}
+        r.check("GET /api/machines/{id}/jobs: bob sees his machine's eight runs done, alice's private experiment "
+                "named \"a member's experiment\", what it lends now; alice, a grantee, may not (403), a stranger's "
+                "view is 404",
+                len([x for x in jobs.get("runs") or [] if x.get("state") == "done"]) >= 8
+                and {x.get("experiment") for x in jobs.get("runs") or []} == {"a member's experiment"}
+                and (jobs.get("lends") or {}).get("lent") is True
+                and alice.get(f"/api/machines/{hid}/jobs").status_code == 403
+                and h.accounts["mod"].get(f"/api/machines/{hid}/jobs").status_code == 404,
+                json.dumps({"runs": len(jobs.get("runs") or []), "lends": jobs.get("lends")})[:500])
+
+        # ---- the share where it binds: 5% of the machine (the site's figure, under bob's 20%), two long games
+        set5 = bob.put(f"/api/machines/{hid}/settings", json={"capabilities": {"cpu": {**REMOTE_SITE,
+                                                                                          "cpu_percent": 5}}})
+        pushed = wait_until(lambda: executor().get("cpu_percent") == 5, 20, 0.25)
+        held5 = f"qa-share-{tag}"
+        alice.post("/api/bots/experiments", json={**LONG_GAME, "name": held5, "games": 2, "seed": 7200})
+        both = wait_until(lambda: len(poller.playing(held5)) == 2, 60, 0.25)
+        watch = CpuWatch(helper.proc.pid).start()
+        time.sleep(8.0)
+        share = watch.stop()
+        queue_file = _saves(h) / "lab" / "queue" / f"{held5}.json"
+        try:
+            queue_file.unlink()
+        except OSError:
+            pass
+        playing5 = poller.playing(held5)
+        ended = wait_until(lambda: not [s for s in poller.samples[-1:] for x in s["runs"] if x["exp"] == held5],
+                           30, 0.25)
+        bound5 = share["peak_pct"] is None or limits.get("cpu") != "hard" or (
+            share["peak_pct"] <= 5 + 2 and share["mean_pct"] >= 2.5)
+        r.check("the share where it binds: at 5% of the machine (pushed to the helper, which restarts its job host "
+                "with it) two long games hold the job host's CPU under 5% plus slack where it is held hard, and the "
+                "experiment deleted from the queue ends its runs on the helper",
+                set5.status_code == 200 and bool(pushed) and bool(both) and bound5 and bool(ended),
+                json.dumps({"cpu": share, "runs": playing5}))
+        data.update(share_cpu=share)
+        bob.put(f"/api/machines/{hid}/settings", json={"capabilities": {"cpu": REMOTE_SITE}})
+        wait_until(lambda: executor().get("cpu_percent") == 20 and executor().get("running") == 0, 30, 0.25)
+
+        # ---- yield: the Servers page's test streams for 3 s while a long game plays
+        held = f"qa-yield-{tag}"
+        alice.post("/api/bots/experiments", json={**LONG_GAME, "name": held, "games": 1, "seed": 7300})
+        playing = wait_until(lambda: poller.playing(held), 60, 0.1) or []
+        run = playing[0] if playing else ""
+        before = len(scripted.completions())
+        t_asked = time.time()
+        test = bob.post(f"/api/pool/servers/{hid}/test", params={"wait": 30})
+        entry = next((q for q in scripted.completions()[before:] if q.get("delay") == YIELD_S and q.get("events")),
+                     None)
+        done_at = entry["events"][-1] if entry else None
+        went_on = wait_until(lambda: next((x for x in poller.of(run) if done_at and x[0] > done_at and not x[2]),
+                                          None), 10, 0.05) if run else None
+        rows = poller.of(run) if run else []
+        holding = [x for x in rows if x[2] and x[0] >= t_asked]
+        extended = max((x[4] for x in rows), default=0.0)
+        r.check("yield: while the Servers page's test streams at the scripted endpoint (3 s), alice's game playing on "
+                "the machine holds (paused, its round the same when held and when let go), goes on within 2 s of the "
+                "stream's [DONE], with its paused time reported and the server's deadline pushed on by it",
+                test.status_code == 200 and bool(run) and entry is not None and bool(holding)
+                and holding[0][0] < done_at and went_on is not None and went_on[0] - done_at < 2.0
+                and went_on[1] == holding[-1][1] and went_on[3] > 0 and extended > 0,
+                json.dumps({"held_from_first_event_s": round(holding[0][0] - entry["events"][0], 3)
+                            if holding and entry else None, "round": holding[-1][1] if holding else None,
+                            "went_on_after_done_s": round(went_on[0] - done_at, 3) if went_on and done_at else None,
+                            "paused_s": went_on[3] if went_on else None, "extended_s": extended}))
+        finished = wait_until(lambda: _lab_view(alice, held).get("state") == "complete", 120, 0.25)
+        moved = [x for x in poller.of(run) if went_on and x[0] > went_on[0] and (x[1] or 0) > (went_on[1] or 0)]
+        r.check("the held game's round moves again and it ends (its line written)",
+                bool(finished) and bool(moved) and len(_lab_lines(h, held)) == 1,
+                f"finished {bool(finished)}; rounds reported after it went on: {[x[1] for x in moved][:3]}")
+
+        # ---- with yield_to_llm off: a request holds nothing; a benchmark's lease pauses the games
+        no_yield = bob.put(f"/api/machines/{hid}/settings", json={"capabilities": {"cpu": {**REMOTE_SITE,
+                                                                                              "yield_to_llm": False}}})
+        time.sleep(1.0)
+        benched = f"qa-bench-{tag}"
+        alice.post("/api/bots/experiments", json={**LONG_GAME, "name": benched, "games": 1, "seed": 7400})
+        playing = wait_until(lambda: poller.playing(benched), 60, 0.1) or []
+        run = playing[0] if playing else ""
+        t_asked = time.time()
+        test = bob.post(f"/api/pool/servers/{hid}/test", params={"wait": 30})
+        unheld = not [x for x in poller.of(run) if x[2] and x[0] >= t_asked] if run else False
+        suite = {"name": f"QA lender bench {tag}", "mode": "sequential", "repeats": 1,
+                 "servers": [{"server_id": hid, "models": [{"model": scripted.MODEL}]}],
+                 "scenarios": [{"name": "QA duel", "map_size": "duel", "map_type": "pangaea", "seed": 7401,
+                                "opponents": 1, "turn_limit": 2, "barbarians": "off", "max_turn_minutes": 5}]}
+        started = bob.post("/api/benchmarks/runs", json={"suite": suite, "name": f"QA lender bench {tag}"})
+        bench_id = started.json().get("id", "") if started.status_code == 200 else ""
+        on = wait_until(lambda: next((s for s in poller.samples if s["benchmark"]), None), 60, 0.05)
+        held_b = wait_until(lambda: next((x for x in poller.of(run) if on and x[0] >= on["t"] and x[2]), None),
+                            10, 0.05) if run else None
+        off_b = wait_until(lambda: next((s for s in poller.samples if on and s["t"] > on["t"]
+                                         and not s["benchmark"]), None), 180, 0.1)
+        during = [x for x in poller.of(run) if held_b and off_b and held_b[0] <= x[0] < off_b["t"]]
+        resumed = wait_until(lambda: next((x for x in poller.of(run) if off_b and x[0] >= off_b["t"] and not x[2]),
+                                          None), 10, 0.05) if run else None
+        bench = wait_until(lambda: (lambda j: j if j.get("status") in ("done", "failed", "error", "cancelled")
+                                    else None)(q3._runs_job(bob, bench_id)), 120, 0.5) if bench_id else None
+        bench = bench or (q3._runs_job(bob, bench_id) if bench_id else {})
+        r.check("with yield_to_llm off a streamed request holds nothing; a one-job benchmark on the machine sends "
+                "jobs_pause when its lease goes live (the game held, its round still, while it lasts) and "
+                "jobs_resume at its end (the game goes on within 2 s)",
+                no_yield.status_code == 200 and test.status_code == 200 and unheld and started.status_code == 200
+                and on is not None and held_b is not None and held_b[0] - on["t"] < 2.0 and off_b is not None
+                and bool(during) and all(x[2] and x[1] == held_b[1] for x in during)
+                and resumed is not None and resumed[0] - off_b["t"] < 2.0,
+                json.dumps({"held_after_lease_s": round(held_b[0] - on["t"], 3) if held_b and on else None,
+                            "benchmark_s": round(off_b["t"] - on["t"], 2) if on and off_b else None,
+                            "round": held_b[1] if held_b else None,
+                            "went_on_after_s": round(resumed[0] - off_b["t"], 3) if resumed and off_b else None,
+                            "benchmark_job": bench.get("status")}))
+        finished = wait_until(lambda: _lab_view(alice, benched).get("state") == "complete", 120, 0.25)
+        settled_b = json.loads((_server_python(h, LAB_STATE, held, benched) or "{}").strip().splitlines()[-1] or "{}")
+        paused = {n: [x for j in (settled_b.get(n) or {}).get("jobs") or [] for x in j["runs"]] for n in (held, benched)}
+        r.check("both held games end, their paused time in their runs' results (the 3 s stream's; the benchmark's)",
+                bool(finished) and all(paused[n] and paused[n][-1]["state"] == "done" for n in (held, benched))
+                and paused[held][-1]["paused_s"] >= 0.8 * YIELD_S and paused[benched][-1]["paused_s"] > 0.0,
+                json.dumps({n: [(x["state"], x["machine"], x["paused_s"]) for x in v] for n, v in paused.items()}))
+        if h.keep:
+            # the browser checklist (H1, H2, H7): the machine stays connected, lending
+            bob.put(f"/api/machines/{hid}/settings", json={"capabilities": {"cpu": REMOTE_SITE}})
+            helpers.clear()
+        r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
+    finally:
+        if poller is not None:
+            poller.stop()
+        for helper in helpers:
+            helper.stop()
+        if not (h.keep and not helpers):
+            scripted.close()
+
+
+def _lab_lines(h, name: str, folder: str = "results") -> list:
+    path = _saves(h) / "lab" / folder / f"{name}.jsonl"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [json.loads(x) for x in text.splitlines() if x.strip()]
+
+
+# ---------------------------------------------------------------------------- the server in WSL (--wsl)
+
+class WslUnreachable(Exception):
+    """The WSL server answers inside WSL, but Windows cannot reach it through localhost forwarding."""
+
+
+class WslServer:
+    """The dev server in WSL (P4.7.6's topology for ``remote --wsl`` and ``exit``), with ``q3.Server``'s interface:
+    started from ``root`` (a checkout in WSL) with ``python`` (its venv's, the extension ``cargo xtask develop`` built
+    there), its state in ``~/citar-qa/<the directory's name>`` inside WSL (emptied first), its log and the helpers'
+    homes in the Windows directory. It binds ``0.0.0.0`` inside WSL only when WSL's networking is NAT (the Linux VM's
+    own interface, reached from Windows only through ``localhost``), else ``127.0.0.1``. ``admin_cli`` and the parts'
+    readers run in WSL with the instance's environment (``cli``, ``python``); ``saves`` is its saves folder as Windows
+    reads it (``\\wsl.localhost``)."""
+
+    topology = "wsl"
+
+    def __init__(self, state: Path, port: int, *, distro: str, user: str, root: str, python: str):
+        import posixpath
+        self.state, self.port = state, port
+        self.distro, self.user, self.root, self.python_bin = distro, user, root, python
+        self.remote = posixpath.join("/home", user, "citar-qa", state.name)
+        self.unc = Path(rf"\\wsl.localhost\{distro}" + self.remote.replace("/", "\\"))
+        self.saves = self.unc / "saves"
+        self.base = f"http://127.0.0.1:{port}"
+        self.public = f"http://localhost:{port}"
+        self.env: dict = {}
+        self.log = state / "server.log"
+        self.proc = None
+        self.mode = self._wsl("wslinfo", "--networking-mode").stdout.strip() or "unknown"
+        self.host = "0.0.0.0" if self.mode == "nat" else "127.0.0.1"
+
+    def _wsl(self, *args: str, stdin: Optional[str] = None, timeout: float = 180):
+        import subprocess
+        return subprocess.run(["wsl", "-d", self.distro, "-u", self.user, "-e", *args], input=stdin,
+                              capture_output=True, text=True, timeout=timeout)
+
+    def _scripts(self) -> None:
+        """``run.sh`` (the instance's environment, then the venv's Python with the arguments) and ``stop.sh`` (the
+        server's process signalled), written into the WSL state through its UNC path: a script file, since a command
+        line given to ``wsl --`` has its ``$`` expanded by the login shell first (each call here is ``wsl -e``, no shell)."""
+        import posixpath
+        dev = _dev_server_module()
+        env = dev.instance_env(_PosixBase(self.remote), self.port, host=self.host, server=True,
+                               registration="invite", environ={})
+        lines = ["#!/bin/bash", f"cd '{self.root}'"]
+        lines += [f"export {k}='{v}'" for k, v in sorted(env.items())]
+        lines += ["export PYTHONUNBUFFERED=1", f"exec '{self.python_bin}' \"$@\""]
+        (self.unc / "run.sh").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        pid = posixpath.join(self.remote, "server.pid")
+        (self.unc / "stop.sh").write_text(
+            "#!/bin/bash\n"
+            f"p=$(cat '{pid}' 2>/dev/null) || exit 0\n"
+            "kill -\"${1:-TERM}\" \"$p\" 2>/dev/null\n"
+            "for i in $(seq 1 100); do kill -0 \"$p\" 2>/dev/null || exit 0; sleep 0.1; done\n"
+            "kill -KILL \"$p\" 2>/dev/null; exit 0\n", encoding="utf-8", newline="\n")
+        (self.unc / "serve.sh").write_text(
+            "#!/bin/bash\n"
+            f"echo $$ > '{pid}'\n"
+            f"exec bash '{self.remote}/run.sh' scripts/dev_server.py --server --registration invite "
+            f"--host {self.host} --port {self.port} --dir '{self.remote}'\n", encoding="utf-8", newline="\n")
+
+    def prepare(self) -> None:
+        """The WSL state emptied and made, and the scripts written."""
+        made = self._wsl("bash", "-c", f"rm -rf '{self.remote}' && mkdir -p '{self.remote}/config'")
+        if made.returncode != 0:
+            raise q3.HarnessError(f"the WSL state {self.remote} could not be made: {made.stderr.strip()[-300:]}")
+        self._scripts()
+
+    def start(self, timeout: float = 180.0) -> None:
+        """Start it (the registry file the harness wrote copied in first) and wait until Windows reaches it."""
+        import subprocess
+        import httpx
+        local = self.state / "config" / "servers.json"
+        if local.exists():
+            (self.unc / "config" / "servers.json").write_bytes(local.read_bytes())
+        out = open(self.log, "w", encoding="utf-8")
+        self.proc = subprocess.Popen(["wsl", "-d", self.distro, "-u", self.user, "-e", "bash",
+                                      f"{self.remote}/serve.sh"], stdout=out, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL)
+        out.close()
+        t0 = time.perf_counter()
+        inside = False
+        with httpx.Client(base_url=self.base, timeout=5.0) as c:
+            while True:
+                try:
+                    if c.get("/api/auth/config").status_code == 200:
+                        return
+                except httpx.HTTPError:
+                    pass
+                if not inside and time.perf_counter() - t0 > 10:
+                    probe = self._wsl("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                      f"http://127.0.0.1:{self.port}/api/auth/config", timeout=30)
+                    inside = probe.stdout.strip() == "200"
+                if self.proc.poll() is not None:
+                    raise q3.HarnessError(f"the WSL server did not start (exit {self.proc.poll()}); see {self.log}")
+                if time.perf_counter() - t0 > timeout:
+                    if inside:
+                        raise WslUnreachable(f"the WSL server answers inside WSL on {self.port}, but Windows "
+                                             f"cannot reach {self.base} ({self.mode} networking)")
+                    raise q3.HarnessError(f"the WSL server did not answer within {timeout:.0f} s; see {self.log}")
+                time.sleep(0.25)
+
+    def cli(self, *args: str, stdin: Optional[str] = None):
+        """``python -m citar.server.admin_cli`` on the instance's database, in WSL."""
+        return self._wsl("bash", f"{self.remote}/run.sh", "-m", "citar.server.admin_cli", *args, stdin=stdin)
+
+    def python(self, *args: str):
+        """``python args`` in WSL with the instance's environment; ``-c CODE`` goes through a file (a program's text
+        is safer as a file than as an argument across ``wsl``)."""
+        import hashlib
+        args = list(args)
+        if len(args) >= 2 and args[0] == "-c":
+            name = f"qa-snippet-{hashlib.sha256(args[1].encode()).hexdigest()[:12]}.py"
+            (self.unc / name).write_text(args[1], encoding="utf-8", newline="\n")
+            args = [f"{self.remote}/{name}", *args[2:]]
+        return self._wsl("bash", f"{self.remote}/run.sh", *args)
+
+    def stop(self, signal: str = "TERM") -> None:
+        if self.proc is None:
+            return
+        self._wsl("bash", f"{self.remote}/stop.sh", signal, timeout=60)
+        try:
+            self.proc.wait(timeout=30)
+        except Exception:
+            self.proc.kill()
+
+    def restart(self, timeout: float = 180.0) -> None:
+        """Stopped as a crash would stop it (``SIGKILL``) and started again on the same state and port."""
+        self.stop("KILL")
+        kept = self.state / f"server-{len(list(self.state.glob('server-*.log'))) + 1}.log"
+        if self.log.exists():
+            self.log.replace(kept)
+        self.start(timeout)
+
+    def tracebacks(self) -> int:
+        logs = [self.log, *sorted(self.state.glob("server-*.log"))]
+        return sum(p.read_text(encoding="utf-8", errors="replace").count("Traceback") for p in logs if p.exists())
+
+
+class _Reachable:
+    """The WSL server, or, once Windows cannot reach it (``WslUnreachable``), the server on Windows in its place: the
+    fallback P4.7.6 names, recorded in ``fallback["why"]``. Everything else is the server's."""
+
+    def __init__(self, wsl: WslServer, plain, fallback: dict):
+        self.__dict__["_server"], self.__dict__["_plain"], self.__dict__["_fallback"] = wsl, plain, fallback
+
+    def start(self, timeout: float = 180.0) -> None:
+        server = self.__dict__["_server"]
+        try:
+            server.start(timeout)
+        except WslUnreachable as e:
+            server.stop("KILL")
+            self.__dict__["_fallback"]["why"] = str(e)
+            windows = self.__dict__["_plain"](server.state, server.port)
+            self.__dict__["_server"] = windows
+            windows.start()
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__["_server"], name)
+
+    def __setattr__(self, name, value):
+        setattr(self.__dict__["_server"], name, value)
+
+
+class _PosixBase(str):
+    """A POSIX path that ``dev_server.instance_env`` can join and print (``/``, ``as_posix``) on Windows."""
+
+    def __truediv__(self, other: str) -> "_PosixBase":
+        return _PosixBase(self.rstrip("/") + "/" + other)
+
+    def as_posix(self) -> str:
+        return str(self)
+
+
+def _dev_server_module():
+    spec = importlib.util.spec_from_file_location("qa4_dev_server", ROOT / "scripts" / "dev_server.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 # ---------------------------------------------------------------------------- the run
 
 PARTS: dict[str, Callable] = {"helper": part_helper, "llm-real": part_llm_real, "scan": part_scan,
-                              "lab": part_lab}
+                              "lab": part_lab, "remote": part_remote}
 
 
 def main(argv=None) -> int:
@@ -1080,22 +1780,50 @@ def main(argv=None) -> int:
     ap.add_argument("--stand-in", action="store_true",
                     help="llm-real: play LM Studio with the scripted endpoint (to check the part without the model)")
     ap.add_argument("--wsl", action="store_true", help="the server in WSL (the remote and exit parts: 4-10, 4-15)")
+    ap.add_argument("--wsl-root", default=None, metavar="PATH", help="--wsl: the checkout in WSL the server runs from")
+    ap.add_argument("--wsl-python", default=None, metavar="PATH",
+                    help="--wsl: the Python in WSL that runs it (a venv's, with the extension cargo xtask develop built)")
+    ap.add_argument("--wsl-distro", default="Ubuntu-24.04", help="--wsl: the WSL distribution (P4.7.1's)")
+    ap.add_argument("--wsl-user", default="claude", help="--wsl: the WSL user (P4.7.1's)")
     args = ap.parse_args(argv)
     # the instance's server plays the lab (the lab part): the test suite's switch, if this runs under it, stays off
     os.environ.pop("CITAR_TEST_NO_DISPATCHER", None)
     global LLM_URL, STAND_IN
     LLM_URL, STAND_IN = args.llm_url, args.stand_in
     q3.HELPER_BIN = args.helper_bin
-    if args.wsl:
+    if args.wsl and args.part != "remote":
         print("refused: --wsl belongs to the remote and exit parts (packages 4-10, 4-15)", flush=True)
+        return 2
+    if args.wsl and not (args.wsl_root and args.wsl_python):
+        print("refused: --wsl needs --wsl-root (a checkout in WSL) and --wsl-python (its venv's Python)", flush=True)
         return 2
     # the harness's own run, on this script's parts
     q3.PARTS, q3.LATER = PARTS, LATER
+    plain = q3.Server
+    fallback: dict = {}
+    if args.wsl:
+        def server(state: Path, port: int):
+            try:
+                made = WslServer(state, port, distro=args.wsl_distro, user=args.wsl_user, root=args.wsl_root,
+                                 python=args.wsl_python)
+                made.prepare()
+                return _Reachable(made, plain, fallback)
+            except Exception as e:          # WSL itself is missing: the fallback, recorded
+                fallback["why"] = f"WSL could not run the server: {e}"
+                return plain(state, port)
+        q3.Server = server
     try:
         code, report = q3.run(args)
     except q3.Refused as e:
         print(f"refused: {e}", flush=True)
         return 2
+    finally:
+        q3.Server = plain
+    if args.wsl:
+        topo = report.data.setdefault("remote", {})
+        topo["topology"] = "windows (the fallback)" if fallback else "wsl"
+        if fallback:
+            topo["fallback"] = fallback.get("why")
     summary = {"part": args.part, "ok": code == 0, "parts": report.summary(), "checks": report.checks, **report.data}
     folder = Path(report.data["server"]["dir"])
     out = folder / f"qa-{args.part}.json"
