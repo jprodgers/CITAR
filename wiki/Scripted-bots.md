@@ -162,15 +162,21 @@ The simulator runs one game per core, and uses all of them.
 ## The lab
 
 For changes that need more than a few dozen games, the lab is a resumable queue of experiments that
-runs for days.
+runs for days. **The CITAR server plays it** (local or server mode): start the server and it plays
+whatever is queued, on its own job host, under the host machine's CPU settings (below). There is no
+separate runner to start any more: `citar lab run` says so and exits 2.
 
 ```bash
 citar lab submit experiment.json     # queue it (bot versions are pinned at submit time)
-citar lab run --workers 11           # the runner; safe to restart
-citar lab status                     # what is running, progress per experiment
+citar lab status                     # what is queued and playing, from the server's database
 citar lab report NAME                # results per seat label, and head to head
-citar lab stop                       # ask it to exit; running games are redone later
+citar lab stop                       # pause: the games playing finish, nothing new starts
+citar lab resume                     # start new games again
 ```
+
+The Bots page's **A/B test** queues an experiment between profiles from the browser (it needs the
+`run_lab` capability), and the Lab page's **Stop** and **Resume** (administrators) do what `stop` and
+`resume` do.
 
 An experiment is a JSON object:
 
@@ -218,25 +224,55 @@ counts and its 25 most built items. Then the times, added by the lab outside the
 `started_ts`, `cpu_s` and `finished`.
 
 `errors` holds the messages of a game's errors only, never a trace or an address. A bot compiled
-into the engine raises none short of a panic, so it is empty. **A game that panics is a crash, not
-a result line**: its turn, the seat whose bot was playing, its label and the message (in
-`crashes.log`, with where it happened, its header ending `final`). A crash is final: the same game
-always crashes the same way, so the runner that saw it does not play it again (it plays a game
-three times only when its process died, which may not happen twice), and a check of the result
-must reproduce it. A runner started later plays such a game once more. An experiment queued
-before its games were checked as jobs, which a job refuses, is shown on the Lab page as one that
-cannot be played, with the reason, and none of its games starts: delete it and queue it again.
+into the engine raises none short of a panic, so it is empty. **A game that panics is a crash**,
+and a crash is its result: its line in the results file says `crash` (its turn, the seat whose bot
+was playing, its label and the message) and `final`, and `crashes.log` has it too, its header ending
+`final`. The same game always crashes the same way, so it is never played again, and a check of the
+result must reproduce it; reports and ratings leave crash lines out. An experiment queued before
+its games were checked as jobs, which a job refuses, is shown on the Lab page as one that cannot be
+played, with the reason, and none of its games starts: delete it and queue it again.
+
+**Where the games are played** (design/phase4-helper.md P4.5.5-P4.5.7). The server's job
+dispatcher turns each game of a queued experiment into a CPU job and offers it to an executor: the
+server's own **job host** (a child process, `python -m citar.jobs host`, the same Rust as the CITAR
+helper's), under the host machine's CPU settings (Servers page, the host's Machine settings: CPU
+sharing on, threads, CPU %, memory and the kinds of work; by default in local mode half the logical
+CPUs as threads and a quarter of the memory, up to 512 MB a thread, in server mode one thread, half
+the machine and min(1,024 MB, a quarter of the memory)), held hard by a Job Object on Windows and by
+a `systemd --user` scope on Linux where the user's service manager makes one. Higher priority goes
+first, and owners take turns within a priority. A game whose experiment is deleted from the queue
+stops. Restricted hours of the host start nothing new (the games playing finish), and a benchmark
+on the host pauses its games until it ends. A failed game (its job host died, it passed its
+deadline) is played again, three times at most; one whose host died of memory is offered only to
+an executor with more memory a run. Each finished game's line names its executor: `executor`
+`{machine, run, verification}`, `reference` for the server's own (from 0.1.6's next packages,
+helpers lending their CPU play games too, and their results are verified). The result is committed
+to the server's database before its line is written, and the two are reconciled when the server
+starts, so a crash never leaves a game twice or not at all; a server stopped with games playing
+plays exactly those again when it starts.
+
+**Kinds of experiment.** `"kind"` is `lab` (the default), `ranking` (a game of the site's own
+ladder: rated like any lab game) or `reference` (a run of the statistical baseline the bots are
+compared against: no seats, the baseline's own, `"params"` overriding every seat's bot and `"turns"`
+its turn limit; its lines go to `saves/lab/reference/NAME.jsonl`, which
+`scripts/refcheck/summarize.py` reads as it reads a baseline's). Ranking and reference runs are an
+administrator's and the server's own data collection: nobody's credits pay for them, and
+`citar lab submit --owner` refuses a member for them.
 
 **Factorial experiments** (`"factors"`) screen many parameters at once: each seat plays with its own
 mix of factor levels, spread evenly across seats and shuffled per game, so each factor's effect can
 be measured within games rather than between them.
 
-Progress is visible on the **Lab** page in the web client — runner health, per-experiment progress
-and ETA, per-game turn progress, and the runner log. A long run you cannot see the progress of is a
-long run you will restart unnecessarily.
+Progress is visible on the **Lab** page in the web client: the dispatcher's health and its
+executors, per-experiment progress and ETA, each game with the machine that played it and its
+verification (**▸ games**), per-game round progress, and the lab's log (administrators'). The
+**Queue** page's CPU card shows the games playing on each executor, named where you may see their
+experiment. A long run you cannot see the progress of is a long run you will restart unnecessarily.
 
-Every finished lab game is written to the usage ledger, so experiments can be costed like anything
-else.
+Every finished game writes one `cpu` event to the compute ledger: its machine's owner gives it (the
+server's own job host is nobody's), the experiment's owner uses it (nobody for ranking and reference
+runs), and its CPU seconds are the job host's own, bounded by the time the server watched it play.
+Experiments are costed like anything else.
 
 ---
 

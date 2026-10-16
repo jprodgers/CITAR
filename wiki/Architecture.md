@@ -286,7 +286,7 @@ tool call: bumps the version, records the turn's metrics (the bot's actions, tak
 wakes the seats a chat now waits on, broadcasts the turn and autosaves at a new round. Headless
 games (`citar sim`, `citar balance`) run whole games through `engine_api.run_game`, the runner of
 `crates/citar-sim`, with the GIL released, so a runner plays one game a core; the lab's games are
-jobs (below), played on the same runner.
+jobs (below), played on the same runner by the server's job host.
 
 ### CPU jobs and the jobs build
 
@@ -342,6 +342,53 @@ helper lending its CPU play with the same Rust, so their results can be compared
   grows. Its parent (`citar_jobs::host::parent`, and the same rules in `citar/jobs/host.py`) classifies its
   death: the allocation-failure line, a `SIGKILL` of a scope's host while its parent cgroup's `oom_kill` rose, or
   the watchdog's line make a `memory` death, which fails every run of it as `memory`.
+
+### The job dispatcher: the lab inside the server
+
+The lab's experiments (`citar/lab.py`'s queue of files) are played by the server itself (design/phase4-helper.md
+P4.5.5-P4.5.7): there is no separate runner process.
+
+- **The dispatcher** (`citar/jobs/dispatcher.py`): one thread per server process, started with the server's other
+  workers, waking every 2 s and whenever something happens (a frame, a benchmark lease, a pause), surviving an
+  exception in its loop and started again if it dies. It is the only writer of `cpu_jobs` and `cpu_job_runs` and of
+  the lab's results files; its view in memory is rebuilt from the database when the server starts. Each tick reads
+  the queue's folder again when it changed; makes jobs of the games next in line (`lab.job_of`, checked and hashed
+  through the binding; a window of four a thread, taken in the order they run, so a 10,000-game experiment is not
+  10,000 rows and a new owner's work never waits behind another's window); reads the executors' frames; expires
+  offers, runs past their deadline (paused time extending it, up to twice) and silent runs; pauses an executor's
+  games while a benchmark lease holds its machine (the prompt scheduler's `benchmark_listeners` wake it); and,
+  unless the lab is paused (`saves/lab/PAUSED`: `citar lab stop`, the Lab page's Stop), offers each free thread the
+  best queued job it does not refuse (another jobs build, a kind its settings leave out, more memory a run than it
+  has), by priority and then round-robin across owners. A deadline is ten times the job's reference cost over the
+  executor's share of a core per game, 5 minutes to 6 hours. A tick with 2,000 queued jobs and ten executors takes
+  about 15 ms.
+- **The cost table** (`citar/jobs/store.py`, `job_costs`): per kind, map size, seats and 50 rounds of turn limit,
+  the median CPU seconds of the reference machines' runs and the 95th percentile of every run's counted peak, seeded
+  from `citar/jobs/costs.json` (measured by `scripts/measure_job_costs.py`) and learning from every run; a new job's
+  `mem_mb` is its cell's peak, raised to the peak a run reached when memory ended it.
+- **The local executor** (`citar/jobs/local.py`): the host machine's row, one job host child under its CPU settings
+  (on by default with the mode's figures; [Configuration](Configuration#the-machines-in-the-database-not-a-file)),
+  started when there is work, restarted when it dies or its settings change, closed with the server (whose death it
+  outlives by two seconds at most: its input closes). It is trusted by definition, so its runs' verdict is
+  `reference`, and its host is told it plays its parent's own work: a server whose self-check fails (a ruleset of its
+  own) still plays its lab, and is never used to verify another machine.
+- **The order of writing** (P4.5.7): a result is checked through the binding (its hash recomputed, its chain
+  folded, the result held to its spec), committed (the job `accepted`, or `crashed`: a crash is a final result),
+  then appended to the results file once per (experiment, game, run), then its stored copy pruned; at the start
+  every active experiment's file is reconciled with the database (an accepted job with no line gets one, a line
+  whose run's job is not accepted with it goes, a line cut short is dropped, a line from before jobs counts its game
+  as done). So a crash between the two writes leaves exactly one line, and a server stopped with games playing
+  plays exactly those again.
+- **The ledger:** each finished run writes one `cpu` event through the ledger's writer (`Ledger.events`): its
+  machine, the machine's owner as the provider (nobody for the host), the job's owner as the consumer (nobody for a
+  ranking or reference run, the server's own collection), its CPU the job host's report bounded by what the server
+  observed (a game is one thread). The usage ledger gets the game's activity and the time its machine held it.
+- **The routes** (`citar/server/jobs_api.py`): an experiment's jobs for whoever may see it, and the dispatcher, its
+  pause and its cost table for administrators; the Lab and Queue pages read them and `lab.overview()`, which takes
+  the dispatcher's published view.
+
+Helpers become executors too from package 4-10 (the hub relays the job frames to the dispatcher), and their results
+are verified from 4-11.
 
 ### Hybrid seats: the bot's turn, the model's diplomacy
 
