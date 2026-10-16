@@ -387,32 +387,61 @@ impl Drop for Never {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_rescan_whose_file_never_answers_holds_up_nothing() {
+/// Its own runtime, shut down as the helper's `main` shuts its own down (`shutdown_timeout`): the
+/// reads blocked opening the FIFO are not waited for at the end. Under `#[tokio::test]` the
+/// runtime's drop waited for them without end, and on CI's macOS runner the FIFO's release did
+/// not always reach them (rust.yml at c9832b2 and 61f2837: nextest's 600 s timeout). Each await
+/// has a deadline of its own, so a step that hangs says which it was.
+#[test]
+fn a_rescan_whose_file_never_answers_holds_up_nothing() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
     let dir = common::scratch("never");
-    let pipe = never(&dir);
-    let mut cfg = config();
-    cfg.hardware_file = pipe.path.clone();
-    let t0 = Instant::now();
-    let mut run = start(cfg, None, Clock::system());
-    // The hello waits for the file at most its 5 s, then reports none.
-    let (mut ws, hello) = welcome(&mut run).await;
-    let waited = t0.elapsed();
-    // Its 5 s and milliseconds more here; the bound leaves a loaded CI runner room.
-    assert!(waited >= Duration::from_secs(4) && waited < Duration::from_secs(15), "{waited:?}");
-    assert_eq!(hello["report"]["hardware_source"], "none", "{hello}");
-    // A rescan reads the file again: the session answers a ping at once all the same.
-    ws.send(Message::Text(r#"{"t": "rescan"}"#.into())).await.expect("rescan");
-    let t1 = Instant::now();
-    round_trip(&mut ws).await;
-    // Milliseconds here; the read it does not wait for takes 5 s.
-    assert!(t1.elapsed() < Duration::from_secs(3), "{:?}", t1.elapsed());
-    // And gives up after its timeout, sending no hardware.
-    let frames = frames_for(&mut ws, 7.0).await;
-    assert!(frames.iter().all(|(_, v)| v["t"] != "hardware"), "{frames:?}");
-    assert!(run.log.contains("could not be read within 5 s"), "{:#?}", run.log.lines());
-    let _stop = run.stop.send(true);
-    assert_eq!(run.task.await.expect("joined"), Exit::Stopped);
-    drop(pipe);
+    // made and dropped in the runtime's context: on Windows the pipes are the runtime's
+    let pipe = {
+        let _in = rt.enter();
+        never(&dir)
+    };
+    rt.block_on(async {
+        let mut cfg = config();
+        cfg.hardware_file = pipe.path.clone();
+        let t0 = Instant::now();
+        let mut run = start(cfg, None, Clock::system());
+        // The hello waits for the file at most its 5 s, then reports none.
+        let (mut ws, hello) = tokio::time::timeout(Duration::from_secs(30), welcome(&mut run))
+            .await
+            .expect("the welcome within its deadline");
+        let waited = t0.elapsed();
+        // Its 5 s and milliseconds more here; the bound leaves a loaded CI runner room.
+        assert!(waited >= Duration::from_secs(4) && waited < Duration::from_secs(15), "{waited:?}");
+        assert_eq!(hello["report"]["hardware_source"], "none", "{hello}");
+        // A rescan reads the file again: the session answers a ping at once all the same.
+        ws.send(Message::Text(r#"{"t": "rescan"}"#.into())).await.expect("rescan");
+        let t1 = Instant::now();
+        tokio::time::timeout(Duration::from_secs(30), round_trip(&mut ws))
+            .await
+            .expect("the ping's answer within its deadline");
+        // Milliseconds here; the read it does not wait for takes 5 s.
+        assert!(t1.elapsed() < Duration::from_secs(3), "{:?}", t1.elapsed());
+        // And gives up after its timeout, sending no hardware.
+        let frames = tokio::time::timeout(Duration::from_secs(30), frames_for(&mut ws, 7.0))
+            .await
+            .expect("the frames after the rescan within its deadline");
+        assert!(frames.iter().all(|(_, v)| v["t"] != "hardware"), "{frames:?}");
+        assert!(run.log.contains("could not be read within 5 s"), "{:#?}", run.log.lines());
+        let _stop = run.stop.send(true);
+        let exit = tokio::time::timeout(Duration::from_secs(30), run.task)
+            .await
+            .expect("the helper's stop within its deadline");
+        assert_eq!(exit.expect("joined"), Exit::Stopped);
+    });
+    {
+        let _in = rt.enter();
+        drop(pipe);
+    }
+    rt.shutdown_timeout(Duration::from_secs(5));
     let _cleaned = std::fs::remove_dir_all(&dir);
 }
