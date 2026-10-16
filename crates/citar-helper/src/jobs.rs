@@ -13,12 +13,21 @@
 //!   the machine's own switch, [`crate::settings::ack`]) under the effective limits, and started
 //!   again, once its runs have finished, when they change. A `settings_ack` that turns CPU work on
 //!   or changes its limits goes once that host is `ready` (or could not start, or [`ACK_HOLD`]
-//!   passed), so it carries the host's own `limits` and `memory_per_run_mb`. A host that could not
-//!   start makes the helper refuse offers `limits` until one does ([`START_RETRY`] later).
+//!   passed), so it carries the host's own `limits` and `memory_per_run_mb`; a `settings` that comes
+//!   while a host starts is applied once that start is over, in turn. When a host becomes ready
+//!   after the acknowledgement of its settings went without its figures (the hold passed, or its
+//!   limits changed while runs played and it was started again once they ended), that
+//!   acknowledgement goes again with them, marked `again`. A host that could not start makes the
+//!   helper refuse offers `limits` until one does ([`START_RETRY`] later).
 //! - **An offer** is checked here first, in this order: `disabled`, `quiet`, `unverifiable`,
 //!   `build`, `kind`, `bad_spec` (by citar-jobs' own checks of the spec and its hash), `limits`,
 //!   `memory` (above the host's `memory_per_run_mb`), `busy`; then relayed to the host, which checks
-//!   it again and answers `job_accept` or `job_reject`, relayed back.
+//!   it again and answers `job_accept` or `job_reject`, relayed back. One that waits for a host's
+//!   start is answered within its time to live (`limits` when the host is still not ready
+//!   [`OFFER_MARGIN`] before it), so the server never counts it as abandoned.
+//! - **A connection's own:** what its server asked and was not answered when it ended (the
+//!   acknowledgements and offers waiting for a host) goes with it, and so does its `jobs_pause`
+//!   (the server says it again after the next welcome while its benchmark lasts).
 //! - **Pauses:** every running game is held (the host's `pause`) while a completion is in flight
 //!   and `yield_to_llm` is on, and between `jobs_pause` and `jobs_resume` whatever `yield_to_llm`
 //!   says; `job_progress` says so (`paused`), and `status` counts the runs held.
@@ -69,6 +78,14 @@ pub const ABORT_GRACE: Duration = Duration::from_secs(10);
 pub const RESULT_IO: Duration = Duration::from_secs(5);
 /// The largest result file read back (a result is well under 1 MB).
 pub const RESULT_FILE_MAX: u64 = 4 << 20;
+/// How long before its time to live an offer waiting for a job host's start is refused `limits`
+/// (half its time to live when that is shorter), so the answer reaches the server in time.
+pub const OFFER_MARGIN: Duration = Duration::from_secs(5);
+/// Why an offer that waited for a job host's start is refused.
+const NOT_READY_IN_TIME: &str = "its job host was not ready within the offer's time to live";
+/// The most runs a hello lists in `results` (PROTOCOL.md: `[run] ≤1024`); the others are sent
+/// after the welcome all the same.
+pub const HELLO_RESULTS_MAX: usize = 1024;
 
 /// A job host, ready: its `ready`, where its frames go and where its own come from. Dropping it
 /// (its `cmds`) ends the host.
@@ -171,11 +188,22 @@ impl Drop for JobSide {
 
 /// The session's word to the job side.
 enum Cmd {
-    Connected { out: mpsc::UnboundedSender<HelperFrame>, machine: String },
+    Connected {
+        out: mpsc::UnboundedSender<HelperFrame>,
+        machine: String,
+    },
     Disconnected,
-    Settings { ack: SettingsAck, cpu: SiteCpu },
+    Settings {
+        ack: SettingsAck,
+        cpu: SiteCpu,
+    },
     Welcome(Welcomed),
-    Offer { offer: JobOffer, quiet: bool },
+    /// An offer, and when it came (its time to live runs from then).
+    Offer {
+        offer: JobOffer,
+        quiet: bool,
+        at: Instant,
+    },
     Abort(JobAbort),
     ResultAck(String),
     Benchmark(bool),
@@ -245,6 +273,7 @@ impl JobSide {
             held: VecDeque::new(),
             hold_until: None,
             waiting_offers: VecDeque::new(),
+            last_ack: None,
             runs: BTreeMap::new(),
             results_held: held
                 .into_iter()
@@ -302,7 +331,7 @@ impl JobSide {
 
     /// A `job_offer`; `quiet` when the local quiet hours hold now.
     pub fn offer(&self, offer: JobOffer, quiet: bool) {
-        self.send(Cmd::Offer { offer, quiet });
+        self.send(Cmd::Offer { offer, quiet, at: Instant::now() });
     }
 
     /// A `job_abort`.
@@ -397,6 +426,22 @@ impl Run {
     }
 }
 
+/// What waits while a job host starts (an acknowledgement's figures, and what follows it).
+enum Parked {
+    /// The acknowledgement of settings already applied, sent once the host is ready.
+    Ack(SettingsAck),
+    /// A command not yet handled (a later `settings` among them: it is applied in its turn).
+    Cmd(Cmd),
+}
+
+/// When an offer that waits must be answered: [`OFFER_MARGIN`] before its time to live ends (or
+/// half way, for a short one).
+fn answer_by(o: &JobOffer, at: Instant) -> Instant {
+    let ttl = if o.offer_ttl_s.is_finite() { o.offer_ttl_s.max(0.0) } else { 0.0 };
+    let margin = OFFER_MARGIN.as_secs_f64();
+    at + Duration::from_secs_f64((ttl - margin).max(ttl / 2.0))
+}
+
 /// A result held until its acknowledgement.
 struct Held {
     frame: Option<JobResult>,
@@ -433,12 +478,14 @@ struct Side {
     host: Option<Live>,
     starting: Option<(Requested, tokio::task::JoinHandle<Result<HostStart, StartFailure>>)>,
     start_failed: Option<(Instant, String)>,
-    /// Commands held while a host starts (acknowledgements and what follows them), until it is
+    /// What is held while a host starts (acknowledgements and what follows them), until it is
     /// ready or `hold_until`.
-    held: VecDeque<Cmd>,
+    held: VecDeque<Parked>,
     hold_until: Option<Instant>,
-    /// Offers that came while a host starts.
-    waiting_offers: VecDeque<JobOffer>,
+    /// Offers that came while a host starts, and when each came.
+    waiting_offers: VecDeque<(JobOffer, Instant)>,
+    /// The last acknowledgement sent on this connection (what an `again` repeats).
+    last_ack: Option<SettingsAck>,
     runs: BTreeMap<String, Run>,
     results_held: BTreeMap<String, Held>,
     llm_busy: bool,
@@ -509,10 +556,12 @@ impl Side {
         self.host = None;
     }
 
-    /// The earliest of the runs' deadlines, the aborts' grace and the held acknowledgements'.
+    /// The earliest of the runs' deadlines, the aborts' grace, the held acknowledgements' and the
+    /// waiting offers' answers.
     fn next_wake(&self) -> Option<Instant> {
         let now = Instant::now();
         let mut at = self.hold_until;
+        let mut soonest = |t: Instant| at = Some(at.map_or(t, |a: Instant| a.min(t)));
         for r in self.runs.values() {
             let t = match r.phase {
                 Phase::Running => r.deadline_at(now),
@@ -520,7 +569,15 @@ impl Side {
                 Phase::Offered => None,
             };
             if let Some(t) = t {
-                at = Some(at.map_or(t, |a: Instant| a.min(t)));
+                soonest(t);
+            }
+        }
+        for (o, came) in &self.waiting_offers {
+            soonest(answer_by(o, *came));
+        }
+        for p in &self.held {
+            if let Parked::Cmd(Cmd::Offer { offer, at: came, .. }) = p {
+                soonest(answer_by(offer, *came));
             }
         }
         at
@@ -536,7 +593,7 @@ impl Side {
         let live = u32::try_from(self.runs.values().filter(|r| r.live()).count()).unwrap_or(0);
         let mut s = lock(&self.state);
         s.running = running;
-        s.held = self.results_held.keys().cloned().collect();
+        s.held = self.results_held.keys().take(HELLO_RESULTS_MAX).cloned().collect();
         s.jobs_running = live;
         s.jobs_paused = if self.paused { live } else { 0 };
         s.verifiable = self.verifiable;
@@ -569,11 +626,15 @@ impl Side {
     async fn command(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Connected { out, machine } => {
+                self.forget_connection();
                 self.conn += 1;
                 self.out = Some(out);
                 self.machine = machine;
             }
-            Cmd::Disconnected => self.out = None,
+            Cmd::Disconnected => {
+                self.out = None;
+                self.forget_connection();
+            }
             Cmd::Benchmark(on) => {
                 self.bench = on;
                 self.repause();
@@ -588,16 +649,38 @@ impl Side {
                 self.stop();
                 let _told = done.send(());
             }
-            other if self.holding() => self.held.push_back(other),
+            other if self.holding() => self.held.push_back(Parked::Cmd(other)),
             Cmd::Settings { ack, cpu } => self.settings(ack, cpu),
             Cmd::Welcome(w) => self.welcome(w).await,
-            Cmd::Offer { offer, quiet } => self.offer(offer, quiet),
+            Cmd::Offer { offer, quiet, at } => self.offer(offer, quiet, at),
+        }
+    }
+
+    /// A connection ended (or another began): what its server asked and was not answered goes with
+    /// it (the acknowledgements and the offers waiting for a host's start, its welcome: the next
+    /// connection's hello and welcome say again what holds), and so does its `jobs_pause`, which
+    /// the server says again after the next welcome while its benchmark lasts. Runs go on.
+    fn forget_connection(&mut self) {
+        let parked = self.held.len() + self.waiting_offers.len();
+        if parked > 0 {
+            self.log.debug(format!(
+                "the connection's {parked} acknowledgement(s) and offer(s) waiting for the job host \
+                 go with it"
+            ));
+        }
+        self.held.clear();
+        self.waiting_offers.clear();
+        self.hold_until = None;
+        self.last_ack = None;
+        if self.bench {
+            self.bench = false;
+            self.repause();
         }
     }
 
     // ------------------------------------------------------------------ settings and the host
 
-    fn settings(&mut self, mut ack: SettingsAck, cpu: SiteCpu) {
+    fn settings(&mut self, ack: SettingsAck, cpu: SiteCpu) {
         let on = cpu.enabled && self.local_cpu;
         self.effective = Some(cpu.clone());
         let want = on.then(|| requested(&cpu));
@@ -628,11 +711,10 @@ impl Side {
             if self.hold_until.is_none() {
                 self.hold_until = Some(Instant::now() + ACK_HOLD);
             }
-            self.held.push_back(Cmd::Settings { ack, cpu });
+            self.held.push_back(Parked::Ack(ack));
             return;
         }
-        self.fill_ack(&mut ack);
-        self.emit(HelperFrame::SettingsAck(ack));
+        self.send_ack(ack);
     }
 
     /// An acknowledgement's `limits` and `memory_per_run_mb`: the running host's, when one holds
@@ -646,6 +728,38 @@ impl Side {
             (Some(h), Some(w)) if h.limits == w => Some(h.ready.memory_per_run_mb),
             _ => None,
         };
+    }
+
+    /// Sends an acknowledgement with the job host's figures as they are now, and keeps it as this
+    /// connection's last.
+    fn send_ack(&mut self, mut ack: SettingsAck) {
+        self.fill_ack(&mut ack);
+        ack.again = None;
+        self.emit(HelperFrame::SettingsAck(ack.clone()));
+        if self.out.is_some() {
+            self.last_ack = Some(ack);
+        }
+    }
+
+    /// A job host became ready: when the last acknowledgement on this connection did not carry its
+    /// figures (it went before the host was ready, or the host was started again under new limits
+    /// once its runs ended), it goes again with them, marked `again` (it answers no `settings`), so
+    /// the server matches offers to the memory each run has now.
+    fn reack(&mut self) {
+        let Some(last) = &self.last_ack else { return };
+        let mut ack = last.clone();
+        self.fill_ack(&mut ack);
+        if ack.memory_per_run_mb == last.memory_per_run_mb && ack.limits == last.limits {
+            return;
+        }
+        self.log.info(format!(
+            "acknowledging the settings again with the job host's figures ({})",
+            ack.memory_per_run_mb.map_or_else(|| "none".to_owned(), |m| format!("{m} MB a run"))
+        ));
+        ack.again = Some(true);
+        self.emit(HelperFrame::SettingsAck(ack.clone()));
+        ack.again = None;
+        self.last_ack = Some(ack);
     }
 
     fn start_host(&mut self, limits: Requested) {
@@ -713,45 +827,69 @@ impl Side {
             }
         }
         self.release_held().await;
+        if self.host.is_some() {
+            self.reack();
+        }
     }
 
-    /// The commands held for the host's start, in order, and the offers that waited for it.
+    /// What was held for the host's start, in order: each acknowledgement sent, each command
+    /// handled (a later `settings` applied in its turn, which may start another host and hold what
+    /// follows it again); then the offers that waited for it.
     async fn release_held(&mut self) {
         self.hold_until = None;
-        while let Some(cmd) = self.held.pop_front() {
-            match cmd {
-                Cmd::Settings { mut ack, .. } => {
-                    self.fill_ack(&mut ack);
-                    self.emit(HelperFrame::SettingsAck(ack));
-                }
-                other => Box::pin(self.command(other)).await,
+        let mut parked = std::mem::take(&mut self.held);
+        while let Some(p) = parked.pop_front() {
+            if self.holding() {
+                // A later `settings` started another host: the rest waits for it, in order.
+                self.held.push_back(p);
+                self.held.extend(parked);
+                break;
+            }
+            match p {
+                Parked::Ack(ack) => self.send_ack(ack),
+                Parked::Cmd(cmd) => Box::pin(self.command(cmd)).await,
             }
         }
         while self.starting.is_none()
-            && let Some(o) = self.waiting_offers.pop_front()
+            && let Some((o, at)) = self.waiting_offers.pop_front()
         {
-            self.offer(o, false);
+            self.offer(o, false, at);
+        }
+    }
+
+    /// Offers waiting for a job host's start whose answer is due: refused `limits`, so the server
+    /// has its answer within the offer's time to live.
+    fn answer_waiting(&mut self, now: Instant) {
+        let mut due = Vec::new();
+        self.waiting_offers.retain(|(o, at)| {
+            let late = answer_by(o, *at) <= now;
+            if late {
+                due.push(o.run.clone());
+            }
+            !late
+        });
+        self.held.retain(|p| match p {
+            Parked::Cmd(Cmd::Offer { offer, at, .. }) if answer_by(offer, *at) <= now => {
+                due.push(offer.run.clone());
+                false
+            }
+            _ => true,
+        });
+        for run in due {
+            self.reject(&run, RejectReason::Limits, NOT_READY_IN_TIME);
         }
     }
 
     async fn tick(&mut self) {
         let now = Instant::now();
+        self.answer_waiting(now);
         if self.hold_until.is_some_and(|t| now >= t) {
             self.log.warn(format!(
-                "the job host is not ready after {} s: acknowledging without its figures",
+                "the job host is not ready after {} s: acknowledging without its figures (they \
+                 follow once it is)",
                 ACK_HOLD.as_secs()
             ));
-            let held: Vec<Cmd> = self.held.drain(..).collect();
-            self.hold_until = None;
-            for cmd in held {
-                match cmd {
-                    Cmd::Settings { mut ack, .. } => {
-                        self.fill_ack(&mut ack);
-                        self.emit(HelperFrame::SettingsAck(ack));
-                    }
-                    other => Box::pin(self.command(other)).await,
-                }
-            }
+            self.release_held().await;
         }
         let mut overdue = Vec::new();
         let mut stuck = false;
@@ -863,7 +1001,7 @@ impl Side {
 
     // ------------------------------------------------------------------ offers and runs
 
-    fn offer(&mut self, o: JobOffer, quiet: bool) {
+    fn offer(&mut self, o: JobOffer, quiet: bool, at: Instant) {
         let run = o.run.clone();
         let cpu = self.effective.clone();
         let on = self.local_cpu && cpu.as_ref().is_some_and(|c| c.enabled);
@@ -913,13 +1051,16 @@ impl Side {
             Ok(c) => c,
             Err(e) => return self.reject(&run, RejectReason::BadSpec, &clip(&e.0, 300)),
         };
+        if answer_by(&o, at) <= Instant::now() {
+            return self.reject(&run, RejectReason::Limits, NOT_READY_IN_TIME);
+        }
         if self.starting.is_some() {
-            self.waiting_offers.push_back(o);
+            self.waiting_offers.push_back((o, at));
             return;
         }
         let Some(host) = &self.host else {
-            if let Some((at, why)) = &self.start_failed
-                && at.elapsed() < START_RETRY
+            if let Some((failed, why)) = &self.start_failed
+                && failed.elapsed() < START_RETRY
             {
                 let why = format!("its job host could not start: {}", clip(why, 200));
                 return self.reject(&run, RejectReason::Limits, &why);
@@ -927,7 +1068,7 @@ impl Side {
             match self.want {
                 Some(w) => {
                     self.start_host(w);
-                    self.waiting_offers.push_back(o);
+                    self.waiting_offers.push_back((o, at));
                 }
                 None => self.reject(&run, RejectReason::Limits, "no job host runs"),
             }
@@ -1001,14 +1142,46 @@ impl Side {
                 }
             }
             Some(_) => {}
-            None => self
-                .log
-                .debug(format!("a job_abort for {}, which is not playing", clip(&a.run, 64))),
+            None => {
+                // An offer still waiting for a job host's start (its time to live passed on the
+                // server's clock first): it goes, unanswered, as the server asked.
+                let before = self.waiting_offers.len() + self.held.len();
+                self.waiting_offers.retain(|(o, _)| o.run != a.run);
+                self.held.retain(
+                    |p| !matches!(p, Parked::Cmd(Cmd::Offer { offer, .. }) if offer.run == a.run),
+                );
+                if self.waiting_offers.len() + self.held.len() < before {
+                    self.log.info(format!(
+                        "the server withdrew its offer of run {} before the job host was ready",
+                        clip(&a.run, 64)
+                    ));
+                } else {
+                    self.log.debug(format!(
+                        "a job_abort for {}, which is not playing",
+                        clip(&a.run, 64)
+                    ));
+                }
+            }
         }
     }
 
     fn stop(&mut self) {
         let now = Instant::now();
+        // Offers waiting for a job host's start are answered: this machine lends nothing now.
+        let waiting: Vec<String> = self
+            .waiting_offers
+            .drain(..)
+            .map(|(o, _)| o.run)
+            .chain(self.held.iter().filter_map(|p| match p {
+                Parked::Cmd(Cmd::Offer { offer, .. }) => Some(offer.run.clone()),
+                _ => None,
+            }))
+            .collect();
+        self.held.clear();
+        self.hold_until = None;
+        for run in waiting {
+            self.reject(&run, RejectReason::Disabled, "the helper is stopping");
+        }
         let ids: Vec<String> = self.runs.keys().cloned().collect();
         for id in ids {
             let Some(r) = self.runs.get_mut(&id) else { continue };
