@@ -1,6 +1,6 @@
 {
   "name": "job-reject-bad-spec",
-  "about": "The helper rejects a spec whose hash does not match: job_reject bad_spec, and the dispatcher backs off that reason for the machine. A correct dispatcher never makes this offer, so the hub's side sends it through its test hook, past its eligibility checks.",
+  "about": "The helper rejects a spec whose hash does not match: job_reject bad_spec, and the dispatcher backs off that reason for the machine. A correct dispatcher never makes this offer, so the hub's side sends it through its test hook, past its eligibility checks; since the server checked the spec itself, a helper's bad_spec is the helper's fault, not the game's: the job is queued again.",
   "refs": ["P4.2.5", "P4.3.6", "P4.5.5"],
   "plays": {"helper": "4-10", "hub": "4-10"},
   "values": {
@@ -134,7 +134,10 @@
     },
     {"h2s": {"t": "job_reject", "run": "<id:run>", "reason": "bad_spec"}, "within_s": 2},
     {
-      "state": {"side": "hub", "expect": {"run": {"id": "<id:run>", "state": "failed"}, "backoff": "bad_spec"}}
+      "state": {
+        "side": "hub",
+        "expect": {"run": {"id": "<id:run>", "state": "failed"}, "job": "queued", "backoff": "bad_spec"}
+      }
     }
   ]
 }

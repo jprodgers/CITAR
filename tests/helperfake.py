@@ -556,11 +556,11 @@ END_TURN = {"name": "end_turn", "description": "End your turn.",
 #: The hub's acts and state words this package plays (the others are later packages').
 ACTS_PLAYED = ("submit_request", "force_request", "cancel_request", "drop_connection", "set_settings", "rescan",
                "reset_key", "revoke_token", "disable_machine", "second_connection", "queue_job", "force_offer",
-               "lab_stop", "abort_run", "expire_run", "benchmark_start", "benchmark_end")
+               "lab_stop", "abort_run", "expire_run", "benchmark_start", "benchmark_end", "delete_experiment")
 STATES_PLAYED = ("slot_free", "draining", "flags", "step", "requeued", "request", "llm_slots", "cpu_threads",
                  "cpu_percent", "memory_mb", "work", "cpu_enabled", "quiet", "models", "loaded", "key", "audit",
                  "token_lookups", "audit_rows", "rate_count", "last_report", "power_rows", "run", "job",
-                 "result_lines", "backoff", "mem_mb_raised", "claim_failures", "events")
+                 "result_lines", "backoff", "mem_mb_raised", "claim_failures", "events", "memory_per_run_mb")
 #: The golden job a job transcript's experiment plays (its offers carry its spec).
 GOLDEN_JOB = "duel-a"
 #: The frames of the fake helper the hub hands to the machine's executor (which times them by the fake clock).
@@ -1101,6 +1101,15 @@ class HubPlayer:
             raise AssertionError(f"run {self.bindings['run']} is not in flight to abort")
         self.dispatcher.poke()
 
+    def act_delete_experiment(self, _arg) -> None:
+        """The experiment ``queue_job`` queued is deleted from the lab's queue, as the Lab page's Delete does: the
+        dispatcher cancels its jobs and aborts its runs at its next look."""
+        if not self.exp_name:
+            raise AssertionError("no experiment was queued to delete")
+        from citar import lab
+        (lab.QUEUE / f"{self.exp_name}.json").unlink()
+        self.dispatcher.poke()
+
     def act_expire_run(self, _arg) -> None:
         if not self.dispatcher.expire(self.bindings["run"]):
             raise AssertionError(f"run {self.bindings['run']} is not in flight to expire")
@@ -1110,9 +1119,15 @@ class HubPlayer:
         self.bench = S.get().lease(self.sid, "dry-run", kind="benchmark", label=f"transcript {self.t.name}")
 
     def act_benchmark_end(self, _arg) -> None:
+        """The lease ends; done once the dispatcher has taken it in (its resume sent, or found no connection to go to),
+        so the steps after it see what follows the lease's end, not a resume still on its way."""
         if self.bench is not None:
             self.bench.release()
             self.bench = None
+        if self.dispatcher is not None:
+            self.dispatcher.poke()
+            if not until(lambda: self.sid not in self.dispatcher._paused_exec, 5.0):
+                raise AssertionError("the dispatcher did not take the benchmark's end in")
 
     def act_cancel_request(self, _arg) -> None:
         self.last_conv.close()
@@ -1340,6 +1355,13 @@ class HubPlayer:
             have = self.dispatcher.backoff(self.sid) if self.dispatcher is not None else []
             if want not in have:
                 raise AssertionError(f"the dispatcher backs the machine off for {have}, not {want}")
+        elif word == "memory_per_run_mb":
+            c = W.hub().get(self.sid)
+            have = c.memory_per_run_mb if c is not None else None
+            executor = self._executor()
+            if have != want or (executor is not None and executor.memory_per_run_mb != want):
+                raise AssertionError(f"the machine's memory a run is {have} (its executor's "
+                                     f"{executor.memory_per_run_mb if executor else None}), not {want}")
         elif word == "claim_failures":
             from citar import db
             from citar.db.models import Server

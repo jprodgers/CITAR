@@ -409,8 +409,8 @@ fn the_helper_plays_its_transcripts() {
         .collect();
     assert_eq!(
         mine.len(),
-        70,
-        "4-03, 4-04, 4-06 and 4-10 play 70 transcripts from the helper's side"
+        75,
+        "4-03, 4-04, 4-06 and 4-10 play 75 transcripts from the helper's side"
     );
     let (live, paused): (Vec<&Transcript>, Vec<&Transcript>) =
         mine.iter().partition(|t| runs_completions(t));
