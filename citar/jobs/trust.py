@@ -42,11 +42,14 @@ A key reset never changes any of this (P4.3.7): the trust is the machine's row's
 """
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 #: The machines' tiers (``models.TRUST_TIERS``).
 TIERS = ("new", "provisional", "trusted", "quarantined")
@@ -477,9 +480,16 @@ def standing_of(row, owner) -> dict:
     return {"tier": tier, "vouched": vouched(tier, site=site, owner_admin=admin)}
 
 
+#: A machine's standing when its row could not be read (``standing``): not vouched, so its results are left out until
+#: the boards, which read every such machine's standing again (``vouched_now``), find it vouched.
+UNKNOWN_STANDING = {"tier": "unknown", "vouched": False}
+
+
 def standing(server_id: Optional[str], session=None) -> Optional[dict]:
     """:func:`standing_of` for a machine by its id, read from the database (None: no such machine, or no database: a
-    seat with no machine, a test's game)."""
+    seat with no machine, a test's game). A read that fails (``database is locked`` under the dispatcher's writes) is
+    ``UNKNOWN_STANDING``, never None: rule 11 fails closed (4-12's review: a None recorded nothing, and every board
+    counted what was not marked), and a machine really vouched still counts once the database answers the boards."""
     if not server_id:
         return None
     from citar.db.models import Server, User
@@ -498,8 +508,9 @@ def standing(server_id: Optional[str], session=None) -> Optional[dict]:
     try:
         with db.session() as s:
             return read(s)
-    except Exception:
-        return None
+    except Exception as exc:
+        log.warning("could not read machine %s's standing (%s); recorded as unknown (not vouched)", server_id, exc)
+        return dict(UNKNOWN_STANDING)
 
 
 #: How long :func:`vouched_now`'s answers are kept (the boards are read every few seconds by an open page).

@@ -12,6 +12,10 @@ count. The others carry an "unverified machine" badge and are left out of every 
 - **The diplomacy board** leaves out the pairs of an untrusted machine but its owner's own (marked).
 - **Probe runs** started on an untrusted machine carry the badge.
 - **The ledger:** a model step's event carries its machine's tier when it ran (``flags.tier``).
+- **4-12's review:** the runs' listing badges copies (never the scheduler's own jobs: trusting the machine takes the
+  badge away); a seat is known by every machine it leased (one that moved off an untrusted machine is left out), and a
+  live lease's machine is read again, so one quarantined mid-game is recorded so; a standing that cannot be read is
+  ``unknown`` and counts nothing until the boards can read the machine.
 """
 from __future__ import annotations
 
@@ -136,7 +140,7 @@ class Tiers(unittest.TestCase):
         self.assertEqual(jobs["alice"]["standing"], {"tier": "trusted", "vouched": True})
         from citar.server.scoring import _digest_save
         saved = _digest_save(bob_game.save("tiers"))
-        self.assertEqual(saved["unvouched"], {0: self.machines["bob"]}, "its save keeps the record")
+        self.assertEqual(saved["unvouched"], {0: [self.machines["bob"]]}, "its save keeps the record")
         # the administrators' board: bob's game left out and counted, the others in
         out = self.scores()
         rows = {r["model"]: r for r in out["models"]}
@@ -169,6 +173,68 @@ class Tiers(unittest.TestCase):
         rows = {r["model"]: r for r in out["models"]}
         self.assertEqual(rows[models["bob"]]["benchmark_games"], 1)
         self.assertNotIn(models["bob"], {u["model"] for u in out["unverified"]})
+
+    def test_a_seat_that_moved_off_an_untrusted_machine_is_known_by_it(self):
+        """4-12's review: a seat's standing was read through the machine it names now, so one that played most of a
+        game on an untrusted member machine and then moved to a trusted one counted whole. Each machine a seat leased
+        is recorded with it (and kept in its save), and a live lease's machine is read again at most every
+        ``STANDING_SECONDS``, so one quarantined mid-game is recorded so."""
+        from citar.server.scoring import _digest_save, _unvouched
+        job = self.play("alice")
+        game = self.manager.get(job["game_id"])
+        model = job["model"]
+        bob, alice = self.machines["bob"], self.machines["alice"]
+        self.assertEqual(game.seat_machines[0][alice], {"tier": "trusted", "vouched": True}, "its lease recorded it")
+        game._note_standing(bob, 0)             # it played on bob's provisional machine before it moved to alice's
+        self.assertEqual(game.seats[0].llm["server_id"], alice)
+        self.assertEqual(_unvouched(game.machines, [(st.player, st.type, st.llm) for st in game.seats],
+                                    game.seat_machines), {0: [bob]})
+        self.assertNotIn(model, {r["model"] for r in self.scores()["models"]}, "left out of the global board")
+        saved = _digest_save(game.save("seats"))
+        self.assertEqual(saved["unvouched"], {0: [bob]}, "its save keeps every machine the seat leased")
+        with db.session() as s:
+            s.get(Server, bob).trust_tier = "trusted"
+        T.forget_vouched()
+        self.assertIn(model, {r["model"] for r in self.scores()["models"]}, "trusted since: it counts")
+        # a live lease's machine read again: not within STANDING_SECONDS, then quarantined mid-game, recorded so
+        reads = []
+        real = T.standing
+        with mock.patch.object(T, "standing", side_effect=lambda sid, *a, **k: reads.append(sid) or real(sid)):
+            game._note_standing(alice, 0, renewing=True)
+            self.assertEqual(reads, [], "read when its lease was made: not again so soon")
+            with db.session() as s:
+                s.get(Server, alice).trust_tier = "quarantined"
+            with mock.patch.object(type(game), "STANDING_SECONDS", 0.0):
+                game._note_standing(alice, 0, renewing=True)
+        self.assertEqual(reads, [alice])
+        self.assertEqual(game.seat_machines[0][alice], {"tier": "quarantined", "vouched": False})
+        with db.session() as s:
+            s.get(Server, alice).trust_tier = "trusted"
+
+    def test_a_standing_that_cannot_be_read_counts_nothing_until_the_boards_can(self):
+        """4-12's review: ``trust.standing`` gave None on any database error, and nothing was recorded, so an untrusted
+        machine's results went onto the global boards for good. A failed read is ``unknown``, not vouched; the boards
+        read the machine again, so a vouched one (an administrator's) still counts and an untrusted one does not."""
+        from sqlalchemy.exc import OperationalError
+        from citar.server.scoring import _unvouched
+        bob, zara = self.machines["bob"], self.machines["zara"]
+        locked = OperationalError("SELECT", {}, Exception("database is locked"))
+        with mock.patch.object(db, "session", side_effect=locked), self.assertLogs("citar.jobs.trust", "WARNING"):
+            self.assertEqual(T.standing(bob), {"tier": "unknown", "vouched": False})
+            self.assertEqual(T.standing(zara), {"tier": "unknown", "vouched": False})
+        self.assertIsNone(T.standing(""), "no machine: nothing to record")
+        self.assertIsNone(T.standing("sv_no_such_machine"), "no such machine")
+        jobs = {who: self.play(who) for who in ("bob", "zara")}
+        for who, job in jobs.items():
+            game = self.manager.get(job["game_id"])
+            game.machines, game.seat_machines = {}, {}
+            with mock.patch.object(db, "session", side_effect=locked), self.assertLogs("citar.jobs.trust", "WARNING"):
+                game._note_standing(self.machines[who], 0)
+            self.assertEqual(_unvouched(game.machines, [(st.player, st.type, st.llm) for st in game.seats],
+                                        game.seat_machines), {0: [self.machines[who]]}, who)
+        rows = {r["model"] for r in self.scores()["models"]}
+        self.assertNotIn(jobs["bob"]["model"], rows, "bob's provisional machine: left out")
+        self.assertIn(jobs["zara"]["model"], rows, "an administrator's machine: counted once its standing is read")
 
     def test_the_runs_listing_and_probe_runs_carry_the_badge(self):
         from citar.server.app import _badge_benchmark_runs, _probe_unverified

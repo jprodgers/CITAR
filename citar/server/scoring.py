@@ -30,7 +30,7 @@ from typing import Optional
 
 from .. import aggregate, engine_api, fsutil
 from .metrics import Metrics
-from .session import SAVE_DIR, SessionManager
+from .session import SAVE_DIR, SessionManager, seat_machines_of
 
 
 def viewer_scope(session, viewer) -> Optional[aggregate.Scope]:
@@ -77,7 +77,8 @@ def _digest_save(path: Path) -> Optional[dict]:
     digest = {"game_id": sess.get("id") or path.parent.name, "name": sess.get("name", path.parent.name),
               "turn": state["turn"], "summary": summary, "benchmark": bench,
               "unvouched": _unvouched(sess.get("machines"), [(st.get("player"), st.get("type"), st.get("llm"))
-                                                             for st in seats])}
+                                                             for st in seats],
+                                      seat_machines_of(sess.get("seat_machines")))}
     _digest_cache[key] = (mtime, digest)
     return digest
 
@@ -141,7 +142,8 @@ def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
             summary = {pid: row for pid, row in s.metrics_report()["summary"].items()
                        if pid not in dry and pid not in hybrid}
             out[s.id] = {"name": s.name, "turn": s.game.turn, "summary": summary, "benchmark": bench,
-                         "unvouched": _unvouched(s.machines, [(st.player, st.type, st.llm) for st in s.seats])}
+                         "unvouched": _unvouched(s.machines, [(st.player, st.type, st.llm) for st in s.seats],
+                                                 s.seat_machines)}
     if SAVE_DIR.exists():
         seen = set(out)
         for p, _ in fsutil.newest_first(SAVE_DIR.glob("*/*.citar")):
@@ -155,17 +157,29 @@ def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
     return out
 
 
-def _unvouched(machines, seats) -> dict:
-    """A game's model seats whose machine's results did not count when they ran (P4.5.8 rule 11): ``{player:
-    machine}``, from the game's ``machines`` record (a game from before it records none: every seat counts)."""
-    if not isinstance(machines, dict) or not machines:
+def _unvouched(machines, seats, seat_machines: Optional[dict] = None) -> dict:
+    """A game's model seats that ran on a machine whose results did not count when they ran (P4.5.8 rule 11):
+    ``{player: [machine, ...]}``. A seat's machines are every one it leased (``seat_machines``: one it played most of
+    the game on before it moved to a trusted machine counts against it) and the one it names now, as ``machines``
+    records it (a benchmark job's standing when it started; all a game saved before 4-12's fix round records). A game
+    from before rule 11 records neither: every seat counts."""
+    seat_machines = seat_machines if isinstance(seat_machines, dict) else {}
+    machines = machines if isinstance(machines, dict) else {}
+    if not machines and not seat_machines:
         return {}
     out = {}
     for pid, kind, llm in seats:
+        if kind not in ("llm", "hybrid") or not isinstance(pid, int):
+            continue
+        mine = seat_machines.get(pid)
+        bad = {sid for sid, st in (mine.items() if isinstance(mine, dict) else ())
+               if isinstance(st, dict) and st.get("vouched") is False}
         sid = llm.get("server_id") if isinstance(llm, dict) else None
-        if (kind in ("llm", "hybrid") and sid and isinstance(machines.get(sid), dict)
-                and machines[sid].get("vouched") is False and isinstance(pid, int)):
-            out[pid] = sid
+        st = machines.get(sid) if sid else None
+        if isinstance(st, dict) and st.get("vouched") is False:
+            bad.add(sid)
+        if bad:
+            out[pid] = sorted(bad)
     return out
 
 
@@ -180,13 +194,13 @@ def _by_tier(reports: dict, scope: Optional[aggregate.Scope]) -> tuple:
     {model: set of game ids})``. A member's own game keeps them, its seats marked ``unverified_seats`` (their own
     figures are theirs); every other viewer's board, an administrator's whole-site one included, leaves them out."""
     from ..jobs import trust
-    ids = {sid for rep in reports.values() for sid in (rep.get("unvouched") or {}).values()}
+    ids = {sid for rep in reports.values() for sids in (rep.get("unvouched") or {}).values() for sid in sids}
     if not ids:
         return reports, {}
     ok = trust.vouched_now(ids)
     out, left = {}, {}
     for gid, rep in reports.items():
-        bad = {pid for pid, sid in (rep.get("unvouched") or {}).items() if sid not in ok}
+        bad = {pid for pid, sids in (rep.get("unvouched") or {}).items() if any(sid not in ok for sid in sids)}
         if not bad:
             out[gid] = rep
             continue
