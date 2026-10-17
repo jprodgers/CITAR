@@ -271,7 +271,8 @@ On the helper's side (the CITAR helper, `citar-helper`): `CITAR_WORKER_SERVER`, 
 file, as `--hardware`), each below the flag and the settings file ([Workers](Workers#the-helpers-settings-citar-016)).
 Its update policy is `updates` (`auto`, `notify` or `off`; `--updates`) in `helper.json` ([Updates](Workers#updates)).
 Prefer the settings file `citar-helper setup` writes (`helper.json`): a token on a command line ends up in the shell
-history and the process list.
+history and the process list. A helper run as a service (`citar-helper service install`) reads its home's `helper.json`
+alone: no flags and no variables reach it ([Workers](Workers#running-the-helper-as-a-service)).
 
 ---
 

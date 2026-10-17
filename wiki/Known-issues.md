@@ -66,8 +66,16 @@ for every asset and every build is a public CI run. See
 
 **macOS binaries are not notarised**, for the same reason — including the CITAR helper, which
 needs `xattr -d com.apple.quarantine` before macOS will run it. The `pip`, `pipx` and Homebrew routes
-are unaffected. There is no helper build for Intel Macs yet (the Python worker that stood in for it
-there is gone in 0.1.6); build one from a checkout with `cargo build --release -p citar-helper`.
+are unaffected.
+
+**The helper as a service runs only while you are signed in, except as a system service.** A
+LaunchAgent (macOS) and a systemd user unit (Linux, unless `loginctl enable-linger` is on) stop when
+you log out, and the Windows Run value starts the helper at your sign-in. A helper that should run
+before anyone signs in is a system service: `citar-helper service install --system` on Linux (as root)
+or Windows (from an elevated prompt); macOS has none
+([Workers](Workers#running-the-helper-as-a-service)). Stopping a helper the Run value
+started (`service uninstall --user`) ends it at once, as closing its window would: a game it was
+playing is played again elsewhere.
 
 **Homebrew, Scoop and winget lag the release** by a day or so — each needs the GitHub release to
 exist before its manifest can be updated.
