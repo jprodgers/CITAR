@@ -5,8 +5,10 @@ gate 1).
   ``new_streak`` matches, ``provisional`` to ``trusted`` at ``promote_verified`` verified matches with no mismatch and
   no over-reporting within ``overreport_days``, any tier to ``quarantined`` on a mismatch, release back to ``new`` with
   the counters reset and ``since`` now), each threshold at and below it, a match against a machine that is no
-  verifier not counted, a quarantined verifier's matches taken back (and a machine below its tier's threshold back to
-  ``new``), the settings' bounds; a key reset keeping the tier is ``tests/test_verification.py``'s, through its route.
+  verifier not counted, a quarantined verifier's matches taken back (a machine whose promotion to its present tier
+  counted them back to ``new`` below that tier's threshold; one an administrator set that tier for, or whose lost
+  matches all came after its promotion, keeping it), the settings' bounds; a key reset keeping the tier is
+  ``tests/test_verification.py``'s, through its route.
 - **Sampling** over 10,000 job ids, for each rate p of 0.02 and 0.10 and two secrets: the observed rate within
   4·sqrt(p(1−p)/n) of p, and the two secrets sampling different jobs.
 - **Claims** through the binding (``engine_api.verify_claim``): an honest claim of the golden duel verifies; a changed
@@ -64,6 +66,12 @@ class Tiers(unittest.TestCase):
             if tier != "quarantined":
                 self.assertEqual(out["verified"], int(trust.get("verified", 0)) + n)
                 self.assertEqual(out["last_verified_at"], NOW.isoformat(timespec="seconds"))
+            if promotions:
+                # a promotion keeps its tier and when the match that made it was counted, to the microsecond
+                self.assertEqual(out["promoted"], {"tier": after, "at": NOW.isoformat(timespec="microseconds")})
+                self.assertEqual(T.promoted_at(after, out), NOW)
+            else:
+                self.assertIsNone(T.promoted_at(got, out))
 
     def test_one_step_a_match_and_the_lowered_thresholds(self):
         """Gate 6's thresholds (3 and 6): three matches make a new machine provisional, three more trusted, each
@@ -92,6 +100,10 @@ class Tiers(unittest.TestCase):
     def test_a_mismatch_quarantines_and_a_release_starts_again(self):
         ev = T.evidence("chain", run="cr_x", job="cj_x", round=12, now=NOW)
         self.assertEqual(ev["words"], "the chains parted at round 12: faulty hardware or an incompatible build")
+        unknown = T.evidence("chain", run="cr_x", job="cj_x", now=NOW)
+        self.assertEqual(unknown["words"], "the chains differ (the round where they parted is not known): faulty "
+                                           "hardware or an incompatible build")
+        self.assertNotIn("round", unknown)
         tier, trust = T.on_mismatch({"streak": 7, "verified": 7, "verifier": True}, ev)
         self.assertEqual(tier, "quarantined")
         self.assertEqual((trust["mismatches"], trust["streak"], trust["verifier"]), (1, 0, False))
@@ -116,20 +128,42 @@ class Tiers(unittest.TestCase):
     def test_a_quarantined_verifiers_matches_taken_back(self):
         s = settings(new_streak=5, promote_verified=50)
         cases = [
-            # (tier, trust, matches lost, the tier after)
-            ("provisional", {"streak": 7, "verified": 7}, 2, "provisional"),
-            ("provisional", {"streak": 6, "verified": 6}, 2, "new"),
-            ("trusted", {"streak": 60, "verified": 60}, 10, "trusted"),
-            ("trusted", {"streak": 60, "verified": 55, "verifier": True}, 10, "new"),
-            ("new", {"streak": 2, "verified": 2}, 5, "new"),
+            # (tier, trust, matches lost, of them counted toward its present tier's promotion, the tier after)
+            ("provisional", {"streak": 7, "verified": 7}, 2, 2, "provisional"),
+            ("provisional", {"streak": 6, "verified": 6}, 2, 2, "new"),
+            ("trusted", {"streak": 60, "verified": 60}, 10, 10, "trusted"),
+            ("trusted", {"streak": 60, "verified": 55, "verifier": True}, 10, 3, "new"),
+            ("new", {"streak": 2, "verified": 2}, 5, 0, "new"),
+            # an administrator set its tier (no promotion counted them): its counters fall, its tier and mark stay
+            ("trusted", {"streak": 1, "verified": 1, "verifier": True}, 1, 0, "trusted"),
+            ("provisional", {"streak": 2, "verified": 2}, 2, 0, "provisional"),
+            # every lost match came after its promotion: they did not earn its tier
+            ("trusted", {"streak": 55, "verified": 55, "verifier": True}, 10, 0, "trusted"),
         ]
-        for tier, trust, n, after in cases:
-            got, out, demoted = T.lose_matches(tier, dict(trust), n, s)
-            self.assertEqual(got, after, (tier, trust, n))
+        for tier, trust, n, counted, after in cases:
+            got, out, demoted = T.lose_matches(tier, dict(trust), n, s, counted=counted)
+            self.assertEqual(got, after, (tier, trust, n, counted))
             self.assertEqual(demoted, after == "new" and tier != "new")
             self.assertEqual(out["verified"], max(0, trust["verified"] - n))
             if demoted:
                 self.assertFalse(out["verifier"])
+                self.assertNotIn("promoted", out)
+            else:
+                self.assertEqual(out.get("verifier"), trust.get("verifier"))
+
+    def test_a_promotion_is_kept_until_the_tier_moves_otherwise(self):
+        s = settings(new_streak=1, promote_verified=2)
+        tier, trust, _p = self.matches("new", {}, 1, s)
+        self.assertEqual((tier, T.promoted_at("provisional", trust)), ("provisional", NOW))
+        self.assertIsNone(T.promoted_at("trusted", trust), "a record of another tier is no promotion to this one")
+        later = NOW + timedelta(minutes=5)
+        tier, trust, promoted = T.on_match(tier, trust, s, counts=True, now=later)
+        self.assertEqual((tier, promoted, T.promoted_at("trusted", trust)), ("trusted", "trusted", later))
+        _t, quarantined = T.on_mismatch(trust, T.evidence("chain", round=3))
+        self.assertNotIn("promoted", quarantined)
+        _t, released = T.release(trust)
+        self.assertNotIn("promoted", released)
+        self.assertIsNone(T.promoted_at("trusted", {"promoted": {"tier": "trusted", "at": "not a time"}}))
 
     def test_replication_by_tier_and_an_administrators_request(self):
         s = settings(provisional_rate=0.0, trusted_rate=0.0)

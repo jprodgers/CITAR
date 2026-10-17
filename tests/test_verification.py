@@ -21,6 +21,13 @@ the helpers' games), so that every game goes to the helpers and the order of the
 - **Visibility** (gate 4): while a primary is in flight its job's listings are the same whether or not it will be
   sampled; its replica is made only once its result is committed.
 - **Collusion and load** (gate 5), **promotion** (gate 6), **quarantine and release** (gate 7).
+- **The review's cases** (4-11's fix round): an outcome naming the honest hash beside an altered result is a ``claim``
+  verdict at once; a result that waits while its machine's key is reset or replaced is no verdict (its run ``lost``,
+  its game offered again); a quarantined verifier takes back no tier its matches did not earn (an administrator's, or
+  a promotion made before them), and its matches are re-opened whether or not it is still marked a verifier; a
+  replica from a machine unmarked while it played checks nothing; a re-opened job settled after a restart completes
+  its experiment; no event is left ``pending`` by a deleted experiment or a withdrawn job; a re-opened primary's
+  pruned digests name no round.
 """
 from __future__ import annotations
 
@@ -154,7 +161,8 @@ class Lender:
         return [f for f in self.conn.frames if f.get("t") == "job_offer" and f["run"] not in self.answered]
 
     def play(self, offer: dict, fault: str = "") -> None:
-        """Accepts ``offer`` and sends its result, honest or as ``fault`` says."""
+        """Accepts ``offer`` and sends its result, honest or as ``fault`` says (``lie``: one score raised, the result
+        hashed again into its signed claim, and the honest hash in the outcome beside it)."""
         self.answered.add(offer["run"])
         self.n += 1
         self.runs.append((self.n, offer["run"], offer["job"]))
@@ -162,16 +170,23 @@ class Lender:
         if fault == "abandon":
             return
         out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
-        if fault == "result":
+        honest_hash = out["result_hash"]
+        if fault in ("result", "lie"):
             out = altered_score(out, offer["kind"])
         elif fault.startswith("digest:"):
             out = altered_digest(out, offer["spec_hash"], int(fault.split(":")[1]))
         claim = claim_of(offer, out, self.sid, seed=self.seed)
         signature = sign_claim(claim, self.seed + 1 if fault == "sig" else self.seed)
         self.e.frame({"t": "job_result", "run": offer["run"],
-                      "outcome": {"result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"],
-                                  "cpu_s": out["cpu_s"], "wall_s": out["wall_s"], "paused_s": 0.0, "peak_mb": 3.0},
+                      "outcome": {"result": out["result"],
+                                  "result_hash": honest_hash if fault == "lie" else out["result_hash"],
+                                  "chain": out["chain"], "cpu_s": out["cpu_s"], "wall_s": out["wall_s"],
+                                  "paused_s": 0.0, "peak_mb": 3.0},
                       "claim": claim, "signature": signature})
+
+    def acknowledged(self) -> set:
+        """The runs the server acknowledged to it."""
+        return {f["run"] for f in self.conn.frames if f.get("t") == "job_result_ack"}
 
     def row(self) -> Server:
         with db.session() as s:
@@ -300,6 +315,27 @@ class CaughtWhileNew(Verify):
         self.assertEqual({bob.e.refuses(j) for j in d.jobs.values() if j.state == "queued"}, {"it is quarantined"})
         self.assertEqual(second.offers(), [])
         self.assertEqual(self.job_of(run).state, "withdrawn")
+
+    def test_an_outcome_naming_the_honest_hash_beside_an_altered_result_is_refused_at_once(self):
+        """The hash the server keeps (and a replica's is compared with) is the outcome's: an altered result whose signed
+        claim names the altered result's hash, sent beside the honest hash, is a ``claim`` verdict at its arrival,
+        never a result a matching replica settles ``verified``."""
+        bob = Lender(self, "Bob's liar", "bob")
+        self.submit("bob", duels("liar", 2))
+        d = self.make([self.verifier()])
+        self.assertTrue(self.drive(d, [bob], fault=lambda lender, n: "lie",
+                                   until=lambda: bob.row().trust_tier == "quarantined"))
+        ((_n, run, job_id),) = bob.runs
+        row = bob.row()
+        ev = row.trust["last_mismatch"]
+        self.assertEqual(ev["verdict"], "claim")
+        self.assertIn("the outcome names result", ev["why"])
+        self.assertEqual([(r.role, r.verdict) for r in self.runs(job_id)], [("primary", "rejected")],
+                         "refused before any replica")
+        self.assertFalse(row.trust.get("verified"), "nothing counted toward its promotion")
+        self.assertEqual(lab.load_results("liar"), [], "no line, verified or not")
+        self.assertEqual(self.event(run).verification, "rejected")
+        self.assertEqual(self.owner_tier("bob"), "quarantined")
 
     def test_a_changed_digest_names_its_round_and_quarantines_the_machine_alone(self):
         bob = Lender(self, "Bob's broken", "bob")
@@ -614,15 +650,19 @@ class CollusionAndLoad(Verify):
         # its first run came before any replica waited; from the second on, both waited
         self.assertEqual(kinds[1:7], ["primary", "replica"] * 3, kinds)
 
-    def test_a_quarantined_verifier_reopens_its_matches_and_takes_back_a_promotion(self):
-        self.settings(provisional_rate=1.0, new_streak=2)
+    def vouched(self, name: str) -> tuple:
+        """A provisional machine of bob's (one verified match before) whose two sampled results carol's verifier
+        reproduces, the second match promoting it to ``trusted`` (``promote_verified`` 3); this server verifies
+        nothing meanwhile. Returns (dispatcher, this server's host, bob's machine, carol's verifier, the matching
+        replicas)."""
+        self.settings(provisional_rate=1.0, trusted_rate=0.0, promote_verified=3)
         verifier = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TEST_KEY_SEED + 5)
         D.change_trust(verifier.sid, verifier=True, actor_id=self.ids["zara"])
         prov = Lender(self, "Bob's provisional", "bob", tier="provisional")
         with db.session() as s:
             row = s.get(Server, prov.sid)
             row.trust = {"verified": 1, "streak": 1}
-        self.submit("bob", duels("vouched", 2))
+        self.submit("bob", duels(name, 2))
         host = self.verifier()
         host.only_verifies = True
         host.state = "off"                     # this server verifies nothing now: carol's machine does
@@ -631,11 +671,17 @@ class CollusionAndLoad(Verify):
                                                            if r.role == "replica" and r.verdict == "match"]) >= 2)
         vouched = [r for r in self.runs() if r.role == "replica" and r.verdict == "match"]
         self.assertEqual({r.machine_id for r in vouched}, {verifier.sid})
+        self.assertEqual(prov.row().trust_tier, "trusted", "promoted on carol's verifier's matches")
+        self.assertEqual(prov.row().trust["promoted"]["tier"], "trusted")
+        return d, host, prov, verifier, vouched
+
+    def test_a_quarantined_verifier_reopens_its_matches_and_takes_back_a_promotion(self):
+        d, host, prov, verifier, vouched = self.vouched("vouched")
         jobs = {r.job_id for r in vouched}
         lines = lab.load_results("vouched")
         self.assertEqual({x["executor"]["verification"] for x in lines}, {"verified"})
-        self.assertEqual((prov.row().trust_tier, prov.row().trust["streak"]), ("provisional", 3))
-        # the verifier quarantined by an administrator: its matches re-opened, the provisional machine's taken back
+        self.assertEqual((prov.row().trust["verified"], prov.row().trust["streak"]), (3, 3))
+        # the verifier quarantined by an administrator: its matches re-opened, the promotion they made taken back
         out = D.change_trust(verifier.sid, tier="quarantined", actor_id=self.ids["zara"])
         self.assertEqual(out["tier"], "quarantined")
         d.tick()
@@ -647,7 +693,8 @@ class CollusionAndLoad(Verify):
         self.led.drain()
         primaries = [self.job_of(r.id).accepted_run for r in vouched]
         self.assertEqual({self.event(p).verification for p in primaries}, {"unverified"})
-        self.assertEqual(prov.row().trust_tier, "new", "below its tier's threshold: back to new")
+        self.assertEqual((prov.row().trust_tier, prov.row().trust["verified"]), ("new", 1),
+                         "below its tier's threshold: back to new")
         # a fresh replica on this server re-verifies them
         host.state = "ready"
         self.drive(d, [prov], until=lambda: (lab.DONE / "vouched.json").exists())
@@ -655,6 +702,135 @@ class CollusionAndLoad(Verify):
         self.assertEqual({x["executor"]["verification"] for x in lines}, {"verified"})
         fresh = [r for r in self.runs() if r.role == "replica" and r.machine_id == "sv_host"]
         self.assertEqual({r.job_id for r in fresh}, jobs)
+
+    def test_a_verifier_unmarked_before_its_quarantine_still_has_its_matches_reopened(self):
+        """Rule 9 reaches every match a machine made as a verifier: an administrator who first unmarks a suspect
+        verifier (or takes its tier), then quarantines it, still re-opens the jobs it vouched for and the promotion
+        they made."""
+        d, host, prov, verifier, vouched = self.vouched("unmarked")
+        D.change_trust(verifier.sid, verifier=False, actor_id=self.ids["zara"])
+        D.change_trust(verifier.sid, tier="provisional", actor_id=self.ids["zara"])
+        D.change_trust(verifier.sid, tier="quarantined", actor_id=self.ids["zara"])
+        d.tick()
+        with db.session() as s:
+            self.assertEqual({s.get(CpuJob, r.job_id).state for r in vouched}, {"settling"})
+        self.assertEqual({x["executor"]["verification"] for x in lab.load_results("unmarked")}, {"unverified"})
+        self.assertEqual({r.verdict for r in self.runs() if r.machine_id == verifier.sid and r.role == "replica"},
+                         {"rejected"})
+        self.assertEqual(prov.row().trust_tier, "new")
+
+    def test_a_quarantined_verifier_takes_back_no_tier_its_matches_did_not_earn(self):
+        """Rule 9 undoes promotions, not administrators' decisions: a verifier an administrator trusted keeps its tier
+        and its mark when another verifier that checked its results is quarantined (its counters alone fall), and a
+        machine promoted before a verifier's matches keeps the tier those matches did not earn."""
+        self.settings(trusted_rate=1.0)
+        carols = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TEST_KEY_SEED + 5)
+        bobs = Lender(self, "Bob's verifier", "bob", tier="trusted")
+        for v in (carols, bobs):
+            D.change_trust(v.sid, verifier=True, actor_id=self.ids["zara"])
+        self.submit("bob", duels("both", 1))
+        host = self.verifier()
+        host.state = "off"
+        d = self.make([host])
+        self.assertTrue(self.drive(d, [carols, bobs], until=lambda: any(
+            r.role == "replica" and r.verdict == "match" and r.machine_id == carols.sid for r in self.runs())))
+        self.assertEqual(bobs.row().trust["verified"], 1)
+        D.change_trust(carols.sid, tier="quarantined", actor_id=self.ids["zara"])
+        row = bobs.row()
+        self.assertEqual((row.trust_tier, row.trust["verifier"], row.trust["verified"]), ("trusted", True, 0),
+                         "an administrator's trust stands; its counters alone fall")
+        self.assertFalse(self.audits("server.trust", bobs.sid)[1:], "no tier change but the administrator's")
+
+    def test_matches_made_after_a_promotion_never_take_it_back(self):
+        self.settings(provisional_rate=1.0, trusted_rate=1.0, promote_verified=2)
+        prov = Lender(self, "Bob's provisional", "bob", tier="provisional")
+        with db.session() as s:
+            s.get(Server, prov.sid).trust = {"verified": 1, "streak": 1}
+        self.submit("bob", duels("earned", 1))
+        host = self.verifier()
+        d = self.make([host])
+        # this server's replica promotes it to trusted
+        self.assertTrue(self.drive(d, [prov], until=lambda: prov.row().trust_tier == "trusted"))
+        promoted_at = T.promoted_at("trusted", prov.row().trust)
+        self.assertIsNotNone(promoted_at)
+        # then carol's verifier checks its next result, sampled at the trusted rate
+        host.state = "off"
+        verifier = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TEST_KEY_SEED + 5)
+        D.change_trust(verifier.sid, verifier=True, actor_id=self.ids["zara"])
+        self.submit("bob", duels("later", 1))
+        self.assertTrue(self.drive(d, [prov, verifier], until=lambda: any(
+            r.role == "replica" and r.verdict == "match" and r.machine_id == verifier.sid for r in self.runs())))
+        self.assertEqual(prov.row().trust["verified"], 3)
+        (late,) = [r for r in self.runs() if r.machine_id == verifier.sid and r.role == "replica"]
+        self.assertGreater(D._aware(late.ended_at), promoted_at)
+        # the administrators have since raised the bar: its counters, the late match taken off, fall below it
+        self.settings(promote_verified=5)
+        D.change_trust(verifier.sid, tier="quarantined", actor_id=self.ids["zara"])
+        row = prov.row()
+        self.assertEqual((row.trust_tier, row.trust["verified"]), ("trusted", 2),
+                         "the match it loses came after its promotion: its tier stands")
+        self.assertEqual(self.job_of(late.id).state, "settling", "the job it verified is re-opened all the same")
+
+    def test_a_replica_from_a_machine_unmarked_while_it_played_checks_nothing(self):
+        """Rule 2: only a verifier's replica checks a primary. One whose machine an administrator unmarked while it
+        played is void (``unchecked``, its event ``unverified``): the job waits for a verifier's replica."""
+        self.settings(provisional_rate=1.0)
+        prov = Lender(self, "Bob's provisional", "bob", tier="provisional")
+        verifier = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TEST_KEY_SEED + 5)
+        D.change_trust(verifier.sid, verifier=True, actor_id=self.ids["zara"])
+        self.submit("bob", duels("void", 1))
+        host = self.verifier()
+        host.state = "off"
+        d = self.make([host])
+        self.assertTrue(self.drive(d, [prov], until=lambda: bool(verifier.offers())))
+        (offer,) = verifier.offers()
+        D.change_trust(verifier.sid, verifier=False, actor_id=self.ids["zara"])
+        verifier.play(offer)                    # honest, and the same result: but its machine verifies no more
+        d.tick()
+        (replica,) = [r for r in self.runs() if r.role == "replica"]
+        self.assertEqual((replica.machine_id, replica.verdict, replica.error["code"]),
+                         (verifier.sid, "unchecked", "void"))
+        self.assertEqual(self.job_of(replica.id).state, "settling")
+        self.assertEqual(self.event(replica.id).verification, "unverified")
+        self.assertEqual(prov.row().trust.get("verified", 0), 0, "nothing counted")
+        self.assertEqual(lab.load_results("void"), [])
+        self.assertIn(offer["run"], verifier.acknowledged())
+        # this server's replica settles it
+        host.state = "ready"
+        self.assertTrue(self.drive(d, [prov, verifier], until=lambda: (lab.DONE / "void.json").exists()))
+        (line,) = lab.load_results("void")
+        self.assertEqual(line["executor"]["verification"], "verified")
+        self.assertEqual([(r.machine_id, r.verdict) for r in self.runs() if r.role == "replica"],
+                         [(verifier.sid, "unchecked"), ("sv_host", "reference")])
+        self.assertEqual(prov.row().trust["verified"], 1)
+
+    def test_a_reopened_primarys_pruned_digests_name_no_round(self):
+        """A verifier that reproduced a faulty primary (both chains altered at round 12) is quarantined; this server's
+        fresh replica of the re-opened job parts from the primary, whose digests were pruned with its line: the
+        evidence names no round rather than a wrong one."""
+        self.settings(provisional_rate=1.0)
+        prov = Lender(self, "Bob's provisional", "bob", tier="provisional")
+        verifier = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TEST_KEY_SEED + 5)
+        D.change_trust(verifier.sid, verifier=True, actor_id=self.ids["zara"])
+        self.submit("bob", duels("colluded", 1))
+        host = self.verifier()
+        host.state = "off"
+        d = self.make([host])
+        self.assertTrue(self.drive(d, [prov, verifier], fault=lambda lender, n: "digest:12",
+                                   until=lambda: bool(lab.load_results("colluded"))))
+        (line,) = lab.load_results("colluded")
+        self.assertEqual(line["executor"]["verification"], "verified")
+        (primary,) = [r for r in self.runs() if r.role == "primary"]
+        self.assertIsNone(primary.digests, "pruned with its line")
+        D.change_trust(verifier.sid, tier="quarantined", actor_id=self.ids["zara"])
+        host.state = "ready"
+        self.assertTrue(self.drive(d, [prov], until=lambda: prov.row().trust_tier == "quarantined"))
+        ev = prov.row().trust["last_mismatch"]
+        self.assertEqual((ev["verdict"], ev.get("round")), ("chain", None))
+        self.assertEqual(ev["words"], T.evidence("chain")["words"])
+        self.assertIn("the round where they parted is not known", ev["words"])
+        self.assertEqual(D._parted(None, ["a", "b"]), None)
+        self.assertEqual(D._parted(["a", "b"], ["a", "c"]), 2)
 
 
 class Tiebreak(Verify):
@@ -696,6 +872,25 @@ class Tiebreak(Verify):
         self.assertEqual(line["executor"]["verification"], "verified")
         self.assertEqual(self.event(replica.id).verification, "rejected", "the wrong replica earns nothing")
 
+    def test_a_replica_waiting_for_a_tiebreak_gets_a_verdict_when_its_job_is_withdrawn(self):
+        self.settings(provisional_rate=1.0)
+        prov = Lender(self, "Bob's provisional", "bob", tier="provisional")
+        verifier = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TEST_KEY_SEED + 5)
+        D.change_trust(verifier.sid, verifier=True, actor_id=self.ids["zara"])
+        self.submit("bob", duels("untied", 1))
+        host = self.verifier()
+        host.state = "off"                     # the tiebreak waits for this server
+        d = self.make([host])
+        self.drive(d, [prov, verifier], fault=lambda lender, n: "result" if lender is prov else "",
+                   until=lambda: any(r.role == "replica" and r.state == "done" for r in self.runs()))
+        (replica,) = [r for r in self.runs() if r.role == "replica"]
+        self.assertEqual(replica.verdict, "mismatch")
+        self.assertEqual(self.event(replica.id).verification, "pending")
+        # an administrator quarantines bob's machine before the tiebreak: its waiting job is withdrawn
+        D.change_trust(prov.sid, tier="quarantined", withdraw=True, actor_id=self.ids["zara"])
+        self.assertEqual(self.job_of(replica.id).state, "withdrawn")
+        self.assertEqual(self.event(replica.id).verification, "unverified", "no event pending for ever")
+
     def test_a_primary_that_disagrees_with_the_tiebreak_is_quarantined_and_its_verifier_kept(self):
         prov, verifier, replica = self.scenario("primary")
         self.assertEqual(prov.row().trust_tier, "quarantined")
@@ -708,6 +903,51 @@ class Tiebreak(Verify):
 class Restart(Verify):
     """A job waiting for its replica when the server stops waits for it again after the start (its primary's
     ``replicating`` mark says what it waits for), and a re-opened job keeps its line."""
+
+    def test_a_reopened_job_settled_after_a_restart_completes_its_experiment(self):
+        """Rule 9's re-opened job whose primary's result was pruned (its line kept in the results file) is settled by
+        this server's replica after a restart: its line relabelled, its game settled again, its experiment done."""
+        self.settings(provisional_rate=1.0)
+        verifier = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TEST_KEY_SEED + 5)
+        D.change_trust(verifier.sid, verifier=True, actor_id=self.ids["zara"])
+        prov = Lender(self, "Bob's provisional", "bob", tier="provisional")
+        self.submit("bob", duels("vouched", 2))
+        host = self.verifier()
+        host.state = "off"
+        d = self.make([host])
+        self.assertTrue(self.drive(d, [prov, verifier], until=lambda: len(
+            [r for r in self.runs() if r.role == "replica" and r.verdict == "match"]) >= 2))
+        jobs = {r.job_id for r in self.runs() if r.role == "replica"}
+        D.change_trust(verifier.sid, tier="quarantined", actor_id=self.ids["zara"])
+        d.tick()
+        with db.session() as s:
+            self.assertEqual({s.get(CpuJob, j).state for j in jobs}, {"settling"})
+        # the server restarts before this server's fresh replicas play
+        d.stop()
+        D.install(None)
+        again = self.verifier()
+        d2 = self.make([again])
+        self.assertTrue(self.drive(d2, [prov], until=lambda: (lab.DONE / "vouched.json").exists()),
+                        "its experiment completes")
+        with db.session() as s:
+            self.assertEqual({s.get(CpuJob, j).state for j in jobs}, {"accepted"})
+        lines = lab.load_results("vouched")
+        self.assertEqual(sorted(x["i"] for x in lines), [0, 1], "each line kept once")
+        self.assertEqual({x["executor"]["verification"] for x in lines}, {"verified"})
+
+    def test_a_settling_job_whose_experiment_is_deleted_leaves_no_event_pending(self):
+        bob = Lender(self, "Bob's new", "bob")
+        self.submit("bob", duels("dropped", 1))
+        host = self.verifier()
+        host.auto = False                       # its replica waits
+        d = self.make([host])
+        self.assertTrue(self.drive(d, [bob], until=lambda: bool(host.offers)))
+        ((_n, run, _job),) = bob.runs
+        self.assertEqual(self.event(run).verification, "pending")
+        (lab.QUEUE / "dropped.json").unlink()
+        d.tick()
+        self.assertEqual(self.job_of(run).state, "cancelled")
+        self.assertEqual(self.event(run).verification, "unverified", "nothing will check it now")
 
     def test_a_settling_job_is_settled_after_a_restart(self):
         bob = Lender(self, "Bob's new", "bob")
@@ -800,6 +1040,75 @@ class QuarantineAndRelease(Verify):
         self.assertEqual((r.json()["stage"], r.json()["code"]), ("admission", "quarantined"))
         mine = client.post(f"/api/pool/servers/{bob.sid}/test", headers=self.headers["bob"]).json()
         self.assertNotEqual(mine.get("code"), "quarantined", "its owner's own test passes admission")
+
+    def one_result_waiting(self, name: str) -> tuple:
+        """Bob's new machine has played its first game honestly; its result waits in its executor's frames for the
+        dispatcher's next tick."""
+        bob = Lender(self, "Bob's honest", "bob")
+        self.submit("bob", duels(name, 1))
+        d = self.make([self.verifier()])
+        for _ in range(20):
+            d.tick()
+            if bob.offers():
+                break
+        (offer,) = bob.offers()
+        bob.play(offer)
+        return d, bob, offer
+
+    def reset_key(self, bob, key=None) -> None:
+        """The owner's key reset (``POST /api/machines/{id}/key/reset``: the helper is disconnected), then, with
+        ``key``, a hello that registers that key."""
+        from datetime import datetime, timezone
+        from citar.server.machines_api import reset_key
+        with db.session() as s:
+            reset_key(s, s.get(Server, bob.sid), s.get(User, self.ids["bob"]))
+        bob.e.disconnected(bob.conn)
+        if key is not None:
+            with db.session() as s:
+                row = s.get(Server, bob.sid)
+                row.public_key, row.key_at = key, datetime.now(timezone.utc)
+            bob.e.connected(bob.conn)
+
+    def assert_lost_no_verdict(self, d, bob, offer) -> None:
+        row = bob.row()
+        self.assertEqual(row.trust_tier, "new")
+        self.assertFalse((row.trust or {}).get("claim_failures"))
+        self.assertNotIn("last_mismatch", row.trust or {})
+        self.assertEqual(self.owner_tier("bob"), "new", "no verdict on its owner")
+        (run,) = [r for r in self.runs() if r.id == offer["run"]]
+        self.assertEqual((run.state, run.error["code"]), ("failed", "lost"))
+        self.assertEqual(self.job_of(offer["run"]).attempts, 0, "no attempt")
+        self.assertNotIn(offer["run"], bob.acknowledged(), "not acknowledged: it was never checked")
+        self.assertIsNone(self.event(offer["run"]))
+
+    def test_a_result_waiting_while_its_machines_key_is_reset_is_no_verdict(self):
+        d, bob, offer = self.one_result_waiting("reset")
+        self.reset_key(bob)
+        d.tick()
+        self.assert_lost_no_verdict(d, bob, offer)
+        self.assertEqual(self.job_of(offer["run"]).state, "queued", "its game waits to be offered again")
+        # its helper's next hello registers its key again: the game is offered again, played and settled
+        self.reset_key(bob, key=test_key(bob.seed))
+        self.assertTrue(self.drive(d, [bob], until=lambda: (lab.DONE / "reset.json").exists()))
+        (line,) = lab.load_results("reset")
+        self.assertEqual(line["executor"]["verification"], "verified")
+        self.assertEqual(bob.row().trust_tier, "new")
+
+    def test_a_result_signed_by_a_key_replaced_since_its_offer_is_no_verdict(self):
+        """The key reset to evict a helper that registered first (P4.3.7): the result it sends, signed by the key
+        that is gone, does not quarantine the machine or its owner."""
+        d, bob, offer = self.one_result_waiting("replaced")
+        self.reset_key(bob, key=test_key(TEST_KEY_SEED + 9))
+        d.tick()
+        self.assert_lost_no_verdict(d, bob, offer)
+
+    def test_a_result_signed_by_the_key_registered_again_is_checked_as_ever(self):
+        d, bob, offer = self.one_result_waiting("again")
+        self.reset_key(bob, key=test_key(bob.seed))
+        d.tick()
+        (run,) = [r for r in self.runs() if r.id == offer["run"]]
+        self.assertEqual((run.state, run.verdict), ("done", "unchecked"), "its claim holds: checked by a replica")
+        self.assertIn(offer["run"], bob.acknowledged())
 
     def test_a_key_reset_keeps_the_tier_and_the_counters(self):
         from fastapi.testclient import TestClient
