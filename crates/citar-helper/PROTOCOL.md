@@ -484,6 +484,21 @@ its standard input and output (`citar-jobs`).
   page: `available`, `downloading`, `verified`, `restarting`, `applied`, `failed`, `refused` or
   `unavailable` (a build that trusts no update key).
 
+**What the helper does with a manifest** (design/phase4-helper.md P4.3.8), each step said in an
+`update_status`, which goes after the acknowledgement of the welcome's settings, and again on a
+later connection when the server relays the same manifest: a build that trusts no update key says
+`unavailable` and downloads nothing; a signature no trusted key made, a manifest that does not read,
+a version that is not newer (`refused` for the same one too), no binary for its target, a binary
+that failed here before, `updates: off`, `auto` in a package manager's build, an address that is not
+`https` (a development or test build also takes `http` to this machine) or a binary folder it may
+not write is `refused` with the reason; `updates: notify` says `available` and stops. Otherwise
+`downloading`, then `refused` for a size or SHA-256 that is not the signed one (or a redirect that is
+not `https`), `failed` for a download or a self-test that fails, else `verified`. Once nothing is in
+flight it says `restarting` (its last frame), closes the socket with 1001, and swaps its binary: so
+the server never sees two connections of the machine, and `shutdown` `replaced` is never what an
+update looks like. The new binary says `applied` after its first welcome; an old binary put back
+after a failed update says `failed` with why.
+
 ## Keep-alive and shutdown
 
 - The server sends `ping` every `welcome.ping_s` seconds (20); the helper answers `pong`. The helper

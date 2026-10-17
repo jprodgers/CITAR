@@ -251,6 +251,14 @@ Budgets on grants are counted in the same credits ([Accounts](Design-accounts-an
 | Variable | Default | Meaning |
 |---|---|---|
 | `CITAR_WORKER_PING_SECONDS` | `20` | Keep-alive on a CITAR helper's WebSocket (`welcome.ping_s`, 5 to 300): a helper silent for 70 s is dropped |
+| `CITAR_HELPER_MANIFEST_URL` | GitHub's release download of this server's version in server mode (`https://github.com/jprodgers/CITAR/releases/download/v{version}/citar-helper-manifest.json`); none in local mode | Where the server fetches the signed manifest of the CITAR helper it relays to its helpers (`{version}` its own version; the signature at the same address with `.sig`), at most hourly and never on a request. `https` only (`http` to this machine for tests); `off` relays none |
+| `CITAR_HELPER_MANIFEST_FILE` | none | A manifest on disk instead (its signature beside it as `<file>.sig`): an offline server's, or a test's. It wins over the URL |
+
+Only a manifest that verifies against the update keys built into the server's extension (the helper's own,
+`crates/citar-jobs/update-keys.pub`, none until the owner's first signed release) is relayed; a failed fetch keeps the
+last good one. Every helper's welcome carries it, a new one goes at once to the connected helpers older than it, and
+each helper decides by its own `updates` setting ([Workers](Workers#updates)). The Servers page shows each
+helper machine's version beside the latest signed helper, and where its helper is with an update.
 
 The limit of refused worker tokens per address (`worker_auth`: 20 different tokens in five minutes) is counted before
 any token is looked up, from the address `CITAR_BEHIND_PROXY` and `CITAR_TRUSTED_PROXY_HOPS` give, as every other
@@ -261,6 +269,7 @@ On the helper's side (the CITAR helper, `citar-helper`): `CITAR_WORKER_SERVER`, 
 `CITAR_WORKER_BASE_URL`, `CITAR_WORKER_PROVIDER`, `CITAR_WORKER_MAX_CONCURRENT`, `CITAR_WORKER_NAME`,
 `CITAR_WORKER_API_KEY_ENV` and `CITAR_WORKER_HARDWARE_FILE` (the hardware to report instead of a scan: a collector's
 file, as `--hardware`), each below the flag and the settings file ([Workers](Workers#the-helpers-settings-citar-016)).
+Its update policy is `updates` (`auto`, `notify` or `off`; `--updates`) in `helper.json` ([Updates](Workers#updates)).
 Prefer the settings file `citar-helper setup` writes (`helper.json`): a token on a command line ends up in the shell
 history and the process list.
 

@@ -276,6 +276,20 @@ that means for an existing install:
   played on, and a standing that cannot be read counts as unverified; the runs listing's badge is no longer saved into
   the run; `PUT /api/admin/verification` answers 400, not 500, to infinity and huge counts; `GET /api/admin/jobs`
   waits at most 2 s for a tick (503 past that).
+- **The helper updates itself, signed** (design/phase4-helper.md P4.3.8, P4.5.9): the server fetches the signed
+  manifest of its own version's helpers (GitHub's release in server mode, `CITAR_HELPER_MANIFEST_URL`, or a file,
+  `CITAR_HELPER_MANIFEST_FILE`) at most hourly, relays it only if it verifies, and pushes a new one to older helpers;
+  each helper checks it again and, under its owner's `updates` (`auto`, `notify`, `off`; `notify` in a package
+  manager's build, which refuses `auto`), downloads over `https` only, checks the size and SHA-256, self-tests the new
+  binary, waits until idle, closes its connection and swaps, keeping `<name>.old`. A console run supervises the new
+  binary and puts the old one back if it exits before its first welcome; under a service manager the helper exits 75,
+  and a new binary that does not come up in three starts restores the old one. `citar-helper update check`, `apply`
+  and `rollback`. The Servers page shows each helper's version beside the latest signed helper and where its update
+  is. No key ships yet: until the owner's first signed release every helper reports updates unavailable; releases are
+  signed in CI by the protected `helper-signing` environment's secret (the owner's one-time setup is in
+  [docs/server/WORKERS.md](Workers#signing-helper-updates-the-owners-one-time-setup)), with
+  `cargo xtask keygen`, `helper-manifest` and `sign-manifest` refusing key paths inside any repository. SECURITY.md
+  describes the update channel. [docs/server/WORKERS.md](Workers#updates).
 
 **Chat** ([docs/PLAYING.md](Playing-in-the-browser), [docs/AI_PLAYERS.md](AI-players)):
 

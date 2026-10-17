@@ -439,6 +439,23 @@ crates allowed `unsafe` (`src/sys/`), the operating-system calls no safe wrapper
 xtask check` refuses `unsafe` anywhere else in them, and their test features and `dev-guard` in
 anything that ships.
 
+**The helper's updates** (`src/update`, design/phase4-helper.md P4.3.8) are tested with two builds of
+one tree that `cargo xtask develop` puts beside the helper: `citar-helper-update-1` and `-2`, built
+with the `test-update-key` feature and `CITAR_HELPER_VERSION` at compile time (`0.1.6-test.1`,
+`0.1.6-test.2`; the second also `CITAR_HELPER_JOBS_SALT`, so it is another jobs build, as another
+release would be). Such a build trusts the update key `--update-key FILE` names, besides the ones
+compiled in (`crates/citar-jobs/update-keys.pub`, empty until the first signed release), and has
+three test hooks: `CITAR_HELPER_TEST_IDLE_WAIT_S` (the hand-off's wait for idle, an hour),
+`CITAR_HELPER_TEST_EXIT_AT_START=<version>` (that version exits at its start, before it can be
+healthy) and `CITAR_HELPER_TEST_STALE_HOST` (the binary an update installed starts its first job
+host from the one it replaced). `tests/update.rs` plays the refusals in-process against a loopback
+asset server, and the start count and `update rollback` with the real binary;
+`tests/test_helper_update_e2e.py` updates, rolls back and hands off the two builds against the real
+hub, and `scripts/qa_phase4.py update` does it with the release side's own tools: `cargo xtask
+keygen --out DIR` (a throwaway key, refused inside any git working tree), `cargo xtask
+helper-manifest --assets DIR --version V` and `cargo xtask sign-manifest --key FILE MANIFEST`.
+Never put a key file in the checkout: `tests/test_no_private_keys.py` fails on one.
+
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
 benchmarks need valgrind, so they run there too, and so do the helper's Linux checks (`cargo
