@@ -100,6 +100,9 @@ async def _startup():
     hub().attach_loop(_loop)                      # lets game threads reach connected helpers
     hub().ping_s = citar_settings.get().worker_ping_seconds
     asyncio.create_task(hub().ping_loop())
+    from .helper_updates import relay
+    relay().start()                               # the signed helper manifest, fetched at most hourly off any request
+                                                  # path and relayed to the helpers (design/phase4-helper.md P4.5.9)
     # lobby games first, so queued benchmarks and probes see which machines they hold
     from .session import register_games_with_queue
     register_games_with_queue()
@@ -167,6 +170,11 @@ def _shutdown():
         jobs_dispatcher.stop()                    # the job host ends its games; the next start plays them again
     except Exception:
         traceback.print_exc()
+    try:
+        from .helper_updates import relay
+        relay().stop()
+    except Exception:
+        pass
     try:
         from .. import ledger
         ledger.get().stop(timeout=10.0)           # the writer drains what it has (the tracker's last CPU included)

@@ -15,8 +15,10 @@ live), a stopping helper's runs, a job host's figures acknowledged again, and a 
 deletion), each against a job dispatcher of its own whose one executor is the helper. Each is a test of its own, named after its file. The helper's side plays the same files
 (``crates/citar-helper/tests/conformance.rs``).
 
-A transcript of a later package (4-13) is not played here; ``test_the_package_plays_its_transcripts`` holds the
-count, and the player refuses any act or state word it cannot do rather than skip it.
+From 4-13 the update transcripts too (a welcome carrying the relayed manifest, one the server learns of pushed to
+the helper, the helper's update_status kept): every transcript with a hub side is played here, and
+``test_the_package_plays_its_transcripts`` holds the count; the player refuses any act or state word it cannot do
+rather than skip it.
 """
 from __future__ import annotations
 
@@ -36,7 +38,8 @@ from tests import helperfake as H
 _TMP = Path(tempfile.mkdtemp(prefix="citar_conformance_"))
 _URL = "sqlite:///" + (_TMP / "test.db").as_posix()
 
-TRANSCRIPTS = H.hub_transcripts("4-05") + H.hub_transcripts("4-06") + H.hub_transcripts("4-10")
+TRANSCRIPTS = (H.hub_transcripts("4-05") + H.hub_transcripts("4-06") + H.hub_transcripts("4-10")
+               + H.hub_transcripts("4-13"))
 
 
 def setUpModule():
@@ -68,17 +71,22 @@ class Transcripts(unittest.TestCase):
         H.HubPlayer(self.server, t).play()
 
     def test_the_package_plays_its_transcripts(self):
-        """The 40 transcripts 4-05 plays from the hub's side, 4-06's 3 and 4-10's 30 are all here, and the player knows
-        every word they use."""
-        self.assertEqual(len(TRANSCRIPTS), 73)
+        """The 40 transcripts 4-05 plays from the hub's side, 4-06's 3, 4-10's 30 and 4-13's 3 are all here (every
+        transcript the hub plays), and the player knows every word they use."""
+        self.assertEqual(len(TRANSCRIPTS), 76)
         self.assertEqual(sum(1 for t in TRANSCRIPTS if t.plays.get("hub") == "4-10"), 30)
         self.assertEqual(sorted(t.name for t in TRANSCRIPTS if t.plays.get("hub") == "4-06"),
                          ["hardware-rescan", "hardware-unchanged", "power-minute"])
+        self.assertEqual(sorted(t.name for t in TRANSCRIPTS if t.plays.get("hub") == "4-13"),
+                         ["update-notify", "update-pushed", "update-unavailable"])
+        self.assertEqual(sorted(t.name for t in TRANSCRIPTS),
+                         sorted(t.name for t in F.transcripts() if t.plays.get("hub")))
         for t in TRANSCRIPTS:
             self.assertIs(H.played(t), True, t.name)
-        # a word of a later package is refused, not skipped
-        later = next(t for t in F.transcripts() if t.plays.get("hub") == "4-13")
-        self.assertIsNot(H.played(later), True)
+        # a word no package plays is refused, not skipped
+        made_up = F.Transcript(name="made-up", about="", refs=[], plays={"hub": "4-99"}, one_side="", values={},
+                               setup={}, steps=[F.Step(action="act", body={"side": "hub", "do": "manifest_vanishes"})])
+        self.assertEqual(H.played(made_up), "manifest_vanishes")
 
 
 def _make(name: str):

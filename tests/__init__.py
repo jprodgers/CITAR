@@ -22,6 +22,11 @@ os.environ.setdefault("CITAR_TEST_LOCKS", "1")
 # small limits (tests/test_dispatcher.py).
 os.environ.setdefault("CITAR_TEST_NO_DISPATCHER", "1")
 
+# The suite's apps relay no helper update manifest from GitHub (citar/server/helper_updates.py, design/phase4-helper.md
+# P4.5.9): a server-mode app would otherwise fetch this version's release on start, a network call no test makes. The
+# relay's tests give theirs a manifest file or a source of their own.
+os.environ.setdefault("CITAR_HELPER_MANIFEST_URL", "off")
+
 # The API test modules each point CITAR_DATA_DIR and CITAR_DB_URL at their own temporary database. This default is
 # for a module run on its own that builds the app without doing so: without it, the app opens the per-user database.
 if not os.environ.get("CITAR_DATA_DIR"):

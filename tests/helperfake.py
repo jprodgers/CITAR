@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import socket
 import threading
 import time
@@ -632,11 +633,45 @@ END_TURN = {"name": "end_turn", "description": "End your turn.",
 #: The hub's acts and state words this package plays (the others are later packages').
 ACTS_PLAYED = ("submit_request", "force_request", "cancel_request", "drop_connection", "set_settings", "rescan",
                "reset_key", "revoke_token", "disable_machine", "second_connection", "queue_job", "force_offer",
-               "lab_stop", "abort_run", "expire_run", "benchmark_start", "benchmark_end", "delete_experiment")
+               "lab_stop", "abort_run", "expire_run", "benchmark_start", "benchmark_end", "delete_experiment",
+               "manifest_arrives")
 STATES_PLAYED = ("slot_free", "draining", "flags", "step", "requeued", "request", "llm_slots", "cpu_threads",
                  "cpu_percent", "memory_mb", "work", "cpu_enabled", "quiet", "models", "loaded", "key", "audit",
                  "token_lookups", "audit_rows", "rate_count", "last_report", "power_rows", "run", "job",
-                 "result_lines", "backoff", "mem_mb_raised", "claim_failures", "events", "memory_per_run_mb")
+                 "result_lines", "backoff", "mem_mb_raised", "claim_failures", "events", "memory_per_run_mb",
+                 "update_status")
+#: The throwaway update key the transcripts' manifests are signed with (``setup.hub.update``: "signed with the test
+#: key"), which the extension's test operations trust through ``CITAR_HELPER_UPDATE_KEY`` while a transcript plays.
+UPDATE_KEY_SEED = 43
+#: The version of the manifests the transcripts' hub relays: newer than any fake helper's.
+UPDATE_VERSION = "9.9.9"
+
+
+def update_public_key(seed: int = UPDATE_KEY_SEED) -> str:
+    """The throwaway update key's public half (the extension's test operations)."""
+    from citar import _engine
+    return _engine.jobs.test_update_public_key(seed)
+
+
+def sign_manifest_text(text: str, seed: int = UPDATE_KEY_SEED) -> str:
+    """``text`` signed by the throwaway update key of ``seed`` (the extension's test operations)."""
+    from citar import _engine
+    return _engine.jobs.test_sign_manifest(seed, text)
+
+
+def signed_manifest(version: str = UPDATE_VERSION, *, seed: int = UPDATE_KEY_SEED, target: str = "x86_64-pc-windows-msvc",
+                    url: str = "https://127.0.0.1:9/citar-helper-test", body: bytes = b"a helper") -> tuple:
+    """A helper update manifest of ``version`` (one asset, for ``target``) and its signature by the throwaway key of
+    ``seed``, as ``cargo xtask helper-manifest`` and ``sign-manifest`` make a release's: (text, signature)."""
+    import hashlib
+    from citar import _engine, engine_api
+    text = json.dumps({
+        "v": 1, "version": version, "protocol": 2, "build": engine_api.build_info()["build_id"],
+        "released_at": "2026-11-01T00:00:00Z",
+        "assets": {target: {"name": "citar-helper-test", "url": url, "sha256": hashlib.sha256(body).hexdigest(),
+                            "size": len(body)}},
+    }, indent=2) + "\n"
+    return text, _engine.jobs.test_sign_manifest(seed, text)
 #: The golden job a job transcript's experiment plays (its offers carry its spec).
 GOLDEN_JOB = "duel-a"
 #: The frames of the fake helper the hub hands to the machine's executor (which times them by the fake clock).
@@ -688,6 +723,8 @@ class HubPlayer:
         hub = transcript.setup.get("hub") or {}
         self.answer_pings = hub.get("answer_pings", True)
         self.setup_hub = hub
+        #: ``CITAR_HELPER_UPDATE_KEY`` as it was before the transcript set it.
+        self.update_key_env: Optional[str] = None
         self.golden = F.committed_golden()
         #: The job dispatcher a job transcript plays against, its experiment's name, the job's first ``mem_mb`` and
         #: the benchmark lease a ``benchmark_start`` takes.
@@ -709,8 +746,9 @@ class HubPlayer:
         hub_setup = self.setup_hub
         for k in hub_setup:
             if k not in ("machine", "token", "rate", "clock", "ping_s", "answer_pings", "local_executor",
-                         "verification", "jobs"):
+                         "verification", "jobs", "update"):
                 raise Unsupported(f"setup.hub.{k} is a later package's")
+        self._prepare_update(hub_setup.get("update"))
         if hub_setup.get("local_executor", False):
             raise Unsupported("setup.hub.local_executor true: no transcript plays it")
         machine = hub_setup.get("machine") or {}
@@ -773,6 +811,22 @@ class HubPlayer:
             self._prepare_jobs(owner_id=owner.id)
         self.lookups0 = hub.lookups
         self.audit0 = self._audit_count()
+
+    def _prepare_update(self, update: Optional[dict]) -> None:
+        """The relay's manifest (``setup.hub.update``): one signed with the throwaway key the extension then trusts
+        (``CITAR_HELPER_UPDATE_KEY``), or none. A transcript whose server learns of one later (``manifest_arrives``)
+        trusts the key too."""
+        from citar.server import helper_updates
+        helper_updates.relay().clear()
+        if update is not None and update.get("manifest") != "signed with the test key":
+            raise Unsupported(f"setup.hub.update {update!r} is not a manifest this player makes")
+        arrives = any(st.action == "act" and F.act_word(st.body["do"]) == "manifest_arrives" for st in self.t.steps)
+        if update is None and not arrives:
+            return
+        self.update_key_env = os.environ.get("CITAR_HELPER_UPDATE_KEY")
+        os.environ["CITAR_HELPER_UPDATE_KEY"] = update_public_key()
+        if update is not None:
+            helper_updates.relay().accept(*signed_manifest())
 
     @staticmethod
     def _verification(setup: Optional[dict]) -> None:
@@ -863,6 +917,14 @@ class HubPlayer:
             th.join(timeout=10)
         W.hub().clock = W.Clock()
         W.hub().limiter.clear()
+        from citar.server import helper_updates
+        helper_updates.relay().clear()
+        W.hub().update_states.pop(self.sid, None)
+        if self.update_key_env is not None or "CITAR_HELPER_UPDATE_KEY" in os.environ:
+            if self.update_key_env is None:
+                os.environ.pop("CITAR_HELPER_UPDATE_KEY", None)
+            else:
+                os.environ["CITAR_HELPER_UPDATE_KEY"] = self.update_key_env
 
     # -------------------------------------------------------------- time
     def _advance(self, seconds: float) -> None:
@@ -1228,6 +1290,11 @@ class HubPlayer:
             if not until(lambda: self.sid not in self.dispatcher._paused_exec, 5.0):
                 raise AssertionError("the dispatcher did not take the benchmark's end in")
 
+    def act_manifest_arrives(self, _arg) -> None:
+        """The server learns of a signed manifest (its relay's fetch): connected helpers older than it are sent it."""
+        from citar.server import helper_updates
+        helper_updates.relay().accept(*signed_manifest())
+
     def act_cancel_request(self, _arg) -> None:
         self.last_conv.close()
 
@@ -1461,6 +1528,10 @@ class HubPlayer:
             if have != want or (executor is not None and executor.memory_per_run_mb != want):
                 raise AssertionError(f"the machine's memory a run is {have} (its executor's "
                                      f"{executor.memory_per_run_mb if executor else None}), not {want}")
+        elif word == "update_status":
+            have = (W.hub().update_states.get(self.sid) or {}).get("state")
+            if have != want:
+                raise AssertionError(f"the machine's last update_status is {have}, not {want}")
         elif word == "claim_failures":
             from citar import db
             from citar.db.models import Server

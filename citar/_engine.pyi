@@ -159,6 +159,28 @@ class jobs:
         chain_inconsistent, each a tampering verdict."""
         verdict: str
 
+    class ManifestRefused(ValueError):
+        """A helper update manifest refused (design/phase4-helper.md P4.5.9); .code is no_key, signature or
+        invalid."""
+        code: str
+
+    @staticmethod
+    def verify_manifest(manifest: str, signature: str) -> bytes:
+        """The manifest, read, as JSON bytes, when signature verifies against the update keys this build trusts
+        (with test operations, CITAR_HELPER_UPDATE_KEY's too); ManifestRefused otherwise."""
+    @staticmethod
+    def update_keys_trusted() -> int:
+        """How many update keys this build trusts."""
+    @staticmethod
+    def version_newer(candidate: str, current: str) -> Optional[bool]:
+        """Whether candidate is a later helper version than current (semver), None when either is not one."""
+    @staticmethod
+    def test_update_public_key(seed: int) -> str:
+        """A throwaway update key's public half from a test's seed (a build with test operations only)."""
+    @staticmethod
+    def test_sign_manifest(seed: int, manifest: str) -> str:
+        """The manifest signed by the throwaway update key of seed (a build with test operations only)."""
+
     @staticmethod
     def check_spec(kind: str, spec_json: bytes, spec_hash: Optional[str] = None) -> bytes:
         """{spec (canonical), spec_hash, bots}; JobRefused (bad_spec) for a spec refused, or one that does not

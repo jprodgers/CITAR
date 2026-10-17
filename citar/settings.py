@@ -43,6 +43,11 @@ MODES = ("local", "server")
 # operator; a provider with no credentials configured simply does not appear on the login page.
 OAUTH_PROVIDERS = ("google", "github", "discord", "microsoft")
 
+# Where a server finds the signed manifest of the CITAR helper of its own version, which it relays
+# to its helpers (design/phase4-helper.md P4.5.9): the release's assets on GitHub, {version} this
+# server's. The default in server mode; a local server relays none unless told where.
+HELPER_MANIFEST_URL = "https://github.com/jprodgers/CITAR/releases/download/v{version}/citar-helper-manifest.json"
+
 
 class SettingsError(RuntimeError):
     """A misconfiguration serious enough that the server must not start."""
@@ -167,6 +172,11 @@ class Settings:
     require_https: bool
     worker_ping_seconds: int
     debug: bool
+    # The helper update relay (design/phase4-helper.md P4.5.9): the manifest's URL ({version} this server's; its
+    # signature at the same URL with .sig), or a manifest file on disk (its .sig beside it), which wins. Neither: no
+    # manifest is relayed and helpers report updates as their own build allows.
+    helper_manifest_url: str = ""
+    helper_manifest_file: str = ""
 
     # ---------------------------------------------------------------- derived
     @property
@@ -223,6 +233,7 @@ class Settings:
             "sso": self.enabled_oauth_providers or ["none configured"],
             "registration": self.registration,
             "behind_proxy": self.behind_proxy,
+            "helper_manifest": self.helper_manifest_file or self.helper_manifest_url or "not relayed",
         }
 
 
@@ -330,7 +341,28 @@ def load(**overrides) -> Settings:
         require_https=require_https,
         worker_ping_seconds=_int("CITAR_WORKER_PING_SECONDS", 20),
         debug=_flag("CITAR_DEBUG"),
+        helper_manifest_url=_manifest_url(overrides, mode),
+        helper_manifest_file=overrides.get("helper_manifest_file", _env("CITAR_HELPER_MANIFEST_FILE")),
     )
+
+
+def _manifest_url(overrides: dict, mode: str) -> str:
+    """``CITAR_HELPER_MANIFEST_URL``: ``off`` (or empty, set) relays none; unset, GitHub's in server mode and none in
+    local mode. It must be ``https`` (``http`` only to this machine, for tests)."""
+    if "helper_manifest_url" in overrides:
+        raw = overrides["helper_manifest_url"] or ""
+    elif "CITAR_HELPER_MANIFEST_URL" in os.environ:
+        raw = _env("CITAR_HELPER_MANIFEST_URL")
+    else:
+        raw = HELPER_MANIFEST_URL if mode == "server" else ""
+    if raw.lower() in ("", "off", "none"):
+        return ""
+    from urllib.parse import urlsplit
+    parts = urlsplit(raw)
+    loopback = (parts.hostname or "") in ("127.0.0.1", "localhost", "::1")
+    if parts.scheme != "https" and not (parts.scheme == "http" and loopback):
+        raise SettingsError(f"CITAR_HELPER_MANIFEST_URL must be an https:// address (or off), not {raw!r}.")
+    return raw
 
 
 _settings: Optional[Settings] = None
