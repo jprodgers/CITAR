@@ -62,6 +62,10 @@ REMEMBERED = 4096
 ROW_SECONDS = 30.0
 #: A job frame's arrival on the dispatcher's clock (beside ``citar.jobs.host.RX``, the process's).
 AT = "_at"
+#: A job frame's place among what its helper sent (its frames, hellos, ``status`` and ``settings_ack``), counted as
+#: they arrive: what came after a frame clears the backoff that frame caused even where the clock has not moved since
+#: (Windows' monotonic clock moves in 15.6 ms steps before Python 3.13).
+SEQ = "_seq"
 
 
 class RemoteExecutor:
@@ -84,6 +88,11 @@ class RemoteExecutor:
         self.last_room = 0.0
         self.last_ack = 0.0
         self.last_hello = 0.0
+        #: The same three as places in the order things arrived (``SEQ``): the hub's event loop counts them.
+        self.seq = 0
+        self.seq_room = 0
+        self.seq_ack = 0
+        self.seq_hello = 0
         self._decisions: dict = {}                      # owner -> (refusal or None, budget id), this tick
         self._facts_now: Optional[dict] = None          # the machine's facts, this tick
         self._eff: tuple = (None, None, None, None)     # (conn, its settings, its ack, their clamp's cpu)
@@ -419,6 +428,8 @@ class RemoteExecutor:
         self.conn = conn
         self.name = conn.server_name or self.name
         self.last_ack = self.last_hello = self.clock()
+        self.seq += 1
+        self.seq_ack = self.seq_hello = self.seq
         if self.paused:
             conn.send_threadsafe(HP.jobs_pause("benchmark"))
         self._woken()
@@ -434,6 +445,8 @@ class RemoteExecutor:
         dispatcher's thread reads)."""
         frame.setdefault(H.RX, time.monotonic())
         frame[AT] = self.clock()
+        self.seq += 1
+        frame[SEQ] = self.seq
         self._frames.append(frame)
         self.received += 1
         self._woken()
@@ -443,12 +456,16 @@ class RemoteExecutor:
         and ``quiet``."""
         if frame.get("quiet_until") is None and int(frame.get("jobs_running") or 0) < max(1, self.threads):
             self.last_room = self.clock()
+            self.seq += 1
+            self.seq_room = self.seq
             self._woken()
         self.received += 1
 
     def acknowledged(self) -> None:
         """Its helper acknowledged settings: the backoff of what its settings decide is cleared."""
         self.last_ack = self.clock()
+        self.seq += 1
+        self.seq_ack = self.seq
         self.received += 1
         self._woken()
 

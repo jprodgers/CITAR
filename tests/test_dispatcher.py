@@ -1850,6 +1850,26 @@ class Remote(Lab):
         self.assertEqual([f["spec"]["exp"] for f in self.offers(conn2)], ["after-the-restart"])
         self.assertEqual(d.backoff(self.sid), [])
 
+    def test_what_came_after_a_backing_off_frame_clears_it_on_a_clock_that_did_not_move(self):
+        """Windows' monotonic clock moves in 15.6 ms steps before Python 3.13: a hello, ``settings_ack`` or ``status``
+        that came after the frame that backed its machine off clears it though both read the same time, and one that
+        came before it does not."""
+        from citar.jobs import remote
+        frozen = 1000.0
+        d = self.dispatcher([], remotes=self.registry)
+        e, conn = self.connect()
+        e.clock = lambda: frozen
+        for reason, clear in (("stopped", lambda: e.connected(conn)), ("busy", lambda: e.status({"jobs_running": 0})),
+                              ("limits", e.acknowledged)):
+            clear()                     # before the frame: it does not clear what the frame causes
+            e.frame({"t": "job_failed", "run": "cr_none", "code": "aborted_locally"})
+            f = e._frames.pop()
+            self.assertEqual(f[remote.AT], frozen)
+            d._back_off(e, reason, f[remote.AT], f"backed off: {reason}", f[remote.SEQ])     # as its callers do
+            self.assertEqual(d._backed_off(e, frozen), f"backed off: {reason}")
+            clear()
+            self.assertIsNone(d._backed_off(e, frozen), reason)
+
 
     # ------------------------------------------------------------------ the review's findings (4-10's fix round)
     def result(self, offer: dict) -> dict:

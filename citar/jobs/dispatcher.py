@@ -1297,7 +1297,7 @@ class Dispatcher:
             # helper's next hello (an honest one closes its connection as it stops)
             self._requeue(s, run, attempt=False)
             if not local:
-                self._back_off(e, "stopped", at, "its helper stopped")
+                self._back_off(e, "stopped", at, "its helper stopped", f.get("_seq"))
             if job is not None:
                 lab.log(f"{job.exp} #{job.i} on {e.name}: its helper stopped ({message}); queued again")
             return
@@ -1308,7 +1308,8 @@ class Dispatcher:
                 # the server built and checked the spec itself, and the helper has its jobs build: a run no machine
                 # could play is its fault (broken or lying), not the game's, which is played again elsewhere
                 self._helper_fault(s, e, run.id, f"it failed a run as not retryable ({code}): {message[:200]}")
-                self._back_off(e, "fault", at, "its helper failed a run it says no machine could play")
+                self._back_off(e, "fault", at, "its helper failed a run it says no machine could play",
+                               f.get("_seq"))
         else:
             from citar.db.models import CpuJob
             row = s.get(CpuJob, run.job)
@@ -1336,13 +1337,14 @@ class Dispatcher:
         log.info("job %s is not offered to %s again for an hour: its own pauses held it past its deadline", run.job,
                  run.machine)
 
-    def _back_off(self, e, reason: str, at: float, why: str) -> None:
+    def _back_off(self, e, reason: str, at: float, why: str, seq: Optional[int] = None) -> None:
         """A helper is offered nothing for a while for ``reason`` (P4.2.5's re-offer backoff): 2 s, doubling to 10
-        minutes while the reason recurs, until what clears it comes (``_backed_off``)."""
+        minutes while the reason recurs, until what clears it comes (``_backed_off``): what came after the frame that
+        caused it (its place ``seq``, ``remote.SEQ``; its arrival ``at`` for a frame with none)."""
         per = self._rejects.setdefault(e.id, {})
-        _until, wait, _why, _at = per.get(reason, (0.0, REJECT_FIRST / 2, "", 0.0))
+        _until, wait, *_rest = per.get(reason, (0.0, REJECT_FIRST / 2, "", 0.0, None))
         wait = min(REJECT_MAX, wait * 2)
-        per[reason] = (at + wait, wait, why, at)
+        per[reason] = (at + wait, wait, why, at, seq if isinstance(seq, int) else None)
 
     def _helper_fault(self, s, e, rid: str, why: str) -> None:
         """A helper's word against the server's own checks (a spec it refused that the server checked with the same jobs
@@ -1391,7 +1393,8 @@ class Dispatcher:
         if e.kind != "local":
             # a helper: offered nothing for a while, per reason, 2 s doubling to 10 minutes (P4.2.5), until what
             # clears that reason comes (``_available``)
-            self._back_off(e, reason, self.clock() if at is None else at, f"its helper refused a job ({reason})")
+            self._back_off(e, reason, self.clock() if at is None else at, f"its helper refused a job ({reason})",
+                           f.get("_seq"))
             if reason == "bad_spec":
                 # the server built and checked the spec itself, and offers a job only to a helper of its jobs build:
                 # a helper's ``bad_spec`` is the helper's fault (broken or lying), not the game's, which is played
@@ -2184,11 +2187,16 @@ class Dispatcher:
         per = self._rejects.get(e.id)
         if not isinstance(per, dict):
             return None
-        room, ack = getattr(e, "last_room", 0.0), getattr(e, "last_ack", 0.0)
-        hello = getattr(e, "last_hello", 0.0)
-        for reason, (until, _wait, why, at) in list(per.items()):
-            if ((reason in self.ROOM_CLEARS and room > at) or (reason in self.ACK_CLEARS and ack > at)
-                    or (reason in self.HELLO_CLEARS and hello > at)):
+        def since(what: str, at: float, seq: Optional[int]) -> bool:
+            # by arrival where both have a place in it (a clock that has not moved orders nothing), else by time
+            place = getattr(e, f"seq_{what}", None)
+            if seq is not None and isinstance(place, int):
+                return place > seq
+            return getattr(e, f"last_{what}", 0.0) > at
+        for reason, (until, _wait, why, at, seq) in list(per.items()):
+            if ((reason in self.ROOM_CLEARS and since("room", at, seq))
+                    or (reason in self.ACK_CLEARS and since("ack", at, seq))
+                    or (reason in self.HELLO_CLEARS and since("hello", at, seq))):
                 del per[reason]
             elif now < until:
                 return why
