@@ -333,6 +333,14 @@ pub fn command(cli: &Cli, action: &ServiceAction, log: &Log) -> Result<u8, Refus
             ),
         ));
     }
+    if scope == Scope::System && Os::this() == Os::Linux && cli.opts.home.is_none() {
+        return Err((
+            2,
+            "a system unit needs its home named: --home DIR, a folder of the account the unit runs as \
+             (the one that runs sudo)"
+                .to_owned(),
+        ));
+    }
     let i = inputs(&cli.opts, scope)?;
     let Some(installing) = installing else { return Ok(status(&i)) };
     let plan =

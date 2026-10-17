@@ -124,7 +124,12 @@ pub fn install_plan(binary: &Path, home: &Path, unit_dir: &Path, user: &str, sys
             may_fail: false,
         },
     ];
-    if !system {
+    if system {
+        steps.push(Step::Note(format!(
+            "the unit runs the helper as {user}: its home {} must be {user}'s own",
+            home.display()
+        )));
+    } else {
         steps.push(Step::Note(format!(
             "a user service runs while {user} is logged in; to keep it running after logging out, run \
              once (not run here): loginctl enable-linger {user}"

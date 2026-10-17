@@ -25,6 +25,7 @@ citar-helper service install --system (a dry run: nothing is written, started or
 3. run: systemctl daemon-reload
 4. run: systemctl enable citar-helper.service
 5. run: systemctl restart citar-helper.service
+6. note: the unit runs the helper as alice: its home /srv/citar-helper must be alice's own
 
 citar-helper service uninstall --system (a dry run: nothing is written, started or changed)
 1. run: systemctl disable --now citar-helper.service (a failure is noted)
