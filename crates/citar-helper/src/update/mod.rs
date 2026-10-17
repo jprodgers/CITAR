@@ -11,23 +11,33 @@
 //!    reports `unavailable` and never downloads; otherwise the signature must verify
 //!    ([`citar_jobs::update::verify`]); the manifest is then kept in `helper/update/`;
 //! 2. only a newer version (no downgrade, not the same), with a binary for this target, and not
-//!    one rolled back here before (`failed.json`'s version and SHA-256);
+//!    one rolled back here before (`failed.json`'s version and SHA-256: by the supervisor, by the
+//!    start count, or by hand with `citar-helper update rollback`);
 //! 3. the policy: `off` refuses ("updates are off on this machine"), `notify` reports `available`
 //!    and stops there, `auto` goes on, except in a `packaged` build (Phase 5's package managers),
 //!    where it is refused ("update through your package manager");
-//! 4. the asset's URL as [`fetch::allowed`] says, the binary's folder writable, and in a
-//!    development build not a build's output ([`files::Install::in_build_output`]); then the
-//!    download ([`fetch::download`]: `downloading`), its size and SHA-256 against the signed ones;
+//! 4. the asset's URL as [`fetch::allowed`] says, the binary's folder writable, in a development
+//!    build not a build's output ([`files::Install::in_build_output`]), and the home's update
+//!    folder its owner's alone ([`files::UpdateDir::secure`]); then the download
+//!    ([`fetch::download`]: `downloading`), its size and SHA-256 against the signed ones;
 //! 5. the staged binary's `--self-test`, whose version line must be the manifest's version,
 //!    build and protocol and this target, and which must pass the canary and the self-check
 //!    (`verified`, or `failed` and the file removed);
 //! 6. idle: the session hands off once no completion or job is in flight, taking work as usual
 //!    for up to [`UpdateSetup::idle_wait`] (an hour), then no new work until what runs ends;
 //! 7. the hand-off (`crate::session`): the job host stopped, `restarting`, the socket closed, then
-//!    `pending.json` written and the binary swapped ([`files::Install::swap_in`], the old one kept
-//!    as `<name>.old`); a console run supervises the new binary ([`supervise`]), a service run
-//!    exits 75. The new binary reports `applied` after its first welcome ([`files::on_start`],
-//!    [`Updater::welcomed`]); a rolled-back one's old binary reports `failed`.
+//!    `pending.json` written and the binary swapped ([`files::Install::swap_in`], the copy checked
+//!    against the signed SHA-256 once more, the old one kept as `<name>.old`); a console run
+//!    supervises the new binary ([`supervise`]), a service run exits 75. The new binary reports
+//!    `applied` after its first welcome ([`files::on_start`], [`Updater::welcomed`]); a
+//!    rolled-back one's old binary reports `failed`.
+//!
+//! **A failure that may pass is tried again** (4-13's fix round): a download the network or the
+//! disk broke off ([`fetch::Fetch::Failed`]), a client that could not start, or a swap that failed
+//! is reported `failed` with when it is tried again, then tried again after [`UpdateSetup::retry`]
+//! (5 minutes), the wait doubling each time up to [`RETRY_MAX`] (6 hours), while the helper runs;
+//! a new manifest starts afresh. What a retry cannot change is not tried again: a refusal (the
+//! signature, the version, the size or the SHA-256, the policy) or a failed self-test.
 //!
 //! Replaces nothing: protocol 1's helper never updated itself.
 
@@ -60,6 +70,11 @@ pub const SELF_TEST_WAIT: Duration = Duration::from_secs(120);
 pub const MESSAGE_CHARS: usize = 1000;
 /// How long a refusal's marking of a new binary healthy may take before the helper goes on.
 pub const HEARD_WAIT: Duration = Duration::from_secs(5);
+/// The first wait before an update that failed in a way that may pass (the network, the disk, the
+/// swap) is tried again.
+pub const RETRY_FIRST: Duration = Duration::from_secs(300);
+/// The longest wait between two tries: the wait doubles from [`RETRY_FIRST`] up to it.
+pub const RETRY_MAX: Duration = Duration::from_secs(6 * 3600);
 
 /// The downloads an updater started (the transcripts' `downloads`).
 #[derive(Clone, Debug, Default)]
@@ -94,6 +109,9 @@ pub struct UpdateSetup {
     pub loopback_only: bool,
     /// Step 6's wait ([`IDLE_WAIT`]; a test build's hook shortens it).
     pub idle_wait: Duration,
+    /// The first wait before a failure that may pass is tried again ([`RETRY_FIRST`]; a test
+    /// build's hook shortens it).
+    pub retry: Duration,
     /// This binary is the new one of an update in progress, from this version (`pending.json`).
     pub updating: Option<String>,
     /// The downloads started.
@@ -110,6 +128,7 @@ impl Default for UpdateSetup {
             tls: None,
             loopback_only: true,
             idle_wait: IDLE_WAIT,
+            retry: RETRY_FIRST,
             updating: None,
             downloads: Downloads::default(),
         }
@@ -181,6 +200,8 @@ impl Updater {
             healthy_at,
             healthy: false,
             applied_sent: false,
+            retry_at: None,
+            retry_wait: setup.retry,
         };
         let downloads = setup.downloads.clone();
         let idle_wait = setup.idle_wait;
@@ -255,7 +276,17 @@ impl Updater {
 /// What the pipeline says as it goes, by its generation (a replaced pipeline's are dropped).
 enum Progress {
     Status(u64, UpdateStatus),
-    Done(u64, Option<Staged>),
+    Done(u64, Outcome),
+}
+
+/// How the pipeline ended.
+enum Outcome {
+    /// Downloaded, checked and self-tested: waiting for the hand-off.
+    Staged(Staged),
+    /// A failure that may pass (the network, the disk): said `failed` and tried again later.
+    Retry(String),
+    /// A refusal or a failed self-test, said already: not tried again.
+    Over,
 }
 
 /// The manifest being dealt with, and the version it is for once it verified.
@@ -292,6 +323,10 @@ struct Task {
     healthy_at: Option<Instant>,
     healthy: bool,
     applied_sent: bool,
+    /// When the current manifest's update is tried again, after a failure that may pass.
+    retry_at: Option<Instant>,
+    /// The wait before the next try after that one ([`RETRY_FIRST`] doubling to [`RETRY_MAX`]).
+    retry_wait: Duration,
 }
 
 fn cut(s: &str) -> String {
@@ -305,7 +340,7 @@ impl Task {
         mut progress: mpsc::UnboundedReceiver<Progress>,
     ) {
         loop {
-            let healthy_at = self.healthy_at;
+            let (healthy_at, retry_at) = (self.healthy_at, self.retry_at);
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
                     Some(c) => self.command(c).await,
@@ -315,6 +350,10 @@ impl Task {
                 () = sleep_until_opt(healthy_at) => {
                     self.healthy_at = None;
                     self.mark_healthy().await;
+                }
+                () = sleep_until_opt(retry_at) => {
+                    self.retry_at = None;
+                    self.try_again().await;
                 }
             }
         }
@@ -338,12 +377,7 @@ impl Task {
             }
             Cmd::SwapFailed(why) => {
                 let _none = self.ready.send(None);
-                let version = self.current.as_ref().and_then(|c| c.version.clone());
-                self.say(
-                    UpdateState::Failed,
-                    version,
-                    &format!("the update could not be installed: {why}"),
-                );
+                self.retry_later(&format!("the update could not be installed: {why}"));
             }
         }
     }
@@ -385,7 +419,8 @@ impl Task {
             && c.signature == offer.signature
         {
             // The same manifest again (a reconnect's welcome): what it came to is said again on a
-            // connection that has not heard it.
+            // connection that has not heard it; a failure that may pass is tried again at its
+            // time, not at every welcome.
             if self.last_sent_on != self.conn
                 && let Some(st) = self.last.clone()
             {
@@ -393,6 +428,35 @@ impl Task {
             }
             return;
         }
+        // Another manifest: whatever the last one came to, this one starts afresh.
+        self.retry_at = None;
+        self.retry_wait = self.setup.retry;
+        self.begin(offer).await;
+    }
+
+    /// The current manifest's update again, after a failure that may pass (its retry time came).
+    async fn try_again(&mut self) {
+        let Some(c) = &self.current else { return };
+        let offer = UpdateOffer { manifest: c.manifest.clone(), signature: c.signature.clone() };
+        self.log.info("trying the update again");
+        self.begin(offer).await;
+    }
+
+    /// A failure that may pass: said `failed` with when it is tried again, and that time set.
+    fn retry_later(&mut self, why: &str) {
+        let wait = self.retry_wait;
+        self.retry_at = Some(Instant::now() + wait);
+        self.retry_wait = (wait * 2).min(RETRY_MAX);
+        let version = self.current.as_ref().and_then(|c| c.version.clone());
+        self.say(
+            UpdateState::Failed,
+            version,
+            &format!("{why}; it is tried again in {}", for_people(wait)),
+        );
+    }
+
+    /// Decides what `offer` comes to, and says it or starts its download.
+    async fn begin(&mut self, offer: UpdateOffer) {
         let decision = self.decide(&offer).await;
         if let Some(busy) = self.busy() {
             let replaces = matches!(&decision, Decision::Fetch(m, _) if newer(&m.version, &busy) == Some(true));
@@ -475,13 +539,13 @@ impl Task {
         };
         if let Some(f) = self.setup.dir.as_ref().and_then(UpdateDir::failed)
             && f.version == m.version
-            && f.sha256 == asset.sha256
+            && f.sha256.eq_ignore_ascii_case(&asset.sha256)
         {
             return refused(
                 v,
                 format!(
-                    "{} failed here before ({}); delete helper/update/failed.json in the helper's \
-                     home to let it try again",
+                    "{} was rolled back on this machine ({}): it is not installed again until \
+                     helper/update/failed.json is deleted from the helper's home",
                     m.version, f.message
                 ),
             );
@@ -537,8 +601,14 @@ impl Task {
         if let Err(why) = install.writable() {
             return refused(v, why);
         }
-        if self.setup.dir.is_none() {
+        let Some(dir) = self.setup.dir.clone() else {
             return refused(v, "this helper has no home to download the update into".to_owned());
+        };
+        // The folder the binary waits in until it is installed: its owner's alone.
+        match tokio::task::spawn_blocking(move || dir.secure()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => return refused(v, why),
+            Err(e) => return refused(v, format!("checking the update folder: {e}")),
         }
         Decision::Fetch(m, asset)
     }
@@ -561,7 +631,7 @@ impl Task {
                     UpdateStatus { state, version: Some(version.clone()), message: cut(&message) },
                 )
             };
-            let staged = pipeline(
+            let outcome = pipeline(
                 &manifest,
                 &asset,
                 &dir,
@@ -574,7 +644,7 @@ impl Task {
                 },
             )
             .await;
-            let _sent = tx.send(Progress::Done(generation, staged));
+            let _sent = tx.send(Progress::Done(generation, outcome));
         }));
     }
 
@@ -590,10 +660,15 @@ impl Task {
                 self.last = Some(st.clone());
                 self.emit(st);
             }
-            Progress::Done(g, staged) if g == self.generation => {
+            Progress::Done(g, outcome) if g == self.generation => {
                 self.pipeline = None;
-                if let Some(s) = staged {
-                    let _ready = self.ready.send(Some(s));
+                match outcome {
+                    Outcome::Staged(s) => {
+                        self.retry_wait = self.setup.retry;
+                        let _ready = self.ready.send(Some(s));
+                    }
+                    Outcome::Retry(why) => self.retry_later(&why),
+                    Outcome::Over => {}
                 }
             }
             _ => {}
@@ -610,7 +685,12 @@ impl Task {
         self.healthy_at = None;
         if let Some(dir) = self.setup.dir.clone() {
             let version = self.version.clone();
-            let done = tokio::task::spawn_blocking(move || dir.mark_healthy(&version)).await;
+            // Healthy here, this version is held back no more (an owner who rolled it back
+            // installed it again by hand).
+            let done = tokio::task::spawn_blocking(move || {
+                dir.mark_healthy(&version).and_then(|()| dir.forget_failed(&version))
+            })
+            .await;
             if !matches!(done, Ok(Ok(()))) {
                 self.log.warn("could not mark this update healthy in the home");
             }
@@ -638,7 +718,10 @@ impl Task {
         .await
         .ok()
         .flatten();
-        if let Some(f) = failed.filter(|f| !f.reported) {
+        // A binary put back after an update to a newer one failed says so, once.
+        if let Some(f) =
+            failed.filter(|f| !f.reported && newer(&f.version, &self.version) == Some(true))
+        {
             self.say(
                 UpdateState::Failed,
                 Some(f.version.clone()),
@@ -658,7 +741,8 @@ async fn sleep_until_opt(at: Option<Instant>) {
 }
 
 /// Steps 4 and 5: the download and its checks, then the staged binary's self-test; each step said
-/// through `say`. The staged binary, or `None` when a step failed (said already).
+/// through `say`, except a failure that may pass, which the outcome carries (the task says it
+/// with when it is tried again).
 #[allow(clippy::too_many_arguments)]
 async fn pipeline(
     manifest: &Manifest,
@@ -669,16 +753,13 @@ async fn pipeline(
     downloads: &Downloads,
     target: &str,
     say: impl Fn(UpdateState, String),
-) -> Option<Staged> {
+) -> Outcome {
     let client = match tls
         .ok_or_else(|| "no TLS set up".to_owned())
         .and_then(|t| fetch::client(t, loopback_only))
     {
         Ok(c) => c,
-        Err(e) => {
-            say(UpdateState::Failed, format!("the download could not start: {e}"));
-            return None;
-        }
+        Err(e) => return Outcome::Retry(format!("the download could not start: {e}")),
     };
     say(
         UpdateState::Downloading,
@@ -690,11 +771,10 @@ async fn pipeline(
         Ok(()) => {}
         Err(fetch::Fetch::Refused(why)) => {
             say(UpdateState::Refused, format!("the download was refused: {why}"));
-            return None;
+            return Outcome::Over;
         }
         Err(fetch::Fetch::Failed(why)) => {
-            say(UpdateState::Failed, format!("the download failed: {why}"));
-            return None;
+            return Outcome::Retry(format!("the download failed: {why}"));
         }
     }
     if let Err(why) = self_test(&staged, manifest, target).await {
@@ -703,7 +783,7 @@ async fn pipeline(
             UpdateState::Failed,
             format!("the new binary failed its self-test, so it is not installed: {why}"),
         );
-        return None;
+        return Outcome::Over;
     }
     say(
         UpdateState::Verified,
@@ -713,12 +793,28 @@ async fn pipeline(
             manifest.version
         ),
     );
-    Some(Staged { path: staged, version: manifest.version.clone(), sha256: asset.sha256.clone() })
+    Outcome::Staged(Staged {
+        path: staged,
+        version: manifest.version.clone(),
+        sha256: asset.sha256.clone(),
+    })
 }
 
 #[allow(clippy::cast_precision_loss)]
 fn mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
+}
+
+/// A wait as people say it: seconds under two minutes, minutes under two hours, else hours.
+fn for_people(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 120 {
+        format!("{} s", s.max(1))
+    } else if s < 2 * 3600 {
+        format!("{} minutes", s.div_ceil(60))
+    } else {
+        format!("{} hours", s.div_ceil(3600))
+    }
 }
 
 /// Step 5: runs `binary --self-test` and checks what it says against the signed manifest and this

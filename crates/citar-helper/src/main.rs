@@ -22,7 +22,13 @@ fn main() -> ExitCode {
         Err(e) => {
             // --help prints to standard output and succeeds; a bad command line is argparse's 2.
             let _printed = e.print();
-            return ExitCode::from(if e.use_stderr() { 2 } else { 0 });
+            if !e.use_stderr() {
+                return ExitCode::from(0);
+            }
+            // A service's command line an update's new binary cannot read counts the start, so
+            // the update is rolled back as one that fails later is (P4.3.8).
+            let code = citar_helper::app::unread_start(args.get(1..).unwrap_or_default());
+            return ExitCode::from(code.unwrap_or(2));
         }
     };
     ExitCode::from(citar_helper::app::main(&cli, bare))

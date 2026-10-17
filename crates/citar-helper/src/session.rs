@@ -937,7 +937,7 @@ impl Helper {
         let done = tokio::task::spawn_blocking(move || {
             dir.begin(&old, &staged.version, &staged.sha256)
                 .map_err(|e| format!("writing {}: {e}", dir.path().display()))?;
-            if let Err(e) = install.swap_in(&staged.path) {
+            if let Err(e) = install.swap_in(&staged.path, &staged.sha256) {
                 let _gone = dir.remove_pending();
                 return Err(e);
             }

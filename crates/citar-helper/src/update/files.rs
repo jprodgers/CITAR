@@ -9,21 +9,32 @@
 //! - `healthy.json` (`{v, version, at}`): the new binary's first welcome (or a minute of running
 //!   while the server could not be reached, or a refusal it understood: the binary works); a
 //!   supervisor reads "the child ended before it was healthy" as `pending` without `healthy`;
-//! - `failed.json` (`{v, version, sha256, message, at, reported}`): an update rolled back. The old
-//!   binary reports it `failed` once after its first welcome, and is not offered the same binary
-//!   again (the same version and SHA-256) until the file is removed;
+//! - `failed.json` (`{v, version, sha256, message, at, reported}`): an update rolled back, by the
+//!   supervisor, by the start count or by hand (`citar-helper update rollback`, written already
+//!   `reported`: its owner did it). The old binary reports it `failed` once after its first
+//!   welcome, and the same binary (the same version and SHA-256) is refused until the file is
+//!   removed, or that version runs healthy here again (installed by hand);
 //! - beside the binary: `<name>.old`, the binary it replaced (kept for a rollback, by the
 //!   supervisor, by the start count, or by `citar-helper update rollback`); `.<name>.new` while it
 //!   is copied in; `<name>.failed`, a binary rolled back while it ran (Windows cannot delete a
 //!   running program's file, only rename it), removed at a later start.
 //!
+//! **The folder is its owner's alone** ([`UpdateDir::secure`], 4-13's fix round): made owner-only
+//! (mode 0700; on Windows a protected DACL for the user, SYSTEM and Administrators that what it
+//! holds inherits) and checked again before every download, an update refused while anyone else
+//! can still reach it. A downloaded binary waits there between its checks, its self-test and its
+//! installation, so another local user who could write the folder could swap it for their own
+//! program, which the helper would then run and install as its own; or write `pending.json` (a
+//! rollback forced, a downgrade) or `failed.json` (updates blocked).
+//!
 //! **The swap** ([`Install::swap_in`]) renames, never copies over: the new file is first copied
-//! into the binary's own folder (so the last step is a rename on one volume), the running binary
-//! is renamed to `<name>.old` (Windows allows renaming a running program's file, not replacing or
-//! deleting it; Unix allows all three), and the new file renamed into its place, the running
-//! binary renamed back if that last step fails. This is what the `self-replace` crate does on each
-//! OS, without its pre-`main` hook and the copy of the program it starts to delete the old file
-//! (the design wants the old file kept, for the rollback).
+//! into the binary's own folder (so the last step is a rename on one volume) and its SHA-256
+//! checked against the signed one there, the running binary is renamed to `<name>.old` (Windows
+//! allows renaming a running program's file, not replacing or deleting it; Unix allows all three),
+//! and the new file renamed into its place, the running binary renamed back if that last step
+//! fails. This is what the `self-replace` crate does on each OS, without its pre-`main` hook and
+//! the copy of the program it starts to delete the old file (the design wants the old file kept,
+//! for the rollback).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -99,11 +110,9 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Writes `value` as JSON to `path` through a file beside it, renamed over it.
+/// Writes `value` as JSON to `path` (in a folder that exists) through a file beside it, renamed
+/// over it.
 fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec(value).map_err(io::Error::other)?)?;
     std::fs::rename(&tmp, path)
@@ -132,6 +141,64 @@ impl UpdateDir {
         self.dir.join(name)
     }
 
+    /// Makes the folder when it is missing, owner-only from the start (the module's doc): the
+    /// folders above it as usual, this one with mode 0700 on Unix and the owner-only DACL on
+    /// Windows. A folder that is there already is left as it is ([`UpdateDir::secure`] checks it).
+    ///
+    /// # Errors
+    /// It could not be made, or made owner-only (it is then removed again).
+    pub fn create(&self) -> io::Result<()> {
+        if self.dir.is_dir() {
+            return Ok(());
+        }
+        if let Some(parent) = self.dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        #[cfg(unix)]
+        let made = {
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new().mode(0o700).create(&self.dir)
+        };
+        #[cfg(not(unix))]
+        let made = std::fs::DirBuilder::new().create(&self.dir);
+        match made {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && self.dir.is_dir() => {
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+        if let Err(e) = citar_jobs::sys::restrict_dir_to_owner(&self.dir) {
+            let _empty_gone = std::fs::remove_dir(&self.dir);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Before a download: the folder made (owner-only) when it is missing, then checked. One that
+    /// someone besides its owner can reach (made so after this helper made it owner-only, or by
+    /// hand) is refused with the command that fixes it, as the machine key is (P4.3.7): the
+    /// helper does not quietly take back a folder someone opened on purpose.
+    ///
+    /// # Errors
+    /// Why the update cannot go on: the folder could not be made, its permissions cannot be read,
+    /// or someone besides its owner can reach it (with the command that fixes it).
+    pub fn secure(&self) -> Result<(), String> {
+        let shown = self.dir.display();
+        self.create().map_err(|e| format!("the update folder {shown} could not be made: {e}"))?;
+        match citar_jobs::sys::dir_exposure(&self.dir) {
+            Ok(None) => Ok(()),
+            Ok(Some(e)) => Err(format!(
+                "another user of this machine could replace the update before it is installed: \
+                 {}",
+                e.describe_folder(&self.dir)
+            )),
+            Err(e) => {
+                Err(format!("the update folder {shown}: its permissions cannot be read: {e}"))
+            }
+        }
+    }
+
     /// `pending.json`, when it reads.
     #[must_use]
     pub fn pending(&self) -> Option<Pending> {
@@ -143,6 +210,7 @@ impl UpdateDir {
     /// # Errors
     /// It could not be written.
     pub fn write_pending(&self, p: &Pending) -> io::Result<()> {
+        self.create()?;
         write_json(&self.file("pending.json"), p)
     }
 
@@ -166,6 +234,7 @@ impl UpdateDir {
     /// # Errors
     /// Either file could not be written or removed.
     pub fn mark_healthy(&self, version: &str) -> io::Result<()> {
+        self.create()?;
         write_json(
             &self.file("healthy.json"),
             &Healthy { v: 1, version: version.to_owned(), at: now_unix() },
@@ -200,6 +269,22 @@ impl UpdateDir {
     /// # Errors
     /// It could not be written.
     pub fn write_failed(&self, version: &str, sha256: &str, message: &str) -> io::Result<()> {
+        self.write_failed_as(version, sha256, message, false)
+    }
+
+    /// Writes `failed.json`, already `reported` or not (a rollback by hand is its owner's own
+    /// doing: the refusal of that version says so, with no `failed` to report).
+    ///
+    /// # Errors
+    /// It could not be written.
+    pub fn write_failed_as(
+        &self,
+        version: &str,
+        sha256: &str,
+        message: &str,
+        reported: bool,
+    ) -> io::Result<()> {
+        self.create()?;
         write_json(
             &self.file("failed.json"),
             &Failed {
@@ -208,9 +293,21 @@ impl UpdateDir {
                 sha256: sha256.to_owned(),
                 message: message.to_owned(),
                 at: now_unix(),
-                reported: false,
+                reported,
             },
         )
+    }
+
+    /// Removes `failed.json` when it names `version`: that binary runs healthy here now (its owner
+    /// installed it again by hand), so it is held back no more.
+    ///
+    /// # Errors
+    /// It is there and could not be removed.
+    pub fn forget_failed(&self, version: &str) -> io::Result<()> {
+        match self.failed() {
+            Some(f) if f.version == version => remove(&self.file("failed.json")),
+            _ => Ok(()),
+        }
     }
 
     /// Marks `failed.json` reported.
@@ -226,7 +323,7 @@ impl UpdateDir {
     /// # Errors
     /// They could not be written.
     pub fn keep_manifest(&self, manifest: &str, signature: &str) -> io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        self.create()?;
         let (m, s) = (self.file("manifest.json"), self.file("manifest.json.sig"));
         std::fs::write(m.with_extension("json.tmp"), manifest)?;
         std::fs::rename(m.with_extension("json.tmp"), &m)?;
@@ -374,14 +471,31 @@ impl Install {
     }
 
     /// Puts `staged` in the binary's place, keeping the binary as `<name>.old` (the module's doc).
+    /// The copy made beside the binary must still have the signed `sha256` (lowercase hex): a
+    /// file changed after its checks, however long the hand-off waited, is never installed.
     ///
     /// # Errors
-    /// A step failed; the binary is then in its place as before.
-    pub fn swap_in(&self, staged: &Path) -> Result<(), String> {
+    /// A step failed, or the copy is not the binary that was checked; the binary is then in its
+    /// place as before.
+    pub fn swap_in(&self, staged: &Path, sha256: &str) -> Result<(), String> {
         let incoming = self.incoming();
         let _stale = remove(&incoming);
         std::fs::copy(staged, &incoming)
             .map_err(|e| format!("copying the new binary beside {}: {e}", self.exe.display()))?;
+        match super::fetch::sha256_file(&incoming) {
+            Ok(got) if got.eq_ignore_ascii_case(sha256) => {}
+            Ok(got) => {
+                let _gone = remove(&incoming);
+                return Err(format!(
+                    "the new binary changed after it was checked (its SHA-256 is {got}, the signed \
+                     one {sha256}): it is not installed"
+                ));
+            }
+            Err(e) => {
+                let _gone = remove(&incoming);
+                return Err(format!("reading the new binary back: {e}"));
+            }
+        }
         make_runnable(&incoming);
         let old = self.old();
         if remove(&old).is_err() {
@@ -553,7 +667,12 @@ mod tests {
         let staged = d.join("staged");
         std::fs::write(&staged, b"new").expect("written");
         let i = Install::at(&exe);
-        i.swap_in(&staged).expect("swapped");
+        let e = i.swap_in(&staged, &"00".repeat(32)).expect_err("not the binary checked");
+        assert!(e.contains("changed after it was checked"), "{e}");
+        assert_eq!(std::fs::read(&exe).expect("read"), b"old", "nothing installed");
+        assert!(!i.old().exists() && !i.incoming().exists());
+        let sha = super::super::fetch::sha256_file(&staged).expect("hashed");
+        i.swap_in(&staged, &sha).expect("swapped");
         assert_eq!(std::fs::read(&exe).expect("read"), b"new");
         assert_eq!(std::fs::read(i.old()).expect("read"), b"old");
         assert!(!i.incoming().exists());
@@ -610,6 +729,32 @@ mod tests {
         assert!(u.healthy_exists() && u.pending().is_none());
         u.begin("0.1.6-test.2", "0.1.6-test.3", "x").expect("begun");
         assert!(!u.healthy_exists(), "a hand-off forgets the last update's health");
+        std::fs::remove_dir_all(&d).expect("cleaned");
+    }
+
+    #[test]
+    fn the_update_folder_is_made_owner_only_and_checked() {
+        let d = scratch("secure");
+        let u = UpdateDir::new(d.join("home").join("helper").join("update"));
+        assert_eq!(u.secure(), Ok(()), "made owner-only");
+        assert_eq!(citar_jobs::sys::dir_exposure(u.path()).expect("read"), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(u.path()).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+            // Opened to others: refused with the command that fixes it, which works.
+            std::fs::set_permissions(u.path(), std::fs::Permissions::from_mode(0o777))
+                .expect("chmod");
+            let e = u.secure().expect_err("refused");
+            assert!(e.contains("its group, others") && e.contains("chmod 700"), "{e}");
+            std::fs::set_permissions(u.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("chmod");
+            assert_eq!(u.secure(), Ok(()));
+        }
+        // Its files are written in it as before.
+        u.begin("0.1.6-test.1", "0.1.6-test.2", "x").expect("begun");
+        assert!(u.pending().is_some());
         std::fs::remove_dir_all(&d).expect("cleaned");
     }
 

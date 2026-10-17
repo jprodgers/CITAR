@@ -8,9 +8,11 @@
 //!   address the name resolves to ([`LoopbackOnly`]), as the connection to the server does
 //!   ([`crate::net`]). No system proxy, and the TLS is the helper's own (the OS's trust store).
 //! - **What:** the integrity is the signed size and SHA-256, never the host: the body is counted
-//!   as it comes and refused past the size, a `Content-Length` over it refused before the body,
-//!   and the whole file checked against both before it is staged ([`download`]). The file is
-//!   written beside its final name (`.part`) and renamed once it holds.
+//!   as it comes and refused past the size, a `Content-Length` other than it refused before the
+//!   body, and the whole file checked against both before it is staged ([`download`]). A body
+//!   that ends short of the size with no `Content-Length` to say so is a broken transfer
+//!   ([`Fetch::Failed`], tried again later), not a wrong file. The file is written beside its final
+//!   name (`.part`, always a new file: one left there is removed first) and renamed once it holds.
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -32,7 +34,8 @@ pub const STALL: Duration = Duration::from_secs(60);
 pub const WHOLE: Duration = Duration::from_secs(1800);
 
 /// Why a download did not give the staged file: `Refused` when what the manifest or a redirect
-/// leads to breaks the rules (the size, the hash, the scheme), `Failed` when the network did.
+/// leads to breaks the rules (the size, the hash, the scheme), `Failed` when the network or the
+/// disk did (the updater tries a failed download again later; a refused one, never).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fetch {
     Refused(String),
@@ -221,7 +224,7 @@ async fn fetch(
         return Err(Fetch::Failed(format!("{} answered {}", cut(url.as_str()), resp.status())));
     }
     if let Some(len) = resp.content_length()
-        && len > asset.size
+        && len != asset.size
     {
         return Err(Fetch::Refused(format!(
             "wrong size: the download is {len} bytes, the signed manifest says {}",
@@ -233,7 +236,17 @@ async fn fetch(
             .await
             .map_err(|e| Fetch::Failed(format!("{}: {e}", dir.display())))?;
     }
-    let mut file = tokio::fs::File::create(part)
+    // A new file, never one already there (which someone else could hold open).
+    match tokio::fs::remove_file(part).await {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(Fetch::Failed(format!("{}: {e}", part.display())));
+        }
+        _ => {}
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(part)
         .await
         .map_err(|e| Fetch::Failed(format!("{}: {e}", part.display())))?;
     let mut hasher = Sha256::new();
@@ -259,9 +272,10 @@ async fn fetch(
     file.flush().await.map_err(|e| Fetch::Failed(format!("{}: {e}", part.display())))?;
     file.sync_all().await.map_err(|e| Fetch::Failed(format!("{}: {e}", part.display())))?;
     drop(file);
-    if got != asset.size {
-        return Err(Fetch::Refused(format!(
-            "wrong size: the download is {got} bytes, the signed manifest says {}",
+    if got < asset.size {
+        // No Content-Length said the file is shorter (that is refused above): the body broke off.
+        return Err(Fetch::Failed(format!(
+            "the download ended after {got} of the {} bytes the signed manifest says",
             asset.size
         )));
     }

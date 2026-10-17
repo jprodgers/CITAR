@@ -8,9 +8,10 @@
 //!   again at once, at most [`MAX_RESTARTS`] times a minute.
 //! - **The child fails before it was healthy** (`pending.json` there, `healthy.json` not, and an
 //!   exit that is not 0, stopped by its owner, or 78, permanently refused by its server, which a
-//!   working binary gives too): the update failed. The old binary is restored, `failed.json`
-//!   written for it to report, and it is started in the new one's place. A new binary stopped before
-//!   it was healthy keeps its `pending.json`: its next start counts on.
+//!   working binary gives too), **or cannot be started at all** (an antivirus quarantined the new
+//!   file; 4-13's fix round): the update failed. The old binary is restored, `failed.json`
+//!   written for it to report, and it is started in the new one's place. A new binary stopped
+//!   before it was healthy keeps its `pending.json`: its next start counts on.
 //! - **Anything else:** the supervisor exits with the child's code (0 stopped, 78 a permanent
 //!   refusal, another a crash), as the console run would have.
 //!
@@ -68,6 +69,11 @@ pub fn supervise(install: &Install, dir: &UpdateDir, args: &[OsString], log: &Lo
                 Ok(c) => c,
                 Err(e) => {
                     log.error(format!("could not start {}: {e}", install.path().display()));
+                    // A new binary this machine will not run (an antivirus quarantined it, a
+                    // folder that runs nothing): rolled back as one that fails at its start.
+                    if roll_back(install, dir, &format!("could not be started ({e})"), log) {
+                        continue;
+                    }
                     return 1;
                 }
             };
@@ -93,31 +99,44 @@ pub fn supervise(install: &Install, dir: &UpdateDir, args: &[OsString], log: &Lo
                 log.info("the helper restarts for an update");
                 continue;
             }
-            if let Some(p) = dir.pending()
-                && !dir.healthy_exists()
-                && !matches!(code, 0 | 78)
+            if !matches!(code, 0 | 78)
+                && roll_back(
+                    install,
+                    dir,
+                    &format!("exited with code {code} before it was healthy"),
+                    log,
+                )
             {
-                let message = format!(
-                    "{} exited with code {code} before it was healthy: {} is back",
-                    p.new, p.old
-                );
-                log.warn(format!("the update failed: {message}"));
-                match install.restore_old() {
-                    Ok(()) => {
-                        let _written = dir.write_failed(&p.new, &p.sha256, &message);
-                        let _gone = dir.remove_pending();
-                        continue;
-                    }
-                    Err(e) => {
-                        log.error(format!("could not roll the update back: {e}"));
-                        let _gone = dir.remove_pending();
-                        return code;
-                    }
-                }
+                continue;
             }
             return code;
         }
     })
+}
+
+/// When the binary in place is an update's new one that never became healthy (`pending.json`
+/// there, `healthy.json` not): the old binary restored, `failed.json` written for it to report
+/// (`"<new> <what>: <old> is back"`) and `pending.json` removed. True when the old binary is back,
+/// to be run in the new one's place.
+fn roll_back(install: &Install, dir: &UpdateDir, what: &str, log: &Log) -> bool {
+    let Some(p) = dir.pending() else { return false };
+    if dir.healthy_exists() {
+        return false;
+    }
+    let message = format!("{} {what}: {} is back", p.new, p.old);
+    log.warn(format!("the update failed: {message}"));
+    let restored = install.restore_old();
+    let _gone = dir.remove_pending();
+    match restored {
+        Ok(()) => {
+            let _written = dir.write_failed(&p.new, &p.sha256, &message);
+            true
+        }
+        Err(e) => {
+            log.error(format!("could not roll the update back: {e}"));
+            false
+        }
+    }
 }
 
 /// Waits for the child; Ctrl-C (which the child also gets) is waited through, and on Unix a

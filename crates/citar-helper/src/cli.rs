@@ -72,7 +72,9 @@ pub enum UpdateAction {
     /// its name with .old added, beside it). Restart the helper (or its service) to run it.
     Apply,
     /// Put the binary the last update replaced (its name with .old added) back in place; the
-    /// replaced one takes that name, so the update can be put back the same way.
+    /// replaced one takes that name, so the update can be put back the same way. Its release is
+    /// held back: this helper does not install it again by itself until helper/update/failed.json
+    /// is deleted from its home (or update apply is run).
     Rollback,
 }
 

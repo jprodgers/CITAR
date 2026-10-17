@@ -7,13 +7,17 @@
 //! every check in front of it, in this order, so that nothing is written or dialled before it is
 //! allowed:
 //! 1. the development guard (`dev-guard` builds, and every build with a test feature): an
-//!    explicit `--home` outside the per-user base, and a loopback server, both refused before
-//!    anything else happens;
-//! 2. the settings ([`config::resolve`], with the first-run questions at a terminal);
-//! 3. the machine key, refused when others can read it, and a warning for a `helper.json` they
+//!    explicit `--home` outside the per-user base, refused before anything else happens;
+//! 2. an update's start path ([`crate::update::files::on_start`]), first thing once the home is
+//!    known (P4.3.8: "reads `pending` first thing"): a new binary counts its start, and one that
+//!    did not become healthy in three is rolled back (exit 75). It comes before the settings, the
+//!    server's address and the log file, so a new binary that refuses any of them (a setting the
+//!    old one took) still counts its starts; a command line it cannot read counts too in a
+//!    service run ([`unread_start`]);
+//! 3. the settings ([`config::resolve`], with the first-run questions at a terminal), and in a
+//!    development build a loopback server, refused before anything is dialled;
+//! 4. the machine key, refused when others can read it, and a warning for a `helper.json` they
 //!    can;
-//! 4. an update's start path ([`crate::update::files::on_start`]): a new binary counts its start,
-//!    and one that did not become healthy in three is rolled back (exit 75);
 //! 5. the session, until it is stopped (Ctrl-C, SIGTERM), permanently refused, or swapped for an
 //!    update's binary: a service run (`--service`, or a supervised one) then exits 75, a console
 //!    run becomes the new binary's supervisor ([`crate::update::supervise`]).
@@ -117,9 +121,64 @@ fn run(cli: &Cli) -> Result<u8, Stop> {
     let log = Log::stderr(opts.verbose);
     match cli.command.clone().unwrap_or(Command::Run) {
         Command::Setup => setup(cli, &home),
-        Command::Run | Command::Scan { .. } => serve(cli, &home, log),
+        Command::Run | Command::Scan { .. } => {
+            // An update's start path before anything a new binary could refuse (the module's
+            // doc, step 2).
+            let started = start_path(&home);
+            if let Start::RolledBack(why) = &started {
+                // The log file too, when it can be opened: the service's log says why.
+                let _file = log.to_file(&home.log_dir());
+                log.error(format!("the update is rolled back: {why}"));
+                return Ok(Exit::Update.code());
+            }
+            serve(cli, &home, log, &started)
+        }
         Command::JobHost => Ok(job_host()),
         Command::Update { action } => update_command(cli, &home, &action, &log),
+    }
+}
+
+/// An update's start path for the home `home` (P4.3.8): this binary's start counted when it is the
+/// new one of an update in progress, and the old one restored after three that did not become
+/// healthy.
+fn start_path(home: &Home) -> Start {
+    let install = Install::current().ok();
+    update_files::on_start(&UpdateDir::new(home.update_dir()), install.as_ref(), version::VERSION)
+}
+
+/// A command line this binary cannot read, in a service run (`--service` or `--supervised` among
+/// the raw `args`, the program's name left out): the start counts as any start does (the
+/// update's start path, in the home the raw `--home` names, else the default home a release
+/// build would use), so a new binary that refuses its service's command line (a flag a release
+/// renamed) is rolled back after three starts, as one that refuses its settings is. A console
+/// run's mistyped command line counts nothing: its owner sees the error, and a console run's
+/// supervisor rolls a failing new binary back by itself. Returns 75 when the start rolled the
+/// update back.
+#[must_use]
+pub fn unread_start(args: &[std::ffi::OsString]) -> Option<u8> {
+    if !args.iter().any(|a| a == "--service" || a == "--supervised") {
+        return None;
+    }
+    let mut named: Option<std::path::PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--home" {
+            named = it.next().map(std::path::PathBuf::from);
+        } else if let Some(rest) = a.to_str().and_then(|t| t.strip_prefix("--home=")) {
+            named = Some(std::path::PathBuf::from(rest));
+        }
+    }
+    if DEV_GUARD {
+        // A development build reads a home only when it is named, outside the per-user base.
+        home::guard(named.as_deref(), &env).ok()?;
+    }
+    let (home, _source) = home::resolve(named.as_deref(), &env).ok()?;
+    match start_path(&home) {
+        Start::RolledBack(why) => {
+            eprintln!("citar-helper: the update is rolled back: {why}");
+            Some(Exit::Update.code())
+        }
+        Start::Normal | Start::Updating { .. } => None,
     }
 }
 
@@ -157,20 +216,28 @@ fn given_keys(
 }
 
 /// A test build's hooks for the update gates (`test-update-key` only): how long a verified update
-/// waits for the helper to be idle (`CITAR_HELPER_TEST_IDLE_WAIT_S`), whether this binary exits at
+/// waits for the helper to be idle (`CITAR_HELPER_TEST_IDLE_WAIT_S`), the first wait before a
+/// failed download is tried again (`CITAR_HELPER_TEST_RETRY_S`), whether this binary exits at
 /// its start before it can become healthy (`CITAR_HELPER_TEST_EXIT_AT_START`, naming the version
 /// that does: "a test build made to exit at start", 4-13's gate 3), and whether the binary an
 /// update just installed starts its first job host from the one it replaced
 /// (`CITAR_HELPER_TEST_STALE_HOST`: a job host left from before the swap, gate 4).
 #[cfg(feature = "test-update-key")]
 fn test_hooks() -> TestHooks {
-    let wait = env("CITAR_HELPER_TEST_IDLE_WAIT_S")
-        .and_then(|v| v.to_string_lossy().parse::<f64>().ok())
-        .filter(|s| s.is_finite() && *s >= 0.0)
-        .map(std::time::Duration::from_secs_f64);
+    let seconds = |name: &str| {
+        env(name)
+            .and_then(|v| v.to_string_lossy().parse::<f64>().ok())
+            .filter(|s| s.is_finite() && *s >= 0.0 && *s < 86_400.0)
+            .map(std::time::Duration::from_secs_f64)
+    };
     let exit = env("CITAR_HELPER_TEST_EXIT_AT_START").is_some_and(|v| v == version::VERSION);
     let stale = env("CITAR_HELPER_TEST_STALE_HOST").is_some_and(|v| !v.is_empty());
-    TestHooks { idle_wait: wait, exit_at_start: exit, stale_host: stale }
+    TestHooks {
+        idle_wait: seconds("CITAR_HELPER_TEST_IDLE_WAIT_S"),
+        retry: seconds("CITAR_HELPER_TEST_RETRY_S"),
+        exit_at_start: exit,
+        stale_host: stale,
+    }
 }
 
 #[cfg(not(feature = "test-update-key"))]
@@ -182,6 +249,7 @@ fn test_hooks() -> TestHooks {
 #[derive(Clone, Copy, Debug, Default)]
 struct TestHooks {
     idle_wait: Option<std::time::Duration>,
+    retry: Option<std::time::Duration>,
     exit_at_start: bool,
     stale_host: bool,
 }
@@ -211,12 +279,43 @@ fn update_command(cli: &Cli, home: &Home, action: &UpdateAction, log: &Log) -> R
             let install = own_install()?;
             install.swap_with_old().map_err(|e| Stop(1, e))?;
             println!(
-                "put {} back in place; the binary it replaced is kept as {}. Restart the helper \
-                 (or its service) to run it.",
+                "put {} back in place; the binary it replaced (CITAR helper {}) is kept as {}. \
+                 Restart the helper (or its service) to run it.",
                 install.old().display().to_string().trim_end_matches(".old"),
+                version::VERSION,
                 install.old().display()
             );
             let _stale = dir.remove_pending();
+            // The release rolled away from is held back, as a failed update is: with `auto` the
+            // next welcome would otherwise install it again within seconds. Already `reported`:
+            // the owner did it, and the refusal of that release says so.
+            let held = crate::update::fetch::sha256_file(&install.old())
+                .map_err(|e| e.to_string())
+                .and_then(|sha| {
+                    dir.write_failed_as(
+                        version::VERSION,
+                        &sha,
+                        &format!(
+                            "{} was rolled back by hand (citar-helper update rollback)",
+                            version::VERSION
+                        ),
+                        true,
+                    )
+                    .map_err(|e| e.to_string())
+                });
+            match held {
+                Ok(()) => println!(
+                    "This helper does not install CITAR helper {} again by itself; delete {} to \
+                     let it.",
+                    version::VERSION,
+                    dir.path().join("failed.json").display()
+                ),
+                Err(e) => log.warn(format!(
+                    "could not hold CITAR helper {} back ({e}): with updates set to auto it may be \
+                     installed again at the next connection; set updates to notify or off",
+                    version::VERSION
+                )),
+            }
             Ok(0)
         }
         UpdateAction::Check => {
@@ -272,8 +371,15 @@ fn update_check(cli: &Cli, home: &Home, dir: &UpdateDir) {
             update_files::MAX_STARTS
         );
     }
-    if let Some(f) = dir.failed() {
-        println!("an update was rolled back: {} ({})", f.version, f.message);
+    if let Some(f) = dir.failed()
+        && citar_jobs::update::newer(&f.version, version::VERSION) == Some(true)
+    {
+        println!(
+            "held back: {} was rolled back here ({}); delete {} to let it be installed again",
+            f.version,
+            f.message,
+            dir.path().join("failed.json").display()
+        );
     }
     if let Ok(i) = Install::current()
         && i.old().is_file()
@@ -323,6 +429,7 @@ fn update_apply(cli: &Cli, dir: &UpdateDir, log: &Log) -> Result<u8, Stop> {
     crate::update::fetch::allowed(&url, DEV_GUARD).map_err(|e| Stop(2, e))?;
     let install = own_install()?;
     install.writable().map_err(|e| Stop(2, e))?;
+    dir.secure().map_err(|e| Stop(2, e))?;
     let tls = net::verified_tls(cli.opts.ca_file.as_deref()).map_err(|e| Stop(1, e))?;
     let client = crate::update::fetch::client(tls, DEV_GUARD).map_err(|e| Stop(1, e))?;
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -349,7 +456,7 @@ fn update_apply(cli: &Cli, dir: &UpdateDir, log: &Log) -> Result<u8, Stop> {
     })?;
     dir.begin(version::VERSION, &m.version, &asset.sha256)
         .map_err(|e| Stop(1, format!("{}: {e}", dir.path().display())))?;
-    if let Err(e) = install.swap_in(&staged) {
+    if let Err(e) = install.swap_in(&staged, &asset.sha256) {
         let _gone = dir.remove_pending();
         return Err(Stop(1, e));
     }
@@ -520,7 +627,7 @@ fn facts() -> (Facts, Machine) {
     )
 }
 
-fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
+fn serve(cli: &Cli, home: &Home, log: Log, started: &Start) -> Result<u8, Stop> {
     let prompt_ok = config::interactive();
     let mut terminal = config::Terminal;
     let prompt: Option<&mut dyn config::Prompt> =
@@ -542,23 +649,20 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
     if let Some(w) = key::config_warning(&config_path) {
         log.warn(w);
     }
-    // An update's start path, first thing after the checks (P4.3.8).
+    // The update's start path ran first ([`run`]); what it found is logged now that the log
+    // file is open.
     let install = Install::current().ok();
     let update_dir = UpdateDir::new(home.update_dir());
-    let updating = match update_files::on_start(&update_dir, install.as_ref(), version::VERSION) {
-        Start::Normal => None,
+    let updating = match started {
         Start::Updating { from, starts } => {
             log.info(format!(
                 "this is CITAR helper {} after an update from {from} (start {starts} of {})",
                 version::VERSION,
                 update_files::MAX_STARTS
             ));
-            Some(from)
+            Some(from.clone())
         }
-        Start::RolledBack(why) => {
-            log.error(format!("the update is rolled back: {why}"));
-            return Ok(Exit::Update.code());
-        }
+        Start::Normal | Start::RolledBack(_) => None,
     };
     let hooks = test_hooks();
     if hooks.exit_at_start {
@@ -678,6 +782,7 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
         tls: Some(net::verified_tls(cfg.ca_file.as_deref()).map_err(|e| Stop(1, e))?),
         loopback_only: DEV_GUARD,
         idle_wait: hooks.idle_wait.unwrap_or(crate::update::IDLE_WAIT),
+        retry: hooks.retry.unwrap_or(crate::update::RETRY_FIRST),
         updating,
         downloads: crate::update::Downloads::default(),
     };
