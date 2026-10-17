@@ -71,9 +71,9 @@ is acknowledged and dropped, neither counted nor credited; a late accept (its of
 Re-offers to a helper back off per reject reason, 2 s doubling to 10 minutes: ``busy`` and ``quiet`` until a
 ``status`` shows room, the reasons its settings decide until its next ``settings_ack`` or hello. Its run's event is
 given by the machine's owner (``pending`` while a replica checks it, then ``verified``, or ``unverified`` when none
-does), its CPU also bounded by 1.5 times the job's reference cost; a run under a grant with a budget holds the job's expected credits from the moment it is picked
-(a hard budget with no room keeps that owner's jobs from the machine for the tick) and settles its credits into that
-budget (a run carried across a restart too). An offer that could not be sent, or that went with its helper's
+does), its CPU also bounded by 1.5 times the job's reference cost; a run under a grant with a budget holds the job's
+expected credits from the moment it is picked (a hard budget with no room keeps that owner's jobs from the machine for
+the tick) and settles its credits into that budget (a run carried across a restart too). An offer that could not be sent, or that went with its helper's
 connection, is nobody's abandon and no attempt.
 
 **A helper's word is not the game's fault** (P4.6): the server built and checked every spec and offers a job only to a
@@ -1750,15 +1750,18 @@ class Dispatcher:
         exp = self.exps.get(job.exp)
         prune = [c.id for c in checks]
         if job.reopened:
-            # its line is in the results file already: its verification restored
+            # its line is in the results file already: its verification restored (the line below is appended only
+            # when the file has lost it, as a start's reconciliation leaves it for its replica to settle)
             after.append(lambda: self._relabel(job.exp, job.kind, {primary.id: "verified"}))
-            self._prune.extend([primary.id, *prune])
-            line = None
-        else:
+        self._prune.extend(prune)
+        line = None
+        if primary.result is not None:
             started = primary.started_at or primary.offered_at
             line = self._line(job.kind, job.exp, job.i, job.spec, primary.result, primary.machine_id, primary.id,
                               primary.executor, primary.cpu_s, primary.wall_s, started, primary.ended_at, "verified")
-            self._prune.extend(prune)
+        elif not job.reopened:
+            log.error("job %s settled verified, but its primary's result is gone: played again at the next start",
+                      job.id)
 
         def written():
             if line is not None:
