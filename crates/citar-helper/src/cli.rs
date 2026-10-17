@@ -69,10 +69,10 @@ pub enum UpdateAction {
     Check,
     /// Install the update the server last relayed, now: checked, downloaded, checked again and
     /// self-tested as an automatic update is, then put in place (the binary it replaces kept as
-    /// <name>.old). Restart the helper (or its service) to run it.
+    /// its name with .old added, beside it). Restart the helper (or its service) to run it.
     Apply,
-    /// Put the binary the last update replaced (<name>.old) back in place; the replaced one is
-    /// kept as <name>.old, so the update can be put back the same way.
+    /// Put the binary the last update replaced (its name with .old added) back in place; the
+    /// replaced one takes that name, so the update can be put back the same way.
     Rollback,
 }
 
