@@ -627,7 +627,10 @@ mod tests {
             let sddl = text.lines().find(|l| l.contains("D:")).expect("an SDDL line");
             let dacl = &sddl[sddl.find("D:").expect("a DACL")..];
             assert!(dacl.starts_with("D:P"), "protected: {dacl}");
-            let allowed = [me.as_str(), "SY", "BA", "S-1-5-18", "S-1-5-32-544"];
+            // SDDL writes the built-in Administrator (a SID ending in -500, as CI's runneradmin) as "LA"
+            // (rust.yml at 682273e, windows: "LA may not reach the key" for the user's own entry).
+            let me_short = if me.ends_with("-500") { "LA" } else { me.as_str() };
+            let allowed = [me.as_str(), me_short, "SY", "BA", "S-1-5-18", "S-1-5-32-544"];
             let aces: Vec<&str> = dacl.split('(').skip(1).collect();
             assert!(!aces.is_empty(), "{dacl}");
             for ace in aces {
