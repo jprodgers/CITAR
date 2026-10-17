@@ -140,6 +140,11 @@ pub struct Options {
     /// the job host's own), print the build, and exit 0 when it does.
     #[arg(long = "self-test", global = true)]
     pub self_test: bool,
+    /// Cheat on purpose (a test build only): result:N, result-at:N,M,..., digest:R, sig, cpu:F,
+    /// abandon:N, hold:S. Repeatable.
+    #[cfg(feature = "test-faults")]
+    #[arg(long = "test-fault", global = true, value_name = "MODE", action = ArgAction::Append)]
+    pub test_faults: Vec<String>,
 }
 
 #[cfg(test)]

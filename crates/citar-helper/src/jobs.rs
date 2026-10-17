@@ -43,6 +43,9 @@
 //!   others deleted; a result made after the hello is sent.
 //! - **Stopping** (Ctrl-C, the service manager) ends every run: `job_failed` `aborted_locally`, so
 //!   the server gives the job to another machine at once.
+//! - **Faults** ([`crate::faults`], a test build only): the jobs are counted as the host accepts
+//!   them, and a helper given `--test-fault` alters, abandons, signs with another key, over-reports
+//!   or holds the ones its modes name, for the verification gates.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -141,6 +144,8 @@ pub struct JobSetup {
     pub results: Option<PathBuf>,
     /// Where the job side says what it holds (the tests read it too).
     pub state: JobState,
+    /// The faults it plays on purpose (none but in a `test-faults` build given `--test-fault`).
+    pub faults: crate::faults::Faults,
 }
 
 /// What the job side holds, shared: it writes, the session and the tests read.
@@ -284,6 +289,9 @@ impl JobSide {
             paused: false,
             restart: false,
             state: Arc::clone(&state),
+            faults: setup.faults.clone(),
+            accepted_n: 0,
+            delayed: Vec::new(),
         };
         side.publish();
         let task = tokio::spawn(side.run(rx));
@@ -398,6 +406,9 @@ struct Run {
     deadline_s: f64,
     phase: Phase,
     accepted: Option<Instant>,
+    /// Which job of this process it is, once its host accepted it (1 for the first): what the
+    /// faults count.
+    ordinal: u64,
     /// Paused time before the current pause.
     paused_s: f64,
     /// When the current pause began, while one holds it.
@@ -494,6 +505,11 @@ struct Side {
     /// The host is to be started again under `want` once its runs have ended.
     restart: bool,
     state: Arc<Mutex<Snapshot>>,
+    faults: crate::faults::Faults,
+    /// The jobs its hosts accepted so far.
+    accepted_n: u64,
+    /// Results held back before they are sent (`--test-fault hold:S`), and when each goes.
+    delayed: Vec<(Instant, String)>,
 }
 
 fn hardness(h: citar_jobs::limits::Hardness) -> Hardness {
@@ -579,6 +595,9 @@ impl Side {
             if let Parked::Cmd(Cmd::Offer { offer, at: came, .. }) = p {
                 soonest(answer_by(offer, *came));
             }
+        }
+        for (t, _) in &self.delayed {
+            soonest(*t);
         }
         at
     }
@@ -883,6 +902,14 @@ impl Side {
     async fn tick(&mut self) {
         let now = Instant::now();
         self.answer_waiting(now);
+        let due: Vec<String> =
+            self.delayed.iter().filter(|(t, _)| *t <= now).map(|(_, r)| r.clone()).collect();
+        if !due.is_empty() {
+            self.delayed.retain(|(t, _)| *t > now);
+            for run in due {
+                self.send_result(&run).await;
+            }
+        }
         if self.hold_until.is_some_and(|t| now >= t) {
             self.log.warn(format!(
                 "the job host is not ready after {} s: acknowledging without its figures (they \
@@ -1118,6 +1145,7 @@ impl Side {
                 deadline_s: o.deadline_s,
                 phase: Phase::Offered,
                 accepted: None,
+                ordinal: 0,
                 paused_s: 0.0,
                 paused_since: None,
             },
@@ -1299,15 +1327,21 @@ impl Side {
             FromHost::JobAccept(r) => {
                 let now = Instant::now();
                 let paused = self.paused;
+                let next = self.accepted_n + 1;
                 if let Some(run) = self.runs.get_mut(&r.run)
                     && run.phase == Phase::Offered
                 {
                     run.phase = Phase::Running;
                     run.accepted = Some(now);
+                    run.ordinal = next;
                     if paused {
                         run.paused_since = Some(now);
                     }
-                    self.emit(HelperFrame::JobAccept(RunRef { run: r.run }));
+                    self.accepted_n = next;
+                    self.emit(HelperFrame::JobAccept(RunRef { run: r.run.clone() }));
+                    if self.faults.abandons(next) {
+                        self.abandon(&r.run, now);
+                    }
                 }
             }
             FromHost::JobReject(r) => {
@@ -1337,7 +1371,7 @@ impl Side {
                         round: round_of(p.round),
                         of: round_of(p.of),
                         elapsed_s: figure(p.elapsed_s),
-                        cpu_s: figure(p.cpu_s),
+                        cpu_s: figure(p.cpu_s) * self.faults.cpu_factor(),
                         paused_s: figure(p.paused_s),
                         peak_mb: figure(p.peak_mb),
                         paused: Some(p.paused || paused),
@@ -1403,9 +1437,10 @@ impl Side {
 
     // ------------------------------------------------------------------ results
 
-    /// A run's result: its claim signed, written to the home, then sent.
+    /// A run's result: its claim signed, written to the home, then sent (a test build's faults
+    /// played on it first, as its modes say).
     async fn result(&mut self, id: &str, run: &Run, outcome: jh::Outcome) {
-        let Value::Object(result) = outcome.result else {
+        let Value::Object(mut result) = outcome.result else {
             self.log.error(format!("run {}: the job host's result is no object", clip(id, 64)));
             self.emit(HelperFrame::JobFailed(JobFailed {
                 run: id.to_owned(),
@@ -1419,6 +1454,14 @@ impl Side {
             self.log.error("no machine key to sign a result with");
             return;
         };
+        let mut result_hash = outcome.result_hash;
+        let mut chain = outcome.chain;
+        let mut cpu_s = figure(outcome.cpu_s) * self.faults.cpu_factor();
+        self.play_faults(id, run, &mut result, &mut result_hash, &mut chain);
+        let hold = self.faults.hold();
+        if let Some(h) = hold {
+            cpu_s += h.as_secs_f64();
+        }
         let claim = citar_jobs::Claim {
             v: citar_jobs::claim::CLAIM_VERSION,
             job: run.job.clone(),
@@ -1428,23 +1471,26 @@ impl Side {
             spec_hash: run.spec_hash.clone(),
             jobs_build: run.jobs_build.clone(),
             bots: run.bots.clone(),
-            result_hash: outcome.result_hash.clone(),
-            chain_head: outcome.chain.head.clone(),
-            rounds: u64::from(outcome.chain.rounds),
+            result_hash: result_hash.clone(),
+            chain_head: chain.head.clone(),
+            rounds: u64::from(chain.rounds),
             key: key.public_b64(),
         };
-        let signature = key.sign_b64(&claim.message());
+        let signature = match self.faults.signer() {
+            Some(other) => claim.sign(other),
+            None => key.sign_b64(&claim.message()),
+        };
         let frame = JobResult {
             run: id.to_owned(),
             outcome: Outcome {
                 result,
-                result_hash: outcome.result_hash,
+                result_hash,
                 chain: Chain {
-                    head: outcome.chain.head,
-                    rounds: u64::from(outcome.chain.rounds),
-                    digests: outcome.chain.digests,
+                    head: chain.head,
+                    rounds: u64::from(chain.rounds),
+                    digests: chain.digests,
                 },
-                cpu_s: figure(outcome.cpu_s),
+                cpu_s,
                 wall_s: figure(outcome.wall_s),
                 paused_s: figure(outcome.paused_s),
                 peak_mb: figure(outcome.peak_mb),
@@ -1473,7 +1519,88 @@ impl Side {
         ));
         self.keep_result(&frame).await;
         self.results_held.insert(id.to_owned(), Held { frame: Some(frame), sent_on: None });
-        self.send_result(id).await;
+        match hold {
+            Some(h) => {
+                self.log.warn(format!(
+                    "test fault: holding run {}'s result {:.1} s before it is sent",
+                    clip(id, 64),
+                    h.as_secs_f64()
+                ));
+                self.delayed.push((Instant::now() + h, id.to_owned()));
+            }
+            None => self.send_result(id).await,
+        }
+    }
+
+    /// A test build's faults on a run's result, as `--test-fault` asks (none in a shipped build):
+    /// one score changed and the result hashed again, or one round's digest changed and the chain
+    /// folded again from it.
+    #[cfg(feature = "test-faults")]
+    fn play_faults(
+        &self,
+        id: &str,
+        run: &Run,
+        result: &mut serde_json::Map<String, Value>,
+        result_hash: &mut String,
+        chain: &mut citar_jobs::Chain,
+    ) {
+        if self.faults.alters(run.ordinal) && crate::faults::alter_result(result) {
+            if let Some(kind) = citar_jobs::Kind::from_name(run.kind.as_str())
+                && let Ok(h) = citar_jobs::result_hash(kind, &Value::Object(result.clone()))
+            {
+                *result_hash = h;
+            }
+            self.log.warn(format!(
+                "test fault: run {} (job {}) altered: one score changed, its hash recomputed",
+                clip(id, 64),
+                run.ordinal
+            ));
+        }
+        if let Some(round) = self.faults.digest_round()
+            && crate::faults::alter_digest(&mut chain.digests, round)
+        {
+            if let Some(spec) = citar_jobs::SpecHash::from_hex(&run.spec_hash)
+                && let Ok(head) = citar_jobs::fold(&spec, &chain.digests)
+            {
+                chain.head = head;
+            }
+            self.log.warn(format!(
+                "test fault: run {}'s digest of round {round} altered, its chain folded again",
+                clip(id, 64)
+            ));
+        }
+    }
+
+    /// No fault in a shipped build.
+    #[cfg(not(feature = "test-faults"))]
+    #[allow(clippy::unused_self)]
+    fn play_faults(
+        &self,
+        _id: &str,
+        _run: &Run,
+        _result: &mut serde_json::Map<String, Value>,
+        _result_hash: &mut String,
+        _chain: &mut citar_jobs::Chain,
+    ) {
+    }
+
+    /// `--test-fault abandon:N`: a job accepted and never finished. Its host lets it go, and
+    /// nothing more is said of it to the server, which expires it as a silent run (an abandon).
+    fn abandon(&mut self, run: &str, now: Instant) {
+        if let Some(r) = self.runs.get_mut(run) {
+            r.phase = Phase::Aborting(Why::Dropped, now);
+            self.log.warn(format!(
+                "test fault: abandoning run {} (job {})",
+                clip(run, 64),
+                r.ordinal
+            ));
+            if let Some(h) = &self.host {
+                let _sent = h.cmds.send(ToHost::JobAbort(jh::Abort {
+                    run: run.to_owned(),
+                    reason: "abandoned (a test fault)".to_owned(),
+                }));
+            }
+        }
     }
 
     /// Writes a result to `helper/results/<run>.json` (beside it first, then renamed over), within

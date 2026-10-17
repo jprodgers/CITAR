@@ -15,7 +15,9 @@
 //!   its task owns; [`quiet`]: local quiet hours; [`scan`]: the hardware scan (the `citar-hardware`
 //!   format, the power guess, the probe programs); [`power`]: the power readings; [`jobs`]: CPU
 //!   jobs (the job host as a child, the job frames relayed, results signed and kept until
-//!   acknowledged), [`jobhost`]: the job host as this binary's child;
+//!   acknowledged), [`jobhost`]: the job host as this binary's child; [`faults`]: a helper that
+//!   cheats on purpose (`--test-fault`, the `test-faults` feature only), for the verification
+//!   gates;
 //! - [`app`]: what the binary does with its command line; [`version`]: `--version`;
 //! - `conformance` (only with the `conformance` feature, or in this crate's own unit tests): the
 //!   shared fixtures under `protocol/v2/`, the matcher language of their transcripts, and
@@ -37,6 +39,7 @@ pub mod clock;
 pub mod config;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
+pub mod faults;
 pub mod home;
 pub mod http1;
 pub mod jobhost;
