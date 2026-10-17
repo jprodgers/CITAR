@@ -4,7 +4,9 @@
 //! engine's unique types from their two sources (1a-05); `gen-params` writes the bot's parameter
 //! struct from its schema (registered in 2-00a, written in 2-01a); `perf` runs the criterion
 //! suites and holds them to their budgets (perfgate, 1e-03; the `games` suite from 2-00a);
-//! `develop` builds the Python extension for the laptop's venv (DESIGN.md P2.6.7, 2-06a).
+//! `develop` builds the Python extension for the laptop's venv (DESIGN.md P2.6.7, 2-06a);
+//! `keygen`, `helper-manifest` and `sign-manifest` are the release side of the helper's update
+//! channel (design/phase4-helper.md P4.3.8, 4-13).
 
 #![forbid(unsafe_code)]
 
@@ -13,6 +15,7 @@ mod develop;
 mod gen_params;
 mod gen_uniques;
 mod lexer;
+mod manifest;
 mod perf;
 
 use std::path::{Path, PathBuf};
@@ -36,7 +39,16 @@ commands:
   perf [--check] [--suite kernels|turns|io|games] [-- <bench arguments>]
            run the criterion suites of citar-bench (games only when named), then check every
            budget of crates/citar-bench/thresholds.toml and the pass rounds' ratios to Python
-           (--check: only check what a run left; exit 0 within, 1 over, 2 could not run)";
+           (--check: only check what a run left; exit 0 within, 1 over, 2 could not run)
+  keygen --out DIR
+           a new update-signing key: DIR/citar-update-signing.key (private) and .pub; refuses a
+           directory inside this repository or any git working tree (exit 0 made, 2 refused)
+  helper-manifest --assets DIR --version V [--base-url URL] [--build B] [--protocol P]
+                  [--released-at T] [--out FILE]
+           citar-helper-manifest.json over the release's helper binaries in DIR
+  sign-manifest (--key FILE | --key-env NAME) MANIFEST [--out SIG]
+           MANIFEST.sig, the manifest signed for the helpers' updates; refuses a key file inside
+           this repository or any git working tree (exit 0 signed, 1 failed, 2 refused)";
 
 fn workspace_root() -> PathBuf {
     // xtask/ sits at the root; this is fixed at build time, so each worktree checks itself.
@@ -90,6 +102,10 @@ fn main() -> ExitCode {
         ["perf", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
             perf::run(&workspace_root(), &rest)
+        }
+        [command @ ("keygen" | "helper-manifest" | "sign-manifest"), rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
+            manifest::run(&workspace_root(), command, &rest)
         }
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");

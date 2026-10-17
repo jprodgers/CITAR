@@ -64,7 +64,7 @@ fn options(args: &[String]) -> Result<Options, String> {
 
 /// A path as it is compared: absolute, with `\` as `/`, without a trailing `/`, and on Windows
 /// in lower case, which the file system ignores.
-fn same_path_key(p: &Path) -> String {
+pub(crate) fn same_path_key(p: &Path) -> String {
     let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let mut s = p.to_string_lossy().replace('\\', "/");
     // canonicalize on Windows gives the verbatim form.
@@ -78,7 +78,7 @@ fn same_path_key(p: &Path) -> String {
 }
 
 /// Whether `inner` is `outer` or inside it.
-fn is_within(inner: &Path, outer: &Path) -> bool {
+pub(crate) fn is_within(inner: &Path, outer: &Path) -> bool {
     let (i, o) = (same_path_key(inner), same_path_key(outer));
     i == o || i.starts_with(&format!("{o}/"))
 }
