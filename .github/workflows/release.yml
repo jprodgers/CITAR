@@ -180,45 +180,65 @@ jobs:
             dist/*.sha256
 
   # ---------------------------------------------------------------------------------- the helper
-  # The CITAR helper (crates/citar-helper, the Rust binary that replaced the Python worker in 0.1.6):
-  # what someone downloads onto the machine with the GPU. The file names carry no version on purpose -
-  # the server's download links point at releases/latest/download/<name>, which then always gives the
-  # newest build. No features: a test feature or the development guard never ships (cargo xtask
-  # check). Package 4-14 adds the Intel Mac build, --self-test and the manifest (design/
-  # phase4-helper.md P4.10).
+  # The CITAR helper (crates/citar-helper, the Rust binary that replaced the Python worker in 0.1.6): what someone
+  # downloads onto the machine with the GPU (design/phase4-helper.md P4.10, 4-14). One build per target, under the
+  # five names the server's download links use (citar/web/js/helperrules.js; citar/web/tests/helper.test.mjs holds the
+  # matrix's `asset:` entries, one line a target, equal to them and to cargo xtask helper-manifest's), with no version
+  # in the name: the links point at releases/latest/download/<name>, which then always gives the newest build. Each
+  # has its .sha256 beside it and is run once here (--version names its target; --self-test runs the job host's
+  # canary and self-check). No features: a test feature, the development guard and the package managers' `packaged`
+  # never reach these builds (cargo xtask check reads every line of this file). The Linux builds are glibc-based on
+  # ubuntu-22.04, so they run on older distributions; rustls with the OS's own verifier means TLS does not depend on
+  # where a distribution keeps its CA bundle (checked on Fedora below).
   build-helper:
     needs: verify
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, asset: citar-helper-windows-x64.exe, name: citar-helper-windows-x64 }
-          - { os: macos-latest, asset: citar-helper-macos-arm64, name: citar-helper-macos-arm64 }
-          # 22.04's older glibc lets the Linux build run on more distributions
-          - { os: ubuntu-22.04, asset: citar-helper-linux-x64, name: citar-helper-linux-x64 }
-          - { os: ubuntu-24.04-arm, asset: citar-helper-linux-arm64, name: citar-helper-linux-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe }
+          - { os: macos-15, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64 }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, asset: citar-helper-macos-x64 }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64 }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Toolchain
-        # rust-toolchain.toml pins the exact release
-        run: rustup toolchain install
+        # rust-toolchain.toml pins the exact release; the target is the runner's own
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
 
       - name: Build
         shell: bash
         run: |
-          cargo build --release --locked -p citar-helper
+          cargo build --release --locked -p citar-helper --target ${{ matrix.target }}
           mkdir -p dist
           ext=""
           if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
-          cp "target/release/citar-helper$ext" "dist/${{ matrix.asset }}"
+          cp "target/${{ matrix.target }}/release/citar-helper$ext" "dist/${{ matrix.asset }}"
+
+      - name: The helper runs, on its target, and computes as every other build does
+        shell: bash
+        run: |
+          chmod +x "dist/${{ matrix.asset }}" || true
+          version="$(./dist/${{ matrix.asset }} --version)"
+          echo "$version"
+          case "$version" in
+            *"target ${{ matrix.target }},"*) ;;
+            *) echo "::error::the build does not name its target ${{ matrix.target }}"; exit 1 ;;
+          esac
+          ./dist/${{ matrix.asset }} --self-test
+          ./dist/${{ matrix.asset }} --help > /dev/null
 
       - name: TLS works on a distribution that keeps its certificates elsewhere
-        # The helper verifies servers with the OS's own trust store (rustls-platform-verifier), so a
-        # distribution that keeps its CA roots elsewhere than the build machine (Fedora; 0.1.1's
-        # Python helper failed every handshake there) must still connect. Any answer from the server
-        # is fine here (a refusal is expected); a certificate error is not.
+        # The helper verifies servers with the OS's own trust store (rustls-platform-verifier), so a distribution
+        # that keeps its CA roots elsewhere than the build machine (Fedora; 0.1.1's Python helper failed every
+        # handshake there) must still connect. Any answer from the server is fine here (a refusal is expected); a
+        # certificate error is not.
         if: matrix.os == 'ubuntu-22.04'
         run: |
           out=$(docker run --rm -v "$PWD/dist:/d" fedora:latest timeout 15 /d/${{ matrix.asset }} \
@@ -226,19 +246,20 @@ jobs:
           echo "$out"
           if echo "$out" | grep -qi "certificate"; then exit 1; fi
 
-      - name: The helper runs
+      - name: Checksum
         shell: bash
         run: |
-          ./dist/${{ matrix.asset }} --help
           cd dist && (sha256sum "${{ matrix.asset }}" 2>/dev/null || shasum -a 256 "${{ matrix.asset }}") \
             | cut -d' ' -f1 > "${{ matrix.asset }}.sha256"
+          cat "${{ matrix.asset }}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.name }}
+          name: ${{ matrix.asset }}
           path: |
             dist/${{ matrix.asset }}
             dist/${{ matrix.asset }}.sha256
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------------- the helper's manifest
   # What helpers update themselves from (design/phase4-helper.md P4.3.8, P4.10): citar-helper-manifest.json over

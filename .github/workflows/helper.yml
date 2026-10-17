@@ -1,0 +1,254 @@
+# The CITAR helper on the five targets it ships for (design/phase4-helper.md P4.7.10, package 4-14):
+#
+# - test: the helper's and citar-jobs' tests (the protocol's conformance transcripts, the real binary against fake
+#   servers, the Run supervisor, the job host and its limits) with every feature and with none, and citar-jobs' `jobs`
+#   golden set in the ci and the release profile, on Windows x64, Linux x64 and arm64, macOS arm64 and x64. rust.yml
+#   runs the helper's tests on three of these on every Rust change; this adds macOS x64 and Linux arm64, where the
+#   helper ships too, and the scan and the limits there.
+# - artifact: the release build of each target, as release.yml builds it (no features: cargo xtask check reads every
+#   line of the jobs whose ids start with "artifact", and this file's workflow-wide env and defaults), run once with
+#   --version (it names its target) and --self-test (the job host's canary and self-check), its .sha256 beside it.
+#   The artifacts are what the service jobs install; they are kept for a week and are not a release.
+# - service-*: that build installed as a service for real on the runner, started, connected to a loopback fake server
+#   that refuses its token (so it must idle, not be restarted), stopped and removed (scripts/ci/service_check.py, which
+#   refuses to run anywhere but here): the Windows service under its virtual account NT SERVICE\citar-helper and the
+#   per-user Run value with its supervisor; a systemd user unit after `loginctl enable-linger`; the LaunchAgent, where
+#   the runner has a GUI domain to load it into (its plist linted either way).
+#
+# Nobody installs a service on the laptop the packages are built on: there these run in WSL (qa_phase4.py service) or
+# as --dry-run (P4.7.1).
+name: helper
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/citar-helper/**"
+      - "crates/citar-jobs/**"
+      - "crates/citar-engine/**"
+      - "crates/citar-bot/**"
+      - "crates/citar-sim/**"
+      - "Cargo.*"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      # citar-helper's configuration test reads it (4-03)
+      - "tests/data/helper_config_cases.json"
+      - "scripts/ci/service_check.py"
+      - ".github/workflows/helper.yml"
+  pull_request:
+    paths:
+      - "crates/citar-helper/**"
+      - "crates/citar-jobs/**"
+      - "crates/citar-engine/**"
+      - "crates/citar-bot/**"
+      - "crates/citar-sim/**"
+      - "Cargo.*"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "tests/data/helper_config_cases.json"
+      - "scripts/ci/service_check.py"
+      - ".github/workflows/helper.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: helper-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artefacts are never reused on a fresh runner; they only slow the cache down.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          # If this label is retired, run x86_64-apple-darwin under Rosetta on macos-15 instead.
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helper-${{ matrix.target }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: The helper and the jobs crate, every feature
+        # The development guard's and the test features' tests among them: the conformance transcripts from the
+        # helper's side, the real binary against fake servers, the update helpers, the Run supervisor.
+        env:
+          PROPTEST_CASES: 64
+        run: cargo nextest run -p citar-helper -p citar-jobs --all-features --locked --cargo-profile ci --profile ci
+
+      - name: The same without features, as the helper ships
+        env:
+          PROPTEST_CASES: 64
+        run: cargo nextest run -p citar-helper -p citar-jobs --locked --cargo-profile ci --profile ci
+
+      - name: The jobs golden set in the release profile
+        # A job's result must be the same bytes in every flavour (design P4.4.5); the ci profile's run is above.
+        run: cargo nextest run -p citar-jobs --locked --cargo-profile release --profile ci
+
+  artifact:
+    name: artifact (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # release.yml's build-helper matrix, line for line (citar/web/tests/helper.test.mjs holds both to the
+        # download card's names and to cargo xtask helper-manifest's)
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe }
+          - { os: macos-15, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64 }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, asset: citar-helper-macos-x64 }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64 }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helper-release-${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --release --locked -p citar-helper --target ${{ matrix.target }}
+          mkdir -p dist
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          cp "target/${{ matrix.target }}/release/citar-helper$ext" "dist/${{ matrix.asset }}"
+
+      - name: The build runs, names its target, and computes as every other build does
+        shell: bash
+        run: |
+          chmod +x "dist/${{ matrix.asset }}" || true
+          version="$(./dist/${{ matrix.asset }} --version)"
+          echo "$version"
+          case "$version" in
+            *"target ${{ matrix.target }},"*) ;;
+            *) echo "::error::the build does not name its target ${{ matrix.target }}"; exit 1 ;;
+          esac
+          ./dist/${{ matrix.asset }} --self-test
+          ./dist/${{ matrix.asset }} service install --dry-run --home "$RUNNER_TEMP/citar-dry-run"
+
+      - name: Checksum
+        shell: bash
+        run: |
+          cd dist && (sha256sum "${{ matrix.asset }}" 2>/dev/null || shasum -a 256 "${{ matrix.asset }}") \
+            | cut -d' ' -f1 > "${{ matrix.asset }}.sha256"
+          cat "${{ matrix.asset }}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  service-linux:
+    name: service (Linux, systemd --user)
+    needs: artifact
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: The fake server's WebSocket
+        run: pip install "websockets>=13"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: citar-helper-linux-x64
+          path: dist
+
+      - name: A user service manager for the runner's account, as for a lender without a login session
+        run: sudo loginctl enable-linger "$USER"
+
+      - name: Install, start, connect, idle while refused, stop, uninstall
+        env:
+          CITAR_SERVICE_CHECK: "1"
+        run: python scripts/ci/service_check.py dist/citar-helper-linux-x64 --scope user
+
+  service-windows:
+    name: service (Windows, the service and the Run value)
+    needs: artifact
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: The fake server's WebSocket
+        run: pip install "websockets>=13"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: citar-helper-windows-x64.exe
+          path: dist
+
+      - name: The Windows service, as NT SERVICE\citar-helper (the runner is elevated)
+        env:
+          CITAR_SERVICE_CHECK: "1"
+        run: python scripts/ci/service_check.py dist/citar-helper-windows-x64.exe --scope system
+
+      - name: The per-user Run value and its supervisor
+        env:
+          CITAR_SERVICE_CHECK: "1"
+        run: python scripts/ci/service_check.py dist/citar-helper-windows-x64.exe --scope user
+
+  service-macos:
+    name: service (macOS, the LaunchAgent)
+    needs: artifact
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: The fake server's WebSocket
+        run: pip install "websockets>=13"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: citar-helper-macos-arm64
+          path: dist
+
+      - name: Install, start, connect, idle while refused, stop, uninstall (bootstrap where the runner allows)
+        env:
+          CITAR_SERVICE_CHECK: "1"
+        run: python scripts/ci/service_check.py dist/citar-helper-macos-arm64 --scope user
