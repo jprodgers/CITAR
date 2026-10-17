@@ -17,7 +17,9 @@ of CPU.
 - **The replica's reference:** a run bounded at first by the cost table's figure for its shape is bounded again by its
   replica's own CPU once that reproduces it, its budget settlement moved by the difference.
 - **An older jobs build** (4-11's leftover): a result that waited for its replica when the server stopped, of a jobs
-  build the server no longer plays, is accepted ``unverified`` at the start.
+  build the server no longer plays, is accepted ``unverified`` at the start when it was sampled; a new machine's, one
+  an administrator asked to check, and one a verifier disputed are set aside with no verdict and no credits, and their
+  games played again (4-12's review).
 """
 from __future__ import annotations
 
@@ -274,12 +276,20 @@ class Credits(TV.Verify):
 
 @unittest.skipUnless(has_test_ops(), "needs the extension's test operations (the throwaway keys)")
 class OlderJobsBuild(TV.Verify):
-    """A result that waits for its replica when the server is upgraded (another jobs build) is accepted unverified at
-    the next start: no verifier would ever reproduce it."""
+    """A result that waits for its replica when the server is upgraded (another jobs build): no verifier will ever
+    reproduce it, so at the next start what it waited for decides. A sampled one is accepted unverified, as an
+    unsampled one is; a new machine's, or one an administrator asked to check, is never accepted unchecked (4-12's
+    review): it is set aside with no verdict on anyone and no credits, and its game played again of this build."""
 
-    def test_a_settling_job_of_an_older_jobs_build_is_accepted_unverified_at_the_start(self):
-        bob = Lender(self, "Bob's new", "bob")
-        self.submit("bob", duels("upgraded", 1))
+    def waiting(self, name: str, *, tier: str = "new", asked: bool = False) -> tuple:
+        """Bob's machine (``tier``; provisional at rate 1 is sampled, at rate 0 with ``asked`` an administrator's
+        replicate) has played its game, which waits for a replica (this server's host is off); the server stops and
+        starts again upgraded."""
+        self.settings(provisional_rate=0.0 if asked else 1.0)
+        bob = Lender(self, f"Bob's {tier}", "bob", tier=tier)
+        if asked:
+            D.replicate_next(bob.sid, 1, actor_id=self.ids["zara"])
+        self.submit("bob", duels(name, 1))
         host = self.verifier()
         host.state = "off"
         d = self.make([host])
@@ -288,12 +298,18 @@ class OlderJobsBuild(TV.Verify):
         ((_n, run, job_id),) = bob.runs
         with db.session() as s:
             self.assertEqual(s.get(CpuJob, job_id).state, "settling")
+            mark = s.get(CpuJobRun, run).error
             s.get(CpuJob, job_id).jobs_build = "0" * 12          # the jobs build the server played before it was upgraded
         self.led.drain()            # its event written (pending), as the ledger's writer does within seconds
         d.stop()
         D.install(None)
-        again = self.verifier()
-        d2 = self.make([again])
+        d2 = self.make([self.verifier()])
+        d2.tick()                   # its start: the experiment loaded
+        return bob, run, job_id, mark["why"], d2
+
+    def test_a_sampled_result_of_an_older_jobs_build_is_accepted_unverified_at_the_start(self):
+        bob, run, job_id, why, d2 = self.waiting("upgraded", tier="provisional")
+        self.assertEqual(why, "sampled")
         self.assertTrue(self.drive(d2, [bob], until=lambda: (lab.DONE / "upgraded.json").exists()))
         with db.session() as s:
             job = s.get(CpuJob, job_id)
@@ -304,7 +320,76 @@ class OlderJobsBuild(TV.Verify):
         (line,) = lab.load_results("upgraded")
         self.assertEqual((line["executor"]["run"], line["executor"]["verification"]), (run, "unverified"))
         self.assertEqual(self.event(run).verification, "unverified")
+        self.assertGreater(self.event(run).credits, 0.0)
         self.assertEqual(int((bob.row().trust or {}).get("verified") or 0), 0, "it counts no match")
+
+    def assert_set_aside_and_played_again(self, bob, run: str, job_id: str, d2, name: str) -> dict:
+        with db.session() as s:
+            self.assertEqual(s.get(CpuJob, job_id).jobs_build, d2.jobs_build, "queued again, of this build")
+        self.assertTrue(self.drive(d2, [bob], until=lambda: (lab.DONE / f"{name}.json").exists()))
+        with db.session() as s:
+            job = s.get(CpuJob, job_id)
+            first = s.get(CpuJobRun, run)
+            self.assertEqual((job.state, job.attempts), ("accepted", 0), "no attempt")
+            self.assertNotEqual(job.accepted_run, run)
+            self.assertEqual((first.verdict, first.error["code"]), (None, "old_build"))
+        (line,) = lab.load_results(name)
+        self.assertNotEqual(line["executor"]["run"], run, "its result was never taken")
+        self.assertEqual(line["executor"]["verification"], "verified", "the game played again was checked")
+        ev = self.event(run)
+        self.assertEqual((ev.verification, ev.credits, ev.cpu_core_s), ("unverified", 0.0, 0.0))
+        self.assertIn("not accepted unchecked", ev.flags["void"])
+        row = bob.row()
+        self.assertNotEqual(row.trust_tier, "quarantined")
+        self.assertEqual(int((row.trust or {}).get("mismatches") or 0), 0, "no verdict on the machine")
+        self.assertEqual(self.owner_tier("bob"), "new", "nor on its owner")
+        return row
+
+    def test_a_new_machines_result_of_an_older_jobs_build_is_played_again(self):
+        bob, run, job_id, why, d2 = self.waiting("upgraded-new")
+        self.assertEqual(why, "new")
+        self.assert_set_aside_and_played_again(bob, run, job_id, d2, "upgraded-new")
+
+    def test_a_result_an_administrator_asked_to_check_is_played_again_and_checked(self):
+        bob, run, job_id, why, d2 = self.waiting("upgraded-asked", tier="provisional", asked=True)
+        self.assertEqual(why, "asked")
+        with db.session() as s:
+            self.assertEqual(s.get(Server, bob.sid).trust["replicate"], 1, "the ask given back to the machine")
+        row = self.assert_set_aside_and_played_again(bob, run, job_id, d2, "upgraded-asked")
+        self.assertEqual(row.trust["replicate"], 0, "spent on the game played again")
+
+    def test_a_disputed_result_of_an_older_jobs_build_is_played_again(self):
+        """A remote verifier's replica disagreed and the tiebreak waits for this server, which is upgraded meanwhile:
+        neither run can be judged, so neither machine is, and the game is played again."""
+        self.settings(provisional_rate=1.0)
+        bob = Lender(self, "Bob's provisional", "bob", tier="provisional")
+        carol = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TV.TEST_KEY_SEED + 5)
+        D.change_trust(carol.sid, verifier=True, actor_id=self.ids["zara"])
+        self.submit("bob", duels("upgraded-disputed", 1))
+        host = self.verifier()
+        host.state = "off"
+        d = self.make([host])
+        self.drive(d, [bob, carol], fault=lambda lender, n: "result" if lender is bob else "",
+                   until=lambda: any(r.role == "replica" and r.state == "done" for r in self.runs()))
+        (replica,) = [r for r in self.runs() if r.role == "replica"]
+        self.assertEqual((replica.verdict, d.jobs[replica.job_id].need), ("mismatch", "tiebreak"))
+        ((_n, run, job_id),) = bob.runs
+        with db.session() as s:
+            s.get(CpuJob, job_id).jobs_build = "0" * 12
+        self.led.drain()
+        d.stop()
+        D.install(None)
+        d2 = self.make([self.verifier()])
+        d2.tick()
+        self.assertEqual(self.event(replica.id).verification, "unverified", "the replica's event pending no more")
+        self.assertTrue(self.drive(d2, [bob, carol], until=lambda: (lab.DONE / "upgraded-disputed.json").exists()))
+        (line,) = lab.load_results("upgraded-disputed")
+        self.assertNotEqual(line["executor"]["run"], run)
+        ev = self.event(run)
+        self.assertEqual((ev.verification, ev.credits), ("unverified", 0.0))
+        self.assertIn("a verifier's replica disagreed", ev.flags["void"])
+        self.assertEqual((bob.row().trust_tier, carol.row().trust_tier), ("provisional", "trusted"),
+                         "no verdict on either machine")
 
 
 if __name__ == "__main__":

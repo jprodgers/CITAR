@@ -577,6 +577,10 @@ class Dispatcher:
                                       run.cpu_s, _observed(run), reference, run.ended_at, verification)
                 if verification == "rejected":
                     row["credits"], row["cpu_core_s"] = 0.0, 0.0
+                elif (run.error or {}).get("code") == "old_build" and run.role == "primary":
+                    # set aside after an upgrade (``_settle_old_build``): its void verdict came before this event
+                    row["credits"], row["cpu_core_s"] = 0.0, 0.0
+                    row["flags"] = {**row["flags"], "void": str((run.error or {}).get("message") or "")[:300]}
                 rows.append(row)
         if rows:
             log.info("writing %d CPU event(s) the ledger had not written", len(rows))
@@ -663,8 +667,12 @@ class Dispatcher:
                 view.run = run.id
                 self.jobs[job.id] = view
                 self.runs[run.id] = run
-            elif job.state == "settling" and job.id not in self.jobs and job.jobs_build != self.jobs_build                     and self._settle_old_build(s, job, exp):
-                exp.settled.add(i)
+            elif (job.state == "settling" and job.id not in self.jobs
+                  and job.jobs_build != self.jobs_build):
+                if self._settle_old_build(s, job, exp):
+                    exp.settled.add(i)
+                else:
+                    self.jobs[job.id] = self._view(job, exp)        # played again, of this build
             elif job.state == "settling" and job.id not in self.jobs:
                 view = self._settling_view(s, job, exp)
                 if view is not None:
@@ -684,25 +692,33 @@ class Dispatcher:
 
     def _settle_old_build(self, s, job, exp: Exp) -> bool:
         """A result that waited for its replica when the server last stopped, from a jobs build this server no longer
-        plays (it was upgraded meanwhile): no verifier would ever reproduce it (this server's job host plays its own
-        build, and every helper's follows), so it is accepted as an unsampled result is, ``unverified`` (P4.5.8 rule
-        4), its line written by the reconciliation that follows. It counts no match; were its machine caught later, it
-        is withdrawn with the rest of its unverified results (rule 8). Returns whether it was settled (False: no
-        primary result to accept, and the job is played again as ``_settling_view`` says)."""
+        plays (it was upgraded meanwhile): no verifier will ever reproduce it (this server's job host plays its own
+        build, and every helper's follows), so what it waited for decides (its primary's ``replicating`` mark):
+
+        - **sampled** (rule 1's keyed sample) or **re-opened** (rule 9): accepted as an unsampled result is,
+          ``unverified`` (rule 4), its line written by the reconciliation that follows. It counts no match; were its
+          machine caught later, it is withdrawn with the rest of its unverified results (rule 8).
+        - **new** (a new machine's results are always replicated, rule 1), **asked** (an administrator's ``replicate``,
+          rule 10), or **disputed** (a remote verifier's replica disagreed, and the tiebreak it waits for cannot be
+          played now): never accepted unchecked. The result is set aside and its game played again, of this build:
+          no verdict on anyone (no attempt, no quarantine, no match), its event ``unverified`` with no credits (the
+          lab never used it, so nobody pays for it and nobody earns by it; a waiting replica's event ``unverified``
+          too), and an administrator's ask given back to the machine (its next result is replicated instead).
+
+        Returns whether it was settled; False: the job is ``queued`` again with this server's jobs build (so too a job
+        with no primary result to accept), for the caller to offer."""
         from sqlalchemy import select
-        from citar.db.models import CpuJobRun
+        from citar.db.models import CpuJobRun, Server
         runs = list(s.scalars(select(CpuJobRun).where(CpuJobRun.job_id == job.id).order_by(CpuJobRun.offered_at)))
         primary = next((r for r in runs if r.id == job.accepted_run), None) if job.accepted_run else None
         if primary is None:
             done = [r for r in runs if r.role == "primary" and r.state == "done" and r.verdict == "unchecked"]
             primary = done[-1] if done else None
-        if primary is None:
-            return False
-        mark = primary.error if isinstance(primary.error, dict) else {}
-        crashed = "crash" in (primary.result or {}) or bool(mark.get("crashed"))
-        job.state = "crashed" if crashed else "accepted"
-        job.accepted_run, job.result_hash = primary.id, primary.result_hash
-        primary.verdict, primary.error = "unchecked", None
+        mark = (primary.error if primary is not None and isinstance(primary.error, dict) else None) or {}
+        reopened = primary is not None and job.accepted_run == primary.id
+        disputed = next((r for r in reversed(runs) if r.role == "replica" and r.state == "done"
+                         and r.verdict == "mismatch"), None)
+        why = "reopened" if reopened else str(mark.get("why") or "sampled")
         for r in runs:
             if r.role != "primary" and r.state in ("offered", "running"):
                 held = self._held_remote.pop(job.id, None)
@@ -710,10 +726,41 @@ class Dispatcher:
                     held.executor.in_flight.discard(held.id)
                 r.state, r.ended_at = "aborted", utcnow()
                 r.error = {"code": "old_build", "message": "its job's jobs build is no longer played"}
-        self._load_verdicts.append({"activity": job.ref, "request_id": primary.id, "verification": "unverified"})
-        lab.log(f"{exp.name} #{store.game_of(job.ref)}: its result waited for a replica of jobs build "
-                f"{job.jobs_build}, which this server no longer plays: accepted unverified")
-        return True
+        game = store.game_of(job.ref)
+        if primary is not None and disputed is None and why not in ("new", "asked"):
+            crashed = "crash" in (primary.result or {}) or bool(mark.get("crashed"))
+            job.state = "crashed" if crashed else "accepted"
+            job.accepted_run, job.result_hash = primary.id, primary.result_hash
+            primary.verdict, primary.error = "unchecked", None
+            self._load_verdicts.append({"activity": job.ref, "request_id": primary.id, "verification": "unverified"})
+            lab.log(f"{exp.name} #{game}: its result waited for a replica of jobs build {job.jobs_build}, which this "
+                    "server no longer plays: accepted unverified")
+            return True
+        reason = ("a verifier's replica disagreed with it" if disputed is not None else
+                  {"new": "every result of a new machine is checked",
+                   "asked": "an administrator asked for its check"}.get(why, "nothing to accept"))
+        words = (f"its result waited for a replica of jobs build {job.jobs_build}, which no verifier plays now, and "
+                 f"is not accepted unchecked ({reason}): its game is played again")
+        if primary is not None:
+            primary.verdict = None
+            primary.error = {"code": "old_build", "why": why if disputed is None else "disputed",
+                             "message": words[:300]}
+            self._load_verdicts.append({"activity": job.ref, "request_id": primary.id, "verification": "unverified",
+                                        "why": words[:300], "cpu_core_s": 0.0, "credits": 0.0,
+                                        "flags": {"void": words[:300]}})
+        if disputed is not None:
+            self._load_verdicts.append({"activity": job.ref, "request_id": disputed.id, "verification": "unverified",
+                                        "why": words[:300]})
+        if why == "asked" and primary is not None:
+            srow = s.get(Server, primary.machine_id)
+            if srow is not None and srow.trust_tier in ("provisional", "trusted"):
+                tr = dict(srow.trust or {})
+                tr["replicate"] = int(tr.get("replicate") or 0) + 1
+                srow.trust = tr
+        job.state, job.jobs_build = "queued", self.jobs_build
+        job.accepted_run, job.result_hash = None, None
+        lab.log(f"{exp.name} #{game}: {words}")
+        return False
 
     def _settling_view(self, s, job, exp: Exp) -> Optional[Job]:
         """A ``settling`` job as the view holds it after a start (P4.5.8): its primary (its accepted run when it was
