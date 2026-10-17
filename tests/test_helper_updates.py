@@ -266,6 +266,7 @@ class Hub(unittest.TestCase):
         U.relay().clear()
         cls.key.__exit__()
         S.reset()
+        db.dispose()
 
     def setUp(self):
         U.relay().clear()
@@ -324,6 +325,10 @@ class Hub(unittest.TestCase):
         view = W.hub().get(sid).client()["update"]
         self.assertFalse(view["available"], "the helper is the latest now")
         self.assertEqual(W.hub().replaced, replaced, "an update's hand-off is never a replaced connection")
+
+
+def tearDownModule():
+    db.dispose()
 
 
 if __name__ == "__main__":
