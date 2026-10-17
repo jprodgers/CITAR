@@ -25,6 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from sqlalchemy import select
+
 from citar import aggregate, db, diplomacy_stats, ledger, servers as REG
 from citar.auth import accounts
 from citar.db.models import Base, Server, User
@@ -70,7 +72,7 @@ class Tiers(unittest.TestCase):
         self.ids = {}
         with db.session() as s:
             for handle, role in (("zara", "admin"), ("alice", "user"), ("bob", "user")):
-                u = s.scalar(__import__("sqlalchemy").select(User).where(User.handle == handle))
+                u = s.scalar(select(User).where(User.handle == handle))
                 if u is None:
                     u = accounts.create_user(s, handle=handle, email=f"{handle}@example.com",
                                              password="a long enough phrase", role=role, status="active",
@@ -117,7 +119,7 @@ class Tiers(unittest.TestCase):
         return model_scores(self.manager, {"benchmark": 0.6, "reliability": 0.25, "speed": 0.15}, scope=scope)
 
     def scope(self, viewer: str, own: set, games: set) -> aggregate.Scope:
-        owner_of = {g: v for g, v in games}
+        owner_of = dict(games)
         return aggregate.Scope(viewer=None, game_ids={g for g, _ in games}, own_ids=set(own),
                                pooled_ids={g for g, _ in games} - set(own),
                                contributors={v for _, v in games}, owner_of=owner_of)
