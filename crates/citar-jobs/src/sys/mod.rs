@@ -6,6 +6,10 @@
 //! and the job host's counting allocator ([`alloc`], P4.4.3), whose `GlobalAlloc` implementation
 //! is unsafe by the trait's definition; on Unix also `SIGTERM` to a process (`terminate`, the
 //! helper's console supervisor passing a stop on to its child, P4.3.8, 4-13). [`crate::limits`] decides what to hold and calls these.
+//! And the helper's services (P4.3.9, 4-14): whether this process is elevated or root
+//! ([`is_elevated`], which an unelevated `service install --system` and the tests that could install
+//! anything check), the user's id on Unix (`user_id`: launchd's `gui/<uid>` domain), and on Windows
+//! the service home's DACL (`restrict_tree_to`) and the service manager's entry (`run_service`).
 //!
 //! **Owner-only files.** The helper's machine key (and, in 4-14, the Windows service's home) must
 //! be readable by the account that runs the helper and nobody else:
@@ -36,14 +40,37 @@ mod unix;
 #[allow(unsafe_code)]
 mod windows;
 
-#[cfg(unix)]
-pub use self::unix::terminate;
 #[cfg(target_os = "macos")]
 pub use self::unix::{background, resident_bytes};
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use self::unix::{limit_data, nice};
+#[cfg(unix)]
+pub use self::unix::{terminate, user_id};
 #[cfg(windows)]
-pub use self::windows::{Ace, AceKind, Dacl, JobObject, committed_bytes, current_user_sid, dacl};
+pub use self::windows::{
+    Ace, AceKind, Dacl, JobObject, committed_bytes, current_user_sid, dacl, restrict_tree_to,
+    run_service,
+};
+
+/// Whether this process may install a system service: elevated on Windows (an administrator's
+/// "Run as administrator"), root on Unix.
+///
+/// # Errors
+/// The OS could not say (Windows: the token could not be read).
+pub fn is_elevated() -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        Ok(unix::is_root())
+    }
+    #[cfg(windows)]
+    {
+        windows::is_elevated()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no elevation on this OS"))
+    }
+}
 
 /// Who besides the file's owner can reach a file that should be owner-only, and how to fix it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -237,6 +264,64 @@ mod tests {
         }
         assert!(restrict_dir_to_owner(&after).is_err(), "a file is not a folder");
         std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    #[test]
+    fn this_test_process_is_not_elevated() {
+        // P4.7.1: nothing here runs elevated; were it, the tests that could install a service
+        // would refuse to run. On CI's runners (administrators, root in containers) this is only
+        // read, never asserted.
+        let elevated = is_elevated().expect("the OS says");
+        if std::env::var_os("CI").is_none() {
+            assert!(!elevated, "the test process is elevated");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_restricted_tree_grants_its_principals_alone_on_everything_under_it() {
+        let dir = scratch("tree");
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("helper").join("logs")).expect("made");
+        std::fs::write(home.join("helper.json"), "{}").expect("written");
+        std::fs::write(home.join("helper").join("logs").join("helper.log"), "x").expect("written");
+        // owner-only for this user first, as `citar-helper setup` writes helper.json
+        restrict_to_owner(&home.join("helper.json")).expect("restricted");
+        let me = current_user_sid().expect("the user");
+        // This user stands in for the service's account (an unelevated test cannot give the
+        // objects to Administrators, nor lock itself out of its own scratch folder).
+        let set = restrict_tree_to(&home, None, &["S-1-5-18", "S-1-5-32-544", &me]).expect("set");
+        assert_eq!(set, 5, "the home, helper/, logs/, helper.json and helper.log");
+        for p in [
+            home.clone(),
+            home.join("helper.json"),
+            home.join("helper").join("logs").join("helper.log"),
+        ] {
+            let d = dacl(&p).expect("the DACL");
+            assert!(d.protected, "{} {d:?}", p.display());
+            let aces = d.aces.expect("a DACL");
+            assert!(aces.iter().all(|a| !a.inherited), "{} {aces:?}", p.display());
+            let mut sids: Vec<String> = aces.iter().filter_map(|a| a.sid.clone()).collect();
+            sids.sort();
+            let mut want = vec!["S-1-5-18".to_owned(), "S-1-5-32-544".to_owned(), me.clone()];
+            want.sort();
+            assert_eq!(sids, want, "{}", p.display());
+        }
+        // What is made there later inherits the folder's entries.
+        std::fs::write(home.join("later.json"), "{}").expect("written");
+        assert_eq!(exposure(&home.join("later.json")).expect("read"), None);
+        assert!(restrict_tree_to(&home.join("helper.json"), None, &["S-1-5-18"]).is_err());
+        restrict_dir_to_owner(&home).expect("given back");
+        std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_console_process_is_no_service() {
+        // `citar-helper service run` from a console: the service manager did not start it.
+        let e =
+            run_service("citar-helper-test", Box::new(|| {}), Box::new(|| 0)).expect_err("refused");
+        assert_eq!(e.raw_os_error(), Some(1063), "{e}");
     }
 
     #[test]

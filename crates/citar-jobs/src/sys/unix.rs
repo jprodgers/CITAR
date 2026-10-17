@@ -67,6 +67,22 @@ pub fn terminate(pid: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// The real user id of this process (`getuid`): launchd's per-user domain is `gui/<uid>`, and
+/// systemd's per-user runtime folder `/run/user/<uid>` (the helper's service installation, P4.3.9).
+#[must_use]
+pub fn user_id() -> u32 {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+/// Whether this process has root's privileges (its effective user id is 0): a system service
+/// is installed only so, and the helper says how rather than elevating (P4.3.9).
+#[must_use]
+pub fn is_root() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
 /// Sets this process's nice value to `n` (higher is lower priority; raising it needs no
 /// privilege).
 ///
