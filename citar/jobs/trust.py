@@ -407,6 +407,35 @@ def class_suspect(speed: Optional[float], others: list) -> Optional[float]:
     return median
 
 
+def card(row, *, admin: bool, cpu_class: Optional[dict] = None) -> dict:
+    """A machine's trust as the Servers page shows it (design/phase4-helper.md P4.5.11): its tier with its verified
+    count, streak and mismatches to its owner; to an administrator (``admin``) also its last mismatch with its evidence,
+    its measured speed beside its CPU class (``cpu_class``: ``{id, name, pinned}``), its ``verifier`` mark, when its
+    standing began, the promotion it earned and the replication asked."""
+    trust = dict(getattr(row, "trust", None) or {})
+    out = {"tier": getattr(row, "trust_tier", None) or "new", "verified": int(trust.get("verified") or 0),
+           "streak": int(trust.get("streak") or 0), "mismatches": int(trust.get("mismatches") or 0)}
+    if admin:
+        out.update({k: trust.get(k) for k in ("last_mismatch", "speed", "since", "promoted", "quarantined_at",
+                                              "replicate")})
+        out["verifier"] = bool(trust.get("verifier"))
+        out["cpu_class"] = cpu_class
+    return out
+
+
+def cpu_class_of(session, row) -> Optional[dict]:
+    """The CPU class a machine is priced by (``{id, name, pinned}``), the one an administrator pinned or its
+    hardware's (``ledger.class_of``)."""
+    from sqlalchemy import select
+    from citar import ledger
+    from citar.db.models import HardwareClass
+    classes = [ledger.class_dict(c) for c in session.scalars(select(HardwareClass).where(HardwareClass.kind == "cpu"))]
+    facts = {"hardware": (row.config or {}).get("hardware") or {}, "class_override": bool(row.class_override),
+             "gpu_class_id": row.gpu_class_id, "cpu_class_id": row.cpu_class_id}
+    cls = ledger.class_of(facts, "cpu", classes)
+    return {"id": cls["id"], "name": cls["name"], "pinned": bool(row.class_override)} if cls else None
+
+
 # ---------------------------------------------------------------------------- rule 11: model results by tier
 
 def vouched(tier: Optional[str], *, site: bool = False, owner_admin: bool = False) -> bool:

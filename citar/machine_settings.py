@@ -675,6 +675,11 @@ def _class_entry(c: Optional[dict]) -> Optional[dict]:
     return None if c is None else {"id": c["id"], "name": c["name"], "kind": c["kind"], "rate": c["rate"]}
 
 
+def _trust_card(session, row, admin: bool) -> dict:
+    from .jobs import trust
+    return trust.card(row, admin=admin, cpu_class=trust.cpu_class_of(session, row) if admin else None)
+
+
 def client(session, row, viewer, *, in_effect: Optional[dict] = None) -> dict:
     """The dialog's read of a machine (``GET /api/machines/{id}/settings``): its capabilities and slots (and what the
     prompt scheduler has in effect for it, ``in_effect``), its modes, its helper's last report with the differences
@@ -723,6 +728,9 @@ def client(session, row, viewer, *, in_effect: Optional[dict] = None) -> dict:
         "class": {"gpu": _class_entry(gpu), "cpu": _class_entry(cpu), "pinned": bool(row.class_override),
                   "kinds": ["api"] if api else ["gpu", "cpu"]},
         "trust_tier": row.trust_tier or "new",
+        # its trust as verification has it (design/phase4-helper.md P4.5.11): counters to its owner, the evidence, the
+        # measured speed and the verifier mark to administrators
+        "trust": _trust_card(session, row, admin),
         "can_admin": admin,
         # the CPU its helper lends in effect, and the grants that lend it for lab runs (package 4-10)
         "cpu_helper": helper_cpu(row),

@@ -276,6 +276,7 @@ class Exp:
     owner_known: bool = False                       # its item was found (an owner, or the server's collection)
     first_seen: float = 0.0                         # when the dispatcher first read it
     probe: Optional["Job"] = None                   # its next game, which no executor would take now (no row)
+    withdrawn: set = field(default_factory=set)     # games whose result was withdrawn and played again (rule 8)
 
     @property
     def kind(self) -> str:
@@ -643,6 +644,10 @@ class Dispatcher:
                   priority=int(spec.get("priority") or 0), submitted=str(spec.get("submitted") or ""),
                   owner_known=known, first_seen=self.clock(), owner_checked=self.clock())
         self.exps[exp.name] = exp
+        for (ref,) in s.execute(select(CpuJob.ref).where(CpuJob.item_kind == "lab_experiment",
+                                                         CpuJob.item_ref == exp.name, CpuJob.state == "withdrawn")):
+            if store.game_of(ref) is not None:
+                exp.withdrawn.add(store.game_of(ref))
         for job in s.scalars(select(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
                                                  CpuJob.state.not_in(("cancelled", "withdrawn")))):
             i = store.game_of(job.ref)
@@ -2189,6 +2194,7 @@ class Dispatcher:
         self.jobs.pop(jrow.id, None)
         exp = self.exps.get(name)
         if exp is not None and i is not None:
+            exp.withdrawn.add(i)
             exp.settled.discard(i)
             exp.has_job.discard(i)
             exp.cursor = min(exp.cursor, i)
@@ -3005,7 +3011,7 @@ class Dispatcher:
         for name, exp in self.exps.items():
             info = dict(per_exp.get(name, {"queued": 0, "running": 0, "settling": 0, "verifying": 0}))
             info.update({"settled": len(exp.settled), "failed": sorted(exp.failed), "refused": exp.refused or None,
-                         "owner": exp.owner_id, "job_kind": exp.job_kind})
+                         "owner": exp.owner_id, "job_kind": exp.job_kind, "withdrawn": len(exp.withdrawn)})
             if not info["running"]:
                 text, parts = None, []
                 if name in firsts:

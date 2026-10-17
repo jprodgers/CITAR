@@ -143,6 +143,10 @@ def lab_jobs(request: Request, exp: str = Query(..., min_length=1, max_length=12
                           "minutes": round(r.get("minutes") or 0.0, 2)})
         if job.state == "failed" and last is not None and last.error:
             entry["error"] = (last.error or {}).get("message")
+        if admin and job.state == "settling" and not any(
+                r.role != "primary" and r.state in ("offered", "running") for r in runs):
+            # its result waits for a replica no verifier plays yet (P4.5.11: why nothing settles it)
+            entry["waiting"] = "waiting for a verifier"
         if admin:
             entry["runs"] = [{"run": r.id, "machine": r.machine_id, "executor": r.executor, "role": r.role,
                               "state": r.state, "verdict": r.verdict, "error": r.error,
