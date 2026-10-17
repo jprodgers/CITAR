@@ -357,7 +357,7 @@ class Dispatcher:
         self._forced = 0
         self._requests: deque = deque()     # administrators' retries and trust changes, served at the next tick
         self._share: dict = {}              # executor -> (new machines' replicas, runs) while both waited (rule 3)
-        self._hands_at, self._hands_cache = -1, None
+        self._hands_at, self._hands_cache, self._settling_by = -1, None, {}
         self.jobs_build = engine_api.jobs_build()
         self.started_at = utcnow()
         for e in self._own:
@@ -2220,17 +2220,19 @@ class Dispatcher:
 
     def _hands(self) -> dict:
         """Each helper machine's work in hand (its runs in flight and its results waiting for a replica), counted once
-        a tick."""
+        a tick (with the results waiting alone as ``_settling_by``)."""
         if self._hands_at == self.ticks and self._hands_cache is not None:
             return self._hands_cache
         hands: dict = defaultdict(int)
+        settling: dict = defaultdict(int)
         for r in self.runs.values():
             if r.role == "primary":
                 hands[r.machine] += 1
         for j in self.jobs.values():
             if j.state == "settling" and j.primary_machine:
                 hands[j.primary_machine] += 1
-        self._hands_at, self._hands_cache = self.ticks, hands
+                settling[j.primary_machine] += 1
+        self._hands_at, self._hands_cache, self._settling_by = self.ticks, hands, settling
         return hands
 
     def _held_new(self, e) -> Optional[str]:
@@ -2245,7 +2247,7 @@ class Dispatcher:
         if not any(x.verifiable and x.want.get("enabled", True) for x in local):
             # its every result waits for a replica on this server, which cannot play one now
             return "waiting for a verifier: this server's job host does not verify now"
-        waiting = sum(1 for j in self.jobs.values() if j.state == "settling" and j.primary_machine == e.id)
+        waiting = self._settling_by.get(e.id, 0)
         if waiting >= max(1, int(e.threads)):
             return f"waiting for a verifier: {waiting} of its results wait for their replicas"
         owner = facts.get("owner_id")

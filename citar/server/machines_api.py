@@ -226,6 +226,8 @@ def machine_trust(sid: str, request: Request, body: dict = Body(...), me: User =
     if body.get("verifier") and (tier or row.trust_tier or "new") != "trusted":
         raise HTTPException(400, "Only a trusted machine verifies others' results.")
     s.commit()
+    from concurrent.futures import TimeoutError as Late
+
     from ..jobs import dispatcher as jobs_dispatcher
     try:
         jobs_dispatcher.change_trust(sid, tier=tier, withdraw=bool(body.get("withdraw")),
@@ -234,6 +236,9 @@ def machine_trust(sid: str, request: Request, body: dict = Body(...), me: User =
         raise HTTPException(400, str(exc)) from None
     except LookupError:
         raise HTTPException(404, "No such server.") from None
+    except Late:
+        raise HTTPException(503, "The job dispatcher did not make the change in time; it will at its next tick: "
+                                 "read the machine again shortly.") from None
     s.expire_all()
     return _answer(s, s.get(Server, sid), me)
 
@@ -248,11 +253,15 @@ def machine_replicate(sid: str, request: Request, body: dict = Body(...), me: Us
     if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= REPLICATE_MAX:
         raise HTTPException(400, f"The body is {{\"n\": 1 to {REPLICATE_MAX}}}.")
     s.commit()
+    from concurrent.futures import TimeoutError as Late
+
     from ..jobs import dispatcher as jobs_dispatcher
     try:
         out = jobs_dispatcher.replicate_next(sid, n, actor_id=me.id)
     except LookupError:
         raise HTTPException(404, "No such server.") from None
+    except Late:
+        raise HTTPException(503, "The job dispatcher did not ask for them in time; it will at its next tick.") from None
     return {"machine": sid, **out}
 
 
