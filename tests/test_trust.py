@@ -188,6 +188,42 @@ class Tiers(unittest.TestCase):
         self.assertFalse(T.is_verifier("provisional", {"verifier": True}))
 
 
+class Speed(unittest.TestCase):
+    """A machine's measured speed and the class it is compared with (P4.5.7), as 4-12's review left them: a helper's
+    figures reach only so far, and the bar is set by machines that did not over-report, trusted ones first."""
+
+    NOW = datetime(2026, 10, 17, tzinfo=timezone.utc)
+
+    def machine(self, speed: float, tier: str = "new", overreported_days_ago: float | None = None):
+        from types import SimpleNamespace
+        flags = {}
+        if overreported_days_ago is not None:
+            flags["overreported_cpu"] = {"count": 1, "last": (self.NOW - timedelta(days=overreported_days_ago))
+                                         .isoformat()}
+        return SimpleNamespace(trust_tier=tier, trust={"speed": speed}, flags=flags)
+
+    def test_a_sample_is_held_within_its_bounds(self):
+        self.assertEqual(T.speed_sample({}, 1.0, 1000.0)["speed"], T.SPEED_MIN, "cpu:1000")
+        self.assertEqual(T.speed_sample({}, 1000.0, 1.0)["speed"], T.SPEED_MAX)
+        self.assertEqual((T.SPEED_MIN, T.SPEED_MAX), (0.05, 20.0))
+        self.assertEqual(T.speed_sample({}, 1.0, 0.1), {}, "under the floor: nothing")
+
+    def test_the_bar_leaves_out_over_reporters_and_prefers_trusted_machines(self):
+        cheat = self.machine(0.05, overreported_days_ago=2)
+        old = self.machine(0.9, overreported_days_ago=40)       # past overreport_days: counted again
+        honest = self.machine(1.0)
+        self.assertEqual(T.class_bar([cheat, old, honest], self.NOW, 30), [old, honest])
+        fast = [self.machine(5.0), self.machine(5.0)]           # a group under-reporting its CPU
+        trusted = self.machine(1.0, "trusted")
+        self.assertEqual(T.class_bar(fast + [trusted], self.NOW, 30), [trusted])
+        peers = [m.trust["speed"] for m in T.class_bar(fast + [trusted], self.NOW, 30)]
+        self.assertIsNone(T.class_suspect(0.6, peers), "an honest machine at 0.6 is in line with the trusted one")
+        self.assertEqual(T.class_suspect(0.6, [5.0, 5.0, 1.0]), 5.0, "as the under-reporters would have it")
+        self.assertEqual(T.class_bar(fast, self.NOW, 30), fast, "no trusted machine: every one that did not "
+                                                                 "over-report")
+        self.assertEqual(T.class_bar([cheat], self.NOW, 30), [])
+
+
 class Sampling(unittest.TestCase):
     N = 10_000
 

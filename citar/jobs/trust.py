@@ -359,8 +359,10 @@ SPEED_SAMPLES = 25
 #: A run whose CPU seconds (its own or its reference's) are under this says nothing of a machine's speed: Windows
 #: counts a thread's CPU time in steps of 15.6 ms, so a shorter game's figures are mostly the timer's grain.
 SPEED_FLOOR_S = 0.2
-#: A measured speed is held within these bounds (a reference ten thousand times faster than a machine is a figure).
-SPEED_MIN, SPEED_MAX = 0.001, 1000.0
+#: A sample of a measured speed is held within these bounds: a machine twenty times faster or slower than the reference
+#: is more likely its helper's figure than its hardware, and one sample of ``cpu:1000`` must not reach far (4-12's
+#: review). A run's deadline holds the speed it is scaled by tighter still (``dispatcher.DEADLINE_SPEED_MIN``).
+SPEED_MIN, SPEED_MAX = 0.05, 20.0
 #: A machine whose measured speed is under this share of the median of the other measured machines of its CPU class
 #: is ``class_suspect`` (P4.5.7): its class prices its work as faster than it is, or its helper over-reports.
 CLASS_SUSPECT_SHARE = 0.5
@@ -400,10 +402,24 @@ def speed_of(trust: Optional[dict]) -> Optional[float]:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
 
 
+def class_bar(others: list, now: Optional[datetime] = None, days: Optional[int] = None) -> list:
+    """The machines a machine's measured speed is compared with (``others``: the other measured machines of its CPU
+    class, rows with ``trust_tier``, ``trust`` and ``flags``): those that did not over-report their CPU within ``days``
+    (an over-reporter's measure is low by its own report, and would hide a slow peer), and of them the ``trusted`` ones
+    alone when there are any. A measured speed is the helper's own report over the reference's: a group of machines
+    under-reporting would raise the class's median and flag honest peers; a trusted machine has made
+    ``promote_verified`` verified matches first (4-12's review)."""
+    now = now or datetime.now(timezone.utc)
+    days = int(settings()["overreport_days"]) if days is None else days
+    honest = [o for o in others if not overreported(dict(getattr(o, "flags", None) or {}), now, days)]
+    trusted = [o for o in honest if (getattr(o, "trust_tier", None) or "new") == "trusted"]
+    return trusted or honest
+
+
 def class_suspect(speed: Optional[float], others: list) -> Optional[float]:
     """Whether a machine's measured ``speed`` is out of line with its CPU class (P4.5.7): under
-    ``CLASS_SUSPECT_SHARE`` of the median speed of ``others`` (the other measured machines of its class). Returns that
-    median when it is, else None (no speed, no other measured machine, or in line)."""
+    ``CLASS_SUSPECT_SHARE`` of the median speed of ``others`` (the measured speeds of :func:`class_bar`'s machines).
+    Returns that median when it is, else None (no speed, no other measured machine, or in line)."""
     if speed is None:
         return None
     median = _median([o for o in others if isinstance(o, (int, float)) and o > 0])

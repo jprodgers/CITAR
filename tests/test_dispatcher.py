@@ -796,6 +796,9 @@ class Deadlines(Lab):
             ((100.0, 50, 1, 1, 1.0), 2000.0),               # the VPS: one vCPU at half
             ((100.0, 100, 4, 4, 2.0), 500.0),               # a machine measured twice as fast
             ((100.0, 100, 4, 4, 0.5), 2000.0),              # half as fast
+            ((100.0, 100, 4, 4, 0.001), 4000.0),            # an over-reporter's own measure: a quarter at most
+            ((100.0, 100, 4, 4, 1000.0), 300.0),            # four times as fast at most (the floor here)
+            ((1000.0, 100, 4, 4, 1000.0), 2500.0),
             ((5000.0, 100, 4, 4, 1.0), 6 * 3600.0),         # the 6-hour ceiling
             ((0.0, 0, 0, 0, 0.0), 300.0),                   # nothing known: the floor
         ]

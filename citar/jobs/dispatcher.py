@@ -129,6 +129,10 @@ SILENT_SECONDS = 300.0
 EXPIRY_GRACE_SECONDS = 60.0
 #: A deadline is ten times the expected time, within these bounds (P4.5.5).
 DEADLINE_FACTOR, DEADLINE_MIN, DEADLINE_MAX = 10.0, 300.0, 6 * 3600.0
+#: The measured speed a deadline is scaled by is held within these: a measured speed is the reference's CPU over what
+#: the helper reported, so an over-reporting helper would otherwise slow its own measure and stretch its deadlines
+#: toward the ceiling, holding the games it takes for hours (4-12's review).
+DEADLINE_SPEED_MIN, DEADLINE_SPEED_MAX = 0.25, 4.0
 #: A machine with this many expired or abandoned runs within the window gets no offer for the window (P4.5.5).
 ABANDONS, ABANDON_WINDOW = 3, 3600.0
 #: The observed bound on a run's CPU seconds: a game is one thread (P4.5.7).
@@ -163,8 +167,9 @@ def share(cpu_percent: float, cpus: int, threads: int) -> float:
 def deadline_s(cost_cpu_s: float, cpu_percent: float, cpus: int, threads: int, speed: float = 1.0) -> float:
     """A run's deadline (P4.5.5): ten times what it is expected to take, ``clamp(10 x expected, 300 s, 6 h)``, where
     expected is the job's reference cost divided by the executor's share of a core per game and by its measured
-    speed (``trust.speed``, 1 until known)."""
-    expected = max(0.0, float(cost_cpu_s)) / share(cpu_percent, cpus, threads) / max(1e-3, float(speed or 1.0))
+    speed (``trust.speed``, 1 until known, held from ``DEADLINE_SPEED_MIN`` to ``DEADLINE_SPEED_MAX``)."""
+    speed = min(DEADLINE_SPEED_MAX, max(DEADLINE_SPEED_MIN, float(speed or 1.0)))
+    expected = max(0.0, float(cost_cpu_s)) / share(cpu_percent, cpus, threads) / speed
     return float(min(DEADLINE_MAX, max(DEADLINE_MIN, DEADLINE_FACTOR * expected)))
 
 
@@ -2031,7 +2036,8 @@ class Dispatcher:
 
     def _class_check(self, s, srow) -> None:
         """``flags.class_suspect`` on the measured machines of ``srow``'s CPU class (P4.5.7): each one whose measured
-        speed (``trust.speed``) is under half the median of the others' is flagged, for an administrator to pin its
+        speed (``trust.speed``) is under half the median of the others' (``trust.class_bar``: those that did not
+        over-report their CPU, the trusted ones alone when there are any) is flagged, for an administrator to pin its
         class (``class_override``); one back in line loses the flag. Quarantined machines are left out of it. The
         first flag of a machine writes an audit row."""
         from sqlalchemy import select
@@ -2050,15 +2056,18 @@ class Dispatcher:
                  if (r.trust_tier or "new") != "quarantined" and T.speed_of(r.trust) is not None
                  and class_id(r) == mine]
         name = next((c["name"] for c in classes if c["id"] == mine), mine)
-        at = utcnow().isoformat()
+        now = utcnow()
+        at = now.isoformat()
+        days = int(T.settings()["overreport_days"])
         for r in peers:
             speed = T.speed_of(r.trust)
-            median = T.class_suspect(speed, [T.speed_of(o.trust) for o in peers if o.id != r.id])
+            bar = T.class_bar([o for o in peers if o.id != r.id], now, days)
+            median = T.class_suspect(speed, [T.speed_of(o.trust) for o in bar])
             flags = dict(r.flags or {})
             had = isinstance(flags.get("class_suspect"), dict)
             if median is not None:
                 flags["class_suspect"] = {"speed": speed, "class_median": round(median, 3), "class": mine,
-                                          "class_name": name, "peers": len(peers) - 1, "at": at}
+                                          "class_name": name, "peers": len(bar), "at": at}
                 if not had:
                     audit.record(s, "server.class_suspect", object_type="server", object_id=r.id, speed=speed,
                                  class_median=round(median, 3), cpu_class=mine)
