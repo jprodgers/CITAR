@@ -1728,7 +1728,8 @@ class Dispatcher:
         (or, re-opened, its line's verification restored), the primary's machine's counters and tier moved (rule 6).
         The runs' results and digests are pruned once its line is written."""
         from citar.db.models import Server
-        crash = "crash" in (primary.result or {})
+        # a re-opened job's result was pruned with its line written: its mark says whether it was a crash
+        crash = "crash" in (primary.result or {}) or bool((primary.error or {}).get("crashed"))
         row.state = "crashed" if crash else "accepted"
         row.accepted_run, row.result_hash = primary.id, primary.result_hash
         primary.verdict, primary.error = "match", None
@@ -1769,6 +1770,11 @@ class Dispatcher:
                     self._settle_line(exp, line, job.i, primary.id)
                 else:
                     self._prune.append(primary.id)
+                if crash and not job.reopened:
+                    # a crash is final, recorded once it is accepted, as a crash this server played is
+                    with open(lab.LAB / "crashes.log", "a", encoding="utf-8") as fh:
+                        fh.write(f"--- {datetime.now():%Y-%m-%d %H:%M} {job.exp} #{job.i} final\n"
+                                 f"{line.get('crash') or ''}\n")
             _ledger().verdicts(updates)
             lab.log(f"{job.exp} #{job.i}: verified (its replica reproduced it)"
                     + (f"; {srow.name if srow is not None else primary.machine_id} is now {promoted}"
@@ -1963,9 +1969,10 @@ class Dispatcher:
             if prow is None or prow.verdict != "match":
                 continue
             lost[prow.machine_id] += 1
+            crashed = jrow.state == "crashed"
             jrow.state = "settling"
             prow.verdict = "unchecked"
-            prow.error = {"code": "replicating", "why": "reopened", "local_only": True}
+            prow.error = {"code": "replicating", "why": "reopened", "local_only": True, "crashed": crashed}
             relabel.setdefault((jrow.item_ref or "", jrow.kind), {})[prow.id] = "unverified"
             after.append(lambda ref=jrow.ref, rid=prow.id: _ledger().verdicts(
                 [{"activity": ref, "request_id": rid, "verification": "unverified"}]))
