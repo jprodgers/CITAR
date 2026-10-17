@@ -624,6 +624,79 @@ class CollusionAndLoad(Verify):
         self.assertEqual({r.job_id for r in fresh}, jobs)
 
 
+class Tiebreak(Verify):
+    """Rule 5: a remote verifier that disagrees with a primary asks this server for a tiebreak, and every machine that
+    disagrees with it is quarantined (a verifier can be wrong too)."""
+
+    def scenario(self, cheat: str) -> tuple:
+        self.settings(provisional_rate=1.0)
+        prov = Lender(self, "Bob's provisional", "bob", tier="provisional")
+        verifier = Lender(self, "Carol's verifier", "carol", tier="trusted", seed=TEST_KEY_SEED + 5)
+        D.change_trust(verifier.sid, verifier=True, actor_id=self.ids["zara"])
+        self.submit("bob", duels("tied", 1))
+        host = self.verifier()
+        host.state = "off"                     # its replica goes to carol's verifier
+        d = self.make([host])
+        cheater = prov if cheat == "primary" else verifier
+        self.drive(d, [prov, verifier], fault=lambda lender, n: "result" if lender is cheater else "",
+                   until=lambda: any(r.role == "replica" and r.state == "done" for r in self.runs()))
+        (replica,) = [r for r in self.runs() if r.role == "replica"]
+        self.assertEqual((replica.machine_id, replica.verdict), (verifier.sid, "mismatch"))
+        self.assertEqual(d.jobs[replica.job_id].need, "tiebreak")
+        self.assertEqual([r for r in self.runs() if r.role == "tiebreak"], [], "this server breaks it, once it can")
+        host.state = "ready"
+        self.drive(d, [prov, verifier], until=lambda: any(r.role == "tiebreak" and r.state == "done"
+                                                          for r in self.runs()) and replica.job_id not in d.jobs)
+        (tie,) = [r for r in self.runs() if r.role == "tiebreak"]
+        self.assertEqual((tie.machine_id, tie.verdict), ("sv_host", "reference"))
+        return prov, verifier, replica
+
+    def test_a_verifier_that_disagrees_with_this_servers_tiebreak_is_quarantined(self):
+        prov, verifier, replica = self.scenario("verifier")
+        self.assertEqual(verifier.row().trust_tier, "quarantined")
+        self.assertEqual(verifier.row().trust["last_mismatch"]["against"], "this server (a tiebreak)")
+        self.assertEqual(prov.row().trust_tier, "provisional")
+        self.assertEqual(prov.row().trust["verified"], 1, "its match against this server's tiebreak counts")
+        job = self.job_of(replica.id)
+        self.assertEqual(job.state, "accepted")
+        (line,) = lab.load_results("tied")
+        self.assertEqual(line["executor"]["verification"], "verified")
+        self.assertEqual(self.event(replica.id).verification, "rejected", "the wrong replica earns nothing")
+
+    def test_a_primary_that_disagrees_with_the_tiebreak_is_quarantined_and_its_verifier_kept(self):
+        prov, verifier, replica = self.scenario("primary")
+        self.assertEqual(prov.row().trust_tier, "quarantined")
+        self.assertEqual(verifier.row().trust_tier, "trusted")
+        self.assertEqual(self.event(replica.id).verification, "verified", "the right replica")
+        self.assertEqual(self.job_of(replica.id).state, "withdrawn")
+        self.assertEqual(lab.load_results("tied"), [], "played again elsewhere")
+
+
+class Restart(Verify):
+    """A job waiting for its replica when the server stops waits for it again after the start (its primary's
+    ``replicating`` mark says what it waits for), and a re-opened job keeps its line."""
+
+    def test_a_settling_job_is_settled_after_a_restart(self):
+        bob = Lender(self, "Bob's new", "bob")
+        self.submit("bob", duels("restarted", 1))
+        host = self.verifier()
+        host.auto = False
+        d = self.make([host])
+        self.drive(d, [bob], until=lambda: bool(host.offers))
+        (run, job, _dl) = host.offers[0]
+        self.assertEqual((job.state, job.need, job.local_only, job.of_new), ("settling", "replica", True, True))
+        d.stop()                                # the server stops: its replica run goes with it
+        D.install(None)
+        again = self.verifier()
+        d2 = self.make([again])
+        self.drive(d2, [bob], until=lambda: (lab.DONE / "restarted.json").exists())
+        (line,) = lab.load_results("restarted")
+        self.assertEqual(line["executor"]["verification"], "verified")
+        roles = [(r.role, r.state, r.machine_id) for r in self.runs()]
+        self.assertIn(("replica", "aborted", "sv_host"), roles, "the one in flight at the stop")
+        self.assertIn(("replica", "done", "sv_host"), roles, "a fresh one after the start")
+
+
 class Promotion(Verify):
     """Gate 6: an honest helper climbs new -> provisional -> trusted, an audit row each."""
 
