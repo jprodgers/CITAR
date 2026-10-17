@@ -27,12 +27,16 @@ from __future__ import annotations
 import tests  # noqa: F401  (temporary saves folder and registry; must be imported before citar)
 
 import json
+import os
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 from sqlalchemy import select
 
 import tests.test_dispatcher as TD
-from citar import _engine, db, engine_api, lab, servers
+from citar import _engine, db, engine_api, lab, ledger, servers, settings
 from citar.bots import ratings
 from citar.db.models import AuditLog, BudgetEntry, ComputeEvent, CpuJob, CpuJobRun, Server, ServerGroup, User
 from citar.jobs import dispatcher as D, remote, trust as T
@@ -40,6 +44,35 @@ from tests import has_test_ops
 from tests.helperfake import claim_of, sign_claim, test_key, TEST_KEY_SEED
 
 duels = TD.duels
+
+#: This module's own folder and database: ``TD.Lab`` makes each test's lab folders in ``TD._TMP``, which
+#: ``tests.test_dispatcher``'s own ``tearDownModule`` removes when that module ran first in this process.
+_TMP = Path(tempfile.mkdtemp(prefix="citar_verification_"))
+_SAVED: dict = {}
+
+
+def setUpModule():
+    _SAVED.update({k: os.environ.get(k) for k in ("CITAR_DATA_DIR", "CITAR_DB_URL")})
+    _SAVED["_tmp"] = TD._TMP
+    os.environ["CITAR_DATA_DIR"] = str(_TMP)
+    os.environ["CITAR_DB_URL"] = "sqlite:///" + (_TMP / "test.db").as_posix()
+    TD._TMP = _TMP
+    settings.reset()
+
+
+def tearDownModule():
+    ledger.reset()
+    db.dispose()
+    TD._TMP = _SAVED.pop("_tmp")
+    for k, v in _SAVED.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    _SAVED.clear()
+    settings.reset()
+    servers.invalidate()
+    shutil.rmtree(_TMP, ignore_errors=True)
 
 
 def altered_score(out: dict, kind: str) -> dict:
