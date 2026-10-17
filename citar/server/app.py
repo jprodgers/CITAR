@@ -2080,11 +2080,15 @@ def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = De
     seen = items.listed(sdb, "lab_experiment", me, slug=key)
     if seen is None:
         return out
+    for e in out.get("experiments") or []:
+        # a game whose result waits for its replica is done to a member, and the replica unseen (P4.5.8 rule 2)
+        e["done"] = int(e.get("done") or 0) + int(e.pop("settling", 0) or 0)
+        e.pop("verifying", None)
     out["experiments"] = _with_perms(sdb, "lab_experiment", me,
                                      [e for e in out.get("experiments", []) if e.get("name") in seen], key="name",
                                      slug=key)
-    out["running"] = [{k: v for k, v in r.items() if k != "machine"} for r in out.get("running", [])
-                      if r.get("exp") in seen]
+    out["running"] = [{k: v for k, v in r.items() if k not in ("machine", "role")} for r in out.get("running", [])
+                      if r.get("exp") in seen and r.get("role", "primary") == "primary"]
     disp = dict(out.get("dispatcher") or {})
     disp["executors"] = [told_executor(e, name) for e in disp.get("executors") or []]
     out["dispatcher"] = disp
@@ -2187,6 +2191,11 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db, s
         overview = {"experiments": [], "runner": {}}
     experiments = sorted([e for e in overview.get("experiments", []) if e.get("state") != "complete"],
                          key=lambda e: (-(e.get("priority") or 0), e.get("submitted") or ""))
+    if not admin:
+        for e in experiments:
+            # a game whose result waits for its replica is done to a member (P4.5.8 rule 2)
+            e["done"] = int(e.get("done") or 0) + int(e.pop("settling", 0) or 0)
+            e.pop("verifying", None)
     from .jobs_api import _namer, told_waiting
     machine_name = _namer(sdb, me)
     for e in experiments:
@@ -2231,6 +2240,8 @@ def _cpu_executors(sdb: DbSession, user, overview: dict, admin: bool, cache: dic
         for r in overview.get("running") or []:
             if r.get("machine") != e.get("machine"):
                 continue
+            if not admin and r.get("role", "primary") != "primary":
+                continue            # a verification run: administrators' alone (P4.5.8 rule 2)
             key = ("lab", r.get("exp"))
             if key not in cache:
                 cache[key] = _queue_access(sdb, user, "lab", r.get("exp"))
@@ -2244,6 +2255,7 @@ def _cpu_executors(sdb: DbSession, user, overview: dict, admin: bool, cache: dic
             available = HOST_STOPPED
         entry = {"name": name(e.get("machine"), e.get("kind"))["name"],
                  "kind": e.get("kind"), "on": e.get("on"), "state": e.get("state"),
+                 "running": int(e.get("running") or 0) - (0 if admin else int(e.get("verifying") or 0)),
                  "threads": e.get("threads"), "cpu_percent": e.get("cpu_percent"),
                  "memory_mb": e.get("memory_mb"), "held": e.get("held") if admin else None,
                  "available": available, "benchmark": e.get("benchmark"), "games": games}

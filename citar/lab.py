@@ -685,7 +685,8 @@ def overview() -> dict:
         info = exps_live.get(exp["name"], {}) if state == "queued" else {}
         done = fig["done"]
         per_game = fig["per_game"]
-        mine = [r for r in running if r["exp"] == exp["name"]]
+        # its games playing (a verification run, administrators' alone, is counted apart: P4.5.8 rule 2)
+        mine = [r for r in running if r["exp"] == exp["name"] and r.get("role", "primary") == "primary"]
         failing = sorted(set(info.get("failed") or []) - fig["games"])
         why = info.get("refused") or ""
         if why:
@@ -716,6 +717,9 @@ def overview() -> dict:
             "minutes_per_game": round(per_game, 1) if per_game else None, "remaining_minutes": round(left, 1),
             "submitted": exp.get("submitted"), "finished": fig["finished"],
             "refused": why or None, "waiting": info.get("waiting") or None,
+            # its games whose results wait for a replica (done to everyone but administrators), and the verification
+            # runs playing for them
+            "settling": int(info.get("settling") or 0), "verifying": int(info.get("verifying") or 0),
             # each executor's reason, for the routes to name each one as the viewer may be told it
             "waiting_on": info.get("waiting_on") or [],
         })

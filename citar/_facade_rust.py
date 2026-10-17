@@ -56,7 +56,7 @@ __all__ = [
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
-    "jobs_build", "run_job_host",
+    "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
     "build_info", "key_fingerprint",
     "DEBUG_ACTIONS", "EngineGame",
     "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",

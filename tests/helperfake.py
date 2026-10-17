@@ -65,9 +65,51 @@ class FakeClock:
 
 
 def key_b64(seed: int = 0) -> str:
-    """A machine key's public half, base64 of 32 bytes (not a real ed25519 key: the hub never verifies one before
-    package 4-11)."""
+    """A machine key's public half, base64 of 32 bytes: no real ed25519 key, for a hello whose claims nothing checks
+    (a machine that plays no job). A machine that plays jobs registers ``test_key``'s, whose claims verify."""
     return base64.b64encode(bytes((seed + i) % 256 for i in range(32))).decode("ascii")
+
+
+#: The throwaway machine key the fake helpers sign their claims with (a seed of the extension's test key).
+TEST_KEY_SEED = 11
+
+
+def test_key(seed: int = TEST_KEY_SEED) -> str:
+    """A throwaway machine key's public half (base64), as a hello registers it: the extension's test operations make
+    it from ``seed``, never stored anywhere."""
+    from citar import _engine
+    return _engine.jobs.test_public_key(seed)
+
+
+def sign_claim(claim: dict, seed: int = TEST_KEY_SEED) -> str:
+    """``claim`` signed by the throwaway key of ``seed``, as a helper signs its own (P4.4.4)."""
+    from citar import _engine
+    return _engine.jobs.test_sign_claim(seed, json.dumps(claim).encode())
+
+
+def claim_of(offer: dict, out: dict, machine: str, *, seed: int = TEST_KEY_SEED) -> dict:
+    """The claim a correct helper makes for ``offer``'s run whose outcome is ``out`` (``engine_api.run_job``'s:
+    ``result_hash`` and ``chain``) on ``machine``, its key the throwaway one of ``seed``."""
+    from citar import engine_api
+    bots = engine_api.check_job_spec(offer["kind"], offer["spec"])["bots"]
+    return {"v": 1, "job": offer["job"], "run": offer["run"], "machine": machine, "kind": offer["kind"],
+            "spec_hash": offer["spec_hash"], "jobs_build": offer["jobs_build"], "bots": bots,
+            "result_hash": out["result_hash"], "chain_head": out["chain"]["head"], "rounds": out["chain"]["rounds"],
+            "key": test_key(seed)}
+
+
+def result_frame(offer: dict, out: dict, machine: str, *, seed: int = TEST_KEY_SEED, cpu_s: Optional[float] = None,
+                 wall_s: Optional[float] = None, peak_mb: float = 3.5, paused_s: float = 0.0,
+                 claim: Optional[dict] = None) -> dict:
+    """A helper's ``job_result`` for ``offer``'s run whose outcome is ``out``, its claim (``claim_of``, unless
+    ``claim`` is given) signed by the throwaway key of ``seed``."""
+    claim = claim if claim is not None else claim_of(offer, out, machine, seed=seed)
+    return {"t": "job_result", "run": offer["run"],
+            "outcome": {"result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"],
+                        "cpu_s": out["cpu_s"] if cpu_s is None else cpu_s,
+                        "wall_s": out["wall_s"] if wall_s is None else wall_s, "paused_s": paused_s,
+                        "peak_mb": peak_mb},
+            "claim": claim, "signature": sign_claim(claim, seed)}
 
 
 def hello(*, token: str = "cwt_test", models: Optional[list] = None, slots: int = 1, key: Optional[str] = None,
@@ -641,7 +683,6 @@ class HubPlayer:
         site = machine.get("settings") or {"llm": {"enabled": False, "slots": 1, "allow_swaps": False},
                                            "cpu": {"enabled": False, "threads": 1, "cpu_percent": 10,
                                                    "memory_mb": 512, "work": ["lab_game"], "yield_to_llm": True}}
-        values = self.t.values
         with db.session() as s:
             owner = s.query(User).filter(User.handle == "transcripts").one_or_none()
             if owner is None:
@@ -649,6 +690,9 @@ class HubPlayer:
                 owner = accounts.create_user(s, handle="transcripts", email="transcripts@example.com",
                                              password="a long enough phrase", role="user", status="active",
                                              email_verified=True)
+            # one owner for every transcript: a quarantine an earlier one caused (a claim that does not hold) is not
+            # this one's
+            owner.trust_tier = "new"
             row = Server(owner_id=owner.id, name=f"T {self.t.name}"[:120], kind="owned", provider="lmstudio",
                          reach="worker", max_concurrent=site["llm"]["slots"] or 1,
                          capabilities={"llm": {"enabled": site["llm"]["enabled"],
@@ -659,7 +703,7 @@ class HubPlayer:
                 row.trust_tier = machine["trust"]
             key = machine.get("key")
             if key == "registered":
-                row.public_key = values.get("key") or key_b64()
+                row.public_key = test_key()
             elif key == "other":
                 row.public_key = key_b64(99)
             s.add(row)
@@ -674,7 +718,9 @@ class HubPlayer:
             s.flush()
             self.sid, self.token_id = row.id, token.id
         servers.invalidate()
-        self.bindings.update(token=raw, machine=self.sid)
+        # the fake helper's machine key is a real throwaway one, so the claims it signs verify (P4.4.4)
+        self.bindings.update(token=raw, machine=self.sid, key=test_key())
+        self._verification(hub_setup.get("verification"))
         hub = W.hub()
         hub.limiter.clear()
         for i in range(int((hub_setup.get("rate") or {}).get("failures") or 0)):
@@ -693,6 +739,22 @@ class HubPlayer:
             self._prepare_jobs(owner_id=owner.id)
         self.lookups0 = hub.lookups
         self.audit0 = self._audit_count()
+
+    @staticmethod
+    def _verification(setup: Optional[dict]) -> None:
+        """The verification settings the transcript's hub runs with (``setup.hub.verification``; the defaults
+        without), in ``settings_kv.verification`` as an administrator keeps them (P4.5.8)."""
+        from citar import db
+        from citar.db.models import Setting
+        from citar.jobs import trust
+        with db.session() as s:
+            row = s.get(Setting, trust.SETTINGS_KEY)
+            value = trust.clean(dict(setup or {}))
+            if row is None:
+                s.add(Setting(key=trust.SETTINGS_KEY, value=value))
+            else:
+                row.value = value
+        trust.forget()
 
     def _plays_jobs(self) -> bool:
         return any(k in self.setup_hub for k in ("local_executor", "jobs")) or any(
@@ -848,6 +910,9 @@ class HubPlayer:
             # what the hello's report left, once it is kept (off the hub's loop), for ``last_report``
             until(self._hardware_at, 2.0)
             self.report_before = self._hardware_at()
+        if pattern["t"] == "job_result" and isinstance(frame.get("claim"), dict) and not step.invalid:
+            # signed as a helper signs it, by the key its hello registered (the claim's ``key``)
+            frame["signature"] = sign_claim(frame["claim"])
         if step.lost:
             return                          # the connection took it: the hub never gets it
         text = json.dumps(frame, separators=(",", ":"), ensure_ascii=False)

@@ -15,8 +15,9 @@ settings held to the machine's own ceiling, CPU work on only when both say so):
 - the same jobs build as the server's (a helper of another version or flavour is offered nothing);
 - a kind its effective work lists (the site's opt-in and the machine owner's own);
 - a job's ``mem_mb`` within the memory its job host leaves each run (``memory_per_run_mb``, its acknowledgement's);
-- **until verification arrives (4-11), only a machine an administrator set ``trusted``**, and never a quarantined
-  machine or one whose owner is quarantined;
+- never a quarantined machine, nor one whose owner is quarantined (design/phase4-helper.md P4.5.8 rule 7); a ``new``
+  or ``provisional`` machine as well as a ``trusted`` one, its results checked by replicas as its tier says (the
+  dispatcher's caps on ``new`` machines, rule 3, are its own: ``Dispatcher._held_new``);
 - **who may use it:** a job of the server's own collection (no owner: ranking and reference runs, collection items) on
   any machine whose work lists its kind; a job of the machine's own owner; otherwise a grant on the machine's group
   whose purposes **list ``lab``** (``admission.check(..., purpose="lab")``: an empty list never lends CPU, and an
@@ -232,12 +233,8 @@ class RemoteExecutor:
         if per_run is not None and job.mem_mb > per_run:
             return f"it needs {job.mem_mb} MB a run, and its job host leaves each run {per_run} MB"
         facts = self._facts()
-        tier = facts.get("trust_tier") or "new"
-        if tier == "quarantined":
+        if (facts.get("trust_tier") or "new") == "quarantined":
             return "it is quarantined"
-        if tier != "trusted":
-            return ("until results can be verified, only a machine an administrator trusted takes CPU work "
-                    f"(this one is {tier})")
         owner = facts.get("owner_id")
         if owner is not None and _owner_tier(owner) == "quarantined":
             return "its owner is quarantined"

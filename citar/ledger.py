@@ -397,6 +397,16 @@ class Ledger:
         if rows:
             self._put(("rows", [dict(r) for r in rows], None, list(settled or [])))
 
+    def verdicts(self, updates: list) -> None:
+        """What verification made of runs whose events are written (P4.5.7, P4.5.8): each ``{"activity",
+        "request_id", "verification", "why"?}`` sets that event's ``verification`` (``verified``, ``unverified``,
+        ``rejected``). A rejected event's credits and CPU seconds go to 0 (``flags.rejected`` says why, and
+        ``flags.rejected_credits`` what it had), its hour's rollups are recomputed, and the budget settlement it made
+        (``flags.budget``) is reversed, in the database and in the keeper. Written by the writer thread after every
+        event put before it, in the same transaction as its batch, so an event and its verdict never cross."""
+        if updates:
+            self._put(("verdicts", [dict(u) for u in updates]))
+
     def _put(self, item) -> None:
         with self._lock:
             self._pending += 1
@@ -552,6 +562,8 @@ class Ledger:
                 return 0
             from sqlalchemy import insert
             from .db.models import ComputeEvent
+            verdicts = [u for item in batch if item[0] == "verdicts" for u in item[1]]
+            refunds: list = []
             for attempt in range(WRITE_TRIES):
                 try:
                     with db.session() as s:
@@ -560,6 +572,7 @@ class Ledger:
                             s.execute(insert(ComputeEvent.__table__), rows)
                         if settled:
                             budgets.settle_entries(s, settled)
+                        refunds = _apply_verdicts(s, verdicts) if verdicts else []
                     break
                 except OperationalError:
                     # the database's write lock held past its busy timeout (a long transaction elsewhere): wait and try
@@ -568,6 +581,8 @@ class Ledger:
                         raise
                     log.info("the database is busy; the ledger tries its batch of %d again", len(batch))
                     time.sleep(WRITE_BACKOFF * (2 ** attempt))
+            for budget_id, key, credits in refunds:
+                keeper.refund(budget_id, key, credits)
             self.written += len(rows)
             for fn in list(self.listeners):
                 try:
@@ -609,6 +624,8 @@ class Ledger:
                 rows.extend(dict(r) for r in item[1])        # made whole by their writer (``events``)
                 if len(item) > 3:
                     settled.extend(item[3])
+            elif item[0] == "verdicts":
+                continue                                    # applied after the rows (``_apply_verdicts``)
             else:
                 row = self._cpu_row(session, item[1], classes, host)
                 if row is not None:
@@ -846,6 +863,48 @@ def owner_of(session, activity: str) -> tuple:
     if prefix == "lab":
         return item("lab_experiment", rest.split(":", 1)[0])
     return None, None, False
+
+
+# ---------------------------------------------------------------------------- verification's verdicts
+
+def _apply_verdicts(session, updates: list) -> list:
+    """``Ledger.verdicts``' updates, in the writer's transaction: each event's ``verification`` set; a rejected one's
+    credits and CPU seconds taken to 0, its budget settlement reversed, its hour's rollups recomputed. Returns the
+    reversals for the keeper, ``[(budget, period, credits)]``, applied once the transaction commits."""
+    from sqlalchemy import select
+    from .db.models import BudgetEntry, ComputeEvent
+    hours: set = set()
+    refunds: list = []
+    for u in updates:
+        activity, request = str(u.get("activity") or "")[:160], str(u.get("request_id") or "")[:64]
+        ev = session.scalar(select(ComputeEvent).where(ComputeEvent.activity == activity,
+                                                       ComputeEvent.request_id == request)
+                            .order_by(ComputeEvent.id.desc()).limit(1))
+        if ev is None:
+            log.info("no compute event of %s, run %s, to give its verdict %s", activity, request,
+                     u.get("verification"))
+            continue
+        verification = str(u.get("verification") or "unverified")
+        if verification == "rejected" and ev.verification != "rejected":
+            flags = dict(ev.flags or {})
+            credits = float(ev.credits or 0.0)
+            hold = flags.get("budget")
+            if isinstance(hold, dict) and credits > 0 and hold.get("id") and hold.get("key"):
+                entry = session.scalar(select(BudgetEntry).where(
+                    BudgetEntry.budget_id == hold["id"], BudgetEntry.activity_id == ev.activity[:64],
+                    BudgetEntry.period_key == hold["key"]))
+                if entry is not None:
+                    entry.actual = max(0.0, float(entry.actual or 0.0) - credits)
+                refunds.append((hold["id"], hold["key"], credits))
+            flags["rejected"] = str(u.get("why") or "rejected")[:300]
+            flags["rejected_credits"] = round(credits, 6)
+            ev.flags, ev.credits, ev.cpu_core_s = flags, 0.0, 0.0
+            hours.add(hour_of(ev.at))
+        ev.verification = verification
+    session.flush()
+    if hours:
+        rollup(session, hours)
+    return refunds
 
 
 # ---------------------------------------------------------------------------- rollups
@@ -1103,6 +1162,8 @@ def reprice(session, since: datetime, until: Optional[datetime] = None, *, ledge
         for ev in page:
             last = ev.id
             n += 1
+            if ev.verification == "rejected":
+                continue                    # rejected work earns nothing, at any rate (P4.5.7)
             facts = servers.machine_facts(ev.machine_id) or {}
             flags = dict(ev.flags or {})
             if ev.kind == "api":
