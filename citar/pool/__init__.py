@@ -278,6 +278,29 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
         # server observed, P3.3.4), for an administrator's card; Phase 4's trust tiers read it too
         base["flags"] = dict(server.flags or {})
         base["trust_tier"] = server.trust_tier or "new"
+    if base["can_manage"] and server.reach == "worker":
+        # its trust (design/phase4-helper.md P4.5.11): its tier with its verified count and streak to its owner; to an
+        # administrator also the last mismatch with its evidence, its measured speed beside its CPU class, its
+        # ``verifier`` mark, when its standing began and what an administrator asked replicated
+        trust = dict(server.trust or {})
+        base["trust_tier"] = server.trust_tier or "new"
+        base["trust"] = {"tier": server.trust_tier or "new", "verified": int(trust.get("verified") or 0),
+                         "streak": int(trust.get("streak") or 0), "mismatches": int(trust.get("mismatches") or 0)}
+        if viewer is not None and viewer.role == "admin":
+            from .. import ledger
+            from ..db.models import HardwareClass
+            from sqlalchemy import select as _select
+            classes = [ledger.class_dict(c) for c in session.scalars(_select(HardwareClass).where(
+                HardwareClass.kind == "cpu"))]
+            facts = {"hardware": (server.config or {}).get("hardware") or {},
+                     "class_override": bool(server.class_override), "gpu_class_id": server.gpu_class_id,
+                     "cpu_class_id": server.cpu_class_id}
+            cls = ledger.class_of(facts, "cpu", classes)
+            base["trust"].update({k: trust.get(k) for k in ("last_mismatch", "speed", "since", "promoted",
+                                                             "quarantined_at", "replicate")})
+            base["trust"]["verifier"] = bool(trust.get("verifier"))
+            base["trust"]["cpu_class"] = {"id": cls["id"], "name": cls["name"], "pinned": bool(server.class_override)} \
+                if cls else None
     config = server.config or {}
     # Safe for anyone who can see the server at all: what it can run, and roughly what it is. Read from the row as
     # stored, so read as text and figures whatever shape a helper's report or an old write left there: one machine's

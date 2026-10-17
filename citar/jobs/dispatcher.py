@@ -2034,8 +2034,9 @@ class Dispatcher:
         reference.verdict = "reference"
         for o in others:
             o.verdict = o.verdict or "unchecked"
-        self._withdraw_job(s, row, primary, ev["words"], after, rejected=True)
-        self._quarantine(s, primary.machine_id, ev, owner_too=T.tampering(verdict), withdraw=True, after=after)
+        caught = self._withdraw_job(s, row, primary, ev["words"], after, rejected=True)
+        self._quarantine(s, primary.machine_id, ev, owner_too=T.tampering(verdict), withdraw=True, after=after,
+                         caught=[caught] if caught else [])
 
     def _tiebroken(self, s, job: Job, row, primary, tiebreak, after: list) -> None:
         """This server's tiebreak between a primary and a remote verifier's replica that disagree (rule 5): every
@@ -2077,20 +2078,21 @@ class Dispatcher:
                 ex._row_at = -1e18          # its executor reads the row (its trust) again at its next refresh
 
     def _quarantine(self, s, machine: str, ev: dict, *, owner_too: bool, withdraw: bool, after: list,
-                    actor=None) -> list:
+                    actor=None, caught: list = ()) -> list:
         """A machine quarantined (rule 7): no CPU job, and admission refuses it for anyone but its owner; its runs in
         flight aborted and their games played elsewhere; its results waiting for a replica withdrawn; with
         ``withdraw`` (always, but for an administrator who says otherwise), everything unverified it gave since
         ``trust.since`` withdrawn (rule 8); on tampering its owner quarantined too; every match it made as a verifier
         re-opened (rule 9), whether or not it is marked one now (an administrator may unmark a suspect verifier, or
-        take its tier, before quarantining it). Returns the jobs withdrawn (the evidence lists them)."""
+        take its tier, before quarantining it). ``caught`` is the job its mismatch withdrew already (``_caught``),
+        listed first. Returns the jobs withdrawn (the evidence lists them)."""
         from citar.db.models import Server
         srow = s.get(Server, machine)
         if srow is None:
             return []
         was = (srow.trust_tier or "new", dict(srow.trust or {}))
         tier, tr = T.on_mismatch(dict(srow.trust or {}), ev)
-        withdrawn: list = []
+        withdrawn: list = list(caught)
         # its runs in flight: stopped, their games played elsewhere (nothing they did counts against the games)
         for run in [r for r in self.runs.values() if r.machine == machine]:
             self._asked.discard(run.id)
