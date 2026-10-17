@@ -727,9 +727,9 @@ def overview() -> dict:
             # its games whose results wait for a replica (done to everyone but administrators), and the verification
             # runs playing for them
             "settling": int(info.get("settling") or 0), "verifying": int(info.get("verifying") or 0),
-            # its accepted games by verification (design/phase4-helper.md P4.5.11), and its games whose result was
-            # withdrawn and played again (P4.5.8 rule 8)
-            "verification": dict(fig.get("verification") or {}), "withdrawn": int(info.get("withdrawn") or 0),
+            # its accepted games by verification (design/phase4-helper.md P4.5.11); the route adds its games whose
+            # result was withdrawn and played again (``store.withdrawn_games``, P4.5.8 rule 8)
+            "verification": dict(fig.get("verification") or {}),
             # each executor's reason, for the routes to name each one as the viewer may be told it
             "waiting_on": info.get("waiting_on") or [],
         })

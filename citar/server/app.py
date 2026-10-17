@@ -2092,8 +2092,12 @@ def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = De
     job hosts' details (their machines' names and ids among them), which name every experiment and the server's own
     jobs, are an administrator's."""
     from .. import lab
+    from ..jobs import store
     from .jobs_api import _namer, told_executor, told_waiting
     out = lab.overview()
+    withdrawn = store.withdrawn_games(sdb)
+    for e in out.get("experiments") or []:
+        e["withdrawn"] = withdrawn.get(e.get("name"), 0)
     # a machine as the caller may be told it (the games table's words): "this server" for the server's own job host,
     # a helper machine's name only where the caller may see that machine
     name = _namer(sdb, me)

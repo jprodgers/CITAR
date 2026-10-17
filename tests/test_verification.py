@@ -562,6 +562,8 @@ class Visibility(Verify):
         admin = client.get("/api/lab/jobs?exp=settling", headers=self.headers["zara"]).json()
         (ajob,) = admin["jobs"]
         self.assertEqual(ajob["state"], "settling")
+        self.assertIsNone(ajob["verification"], "no verification badge until it settles, to an administrator too")
+        self.assertEqual(ajob.get("waiting"), None, "its replica is offered: not waiting for a verifier")
         self.assertEqual(sorted(r["role"] for r in ajob["runs"]), ["primary", "replica"])
         lab_view = client.get("/api/lab", headers=self.headers["bob"]).json()
         self.assertEqual([r for r in lab_view["running"] if r.get("exp") == "settling"], [], "no replica in sight")

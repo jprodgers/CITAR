@@ -119,7 +119,7 @@ function mismatchesCard(data) {
     el("td", { class: "nowrap" }, when(m.at)),
     el("td", {}, el("a", { href: `#/pool/${encodeURIComponent(m.machine)}` }, m.name || m.machine)),
     el("td", {}, `${m.exp} #${m.i}`, m.role !== "primary" ? el("span", { class: "muted small" }, ` (${m.role})`) : null),
-    el("td", {}, el("code", {}, m.verdict)),
+    el("td", { class: "nowrap" }, el("code", {}, m.verdict)),
     el("td", { class: "evidence" }, m.words || "", m.against ? el("span", { class: "muted small" }, ` against ${m.against}`) : null)));
   return el("section", { class: "card" }, el("h2", {}, "Recent mismatches"),
     rows.length ? el("div", { class: "table-wrap" }, el("table", { class: "list" },
@@ -146,7 +146,7 @@ function verifiersCard(data) {
   const rows = data.verifiers.map((v) => {
     const latest = (v.latest || []).map((r) => (r.void ? "void" : r.verdict)).join(", ");
     const state = v.kind === "local"
-      ? (v.on === false ? "off: CPU work is off in the host's machine settings (new machines' results wait)"
+      ? (v.on === false ? "off: CPU work is off in the host's machine settings (results waiting for a replica wait)"
         : v.verifiable === false ? `its self-check failed: ${v.why || "it verifies nobody"}` : "verifies")
       : `${v.online ? "online" : "offline"}${v.verifiable === false ? ", its self-check failed" : ""}`;
     return el("tr", {},

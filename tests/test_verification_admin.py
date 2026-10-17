@@ -140,6 +140,9 @@ class AdminVerification(TV.Verify):
                          (run, bob.sid, "caught", 0, "result", "this server"))
         (w,) = got["withdrawals"]
         self.assertEqual((w["job"], w["run"], w["machine"], w["exp"], w["i"]), (job, run, bob.sid, "caught", 0))
+        # the Lab page counts the experiment's withdrawn game (its owner sees it played again, not the verdict)
+        (exp,) = [e for e in self.call("bob", "GET", "/api/lab").json()["experiments"] if e["name"] == "caught"]
+        self.assertEqual(exp["withdrawn"], 1)
         kinds = {(v["kind"], v["machine"]) for v in got["verifiers"]}
         self.assertEqual(kinds, {("local", "sv_host"), ("remote", verifier.sid)})
         self.assertEqual(got["tiers"].get("quarantined"), 1)

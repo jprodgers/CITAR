@@ -243,6 +243,16 @@ def experiment_jobs(session, name: str) -> list:
     return [(j, runs.get(j.id, [])) for j in jobs]
 
 
+def withdrawn_games(session) -> dict:
+    """Each experiment's games whose result was withdrawn (P4.5.8 rule 8: its machine caught) and played again, as
+    the Lab page counts them: ``{experiment: games}``."""
+    from sqlalchemy import func, select
+    from citar.db.models import CpuJob
+    q = (select(CpuJob.item_ref, func.count(func.distinct(CpuJob.ref)))
+         .where(CpuJob.state == "withdrawn", CpuJob.item_kind == "lab_experiment").group_by(CpuJob.item_ref))
+    return {name: int(n) for name, n in session.execute(q) if name}
+
+
 def game_of(ref: str) -> Optional[int]:
     """The game a job's ``ref`` (``lab:<experiment>:<game>``) names."""
     try:

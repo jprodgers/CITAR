@@ -133,7 +133,8 @@ def lab_jobs(request: Request, exp: str = Query(..., min_length=1, max_length=12
         if accepted is not None and job.state != "withdrawn":
             settled = job.state in ("accepted", "crashed")
             entry.update({"executor": name(accepted.machine_id, accepted.executor),
-                          "verification": verification_of(accepted) if settled or admin else None,
+                          # once it settles (to an administrator too: a settling job's primary is no verdict yet)
+                          "verification": verification_of(accepted) if settled else None,
                           "started": _iso(accepted.started_at), "ended": _iso(accepted.ended_at),
                           "cpu_s": round(accepted.cpu_s or 0.0, 2), "wall_s": round(accepted.wall_s or 0.0, 2),
                           "peak_mb": round(accepted.peak_mb or 0.0, 1)})
