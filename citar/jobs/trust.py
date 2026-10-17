@@ -42,6 +42,7 @@ A key reset never changes any of this (P4.3.7): the trust is the machine's row's
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -86,16 +87,20 @@ class SettingsError(ValueError):
 
 
 def _bounded(key: str, value) -> float:
+    """``value`` for setting ``key`` when it is in the setting's bounds (a count a whole number), else
+    ``SettingsError``. Compared before it is converted, and never through ``float`` of an int: JSON gives
+    ``1e999`` as infinity and a 400-digit count as an int no float holds, and both must be refused, not raise."""
     lo, hi = BOUNDS[key]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))):
         raise SettingsError(f"{key} is a number from {lo} to {hi}.")
-    if isinstance(lo, int) and isinstance(hi, int):
-        if float(value) != int(value):
-            raise SettingsError(f"{key} is a whole number from {lo} to {hi}.")
-        value = int(value)
+    whole = isinstance(lo, int) and isinstance(hi, int)
+    if whole and isinstance(value, float) and not value.is_integer():
+        raise SettingsError(f"{key} is a whole number from {lo} to {hi}.")
     if not lo <= value <= hi:
-        raise SettingsError(f"{key} is from {lo} to {hi}, not {value}.")
-    return value
+        shown = str(value) if abs(value) < 1e9 else "a number past them"
+        raise SettingsError(f"{key} is from {lo} to {hi}, not {shown}.")
+    return int(value) if whole else value
 
 
 def clean(changes: dict) -> dict:

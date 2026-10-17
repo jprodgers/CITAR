@@ -98,6 +98,16 @@ class AdminVerification(TV.Verify):
         before = T.settings(fresh=True)
         for body in bad:
             self.assertEqual(self.call("zara", "PUT", "/api/admin/verification", json=body).status_code, 400, body)
+        # numbers JSON reads as no float holds them (4-12's review: these answered 500): infinity, a 400-digit count,
+        # not a number, a count past every float's whole numbers
+        raw = ['{"new_streak": 1e999}', '{"new_streak": -1e999}', '{"new_streak": 1' + "0" * 400 + "}",
+               '{"promote_verified": NaN}', '{"trusted_rate": Infinity}', '{"trusted_rate": 1' + "0" * 400 + "}",
+               '{"overreport_days": 1e300}', '{"new_per_owner": 4.000000000000001}']
+        for body in raw:
+            r = self.client.put("/api/admin/verification", content=body,
+                                headers={**self.headers["zara"], "content-type": "application/json"})
+            self.assertEqual(r.status_code, 400, (body[:40], r.text[:200]))
+            self.assertLess(len(r.text), 200, "the refusal does not quote a huge number")
         self.assertEqual(self.call("zara", "PUT", "/api/admin/verification", json=[1, 2]).status_code, 422,
                          "not an object at all")
         self.assertEqual(T.settings(fresh=True), before, "a refused change changes nothing")
