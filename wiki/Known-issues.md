@@ -107,8 +107,17 @@ as many games as its threads, and a watchdog ends its job host past its memory: 
 cap to an ordinary program, so the machine settings dialog shows both limits "soft". Lend fewer threads for a tighter
 hold.
 
-**Helpers' results are not checked yet.** Until the server verifies helpers' results by itself (a later 0.1.6
-package), CPU work goes only to machines an administrator set trusted, and their games are entered as unverified.
+**A patient cheater can slip some games past the sampling.** A `trusted` machine's results are replayed about one in
+fifty, so a machine that alters a result now and then contributes about 50 games on average before a replay catches
+it. Every unverified result it gave is withdrawn when it is caught, with its credits.
+
+**A model served on a member's machine cannot be checked.** A helper could serve a smaller model than the one it names;
+its results count on the global boards only once an administrator trusts the machine, and over-reported generation
+time is flagged, but the model itself is not verified.
+
+**Short games are not timed.** A game of under a fifth of a second of CPU says nothing of a machine's speed (Windows
+counts a thread's time in steps of about 16 ms), so a machine that plays only short games has no measured speed and
+cannot be flagged as out of line with its class; its CPU is still bounded by the reference.
 
 **A group's visibility shares nothing yet.** A group's machines are listed and lent through its
 grants only; making a group visible to members or published lists nothing more.

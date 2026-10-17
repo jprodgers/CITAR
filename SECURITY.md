@@ -79,6 +79,60 @@ runs exactly as it would in production. There is no branch anywhere that skips a
 because the server is local — which is what stops authorisation bugs from hiding during
 development.
 
+## Helpers and shared machines
+
+From 0.1.6 a member's machine joins a server through the **CITAR helper**, which dials out to it. Two parties trust
+each other a little: the lender trusts the server with their CPU and their model, and the server trusts the lender's
+helper with games whose results go into everyone's lab, ratings and credits.
+
+**What a worker token allows.** Serving completions from the endpoint the helper's owner configured, for the models
+they listed, and running the server's closed list of CPU jobs (the lab's, ranking and reference games of the bots
+compiled into the helper) under the owner's limits. Nothing else: a token never reaches an account's games, settings or
+other machines. Anything a token allows beyond that is in scope.
+
+**What a lender can rely on** (the helper's own guarantees, design/phase4-helper.md P4.3.10): it never runs a command, a
+script or code it was sent; never reads or writes a file outside its home; never dials anything but its server and its
+configured model endpoint; never loads, unloads or swaps a model; never changes a system setting. It runs only the
+engine and bots compiled into it, on specs that are data. Its machine key is created mode 0600 (an owner-only DACL on
+Windows) and refused at start when others can read it. CPU lending is off until the owner turns it on at the machine,
+and the owner's own ceiling caps every figure the server sends.
+
+**How the server checks what a helper says** (P4.4.4, P4.5.7, P4.5.8):
+
+- Every result comes with a claim signed by the machine key (bound to its job, run, machine, spec, jobs build and the
+  result's hash and chain), checked against the key the machine registered and the server's own records; the chain of
+  round digests and the result's hash are recomputed by the server.
+- Results are replayed on a verifier (this server, or a trusted machine an administrator marked one, never another of
+  the same owner's): every result of a `new` machine, then a keyed sample (10% while `provisional`, 2% once
+  `trusted`) decided only after a result is in, so a helper cannot tell which of its games will be checked.
+- A mismatch quarantines the machine (and, for tampering, its owner) and withdraws everything it gave unverified since
+  it was registered or released: results files, ratings, credits and budget settlements follow. A quarantined machine
+  serves nobody but its owner, model work included.
+- CPU seconds are credited at most what the server observed (plus 5% and a second) and 1.5 times the job's reference
+  cost; past the first, the machine is kept from promotion. A machine's measured speed is compared with its CPU
+  class's.
+- Model work cannot be replayed: it is attributed to its machine, its generation time bounded by what the server
+  observed, and a member's machine's model results count on the global boards only once an administrator trusts it.
+
+**The threat model:**
+
+| Threat | Mitigation | Left over |
+|---|---|---|
+| A server makes the helper run code, read files or reach the lender's network | No command, script or code is ever accepted; jobs are a closed vocabulary of typed, bounded specs running compiled-in engine and bots; completions go only to the configured endpoint with whitelisted parameters and the model allowlist; nothing is read outside the home | A bug in the engine or a spec parser on hostile input: frames and specs are fuzzed, and the job host runs under limits |
+| A server exhausts the lender's machine | Lending is off until turned on at the machine; the local ceiling caps every figure; hard limits where the OS allows, soft and labelled where not; local quiet hours; games yield to the lender's model; spec bounds and deadlines | macOS limits are soft |
+| A server learns more about the lender than it should | Hardware reports can be a file or nothing; power readings can be off; the key's secret never leaves the machine | The prompts a lender's model serves are seen by the lender |
+| A lender fakes results or poisons the ratings | Signed claims bound to the run; chains and result hashes recomputed; replication of every job of a `new` machine and samples after, decided only once a result is in and invisible to its owner until settled; verifiers only the server and administrator-marked machines; quarantine on any mismatch, of the owner too on tampering; withdrawal of everything unverified since registration or release | A patient cheater on a `trusted` machine contaminates about 50 jobs on average (2% sampling) before it is caught; all of them are withdrawn when it is |
+| A lender inflates credits | CPU seconds bounded by the observed time and by 1.5 times the job's reference cost; generation time by the observed time; a class out of line with the measured speed flagged; rejected runs earn nothing and reverse their budget settlements; replays earn the lender credit but no one pays for them | A helper can be slow on purpose or hold results: it earns at most 1.5 times a job's reference cost and misses deadlines |
+| A lender swamps verification or dodges quarantine with more accounts | Owner quarantine on tampering; at most two new machines per owner offered work at once; new machines' replays capped at half of this server's runs; a key reset keeps the tier | Many approved accounts can still occupy the verifiers' share; administrators see it and suspend accounts |
+| A local user of a lender's machine reads its token or key | The machine key is owner-only and refused at start when others can read it | An administrator of that machine can read anything on it |
+| A lender serves a smaller model than claimed | Not verifiable; its events carry the machine's tier, its model results stay off the global boards until it is trusted, and administrators see over-reported time | — |
+| Someone steals a machine's identity | Tokens hashed at rest and revocable; keys bound on first use and resettable only by the owner or an administrator; the token rate limit before any lookup | A token stolen before the real helper's first hello registers the thief's key; the fingerprint on the Servers page shows it, and a reset fixes it |
+| A broken but honest machine produces wrong results | The canary and the self-check refuse jobs on a machine that computes differently; otherwise the same replays, the evidence naming the round where the chains parted and the owner not quarantined | — |
+| A network attacker reads or alters traffic | TLS with the operating system's verifier; `--insecure` only for loopback and private hosts; `--ca-file` for a self-signed server | — |
+| A member uses a machine they were not lent | Every offer is admitted by grant, with Lab (CPU work) listed explicitly for CPU work (an empty list never lends it) | — |
+
+The helper does not update itself yet; its signed update channel, and that channel's row in this table, come with it.
+
 ## Supported versions
 
 Pre-1.0, only the latest release. Security fixes go out as a patch release, and the advisory says

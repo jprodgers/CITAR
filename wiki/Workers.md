@@ -111,7 +111,8 @@ and the members'. Each machine is a card, and the card of a machine you manage c
 | Quiet hours | When nothing runs on it, for anyone | Its owner and administrators |
 | API key | Where the server keeps the key of a machine it dials (an environment variable: administrators) | Its owner and administrators, on a machine the server dials |
 | Helper | Its worker tokens (issue, revoke), how to run the helper, what the helper is (version, build, protocol) and the fingerprint of its machine key, with **Reset key…** | Its owner and administrators, on a helper machine |
-| Machine settings… | Capabilities (LLM on or off, slots, model swaps for pooled prompts, CPU sharing), what its helper's reports may change (hardware, models and power, each auto or manual) with the last report and Apply, its hardware class and trust tier ([below](#machine-settings-and-what-a-helpers-report-changes)) | Its owner and administrators (pinning the class and the trust tier: administrators) |
+| Machine settings… | Capabilities (LLM on or off, slots, model swaps for pooled prompts, CPU sharing), what its helper's reports may change (hardware, models and power, each auto or manual) with the last report and Apply, its hardware class and trust ([below](#machine-settings-and-what-a-helpers-report-changes)) | Its owner and administrators (pinning the class, the trust tier and the verifier mark: administrators) |
+| Its trust | On a helper machine's card: its tier with its verified count and streak; to an administrator also its last mismatch with its evidence, its measured speed beside its CPU class, its verifier mark and the flags on it, with **Quarantine…** (withdrawing what it gave unverified, or not), **Release**, **Mark as verifier** (a trusted machine) and **Replicate…** ([Verification](#verification-what-a-lenders-tier-means)) | Its owner (the tier and counters) and administrators |
 | Sharing | The server group that shares it | Its owner and administrators |
 | Disable, Enable, Remove | Disabling and removing drop its helper at once (below) | Its owner and administrators |
 
@@ -428,8 +429,48 @@ tier back, and a tier an administrator set is never taken back by them.
 
 **What this means for a lender:** an honest machine climbs on its own; a broken one (bad memory, an overclock) is caught
 by its replays and quarantined without blame on its owner; a key reset never changes the tier. Model work is not
-replayed: it is attributed to the machine, and over-reported generation time only keeps a machine from being
-promoted.
+replayed: it is attributed to the machine (each step's ledger entry records its tier), and over-reported generation
+time only keeps a machine from being promoted.
+
+**For administrators**, `#/admin/verification` (linked from the users page) holds the settings (how many matches make
+a machine provisional and trusted, the sample rates, how long over-reporting holds a machine back, how many new
+machines of one owner play at once, and this server's share for new machines' replays, each bounded), the quarantined
+machines with their evidence and the results withdrawn with them, the quarantined owners, each with **Release**, the
+recent mismatches and withdrawals, the verifiers and the machines the credits' bounds or the class check flagged. A
+machine's card and its machine settings dialog carry its trust and the controls; `GET /api/admin/jobs` shows the
+verifiers' replays and the caps on new machines. Results that waited for their replays when the server was upgraded to
+another jobs build (which no verifier plays) are accepted unverified at its next start.
+
+### Credits for CPU work
+
+Each game a machine plays is one entry in the compute ledger, given by the machine's owner and used by the
+experiment's owner, priced at the machine's CPU class's rate per core-second. The seconds are the helper's own report,
+so the server bounds them twice:
+
+- **by what it observed**: never more than the time from the game's start to its result, plus 5% and a second (a game
+  is one thread). A helper past that has its runs credited the bound and is flagged **over-reports its CPU**, which no
+  honest helper can reach: it keeps the machine from being promoted to trusted for 30 days;
+- **by the work itself**: never more than 1.5 times the game's **reference cost**, what it costs this server's own job
+  host (the cost table's figure for its kind and size while its result waits, then the replay's own CPU once a replay
+  reproduces it). A game held, or played on a slow machine, earns no more than that and is marked **CPU capped**; that
+  is informational, since a slow honest machine is capped too, and never blocks a promotion.
+
+Its replays also measure the machine: its **measured speed** is the median of the reference's CPU seconds over its own
+on its replayed games long enough to time (a fifth of a second at least), shown to administrators beside its CPU class.
+A machine under half the median speed of the other measured machines of its class is flagged **class suspect**: its
+class prices it as faster than it is, or its helper over-reports; an administrator pins it to a fairer class (Machine
+settings…, Class and trust). A game rejected by verification earns nothing, and any budget it counted against gets its
+credits back.
+
+### Model results and the global boards
+
+Model work is not replayed (a model's answers cannot be checked by running them again), so the global boards (the model
+scores, the diplomacy leaderboard) count a model's results from a member's machine only once that machine is
+**trusted**: a game played on a machine that was not trusted when it ran (nor is since) is left out of every board but
+its owner's own figures, where it is marked **unverified machine**, as are its benchmark run and its probe run; each
+board says how many games it left out per model. When an administrator trusts the machine, its earlier results count
+too. The site's machines (the host, its online APIs) and an administrator's always count. A machine that serves models
+but lends no CPU has no games to be promoted by: its owner asks an administrator, who can judge it by its results.
 
 ### CPU limits, per operating system
 
@@ -593,19 +634,20 @@ An administrator's `GET /api/status` lists what the scheduler holds for each mac
 
 ### What the server can and cannot do
 
-It can ask your machine to run a completion with one of the models you exposed, with at most five
-sampling parameters (`temperature`, `max_tokens`, `top_p`, `seed`, `reasoning_effort`); the helper
-drops any other, and nothing in a request changes which endpoint it dials, the key it sends or whether
-it streams. It can ask it to scan its hardware again, and send it its settings, which your own
-ceiling caps.
+What a server (or whoever runs it) could try against a lender's machine, what stops it, and what is left
+([SECURITY.md](https://github.com/jprodgers/CITAR/blob/main/SECURITY.md#helpers-and-shared-machines) holds the whole
+threat model):
 
-It can offer it lab games from the closed list the helper plays (lab, ranking and reference games of the bots compiled
-into it), each a typed spec with no path, script or code in it, and replay some of its results elsewhere to check them.
+| A server could try to | What stops it | What is left |
+|---|---|---|
+| Make the helper run code, read files or reach your network | The helper accepts no command, script or code: CPU work is a closed list of games (lab, ranking and reference games of the bots compiled into it), each a typed spec with no path in it, run under limits; completions go only to the endpoint you configured, for the models you listed, with at most five sampling parameters (`temperature`, `max_tokens`, `top_p`, `seed`, `reasoning_effort`: the helper drops any other, and nothing in a request changes the endpoint, the key or streaming); it reads and writes nothing outside its home | A bug in the engine or a spec parser on hostile input: the frames and the specs are fuzzed, and the games run under the job host's limits |
+| Wear your machine out | CPU lending is off until you turn it on at the machine; your own ceiling caps every figure the server sends; the limits hold hard where the operating system allows (Windows, Linux) and are marked soft where not (macOS); your quiet hours; its games pause while your model works | macOS holds the limits softly: lend fewer threads there |
+| Learn more about your machine than it should | The hardware report can be a file you write or nothing (`--hardware FILE`, `--no-hardware`); power readings can be off (`--no-power`); the machine key's secret never leaves the machine | The prompts your model serves are seen by your machine, as before: lending a GPU means seeing what it computes |
+| Use your machine for someone you did not lend it to | Every offer is checked against your groups' grants: CPU work only with a grant that lists Lab (CPU work), never one with no purposes | — |
 
-It cannot read your files, run commands, see other things on your network, or use models you did
-not list. The helper only speaks to the base URL you configured, and only forwards completion
-requests to it; your quiet hours, your model list and your slots are enforced on your machine,
-whatever the server asks.
+It can ask it to scan its hardware again, and send it its settings, which your own ceiling caps. It can replay some of
+its results elsewhere to check them ([Verification](#verification-what-a-lenders-tier-means)): what that costs a lender
+is the time of the games replayed, never a game of theirs.
 
 Stop lending at any time: stop the helper, or revoke its token (or remove the machine) on the
 Servers page; the server drops the connection at once. Neither needs the other's cooperation.

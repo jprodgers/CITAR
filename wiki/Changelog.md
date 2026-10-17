@@ -247,6 +247,27 @@ that means for an existing install:
   `verifier`; new route `POST /api/admin/machines/{id}/replicate`. `citar-helper-faults` (the
   `test-faults` feature, `--test-fault`) cheats on purpose for the tests; `scripts/qa_phase4.py verify`.
   [docs/server/WORKERS.md](Workers#verification-what-a-lenders-tier-means).
+- **Credits for CPU work bounded by the job's reference cost** (design/phase4-helper.md P4.5.7): a helper's CPU
+  seconds count at most what the server observed (plus 5% and a second) and 1.5 times the job's reference cost (the
+  cost table's figure, then the replay's own CPU once a replay reproduces it, its budget settlement moved by the
+  difference). Past the first bound the machine is flagged `overreported_cpu`, which keeps it from `trusted`; past the
+  second `capped_cpu`, informational. A machine's measured speed (its replays' CPU over its own) is shown to
+  administrators beside its CPU class, and one under half its class's median is flagged `class_suspect`.
+  [docs/server/WORKERS.md](Workers#credits-for-cpu-work).
+- **Model results by their machine's tier** (P4.5.8 rule 11): a member's machine's model results (benchmark games,
+  probes, the diplomacy leaderboard's pairs, its games' metrics) count on the global boards only once the machine is
+  trusted (its earlier results with it); until then they are left out of every board but their owner's own figures,
+  badged "unverified machine", and counted. A model step's ledger entry records its machine's tier.
+  [docs/server/WORKERS.md](Workers#model-results-and-the-global-boards).
+- **`#/admin/verification`** (linked from the admin users page): the verification settings, bounded
+  (`GET`/`PUT /api/admin/verification`), the quarantined machines and owners with their evidence and Release, the
+  recent mismatches and withdrawals, the verifiers and the flagged machines. A helper machine's card and machine
+  settings dialog show its trust (tier, verified count, streak; for administrators the evidence, the measured speed,
+  the verifier mark, Quarantine…, Release, Mark as verifier, Replicate…). `GET /api/admin/jobs` lists the verifiers'
+  replays and the caps on new machines. The Lab page counts each experiment's games by verification and the withdrawn
+  ones, and says when games wait for a verifier; helpers whose connection went are counted rather than listed.
+- **Security:** SECURITY.md's "Helpers and shared machines": what a worker token allows, what a lender can rely on, how
+  the server checks a helper, and the threat model.
 
 **Chat** ([docs/PLAYING.md](Playing-in-the-browser), [docs/AI_PLAYERS.md](AI-players)):
 
@@ -291,6 +312,9 @@ own, and all of them at once in one game, with a real model in LM Studio last
 
 ### Fixed
 
+- A helper's result that waited for its replay when the server was upgraded to another jobs build waited for ever (no
+  verifier plays an old build): it is accepted unverified at the next start.
+- The evidence of a machine caught at its first mismatch did not list the job its mismatch withdrew.
 - The limit on refused worker tokens never refused anything (it was counted after the lookup and its
   refusal dropped), and it took the client's address from `X-Forwarded-For` whatever the proxy
   settings: an address is now refused before any lookup once 20 different tokens failed from it in
