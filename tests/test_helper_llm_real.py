@@ -29,6 +29,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from citar import db, servers, settings
@@ -129,11 +130,13 @@ class StandIn(unittest.TestCase):
         self.assertGreater(side["ran_on_s"] or 0, 2.0, f"the abandoned generation held the model: {side}")
 
     def test_the_checks_fail_when_the_long_generation_ends_before_the_cancel(self):
-        # a generation over before 2 s tests no cancel: its check fails at once, saying so, and the rest still run.
-        # Over in 0.2 s once it starts: at 1.0 s, CI's macOS runner reached the stand-in late enough that the
-        # generation still ran at the cancel (test.yml run 38717379734), and the check it is meant to fail passed.
+        # a generation over before the cancel tests no cancel: its check fails at once, saying so, and the rest still
+        # run. Over in 0.2 s once it starts, and the cancel 10 s after the request here: the 2 s of the gate count
+        # from before its ticket, the hub and the helper, and CI's macOS runner had not had the answer back by then
+        # twice (test.yml runs 38717379734 and 38986642828), so the check it is meant to fail passed.
         ep = self.stand_in(long_s=0.2)
-        checks, data, _state = self.exercise(ep)
+        with mock.patch.object(qa4, "CANCEL_AT", 10.0):
+            checks, data, _state = self.exercise(ep)
         failed = [c for c in checks if not c["ok"]]
         self.assertEqual(len(checks), 6, self.said(checks))
         self.assertEqual(len(failed), 1, self.said(checks))

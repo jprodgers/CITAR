@@ -344,7 +344,17 @@ class Lending(unittest.TestCase):
         if limits.get("cpu") == "hard" and cpu["peak_pct"] is not None:
             self.assertLessEqual(cpu["peak_pct"], 5 + 2, cpu)
             self.assertGreater(cpu["mean_pct"], 2.5, f"it used its share: {cpu}")
-        (lab.QUEUE / f"{name}.json").unlink()
+        try:
+            (lab.QUEUE / f"{name}.json").unlink()
+        except FileNotFoundError:
+            if limits.get("cpu") == "hard":
+                raise
+            # A share held softly (macOS: nice and a thread cap) let both games end within the 8 s on CI's runner
+            # (test.yml run 38986642828: the experiment done, its file gone), so nothing is left to abort. Where it is
+            # held hard the games are still running and the deletion must find them.
+            print(f"\n[jobs e2e] a share of 5% held {limits}: both games ended within the 8 s; CPU {json.dumps(cpu)}",
+                  file=sys.stderr)
+            return
         D.poke()
         for run in runs.running():
             self.assertEqual(self.finished(run, 30).state, "aborted")

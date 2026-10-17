@@ -1827,8 +1827,9 @@ class Remote(Lab):
         e.disconnected(conn)
         _e, conn2 = self.connect()
         self.submit("alice", duels("after-the-restart", 1))
-        d.tick()
-        d.tick()
+        # ticked until it comes, not twice: CI's windows runner had offered nothing after two (test.yml run
+        # 38986642828), the new connection not yet taking work
+        self.until(d, lambda: self.offers(conn2), timeout=30)
         self.assertEqual([f["spec"]["exp"] for f in self.offers(conn2)], ["after-the-restart"])
         self.assertEqual(d.backoff(self.sid), [])
 
