@@ -281,6 +281,20 @@ pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// Makes the binary at `path` runnable (Unix: mode 0755; elsewhere nothing to do): a file put in
+/// the binary's place by a swap or a rollback runs whatever mode it came with (a copy, or an
+/// `.old` an owner put there by hand, may have none). Best effort: a binary that cannot be made
+/// runnable fails at its start, where the supervisor or the start count rolls it back.
+fn make_runnable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _mode = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+    }
+    #[cfg(not(unix))]
+    let _unix_only = path;
+}
+
 /// `path` with `suffix` added to its file name.
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default();
@@ -368,11 +382,7 @@ impl Install {
         let _stale = remove(&incoming);
         std::fs::copy(staged, &incoming)
             .map_err(|e| format!("copying the new binary beside {}: {e}", self.exe.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _mode = std::fs::set_permissions(&incoming, std::fs::Permissions::from_mode(0o755));
-        }
+        make_runnable(&incoming);
         let old = self.old();
         if remove(&old).is_err() {
             // A running program's file (an old binary still running somewhere): set aside.
@@ -419,6 +429,7 @@ impl Install {
             let _back = rename(&failed, &self.exe);
             return Err(format!("restoring {}: {e}", old.display()));
         }
+        make_runnable(&self.exe);
         Ok(())
     }
 
@@ -440,6 +451,7 @@ impl Install {
             let _back = rename(&aside, &self.exe);
             return Err(format!("restoring {}: {e}", old.display()));
         }
+        make_runnable(&self.exe);
         if let Err(e) = rename(&aside, &old) {
             return Err(format!(
                 "the old binary is back; the one it replaced is {} ({e})",

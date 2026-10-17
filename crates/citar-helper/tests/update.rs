@@ -430,7 +430,8 @@ fn a_new_binary_that_dies_three_starts_in_a_row_is_rolled_back() {
 }
 
 /// `citar-helper update rollback` puts `<name>.old` back by hand, and keeps the binary it replaced
-/// as `<name>.old`.
+/// as `<name>.old`. The `.old` here is written without an executable bit (as a copy made by hand
+/// may be): the binary put back runs all the same.
 #[test]
 fn update_rollback_puts_the_old_binary_back() {
     let d = scratch("rollback");
@@ -453,6 +454,12 @@ fn update_rollback_puts_the_old_binary_back() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(std::fs::read(&exe).expect("read"), old_bytes, "the old binary is back");
     assert_eq!(std::fs::read(install.old()).expect("read"), new_bytes, "the replaced one is .old");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&exe).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "the binary put back is runnable: {mode:o}");
+    }
     // Nothing to roll back to: refused, nothing changed.
     std::fs::remove_file(install.old()).expect("gone");
     let out = std::process::Command::new(&exe)
