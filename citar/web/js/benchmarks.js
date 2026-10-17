@@ -10,6 +10,7 @@ import { seatServers } from "./lobby.js";
 import { mapOptionsForm } from "./mapoptions.js";
 import { CATEGORIES, HANDICAPS, PRESETS, PROMPT_EVERY, modelCategories, ownersMap, presetOf } from "./seats.js";
 import { controlText, ownersText, pairText, recordText } from "./diplomacy.js";
+import { UNVERIFIED_MACHINE } from "./trustrules.js";
 
 const STATUS_CLASS = { running: "live", loading: "live", resuming: "live", paused: "warn", queued: "", done: "good", failed: "bad", cancelled: "muted" };
 const COLORS = { llm: "#4f8cff", bot: "#e8c547" };
@@ -122,6 +123,8 @@ function renderRun(run, ctx) {
     el("span", { class: "caret" }, open ? "▾" : "▸"),
     el("b", {}, run.name),
     el("span", { class: `pill ${STATUS_CLASS[run.status] || ""}` }, run.status),
+    // its games played on a machine no administrator has trusted yet: left out of the global boards (P4.5.8 rule 11)
+    run.unverified_machine ? el("span", { class: "pill warn", title: UNVERIFIED_MACHINE }, "unverified machine") : null,
     el("span", { class: "muted" }, `${run.mode} · started ${new Date(run.created * 1000).toLocaleString()}`),
     el("div", { class: "grow run-progress" }, bar(sm.turns_total ? sm.turns_done / sm.turns_total : 0,
       `${sm.turns_done.toLocaleString()} / ${sm.turns_total.toLocaleString()} turns`)),
@@ -182,7 +185,9 @@ function renderJob(run, job, ctx) {
   const hybrid = job.mode === "hybrid";
   const pair = hybrid ? pairText((job.result || {}).pair) : null;
   const row = el("tr", { class: `job ${watchable ? "clickable" : ""}`, title: watchable ? "Click to watch this game" : "", onclick: watch },
-    el("td", {}, el("b", {}, job.label), job.profile || job.tool_mode ? el("div", { class: "muted small" }, [job.profile ? `profile: ${job.profile}` : null, job.tool_mode ? `tools: ${job.tool_mode}` : null].filter(Boolean).join(" · ")) : null,
+    el("td", {}, el("b", {}, job.label),
+        job.unverified_machine ? el("span", { class: "pill warn small", title: UNVERIFIED_MACHINE }, " unverified machine") : null,
+        job.profile || job.tool_mode ? el("div", { class: "muted small" }, [job.profile ? `profile: ${job.profile}` : null, job.tool_mode ? `tools: ${job.tool_mode}` : null].filter(Boolean).join(" · ")) : null,
         hybrid ? el("div", { class: "small" }, el("span", { class: "pill", title: "A bot plays the turns; the model decides this diplomacy" },
           `hybrid: ${ownersText(job.owners)}`)) : null,
         hybrid && job.control ? el("div", { class: `small ${job.control.status === "failed" ? "bad" : "muted"}` }, controlText(job.control)) : null,

@@ -20,6 +20,7 @@ import { renderLanding } from "./landing.js";
 import { renderQueue } from "./queue.js";
 import { renderPeople, renderProfile } from "./people.js";
 import { renderAdminUsers } from "./admin_users.js";
+import { renderAdminVerification } from "./admin_verification.js";
 import * as auth from "./auth.js";
 
 let rules = null;
@@ -165,6 +166,8 @@ async function route() {
       screen = await renderProfile(root, decodeURIComponent(parts[1]));
     } else if (page === "admin" && parts[1] === "users") {
       screen = await renderAdminUsers(root);
+    } else if (page === "admin" && parts[1] === "verification") {
+      screen = await renderAdminVerification(root);
     } else {
       screen = await renderLobby(root, rules);
     }

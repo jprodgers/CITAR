@@ -123,6 +123,8 @@ export const api = {
   labReport: (name) => request("GET", `/api/lab/report/${encodeURIComponent(name)}`),
   labJobs: (name) => request("GET", `/api/lab/jobs?exp=${encodeURIComponent(name)}`),
   adminJobs: () => request("GET", "/api/admin/jobs"),
+  adminVerification: () => request("GET", "/api/admin/verification"),
+  saveVerification: (settings) => request("PUT", "/api/admin/verification", settings),
   labPause: () => request("POST", "/api/admin/jobs/pause"),
   labResume: () => request("POST", "/api/admin/jobs/resume"),
   labRetry: (name) => request("POST", `/api/admin/jobs/retry?exp=${encodeURIComponent(name)}`),
@@ -188,7 +190,10 @@ export const api = {
   // its helper's machine key and a scan now (design/phase4-helper.md P4.5.10)
   resetMachineKey: (id) => request("POST", `/api/machines/${encodeURIComponent(id)}/key/reset`),
   rescanMachine: (id) => request("POST", `/api/machines/${encodeURIComponent(id)}/rescan`),
-  setMachineTrust: (id, trust_tier) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/trust`, { trust_tier }),
+  // any of {trust_tier, withdraw, verifier} (a bare tier for the tier alone)
+  setMachineTrust: (id, change) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/trust`,
+    typeof change === "string" ? { trust_tier: change } : change),
+  replicateMachine: (id, n) => request("POST", `/api/admin/machines/${encodeURIComponent(id)}/replicate`, { n }),
   setMachineClass: (id, body) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/class`, body),
   // reports
   reports: () => request("GET", "/api/reports"),

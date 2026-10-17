@@ -10,11 +10,12 @@
 // The availability editor is the interesting part. A window is entered in the *owner's* zone and shown to everyone
 // else in theirs, because "midnight to 6am" means the owner's midnight and a viewer in Tokyo needs to know that is
 // their afternoon.
-import { el, clear, toast, modal, confirmBox, keepPlace } from "./util.js";
+import { el, clear, toast, modal, confirmBox, keepPlace, prompt } from "./util.js";
 import { pageHeader } from "./nav.js";
 import { helperCard } from "./helper.js";
 import { openMachineSettings } from "./machine_settings.js";
 import { cpuInEffectText, poolTarget } from "./machines.js";
+import { evidenceText, flagText, speedText, trustLine } from "./trustrules.js";
 import {
   KIND, KEYED, PROVIDER, addDirectMachine, call, describeConn, describeQuiet, loadRegistry, may, money, openConnection,
   openCosts, openHardware, openKey, openPlans, openQuietHours, openSettings, viewer,
@@ -466,10 +467,12 @@ function machineCard(m, data, reload) {
       statusPill(m),
       m.restricted_until ? el("span", { class: "pill quiet", title: "Quiet hours: all work on this machine is paused" }, `🌙 quiet until ${m.restricted_until}`) : null,
       group ? el("span", { class: "pill", title: "Shared through this group" }, `shared: ${group.name}`) : null,
-      // an administrator's card: what the prompt scheduler noticed of its helper (P3.3.4)
-      m.flags && m.flags.overreports ? el("span", { class: "pill warn", title: "Its helper reported more generation time "
-        + "than the server observed, by over 10% and a second; its work is credited the observed time. Machine settings…, "
-        + "Class and trust" }, `⚠ over-reports its time (${m.flags.overreports.count}×)`) : null,
+      // an administrator's card: what the prompt scheduler (P3.3.4), the credits' bounds and the class check (P4.5.7)
+      // noticed of its helper
+      ...Object.entries(m.flags || {}).map(([key, f]) => {
+        const t = flagText(key, f);
+        return t ? el("span", { class: `pill ${t[0]}`, title: t[2] }, `⚠ ${t[1]}`) : null;
+      }),
       m.is_mine || !m.owner ? null : el("span", { class: "muted small" }, `owned by ${m.owner.display_name || m.owner.handle}`)),
     el("div", { class: "muted", style: { marginTop: "4px" } }, reg ? describeConn(reg) : `${PROVIDER[provider] || provider}${helper ? ", through its CITAR helper" : ""}`),
     hardwareLine(m),
@@ -484,6 +487,7 @@ function machineCard(m, data, reload) {
     reg && reg.issues.length ? el("ul", { class: "issues" }, ...reg.issues.map((i) => el("li", { class: "warn small" }, i))) : null,
     models,
     el("div", { style: { marginTop: "6px" } }, admissionLine(m)),
+    trustBlock(m, reload),
     actions(m, data, reload));
   if (reg && m.kind !== "test" && may("serverRates", g)) {
     call("serverRates", g, m.id).then((r) => {
@@ -502,6 +506,81 @@ function machineCard(m, data, reload) {
     }).catch(() => {});
   }
   return card;
+}
+
+// ---------------------------------------------------------------------------- its trust (design/phase4-helper.md P4.5.11)
+
+/** A helper machine's trust on its card: its tier with its verified count and streak, to its owner and
+ *  administrators; to an administrator also the last mismatch with its evidence, its measured speed beside its CPU
+ *  class and its verifier mark, with Quarantine… or Release, Mark as verifier (a trusted machine) and Replicate…. The
+ *  server makes every change through its job dispatcher (P4.5.8 rule 10). */
+function trustBlock(m, reload) {
+  const t = m.trust;
+  if (!t) return null;
+  const g = gateOf(m);
+  const rows = [el("div", { class: "row gap wrap" },
+    el("span", { class: `small trust trust-${t.tier}` }, trustLine(t)),
+    t.verifier ? el("span", { class: "pill good", title: "It replays other machines' results: its matches count "
+      + "toward their promotion" }, "verifier") : null)];
+  if (!may("setMachineTrust", g)) return el("div", { class: "col", style: { marginTop: "4px" } }, ...rows);
+  if (t.last_mismatch) {
+    rows.push(el("span", { class: t.tier === "quarantined" ? "bad small" : "muted small" },
+      `Last mismatch: ${evidenceText(t.last_mismatch)}`));
+  }
+  rows.push(el("span", { class: "muted small" }, speedText(t.speed, t.cpu_class),
+    t.replicate ? ` · its next ${t.replicate} result${t.replicate === 1 ? "" : "s"} checked by replicas` : ""));
+  const change = async (body, done) => {
+    try { await call("setMachineTrust", g, m.id, body); toast(done, "good"); reload(); }
+    catch (e) { toast(e.message, "error", 9000); }
+  };
+  const button = (label, onclick, title) => el("button", { class: "small", onclick, title }, label);
+  const controls = [];
+  if (t.tier === "quarantined") {
+    controls.push(button("Release", () => change({ trust_tier: "new" }, `${m.name} released: new again.`),
+      "Back to new: its counters reset and its standing from now; its owner, if quarantined, is released apart "
+      + "(the admin users page)"));
+  } else {
+    controls.push(button("Quarantine…", () => quarantineDialog(m, t, change),
+      "It plays no CPU job and serves nobody but its owner"));
+  }
+  if (t.tier === "trusted") {
+    controls.push(button(t.verifier ? "Unmark verifier" : "Mark as verifier",
+      () => change({ verifier: !t.verifier }, t.verifier ? `${m.name} verifies nobody now.` : `${m.name} is a verifier.`),
+      "A verifier replays other owners' machines' sampled results; this server always verifies too"));
+  }
+  if (t.tier !== "quarantined" && may("replicateMachine", g)) {
+    controls.push(button("Replicate…", async () => {
+      const text = await prompt(`Replicate ${m.name}'s next results`, "How many of its next results a replica checks "
+        + "whatever its tier's rate (1 to 100):", "1");
+      if (text == null) return;
+      const n = Number(text);
+      if (!Number.isInteger(n) || n < 1 || n > 100) { toast("A whole number from 1 to 100.", "error"); return; }
+      try { await call("replicateMachine", g, m.id, n); toast(`Its next ${n} result(s) will be checked.`, "good"); reload(); }
+      catch (e) { toast(e.message, "error"); }
+    }, "Have its next results checked by replicas, whatever its tier's sample says"));
+  }
+  rows.push(el("div", { class: "row gap wrap" }, ...controls));
+  return el("div", { class: "col trust-block", style: { marginTop: "4px" } }, ...rows);
+}
+
+/** Quarantine by hand: with or without withdrawing every result it gave unverified since its standing began. */
+function quarantineDialog(m, t, change) {
+  const withdraw = el("input", { type: "checkbox", checked: true });
+  const since = t.since ? `since ${new Date(t.since).toLocaleString()} (its last release)` : "since it was registered";
+  const dialog = modal({
+    title: `Quarantine “${m.name}”?`, narrow: true,
+    content: el("div", { class: "col gap" },
+      el("p", {}, "It plays no CPU job and serves nobody but its owner until it is released. Its runs in flight are "
+        + "stopped and their games played elsewhere; its results waiting for a replica are withdrawn."),
+      el("label", { class: "checkrow" }, withdraw,
+        ` Also withdraw every result it gave unverified ${since}: their lines leave the results files, their credits `
+        + "are rejected and their games are played again.")),
+    footer: [el("button", { onclick: () => dialog.close() }, "Cancel"),
+      el("button", { class: "danger", onclick: () => {
+        dialog.close();
+        change({ trust_tier: "quarantined", withdraw: withdraw.checked }, `${m.name} is quarantined.`);
+      } }, "Quarantine")],
+  });
 }
 
 function hardwareLine(m) {
