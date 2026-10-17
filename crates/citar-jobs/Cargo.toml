@@ -21,8 +21,14 @@ citar-bot.workspace = true
 citar-sim.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# The spec, result and jobs-build hashes; the chain is the engine's (DESIGN.md 4.10).
+# The spec, result and jobs-build hashes; the chain is the engine's (DESIGN.md 4.10); the keyed
+# sample of which results a replica checks (P4.5.8).
 blake3.workspace = true
+# A run's claim, signed by the helper's machine key and verified by the server against the key the
+# machine registered (P4.4.4): ed25519, the signatures and keys in standard base64 as the frames
+# carry them.
+ed25519-dalek.workspace = true
+base64.workspace = true
 thiserror.workspace = true
 # A run's CPU time, reported beside its result and never hashed: the thread's that played it.
 cpu-time.workspace = true

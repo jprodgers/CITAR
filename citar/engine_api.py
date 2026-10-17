@@ -45,7 +45,7 @@ __all__ = [
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     # CPU jobs (design/phase4-helper.md P4.4): the same Rust as the helper's
     "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
-    "jobs_build", "run_job_host",
+    "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
     # this build
     "build_info", "key_fingerprint",
     # one game

@@ -531,6 +531,35 @@ def job_chain_check(spec_hash: str, chain: dict) -> None:
     _E.jobs.chain_check(spec_hash, _dumps(chain))
 
 
+#: A run's claim refused (a ValueError, P4.4.4): ``.verdict`` is ``signature`` (it does not verify against the
+#: machine's registered key), ``claim`` (it names another job, run, machine, kind, spec, jobs build, bots, key, result
+#: or chain than the server's records and what was sent, or its result does not answer its spec) or
+#: ``chain_inconsistent`` (its digests do not fold to the head it names): each a tampering verdict (P4.5.8).
+ClaimRefused = _E.jobs.ClaimRefused
+
+
+def verify_claim(kind: str, spec: dict, spec_hash: str, *, job: str, run: str, machine: str, jobs_build: str,
+                 public_key: str, claim: Any, signature: Any, result: Any, chain: Any) -> None:
+    """Checks a helper's signed claim for its run (P4.4.4), by the same Rust as the helper's: the signature against
+    the machine's registered ``public_key``, the claim against the server's records (``job``, ``run``, ``machine``,
+    ``kind``, the spec's hash and bots, ``jobs_build``, the key), the result's hash against the claim's, the chain's
+    head and rounds against the claim's and its own fold, then the result against its spec. Raises ClaimRefused with
+    its verdict; JobRefused (``bad_spec``) when the server's own spec does not check."""
+    if not isinstance(signature, str):
+        err = ClaimRefused("the signature is not text")
+        err.verdict = "signature"
+        raise err
+    _E.jobs.verify_claim(kind, _dumps(spec), spec_hash, job, run, machine, jobs_build, public_key or "",
+                         _dumps(claim), signature, _dumps(result), _dumps(chain))
+
+
+def sample_fraction(secret: str, job: str) -> float:
+    """Where the server's keyed sample of the job ``job`` falls, in [0, 1) (P4.5.8 rule 1): blake3 keyed by the
+    server's ``secret`` over the job's id. A provisional or trusted machine's result is checked by a replica when this
+    is below its tier's rate; without the secret nobody can tell which jobs will be."""
+    return _E.jobs.sample_fraction(secret.encode("utf-8"), job)
+
+
 def jobs_build() -> str:
     """This build's jobs build (P4.4.5): 12 hex digits over the build id, the runner's and the jobs crate's code and
     the build's flavour (a ci and a release build differ). Results are only compared within one jobs build."""
