@@ -489,11 +489,15 @@ its standard input and output (`citar-jobs`).
 later connection when the server relays the same manifest: a build that trusts no update key says
 `unavailable` and downloads nothing; a signature no trusted key made, a manifest that does not read,
 a version that is not newer (`refused` for the same one too), no binary for its target, a binary
-that failed here before, `updates: off`, `auto` in a package manager's build, an address that is not
-`https` (a development or test build also takes `http` to this machine) or a binary folder it may
-not write is `refused` with the reason; `updates: notify` says `available` and stops. Otherwise
-`downloading`, then `refused` for a size or SHA-256 that is not the signed one (or a redirect that is
-not `https`), `failed` for a download or a self-test that fails, else `verified`. Once nothing is in
+that failed here before or that its owner rolled back by hand, `updates: off`, `auto` in a package
+manager's build, an address that is not `https` (a development or test build also takes `http` to
+this machine), a binary folder it may not write or an update folder others can reach is `refused`
+with the reason; `updates: notify` says `available` and stops. Otherwise `downloading`, then
+`refused` for a size (a `Content-Length` too) or SHA-256 that is not the signed one (or a redirect
+that is not `https`), `failed` for a self-test that fails, else `verified`. A download the network
+or the disk breaks off, and a swap that fails, are `failed` with when they are tried again (5
+minutes, doubling up to 6 hours); the helper then tries again by itself, with no new frame from the
+server. Once nothing is in
 flight it says `restarting` (its last frame), closes the socket with 1001, and swaps its binary: so
 the server never sees two connections of the machine, and `shutdown` `replaced` is never what an
 update looks like. The new binary says `applied` after its first welcome; an old binary put back

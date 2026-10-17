@@ -290,6 +290,15 @@ that means for an existing install:
   [docs/server/WORKERS.md](Workers#signing-helper-updates-the-owners-one-time-setup)), with
   `cargo xtask keygen`, `helper-manifest` and `sign-manifest` refusing key paths inside any repository. SECURITY.md
   describes the update channel. [docs/server/WORKERS.md](Workers#updates).
+- **Self-update, hardened (4-13's review):** `citar-helper update rollback` holds the release it rolls away from back,
+  so an automatic helper no longer installs it again at its next connection; a download the network breaks off (and a
+  failed swap) is tried again after 5 minutes, doubling up to 6 hours, instead of never while the helper runs; a service
+  start the new binary refuses early (a setting, a command line) counts toward the rollback; a new binary the console
+  supervisor cannot even start is rolled back; the update folder is its user's alone and the binary put in place is
+  checked against the signed SHA-256 once more; `cargo xtask keygen` writes the key owner-only on Windows too; a server
+  that trusts no update key fetches nothing (no hourly GitHub request and warning), relays only a manifest of its own
+  engine build, and logs a helper's update status once per change; committing the owner's public key keeps the test
+  suite green.
 
 **Chat** ([docs/PLAYING.md](Playing-in-the-browser), [docs/AI_PLAYERS.md](AI-players)):
 

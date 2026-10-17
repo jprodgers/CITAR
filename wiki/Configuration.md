@@ -251,7 +251,7 @@ Budgets on grants are counted in the same credits ([Accounts](Design-accounts-an
 | Variable | Default | Meaning |
 |---|---|---|
 | `CITAR_WORKER_PING_SECONDS` | `20` | Keep-alive on a CITAR helper's WebSocket (`welcome.ping_s`, 5 to 300): a helper silent for 70 s is dropped |
-| `CITAR_HELPER_MANIFEST_URL` | GitHub's release download of this server's version in server mode (`https://github.com/jprodgers/CITAR/releases/download/v{version}/citar-helper-manifest.json`); none in local mode | Where the server fetches the signed manifest of the CITAR helper it relays to its helpers (`{version}` its own version; the signature at the same address with `.sig`), at most hourly and never on a request. `https` only (`http` to this machine for tests); `off` relays none |
+| `CITAR_HELPER_MANIFEST_URL` | GitHub's release download of this server's version in server mode (`https://github.com/jprodgers/CITAR/releases/download/v{version}/citar-helper-manifest.json`); none in local mode | Where the server fetches the signed manifest of the CITAR helper it relays to its helpers (`{version}` its own version; the signature at the same address with `.sig`), at most hourly and never on a request. `https` only (`http` to this machine for tests); `off` relays none. A server whose build trusts no update key (every build until the first signed release) fetches nothing, and a manifest of another engine build than the server's is never relayed |
 | `CITAR_HELPER_MANIFEST_FILE` | none | A manifest on disk instead (its signature beside it as `<file>.sig`): an offline server's, or a test's. It wins over the URL |
 
 Only a manifest that verifies against the update keys built into the server's extension (the helper's own,

@@ -67,7 +67,10 @@ and shown on the machine's Helper dialog.
 The server relays the signed manifest of the CITAR helper of its own version to its helpers (design/phase4-helper.md
 P4.5.9): fetched from the release's assets on GitHub (`CITAR_HELPER_MANIFEST_URL`, the default in server mode) or a
 file (`CITAR_HELPER_MANIFEST_FILE`), at most hourly, off any request, and only when it verifies against the update keys
-built into the server ([Configuration](../CONFIGURATION.md#workers)). A failed fetch keeps the last good manifest. Every
+built into the server ([Configuration](../CONFIGURATION.md#workers)) and names the server's own engine build (helpers
+follow their server: a server built from changed sources relays nothing). A server built with no update key (every
+0.1.6 build until the first signed release) fetches nothing at all and says so once in its log. A failed fetch keeps
+the last good manifest. Every
 helper's welcome carries it, and a new one goes at once to the connected helpers older than it; each helper decides by
 its owner's `updates` setting ([Updates](#updates)). Each helper machine's card on the Servers page (and its Helper
 dialog) shows its version beside the latest signed helper, "update available" when it is older, and where its helper
@@ -82,15 +85,22 @@ helper reports updates **unavailable**. To set it up, once, on a machine of your
 
 1. **Make the key**, in a folder outside every git repository (the tool refuses one inside):
    `cargo xtask keygen --out ~/citar-update-key`. It writes `citar-update-signing.key` (the private key: JSON with its
-   `secret`, owner-only on Unix) and `citar-update-signing.pub` (one line, the public key). Keep the private file
-   somewhere safe and offline as well: it is the only way to sign updates helpers already trust.
+   `secret`) and `citar-update-signing.pub` (one line, the public key). The key file is its owner's alone before the
+   secret is written into it: mode 0600 on Unix; on Windows `keygen` gives it a protected access list (you, SYSTEM and
+   Administrators, nothing inherited from the folder, so a folder such as `C:\keys`, which every signed-in user may
+   change, does not open it to them). Keep the private file somewhere safe and offline as well: it is the only way to
+   sign updates helpers already trust.
 2. **Store the private key in GitHub:** the repository's Settings → Environments → New environment, named
    `helper-signing`; add a **required reviewer** (yourself) so every signing run waits for your approval; add an
    environment secret `CITAR_UPDATE_SIGNING_KEY` whose value is the whole content of `citar-update-signing.key`.
 3. **Commit the public key:** put the line of `citar-update-signing.pub` in `crates/citar-jobs/update-keys.pub` (one key
    a line, at most two) in a release commit. Helpers and servers built from it trust that key; the next tagged
    release's `sign-helper-manifest` job (after your approval) signs `citar-helper-manifest.json` and attaches it and its
-   `.sig` to the release beside the binaries.
+   `.sig` to the release beside the binaries. The test suite holds that file to its format (public keys only, at most
+   two, `tests/test_no_private_keys.py` and citar-jobs' `the_committed_key_file_holds_public_keys_only`), not to being
+   empty, and the tests of updates sign with throwaway keys of their own, so the commit keeps CI green; `qa_phase4.py
+   update` then expects the run's own helper to refuse the throwaway key's manifest rather than report updates
+   unavailable.
 4. **Check it** before the release: `cargo xtask helper-manifest --assets DIR --version V` over the built binaries and
    `cargo xtask sign-manifest --key ~/citar-update-key/citar-update-signing.key DIR/citar-helper-manifest.json` sign a
    manifest by hand the same way (the key file must be outside any repository).
@@ -406,12 +416,23 @@ self-test (its version, build, protocol and target must be the manifest's, and i
 The binary's folder must be writable by the helper's user: one installed by an administrator into a protected folder
 says so and stays as it is.
 
+The download waits in `helper/update/` in the helper's home, which the helper makes **its user's alone** (mode 0700;
+on Windows an access list for that user, SYSTEM and Administrators only), so no other user of the machine can swap the
+new binary between its checks and its installation; the copy put in place is checked against the signed SHA-256 once
+more. If someone opens that folder to others, the update is refused with the command that closes it again (the same
+rule as for the machine key). A download the network breaks off (or a server error, or a swap that fails) is reported
+**failed** with when it is tried again: in 5 minutes, then 10, doubling up to every 6 hours while the helper runs; a
+new release relayed starts afresh. A refusal (the signature, the version, the size or the SHA-256, your policy) and a
+failed self-test are not tried again.
+
 **After the swap.** Run by hand, the helper stays in your console and supervises the new binary: if the new binary
-exits before its first welcome, the old one is put back at once, connects again, and the Servers page says the update
-**failed** (with why); that binary is not tried again until you delete `helper/update/failed.json` in the helper's
-home. Under a service manager the helper exits with code 75 and the manager starts the new binary; one that does not
-come up healthy in three starts puts the old binary back and exits 75 again, so the manager starts the old one. The new
-binary says **applied** once its server welcomes it.
+exits before its first welcome (or cannot be started at all, as when an antivirus quarantines it), the old one is put
+back at once, connects again, and the Servers page says the update **failed** (with why); that binary is not tried
+again until you delete `helper/update/failed.json` in the helper's home. Under a service manager the helper exits with
+code 75 and the manager starts the new binary; one that does not come up healthy in three starts puts the old binary
+back and exits 75 again, so the manager starts the old one. A start counts however early the new binary stops,
+whether at a setting or a command line it does not take (a service run's command line counts too). The new binary
+says **applied** once its server welcomes it.
 
 By hand, in the helper's home (`--home` as the helper runs):
 
@@ -420,7 +441,10 @@ By hand, in the helper's home (`--home` as the helper runs):
 - `citar-helper update apply`: installs the relayed update now, checked and self-tested as `auto` would, keeping the old
   binary as `<name>.old`; restart the helper (or its service) to run it;
 - `citar-helper update rollback`: puts `<name>.old` back, keeping the binary it replaces as `<name>.old`, so the same
-  command puts the update back.
+  command puts the update back. The release it rolls away from is **held back** (written to
+  `helper/update/failed.json`): with `updates: auto` the helper does not install it again at its next connection, and
+  the Servers page shows it refused as rolled back on this machine. Delete that file (or run `update apply`) to take it
+  again.
 
 ### Lending CPU: what plays on it, and for whom
 
@@ -764,10 +788,12 @@ is not the same as a model in memory.
 
 **The update says unavailable, refused or failed.** *Unavailable*: this build trusts no update key (every build until
 the first signed release): download the new helper from the Servers page. *Refused*: the reason follows (the same or
-an older version, no binary for this machine, `updates: off`, a folder the helper may not write, a download whose size
-or SHA-256 is not the signed one). *Failed*: the download broke off, the new binary failed its self-test, or it did not
-come up and the old one is back; `citar-helper update check` says what the home holds, and the helper's log says
-more.
+an older version, no binary for this machine, `updates: off`, a release rolled back here (by hand or after it failed:
+delete `helper/update/failed.json` to take it again), a folder the helper may not write, an update folder others can
+reach (run the command the message gives), a download whose size or SHA-256 is not the signed one). *Failed*: the
+download broke off (it is tried again by itself, the message says when), the new binary failed its self-test, or it
+did not come up and the old one is back; `citar-helper update check` says what the home holds, and the helper's log
+says more.
 
 ---
 

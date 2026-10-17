@@ -454,7 +454,12 @@ asset server, and the start count and `update rollback` with the real binary;
 hub, and `scripts/qa_phase4.py update` does it with the release side's own tools: `cargo xtask
 keygen --out DIR` (a throwaway key, refused inside any git working tree), `cargo xtask
 helper-manifest --assets DIR --version V` and `cargo xtask sign-manifest --key FILE MANIFEST`.
-Never put a key file in the checkout: `tests/test_no_private_keys.py` fails on one.
+That part runs `cargo xtask` from the checkout, so `cargo` must be on the `PATH`; it builds into
+`CARGO_TARGET_DIR`, else into the folder above `CITAR_EXT_DIR` (the target folder `cargo xtask
+develop` used), and refuses to run with neither, so nothing is built into a synced checkout. A
+fourth hook, `CITAR_HELPER_TEST_RETRY_S`, cuts the wait before a failed download is tried again
+(5 minutes, doubling to 6 hours). Never put a key file in the checkout:
+`tests/test_no_private_keys.py` fails on one.
 
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count

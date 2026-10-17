@@ -150,8 +150,15 @@ The helper downloads into its home, checks the size and the SHA-256, runs the ne
 build, protocol and target must be the manifest's, and its canary and self-check must pass), waits until no work is in
 flight, closes its connection, keeps the old binary as `<name>.old`, and swaps; a new binary that exits before its
 first welcome is swapped back (by the console run's supervisor at once, or by its own start count under a service
-manager), and the old one reports the failure and does not take that binary again. Development and test builds
-(`dev-guard`, any test feature) also take `http` downloads, but only from this machine, as they dial nothing else.
+manager, which counts a start however early it stops), and the old one reports the failure and does not take that
+binary again; nor does it take a release its owner rolled back by hand. The download waits in a folder of the helper's
+home that only its user can reach (mode 0700, or an access list for that user, SYSTEM and Administrators), refused
+with the fixing command if anyone opens it to others, and the copy put in place is checked against the signed
+SHA-256 again, so another local user cannot swap the binary between its checks and its installation. A server whose
+extension trusts no update key fetches no manifest at all, and one relays only a manifest of its own engine build.
+`cargo xtask keygen` writes the private key owner-only (mode 0600, or that access list on Windows) before the secret
+is in it. Development and test builds (`dev-guard`, any test feature) also take `http` downloads, but only from this
+machine, as they dial nothing else.
 
 ## Supported versions
 
