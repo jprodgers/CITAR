@@ -112,8 +112,13 @@ Parts:
   install folder of the run's own, downloads it, checks it, self-tests it, hands off and reconnects as
   ``0.1.6-test.2`` reporting applied, never replaced; the folder holds the new binary and the old one as ``.old``;
   his card says up to date. A helper set to notify reports the update available and downloads nothing; the run's
-  own helper, which trusts no key, reports updates unavailable. With ``--keep`` the three stay connected, for the
-  browser checklist's H1 (the cards' update lines).
+  own helper, which trusts no throwaway key, reports updates unavailable (or, once the owner's key is committed to
+  ``update-keys.pub``, refuses the manifest the throwaway key signed: ``citar-helper update check`` says which). With
+  ``--keep`` the three stay connected, for the browser checklist's H1 (the cards' update lines). The part runs the
+  ``cargo xtask`` tools from the checkout, so ``cargo`` must be on the ``PATH``; their build goes to
+  ``CARGO_TARGET_DIR``, else to the folder above ``CITAR_EXT_DIR`` (the target folder ``cargo xtask develop`` built
+  the extension in), never into the checkout (which may be a synced folder: CONTRIBUTING.md, "Build outside synced
+  folders").
 
 ``all`` runs every part written so far; later packages add ``service`` (4-14), ``exit`` and ``real`` (4-15).
 """
@@ -2338,11 +2343,41 @@ def update_binaries() -> tuple:
     return tuple(found)
 
 
+def _xtask_target() -> str:
+    """Where ``cargo xtask`` builds: ``CARGO_TARGET_DIR``, else the target folder ``cargo xtask develop`` built the
+    extension in (``CITAR_EXT_DIR`` is its ``citar-ext``), never the checkout's own ``target/``."""
+    given = os.environ.get("CARGO_TARGET_DIR")
+    if given:
+        return given
+    ext = os.environ.get("CITAR_EXT_DIR")
+    if ext and Path(ext).name == "citar-ext" and Path(ext).parent.is_dir():
+        return str(Path(ext).parent)
+    raise q3.HarnessError("set CARGO_TARGET_DIR (or CITAR_EXT_DIR, which cargo xtask develop prints) so cargo xtask "
+                          "builds outside the checkout")
+
+
 def _xtask(*args: str):
     """``cargo xtask`` from the checkout (the release side of the update channel: keygen, helper-manifest,
-    sign-manifest)."""
+    sign-manifest), building into :func:`_xtask_target`."""
     import subprocess
-    return subprocess.run(["cargo", "xtask", *args], cwd=str(ROOT), capture_output=True, text=True, timeout=900)
+    env = {**os.environ, "CARGO_TARGET_DIR": _xtask_target()}
+    return subprocess.run(["cargo", "xtask", *args], cwd=str(ROOT), capture_output=True, text=True, timeout=900,
+                          env=env)
+
+
+def _keys_trusted(binary: str, home: Path) -> int:
+    """How many update keys ``binary`` trusts of its own (``citar-helper update check``'s line): the ones
+    ``update-keys.pub`` held when it was built, none until the owner's key is committed."""
+    import re
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CITAR_WORKER_", "CITAR_HELPER_"))}
+    env["CITAR_DATA_DIR"] = str(home)
+    out = subprocess.run([binary, "update", "check", "--home", str(home)], capture_output=True, text=True,
+                         timeout=60, env=env).stdout
+    m = re.search(r"update keys trusted: (\d+)", out)
+    if not m:
+        raise q3.HarnessError(f"{binary} update check said no key count: {out.strip()[-300:]}")
+    return int(m.group(1))
 
 
 class _Assets:
@@ -2523,15 +2558,24 @@ def part_update(h) -> None:
         hid3, token3 = machine("keyless box")
         keyless = Helper(h, token3, h.endpoint, "qa-keyless-box", extra=("--no-llm",))
         helpers.append(keyless)
-        unavailable = wait_until(lambda: (((_workers(bob, hid3).get("update") or {}).get("status") or {}).get("state")
-                                          == "unavailable") or None, 60, 0.25)
+        # Every build of this tree trusts no key until the owner's is committed to update-keys.pub; then the run's own
+        # helper trusts that one, and refuses the manifest the throwaway key signed.
+        own_keys = _keys_trusted(q3.helper_binary(), keyless.home)
+        expected = ("unavailable", "") if own_keys == 0 else ("refused", "does not verify")
+
+        def keyless_said():
+            st = (_workers(bob, hid3).get("update") or {}).get("status") or {}
+            return st if st.get("state") == expected[0] and expected[1] in (st.get("message") or "") else None
+        keyless_status = wait_until(keyless_said, 60, 0.25)
         notified = card(hid2)
         r.check("a helper whose updates are set to notify reports the update available and downloads nothing; its card "
-                "says update available. The run's own helper, which trusts no update key (as every build of this tree), "
-                "reports updates unavailable",
+                "says update available. The run's own helper, which trusts no throwaway key, reports updates "
+                "unavailable (no key trusted, as every build of this tree until the owner's key is committed) or "
+                "refuses the throwaway key's manifest (the owner's key trusted)",
                 bool(available) and len(assets.asked) == asked_before
-                and (notified.get("helper_update") or {}).get("available") is True and bool(unavailable),
-                json.dumps({"notify": (notified.get("helper_update") or {}), "asked": assets.asked[asked_before:]})[:600])
+                and (notified.get("helper_update") or {}).get("available") is True and bool(keyless_status),
+                json.dumps({"notify": (notified.get("helper_update") or {}), "asked": assets.asked[asked_before:],
+                            "own_keys": own_keys, "keyless": keyless_status})[:600])
         data["browser"] = {"updated": hid, "notify": hid2, "keyless": hid3}
     finally:
         if not h.keep:
