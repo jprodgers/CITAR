@@ -1136,6 +1136,89 @@ class QuarantineAndRelease(Verify):
         self.assertEqual((row.trust_tier, row.trust["verified"], row.public_key), ("provisional", 7, None))
 
 
+class DeletedWhileChecked(Verify):
+    """4-12's review: a cheater that deletes its machine while an altered result waits for its replica (the moment it
+    can tell a result was sampled) is quarantined all the same, from its runs: its owner on tampering, and everything
+    unverified it gave since its registration withdrawn."""
+
+    def cheat_waiting(self, name: str, *, tier: str = "new", earlier: int = 0) -> tuple:
+        """Bob's machine (``tier``) has given ``earlier`` altered results accepted unverified (provisional at rate 0),
+        then an altered one an administrator asked to replicate, which waits: this server's host is off."""
+        self.settings(provisional_rate=0.0)
+        bob = Lender(self, f"Bob's {name}", "bob", tier=tier)
+        self.submit("bob", duels(name, earlier + 2))
+        host = self.verifier()
+        d = self.make([host])
+        cheat = lambda lender, n: "result"       # noqa: E731
+        if earlier:
+            self.assertTrue(self.drive(d, [bob], cheat, until=lambda: bob.n >= earlier and all(
+                self.job_of(r).state == "accepted" for _n, r, _j in bob.runs[:earlier])))
+        host.state = "off"
+        if tier != "new":
+            D.replicate_next(bob.sid, 1, actor_id=self.ids["zara"])
+        self.assertTrue(self.drive(d, [bob], cheat, until=lambda: bob.n > earlier and self.job_of(
+            bob.runs[earlier][1]).state == "settling"))
+        return d, host, bob, [r for _n, r, _j in bob.runs[:earlier]], bob.runs[earlier][1]
+
+    def caught(self, d, host, run: str) -> None:
+        self.led.drain()
+        host.state = "ready"
+        self.assertTrue(self.drive(d, [], until=lambda: self.job_of(run).state == "withdrawn", ticks=200))
+
+    def test_a_new_machine_deleted_through_the_route_still_quarantines_its_owner(self):
+        from fastapi.testclient import TestClient
+        from citar.server import app as appmod
+        client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(client.close)
+        d, host, bob, _earlier, run = self.cheat_waiting("gone")
+        r = client.delete(f"/api/pool/servers/{bob.sid}", headers=self.headers["bob"])
+        self.assertEqual(r.status_code, 200, r.text)
+        servers.invalidate()
+        self.assertEqual(self.audits("server.deleted", bob.sid)[0]["owner_id"], self.ids["bob"])
+        self.caught(d, host, run)
+        primary = next(x for x in self.runs() if x.id == run)
+        self.assertEqual((primary.verdict, primary.error["verdict"]), ("mismatch", "result"))
+        self.assertEqual(self.event(run).verification, "rejected")
+        self.assertEqual(self.owner_tier("bob"), "quarantined", "deleting the machine does not save its owner")
+        (entry,) = self.audits("server.trust", bob.sid)
+        self.assertEqual((entry["changed"], entry["deleted"], entry["machine_run"]),
+                         ({"from": "deleted", "to": "quarantined"}, True, run))
+        # a machine its owner registers again is refused CPU work
+        second = Lender(self, "Bob's next", "bob", seed=TEST_KEY_SEED + 7)
+        d.tick()
+        self.assertEqual({second.e.refuses(j) for j in d.jobs.values() if j.state == "queued"},
+                         {"its owner is quarantined"})
+
+    def test_a_provisional_machine_deleted_loses_its_earlier_unverified_results(self):
+        from citar import pool
+        d, host, bob, earlier, run = self.cheat_waiting("gone2", tier="provisional", earlier=2)
+        lined = {(x.get("executor") or {}).get("run"): x for x in lab.load_results("gone2")}
+        self.assertEqual([lined[r]["executor"]["verification"] for r in earlier], ["unverified"] * 2)
+        with db.session() as s:
+            pool.delete_server(s, s.get(User, self.ids["bob"]), s.get(Server, bob.sid))
+        servers.invalidate()
+        self.caught(d, host, run)
+        lined = {(x.get("executor") or {}).get("run") for x in lab.load_results("gone2")}
+        self.assertFalse(set(earlier) & lined, "its earlier unverified results leave the results file")
+        for r in earlier:
+            self.assertEqual(self.job_of(r).state, "withdrawn")
+            self.assertEqual((self.event(r).verification, self.event(r).credits), ("rejected", 0.0))
+        self.assertEqual(self.owner_tier("bob"), "quarantined")
+        (entry,) = self.audits("server.trust", bob.sid)
+        self.assertEqual(entry["withdrawn"], 3, "the caught job and the two before it")
+
+    def test_a_deletion_with_no_owner_on_record_finds_the_owner_by_the_ledger(self):
+        """A machine deleted before its deletion's audit row named its owner (or by the registry alone): its owner is
+        the provider of its runs' events."""
+        d, host, bob, _earlier, run = self.cheat_waiting("gone3")
+        with db.session() as s:
+            servers.delete(bob.sid, session=s)
+        servers.invalidate()
+        self.assertEqual(self.audits("server.deleted", bob.sid), [])
+        self.caught(d, host, run)
+        self.assertEqual(self.owner_tier("bob"), "quarantined")
+
+
 class Routes(Verify):
     """Gate 8's access: the trust and replicate routes are administrators' (a member and a moderator "not found", a
     visitor 401), and their bounds."""

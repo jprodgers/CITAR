@@ -197,8 +197,9 @@ def delete_server(session, actor: User, server: Server) -> dict:
     remove its key with (``servers.forget_key``) once this is committed."""
     access.on(session, actor, server).require(access.MANAGE)
     config = dict(server.config or {})
+    # its owner kept, so a mismatch found after the deletion still quarantines them (``Dispatcher._owner_of_gone``)
     audit.record(session, "server.deleted", actor=actor, object_type="server", object_id=server.id,
-                 name=server.name)
+                 name=server.name, owner_id=server.owner_id)
     session.delete(server)
     return config
 

@@ -2086,13 +2086,16 @@ class Dispatcher:
         ``trust.since`` withdrawn (rule 8); on tampering its owner quarantined too; every match it made as a verifier
         re-opened (rule 9), whether or not it is marked one now (an administrator may unmark a suspect verifier, or
         take its tier, before quarantining it). ``caught`` is the job its mismatch withdrew already (``_caught``),
-        listed first. Returns the jobs withdrawn (the evidence lists them)."""
+        listed first. Returns the jobs withdrawn (the evidence lists them).
+
+        A machine deleted while a result of its waited for its replica is quarantined all the same, from its runs: its
+        owner deletes it as soon as a result is sampled, so the deletion must not keep its other cheats or its owner's
+        standing. Everything unverified it gave since its registration is withdrawn (its id is never reused), its
+        owner found by ``_owner_of_gone``, and one ``server.trust`` audit row keeps the verdict."""
         from citar.db.models import Server
         srow = s.get(Server, machine)
-        if srow is None:
-            return []
-        was = (srow.trust_tier or "new", dict(srow.trust or {}))
-        tier, tr = T.on_mismatch(dict(srow.trust or {}), ev)
+        was = (srow.trust_tier or "new", dict(srow.trust or {})) if srow is not None else ("deleted", {})
+        tier, tr = T.on_mismatch(dict(was[1]), ev)
         withdrawn: list = list(caught)
         # its runs in flight: stopped, their games played elsewhere (nothing they did counts against the games)
         for run in [r for r in self.runs.values() if r.machine == machine]:
@@ -2115,12 +2118,42 @@ class Dispatcher:
         if withdrawn:
             ev = {**ev, "withdrawn": len(withdrawn), "withdrawn_jobs": withdrawn[:100]}
             tr["last_mismatch"] = ev
-        self._set_tier(s, srow, tier, ev.get("words") or ev.get("verdict") or "quarantined", tr, actor=actor)
-        if owner_too and srow.owner_id:
-            self._quarantine_owner(s, srow.owner_id, ev, actor=actor)
+        why = ev.get("words") or ev.get("verdict") or "quarantined"
+        if srow is not None:
+            self._set_tier(s, srow, tier, why, tr, actor=actor)
+            owner = srow.owner_id
+        else:
+            from citar.auth import audit
+            owner = self._owner_of_gone(s, machine, ev.get("run"))
+            audit.record(s, "server.trust", actor=actor, object_type="server", object_id=machine,
+                         changed={"from": "deleted", "to": tier}, why=why[:300], deleted=True,
+                         machine_run=ev.get("run"), withdrawn=len(withdrawn))
+            lab.log(f"deleted machine {machine}: quarantined ({why})")
+        if owner_too and owner:
+            self._quarantine_owner(s, owner, ev, actor=actor)
         # its matches as a verifier (none for a machine that never verified: the query finds nothing)
         self._reopen(s, machine, after)
         return withdrawn
+
+    @staticmethod
+    def _owner_of_gone(s, machine: str, run_id: Optional[str]) -> Optional[str]:
+        """A deleted machine's owner: the one its deletion's audit row names (``owner_id``, written since 4-12's fix
+        round), else the provider of the caught run's ledger event, else of any event of the machine's (the owner when
+        the run was offered; a site machine's events name nobody)."""
+        from sqlalchemy import select
+        from citar.db.models import AuditLog, ComputeEvent
+        for entry in s.scalars(select(AuditLog).where(AuditLog.action == "server.deleted",
+                                                      AuditLog.object_id == machine).order_by(AuditLog.id.desc())):
+            owner = (entry.detail or {}).get("owner_id")
+            if owner:
+                return str(owner)
+        q = select(ComputeEvent.provider_id).where(ComputeEvent.machine_id == machine[:40],
+                                                   ComputeEvent.provider_id.is_not(None))
+        if run_id:
+            owner = s.scalar(q.where(ComputeEvent.request_id == run_id[:64]).limit(1))
+            if owner:
+                return owner
+        return s.scalar(q.order_by(ComputeEvent.at.desc()).limit(1))
 
     def _quarantine_owner(self, s, owner: str, ev: dict, actor=None) -> None:
         """A tampering verdict's owner quarantined (rule 7): every machine of theirs refused CPU work, a new one too,
