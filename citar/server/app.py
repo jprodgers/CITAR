@@ -1340,14 +1340,22 @@ def bench_runs(request: Request, me=Depends(require_user), sdb: DbSession = Depe
 def _badge_benchmark_runs(runs: list) -> None:
     """Each benchmark job that ran on a machine whose model results do not count (design/phase4-helper.md P4.5.8 rule
     11: not trusted, a site machine or an administrator's when it ran, nor trusted since) gets the "unverified
-    machine" badge (``unverified_machine``), and so does its run: the boards leave its games out."""
+    machine" badge (``unverified_machine``), and so does its run: the boards leave its games out. It marks copies
+    (``list_runs`` gives copies already; these are made here too, so no caller's dict, the scheduler's own above all,
+    keeps a badge once its machine is trusted), each badge decided again at each listing."""
     from ..jobs import trust
     bad = trust.not_counted((j.get("server_id"), j.get("standing")) for r in runs for j in r.get("jobs") or [])
     for r in runs:
+        r.pop("unverified_machine", None)
+        jobs = []
         for j in r.get("jobs") or []:
+            j = {k: v for k, v in j.items() if k != "unverified_machine"}
             if j.get("server_id") in bad and (j.get("standing") or {}).get("vouched") is False:
                 j["unverified_machine"] = True
                 r["unverified_machine"] = True
+            jobs.append(j)
+        if "jobs" in r:
+            r["jobs"] = jobs
 
 
 class RunControl(BaseModel):

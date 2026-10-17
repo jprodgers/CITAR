@@ -185,6 +185,46 @@ class Tiers(unittest.TestCase):
         T.forget_vouched()
         self.assertFalse(_probe_unverified(probe, T.not_counted([(bob, probe["standing"])])), "trusted since")
 
+    def test_the_runs_route_badges_copies_and_drops_the_badge_once_the_machine_is_trusted(self):
+        """4-12's review: the listing once badged the scheduler's own job dicts, so the badge was saved to the run's
+        file and outlived the machine's trusting. Through ``GET /api/benchmarks/runs``: listed, trusted, listed again;
+        the scheduler's job never carries the key, and a key a run's file kept is not believed."""
+        from fastapi.testclient import TestClient
+        from citar.auth import sessions
+        from citar.server import app as appmod
+        sch = BenchmarkScheduler(self.manager, self.dir, autostart=False)
+        self.addCleanup(sch.stop)
+        sid = self.machines["bob"]
+        with db.session() as s:
+            bob = s.get(User, self.ids["bob"])
+            row, raw = sessions.start(s, bob)
+            headers = {"cookie": f"{sessions.COOKIE_NAME}={raw}", sessions.CSRF_HEADER: row.csrf_token,
+                       "origin": "https://citar.test"}
+            run = sch.create_run({"name": "bob's listed run", "mode": "sequential",
+                                  "servers": [{"server_id": sid, "models": [{"model_id": "m_tier_bob"}]}],
+                                  "scenarios": [{"name": "Tiny duel", "map_size": "duel", "map_type": "pangaea",
+                                                 "seed": 5, "opponents": 1, "turn_limit": 3, "barbarians": "off",
+                                                 "max_turn_minutes": 5}]}, owner_id=bob.id, session=s)
+        self.assertTrue(wait_for(lambda: run["status"] == "done", sch), [j.get("error") for j in run["jobs"]])
+        client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(client.close)
+        live = sch.runs[run["id"]]["jobs"][0]
+
+        def listed() -> tuple:
+            with mock.patch.object(appmod, "_scheduler", return_value=sch):
+                r = client.get("/api/benchmarks/runs", headers=headers)
+            self.assertEqual(r.status_code, 200, r.text)
+            (mine,) = [x for x in r.json() if x["id"] == run["id"]]
+            return mine.get("unverified_machine"), mine["jobs"][0].get("unverified_machine")
+        self.assertEqual(listed(), (True, True), "provisional when it ran: badged")
+        self.assertNotIn("unverified_machine", live, "the scheduler's own job is never marked")
+        with db.session() as s:
+            s.get(Server, sid).trust_tier = "trusted"
+        T.forget_vouched()
+        self.assertEqual(listed(), (None, None), "trusted since: neither the run nor its job is badged")
+        live["unverified_machine"] = True           # as a run's file written before the fix keeps it
+        self.assertEqual(listed(), (None, None))
+
     def test_the_diplomacy_board_leaves_out_an_untrusted_machines_pairs(self):
         bob, zara = self.machines["bob"], self.machines["zara"]
         line = {"score_diff": {"end": 5.0}, "deals": 1, "proposals_made": 1, "accepted_own": 1}

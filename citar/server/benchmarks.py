@@ -1430,12 +1430,15 @@ def game_progress(s: GameSession, llm_player: Optional[int] = None, model: Optio
 
 
 def _job_view(job: dict) -> dict:
-    """A job as the runs' list shows it: a hybrid job's result without its diplomacy record's rows (hundreds a game;
-    the run's file keeps them), its summary and pair line kept."""
-    res = job.get("result")
-    if not isinstance(res, dict) or not isinstance(res.get("diplomacy"), dict):
-        return job
-    return {**job, "result": {**res, "diplomacy": {k: v for k, v in res["diplomacy"].items() if k != "rows"}}}
+    """A job as the runs' list shows it, always a copy (a listing marks its jobs, the "unverified machine" badge among
+    them, and the scheduler's own job is saved to its run's file and read by its thread): a hybrid job's result without
+    its diplomacy record's rows (hundreds a game; the run's file keeps them), its summary and pair line kept. A badge a
+    run's file kept from before 4-12's fix round is dropped: the listing decides it again."""
+    out = {k: v for k, v in job.items() if k != "unverified_machine"}
+    res = out.get("result")
+    if isinstance(res, dict) and isinstance(res.get("diplomacy"), dict):
+        out["result"] = {**res, "diplomacy": {k: v for k, v in res["diplomacy"].items() if k != "rows"}}
+    return out
 
 
 def run_summary(run: dict) -> dict:
