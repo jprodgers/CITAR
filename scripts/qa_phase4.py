@@ -4,6 +4,7 @@ down (design/phase4-helper.md P4.7.6).
     python scripts/qa_phase4.py <part>|all [--port N] [--dir D] [--keep] [--helper-bin PATH] [--skip PART]
                                 [--llm-url URL] [--stand-in]
                                 [--wsl --wsl-root PATH --wsl-python PATH [--wsl-distro NAME] [--wsl-user NAME]]
+                                [--wsl-helper PATH]
 
 It reuses ``scripts/qa_phase3.py``'s harness, imported rather than copied: its refusals (exit 2, touching nothing, for
 the dev server's port 8799, a port in use, a directory holding anything without the harness's marker, the owner's
@@ -120,7 +121,20 @@ Parts:
   the extension in), never into the checkout (which may be a synced folder: CONTRIBUTING.md, "Build outside synced
   folders").
 
-``all`` runs every part written so far; later packages add ``service`` (4-14), ``exit`` and ``real`` (4-15).
+- ``service`` (4-14): the helper as a systemd user service in WSL, against the dev server in WSL (``--wsl``, as
+  ``remote --wsl`` runs it, and ``--wsl-helper``, the helper ``cargo xtask develop`` built in WSL; design P4.7.1 rule 8:
+  services are installed for real only there, never on Windows). Bob's helper machine and its token; then one ``wsl``
+  invocation whose script installs, checks and uninstalls under a ``trap`` that uninstalls on any exit (``claude`` has
+  ``Linger=no``, so a unit left enabled would start again at the next invocation), waiting at each step for the
+  Windows side: ``service install --user`` writes the unit (``Restart=on-failure``, ``RestartPreventExitStatus=78``)
+  and starts it, ``service status`` says running, and the machine is online on the server; bob revokes the token, the
+  hub drops the helper (``shutdown`` ``revoked``) and it idles: the same process, ``NRestarts`` 0, no new attempt; the
+  unit restarted by hand under the revoked token makes exactly one attempt (one ``worker.auth_failed`` audit row) and
+  idles again, ``NRestarts`` still 0; ``service uninstall`` stops and removes it, ``service status`` says not installed,
+  and ``systemctl --user list-unit-files`` lists no citar unit. A last invocation checks that none is left.
+
+``all`` runs every part written so far; ``service`` needs ``--wsl`` (the server in WSL), and 4-15 adds ``exit`` and
+``real``.
 """
 from __future__ import annotations
 
@@ -149,7 +163,7 @@ q3 = _phase3()
 Harness, Helper, FakeEndpoint, wait_until = q3.Harness, q3.Helper, q3.FakeEndpoint, q3.wait_until
 
 #: Parts a later package writes (P4.7.6): asked for now, the harness says so and refuses.
-LATER = {"service": "4-14", "exit": "4-15", "real": "4-15"}
+LATER = {"exit": "4-15", "real": "4-15"}
 #: The v1 refusal's words (``citar.server.helper_protocol.V1_REFUSAL_MESSAGE``), as a 0.1.5 worker prints them.
 V1_START = "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2)."
 #: A protocol 1 hello, as a 0.1.5 worker sent it.
@@ -2591,10 +2605,223 @@ def part_update(h) -> None:
                     h.server.env[k] = v
 
 
+# ---------------------------------------------------------------------------- the service part (4-14)
+
+#: The helper ``cargo xtask develop`` built in WSL (``--wsl-helper``), which the service part installs.
+WSL_HELPER: Optional[str] = None
+
+#: The service part's script in WSL: one invocation installs, checks and uninstalls, under a trap that uninstalls on
+#: any exit; it waits for the Windows side's go files (``revoked``, ``restart``, ``counted``) and says each step on a
+#: ``QA`` line. Arguments: the helper, its home, the folder of go files, the server's port, the token.
+SERVICE_SH = r"""#!/bin/bash
+set -u
+BIN="$1"; HOME_DIR="$2"; GO="$3"; PORT="$4"; TOKEN="$5"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+UNIT="$HOME/.config/systemd/user/citar-helper.service"
+say() { echo "QA $*"; }
+show() { systemctl --user show citar-helper.service -p ActiveState -p SubState -p MainPID -p NRestarts | tr '\n' ' '; }
+uninstall() {
+  "$BIN" service uninstall --user --home "$HOME_DIR" >/dev/null 2>&1
+  rm -f "$UNIT"
+  systemctl --user daemon-reload >/dev/null 2>&1
+  systemctl --user reset-failed citar-helper.service >/dev/null 2>&1
+  say "trap: uninstalled"
+}
+trap uninstall EXIT
+wait_file() { for i in $(seq 1 "$2"); do [ -e "$1" ] && return 0; sleep 1; done; return 1; }
+mkdir -p "$HOME_DIR" "$GO"
+printf '{"server_url": "http://127.0.0.1:%s", "token": "%s", "no_llm": true, "no_power": true, "updates": "off"}\n' \
+  "$PORT" "$TOKEN" > "$HOME_DIR/helper.json"
+chmod 600 "$HOME_DIR/helper.json"
+say "linger $(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)"
+say "user-manager $(systemctl --user is-system-running 2>&1)"
+"$BIN" service install --user --home "$HOME_DIR"; say "install-exit $?"
+for i in $(seq 1 60); do "$BIN" service status --user --home "$HOME_DIR" >/dev/null 2>&1 && break; sleep 1; done
+st=$("$BIN" service status --user --home "$HOME_DIR"); say "status-exit $? $st"
+say "show-installed $(show)"
+say "unitfile $(grep -c -e '^Restart=on-failure' -e '^RestartPreventExitStatus=78' -e '^RestartSec=15' "$UNIT")"
+say "READY"
+wait_file "$GO/revoked" 240 || { say "no go: revoked"; exit 1; }
+sleep 20
+say "show-revoked $(show)"
+say "REVOKED-IDLE"
+wait_file "$GO/restart" 240 || { say "no go: restart"; exit 1; }
+systemctl --user restart citar-helper.service; say "restart-exit $?"
+sleep 25
+say "show-restarted $(show)"
+st=$("$BIN" service status --user --home "$HOME_DIR"); say "status-restarted-exit $? $st"
+say "RESTARTED-IDLE"
+wait_file "$GO/counted" 240 || { say "no go: counted"; exit 1; }
+"$BIN" service uninstall --user --home "$HOME_DIR"; say "uninstall-exit $?"
+st=$("$BIN" service status --user --home "$HOME_DIR"); say "status-after-exit $? $st"
+say "unitfiles-after $(systemctl --user list-unit-files 'citar*' --no-legend | grep -c .)"
+say "unitfile-after $(ls "$UNIT" 2>/dev/null | grep -c .)"
+say "procs-after $(pgrep -u "$(id -u)" -f 'citar-helper run --service' | grep -c .)"
+say "DONE"
+"""
+
+#: What a fresh invocation finds afterwards: citar units listed, unit files, helper processes.
+SERVICE_LEFT_SH = r"""#!/bin/bash
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+echo "units $(systemctl --user list-unit-files 'citar*' --no-legend 2>/dev/null | grep -c .)"
+echo "files $(ls "$HOME"/.config/systemd/user/citar* 2>/dev/null | grep -c .)"
+echo "procs $(pgrep -u "$(id -u)" -f 'citar-helper run' | grep -c .)"
+"""
+
+#: The ``worker.auth_failed`` audit rows on the instance's database: one per refused token.
+AUTH_FAILED = """
+from sqlalchemy import func, select
+from citar import db
+from citar.db.models import AuditLog
+db.configure()
+with db.session() as s:
+    print(s.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.action == "worker.auth_failed")))
+"""
+
+
+def _qa_values(lines: list, key: str) -> str:
+    """The rest of the last ``QA key ...`` line, or ''."""
+    found = [line[len(f"QA {key}"):].strip() for line in lines if line.startswith(f"QA {key}")]
+    return found[-1] if found else ""
+
+
+def _shown(text: str) -> dict:
+    """``systemctl show``'s ``KEY=value`` pairs, as the script's ``show`` prints them on one line."""
+    return dict(pair.split("=", 1) for pair in text.split() if "=" in pair)
+
+
+def part_service(h) -> None:
+    """The ``service`` part (the module's doc)."""
+    import subprocess
+    r = h.report
+    bob = h.accounts["bob"]
+    data = r.data.setdefault("service", {})
+    server = h.server
+    if getattr(server, "topology", "") != "wsl" or not WSL_HELPER:
+        r.check("the service part runs with the server in WSL and the helper built there (--wsl, --wsl-helper)", False,
+                f"topology {getattr(server, 'topology', 'windows')}, --wsl-helper {WSL_HELPER!r}")
+        return
+    made = bob.post("/api/pool/servers", json={"config": {"name": f"QA service box {h.tag}", "kind": "owned",
+                                                           "connection": {"provider": "openai_compatible"}},
+                                                "reach": "worker"})
+    hid = made.json().get("id", "") if made.status_code == 200 else ""
+    issued = bob.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "service"}).json() if hid else {}
+    token, tid = issued.get("token", ""), issued.get("id", "")
+    if not token:
+        r.check("bob's helper machine and its token", False, made.text[:300])
+        return
+    home, go = f"{server.remote}/helper-svc", f"{server.remote}/svc-go"
+    server._put("service.sh", SERVICE_SH)
+    server._put("service-left.sh", SERVICE_LEFT_SH)
+    log_path = server.state / "service-wsl.log"
+    lines: list = []
+    proc = subprocess.Popen(["wsl", "-d", server.distro, "-u", server.user, "-e", "bash", f"{server.remote}/service.sh",
+                             WSL_HELPER, home, go, str(server.port), token],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+
+    def read():
+        with open(log_path, "w", encoding="utf-8") as log:
+            for raw in proc.stdout:
+                line = raw.decode("utf-8", "replace").rstrip()
+                lines.append(line)
+                log.write(line + "\n")
+                log.flush()
+
+    threading.Thread(target=read, name="qa-service-wsl", daemon=True).start()
+
+    def said(marker: str, within: float) -> bool:
+        """Whether the script said ``QA marker`` within ``within`` seconds (no longer once it has ended)."""
+        until = time.perf_counter() + within
+        while time.perf_counter() < until:
+            if f"QA {marker}" in lines:
+                return True
+            if proc.poll() is not None:
+                time.sleep(0.5)          # its last lines, still in the reader's hands
+                return f"QA {marker}" in lines
+            time.sleep(0.25)
+        return f"QA {marker}" in lines
+
+    def audits() -> int:
+        out = _server_python(h, AUTH_FAILED).strip().splitlines()
+        return int(out[-1]) if out and out[-1].isdigit() else -1
+
+    try:
+        ready = said("READY", 300)
+        installed = _shown(_qa_values(lines, "show-installed"))
+        status = _qa_values(lines, "status-exit")
+        r.check("in one wsl invocation under a trap that uninstalls: service install --user writes the unit with its "
+                "restart rules and starts it, and service status says running",
+                ready and _qa_values(lines, "install-exit") == "0" and status.startswith("0 ") and "running" in status
+                and _qa_values(lines, "unitfile") == "3" and installed.get("ActiveState") == "active"
+                and installed.get("NRestarts") == "0",
+                json.dumps({"lines": [x for x in lines if x.startswith("QA ")][:12]})[:900])
+        online = wait_until(lambda: (lambda w: w if w.get("online") else None)(_workers(bob, hid)), 90, 0.5) or {}
+        worker = online.get("worker") or {}
+        r.check("the helper the unit runs connects to the WSL server: bob's machine is online, protocol 2",
+                bool(online) and (online.get("helper") or {}).get("protocol") == 2,
+                json.dumps({"worker": {k: worker.get(k) for k in ("version", "target", "protocol")},
+                            "helper": online.get("helper")})[:500])
+        before = audits()
+        revoked = bob.delete(f"/api/pool/servers/{hid}/workers/tokens/{tid}")
+        dropped = wait_until(lambda: (not _workers(bob, hid).get("online")) or None, 30, 0.25)
+        server._wsl("bash", "-c", 'mkdir -p "$1" && touch "$1/revoked"', "go", go)
+        idle = said("REVOKED-IDLE", 180)
+        after_revoke = _shown(_qa_values(lines, "show-revoked"))
+        between = audits()
+        r.check("with its token revoked the hub drops it and it idles: the same process, NRestarts 0, no new attempt",
+                revoked.status_code == 200 and bool(dropped) and idle
+                and after_revoke.get("MainPID") == installed.get("MainPID") and after_revoke.get("NRestarts") == "0"
+                and after_revoke.get("ActiveState") == "active" and between == before,
+                json.dumps({"revoke": revoked.status_code, "installed": installed, "after": after_revoke,
+                            "attempts": between - before}))
+        server._wsl("touch", f"{go}/restart")
+        again = said("RESTARTED-IDLE", 180)
+        restarted = _shown(_qa_values(lines, "show-restarted"))
+        counted = audits()
+        r.check("restarted by hand under the revoked token, the server sees one attempt (one refused token) and it "
+                "idles: its process runs on, NRestarts stays 0, service status says running",
+                again and counted - between == 1 and restarted.get("ActiveState") == "active"
+                and restarted.get("NRestarts") == "0" and restarted.get("MainPID") not in ("", "0")
+                and _qa_values(lines, "status-restarted-exit").startswith("0 "),
+                json.dumps({"restarted": restarted, "attempts": counted - between,
+                            "status": _qa_values(lines, "status-restarted-exit")}))
+        server._wsl("touch", f"{go}/counted")
+        done = said("DONE", 180)
+        r.check("service uninstall stops and removes it: status says not installed, no unit file, systemctl --user "
+                "list-unit-files lists no citar unit, no helper process",
+                done and _qa_values(lines, "uninstall-exit") == "0"
+                and _qa_values(lines, "status-after-exit").startswith("3 ")
+                and "not installed" in _qa_values(lines, "status-after-exit")
+                and _qa_values(lines, "unitfiles-after") == "0" and _qa_values(lines, "unitfile-after") == "0"
+                and _qa_values(lines, "procs-after") == "0",
+                json.dumps({k: _qa_values(lines, k) for k in ("uninstall-exit", "status-after-exit", "unitfiles-after",
+                                                               "unitfile-after", "procs-after")}))
+        try:
+            code = proc.wait(timeout=60)
+        except Exception:
+            code = None
+        r.check("the invocation ended (exit 0), its trap having uninstalled", code == 0
+                and "QA trap: uninstalled" in lines, f"exit {code}")
+        left = server._wsl("bash", f"{server.remote}/service-left.sh", timeout=60).stdout
+        r.check("a fresh wsl invocation afterwards finds no citar unit, unit file or helper process",
+                left.split() == ["units", "0", "files", "0", "procs", "0"], left.strip())
+        data.update(machine=hid, lines=[x for x in lines if x.startswith("QA ")], left=left.strip(),
+                    attempts={"before": before, "revoked": between, "restarted": counted})
+    finally:
+        if proc.poll() is None:
+            # the trap uninstalls when the script ends: give it every go file, then end it
+            server._wsl("bash", "-c", 'mkdir -p "$1" && touch "$1/revoked" "$1/restart" "$1/counted"', "go", go)
+            try:
+                proc.wait(timeout=120)
+            except Exception:
+                proc.kill()
+
+
 # ---------------------------------------------------------------------------- the run
 
 PARTS: dict[str, Callable] = {"helper": part_helper, "llm-real": part_llm_real, "scan": part_scan,
-                              "lab": part_lab, "remote": part_remote, "verify": part_verify, "update": part_update}
+                              "lab": part_lab, "remote": part_remote, "verify": part_verify, "update": part_update,
+                              "service": part_service}
 
 
 def main(argv=None) -> int:
@@ -2612,20 +2839,30 @@ def main(argv=None) -> int:
     ap.add_argument("--llm-url", default=REAL_URL, help="llm-real: LM Studio's address (read only)")
     ap.add_argument("--stand-in", action="store_true",
                     help="llm-real: play LM Studio with the scripted endpoint (to check the part without the model)")
-    ap.add_argument("--wsl", action="store_true", help="the server in WSL (the remote and exit parts: 4-10, 4-15)")
+    ap.add_argument("--wsl", action="store_true",
+                    help="the server in WSL (the remote, service and exit parts: 4-10, 4-14, 4-15)")
     ap.add_argument("--wsl-root", default=None, metavar="PATH", help="--wsl: the checkout in WSL the server runs from")
     ap.add_argument("--wsl-python", default=None, metavar="PATH",
                     help="--wsl: the Python in WSL that runs it (a venv's, with the extension cargo xtask develop built)")
     ap.add_argument("--wsl-distro", default="Ubuntu-24.04", help="--wsl: the WSL distribution (P4.7.1's)")
     ap.add_argument("--wsl-user", default="claude", help="--wsl: the WSL user (P4.7.1's)")
+    ap.add_argument("--wsl-helper", default=None, metavar="PATH",
+                    help="service: the helper in WSL to install (cargo xtask develop's citar-ext/citar-helper there)")
     args = ap.parse_args(argv)
     # the instance's server plays the lab (the lab part): the test suite's switch, if this runs under it, stays off
     os.environ.pop("CITAR_TEST_NO_DISPATCHER", None)
-    global LLM_URL, STAND_IN
-    LLM_URL, STAND_IN = args.llm_url, args.stand_in
+    global LLM_URL, STAND_IN, WSL_HELPER
+    LLM_URL, STAND_IN, WSL_HELPER = args.llm_url, args.stand_in, args.wsl_helper
     q3.HELPER_BIN = args.helper_bin
-    if args.wsl and args.part != "remote":
-        print("refused: --wsl belongs to the remote and exit parts (packages 4-10, 4-15)", flush=True)
+    if args.wsl and args.part not in ("remote", "service", "all"):
+        print("refused: --wsl belongs to the remote, service and exit parts (packages 4-10, 4-14, 4-15)", flush=True)
+        return 2
+    if args.part == "service" and not (args.wsl and args.wsl_helper):
+        print("refused: the service part installs the helper as a systemd user service in WSL only (design P4.7.1 "
+              "rule 8): give --wsl --wsl-root --wsl-python and --wsl-helper (absolute paths inside WSL)", flush=True)
+        return 2
+    if args.wsl_helper and not (args.wsl_helper.startswith("/") and ":" not in args.wsl_helper):
+        print("refused: --wsl-helper is an absolute path inside WSL (from Git Bash, set MSYS_NO_PATHCONV=1)", flush=True)
         return 2
     if args.wsl and not (args.wsl_root and args.wsl_python):
         print("refused: --wsl needs --wsl-root (a checkout in WSL) and --wsl-python (its venv's Python)", flush=True)
