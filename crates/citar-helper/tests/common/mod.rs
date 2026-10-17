@@ -167,6 +167,48 @@ pub trait UnderTest {
         let _unused = (step, golden);
         Err("this player has no fake job host".to_owned())
     }
+    /// The update downloads the helper made (`downloads`), when the player can see them.
+    fn downloads(&self) -> Option<usize> {
+        None
+    }
+}
+
+/// The manifest the fake server relays to a helper of `version` for `target` (the transcripts'
+/// `<string>` manifest): one version on (its patch number plus one), a binary for this target at
+/// an address it never reaches in the transcripts (each refuses or stops before a download).
+#[must_use]
+pub fn test_manifest(version: &str, target: &str, build: &str) -> String {
+    let v = semver_bump(version);
+    serde_json::json!({
+        "v": 1,
+        "version": v,
+        "protocol": 2,
+        "build": build,
+        "released_at": "2026-11-01T00:00:00Z",
+        "assets": {
+            target: {
+                "name": "citar-helper-test",
+                "url": format!("https://127.0.0.1:9/download/v{v}/citar-helper-test"),
+                "sha256": "ab".repeat(32),
+                "size": 1024,
+            }
+        }
+    })
+    .to_string()
+}
+
+/// `version` with its patch number one higher (its pre-release dropped).
+fn semver_bump(version: &str) -> String {
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let mut parts: Vec<u64> = core.split('.').filter_map(|p| p.parse().ok()).collect();
+    parts.resize(3, 0);
+    parts[2] += 1;
+    format!("{}.{}.{}", parts[0], parts[1], parts[2])
+}
+
+/// Whether a pattern's value is a matcher (`<string>`, `<base64>`, …) rather than a literal.
+fn is_matcher(v: Option<&Value>) -> bool {
+    v.and_then(Value::as_str).is_some_and(|s| s.starts_with('<') && s.ends_with('>'))
 }
 
 /// Something the helper did on the wire.
@@ -213,6 +255,12 @@ pub struct Player<'t> {
     last: Instant,
     /// The committed golden sets the transcripts' `<golden:…>` values come from.
     pub golden: Committed,
+    /// The throwaway update key the run's helper trusts (`setup.helper.update_key: "test"`), and
+    /// the helper's version, target and build: a relayed manifest the transcript leaves open
+    /// (`<string>`) is one for it, signed by this key when the transcript leaves the signature
+    /// open too (a literal signature is sent as it is: none of this key's).
+    pub update_key: Option<citar_jobs::claim::SigningKey>,
+    pub update_for: (String, String, String),
 }
 
 fn t_of(v: &Value) -> &str {
@@ -241,7 +289,26 @@ impl<'t> Player<'t> {
             cancel_sent: None,
             last: Instant::now(),
             golden: Committed::load().expect("the golden sets read"),
+            update_key: None,
+            update_for: (String::new(), String::new(), String::new()),
         }
+    }
+
+    /// A relayed manifest the pattern leaves open, made for the helper and signed (the field's
+    /// doc); `update` is the frame's `update` object (or the `update` frame itself).
+    fn realize_update(&self, pattern: Option<&Value>, update: &mut Value) {
+        let Some(pattern) = pattern else { return };
+        if !is_matcher(pattern.get("manifest")) {
+            return;
+        }
+        let (version, target, build) = &self.update_for;
+        let manifest = test_manifest(version, target, build);
+        if is_matcher(pattern.get("signature"))
+            && let Some(k) = &self.update_key
+        {
+            update["signature"] = Value::String(citar_jobs::update::sign(manifest.as_bytes(), k));
+        }
+        update["manifest"] = Value::String(manifest);
     }
 
     fn fail(&self, i: usize, why: impl std::fmt::Display) -> String {
@@ -340,9 +407,18 @@ impl<'t> Player<'t> {
     async fn s2h(&mut self, i: usize, s: &Step, pattern: &Value) -> Result<(), String> {
         let t = t_of(pattern).to_owned();
         let example = self.canonical.get(&(Sender::Server, t.clone())).cloned();
-        let frame =
+        let mut frame =
             realize(pattern, &mut self.bindings, &self.t.values, &self.golden, example.as_ref())
                 .map_err(|e| self.fail(i, e))?;
+        if t == "update" {
+            let mut u = frame.clone();
+            self.realize_update(Some(pattern), &mut u);
+            frame = u;
+        } else if t == "welcome" && frame.get("update").is_some_and(Value::is_object) {
+            let mut u = frame["update"].clone();
+            self.realize_update(pattern.get("update"), &mut u);
+            frame["update"] = u;
+        }
         if s.invalid.is_none() {
             parse_server_frame(&frame.to_string()).map_err(|e| {
                 self.fail(i, format!("the realized frame fails its checks: {e}: {frame}"))
@@ -632,6 +708,19 @@ impl<'t> Player<'t> {
                         return Err(
                             self.fail(i, format!("the helper's log has no line with {text:?}"))
                         );
+                    }
+                }
+                "downloads" => {
+                    let want = v.as_u64().and_then(|n| usize::try_from(n).ok());
+                    let got = helper.downloads();
+                    if got.is_none() {
+                        return Err(self.fail(i, "this player cannot see the helper's downloads"));
+                    }
+                    if got != want {
+                        return Err(self.fail(
+                            i,
+                            format!("the helper made {got:?} update downloads, not {want:?}"),
+                        ));
                     }
                 }
                 "held_results" | "running" => {
@@ -1488,6 +1577,7 @@ impl citar_helper::jobs::Hosts for FakeHosts {
             if fails {
                 return Err(StartFailure {
                     limits: true,
+                    build: false,
                     message: "the job host refused to start (Limits): the fake host holds no \
                               limits (setup)"
                         .to_owned(),

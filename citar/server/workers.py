@@ -58,6 +58,13 @@ holds for the machine are kept, the others dropped, and the held results it want
 dispatcher's thread reads; the hub never handles a job on its loop. A job frame that does not read, whose run does,
 fails that run as a retryable ``internal`` failure would.
 
+**Updates** (P4.5.9, ``citar.server.helper_updates``): every welcome carries the manifest the relay holds (or null), a
+newly relayed one goes as an ``update`` frame to each connected helper older than it (``WorkerHub.push_update``), and
+each helper's ``update_status`` is kept per machine across its reconnects (``WorkerHub.update_states``: an update's
+``restarting`` comes over the old connection, its ``applied`` over the new binary's) for the Servers page. An update's
+hand-off closes the old socket before the new binary dials, so it never shows as ``replaced``
+(``WorkerHub.replaced`` counts those, for the tests).
+
 A connection lasts only as long as what let it in: revoking its token, disabling or deleting its machine, or suspending
 the machine's owner drops it at once (``WorkerHub.drop``, ``shutdown`` with the matching code), and the keep-alive
 checks every connection again at each ping, so a change made elsewhere drops it within a ping (P3.2.8). The newest
@@ -111,8 +118,8 @@ _HELLO_PARSER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name
 #: connection it had, since a request sent over a socket that has gone can never be answered.
 _SERIALS = itertools.count(1)
 
-#: The frame types this package's hub does not act on yet (P4.11): updates, from 4-13.
-NOT_YET = ("update_status",)
+#: The frame types the hub does not act on yet (P4.11): none since 4-13.
+NOT_YET: tuple = ()
 #: The job frames a helper sends, which go to its remote executor (``citar.jobs.remote``).
 JOB_FRAMES = ("job_accept", "job_reject", "job_progress", "job_result", "job_failed", "job_aborted")
 #: How often a helper takes a power reading (PROTOCOL.md: "samples taken every 10 s"): a frame's samples cover this
@@ -124,6 +131,8 @@ POWER_SAMPLE_SECONDS = 10.0
 POWER_MIN_SECONDS = 30.0
 #: A draw above this, in watts, is no machine's reading and is left out of its row.
 POWER_W_MAX = 20000.0
+#: The shortest time between two log lines of one machine's ``update_status`` in one state (``record_update_status``).
+UPDATE_LOG_SECONDS = 60.0
 #: A GPU draw above this many times the sum of the power limits the machine's own scan reports (``gpu_draw_cap``) is
 #: no reading of that machine (a glitch, or a helper reporting what its cards cannot draw): left out of its row.
 POWER_LIMIT_MARGIN = 1.5
@@ -183,6 +192,23 @@ def _helper_changed(server_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------- the settings, as the site asks them
+
+def update_view(server_id: str, helper_version: str) -> dict:
+    """A helper machine's update state for the Servers page: the latest signed helper this server relays (or None),
+    whether it is newer than the machine's helper, and the helper's last ``update_status`` (or None)."""
+    from .. import engine_api
+    from .helper_updates import relay
+    cur = relay().current()
+    newer = None
+    if cur is not None and helper_version:
+        try:
+            newer = engine_api.helper_version_newer(cur.version, helper_version)
+        except Exception:
+            newer = None
+    status = hub().update_states.get(server_id)
+    return {"latest": cur.view() if cur is not None else None, "available": bool(newer),
+            "status": dict(status) if status else None}
+
 
 def site_settings(server_id: str) -> dict:
     """The machine's settings as the ``settings`` frame carries them (P4.2.3), from ``servers.machine_settings`` (the
@@ -525,6 +551,7 @@ class WorkerConnection:
                     "memory_per_run_mb": self.memory_per_run_mb, "ceiling": cpu.get("ceiling")},
             "quiet_until": self.quiet_until, "connected_at": self.connected_at, "last_seen": self.last_seen,
             "alive": self.alive, "uptime_seconds": round(self.clock.time() - self.connected_at),
+            "update": update_view(self.server_id, self.helper_version),
         }
 
     def log_once(self, key: str, level: int, message: str, *args) -> None:
@@ -697,6 +724,15 @@ class WorkerHub:
         self._power_at: dict = {}
         #: Test hooks' counters (the conformance player reads them): token lookups made.
         self.lookups = 0
+        #: server_id -> the helper's last ``update_status`` ({state, version, message, at}), across its reconnects,
+        #: and its last few, oldest first (the tests read the order an update went through).
+        self.update_states: dict = {}
+        self.update_log: dict = {}
+        #: (server_id, state) -> when the hub's clock last logged such an ``update_status`` (``UPDATE_LOG_SECONDS``).
+        self._update_logged: dict = {}
+        #: How many connections a newer one of their machine replaced (``shutdown`` ``replaced``): an update's
+        #: hand-off never adds one.
+        self.replaced = 0
 
     def time(self) -> float:
         """The hub's clock (``AuthLimiter`` reads it through the hub, so a test's clock swap reaches it)."""
@@ -774,6 +810,7 @@ class WorkerHub:
             previous = self._workers.get(connection.server_id)
             self._workers[connection.server_id] = connection
         if previous is not None:
+            self.replaced += 1
             previous.fail_all("Replaced by a newer connection of the same machine.")
         _helper_changed(connection.server_id)
         return previous
@@ -1011,6 +1048,47 @@ class WorkerHub:
         with self._lock:
             connection = self._workers.get(server_id)
         return connection.cancel(request_id) if connection is not None else False
+
+    def push_update(self, relayed) -> int:
+        """A newly relayed manifest (``helper_updates.Relayed``) to each connected helper whose version is older than
+        it, as an ``update`` frame; returns how many it went to."""
+        from .. import engine_api
+        with self._lock:
+            connections = list(self._workers.values())
+        text = HP.update(relayed.manifest, relayed.signature)
+        sent = 0
+        for connection in connections:
+            try:
+                if engine_api.helper_version_newer(relayed.version, connection.helper_version) is not True:
+                    continue
+                connection.send_threadsafe(text)
+                sent += 1
+            except Exception:
+                log.exception("could not send the helper manifest to %s", connection.server_id)
+        return sent
+
+    def record_update_status(self, server_id: str, frame: dict) -> bool:
+        """A helper's ``update_status``, kept for the machine across its reconnects. Returns whether it is news for the
+        log: a state or version other than the machine's last, and no line of that state for the machine within
+        ``UPDATE_LOG_SECONDS`` (a helper says its last status again at each connection; a modified one could send
+        them at wire speed)."""
+        now = self.clock.time()
+        state = {"state": frame["state"], "version": frame.get("version"), "message": frame.get("message") or "",
+                 "at": now}
+        with self._lock:
+            last = self.update_states.get(server_id)
+            self.update_states[server_id] = state
+            self.update_log.setdefault(server_id, collections.deque(maxlen=32)).append(state)
+            if last is not None and (last["state"], last["version"]) == (state["state"], state["version"]):
+                return False
+            key = (server_id, state["state"])
+            logged = self._update_logged.get(key)
+            if logged is not None and 0 <= now - logged < UPDATE_LOG_SECONDS:
+                return False
+            if len(self._update_logged) > 4096:
+                self._update_logged.clear()
+            self._update_logged[key] = now
+            return True
 
     def broadcast(self, frame_text: str):
         """Send a frame to every connected helper."""
@@ -1268,8 +1346,9 @@ async def serve(websocket) -> None:
         executor = _executor(found.server_id) if (hello.get("helper") or {}).get("jobs_build") else None
         if executor is not None:
             executor.connected(connection)
+        from .helper_updates import relay
         welcome = HP.welcome(found.server_id, found.server_name[:120], settings, max(5, min(300, int(the_hub.ping_s))),
-                             await asyncio.to_thread(server_block), None, keep, drop, resend)
+                             await asyncio.to_thread(server_block), relay().offer(), keep, drop, resend)
         # what was sent to it since it was registered (a request waiting for the machine) follows the welcome
         await connection.welcome(welcome)
         await asyncio.to_thread(record_hello, found.server_id, hello)
@@ -1389,6 +1468,14 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
         await connection.send(HP.pong())
     elif t == "pong":
         pass
+    elif t == "update_status":
+        news = the_hub.record_update_status(sid, data)
+        if news and data["state"] in ("failed", "refused", "applied", "restarting"):
+            # A helper refusing the release it already runs (each welcome relays it) is no news.
+            own = data["state"] == "refused" and bool(data.get("version")) \
+                and data.get("version") == connection.helper_version
+            log.log(logging.DEBUG if own else logging.INFO, "the helper of %s: update %s %s: %s", sid, data["state"],
+                    data.get("version") or "", (data.get("message") or "")[:300])
     elif t == "hello":
         connection.log_once("hello", logging.WARNING, "the helper of %s sent a second hello: ignored", sid)
     elif t in NOT_YET:

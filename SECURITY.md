@@ -91,8 +91,10 @@ compiled into the helper) under the owner's limits. Nothing else: a token never 
 other machines. Anything a token allows beyond that is in scope.
 
 **What a lender can rely on** (the helper's own guarantees, design/phase4-helper.md P4.3.10): it never runs a command, a
-script or code it was sent; never reads or writes a file outside its home; never dials anything but its server and its
-configured model endpoint; never loads, unloads or swaps a model; never changes a system setting. It runs only the
+script or code it was sent; never reads or writes a file outside its home (and, when it updates itself, the folder its
+own binary is in); never dials anything but its server, its configured model endpoint and, for an update, the signed
+manifest's download address and the `https` redirects it leads to; never loads, unloads or swaps a model; never
+changes a system setting. It runs only the
 engine and bots compiled into it, on specs that are data. Its machine key is created mode 0600 (an owner-only DACL on
 Windows) and refused at start when others can read it. CPU lending is off until the owner turns it on at the machine,
 and the owner's own ceiling caps every figure the server sends.
@@ -131,8 +133,32 @@ and the owner's own ceiling caps every figure the server sends.
 | A broken but honest machine produces wrong results | The canary and the self-check refuse jobs on a machine that computes differently; otherwise the same replays, the evidence naming the round where the chains parted and the owner not quarantined | — |
 | A network attacker reads or alters traffic | TLS with the operating system's verifier; `--insecure` only for loopback and private hosts; `--ca-file` for a self-signed server | — |
 | A member uses a machine they were not lent | Every offer is admitted by grant, with Lab (CPU work) listed explicitly for CPU work (an empty list never lends it) | — |
+| A server pushes malicious or old code as an update | Manifests are verified against public keys compiled into the helper, whose private halves no server holds; never a downgrade or the same version; the download's SHA-256 and size checked against the signed ones, over `https` only, redirects included; the new binary self-tests before it is put in place, and is rolled back when it does not come up; the owner's policy (`off`, `notify`) holds locally, and a package manager's build never installs one | The release key itself (below) |
+| Someone signs a malicious release | The signing key lives only in a GitHub Actions secret of a protected environment (`helper-signing`) whose required reviewer approves every signing run; two key slots allow a rotation | The owner's custody of that environment and their GitHub account |
 
-The helper does not update itself yet; its signed update channel, and that channel's row in this table, come with it.
+**The update channel** (P4.3.8, P4.5.9). Each release publishes `citar-helper-manifest.json` (every helper binary's
+download address, SHA-256 and size, and the release's version, protocol and engine build) and its signature,
+`citar-helper-manifest.json.sig`: ed25519 over a domain string and the file's bytes as published. The private key never
+touches a disk the project controls: it is the `CITAR_UPDATE_SIGNING_KEY` secret of the `helper-signing` environment,
+read by the release workflow's signing job from the environment and passed to `cargo xtask sign-manifest`, which
+refuses a key file inside any git working tree. The public key is compiled into the helper (and the server's
+extension) from `crates/citar-jobs/update-keys.pub`, which holds at most two keys and **is empty until the owner's
+first signed release**: until then every helper reports updates "unavailable" and never downloads anything. A server
+fetches the manifest of its own version, relays it only if it verifies against the same keys, and pushes it only to
+older helpers; the helper checks it again, so a compromised server can relay nothing the release key did not sign.
+The helper downloads into its home, checks the size and the SHA-256, runs the new binary's `--self-test` (its version,
+build, protocol and target must be the manifest's, and its canary and self-check must pass), waits until no work is in
+flight, closes its connection, keeps the old binary as `<name>.old`, and swaps; a new binary that exits before its
+first welcome is swapped back (by the console run's supervisor at once, or by its own start count under a service
+manager, which counts a start however early it stops), and the old one reports the failure and does not take that
+binary again; nor does it take a release its owner rolled back by hand. The download waits in a folder of the helper's
+home that only its user can reach (mode 0700, or an access list for that user, SYSTEM and Administrators), refused
+with the fixing command if anyone opens it to others, and the copy put in place is checked against the signed
+SHA-256 again, so another local user cannot swap the binary between its checks and its installation. A server whose
+extension trusts no update key fetches no manifest at all, and one relays only a manifest of its own engine build.
+`cargo xtask keygen` writes the private key owner-only (mode 0600, or that access list on Windows) before the secret
+is in it. Development and test builds (`dev-guard`, any test feature) also take `http` downloads, but only from this
+machine, as they dial nothing else.
 
 ## Supported versions
 

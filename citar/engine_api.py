@@ -46,6 +46,8 @@ __all__ = [
     # CPU jobs (design/phase4-helper.md P4.4): the same Rust as the helper's
     "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
     "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
+    # the helper's update channel (design/phase4-helper.md P4.5.9): the same Rust as the helper's
+    "ManifestRefused", "verify_manifest", "update_keys_trusted", "helper_version_newer",
     # this build
     "build_info", "key_fingerprint",
     # one game

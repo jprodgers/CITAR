@@ -22,7 +22,9 @@
 //!    script find it, with `citar-fake-probe` beside it (the stand-in for the scan's probe
 //!    programs that those builds alone make, P4.3.5), and `citar-helper-faults`, the same helper
 //!    with the `test-faults` feature as well (`--test-fault`, a helper that cheats on purpose for
-//!    the verification tests, P4.4.6);
+//!    the verification tests, P4.4.6), and `citar-helper-update-1` and `-2`, the helper with the
+//!    `test-update-key` feature calling itself `0.1.6-test.1` and `0.1.6-test.2` (the second also
+//!    another jobs build), the older and the newer build of the update tests (P4.3.8, 4-13);
 //! 5. writes `citar-dev.pth` into the venv: the checkout on `sys.path`, and `CITAR_EXT_DIR`,
 //!    which `citar/__init__.py` puts first on the package's path, so `import citar._engine`
 //!    finds the built library while every other module comes from the checkout.
@@ -64,7 +66,7 @@ fn options(args: &[String]) -> Result<Options, String> {
 
 /// A path as it is compared: absolute, with `\` as `/`, without a trailing `/`, and on Windows
 /// in lower case, which the file system ignores.
-fn same_path_key(p: &Path) -> String {
+pub(crate) fn same_path_key(p: &Path) -> String {
     let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let mut s = p.to_string_lossy().replace('\\', "/");
     // canonicalize on Windows gives the verbatim form.
@@ -78,7 +80,7 @@ fn same_path_key(p: &Path) -> String {
 }
 
 /// Whether `inner` is `outer` or inside it.
-fn is_within(inner: &Path, outer: &Path) -> bool {
+pub(crate) fn is_within(inner: &Path, outer: &Path) -> bool {
     let (i, o) = (same_path_key(inner), same_path_key(outer));
     i == o || i.starts_with(&format!("{o}/"))
 }
@@ -185,6 +187,13 @@ const fn helper_name() -> &'static str {
 const fn faults_name() -> &'static str {
     if cfg!(windows) { "citar-helper-faults.exe" } else { "citar-helper-faults" }
 }
+
+/// The update tests' two helpers (`test-update-key`): what each calls itself, its jobs build's
+/// salt, and its executable's name, beside the helper.
+const UPDATE_BUILDS: [(&str, Option<&str>, &str); 2] = [
+    ("0.1.6-test.1", None, "citar-helper-update-1"),
+    ("0.1.6-test.2", Some("test.2"), "citar-helper-update-2"),
+];
 
 /// The fake probe's executable, beside the helper.
 const fn fake_probe_name() -> &'static str {
@@ -447,6 +456,37 @@ fn develop(root: &Path, args: &[String]) -> Result<(), Step> {
     .map_err(Step::Failed)?;
     install_library(&build_dir.join(profile).join(helper_name()), &ext.join(faults_name()))
         .map_err(Step::Failed)?;
+    // The update tests' older and newer helper (P4.3.8): the same tree calling itself two versions,
+    // the newer one another jobs build too, each trusting an update key given at run time.
+    for (version, salt, name) in UPDATE_BUILDS {
+        let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        cmd.args([
+            "build",
+            "--locked",
+            "-p",
+            "citar-helper",
+            "--bin",
+            "citar-helper",
+            "--features",
+            "dev-guard,test-update-key",
+            "--profile",
+            profile,
+        ])
+        .arg("--target-dir")
+        .arg(&build_dir)
+        .current_dir(root)
+        .env("CITAR_BUILD_ID", &label)
+        .env("CITAR_HELPER_VERSION", version);
+        match salt {
+            Some(s) => cmd.env("CITAR_HELPER_JOBS_SALT", s),
+            None => cmd.env_remove("CITAR_HELPER_JOBS_SALT"),
+        };
+        run(&mut cmd, &format!("building {name} ({profile} profile, test-update-key, {version})"))
+            .map_err(Step::Failed)?;
+        let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_owned() };
+        install_library(&build_dir.join(profile).join(helper_name()), &ext.join(exe))
+            .map_err(Step::Failed)?;
+    }
 
     // 5. The venv's link to this worktree and the library.
     std::fs::write(&pth, pth_text(root, &ext))

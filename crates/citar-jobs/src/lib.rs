@@ -29,7 +29,10 @@
 //!   under a `systemd --user` scope on Linux, and classifying its death);
 //! - [`limits`]: what the host holds per OS (P4.3.6), and how hard;
 //! - [`sys`]: the operating-system calls no safe wrapper makes, and the counting allocator
-//!   ([`Counting`]) a program that runs a job host declares as its `#[global_allocator]`.
+//!   ([`Counting`]) a program that runs a job host declares as its `#[global_allocator]`;
+//! - [`update`]: the helper's signed update manifest, the update keys this build trusts
+//!   (`update-keys.pub`, empty in Phase 4) and the version order (P4.3.8, P4.5.9): the helper
+//!   updates itself from it and the server relays it, each after the same check.
 //!
 //! The workspace denies `unsafe_code`; [`sys`]'s two per-OS files allow it, each block with its
 //! `// SAFETY:` comment, and `cargo xtask check` refuses an `unsafe` token anywhere else in this
@@ -52,6 +55,7 @@ pub mod limits;
 pub mod reference;
 pub mod spec;
 pub mod sys;
+pub mod update;
 
 pub use self::build::{Flavour, jobs_build, jobs_build_of};
 pub use self::canary::{CanaryFailure, Inject, canary, canary_injected, self_check};

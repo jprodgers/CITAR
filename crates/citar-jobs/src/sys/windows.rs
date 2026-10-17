@@ -184,9 +184,24 @@ pub fn current_user_sid() -> io::Result<String> {
 /// Gives `path` a protected DACL: full control for the current user, SYSTEM and Administrators,
 /// nothing for anyone else, and no inheritance from its folder.
 pub(super) fn restrict_to_owner(path: &Path) -> io::Result<()> {
+    restrict(path, "")
+}
+
+/// Gives the folder `path` a protected DACL as [`restrict_to_owner`] gives a file, its entries
+/// inherited by every file and folder made in it (`OICI`); the API carries them down to what it
+/// already holds.
+pub(super) fn restrict_dir_to_owner(path: &Path) -> io::Result<()> {
+    if !std::fs::metadata(path)?.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a folder"));
+    }
+    restrict(path, "OICI")
+}
+
+/// The protected DACL of [`restrict_to_owner`], each entry with the inheritance `flags` (SDDL).
+fn restrict(path: &Path, flags: &str) -> io::Result<()> {
     let user = current_user_sid()?;
     let sddl = wide(OsStr::new(&format!(
-        "D:P(A;;FA;;;{user})(A;;FA;;;{SYSTEM})(A;;FA;;;{ADMINISTRATORS})"
+        "D:P(A;{flags};FA;;;{user})(A;{flags};FA;;;{SYSTEM})(A;{flags};FA;;;{ADMINISTRATORS})"
     )));
     let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and alive across the call; on success the API allocates
@@ -355,6 +370,17 @@ fn named(sid: &str) -> String {
 }
 
 pub(super) fn exposure(path: &Path) -> io::Result<Option<Exposure>> {
+    exposure_of(path, "")
+}
+
+/// A folder: as [`exposure`], and the fixing command's grants inherited by what it holds.
+pub(super) fn dir_exposure(path: &Path) -> io::Result<Option<Exposure>> {
+    exposure_of(path, "(OI)(CI)")
+}
+
+/// Who besides the user, SYSTEM and Administrators the DACL of `path` lets in, and the `icacls`
+/// line that shuts them out, its grants carrying `inherit` (icacls' inheritance flags).
+fn exposure_of(path: &Path, inherit: &str) -> io::Result<Option<Exposure>> {
     let d = dacl(path)?;
     let me = current_user_sid()?;
     let allowed = [me.as_str(), SYSTEM, ADMINISTRATORS];
@@ -391,7 +417,8 @@ pub(super) fn exposure(path: &Path) -> io::Result<Option<Exposure>> {
         return Ok(None);
     }
     let mut fix = format!(
-        "icacls \"{}\" /inheritance:r /grant:r *{me}:F *{SYSTEM}:F *{ADMINISTRATORS}:F",
+        "icacls \"{}\" /inheritance:r /grant:r *{me}:{inherit}F *{SYSTEM}:{inherit}F \
+         *{ADMINISTRATORS}:{inherit}F",
         path.display()
     );
     if !explicit.is_empty() {

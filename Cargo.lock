@@ -324,6 +324,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "thiserror",
  "tokio",
@@ -345,6 +346,7 @@ dependencies = [
  "libc",
  "libtest-mimic",
  "proptest",
+ "semver",
  "serde",
  "serde_json",
  "sysinfo",
@@ -2804,8 +2806,13 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 name = "xtask"
 version = "0.1.5"
 dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
 ]
 

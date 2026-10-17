@@ -62,6 +62,53 @@ connection's own unless `CITAR_BEHIND_PROXY` says a proxy in front is trusted fo
 `CITAR_TRUSTED_PROXY_HOPS` hops, as for every other limit. A token's last address and time are kept
 and shown on the machine's Helper dialog.
 
+### Helper updates
+
+The server relays the signed manifest of the CITAR helper of its own version to its helpers (design/phase4-helper.md
+P4.5.9): fetched from the release's assets on GitHub (`CITAR_HELPER_MANIFEST_URL`, the default in server mode) or a
+file (`CITAR_HELPER_MANIFEST_FILE`), at most hourly, off any request, and only when it verifies against the update keys
+built into the server ([Configuration](Configuration#workers)) and names the server's own engine build (helpers
+follow their server: a server built from changed sources relays nothing). A server built with no update key (every
+0.1.6 build until the first signed release) fetches nothing at all and says so once in its log. A failed fetch keeps
+the last good manifest. Every
+helper's welcome carries it, and a new one goes at once to the connected helpers older than it; each helper decides by
+its owner's `updates` setting ([Updates](#updates)). Each helper machine's card on the Servers page (and its Helper
+dialog) shows its version beside the latest signed helper, "update available" when it is older, and where its helper
+is with an update: downloading, applied, failed with why, refused with why, or that it does not update itself (a build
+that trusts no update key: download the newer helper from the Servers page).
+
+### Signing helper updates (the owner's one-time setup)
+
+Updates are signed in CI by the release workflow's `sign-helper-manifest` job, with a key that lives only in a GitHub
+Actions secret (the owner's choice of 2026-10-14). Until it is set up the job says so and signs nothing, and every
+helper reports updates **unavailable**. To set it up, once, on a machine of your own:
+
+1. **Make the key**, in a folder outside every git repository (the tool refuses one inside):
+   `cargo xtask keygen --out ~/citar-update-key`. It writes `citar-update-signing.key` (the private key: JSON with its
+   `secret`) and `citar-update-signing.pub` (one line, the public key). The key file is its owner's alone before the
+   secret is written into it: mode 0600 on Unix; on Windows `keygen` gives it a protected access list (you, SYSTEM and
+   Administrators, nothing inherited from the folder, so a folder such as `C:\keys`, which every signed-in user may
+   change, does not open it to them). Keep the private file somewhere safe and offline as well: it is the only way to
+   sign updates helpers already trust.
+2. **Store the private key in GitHub:** the repository's Settings → Environments → New environment, named
+   `helper-signing`; add a **required reviewer** (yourself) so every signing run waits for your approval; add an
+   environment secret `CITAR_UPDATE_SIGNING_KEY` whose value is the whole content of `citar-update-signing.key`.
+3. **Commit the public key:** put the line of `citar-update-signing.pub` in `crates/citar-jobs/update-keys.pub` (one key
+   a line, at most two) in a release commit. Helpers and servers built from it trust that key; the next tagged
+   release's `sign-helper-manifest` job (after your approval) signs `citar-helper-manifest.json` and attaches it and its
+   `.sig` to the release beside the binaries. The test suite holds that file to its format (public keys only, at most
+   two, `tests/test_no_private_keys.py` and citar-jobs' `the_committed_key_file_holds_public_keys_only`), not to being
+   empty, and the tests of updates sign with throwaway keys of their own, so the commit keeps CI green; `qa_phase4.py
+   update` then expects the run's own helper to refuse the throwaway key's manifest rather than report updates
+   unavailable.
+4. **Check it** before the release: `cargo xtask helper-manifest --assets DIR --version V` over the built binaries and
+   `cargo xtask sign-manifest --key ~/citar-update-key/citar-update-signing.key DIR/citar-helper-manifest.json` sign a
+   manifest by hand the same way (the key file must be outside any repository).
+
+**Rotating the key:** make a new one, add its public line to `update-keys.pub` beside the old one in a release (two
+slots), sign that release with the old key, then replace the secret and, a release later, drop the old line. A helper
+trusts only the keys it was built with, so the step through a release that holds both is what lets old helpers follow.
+
 ---
 
 ## Who may do what to a machine
@@ -110,7 +157,8 @@ and the members'. Each machine is a card, and the card of a machine you manage c
 | Costs | Components and cost periods (an electricity plan is an administrator's to name) | Its owner and administrators |
 | Quiet hours | When nothing runs on it, for anyone | Its owner and administrators |
 | API key | Where the server keeps the key of a machine it dials (an environment variable: administrators) | Its owner and administrators, on a machine the server dials |
-| Helper | Its worker tokens (issue, revoke), how to run the helper, what the helper is (version, build, protocol) and the fingerprint of its machine key, with **Reset key…** | Its owner and administrators, on a helper machine |
+| Helper | Its worker tokens (issue, revoke), how to run the helper, what the helper is (version, build, protocol) and the fingerprint of its machine key, with **Reset key…**, and its update line (below) | Its owner and administrators, on a helper machine |
+| Its update | On a helper machine's card: its helper's version beside the latest signed helper this server relays, "update available" when it is older, and where the helper is with an update (downloading, applied, failed or refused with why, unavailable) ([Updates](#updates)) | Its owner and administrators |
 | Machine settings… | Capabilities (LLM on or off, slots, model swaps for pooled prompts, CPU sharing), what its helper's reports may change (hardware, models and power, each auto or manual) with the last report and Apply, its hardware class and trust ([below](#machine-settings-and-what-a-helpers-report-changes)) | Its owner and administrators (pinning the class, the trust tier and the verifier mark: administrators) |
 | Its trust | On a helper machine's card: its tier with its verified count and streak; to an administrator also its last mismatch with its evidence, its measured speed beside its CPU class, its verifier mark and the flags on it, with **Quarantine…** (withdrawing what it gave unverified, or not), **Release**, **Mark as verifier** (a trusted machine) and **Replicate…** ([Verification](#verification-what-a-lenders-tier-means)) | Its owner (the tier and counters) and administrators |
 | Sharing | The server group that shares it | Its owner and administrators |
@@ -273,7 +321,7 @@ as not given, and so does an empty value in the file.
 | Serve no models (lend CPU only) | `--no-llm` | `no_llm` | | |
 | Lend spare CPU | `--cpu` (this run) | `cpu.enabled` | | **off** |
 | The CPU ceiling | | `cpu.threads`, `cpu.cpu_percent`, `cpu.memory_mb`, `cpu.work` | | half the logical CPUs, 50%, a quarter of the memory, every kind of work |
-| Updates | `--updates` | `updates` | | `auto` (or `notify`, `off`) |
+| Updates ([Updates](#updates)) | `--updates` | `updates` | | `auto` (or `notify`, `off`; `notify` in a package manager's build) |
 | Stream from the endpoint | | `stream` | | `true` |
 | Send no power samples | `--no-power` | `no_power` | | |
 | Run as a service | `--service` | | | |
@@ -341,6 +389,62 @@ question, `"cpu": {"enabled": true}` in `helper.json`, or `--cpu` for one run. A
 and the server's machine dialog shows "not lent by this machine's owner". The `cpu` figures are a
 ceiling: the helper takes the smaller of each of the server's figures and yours, and tells the
 server what it will actually do.
+
+### Updates
+
+The helper updates itself from its server, never from anywhere else, and only to a release signed by CITAR's update
+key (design/phase4-helper.md P4.3.8). The server fetches the signed manifest of its own version (the release's list of
+helper binaries, each with its SHA-256 and size) and passes it on; your helper checks the signature again against the
+keys built into it, so a server can pass on nothing the release key did not sign. Your `updates` setting decides what
+happens then:
+
+| `updates` | What the helper does with a newer signed release |
+|---|---|
+| `auto` (the default) | Downloads it into its home, checks its size and SHA-256, runs the new binary's `--self-test`, waits until nothing is in flight (taking work as usual for up to an hour, then no new work until what runs ends), closes its connection, keeps the old binary as `<name>.old` beside it, swaps, and comes back as the new version |
+| `notify` | Reports it on the Servers page ("update available") and stops there: `citar-helper update apply` installs it when you choose |
+| `off` | Ignores it (the Servers page says updates are off on this machine) |
+
+To turn updates off: `"updates": "off"` in `helper.json`, or `--updates off`. A helper installed by a package manager
+(Homebrew, Scoop, winget: a `packaged` build) defaults to `notify` and refuses `auto`: update it through the package
+manager, which owns its binary.
+
+What it checks, each a refusal the Servers page shows with its reason: the signature (a build that trusts no update
+key reports updates **unavailable** and downloads nothing: **every 0.1.6 build until the owner's first signed release
+ships a key**); a newer version only (never a downgrade, never the same one); a binary for this machine; `https` for
+the download and every redirect, at most five; the size and the SHA-256 against the signed ones; and the new binary's
+self-test (its version, build, protocol and target must be the manifest's, and its canary and self-check must pass).
+The binary's folder must be writable by the helper's user: one installed by an administrator into a protected folder
+says so and stays as it is.
+
+The download waits in `helper/update/` in the helper's home, which the helper makes **its user's alone** (mode 0700;
+on Windows an access list for that user, SYSTEM and Administrators only), so no other user of the machine can swap the
+new binary between its checks and its installation; the copy put in place is checked against the signed SHA-256 once
+more. If someone opens that folder to others, the update is refused with the command that closes it again (the same
+rule as for the machine key). A download the network breaks off (or a server error, or a swap that fails) is reported
+**failed** with when it is tried again: in 5 minutes, then 10, doubling up to every 6 hours while the helper runs; a
+new release relayed starts afresh. A refusal (the signature, the version, the size or the SHA-256, your policy) and a
+failed self-test are not tried again.
+
+**After the swap.** Run by hand, the helper stays in your console and supervises the new binary: if the new binary
+exits before its first welcome (or cannot be started at all, as when an antivirus quarantines it), the old one is put
+back at once, connects again, and the Servers page says the update **failed** (with why); that binary is not tried
+again until you delete `helper/update/failed.json` in the helper's home. Under a service manager the helper exits with
+code 75 and the manager starts the new binary; one that does not come up healthy in three starts puts the old binary
+back and exits 75 again, so the manager starts the old one. A start counts however early the new binary stops,
+whether at a setting or a command line it does not take (a service run's command line counts too). The new binary
+says **applied** once its server welcomes it.
+
+By hand, in the helper's home (`--home` as the helper runs):
+
+- `citar-helper update check`: this helper's version, the update keys it trusts, its policy, the last manifest its
+  server relayed (and whether it is newer), and any update in progress or rolled back;
+- `citar-helper update apply`: installs the relayed update now, checked and self-tested as `auto` would, keeping the old
+  binary as `<name>.old`; restart the helper (or its service) to run it;
+- `citar-helper update rollback`: puts `<name>.old` back, keeping the binary it replaces as `<name>.old`, so the same
+  command puts the update back. The release it rolls away from is **held back** (written to
+  `helper/update/failed.json`): with `updates: auto` the helper does not install it again at its next connection, and
+  the Servers page shows it refused as rolled back on this machine. Delete that file (or run `update apply`) to take it
+  again.
 
 ### Lending CPU: what plays on it, and for whom
 
@@ -652,6 +756,7 @@ threat model):
 | Wear your machine out | CPU lending is off until you turn it on at the machine; your own ceiling caps every figure the server sends; the limits hold hard where the operating system allows (Windows, Linux) and are marked soft where not (macOS); your quiet hours; its games pause while your model works | macOS holds the limits softly: lend fewer threads there |
 | Learn more about your machine than it should | The hardware report can be a file you write or nothing (`--hardware FILE`, `--no-hardware`); power readings can be off (`--no-power`); the machine key's secret never leaves the machine | The prompts your model serves are seen by your machine, as before: lending a GPU means seeing what it computes |
 | Use your machine for someone you did not lend it to | Every offer is checked against your groups' grants: CPU work only with a grant that lists Lab (CPU work), never one with no purposes | — |
+| Install code on it as an update | Only a manifest signed by CITAR's release key, which no server holds, checked again by the helper; never an older or the same version; the download's SHA-256 and size checked, over `https` only; the new binary self-tests first and is rolled back if it does not come up; your `updates` setting (`notify`, `off`) holds | The release key's custody ([SECURITY.md](https://github.com/jprodgers/CITAR/blob/main/SECURITY.md#helpers-and-shared-machines)) |
 
 It can ask it to scan its hardware again, and send it its settings, which your own ceiling caps. It can replay some of
 its results elsewhere to check them ([Verification](#verification-what-a-lenders-tier-means)): what that costs a lender
@@ -680,6 +785,15 @@ says when a listing of the models failed.
 
 **Everything looks fine and completions fail.** The model is probably not loaded. A catalogue entry
 is not the same as a model in memory.
+
+**The update says unavailable, refused or failed.** *Unavailable*: this build trusts no update key (every build until
+the first signed release): download the new helper from the Servers page. *Refused*: the reason follows (the same or
+an older version, no binary for this machine, `updates: off`, a release rolled back here (by hand or after it failed:
+delete `helper/update/failed.json` to take it again), a folder the helper may not write, an update folder others can
+reach (run the command the message gives), a download whose size or SHA-256 is not the signed one). *Failed*: the
+download broke off (it is tried again by itself, the message says when), the new binary failed its self-test, or it
+did not come up and the old one is back; `citar-helper update check` says what the home holds, and the helper's log
+says more.
 
 ---
 

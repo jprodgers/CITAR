@@ -16,6 +16,7 @@ import { helperCard } from "./helper.js";
 import { openMachineSettings } from "./machine_settings.js";
 import { cpuInEffectText, poolTarget } from "./machines.js";
 import { evidenceText, flagText, speedText, trustLine } from "./trustrules.js";
+import { updateLine } from "./updaterules.js";
 import {
   KIND, KEYED, PROVIDER, addDirectMachine, call, describeConn, describeQuiet, loadRegistry, may, money, openConnection,
   openCosts, openHardware, openKey, openPlans, openQuietHours, openSettings, viewer,
@@ -217,6 +218,8 @@ function helperFacts(info, m, refresh) {
       + (h.target ? ` · ${h.target}` : "")));
     rows.push(el("span", { class: "muted small" }, `CPU: ${cpuInEffectText(info.cpu)}`));
   }
+  const upd = updateLine(info.update, h && h.version);
+  if (upd) rows.push(el("span", { class: `${upd.cls} small`, "data-update": "" }, upd.text));
   rows.push(el("div", { class: "row gap wrap" },
     el("span", { class: "muted small" }, key.fingerprint
       ? ["Machine key ", el("code", {}, key.fingerprint)] : "No machine key registered yet: its helper's next hello registers one."),
@@ -487,6 +490,7 @@ function machineCard(m, data, reload) {
     reg && reg.issues.length ? el("ul", { class: "issues" }, ...reg.issues.map((i) => el("li", { class: "warn small" }, i))) : null,
     models,
     el("div", { style: { marginTop: "6px" } }, admissionLine(m)),
+    updateBlock(m),
     trustBlock(m, reload),
     actions(m, data, reload));
   if (reg && m.kind !== "test" && may("serverRates", g)) {
@@ -506,6 +510,15 @@ function machineCard(m, data, reload) {
     }).catch(() => {});
   }
   return card;
+}
+
+// ---------------------------------------------------------------------------- its updates (design/phase4-helper.md P4.5.11)
+
+/** A helper machine's updates on its card, to its owner and administrators: the helper's version beside the latest
+ *  signed helper this server relays ("update available" when it is newer) and where the helper is with it. */
+function updateBlock(m) {
+  const line = updateLine(m.helper_update, m.helper_version);
+  return line ? el("div", { class: `${line.cls} small`, "data-update": "", style: { marginTop: "4px" } }, line.text) : null;
 }
 
 // ---------------------------------------------------------------------------- its trust (design/phase4-helper.md P4.5.11)

@@ -77,6 +77,12 @@ impl Home {
     pub fn results_dir(&self) -> PathBuf {
         self.state_dir().join("results")
     }
+
+    /// `helper/update/`: an update's download and its markers (P4.3.8, `crate::update::files`).
+    #[must_use]
+    pub fn update_dir(&self) -> PathBuf {
+        self.state_dir().join("update")
+    }
 }
 
 /// Reads one environment variable; tests pass their own.

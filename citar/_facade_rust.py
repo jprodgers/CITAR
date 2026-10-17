@@ -57,6 +57,7 @@ __all__ = [
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
     "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
+    "ManifestRefused", "verify_manifest", "update_keys_trusted", "helper_version_newer",
     "build_info", "key_fingerprint",
     "DEBUG_ACTIONS", "EngineGame",
     "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
@@ -562,6 +563,36 @@ def sample_fraction(secret: str, job: str) -> float:
     server's ``secret`` over the job's id. A provisional or trusted machine's result is checked by a replica when this
     is below its tier's rate; without the secret nobody can tell which jobs will be."""
     return _E.jobs.sample_fraction(secret.encode("utf-8"), job)
+
+
+#: A helper update manifest refused (design/phase4-helper.md P4.5.9): ``.code`` is ``no_key`` (this build trusts no
+#: update key: none ships in Phase 4), ``signature`` (a bad signature, or a key it does not trust) or ``invalid``
+#: (signed, but not a manifest this release reads).
+ManifestRefused = _E.jobs.ManifestRefused
+
+
+def verify_manifest(manifest: str, signature: str) -> dict:
+    """The helper update manifest ``manifest`` (its text exactly as published), read, when ``signature`` (standard
+    base64) is a trusted update key's signature over it: ``{v, version, protocol, build, released_at, assets: {target:
+    {name, url, sha256, size}}}``. The keys are the ones compiled in (``crates/citar-jobs/update-keys.pub``, the same
+    the helper trusts); a build with test operations also trusts ``CITAR_HELPER_UPDATE_KEY``'s, so the tests can use a
+    throwaway key and no shipped wheel can be fooled by the environment. Raises ManifestRefused."""
+    if not isinstance(manifest, str) or not isinstance(signature, str):
+        err = ManifestRefused("a manifest and its signature are text")
+        err.code = "invalid"
+        raise err
+    return json.loads(_E.jobs.verify_manifest(manifest, signature))
+
+
+def update_keys_trusted() -> int:
+    """How many helper update keys this build trusts: with none, no manifest verifies and none is ever relayed."""
+    return _E.jobs.update_keys_trusted()
+
+
+def helper_version_newer(candidate: str, current: str) -> Optional[bool]:
+    """Whether helper version ``candidate`` is later than ``current``, as semver orders them (``0.1.6-test.1`` before
+    ``0.1.6-test.2`` before ``0.1.6``), by the same Rust as the helper's; None when either is not a version."""
+    return _E.jobs.version_newer(str(candidate), str(current))
 
 
 def jobs_build() -> str:

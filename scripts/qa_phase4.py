@@ -102,8 +102,25 @@ Parts:
   the scripted endpoint) is left out of the administrators' and alice's model scores, counted in ``unverified``,
   badged on bob's own board and on his run, and counted once an administrator trusts the machine.
 
-``all`` runs every part written so far; later packages add ``update`` (4-13), ``service`` (4-14), ``exit`` and
-``real`` (4-15).
+- ``update`` (4-13): the helper updating itself (design/phase4-helper.md P4.3.8, P4.5.9), with the release side's own
+  tools: ``cargo xtask keygen`` makes a throwaway key in the run's directory (and refuses a folder inside the
+  repository, as ``sign-manifest`` refuses a key file there), ``helper-manifest`` lists the newer update helper
+  ``cargo xtask develop`` built (``citar-helper-update-2``, which calls itself ``0.1.6-test.2``) under its release name,
+  served on loopback behind a redirect as GitHub serves release assets, and ``sign-manifest`` signs it. The server,
+  restarted with ``CITAR_HELPER_MANIFEST_FILE`` and the key trusted (``CITAR_HELPER_UPDATE_KEY``, the extension's test
+  operations), relays it; bob's machine's older helper (``citar-helper-update-1``, ``0.1.6-test.1``), copied into an
+  install folder of the run's own, downloads it, checks it, self-tests it, hands off and reconnects as
+  ``0.1.6-test.2`` reporting applied, never replaced; the folder holds the new binary and the old one as ``.old``;
+  his card says up to date. A helper set to notify reports the update available and downloads nothing; the run's
+  own helper, which trusts no throwaway key, reports updates unavailable (or, once the owner's key is committed to
+  ``update-keys.pub``, refuses the manifest the throwaway key signed: ``citar-helper update check`` says which). With
+  ``--keep`` the three stay connected, for the browser checklist's H1 (the cards' update lines). The part runs the
+  ``cargo xtask`` tools from the checkout, so ``cargo`` must be on the ``PATH``; their build goes to
+  ``CARGO_TARGET_DIR``, else to the folder above ``CITAR_EXT_DIR`` (the target folder ``cargo xtask develop`` built
+  the extension in), never into the checkout (which may be a synced folder: CONTRIBUTING.md, "Build outside synced
+  folders").
+
+``all`` runs every part written so far; later packages add ``service`` (4-14), ``exit`` and ``real`` (4-15).
 """
 from __future__ import annotations
 
@@ -132,7 +149,7 @@ q3 = _phase3()
 Harness, Helper, FakeEndpoint, wait_until = q3.Harness, q3.Helper, q3.FakeEndpoint, q3.wait_until
 
 #: Parts a later package writes (P4.7.6): asked for now, the harness says so and refuses.
-LATER = {"update": "4-13", "service": "4-14", "exit": "4-15", "real": "4-15"}
+LATER = {"service": "4-14", "exit": "4-15", "real": "4-15"}
 #: The v1 refusal's words (``citar.server.helper_protocol.V1_REFUSAL_MESSAGE``), as a 0.1.5 worker prints them.
 V1_START = "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2)."
 #: A protocol 1 hello, as a 0.1.5 worker sent it.
@@ -2300,10 +2317,284 @@ def _verify_for_the_browser(h, helpers: dict, machine, start, queue, tier, host:
     return made
 
 
+
+# ---------------------------------------------------------------------------- the update part (4-13)
+
+#: The update part's two helpers (``cargo xtask develop`` builds them beside the helper: the ``test-update-key``
+#: feature, each calling itself its version; the newer another jobs build).
+UPDATE_OLD, UPDATE_NEW = "0.1.6-test.1", "0.1.6-test.2"
+#: Each target's release asset name (P4.10; ``cargo xtask helper-manifest`` reads them by these names).
+RELEASE_NAMES = {"x86_64-pc-windows-msvc": "citar-helper-windows-x64.exe", "aarch64-apple-darwin":
+                 "citar-helper-macos-arm64", "x86_64-apple-darwin": "citar-helper-macos-x64",
+                 "x86_64-unknown-linux-gnu": "citar-helper-linux-x64", "aarch64-unknown-linux-gnu":
+                 "citar-helper-linux-arm64"}
+
+
+def update_binaries() -> tuple:
+    """``citar-helper-update-1`` and ``-2`` beside the helper the run uses."""
+    folder = Path(q3.helper_binary()).parent
+    found = []
+    for n in (1, 2):
+        path = next((folder / name for name in (f"citar-helper-update-{n}.exe", f"citar-helper-update-{n}")
+                     if (folder / name).is_file()), None)
+        if path is None:
+            raise q3.HarnessError(f"no citar-helper-update-{n} beside {q3.helper_binary()}: run cargo xtask develop")
+        found.append(str(path))
+    return tuple(found)
+
+
+def _xtask_target() -> str:
+    """Where ``cargo xtask`` builds: ``CARGO_TARGET_DIR``, else the target folder ``cargo xtask develop`` built the
+    extension in (``CITAR_EXT_DIR`` is its ``citar-ext``), never the checkout's own ``target/``."""
+    given = os.environ.get("CARGO_TARGET_DIR")
+    if given:
+        return given
+    ext = os.environ.get("CITAR_EXT_DIR")
+    if ext and Path(ext).name == "citar-ext" and Path(ext).parent.is_dir():
+        return str(Path(ext).parent)
+    raise q3.HarnessError("set CARGO_TARGET_DIR (or CITAR_EXT_DIR, which cargo xtask develop prints) so cargo xtask "
+                          "builds outside the checkout")
+
+
+def _xtask(*args: str):
+    """``cargo xtask`` from the checkout (the release side of the update channel: keygen, helper-manifest,
+    sign-manifest), building into :func:`_xtask_target`."""
+    import subprocess
+    env = {**os.environ, "CARGO_TARGET_DIR": _xtask_target()}
+    return subprocess.run(["cargo", "xtask", *args], cwd=str(ROOT), capture_output=True, text=True, timeout=900,
+                          env=env)
+
+
+def _keys_trusted(binary: str, home: Path) -> int:
+    """How many update keys ``binary`` trusts of its own (``citar-helper update check``'s line): the ones
+    ``update-keys.pub`` held when it was built, none until the owner's key is committed."""
+    import re
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CITAR_WORKER_", "CITAR_HELPER_"))}
+    env["CITAR_DATA_DIR"] = str(home)
+    out = subprocess.run([binary, "update", "check", "--home", str(home)], capture_output=True, text=True,
+                         timeout=60, env=env).stdout
+    m = re.search(r"update keys trusted: (\d+)", out)
+    if not m:
+        raise q3.HarnessError(f"{binary} update check said no key count: {out.strip()[-300:]}")
+    return int(m.group(1))
+
+
+class _Assets:
+    """The release's assets on loopback, as GitHub serves them: ``/download/<tag>/<name>`` redirects to
+    ``/cdn/<name>``, which serves the file. Every path asked is recorded."""
+
+    def __init__(self, folder: Path):
+        import http.server
+        import threading as _threading
+        self.folder, self.asked = folder, []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                outer.asked.append(self.path)
+                name = self.path.rsplit("/", 1)[-1]
+                if self.path.startswith("/download/"):
+                    self.send_response(302)
+                    self.send_header("Location", f"/cdn/{name}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                path = outer.folder / name
+                if not self.path.startswith("/cdn/") or not path.is_file():
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}/download/v{UPDATE_NEW}"
+        _threading.Thread(target=self.httpd.serve_forever, name="qa-assets", daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _end_tree(helper) -> None:
+    """A helper and what it started (after an update a console run supervises the new binary), ended."""
+    for child in reversed(descendants(helper.proc.pid)):
+        try:
+            os.kill(child, 15)
+        except OSError:
+            pass
+    helper.stop()
+
+
+def _sha(path) -> str:
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def part_update(h) -> None:
+    """The ``update`` part (the module's doc)."""
+    import shutil
+    r = h.report
+    bob = h.accounts["bob"]
+    data = r.data.setdefault("update", {})
+    state = h.server.state
+    old_bin, new_bin = update_binaries()
+    work = state / "update"
+    keys, assets_dir, install = work / "keys", work / "assets", work / "install"
+    for d in (assets_dir, install):
+        d.mkdir(parents=True, exist_ok=True)
+    helpers: list = []
+    assets = None
+    saved_env = {k: h.server.env.get(k) for k in ("CITAR_HELPER_MANIFEST_FILE", "CITAR_HELPER_UPDATE_KEY")}
+    try:
+        # ---- the release side, with a throwaway key made here, outside the repository
+        inside = ROOT / "qa-update-keys-never"
+        refused_keygen = _xtask("keygen", "--out", str(inside))
+        made = _xtask("keygen", "--out", str(keys))
+        key_file, pub_file = keys / "citar-update-signing.key", keys / "citar-update-signing.pub"
+        refused_sign = _xtask("sign-manifest", "--key", str(ROOT / "citar-update-signing.key"),
+                              str(work / "citar-helper-manifest.json"))
+        r.check("cargo xtask keygen makes a throwaway key outside the repository, and keygen and sign-manifest refuse "
+                "paths inside it (exit 2, nothing made)",
+                made.returncode == 0 and key_file.is_file() and pub_file.is_file()
+                and refused_keygen.returncode == 2 and "inside this repository" in refused_keygen.stderr
+                and not inside.exists() and refused_sign.returncode == 2
+                and "inside this repository" in refused_sign.stderr,
+                json.dumps({"keygen": made.returncode, "refused": [refused_keygen.returncode, refused_sign.returncode],
+                            "why": refused_keygen.stderr.strip()[-200:]}))
+        import subprocess
+        line = subprocess.run([new_bin, "--version"], capture_output=True, text=True, timeout=60).stdout
+        target = line.split("target ", 1)[1].split(",", 1)[0] if "target " in line else ""
+        name = RELEASE_NAMES.get(target, "citar-helper-test-asset")
+        shutil.copy2(new_bin, assets_dir / name)
+        assets = _Assets(assets_dir)
+        manifest = work / "citar-helper-manifest.json"
+        listed = _xtask("helper-manifest", "--assets", str(assets_dir), "--version", UPDATE_NEW,
+                        "--base-url", assets.base, "--out", str(manifest))
+        signed = _xtask("sign-manifest", "--key", str(key_file), str(manifest))
+        doc = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else {}
+        asset = (doc.get("assets") or {}).get(target) or {}
+        r.check("cargo xtask helper-manifest lists the newer helper for this machine's target (its build read from the "
+                "binary, its SHA-256 and size), and sign-manifest signs the file as published",
+                listed.returncode == 0 and signed.returncode == 0 and doc.get("version") == UPDATE_NEW
+                and asset.get("sha256") == _sha(new_bin) and asset.get("size") == Path(new_bin).stat().st_size
+                and asset.get("url", "").startswith(assets.base) and (work / "citar-helper-manifest.json.sig").is_file(),
+                json.dumps({"target": target, "asset": asset, "out": (listed.stdout + signed.stdout).strip()[-300:],
+                            "err": (listed.stderr + signed.stderr).strip()[-300:]})[:600])
+
+        # ---- the server relays it: its manifest file, its key trusted by the extension's test operations
+        h.server.env["CITAR_HELPER_MANIFEST_FILE"] = str(manifest)
+        h.server.env["CITAR_HELPER_UPDATE_KEY"] = pub_file.read_text(encoding="utf-8").strip()
+        h.server.restart()
+
+        def machine(label: str) -> tuple:
+            made = bob.post("/api/pool/servers", json={"config": {"name": f"QA {label} {h.tag}", "kind": "owned",
+                                                                   "connection": {"provider": "openai_compatible"}},
+                                                        "reach": "worker"})
+            hid = made.json().get("id", "") if made.status_code == 200 else ""
+            issued = bob.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": label}) if hid else None
+            token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
+            return hid, token
+
+        def card(hid: str) -> dict:
+            got = bob.get("/api/pool/servers")
+            servers = got.json().get("servers", []) if got.status_code == 200 else []
+            return next((m for m in servers if m.get("id") == hid), {})
+
+        # ---- the update itself: the older helper in an install folder of its own, updates automatic
+        hid, token = machine("updating box")
+        exe = install / ("citar-helper.exe" if os.name == "nt" else "citar-helper")
+        shutil.copy2(old_bin, exe)
+        first = Helper(h, token, h.endpoint, "qa-update-box", binary=str(exe),
+                       extra=("--no-llm", "--updates", "auto", "--update-key", str(pub_file)))
+        helpers.append(first)
+        relayed = wait_until(lambda: ((card(hid).get("helper_update") or {}).get("latest") or {}).get("version"),
+                             30, 0.25)
+        applied = wait_until(lambda: (lambda w: w if ((w.get("update") or {}).get("status") or {}).get("state")
+                                      == "applied" and (w.get("worker") or {}).get("version") == UPDATE_NEW
+                                      else None)(_workers(bob, hid)), 180, 0.25)
+        log = first.text()
+        said = [w for w in ("downloading", "verified", "restarting", "applied") if f"update: {w}" in log]
+        replaced = "Another helper connected with this machine's token" in log
+        r.check("the server relays the signed manifest (the card's latest signed helper), and the helper downloads "
+                "the newer binary through a redirect, checks its size and SHA-256, self-tests it, hands off and "
+                "reconnects as 0.1.6-test.2 reporting applied, never replaced (its old socket closed first)",
+                relayed == UPDATE_NEW and bool(applied) and said == ["downloading", "verified", "restarting", "applied"]
+                and not replaced and any(p.startswith("/download/") for p in assets.asked)
+                and any(p.startswith("/cdn/") for p in assets.asked),
+                json.dumps({"relayed": relayed, "said": said, "asked": assets.asked, "replaced": replaced,
+                            "status": ((applied or {}).get("update") or {}).get("status")})[:600])
+        r.check("the install folder holds the new binary, the old one kept as <name>.old; the helper's home says the "
+                "update is healthy and nothing is pending",
+                exe.is_file() and _sha(exe) == _sha(new_bin) and _sha(str(exe) + ".old") == _sha(old_bin)
+                and (first.home / "helper" / "update" / "healthy.json").is_file()
+                and not (first.home / "helper" / "update" / "pending.json").exists(),
+                json.dumps({"new": _sha(exe)[:12], "old": _sha(str(exe) + ".old")[:12] if Path(str(exe) + ".old").is_file()
+                            else None}))
+        updated = card(hid)
+        r.check("bob's card says the helper is up to date, updated, beside the latest signed helper",
+                (updated.get("helper_update") or {}).get("available") is False
+                and ((updated.get("helper_update") or {}).get("status") or {}).get("state") == "applied"
+                and updated.get("helper_version") == UPDATE_NEW,
+                json.dumps({k: updated.get(k) for k in ("helper_version", "helper_update")})[:500])
+        data.update(machine=hid, said=said, asked=assets.asked, relayed=relayed)
+
+        # ---- notify: available, nothing downloaded; a build that trusts no key: unavailable
+        asked_before = len(assets.asked)
+        hid2, token2 = machine("notify box")
+        notify = Helper(h, token2, h.endpoint, "qa-notify-box", binary=old_bin,
+                        extra=("--no-llm", "--updates", "notify", "--update-key", str(pub_file)))
+        helpers.append(notify)
+        available = wait_until(lambda: (((_workers(bob, hid2).get("update") or {}).get("status") or {}).get("state")
+                                        == "available") or None, 60, 0.25)
+        hid3, token3 = machine("keyless box")
+        keyless = Helper(h, token3, h.endpoint, "qa-keyless-box", extra=("--no-llm",))
+        helpers.append(keyless)
+        # Every build of this tree trusts no key until the owner's is committed to update-keys.pub; then the run's own
+        # helper trusts that one, and refuses the manifest the throwaway key signed.
+        own_keys = _keys_trusted(q3.helper_binary(), keyless.home)
+        expected = ("unavailable", "") if own_keys == 0 else ("refused", "does not verify")
+
+        def keyless_said():
+            st = (_workers(bob, hid3).get("update") or {}).get("status") or {}
+            return st if st.get("state") == expected[0] and expected[1] in (st.get("message") or "") else None
+        keyless_status = wait_until(keyless_said, 60, 0.25)
+        notified = card(hid2)
+        r.check("a helper whose updates are set to notify reports the update available and downloads nothing; its card "
+                "says update available. The run's own helper, which trusts no throwaway key, reports updates "
+                "unavailable (no key trusted, as every build of this tree until the owner's key is committed) or "
+                "refuses the throwaway key's manifest (the owner's key trusted)",
+                bool(available) and len(assets.asked) == asked_before
+                and (notified.get("helper_update") or {}).get("available") is True and bool(keyless_status),
+                json.dumps({"notify": (notified.get("helper_update") or {}), "asked": assets.asked[asked_before:],
+                            "own_keys": own_keys, "keyless": keyless_status})[:600])
+        data["browser"] = {"updated": hid, "notify": hid2, "keyless": hid3}
+    finally:
+        if not h.keep:
+            for helper in helpers:
+                _end_tree(helper)
+        if assets is not None and not h.keep:
+            assets.close()
+        if not h.keep:
+            for k, v in saved_env.items():
+                if v is None:
+                    h.server.env.pop(k, None)
+                else:
+                    h.server.env[k] = v
+
+
 # ---------------------------------------------------------------------------- the run
 
 PARTS: dict[str, Callable] = {"helper": part_helper, "llm-real": part_llm_real, "scan": part_scan,
-                              "lab": part_lab, "remote": part_remote, "verify": part_verify}
+                              "lab": part_lab, "remote": part_remote, "verify": part_verify, "update": part_update}
 
 
 def main(argv=None) -> int:

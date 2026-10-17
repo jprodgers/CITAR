@@ -18,6 +18,23 @@ pub(super) fn restrict_to_owner(path: &Path) -> io::Result<()> {
 }
 
 pub(super) fn exposure(path: &Path) -> io::Result<Option<Exposure>> {
+    exposure_of(path, "600")
+}
+
+/// A folder: mode 0700, so only its owner may list it or add, replace or remove what it holds.
+pub(super) fn restrict_dir_to_owner(path: &Path) -> io::Result<()> {
+    if !std::fs::metadata(path)?.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a folder"));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+pub(super) fn dir_exposure(path: &Path) -> io::Result<Option<Exposure>> {
+    exposure_of(path, "700")
+}
+
+/// Who besides the owner the mode lets in, and the `chmod` to `mode` that shuts them out.
+fn exposure_of(path: &Path, mode_fix: &str) -> io::Result<Option<Exposure>> {
     let mode = std::fs::metadata(path)?.permissions().mode();
     if mode & NOT_OWNER == 0 {
         return Ok(None);
@@ -29,7 +46,25 @@ pub(super) fn exposure(path: &Path) -> io::Result<Option<Exposure>> {
     if mode & 0o007 != 0 {
         who.push("others".to_owned());
     }
-    Ok(Some(Exposure { who, fix: format!("chmod 600 {}", shell_quote(path)) }))
+    Ok(Some(Exposure { who, fix: format!("chmod {mode_fix} {}", shell_quote(path)) }))
+}
+
+/// Asks the process `pid` to stop (`SIGTERM`): the helper's console supervisor passes a stop on
+/// to the helper it runs (design/phase4-helper.md P4.3.8), which the standard library's
+/// `Child::kill` (`SIGKILL`) cannot.
+///
+/// # Errors
+/// No such process, or not one this user may signal.
+pub fn terminate(pid: u32) -> io::Result<()> {
+    let pid = libc::pid_t::try_from(pid)
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no such process id"))?;
+    // SAFETY: kill takes plain integers; a pid above 0 names one process, never a group.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Sets this process's nice value to `n` (higher is lower priority; raising it needs no

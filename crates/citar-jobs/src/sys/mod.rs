@@ -4,7 +4,8 @@
 //! job host's limits (P4.3.6, 4-08: a Job Object and the process's committed memory on Windows;
 //! `setpriority` and `RLIMIT_DATA` on Linux; the background band and the resident size on macOS),
 //! and the job host's counting allocator ([`alloc`], P4.4.3), whose `GlobalAlloc` implementation
-//! is unsafe by the trait's definition. [`crate::limits`] decides what to hold and calls these.
+//! is unsafe by the trait's definition; on Unix also `SIGTERM` to a process (`terminate`, the
+//! helper's console supervisor passing a stop on to its child, P4.3.8, 4-13). [`crate::limits`] decides what to hold and calls these.
 //!
 //! **Owner-only files.** The helper's machine key (and, in 4-14, the Windows service's home) must
 //! be readable by the account that runs the helper and nobody else:
@@ -16,6 +17,12 @@
 //!   modify rights, and anything under `%ProgramData%` inherits Users' read. The DACL is read
 //!   through the security API, never through `icacls`, whose output is localised; `icacls` is
 //!   only what [`Exposure::fix`] tells a person to run.
+//!
+//! **Owner-only folders** ([`restrict_dir_to_owner`], [`dir_exposure`]): the helper's update
+//! folder (P4.3.8, 4-13's fix round), where a downloaded binary waits to be self-tested and
+//! installed, must be writable by nobody else, or another local user could swap that binary
+//! between its checks and its run: mode 0700 on Unix; on Windows the same protected DACL as a
+//! file's, its entries inherited by everything made in the folder.
 
 use std::io;
 use std::path::Path;
@@ -29,6 +36,8 @@ mod unix;
 #[allow(unsafe_code)]
 mod windows;
 
+#[cfg(unix)]
+pub use self::unix::terminate;
 #[cfg(target_os = "macos")]
 pub use self::unix::{background, resident_bytes};
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -52,6 +61,17 @@ impl Exposure {
     pub fn describe(&self, path: &Path) -> String {
         format!(
             "{} can be read by {} besides its owner; make it owner-only with: {}",
+            path.display(),
+            self.who.join(", "),
+            self.fix
+        )
+    }
+
+    /// One line naming who can reach the folder and the command that fixes it.
+    #[must_use]
+    pub fn describe_folder(&self, path: &Path) -> String {
+        format!(
+            "the folder {} can be reached by {} besides its owner; make it owner-only with: {}",
             path.display(),
             self.who.join(", "),
             self.fix
@@ -97,6 +117,50 @@ pub fn exposure(path: &Path) -> io::Result<Option<Exposure>> {
     {
         let _ = path;
         Err(io::Error::new(io::ErrorKind::Unsupported, "no owner-only files on this OS"))
+    }
+}
+
+/// Makes the folder `path` the owner's alone, and what is made in it from then on: mode 0700 on
+/// Unix; on Windows a protected DACL granting full control to the current user, SYSTEM and
+/// Administrators, inherited by the files and folders in it, and nothing to anyone else.
+///
+/// # Errors
+/// The OS refused (the folder is missing, `path` is not a folder, or the caller may not change
+/// its permissions).
+pub fn restrict_dir_to_owner(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::restrict_dir_to_owner(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::restrict_dir_to_owner(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no owner-only folders on this OS"))
+    }
+}
+
+/// Who else can reach the folder `path` (list it, or add, replace or remove what it holds), or
+/// `None` when only its owner can; [`Exposure::fix`] is the folder's command.
+///
+/// # Errors
+/// The OS could not say (the folder is missing, or its permissions cannot be read).
+pub fn dir_exposure(path: &Path) -> io::Result<Option<Exposure>> {
+    #[cfg(unix)]
+    {
+        unix::dir_exposure(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::dir_exposure(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no owner-only folders on this OS"))
     }
 }
 
@@ -148,6 +212,34 @@ mod tests {
     }
 
     #[test]
+    fn a_restricted_folder_is_owner_only_and_so_is_what_is_made_in_it() {
+        let dir = scratch("restrict-dir");
+        let folder = dir.join("update");
+        std::fs::create_dir_all(&folder).expect("made");
+        std::fs::write(folder.join("before.bin"), b"x").expect("written");
+        restrict_dir_to_owner(&folder).expect("restricted");
+        assert_eq!(dir_exposure(&folder).expect("read back"), None);
+        let after = folder.join("after.bin");
+        std::fs::write(&after, b"y").expect("written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&folder).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        #[cfg(windows)]
+        {
+            // What the folder holds, old and new, inherits its owner-only entries.
+            assert_eq!(exposure(&after).expect("read"), None);
+            assert_eq!(exposure(&folder.join("before.bin")).expect("read"), None);
+            let d = dacl(&folder).expect("the DACL");
+            assert!(d.protected, "{d:?}");
+        }
+        assert!(restrict_dir_to_owner(&after).is_err(), "a file is not a folder");
+        std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    #[test]
     fn shell_quoting_survives_a_quote() {
         assert_eq!(shell_quote(Path::new("/a b/it's")), r"'/a b/it'\''s'");
     }
@@ -157,6 +249,8 @@ mod tests {
         let dir = scratch("missing");
         assert!(exposure(&dir.join("absent")).is_err());
         assert!(restrict_to_owner(&dir.join("absent")).is_err());
+        assert!(dir_exposure(&dir.join("absent")).is_err());
+        assert!(restrict_dir_to_owner(&dir.join("absent")).is_err());
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 }

@@ -43,6 +43,14 @@
 //!   `error` is ignored. **A lost connection drops every completion in flight** (their connections
 //!   to the endpoint with them, P4.2.4), so none holds the model or a slot for an answer nobody
 //!   will read; a stop answers each `stopping` before the socket closes.
+//! - **Updates** ([`crate::update`], P4.3.8): the welcome's manifest and each `update` frame go to
+//!   the updater, whose `update_status` frames are sent from here (after the welcome's settings
+//!   are acknowledged). Once a verified binary waits, the connection hands off when nothing is in
+//!   flight: work is taken as usual for up to an hour, then no new work (requests refused
+//!   `stopping`, offers `busy`) until what runs ends; the job host is ended, `restarting` sent, the
+//!   socket closed, and only then is the binary swapped (by [`Helper::run`]), so the server never
+//!   sees two connections of the machine (`replaced` is never the success signal). A swap that
+//!   fails leaves the old binary serving, which reconnects and says `failed`.
 //! - **A hostile server** (P4.6, threat A) cannot make the helper hold more than it bounds: a
 //!   frame type it invents or a value it fills is quoted cut to a few hundred characters
 //!   ([`SERVER_TEXT`]), a bad frame's throttling key is one of the known types or `?`, and every
@@ -73,11 +81,12 @@ use crate::protocol::{
     self, Ceiling as WireCeiling, CpuInfo, ErrorCode, FrameSet, HelloHardwareSource, HelperFrame,
     HelperInfo, JobReject, LlmInfo, MAX_FRAME_BYTES, MachineInfo, Model, Parsed, ProtocolError,
     RefusedCode, RejectReason, Report, Request, RequestError, RequestErrorCode, ServerFrame,
-    Settings, Status,
+    Settings, Status, UpdateState, UpdateStatus,
 };
 use crate::proxy::{self, Finished, Flights, InFlight, Outcome};
 use crate::scan::{self, Runtime, Scanner};
 use crate::settings::{self, Local};
+use crate::update::{Staged, UpdateSetup, Updater};
 
 /// The first reconnect delay.
 pub const BACKOFF_START: Duration = Duration::from_secs(2);
@@ -141,6 +150,9 @@ pub enum Exit {
     Stopped,
     /// A permanent refusal from a console run: exit code 78.
     Refused,
+    /// An update's binary is in place: exit code 75, so a service manager or the console run's
+    /// supervisor starts it (P4.3.8, P4.3.9).
+    Update,
 }
 
 impl Exit {
@@ -150,9 +162,13 @@ impl Exit {
         match self {
             Exit::Stopped => 0,
             Exit::Refused => 78,
+            Exit::Update => 75,
         }
     }
 }
+
+/// How long the job host may take to go at an update's hand-off.
+pub const HANDOFF_HOST_WAIT: Duration = Duration::from_secs(10);
 
 /// What the hello says about the machine that the session does not work out itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,6 +208,8 @@ pub struct Helper {
     pub sensors: Sensors,
     /// What plays CPU jobs: the job hosts, the key that signs results, where results wait.
     pub jobs: JobSetup,
+    /// What updates the helper: the keys it trusts, its binary, where downloads go (P4.3.8).
+    pub update: UpdateSetup,
 }
 
 /// What scans the machine and measures its power: the machine's own ([`crate::scan::SystemScanner`],
@@ -270,10 +288,14 @@ const CACHE_VERSION: u64 = 1;
 #[derive(Clone, Debug, PartialEq)]
 enum End {
     Stopped,
-    Reconnect { welcomed: bool },
+    Reconnect {
+        welcomed: bool,
+    },
     Permanent(String),
     Upgrade(String),
     Rate(Duration),
+    /// An update's hand-off: `restarting` sent and the socket closed; the binary is swapped next.
+    Update(Staged),
 }
 
 /// Reconnect delays: 2 s doubling to 60 s, each with up to 30% jitter added.
@@ -746,8 +768,21 @@ impl Helper {
         *self.stop.borrow()
     }
 
-    /// Runs the helper until it is stopped or permanently refused (from a console).
+    /// Runs the helper until it is stopped, permanently refused (from a console), or swapped for
+    /// an update's binary.
     pub async fn run(&self) -> Exit {
+        let updater = Updater::start(
+            &self.update,
+            self.config.updates,
+            &self.facts.version,
+            &self.facts.target,
+            self.log.clone(),
+        );
+        self.run_with(&updater).await
+    }
+
+    /// [`Helper::run`] with its updater (the tests read it).
+    pub async fn run_with(&self, updater: &Updater) -> Exit {
         let mut backoff = Backoff::default();
         let mut idle_logged = false;
         let mut first = true;
@@ -770,6 +805,28 @@ impl Helper {
             if self.stopped() {
                 return Exit::Stopped;
             }
+            // A binary staged while the server could not be reached: handed off when idle, with
+            // no socket to close.
+            if let Some(staged) = updater.staged()
+                && jobs.as_ref().is_none_or(|j| j.snapshot().jobs_running == 0)
+            {
+                self.log.info(format!(
+                    "handing off to CITAR helper {} (not connected)",
+                    staged.version
+                ));
+                if let Some(j) = &jobs {
+                    j.hand_off(HANDOFF_HOST_WAIT).await;
+                }
+                match self.swap(&staged).await {
+                    Ok(()) => return Exit::Update,
+                    Err(why) => {
+                        updater.swap_failed(why);
+                        if let Some(j) = &jobs {
+                            j.resume();
+                        }
+                    }
+                }
+            }
             let report = tokio::select! {
                 r = self.prepare(&mut catalog, &mut scans) => r,
                 () = stop_signal(self.stop.clone()) => return Exit::Stopped,
@@ -787,7 +844,8 @@ impl Helper {
             };
             let end = match dialled {
                 Ok(ws) => {
-                    self.connection(ws, &mut catalog, &mut scans, report, jobs.as_ref()).await
+                    self.connection(ws, &mut catalog, &mut scans, report, jobs.as_ref(), updater)
+                        .await
                 }
                 Err(e) => {
                     let d = backoff.delay();
@@ -801,8 +859,24 @@ impl Helper {
                     continue;
                 }
             };
+            if matches!(end, End::Permanent(_) | End::Upgrade(_) | End::Rate(_)) {
+                // The server answered, and this binary understood it: an update's new binary works.
+                updater.heard().await;
+            }
             let wait = match end {
                 End::Stopped => return Exit::Stopped,
+                End::Update(staged) => match self.swap(&staged).await {
+                    Ok(()) => return Exit::Update,
+                    Err(why) => {
+                        self.log.error(format!("the update could not be installed: {why}"));
+                        updater.swap_failed(why);
+                        if let Some(j) = &jobs {
+                            j.resume();
+                        }
+                        backoff.reset();
+                        backoff.delay()
+                    }
+                },
                 End::Reconnect { welcomed } => {
                     if welcomed {
                         backoff.reset();
@@ -849,6 +923,35 @@ impl Helper {
         }
     }
 
+    /// The hand-off's swap (P4.3.8 step 7, after the socket closed): `pending.json` written, then
+    /// the staged binary put in place, the old one kept as `<name>.old`.
+    ///
+    /// # Errors
+    /// Why not; the old binary is then in its place, and `pending.json` gone.
+    async fn swap(&self, staged: &Staged) -> Result<(), String> {
+        let (Some(install), Some(dir)) = (self.update.install.clone(), self.update.dir.clone())
+        else {
+            return Err("this helper does not know its own binary or its home".to_owned());
+        };
+        let (old, staged) = (self.facts.version.clone(), staged.clone());
+        let done = tokio::task::spawn_blocking(move || {
+            dir.begin(&old, &staged.version, &staged.sha256)
+                .map_err(|e| format!("writing {}: {e}", dir.path().display()))?;
+            if let Err(e) = install.swap_in(&staged.path, &staged.sha256) {
+                let _gone = dir.remove_pending();
+                return Err(e);
+            }
+            let _staged_gone = std::fs::remove_file(&staged.path);
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("the swap's thread: {e}")));
+        if done.is_ok() {
+            self.log.info("the update's binary is in place");
+        }
+        done
+    }
+
     /// One connection, from the hello to its end.
     async fn connection(
         &self,
@@ -857,6 +960,7 @@ impl Helper {
         scans: &mut Scans,
         report: Report,
         jobs: Option<&JobSide>,
+        updater: &Updater,
     ) -> End {
         let (mut tx, mut rx) = ws.split();
         let n = catalog.models.len();
@@ -878,6 +982,14 @@ impl Helper {
             self.config.max_concurrent,
             if self.config.max_concurrent == 1 { "" } else { "s" }
         ));
+        // The updater's frames, after the welcome's settings are acknowledged: the manifest the
+        // welcome relays, and what an update in progress (or a rolled-back one) says.
+        let (update_out, update_frames) = mpsc::unbounded_channel();
+        updater.connected(update_out);
+        if let Some(u) = welcome.update.clone() {
+            updater.offered(u);
+        }
+        updater.welcomed();
         let mut job_frames = None;
         match jobs {
             Some(j) => {
@@ -927,7 +1039,11 @@ impl Helper {
             }
         }
         let mut steady = Steady::new(self, catalog, scans, quiet_until, jobs, job_frames);
+        steady.updates = Some(update_frames);
+        steady.updater = Some(updater);
+        steady.acked = jobs.is_none();
         let end = steady.serve(&mut tx, &mut rx).await;
+        updater.disconnected();
         if let Some(j) = jobs {
             j.disconnected();
             j.llm_busy(false);
@@ -1333,6 +1449,21 @@ struct Steady<'a> {
     /// This minute's readings: how many were taken, and the samples among them.
     taken: u32,
     samples: Vec<protocol::Sample>,
+    /// The updater, and the frames it hands out for the server.
+    updater: Option<&'a Updater>,
+    updates: Option<mpsc::UnboundedReceiver<HelperFrame>>,
+    /// The welcome's settings are acknowledged: the updater's frames may go.
+    acked: bool,
+    /// A verified binary waits for the hand-off: since when, and whether work is refused now.
+    handoff: Option<Handoff>,
+}
+
+/// An update waiting for the helper to be idle (P4.3.8 step 6).
+struct Handoff {
+    staged: Staged,
+    since: Instant,
+    /// The wait is over: no new work is taken until what runs ends.
+    draining: bool,
 }
 
 impl Drop for Steady<'_> {
@@ -1428,7 +1559,56 @@ impl<'a> Steady<'a> {
             meter,
             taken: 0,
             samples: Vec::new(),
+            updater: None,
+            updates: None,
+            acked: true,
+            handoff: None,
         }
+    }
+
+    /// Nothing in flight: no completion, no live job run.
+    fn idle(&self) -> bool {
+        self.flights.is_empty() && self.jobs.is_none_or(|j| j.snapshot().jobs_running == 0)
+    }
+
+    /// The hand-off (P4.3.8 step 7): no work taken from now on, the job host ended (its results
+    /// already made are sent; nothing it says after this is), `restarting`, and the socket closed.
+    async fn hand_off(&mut self, tx: &mut Sink) -> End {
+        let Some(h) = self.handoff.take() else { return End::Reconnect { welcomed: true } };
+        let version = h.staged.version.clone();
+        self.h.log.info(format!("handing off to CITAR helper {version}: the helper is idle"));
+        if let Some(j) = self.jobs {
+            j.hand_off(HANDOFF_HOST_WAIT).await;
+            if let Some(r) = self.job_frames.as_mut() {
+                while let Ok(f) = r.try_recv() {
+                    if self.h.send(tx, f).await.is_err() {
+                        return End::Update(h.staged);
+                    }
+                }
+            }
+        }
+        // The updater's last words before this one (its `verified`, said just before the binary was
+        // staged) go first.
+        if let Some(r) = self.updates.as_mut() {
+            while let Ok(f) = r.try_recv() {
+                if self.h.send(tx, f).await.is_err() {
+                    return End::Update(h.staged);
+                }
+            }
+        }
+        let st = UpdateStatus {
+            state: UpdateState::Restarting,
+            version: Some(version.clone()),
+            message: format!("restarting into CITAR helper {version}"),
+        };
+        self.h.log.info(format!("update: restarting {version}: {}", st.message));
+        if self.h.send(tx, HelperFrame::UpdateStatus(st)).await.is_ok() {
+            let close =
+                CloseFrame { code: CloseCode::Away, reason: "restarting for an update".into() };
+            let _closed =
+                tokio::time::timeout(CLOSE_SEND, tx.send(Message::Close(Some(close)))).await;
+        }
+        End::Update(h.staged)
     }
 
     /// When the next scan is due, when this helper scans and none is being made: the wall clock's
@@ -1501,10 +1681,21 @@ impl<'a> Steady<'a> {
     }
 
     async fn serve(&mut self, tx: &mut Sink, rx: &mut Stream) -> End {
+        let mut ready = self.updater.map(Updater::ready);
         loop {
+            if self.handoff.is_some() && self.idle() {
+                return self.hand_off(tx).await;
+            }
             let ping_at = (!self.pinged).then(|| self.last_rx + PING_AFTER);
             let stale_at = self.last_rx + STALE_AFTER;
             let mut wake = stale_at.min(self.next_quiet);
+            let drain_at = match (&self.handoff, self.updater) {
+                (Some(h), Some(u)) if !h.draining => Some(h.since + u.idle_wait()),
+                _ => None,
+            };
+            if let Some(d) = drain_at {
+                wake = wake.min(d);
+            }
             if let Some(p) = ping_at {
                 wake = wake.min(p);
             }
@@ -1551,10 +1742,44 @@ impl<'a> Steady<'a> {
                     None => std::future::pending().await,
                 }
             };
+            let acked = self.acked;
+            let updates = &mut self.updates;
+            let update_frame = async {
+                match updates.as_mut() {
+                    Some(r) if acked => r.recv().await,
+                    _ => std::future::pending().await,
+                }
+            };
+            let staged = async {
+                match ready.as_mut() {
+                    Some(r) => r.changed().await.map(|()| r.borrow_and_update().clone()),
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 Some(frame) = job_frame => {
+                    let ack = matches!(frame, HelperFrame::SettingsAck(_));
                     if self.h.send(tx, frame).await.is_err() {
                         return End::Reconnect { welcomed: true };
+                    }
+                    self.acked |= ack;
+                }
+                Some(frame) = update_frame => {
+                    if self.h.send(tx, frame).await.is_err() {
+                        return End::Reconnect { welcomed: true };
+                    }
+                }
+                Ok(s) = staged => {
+                    match s {
+                        Some(staged) if self.handoff.is_none() => {
+                            self.h.log.info(format!(
+                                "CITAR helper {} waits to be installed: handing off once nothing is in flight",
+                                staged.version
+                            ));
+                            self.handoff = Some(Handoff { staged, since: Instant::now(), draining: false });
+                        }
+                        Some(_) => {}
+                        None => self.handoff = None,
                     }
                 }
                 m = rx.next() => {
@@ -1665,6 +1890,22 @@ impl<'a> Steady<'a> {
                         self.h.log.warn("no frame from the server for 70 s: the connection is dead");
                         return End::Reconnect { welcomed: true };
                     }
+                    if drain_at.is_some_and(|d| now >= d)
+                        && let Some(h) = self.handoff.as_mut()
+                    {
+                        h.draining = true;
+                        let waited = self.updater.map_or(0, |u| u.idle_wait().as_secs());
+                        self.h.log.info(format!(
+                            "CITAR helper {} has waited {} for this helper to be idle: no new work \
+                             until what runs ends",
+                            h.staged.version,
+                            if waited >= 120 {
+                                format!("{} minutes", waited / 60)
+                            } else {
+                                format!("{waited} s")
+                            }
+                        ));
+                    }
                     if ping_at.is_some_and(|p| now >= p) {
                         self.pinged = true;
                         if self.h.send(tx, HelperFrame::Ping(protocol::Ping {})).await.is_err() {
@@ -1721,6 +1962,15 @@ impl<'a> Steady<'a> {
                 }
                 Ok(())
             }
+            ServerFrame::Request(r) if self.handoff.as_ref().is_some_and(|h| h.draining) => {
+                let e = RequestError {
+                    id: r.id,
+                    code: RequestErrorCode::Stopping,
+                    message: "the helper is restarting for an update".to_owned(),
+                    retryable: true,
+                };
+                self.h.send(tx, HelperFrame::Error(e)).await
+            }
             ServerFrame::Request(r) => self.request(tx, r).await,
             ServerFrame::Cancel(c) => {
                 if !self.flights.cancel(&c.id) {
@@ -1730,6 +1980,16 @@ impl<'a> Steady<'a> {
                         "a cancel for {}, which is not in flight",
                         clip(&c.id, TYPE_SHOWN)
                     ));
+                }
+                Ok(())
+            }
+            ServerFrame::JobOffer(o) if self.handoff.as_ref().is_some_and(|h| h.draining) => {
+                let r = JobReject { run: o.run, reason: RejectReason::Busy };
+                self.h.send(tx, HelperFrame::JobReject(r)).await
+            }
+            ServerFrame::Update(u) => {
+                if let Some(up) = self.updater {
+                    up.offered(u);
                 }
                 Ok(())
             }
@@ -1772,7 +2032,7 @@ impl<'a> Steady<'a> {
                 Ok(())
             }
             other => {
-                // update (4-13), pong, and a second welcome.
+                // pong, and a second welcome.
                 self.h.log.debug(format!("nothing to do for {}", other.type_name()));
                 Ok(())
             }
@@ -1933,6 +2193,7 @@ mod tests {
     fn exit_codes_are_the_contracts() {
         assert_eq!(Exit::Stopped.code(), 0);
         assert_eq!(Exit::Refused.code(), 78);
+        assert_eq!(Exit::Update.code(), 75);
     }
 
     #[test]

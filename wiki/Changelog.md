@@ -276,6 +276,29 @@ that means for an existing install:
   played on, and a standing that cannot be read counts as unverified; the runs listing's badge is no longer saved into
   the run; `PUT /api/admin/verification` answers 400, not 500, to infinity and huge counts; `GET /api/admin/jobs`
   waits at most 2 s for a tick (503 past that).
+- **The helper updates itself, signed** (design/phase4-helper.md P4.3.8, P4.5.9): the server fetches the signed
+  manifest of its own version's helpers (GitHub's release in server mode, `CITAR_HELPER_MANIFEST_URL`, or a file,
+  `CITAR_HELPER_MANIFEST_FILE`) at most hourly, relays it only if it verifies, and pushes a new one to older helpers;
+  each helper checks it again and, under its owner's `updates` (`auto`, `notify`, `off`; `notify` in a package
+  manager's build, which refuses `auto`), downloads over `https` only, checks the size and SHA-256, self-tests the new
+  binary, waits until idle, closes its connection and swaps, keeping `<name>.old`. A console run supervises the new
+  binary and puts the old one back if it exits before its first welcome; under a service manager the helper exits 75,
+  and a new binary that does not come up in three starts restores the old one. `citar-helper update check`, `apply`
+  and `rollback`. The Servers page shows each helper's version beside the latest signed helper and where its update
+  is. No key ships yet: until the owner's first signed release every helper reports updates unavailable; releases are
+  signed in CI by the protected `helper-signing` environment's secret (the owner's one-time setup is in
+  [docs/server/WORKERS.md](Workers#signing-helper-updates-the-owners-one-time-setup)), with
+  `cargo xtask keygen`, `helper-manifest` and `sign-manifest` refusing key paths inside any repository. SECURITY.md
+  describes the update channel. [docs/server/WORKERS.md](Workers#updates).
+- **Self-update, hardened (4-13's review):** `citar-helper update rollback` holds the release it rolls away from back,
+  so an automatic helper no longer installs it again at its next connection; a download the network breaks off (and a
+  failed swap) is tried again after 5 minutes, doubling up to 6 hours, instead of never while the helper runs; a service
+  start the new binary refuses early (a setting, a command line) counts toward the rollback; a new binary the console
+  supervisor cannot even start is rolled back; the update folder is its user's alone and the binary put in place is
+  checked against the signed SHA-256 once more; `cargo xtask keygen` writes the key owner-only on Windows too; a server
+  that trusts no update key fetches nothing (no hourly GitHub request and warning), relays only a manifest of its own
+  engine build, and logs a helper's update status once per change; committing the owner's public key keeps the test
+  suite green.
 
 **Chat** ([docs/PLAYING.md](Playing-in-the-browser), [docs/AI_PLAYERS.md](AI-players)):
 

@@ -11,6 +11,13 @@
 //! any other: Python's `json` writes `NaN` and `Infinity`, which JSON has not, and a value nested
 //! deeper than 128 levels does not read.
 //!
+//! The helper's update manifests (design/phase4-helper.md P4.5.9) are checked here too
+//! (`verify_manifest`, `version_newer`), by the same Rust as the helper's, against the update keys
+//! this build trusts (`update-keys.pub`, none in Phase 4); a build with the test operations also
+//! trusts the keys `CITAR_HELPER_UPDATE_KEY` holds, so the Python suite can sign with a throwaway
+//! key while no shipped wheel can be fooled by the environment. A refused manifest is
+//! `ManifestRefused` (a `ValueError`) with `.code`: `no_key`, `signature` or `invalid`.
+//!
 //! `run` plays the job with the GIL released one seat step at a time, as `run_game` does, so
 //! another thread's game goes on beside it; between steps it checks for signals and hands each
 //! new round to `on_round`, whose exception ends the run and is raised. A game that panics is
@@ -334,6 +341,113 @@ pub fn verify_claim(
     out.map_err(|e| claim_refused(e.verdict, e.why))
 }
 
+create_exception!(
+    citar._engine,
+    ManifestRefused,
+    PyValueError,
+    "A helper update manifest refused: `.code` is no_key (this build trusts no update key), \
+     signature (a bad signature, or an unknown key) or invalid (signed, but not a manifest this \
+     release reads)."
+);
+
+/// The update keys this build trusts: `update-keys.pub`'s, and with the test operations those
+/// `CITAR_HELPER_UPDATE_KEY` holds (one standard-base64 key a line, or several on one line split
+/// by spaces or commas).
+fn update_keys() -> PyResult<Vec<citar_jobs::update::VerifyingKey>> {
+    let keys = citar_jobs::update::trusted_keys().map_err(|e| manifest_refused("invalid", e))?;
+    test_keys(keys)
+}
+
+/// `keys` and the test operations' `CITAR_HELPER_UPDATE_KEY`.
+#[cfg(feature = "test-ops")]
+fn test_keys(
+    mut keys: Vec<citar_jobs::update::VerifyingKey>,
+) -> PyResult<Vec<citar_jobs::update::VerifyingKey>> {
+    if let Ok(text) = std::env::var("CITAR_HELPER_UPDATE_KEY") {
+        let lines = text.replace([',', ' '], "\n");
+        let more = citar_jobs::update::parse_keys(&lines)
+            .map_err(|e| manifest_refused("invalid", format!("CITAR_HELPER_UPDATE_KEY: {e}")))?;
+        for k in more {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+    }
+    Ok(keys)
+}
+
+/// `keys`: a shipped build trusts nothing from the environment.
+#[cfg(not(feature = "test-ops"))]
+#[allow(clippy::unnecessary_wraps)]
+fn test_keys(
+    keys: Vec<citar_jobs::update::VerifyingKey>,
+) -> PyResult<Vec<citar_jobs::update::VerifyingKey>> {
+    Ok(keys)
+}
+
+fn manifest_refused(code: &'static str, message: String) -> PyErr {
+    Python::attach(|py| {
+        let err = ManifestRefused::new_err(message);
+        match err.value(py).setattr("code", code) {
+            Ok(()) => err,
+            Err(lost) => lost,
+        }
+    })
+}
+
+/// The helper update manifest `manifest` (its text exactly as published) when `signature` is a
+/// trusted update key's signature over it (P4.3.8, P4.5.9), as JSON bytes: `{v, version,
+/// protocol, build, released_at, assets: {<target>: {name, url, sha256, size}}}`. The size is
+/// checked first, then the signature, and only then the manifest's fields.
+#[pyfunction]
+pub fn verify_manifest(manifest: &str, signature: &str) -> PyResult<Bytes> {
+    let keys = update_keys()?;
+    match citar_jobs::update::verify(manifest.as_bytes(), signature, &keys) {
+        Ok(m) => Ok(Bytes(serde_json::to_vec(&m).map_err(|e| Failure::Runtime(e.to_string()))?)),
+        Err(e) => {
+            let code = match &e {
+                citar_jobs::update::ManifestError::NoKey => "no_key",
+                citar_jobs::update::ManifestError::Signature(_) => "signature",
+                _ => "invalid",
+            };
+            Err(manifest_refused(code, e.to_string()))
+        }
+    }
+}
+
+/// How many update keys this build trusts (with the test operations, `CITAR_HELPER_UPDATE_KEY`'s
+/// too): none means no manifest is ever relayed.
+#[pyfunction]
+pub fn update_keys_trusted() -> PyResult<usize> {
+    Ok(update_keys()?.len())
+}
+
+/// Whether `candidate` is a later helper version than `current` (semver: `0.1.6-test.1` before
+/// `0.1.6-test.2` before `0.1.6`); `None` when either is not a version.
+#[pyfunction]
+pub fn version_newer(candidate: &str, current: &str) -> Option<bool> {
+    citar_jobs::update::newer(candidate, current)
+}
+
+/// A throwaway update key's public half from a test's `seed`, in standard base64 (a build with
+/// the test operations only): what a test puts in `CITAR_HELPER_UPDATE_KEY`.
+#[cfg(feature = "test-ops")]
+#[pyfunction]
+pub fn test_update_public_key(seed: u8) -> String {
+    citar_jobs::claim::public_b64(&citar_jobs::claim::SigningKey::from_bytes(&[seed; 32]))
+}
+
+/// `manifest` signed by the throwaway update key of `seed` (a build with the test operations
+/// only), as `cargo xtask sign-manifest` signs a release's.
+#[cfg(feature = "test-ops")]
+#[pyfunction]
+pub fn test_sign_manifest(seed: u8, manifest: &str) -> String {
+    citar_jobs::update::sign(
+        manifest.as_bytes(),
+        &citar_jobs::claim::SigningKey::from_bytes(&[seed; 32]),
+    )
+}
+
 /// A claim refused with its verdict.
 fn claim_refused(verdict: citar_jobs::ClaimVerdict, message: String) -> PyErr {
     Python::attach(|py| {
@@ -421,6 +535,14 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     let m = PyModule::new(py, "jobs")?;
     m.add("JobRefused", py.get_type::<JobRefused>())?;
     m.add("ClaimRefused", py.get_type::<ClaimRefused>())?;
+    m.add("ManifestRefused", py.get_type::<ManifestRefused>())?;
+    m.add_function(wrap_pyfunction!(verify_manifest, &m)?)?;
+    m.add_function(wrap_pyfunction!(update_keys_trusted, &m)?)?;
+    m.add_function(wrap_pyfunction!(version_newer, &m)?)?;
+    #[cfg(feature = "test-ops")]
+    m.add_function(wrap_pyfunction!(test_update_public_key, &m)?)?;
+    #[cfg(feature = "test-ops")]
+    m.add_function(wrap_pyfunction!(test_sign_manifest, &m)?)?;
     m.add_function(wrap_pyfunction!(verify_claim, &m)?)?;
     m.add_function(wrap_pyfunction!(sample_fraction, &m)?)?;
     #[cfg(feature = "test-ops")]

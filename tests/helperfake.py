@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import socket
 import threading
 import time
@@ -335,6 +336,108 @@ def require_faults_binary(what: str) -> str:
     raise unittest.SkipTest(f"{what}: no citar-helper-faults in CITAR_EXT_DIR (cargo xtask develop builds it)")
 
 
+def update_binaries() -> Optional[tuple]:
+    """The update tests' older and newer helper (the ``test-update-key`` feature, P4.3.8): ``CITAR_HELPER_UPDATE_BINS``
+    (two paths joined by ``os.pathsep``: CI's test jobs name the build-ext job's), else ``citar-helper-update-1`` and
+    ``-2`` beside the helper ``cargo xtask develop`` built, calling themselves ``0.1.6-test.1`` and ``0.1.6-test.2`` (the
+    second another jobs build). None when there are none; named ones that are no files raise ``NoHelperBinary``."""
+    import os
+    from pathlib import Path
+    given = os.environ.get("CITAR_HELPER_UPDATE_BINS")
+    if given:
+        paths = given.split(os.pathsep)
+        if len(paths) != 2 or not all(Path(p).is_file() for p in paths):
+            raise NoHelperBinary(f"CITAR_HELPER_UPDATE_BINS names {given!r}, which is not two files")
+        return tuple(paths)
+    binary = helper_binary()
+    if binary is None:
+        return None
+    found = []
+    for n in (1, 2):
+        for name in (f"citar-helper-update-{n}.exe", f"citar-helper-update-{n}"):
+            path = Path(binary).with_name(name)
+            if path.is_file():
+                found.append(str(path))
+                break
+    return tuple(found) if len(found) == 2 else None
+
+
+def require_update_binaries(what: str) -> tuple:
+    """``update_binaries``, or a skip (``unittest.SkipTest``) without them; on CI a failure."""
+    import os
+    import unittest
+    found = update_binaries()
+    if found is not None:
+        return found
+    if os.environ.get("CI"):
+        raise NoHelperBinary(f"{what}: no citar-helper-update-1 and -2 on CI (set CITAR_HELPER_UPDATE_BINS)")
+    raise unittest.SkipTest(f"{what}: no citar-helper-update-1 and -2 in CITAR_EXT_DIR (cargo xtask develop builds "
+                            "them)")
+
+
+def process_tree(pid: int) -> list:
+    """The processes ``pid`` started and theirs, by their parents' ids (Windows' process snapshot, Linux's ``/proc``;
+    [] elsewhere): what a test ends when a helper's supervisor leaves a child behind."""
+    import sys
+    from pathlib import Path
+    parents: dict = {}
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class Entry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return []
+        try:
+            e = Entry()
+            e.dwSize = ctypes.sizeof(Entry)
+            ok = k32.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                parents.setdefault(int(e.th32ParentProcessID), []).append(int(e.th32ProcessID))
+                ok = k32.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            k32.CloseHandle(snap)
+    elif sys.platform.startswith("linux"):
+        for d in Path("/proc").iterdir():
+            if not d.name.isdigit():
+                continue
+            try:
+                stat = (d / "stat").read_text()
+            except OSError:
+                continue
+            parents.setdefault(int(stat[stat.rindex(")") + 2:].split()[1]), []).append(int(d.name))
+    out, todo = [], [pid]
+    while todo:
+        for child in parents.get(todo.pop(), []):
+            if child not in out and child != pid:
+                out.append(child)
+                todo.append(child)
+    return out
+
+
+def kill_tree(pid: int) -> None:
+    """Ends ``pid``'s descendants, then ``pid``: a helper's supervisor and the helper it runs."""
+    import os
+    import signal
+    for child in reversed(process_tree(pid)):
+        try:
+            os.kill(child, signal.SIGTERM)
+        except OSError:
+            pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
 def fake_probe() -> Optional[str]:
     """``citar-fake-probe`` beside the helper binary (``helper_binary``): the stand-in for the scan's probe programs
     that development builds of the helper run when ``CITAR_HELPER_NVIDIA_SMI`` (or ``_POWERSHELL``,
@@ -632,11 +735,45 @@ END_TURN = {"name": "end_turn", "description": "End your turn.",
 #: The hub's acts and state words this package plays (the others are later packages').
 ACTS_PLAYED = ("submit_request", "force_request", "cancel_request", "drop_connection", "set_settings", "rescan",
                "reset_key", "revoke_token", "disable_machine", "second_connection", "queue_job", "force_offer",
-               "lab_stop", "abort_run", "expire_run", "benchmark_start", "benchmark_end", "delete_experiment")
+               "lab_stop", "abort_run", "expire_run", "benchmark_start", "benchmark_end", "delete_experiment",
+               "manifest_arrives")
 STATES_PLAYED = ("slot_free", "draining", "flags", "step", "requeued", "request", "llm_slots", "cpu_threads",
                  "cpu_percent", "memory_mb", "work", "cpu_enabled", "quiet", "models", "loaded", "key", "audit",
                  "token_lookups", "audit_rows", "rate_count", "last_report", "power_rows", "run", "job",
-                 "result_lines", "backoff", "mem_mb_raised", "claim_failures", "events", "memory_per_run_mb")
+                 "result_lines", "backoff", "mem_mb_raised", "claim_failures", "events", "memory_per_run_mb",
+                 "update_status")
+#: The throwaway update key the transcripts' manifests are signed with (``setup.hub.update``: "signed with the test
+#: key"), which the extension's test operations trust through ``CITAR_HELPER_UPDATE_KEY`` while a transcript plays.
+UPDATE_KEY_SEED = 43
+#: The version of the manifests the transcripts' hub relays: newer than any fake helper's.
+UPDATE_VERSION = "9.9.9"
+
+
+def update_public_key(seed: int = UPDATE_KEY_SEED) -> str:
+    """The throwaway update key's public half (the extension's test operations)."""
+    from citar import _engine
+    return _engine.jobs.test_update_public_key(seed)
+
+
+def sign_manifest_text(text: str, seed: int = UPDATE_KEY_SEED) -> str:
+    """``text`` signed by the throwaway update key of ``seed`` (the extension's test operations)."""
+    from citar import _engine
+    return _engine.jobs.test_sign_manifest(seed, text)
+
+
+def signed_manifest(version: str = UPDATE_VERSION, *, seed: int = UPDATE_KEY_SEED, target: str = "x86_64-pc-windows-msvc",
+                    url: str = "https://127.0.0.1:9/citar-helper-test", body: bytes = b"a helper") -> tuple:
+    """A helper update manifest of ``version`` (one asset, for ``target``) and its signature by the throwaway key of
+    ``seed``, as ``cargo xtask helper-manifest`` and ``sign-manifest`` make a release's: (text, signature)."""
+    import hashlib
+    from citar import _engine, engine_api
+    text = json.dumps({
+        "v": 1, "version": version, "protocol": 2, "build": engine_api.build_info()["build_id"],
+        "released_at": "2026-11-01T00:00:00Z",
+        "assets": {target: {"name": "citar-helper-test", "url": url, "sha256": hashlib.sha256(body).hexdigest(),
+                            "size": len(body)}},
+    }, indent=2) + "\n"
+    return text, _engine.jobs.test_sign_manifest(seed, text)
 #: The golden job a job transcript's experiment plays (its offers carry its spec).
 GOLDEN_JOB = "duel-a"
 #: The frames of the fake helper the hub hands to the machine's executor (which times them by the fake clock).
@@ -688,6 +825,8 @@ class HubPlayer:
         hub = transcript.setup.get("hub") or {}
         self.answer_pings = hub.get("answer_pings", True)
         self.setup_hub = hub
+        #: ``CITAR_HELPER_UPDATE_KEY`` as it was before the transcript set it.
+        self.update_key_env: Optional[str] = None
         self.golden = F.committed_golden()
         #: The job dispatcher a job transcript plays against, its experiment's name, the job's first ``mem_mb`` and
         #: the benchmark lease a ``benchmark_start`` takes.
@@ -709,8 +848,9 @@ class HubPlayer:
         hub_setup = self.setup_hub
         for k in hub_setup:
             if k not in ("machine", "token", "rate", "clock", "ping_s", "answer_pings", "local_executor",
-                         "verification", "jobs"):
+                         "verification", "jobs", "update"):
                 raise Unsupported(f"setup.hub.{k} is a later package's")
+        self._prepare_update(hub_setup.get("update"))
         if hub_setup.get("local_executor", False):
             raise Unsupported("setup.hub.local_executor true: no transcript plays it")
         machine = hub_setup.get("machine") or {}
@@ -773,6 +913,22 @@ class HubPlayer:
             self._prepare_jobs(owner_id=owner.id)
         self.lookups0 = hub.lookups
         self.audit0 = self._audit_count()
+
+    def _prepare_update(self, update: Optional[dict]) -> None:
+        """The relay's manifest (``setup.hub.update``): one signed with the throwaway key the extension then trusts
+        (``CITAR_HELPER_UPDATE_KEY``), or none. A transcript whose server learns of one later (``manifest_arrives``)
+        trusts the key too."""
+        from citar.server import helper_updates
+        helper_updates.relay().clear()
+        if update is not None and update.get("manifest") != "signed with the test key":
+            raise Unsupported(f"setup.hub.update {update!r} is not a manifest this player makes")
+        arrives = any(st.action == "act" and F.act_word(st.body["do"]) == "manifest_arrives" for st in self.t.steps)
+        if update is None and not arrives:
+            return
+        self.update_key_env = os.environ.get("CITAR_HELPER_UPDATE_KEY")
+        os.environ["CITAR_HELPER_UPDATE_KEY"] = update_public_key()
+        if update is not None:
+            helper_updates.relay().accept(*signed_manifest())
 
     @staticmethod
     def _verification(setup: Optional[dict]) -> None:
@@ -863,6 +1019,14 @@ class HubPlayer:
             th.join(timeout=10)
         W.hub().clock = W.Clock()
         W.hub().limiter.clear()
+        from citar.server import helper_updates
+        helper_updates.relay().clear()
+        W.hub().update_states.pop(self.sid, None)
+        if self.update_key_env is not None or "CITAR_HELPER_UPDATE_KEY" in os.environ:
+            if self.update_key_env is None:
+                os.environ.pop("CITAR_HELPER_UPDATE_KEY", None)
+            else:
+                os.environ["CITAR_HELPER_UPDATE_KEY"] = self.update_key_env
 
     # -------------------------------------------------------------- time
     def _advance(self, seconds: float) -> None:
@@ -1228,6 +1392,11 @@ class HubPlayer:
             if not until(lambda: self.sid not in self.dispatcher._paused_exec, 5.0):
                 raise AssertionError("the dispatcher did not take the benchmark's end in")
 
+    def act_manifest_arrives(self, _arg) -> None:
+        """The server learns of a signed manifest (its relay's fetch): connected helpers older than it are sent it."""
+        from citar.server import helper_updates
+        helper_updates.relay().accept(*signed_manifest())
+
     def act_cancel_request(self, _arg) -> None:
         self.last_conv.close()
 
@@ -1461,6 +1630,10 @@ class HubPlayer:
             if have != want or (executor is not None and executor.memory_per_run_mb != want):
                 raise AssertionError(f"the machine's memory a run is {have} (its executor's "
                                      f"{executor.memory_per_run_mb if executor else None}), not {want}")
+        elif word == "update_status":
+            have = (W.hub().update_states.get(self.sid) or {}).get("state")
+            if have != want:
+                raise AssertionError(f"the machine's last update_status is {have}, not {want}")
         elif word == "claim_failures":
             from citar import db
             from citar.db.models import Server

@@ -11,6 +11,14 @@ publish.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+# The helper's update channel (design/phase4-helper.md P4.3.8, P4.10): `keygen` makes an ed25519
+# key from the OS's random source, `helper-manifest` hashes the assets, `sign-manifest` signs the
+# manifest's bytes. xtask links no workspace crate, so it signs with ed25519-dalek directly.
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+base64.workspace = true
+sha2.workspace = true
+semver.workspace = true
 
 [lints]
 workspace = true

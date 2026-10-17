@@ -6,10 +6,12 @@
 //! argparse allowed. The flags work before or after the command; `run` is the default command.
 //!
 //! New in protocol 2: `--home`, `--no-llm`, `--cpu`, `--ca-file`, `--no-power`, `--updates`,
-//! `--service`, `--self-test`, and the `setup`, `scan [FILE]` and (internal) `job-host` commands.
-//! They make a few prefixes ambiguous that were not (`--serv`, `--no`, `--c`, `--se`), which are
-//! refused as argparse refuses an ambiguous one. `service` and `update` arrive with packages 4-13
-//! and 4-14.
+//! `--service`, `--self-test`, and the `setup`, `scan [FILE]`, `update check|apply|rollback` (4-13)
+//! and (internal) `job-host` commands, and the hidden `--supervised` (a console run's supervisor
+//! gives it to the helper it runs after an update, P4.3.8). They make a few prefixes ambiguous that
+//! were not (`--serv`, `--no`, `--c`, `--se`), which are refused as argparse refuses an
+//! ambiguous one. `service` arrives with package 4-14. A `test-update-key` build also takes
+//! `--update-key FILE`.
 
 use std::path::PathBuf;
 
@@ -50,6 +52,30 @@ pub enum Command {
     /// lines on its standard input and plays them under the limits it is given.
     #[command(name = "job-host", hide = true)]
     JobHost,
+    /// Self-update: what this helper knows of updates, install the one its server relayed, or put
+    /// the binary an update replaced back.
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
+}
+
+/// What `update` does.
+#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
+pub enum UpdateAction {
+    /// Print this helper's version, the update keys it trusts, its policy, and what its home
+    /// holds of updates: the last manifest its server relayed (and whether it is newer), a
+    /// download waiting, an update in progress or rolled back.
+    Check,
+    /// Install the update the server last relayed, now: checked, downloaded, checked again and
+    /// self-tested as an automatic update is, then put in place (the binary it replaces kept as
+    /// its name with .old added, beside it). Restart the helper (or its service) to run it.
+    Apply,
+    /// Put the binary the last update replaced (its name with .old added) back in place; the
+    /// replaced one takes that name, so the update can be put back the same way. Its release is
+    /// held back: this helper does not install it again by itself until helper/update/failed.json
+    /// is deleted from its home (or update apply is run).
+    Rollback,
 }
 
 /// The flags, each also accepted after the command.
@@ -130,6 +156,14 @@ pub struct Options {
     /// Run as a service: a permanent refusal idles and retries hourly instead of exiting.
     #[arg(long, global = true)]
     pub service: bool,
+    /// Run under the console run's supervisor (internal, P4.3.8): an update's hand-off exits 75
+    /// and the supervisor starts the new binary.
+    #[arg(long, global = true, hide = true)]
+    pub supervised: bool,
+    /// Trust this update key too (a test build only): a file of base64 public keys, one a line.
+    #[cfg(feature = "test-update-key")]
+    #[arg(long = "update-key", global = true, value_name = "FILE")]
+    pub update_key: Option<PathBuf>,
     /// Log more.
     #[arg(short, long, global = true)]
     pub verbose: bool,
@@ -201,9 +235,23 @@ mod tests {
         assert!(parse(&["-V"]).opts.version);
         assert!(parse(&["--self-test"]).opts.self_test);
         assert_eq!(parse(&["job-host"]).command, Some(Command::JobHost));
-        for bad in
-            [&["--provider", "vllm"][..], &["--max-concurrent", "two"], &["--no"], &["bogus"]]
-        {
+        assert_eq!(
+            parse(&["update", "rollback", "--home", "/h"]).command,
+            Some(Command::Update { action: UpdateAction::Rollback })
+        );
+        assert_eq!(
+            parse(&["update", "check"]).command,
+            Some(Command::Update { action: UpdateAction::Check })
+        );
+        assert!(parse(&["run", "--supervised"]).opts.supervised);
+        for bad in [
+            &["--provider", "vllm"][..],
+            &["--max-concurrent", "two"],
+            &["--no"],
+            &["bogus"],
+            &["update"],
+            &["update", "now"],
+        ] {
             let args = std::iter::once("citar-helper").chain(bad.iter().copied());
             assert!(Cli::try_parse_from(args).is_err(), "{bad:?}");
         }

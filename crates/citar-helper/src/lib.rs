@@ -18,6 +18,9 @@
 //!   acknowledged), [`jobhost`]: the job host as this binary's child; [`faults`]: a helper that
 //!   cheats on purpose (`--test-fault`, the `test-faults` feature only), for the verification
 //!   gates;
+//! - [`update`]: self-update (P4.3.8): the signed manifest the server relays, checked again, the
+//!   download, its checks and the staged binary's self-test, the hand-off, the console run's
+//!   supervisor and the rollbacks;
 //! - [`app`]: what the binary does with its command line; [`version`]: `--version`;
 //! - `conformance` (only with the `conformance` feature, or in this crate's own unit tests): the
 //!   shared fixtures under `protocol/v2/`, the matcher language of their transcripts, and
@@ -55,4 +58,5 @@ pub mod quiet;
 pub mod scan;
 pub mod session;
 pub mod settings;
+pub mod update;
 pub mod version;

@@ -41,6 +41,9 @@ def instance_env(base: Path, port: int, *, host: str = "127.0.0.1", server: bool
     env["CITAR_PORT"] = str(port)
     env["CITAR_REGISTRATION"] = registration
     env.setdefault("CITAR_DEBUG", "1")
+    # A development instance fetches no helper update manifest from GitHub (design/phase4-helper.md P4.5.9); one that
+    # relays a test's manifest is given CITAR_HELPER_MANIFEST_FILE, which wins.
+    env.setdefault("CITAR_HELPER_MANIFEST_URL", "off")
     if server:
         env["CITAR_MODE"] = "server"
         # Browsers are opened at localhost, and an Origin of http://localhost:8800 does not match

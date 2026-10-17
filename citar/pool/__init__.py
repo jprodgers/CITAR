@@ -288,6 +288,12 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
         base["trust_tier"] = server.trust_tier or "new"
         base["trust"] = trust.card(server, admin=admin,
                                    cpu_class=trust.cpu_class_of(session, server) if admin else None)
+        # its helper's updates (P4.3.8, P4.5.9): the latest signed helper this server relays, whether its helper is
+        # older, and where its helper is with an update
+        from ..server.workers import update_view
+        block = server.helper if isinstance(server.helper, dict) else {}
+        base["helper_version"] = str(block.get("version") or "") or None
+        base["helper_update"] = update_view(server.id, base["helper_version"] or "")
     config = server.config or {}
     # Safe for anyone who can see the server at all: what it can run, and roughly what it is. Read from the row as
     # stored, so read as text and figures whatever shape a helper's report or an old write left there: one machine's

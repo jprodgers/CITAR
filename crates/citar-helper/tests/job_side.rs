@@ -72,7 +72,10 @@ impl Hosts for GatedHosts {
             };
             while !*gate.borrow_and_update() {
                 if gate.changed().await.is_err() {
-                    return Err(StartFailure { limits: false, message: "the test ended".into() });
+                    return Err(StartFailure {
+                        message: "the test ended".into(),
+                        ..StartFailure::default()
+                    });
                 }
             }
             let held = Arc::clone(&rec);

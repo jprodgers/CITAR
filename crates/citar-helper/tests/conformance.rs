@@ -7,7 +7,9 @@
 //! the endpoint's bytes are on their way, and since what they check is the real connection to the
 //! endpoint (its client gone within 1 s of a cancel). The hub's side plays the same files from 4-05
 //! on (`tests/test_helper_conformance.py`). From 4-10 the in-process helper plays CPU jobs on
-//! `common`'s fake job host, its results kept in a home of its own.
+//! `common`'s fake job host, its results kept in a home of its own; from 4-13 it trusts the run's
+//! throwaway update key when the transcript says so (`setup.helper.update_key: "test"`), and the
+//! fake server relays manifests made for it and signed with that key.
 
 mod common;
 
@@ -37,7 +39,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 /// The packages whose helper-side transcripts this crate plays (it refuses what it cannot do).
-const PLAYED_THROUGH: &str = "4-10";
+const PLAYED_THROUGH: &str = "4-13";
 
 /// The fake clock's start: Wednesday 2026-10-14, 12:00 UTC, outside any transcript's quiet hours.
 const START_UNIX: f64 = 1_791_979_200.0;
@@ -53,6 +55,8 @@ struct InProcess {
     /// The fake job host, and what the helper's job side holds.
     hosts: FakeHosts,
     jobs: JobState,
+    /// The update downloads it made.
+    downloads: citar_helper::update::Downloads,
 }
 
 impl UnderTest for InProcess {
@@ -103,6 +107,10 @@ impl UnderTest for InProcess {
         golden: &Committed,
     ) -> Result<(), String> {
         self.hosts.step(step, golden)
+    }
+
+    fn downloads(&self) -> Option<usize> {
+        Some(self.downloads.get())
     }
 }
 
@@ -268,10 +276,25 @@ fn play_sensed(
     sensors: Sensors,
 ) -> Result<(), String> {
     for key in t.setup_helper.keys() {
-        if !["config", "clock", "service", "endpoint", "host", "home"].contains(&key.as_str()) {
+        if !["config", "clock", "service", "endpoint", "host", "home", "update_key"]
+            .contains(&key.as_str())
+        {
             return Err(format!("{}: this player cannot yet set up the helper's {key:?}", t.name));
         }
     }
+    // The run's throwaway update key, which the helper trusts (`update_key: "test"`); without
+    // it the helper trusts none, as a build of this tree does (`update-keys.pub` is empty).
+    let update_key = match t.setup_helper.get("update_key").and_then(Value::as_str) {
+        None => None,
+        Some("test") => {
+            let mut seed = [0u8; 32];
+            getrandom::fill(&mut seed).expect("the OS's random source");
+            Some(citar_jobs::claim::SigningKey::from_bytes(&seed))
+        }
+        Some(other) => {
+            return Err(format!("{}: setup.helper.update_key {other:?} is not known", t.name));
+        }
+    };
     let hosts = FakeHosts::from_setup(t.setup_helper.get("host"))?;
     // Its home's results folder, with what a previous run of the helper left there.
     let results = std::env::temp_dir().join(format!(
@@ -352,6 +375,14 @@ fn play_sensed(
         let in_flight = InFlight::default();
         let mut player = Player::new(t, conns_rx, models, canonical.clone());
         player.endpoint = fake;
+        player.update_key = update_key.clone();
+        player.update_for = (facts.version.clone(), facts.target.clone(), facts.build.clone());
+        let downloads = citar_helper::update::Downloads::default();
+        let update = citar_helper::update::UpdateSetup {
+            keys: update_key.iter().map(citar_jobs::claim::SigningKey::verifying_key).collect(),
+            downloads: downloads.clone(),
+            ..Default::default()
+        };
         player.bindings.bind("token", Value::String(cfg.token.clone()));
         player.bindings.bind("key", Value::String(key.public_b64()));
         for (name, v) in binds {
@@ -379,6 +410,7 @@ fn play_sensed(
                 state: jobs.clone(),
                 ..Default::default()
             },
+            update,
         };
         let task = tokio::spawn(async move { helper.run().await });
         let mut under = InProcess {
@@ -390,6 +422,7 @@ fn play_sensed(
             stop: stop_tx,
             hosts,
             jobs,
+            downloads,
         };
         let result = player.play(&mut under).await;
         if let Some(task) = under.task.take() {
@@ -410,9 +443,10 @@ fn the_helper_plays_its_transcripts() {
         .collect();
     assert_eq!(
         mine.len(),
-        75,
-        "4-03, 4-04, 4-06 and 4-10 play 75 transcripts from the helper's side"
+        79,
+        "4-03, 4-04, 4-06, 4-10 and 4-13 play 79 transcripts from the helper's side"
     );
+    assert_eq!(mine.iter().filter(|t| t.plays.helper.as_deref() == Some("4-13")).count(), 4);
     let (live, paused): (Vec<&Transcript>, Vec<&Transcript>) =
         mine.iter().partition(|t| runs_completions(t));
     assert_eq!(live.len(), 15, "4-04's 15 run completions");

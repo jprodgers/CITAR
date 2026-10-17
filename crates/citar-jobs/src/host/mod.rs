@@ -479,6 +479,11 @@ pub struct Setup {
     /// that a failed self-check alone refuses every job (the canary still passes on each run's
     /// thread).
     pub fail_self_check: bool,
+    /// The jobs build the host says it is, and holds its parent's `limits` to, when it is not
+    /// [`crate::jobs_build`]'s: the program that runs the host computes it (the helper's test
+    /// builds that call themselves another version, design/phase4-helper.md 4-13, are another
+    /// jobs build as another release would be). `None` everywhere else.
+    pub jobs_build: Option<&'static str>,
 }
 
 impl Setup {
@@ -667,7 +672,7 @@ pub fn serve(mut input: impl BufRead, output: impl Write + Send + 'static, setup
         return fatal(FatalCode::Protocol, "the first frame must be `limits`".to_owned());
     };
     let rules = Ruleset::shared();
-    let mine = crate::build::jobs_build(rules);
+    let mine = setup.jobs_build.map_or_else(|| crate::build::jobs_build(rules), str::to_owned);
     if asked.jobs_build != mine {
         return fatal(
             FatalCode::Build,
