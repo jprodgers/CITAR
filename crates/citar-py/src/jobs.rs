@@ -369,6 +369,20 @@ pub fn test_sign_claim(seed: u8, claim_json: &[u8]) -> PyResult<String> {
     Ok(claim.sign(&citar_jobs::claim::SigningKey::from_bytes(&[seed; 32])))
 }
 
+/// The head the digests (`digests_json`, a list of 64 hex digits each) fold to from `chain_0` of
+/// `spec_hash` (a build with the test operations only): what the tests' fake helpers that report
+/// broken hardware (a round's digest changed) name in their claims, as `--test-fault digest:R`
+/// does.
+#[cfg(feature = "test-ops")]
+#[pyfunction]
+pub fn test_fold(spec_hash: &str, digests_json: &[u8]) -> PyResult<String> {
+    let hash = SpecHash::from_hex(spec_hash)
+        .ok_or_else(|| refused("bad_chain", format!("{spec_hash:?} is no spec hash")))?;
+    let digests: Vec<String> = serde_json::from_slice(digests_json)
+        .map_err(|e| refused("bad_chain", format!("The digests do not read: {e}")))?;
+    citar_jobs::fold(&hash, &digests).map_err(|e| refused("bad_chain", e.to_string()))
+}
+
 /// This build's jobs build (P4.4.5), under the process's ruleset: 12 hex digits.
 #[pyfunction]
 pub fn jobs_build(py: Python<'_>) -> PyResult<String> {
@@ -411,6 +425,8 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_function(wrap_pyfunction!(test_public_key, &m)?)?;
     #[cfg(feature = "test-ops")]
     m.add_function(wrap_pyfunction!(test_sign_claim, &m)?)?;
+    #[cfg(feature = "test-ops")]
+    m.add_function(wrap_pyfunction!(test_fold, &m)?)?;
     m.add_function(wrap_pyfunction!(check_spec_py, &m)?)?;
     m.add_function(wrap_pyfunction!(run, &m)?)?;
     m.add_function(wrap_pyfunction!(result_hash, &m)?)?;

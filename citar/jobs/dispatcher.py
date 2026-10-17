@@ -1907,7 +1907,8 @@ class Dispatcher:
         name = jrow.item_ref or ""
         i = store.game_of(jrow.ref)
         jrow.state = "withdrawn"
-        prow.verdict = "rejected"
+        if prow.verdict != "mismatch":
+            prow.verdict = "rejected"       # a mismatch keeps its verdict, beside the withdrawal
         prow.error = {**(prow.error if isinstance(prow.error, dict) and prow.error.get("verdict") else {}),
                       "code": "withdrawn", "why": why[:300]}
         for r in s.scalars(select(CpuJobRun).where(CpuJobRun.job_id == jrow.id,
@@ -2291,6 +2292,7 @@ class Dispatcher:
         that could not be sent ends at once, its job waiting again, nobody's abandon."""
         for key in [k for k, until in self._shun.items() if now >= until]:
             del self._shun[key]
+        self._hands_cache = None            # counted afresh from this tick's runs, then with its offers
         ready = [e for e in self.executors if e.free > 0 and self._available(e, now) is None]
         queued = [j for j in self.jobs.values() if j.state == "queued"]
         verify = sorted((j for j in self.jobs.values() if j.state == "settling" and j.need and j.run is None),
@@ -2303,10 +2305,14 @@ class Dispatcher:
         offers, memo = [], {}
         for e in ready:
             for _ in range(e.free):
+                if e.kind != "local" and self._held_new(e) is not None:
+                    break                   # a new machine's caps, with this tick's offers counted (rule 3)
                 picked = self._next_for(e, levels, verify, memo, now)
                 if picked is None:
                     break
                 offers.append((e, *picked))
+                if picked[2] == "primary":
+                    self._hands()[e.id] += 1
         if not offers:
             return
         from citar import db

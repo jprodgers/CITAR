@@ -302,6 +302,39 @@ def require_helper_binary(what: str) -> str:
     raise unittest.SkipTest(f"{what}: no citar-helper in CITAR_EXT_DIR (cargo xtask develop builds it)")
 
 
+def faults_binary() -> Optional[str]:
+    """The helper built to cheat on purpose (``--test-fault``, the ``test-faults`` feature, P4.4.6): ``CITAR_HELPER_
+    FAULTS_BIN`` (CI's test jobs name the build-ext job's), else ``citar-helper-faults`` beside the helper ``cargo xtask
+    develop`` built; None when there is none. One that is named and is no file raises ``NoHelperBinary``."""
+    import os
+    from pathlib import Path
+    given = os.environ.get("CITAR_HELPER_FAULTS_BIN")
+    if given:
+        if not Path(given).is_file():
+            raise NoHelperBinary(f"CITAR_HELPER_FAULTS_BIN names {given!r}, which is not a file")
+        return given
+    binary = helper_binary()
+    if binary is None:
+        return None
+    for name in ("citar-helper-faults.exe", "citar-helper-faults"):
+        path = Path(binary).with_name(name)
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def require_faults_binary(what: str) -> str:
+    """``faults_binary``, or a skip (``unittest.SkipTest``) without one; on CI a failure."""
+    import os
+    import unittest
+    binary = faults_binary()
+    if binary is not None:
+        return binary
+    if os.environ.get("CI"):
+        raise NoHelperBinary(f"{what}: no citar-helper-faults on CI (set CITAR_HELPER_FAULTS_BIN)")
+    raise unittest.SkipTest(f"{what}: no citar-helper-faults in CITAR_EXT_DIR (cargo xtask develop builds it)")
+
+
 def fake_probe() -> Optional[str]:
     """``citar-fake-probe`` beside the helper binary (``helper_binary``): the stand-in for the scan's probe programs
     that development builds of the helper run when ``CITAR_HELPER_NVIDIA_SMI`` (or ``_POWERSHELL``,
@@ -324,12 +357,13 @@ class RealHelper:
     programs ``env`` names (``CITAR_HELPER_NVIDIA_SMI`` and the others: the fake probe), or the machine's own."""
 
     def __init__(self, server_url: str, token: str, endpoint_url: str, *, name: str = "e2e helper",
-                 slots: int = 1, extra: tuple = (), home=None, sensors: bool = False, env: Optional[dict] = None):
+                 slots: int = 1, extra: tuple = (), home=None, sensors: bool = False, env: Optional[dict] = None,
+                 binary: Optional[str] = None):
         import os
         import subprocess
         import tempfile
         from pathlib import Path
-        binary = helper_binary()
+        binary = binary or helper_binary()
         if binary is None:
             raise RuntimeError("no citar-helper in CITAR_EXT_DIR: run cargo xtask develop")
         self.home = Path(home or tempfile.mkdtemp(prefix="citar-helper-home-"))

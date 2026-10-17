@@ -214,6 +214,10 @@ class Lab(unittest.TestCase):
                 self.headers[handle] = {"cookie": f"{sessions.COOKIE_NAME}={raw}",
                                         sessions.CSRF_HEADER: row.csrf_token, "origin": "https://citar.test"}
                 self.ids[handle] = user.id
+            # a trusted or provisional helper's results unsampled: verification is tests/test_verification.py's (a
+            # sampled result would wait for a verifier these tests do not give it)
+            from citar.jobs import trust
+            trust.save_settings(s, {"trusted_rate": 0.0, "provisional_rate": 0.0})
         self.host_cpu(threads=self.THREADS, memory_mb=400)
 
     def host_cpu(self, **cpu) -> None:
