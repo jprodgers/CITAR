@@ -204,7 +204,7 @@ pub fn read_key(text: &str) -> Result<SigningKey, String> {
 
 /// Writes `text` to `path`, which must not exist yet. When `private`, the file is its owner's
 /// alone before anything is written in it: mode 0600 on Unix from its creation; on Windows
-/// [`owner_only`] on the empty file (else a `--out` such as `C:\keys`, which inherits
+/// `owner_only` on the empty file (else a `--out` such as `C:\keys`, which inherits
 /// Authenticated Users' modify right, would leave the release's signing key readable and
 /// replaceable by every local user).
 fn write_new(path: &Path, text: &str, private: bool) -> Result<(), String> {
