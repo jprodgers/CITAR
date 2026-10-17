@@ -172,7 +172,7 @@ def machine_jobs(sid: str, request: Request, limit: int = Query(50, ge=1, le=MAC
     run's verdict only once its job settled, P4.5.8 rule 2), each experiment named where the caller may view it ("a
     member's experiment" otherwise); what its helper lends now (the CPU in effect, each limit hard or soft, the memory
     a run may use, or why it lends nothing); and its trust counters (an administrator also sees the last claim
-    failure). Replicas, from 4-11, are administrators' alone."""
+    failure). Replicas and tiebreaks are administrators' alone (P4.5.8 rule 2)."""
     from sqlalchemy import select
     from ..auth.deps import require_user
     from ..db.models import CpuJob, CpuJobRun

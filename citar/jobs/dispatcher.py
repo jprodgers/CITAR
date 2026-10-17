@@ -70,8 +70,8 @@ the machine when they differ; a late result (its run expired, failed or aborted,
 is acknowledged and dropped, neither counted nor credited; a late accept (its offer expired) is answered ``job_abort``.
 Re-offers to a helper back off per reject reason, 2 s doubling to 10 minutes: ``busy`` and ``quiet`` until a
 ``status`` shows room, the reasons its settings decide until its next ``settings_ack`` or hello. Its run's event is
-given by the machine's owner and, until replicas exist (4-11), ``unverified``, its CPU also bounded by 1.5 times the
-job's reference cost; a run under a grant with a budget holds the job's expected credits from the moment it is picked
+given by the machine's owner (``pending`` while a replica checks it, then ``verified``, or ``unverified`` when none
+does), its CPU also bounded by 1.5 times the job's reference cost; a run under a grant with a budget holds the job's expected credits from the moment it is picked
 (a hard budget with no room keeps that owner's jobs from the machine for the tick) and settles its credits into that
 budget (a run carried across a restart too). An offer that could not be sent, or that went with its helper's
 connection, is nobody's abandon and no attempt.

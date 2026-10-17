@@ -65,7 +65,8 @@ Parts:
   the machine and 512 MB in its own ``helper.json`` (the owner's ceiling, which wins); the host lends nothing here.
   Alice, given ``run_lab`` by an administrator and named by bob's grant listing Lab (CPU work), queues eight 30-round
   duels from the A/B route: they play on bob's machine (eight lines with ``executor.machine`` his machine,
-  ``unverified`` until 4-11; eight events given by bob and used by alice); the dialog and the helper card show the CPU
+  ``unverified``: accepted without a replica, its results unsampled in this part; eight events given by bob and used
+  by alice); the dialog and the helper card show the CPU
   in effect, hard on Windows, and the grant; the job host's CPU stays under its cap plus slack and every run's round
   moves at least every 30 s; ``GET /api/machines/{id}/jobs`` is bob's (alice, a grantee, 403; a stranger 404). Where
   the share binds (5% of the machine, pushed to the helper) two long games stay under it, and deleting their
@@ -79,8 +80,21 @@ Parts:
   localhost forwarding; when Windows cannot reach it the part says so and runs with the server on Windows (the
   fallback), recorded in the evidence's ``remote.topology``.
 
-``all`` runs every part written so far; later packages add ``verify`` (4-11, 4-12), ``update`` (4-13), ``service``
-(4-14), ``exit`` and ``real`` (4-15).
+- ``verify`` (4-11; 4-12 completes it): helpers' results checked (design/phase4-helper.md P4.5.8), with real helpers
+  built to cheat on purpose (``citar-helper-faults``, which ``cargo xtask develop`` builds beside the helper:
+  ``--test-fault``) and this server's job host as their verifier. A new machine of bob's that alters every result
+  (``result:1``) is quarantined at its first job ("same chain, different result: tampering or an incompatible
+  build"), its result never in the results file, its event rejected, bob quarantined; his second machine, honest, is
+  refused CPU work meanwhile; the quarantined machine serves nobody but its owner (alice's pooled prompt on it is
+  refused ``quarantined`` at admission); an administrator's release returns it to ``new`` (its counters reset,
+  ``since`` now) and bob's honest machine plays again. An honest new machine of alice's (thresholds lowered to 2 and
+  4) climbs to ``trusted``, an audit row each step, its lines verified. A provisional machine of bob's that alters
+  chosen jobs (``result-at:2,4``; its results unsampled) plays three games unnoticed, then an administrator's
+  ``replicate 1`` checks its fourth: it mismatches, the machine is quarantined, and every result it gave unverified is
+  withdrawn (lines gone, events rejected) and played again on this server. The trust routes are administrators'.
+
+``all`` runs every part written so far; later packages add ``update`` (4-13), ``service`` (4-14), ``exit`` and
+``real`` (4-15).
 """
 from __future__ import annotations
 
@@ -109,7 +123,7 @@ q3 = _phase3()
 Harness, Helper, FakeEndpoint, wait_until = q3.Harness, q3.Helper, q3.FakeEndpoint, q3.wait_until
 
 #: Parts a later package writes (P4.7.6): asked for now, the harness says so and refuses.
-LATER = {"verify": "4-11, 4-12", "update": "4-13", "service": "4-14", "exit": "4-15", "real": "4-15"}
+LATER = {"update": "4-13", "service": "4-14", "exit": "4-15", "real": "4-15"}
 #: The v1 refusal's words (``citar.server.helper_protocol.V1_REFUSAL_MESSAGE``), as a 0.1.5 worker prints them.
 V1_START = "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2)."
 #: A protocol 1 hello, as a 0.1.5 worker sent it.
@@ -1339,7 +1353,10 @@ def part_remote(h) -> None:
     helpers: list = []
     poller: Optional[JobsPoller] = None
     try:
-        # ---- the host lends nothing in this part: every game goes to a helper
+        # ---- the host lends nothing in this part: every game goes to a helper, whose results are not sampled
+        # (its trusted machine's rate 0: with no verifier a sampled result would wait; verification is the verify
+        # part's)
+        _verification(h, trusted_rate=0.0)
         off = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {"enabled": False}}})
         # ---- bob's machine in a group of his, trusted by an administrator; alice given run_lab, and bob's grant
         # listing lab for her
@@ -1423,7 +1440,8 @@ def part_remote(h) -> None:
         took = round(done - t0, 1) if done else None
         lines = _lab_lines(h, eight)
         r.check("alice (given run_lab) queues eight 30-round duels from the A/B route; they play on bob's machine to "
-                "their end: eight lines with executor.machine his machine and verification unverified (until 4-11), "
+                "their end: eight lines with executor.machine his machine and verification unverified (its results "
+                "unsampled in this part), "
                 "each game once",
                 queued.status_code == 200 and bool(done) and sorted(x.get("i") for x in lines) == list(range(8))
                 and {((x.get("executor") or {}).get("machine"), (x.get("executor") or {}).get("verification"))
@@ -1580,6 +1598,10 @@ def part_remote(h) -> None:
             helper.stop()
         if not (h.keep and not helpers):
             scripted.close()
+        try:
+            _verification(h, trusted_rate=0.02)        # the default again, for the parts after this one
+        except Exception:
+            pass
 
 
 def _lab_lines(h, name: str, folder: str = "results") -> list:
@@ -1783,10 +1805,302 @@ def _dev_server_module():
     return module
 
 
+# ---------------------------------------------------------------------------- the verify part (4-11; 4-12 completes it)
+
+#: The verification settings (``settings_kv.verification``, P4.5.8) set on the instance, as an administrator keeps
+#: them (4-12 adds their route); prints what is in force.
+VERIFICATION = """
+import json, sys
+from citar import db
+from citar.jobs import trust
+db.configure()
+with db.session() as s:
+    print(json.dumps(trust.save_settings(s, json.loads(sys.argv[1]))))
+"""
+
+#: What the instance's database says of machines and accounts (their tiers, the trust audit rows of each).
+TRUST_STATE = """
+import json, sys
+from sqlalchemy import select
+from citar import db
+from citar.db.models import AuditLog, Server, User
+db.configure()
+out = {"machines": {}, "users": {}}
+with db.session() as s:
+    for sid in sys.argv[1].split(","):
+        row = s.get(Server, sid)
+        if row is None:
+            continue
+        audits = [a.detail.get("changed") for a in s.scalars(select(AuditLog).where(
+            AuditLog.action == "server.trust", AuditLog.object_id == sid).order_by(AuditLog.id))]
+        out["machines"][sid] = {"tier": row.trust_tier, "trust": row.trust or {}, "audits": audits}
+    for uid in sys.argv[2].split(","):
+        u = s.get(User, uid)
+        if u is not None:
+            out["users"][uid] = u.trust_tier
+print(json.dumps(out, default=str))
+"""
+
+
+def _verification(h, **values) -> dict:
+    """The instance's verification settings, ``values`` over what it has; what is in force."""
+    out = _server_python(h, VERIFICATION, json.dumps(values)).strip().splitlines()
+    return json.loads(out[-1]) if out else {}
+
+
+def _trust_state(h, machines: list, users: list) -> dict:
+    out = _server_python(h, TRUST_STATE, ",".join(machines), ",".join(users)).strip().splitlines()
+    return json.loads(out[-1]) if out else {"machines": {}, "users": {}}
+
+
+def faults_binary() -> str:
+    """``citar-helper-faults`` beside the helper (``cargo xtask develop`` builds it: the helper with the
+    ``test-faults`` feature, which cheats on purpose, P4.4.6)."""
+    helper = Path(q3.helper_binary())
+    for name in ("citar-helper-faults.exe", "citar-helper-faults"):
+        path = helper.with_name(name)
+        if path.is_file():
+            return str(path)
+    raise q3.HarnessError("no citar-helper-faults beside the helper: run cargo xtask develop")
+
+
+def part_verify(h) -> None:
+    """The ``verify`` part (the module's doc)."""
+    r = h.report
+    admin, alice, bob, mod = (h.accounts[k] for k in ("admin", "alice", "bob", "mod"))
+    data = r.data.setdefault("verify", {})
+    tag = h.tag
+    host = "sv_qa_host"
+    share = max(1, min(100, 200 // (os.cpu_count() or 1)))
+    scripted = FakeEndpoint(delay=0.05)
+    helpers: dict = {}
+    duel = {"profiles": ["standard", "classic-production"], "players": 2, "size": "duel", "maps": ["pangaea"],
+            "speed": "Quick", "turns": 30}
+    try:
+        binary = faults_binary()
+        ids = {who: h.accounts[who].get("/api/auth/me").json()["user"]["id"] for who in ("alice", "bob")}
+        host_cpu = {"enabled": True, "threads": 1, "cpu_percent": share, "memory_mb": 400, "work": ["lab_game"]}
+        put = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_cpu}})
+        caps = [admin.patch(f"/api/admin/users/{ids[w]}", json={"caps": {"run_lab": True}}) for w in ids]
+        defaults = _verification(h)
+        r.check("this server's job host lends one thread (its verifier), alice and bob run lab experiments, and the "
+                "verification settings are the defaults (P4.5.8)",
+                put.status_code == 200 and all(c.status_code == 200 for c in caps)
+                and defaults.get("new_streak") == 5 and defaults.get("trusted_rate") == 0.02,
+                json.dumps({"settings": defaults}))
+
+        def machine(who, label: str) -> tuple:
+            """A machine of ``who``'s in a group of theirs, its helper machine registered and a token issued."""
+            group = who.post("/api/pool/groups", json={"name": f"QA verify {label} {tag}"})
+            gid = group.json().get("id", "") if group.status_code == 200 else ""
+            made = who.post("/api/pool/servers", json={"config": {"name": f"QA {label} {tag}", "kind": "owned",
+                                                                  "connection": {"provider": "openai_compatible",
+                                                                                 "max_parallel": 1}},
+                                                       "reach": "worker", "group_id": gid})
+            sid = made.json().get("id", "") if made.status_code == 200 else ""
+            issued = who.post(f"/api/pool/servers/{sid}/workers/tokens", json={"label": label}) if sid else None
+            token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
+            who.put(f"/api/machines/{sid}/settings", json={"capabilities": {"cpu": REMOTE_SITE}})
+            return sid, token, gid
+
+        def start(label: str, sid: str, token: str, *modes: str):
+            home = h.server.state / f"helper-home-qa-verify-{label}"
+            home.mkdir(parents=True, exist_ok=True)
+            ceiling = {**REMOTE_CEILING, "threads": 1}
+            (home / "helper.json").write_text(json.dumps({"cpu": ceiling}), encoding="utf-8")
+            extra = ("--no-llm", *(x for m in modes for x in ("--test-fault", m)))
+            helper = Helper(h, token, scripted, f"qa-verify-{label}", machine=f"qa-verify-{label}",
+                            binary=binary if modes else None, extra=extra)
+            helpers[label] = helper
+            return wait_until(lambda: executor(sid).get("state") == "ready", 120, 0.25)
+
+        def executor(sid: str) -> dict:
+            got = admin.get("/api/admin/jobs")
+            return next((e for e in ((got.json().get("dispatcher") or {}).get("executors") or [])
+                         if e.get("machine") == sid), {}) if got.status_code == 200 else {}
+
+        def tier(sid: str) -> str:
+            got = admin.get(f"/api/machines/{sid}/jobs")
+            return (got.json().get("machine") or {}).get("trust_tier", "") if got.status_code == 200 else ""
+
+        def runs_of(sid: str, who=admin) -> list:
+            got = who.get(f"/api/machines/{sid}/jobs", params={"limit": 200})
+            return got.json().get("runs") or [] if got.status_code == 200 else []
+
+        def queue(who, name: str, games: int, seed: int):
+            return who.post("/api/bots/experiments", json={**duel, "name": name, "games": games, "seed": seed})
+
+        # ---- a new machine whose helper alters its results (--test-fault result:1): caught at its first job
+        a_sid, a_token, b_gid = machine(bob, "cheat")
+        ready = start("cheat", a_sid, a_token, "result:1")
+        cheat = f"qa-verify-cheat-{tag}"
+        queued = queue(bob, cheat, 6, 8100)
+        caught = wait_until(lambda: tier(a_sid) == "quarantined", 120, 0.25)
+        state = _trust_state(h, [a_sid], [ids["bob"]])
+        ev = (state["machines"].get(a_sid) or {}).get("trust", {}).get("last_mismatch") or {}
+        done = wait_until(lambda: _lab_view(bob, cheat).get("state") == "complete", 120, 0.5)
+        lines = _lines(h, cheat)
+        a_runs = [x for x in runs_of(a_sid) if x.get("state") == "done"]
+
+        def a_events_now():
+            got = json.loads((_server_python(h, LAB_STATE, cheat) or "{}").strip().splitlines()[-1] or "{}")
+            evs = [e for e in (got.get(cheat) or {}).get("events") or [] if e["machine"] == a_sid]
+            return evs if evs and all(e["verification"] == "rejected" for e in evs) else None
+        a_events = wait_until(a_events_now, 30, 1.0) or []      # the ledger's writer writes them in batches
+        r.check("a new machine whose helper alters a score of every result (--test-fault result:1) is quarantined "
+                "at its first job: \"same chain, different result: tampering or an incompatible build\", checked "
+                "against this server's replica; its result never reaches the results file, its event is rejected "
+                "with no credits, its owner (bob) is quarantined; the experiment ends on this server",
+                bool(ready) and queued.status_code == 200 and bool(caught) and ev.get("verdict") == "result"
+                and ev.get("words") == "same chain, different result: tampering or an incompatible build"
+                and len(a_runs) == 1 and a_runs[0]["run"] not in {(x.get("executor") or {}).get("run") for x in lines}
+                and bool(done) and sorted(x["i"] for x in lines) == list(range(6))
+                and {(x["executor"]["machine"], x["executor"]["verification"]) for x in lines}
+                == {(host, "reference")}
+                and a_events and all(e["verification"] == "rejected" and e["flags"].get("rejected") for e in a_events)
+                and state["users"].get(ids["bob"]) == "quarantined",
+                json.dumps({"evidence": ev, "a_runs": len(a_runs), "events": a_events})[:700])
+        data.update(cheat_machine=a_sid, cheat_evidence=ev)
+
+        # ---- bob's second machine, an honest helper, is refused CPU work while bob is quarantined
+        b_sid, b_token, _gid = machine(bob, "other")
+        ready_b = start("other", b_sid, b_token)
+        refused_exp = f"qa-verify-refused-{tag}"
+        queue(bob, refused_exp, 2, 8200)
+        done_b = wait_until(lambda: _lab_view(bob, refused_exp).get("state") == "complete", 120, 0.5)
+        r.check("bob's second machine, an honest helper, is refused CPU work while its owner is quarantined (his next "
+                "experiment plays on this server alone)",
+                bool(ready_b) and bool(done_b) and runs_of(b_sid) == [],
+                json.dumps({"b_runs": runs_of(b_sid)}))
+
+        # ---- quarantine refuses its work for other members, its owner's own still served (admission's code)
+        grant = bob.post(f"/api/pool/groups/{b_gid}/grants", json={"subject_type": "user", "handle": alice.handle,
+                                                                  "purposes": []})
+        other = alice.post(f"/api/pool/servers/{a_sid}/test")
+        own = bob.post(f"/api/pool/servers/{a_sid}/test")
+        r.check("the quarantined machine serves nobody but its owner: alice's pooled prompt on it (under bob's grant) "
+                "is refused at admission with code quarantined; bob's own is not",
+                grant.status_code == 200 and other.status_code == 200
+                and (other.json().get("stage"), other.json().get("code")) == ("admission", "quarantined")
+                and own.status_code == 200 and own.json().get("code") != "quarantined",
+                json.dumps({"alice": other.json() if other.status_code == 200 else other.status_code,
+                            "bob": own.json() if own.status_code == 200 else own.status_code})[:500])
+
+        # ---- released: the machine back to new with its counters reset and since now; the owner released
+        helpers.pop("cheat").stop()
+        rel = admin.put(f"/api/admin/machines/{a_sid}/trust", json={"trust_tier": "new"})
+        rel_owner = admin.patch(f"/api/admin/users/{ids['bob']}", json={"trust_tier": "new"})
+        state = _trust_state(h, [a_sid], [ids["bob"]])
+        trust_a = (state["machines"].get(a_sid) or {}).get("trust") or {}
+        again = f"qa-verify-again-{tag}"
+        queue(bob, again, 4, 8300)
+        played = wait_until(lambda: runs_of(b_sid), 120, 0.25)
+        wait_until(lambda: _lab_view(bob, again).get("state") == "complete", 120, 0.5)
+        r.check("an administrator releases the machine (back to new: its counters reset, since now) and its owner; "
+                "bob's honest machine then plays his games again",
+                rel.status_code == 200 and rel_owner.status_code == 200
+                and (state["machines"].get(a_sid) or {}).get("tier") == "new"
+                and trust_a.get("mismatches") == 0 and bool(trust_a.get("since"))
+                and state["users"].get(ids["bob"]) == "new" and bool(played),
+                json.dumps({"trust": trust_a, "b_runs": len(runs_of(b_sid))})[:500])
+        helpers.pop("other").stop()
+
+        # ---- an honest helper promoted new -> provisional -> trusted (thresholds lowered: 2 and 4)
+        _verification(h, new_streak=2, promote_verified=4, provisional_rate=1.0, trusted_rate=1.0)
+        c_sid, c_token, _cg = machine(alice, "honest")
+        ready_c = start("honest", c_sid, c_token)
+        climb = f"qa-verify-climb-{tag}"
+        queue(alice, climb, 16, 8400)
+        trusted = wait_until(lambda: tier(c_sid) == "trusted", 180, 0.5)
+        wait_until(lambda: _lab_view(alice, climb).get("state") == "complete", 180, 0.5)
+        state = _trust_state(h, [c_sid], [])
+        audits = (state["machines"].get(c_sid) or {}).get("audits") or []
+        lines = _lines(h, climb)
+        mine = [x for x in lines if x["executor"]["machine"] == c_sid]
+        r.check("an honest new helper (thresholds lowered to 2 and 4, every result of a provisional machine "
+                "sampled) goes new -> provisional -> trusted, an audit row each; its results in the file are "
+                "verified by this server's replicas",
+                bool(ready_c) and bool(trusted)
+                and audits == [{"from": "new", "to": "provisional"}, {"from": "provisional", "to": "trusted"}]
+                and bool(mine) and all(x["executor"]["verification"] == "verified" for x in mine),
+                json.dumps({"audits": audits, "verified": (state["machines"][c_sid]["trust"] or {}).get("verified"),
+                            "lines": len(mine)}))
+        helpers.pop("honest").stop()
+        _verification(h, **{k: defaults[k] for k in ("new_streak", "promote_verified", "provisional_rate",
+                                                     "trusted_rate")})
+
+        # ---- a provisional machine that alters chosen jobs (--test-fault result-at:2,4), its results unsampled
+        # (rate 0): caught by an administrator's replicate, everything unverified it gave withdrawn
+        _verification(h, provisional_rate=0.0)
+        d_sid, d_token, _dg = machine(bob, "selective")
+        prov = admin.put(f"/api/admin/machines/{d_sid}/trust", json={"trust_tier": "provisional"})
+        off = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {**host_cpu,
+                                                                                         "enabled": False}}})
+        ready_d = start("selective", d_sid, d_token, "result-at:2,4")
+        first = f"qa-verify-first-{tag}"
+        queue(bob, first, 3, 8500)
+        done_first = wait_until(lambda: _lab_view(bob, first).get("state") == "complete", 120, 0.5)
+        before = _lines(h, first)
+        r.check("a provisional machine (an administrator's tier; its results unsampled at rate 0) plays bob's three "
+                "games with this server lending nothing: three lines, each its own and unverified (its second "
+                "altered, unnoticed)",
+                prov.status_code == 200 and off.status_code == 200 and bool(ready_d) and bool(done_first)
+                and {(x["executor"]["machine"], x["executor"]["verification"]) for x in before}
+                == {(d_sid, "unverified")} and len(before) == 3,
+                json.dumps([x["executor"] for x in before])[:500])
+        on = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_cpu}})
+        rep = admin.post(f"/api/admin/machines/{d_sid}/replicate", json={"n": 1})
+        second = f"qa-verify-second-{tag}"
+        queue(bob, second, 4, 8600)
+        caught_d = wait_until(lambda: tier(d_sid) == "quarantined", 120, 0.25)
+        replayed = wait_until(lambda: (lambda xs: xs if len(xs) == 3 and all(
+            x["executor"]["machine"] == host for x in xs) else None)(_lines(h, first)), 180, 0.5)
+        wait_until(lambda: _lab_view(bob, second).get("state") == "complete", 180, 0.5)
+        state = _trust_state(h, [d_sid], [ids["bob"]])
+        ev_d = (state["machines"].get(d_sid) or {}).get("trust", {}).get("last_mismatch") or {}
+        withdrawn = {w["run"] for w in ev_d.get("withdrawn_jobs") or []}
+        old_runs = {x["executor"]["run"] for x in before}
+        settled = json.loads((_server_python(h, LAB_STATE, first) or "{}").strip().splitlines()[-1] or "{}")
+        old_events = [e for e in (settled.get(first) or {}).get("events") or [] if e["request"] in old_runs]
+        view = alice.get(f"/api/lab/jobs?exp={first}")
+        mine = bob.get(f"/api/lab/jobs?exp={first}")
+        listed = mine.json().get("jobs") or [] if mine.status_code == 200 else []
+        r.check("an administrator asks for its next result's replica (POST .../replicate): its fourth job, altered, "
+                "mismatches this server's; it is quarantined, and every result it gave unverified (the first three, "
+                "the altered one among them) is withdrawn: their lines leave the results file, their events are "
+                "rejected, and their games are played again on this server and accepted (bob sees each game done "
+                "once, by this server)",
+                on.status_code == 200 and rep.status_code == 200 and bool(caught_d)
+                and ev_d.get("verdict") == "result" and old_runs <= withdrawn and bool(replayed)
+                and len(old_events) == 3 and all(e["verification"] == "rejected" for e in old_events)
+                and view.status_code == 404 and sorted(j["i"] for j in listed) == [0, 1, 2]
+                and all(j["state"] == "done" and (j.get("executor") or {}).get("name") == "this server"
+                        for j in listed),
+                json.dumps({"evidence": {k: ev_d.get(k) for k in ("verdict", "words", "withdrawn")},
+                            "listed": [(j["i"], j["state"]) for j in listed]})[:700])
+        data.update(selective_machine=d_sid, selective_withdrawn=sorted(withdrawn))
+        helpers.pop("selective").stop()
+
+        # ---- the routes are administrators'
+        trust_path, rep_path = f"/api/admin/machines/{d_sid}/trust", f"/api/admin/machines/{d_sid}/replicate"
+        statuses = {who: (h.accounts[who].put(trust_path, json={"verifier": False}).status_code,
+                          h.accounts[who].post(rep_path, json={"n": 1}).status_code) for who in ("bob", "alice", "mod")}
+        r.check("PUT /api/admin/machines/{id}/trust and POST .../replicate are administrators': its owner, another "
+                "member and a moderator are told \"not found\"",
+                all(v == (404, 404) for v in statuses.values()), json.dumps(statuses))
+        _verification(h, provisional_rate=defaults["provisional_rate"])
+        admin.patch(f"/api/admin/users/{ids['bob']}", json={"trust_tier": "new"})      # the instance left as it was
+        r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
+    finally:
+        for helper in helpers.values():
+            helper.stop()
+        scripted.close()
+
+
 # ---------------------------------------------------------------------------- the run
 
 PARTS: dict[str, Callable] = {"helper": part_helper, "llm-real": part_llm_real, "scan": part_scan,
-                              "lab": part_lab, "remote": part_remote}
+                              "lab": part_lab, "remote": part_remote, "verify": part_verify}
 
 
 def main(argv=None) -> int:
