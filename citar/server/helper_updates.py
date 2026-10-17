@@ -7,11 +7,14 @@ own version, fetched off any request path, verified, and handed to the helpers t
   mode). Neither: nothing is relayed, and helpers report updates as their own build allows.
 - **When:** at start and then at most once an hour (``FETCH_SECONDS``), on a thread of its own (``Relay.start``),
   never on a request path. A fetch that fails, or a manifest that does not verify, keeps the last good one; either is
-  logged at most once an hour.
+  logged at most once an hour. **A build that trusts no update key fetches nothing** (4-13's fix round): no manifest
+  could verify, so it neither asks GitHub hourly nor warns hourly; it says so once, at INFO.
 - **What:** only a manifest that verifies against the update keys the extension embeds (``engine_api.verify_manifest``:
   the helper's own ``update-keys.pub``; a build with the test operations also trusts ``CITAR_HELPER_UPDATE_KEY``, so the
-  suite can use a throwaway key and no shipped wheel can be fooled by the environment), whose protocol is the hub's,
-  is relayed. Phase 4 ships no key, so a release server relays nothing until the owner's Phase 5 key is in.
+  suite can use a throwaway key and no shipped wheel can be fooled by the environment), whose protocol is the hub's
+  and whose engine build is this server's (helpers follow their server, P4.3.8: a server built from changed sources
+  never moves its helpers onto a build it does not run), is relayed. Phase 4 ships no key, so a release server relays
+  nothing until the owner's Phase 5 key is in.
 - **To whom:** every welcome carries the current manifest (``welcome.update``: the helper decides what it means for
   it); a newly accepted one goes as an ``update`` frame to each connected helper whose version is older
   (``engine_api.helper_version_newer``), at once.
@@ -140,6 +143,7 @@ class Relay:
         self.refusals = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._keyless_said = False
 
     # -------------------------------------------------------------- what is relayed
     def current(self) -> Optional[Relayed]:
@@ -166,6 +170,10 @@ class Relay:
         m = engine_api.verify_manifest(manifest, signature)
         if int(m.get("protocol") or 0) != HP.PROTOCOL:
             raise ValueError(f"the manifest is for protocol {m.get('protocol')}, and this hub speaks {HP.PROTOCOL}")
+        own = str(engine_api.build_info().get("build_id") or "")
+        if str(m.get("build") or "") != own:
+            raise ValueError(f"the manifest is for engine build {m.get('build')}, and this server runs "
+                             f"{own or 'one it cannot tell'}: its helpers follow its own build")
         relayed = Relayed(manifest=manifest, signature=signature.strip(), version=str(m["version"]),
                           build=str(m["build"]), released_at=str(m.get("released_at") or ""),
                           protocol=int(m["protocol"]), at=self.clock())
@@ -182,6 +190,19 @@ class Relay:
         return relayed
 
     # -------------------------------------------------------------- fetching
+    def trusts_a_key(self) -> bool:
+        """Whether the extension trusts any update key: without one no manifest could verify, so nothing is fetched
+        (said once, at INFO)."""
+        from .. import engine_api
+        try:
+            trusted = engine_api.update_keys_trusted() > 0
+        except Exception:
+            trusted = False
+        if not trusted and not self._keyless_said:
+            self._keyless_said = True
+            log.info("this build trusts no helper update key: no helper manifest is fetched or relayed")
+        return trusted
+
     def due(self, now: Optional[float] = None) -> bool:
         """Whether a fetch is due: never made, or the last at least ``FETCH_SECONDS`` ago."""
         now = self.clock() if now is None else now
@@ -192,7 +213,7 @@ class Relay:
     def check(self) -> Optional[Relayed]:
         """One fetch when one is due (at most hourly): the manifest accepted, or None (none due, the fetch failed, or
         the manifest was refused: the last good one stays, and the failure is logged at most hourly)."""
-        if self.source is None or not self.due():
+        if self.source is None or not self.due() or not self.trusts_a_key():
             return None
         now = self.clock()
         with self._lock:
@@ -217,8 +238,9 @@ class Relay:
 
     # -------------------------------------------------------------- the thread
     def start(self) -> None:
-        """Fetch now and then hourly on a daemon thread, which survives its own exceptions."""
-        if self.source is None or (self._thread is not None and self._thread.is_alive()):
+        """Fetch now and then hourly on a daemon thread, which survives its own exceptions; no thread when there is
+        no source, or the build trusts no update key."""
+        if self.source is None or (self._thread is not None and self._thread.is_alive()) or not self.trusts_a_key():
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="citar-helper-updates", daemon=True)

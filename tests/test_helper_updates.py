@@ -61,16 +61,25 @@ class _Key:
 
 
 @unittest.skipUnless(has_test_ops(), "needs the extension's test operations (cargo xtask develop)")
+def committed_keys() -> int:
+    """How many update keys crates/citar-jobs/update-keys.pub holds (none in Phase 4; the owner's one-time setup adds
+    one): what the extension trusts besides ``CITAR_HELPER_UPDATE_KEY``."""
+    text = (Path(__file__).resolve().parent.parent / "crates" / "citar-jobs" / "update-keys.pub").read_text(
+        encoding="utf-8")
+    return len({line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")})
+
+
 class Verify(unittest.TestCase):
-    def test_no_key_ships_and_a_trusted_one_verifies(self):
+    def test_the_keys_trusted_and_a_trusted_one_verifies(self):
         text, sig = H.signed_manifest("0.2.0", seed=SEED)
         with _Key(None):
-            self.assertEqual(engine_api.update_keys_trusted(), 0, "Phase 4 ships no update key")
+            self.assertEqual(engine_api.update_keys_trusted(), committed_keys(), "update-keys.pub's, none in Phase 4")
             with self.assertRaises(engine_api.ManifestRefused) as e:
                 engine_api.verify_manifest(text, sig)
-            self.assertEqual(e.exception.code, "no_key")
+            # no key: nothing verifies; the owner's key committed: the throwaway key's signature is not its
+            self.assertEqual(e.exception.code, "signature" if committed_keys() else "no_key")
         with _Key(SEED):
-            self.assertEqual(engine_api.update_keys_trusted(), 1)
+            self.assertEqual(engine_api.update_keys_trusted(), committed_keys() + 1)
             m = engine_api.verify_manifest(text, sig)
             self.assertEqual((m["v"], m["version"], m["protocol"]), (1, "0.2.0", 2))
             self.assertEqual(m["build"], engine_api.build_info()["build_id"])
@@ -184,6 +193,35 @@ class Relay(unittest.TestCase):
         with self.assertRaises(ValueError):
             r.accept(other_text, H.sign_manifest_text(other_text, SEED))
         self.assertEqual(r.current().version, "0.2.0")
+        # nor one of another engine build: helpers follow their server's own build
+        other = json.loads(text)
+        other["build"] = "0123456789ab" if other["build"] != "0123456789ab" else "ba9876543210"
+        other_text = json.dumps(other)
+        with self.assertRaises(ValueError) as e:
+            r.accept(other_text, H.sign_manifest_text(other_text, SEED))
+        self.assertIn("engine build", str(e.exception))
+        self.assertEqual(r.current().version, "0.2.0")
+        self.assertEqual([p.version for p in self.pushed], ["0.2.0"])
+
+    def test_a_build_that_trusts_no_key_fetches_nothing(self):
+        """No key, no manifest could verify: the relay neither fetches (GitHub, hourly) nor warns; it says so once, at
+        INFO, and starts no thread."""
+        from unittest import mock
+        with mock.patch.object(engine_api, "update_keys_trusted", return_value=0):
+            with self.assertLogs("citar.helper_updates", "INFO") as logged:
+                self.assertIsNone(self.relay.check())
+                self.clock.now += U.FETCH_SECONDS
+                self.assertIsNone(self.relay.check())
+                self.relay.start()
+            self.assertIsNone(self.relay._thread, "no thread")
+        self.assertEqual(self.fetched, 0, "nothing fetched")
+        self.assertEqual(self.relay.fetches, 0)
+        lines = [line for line in logged.output if "trusts no helper update key" in line]
+        self.assertEqual(len(lines), 1, logged.output)
+        self.assertTrue(all(line.startswith("INFO") for line in logged.output), logged.output)
+        # a key trusted again (a test operation's): fetched as usual
+        self.assertEqual(self.relay.check().version, "0.2.0")
+        self.assertEqual(self.fetched, 1)
 
     def test_the_source_comes_from_the_settings(self):
         folder = Path(tempfile.mkdtemp(prefix="citar_manifest_"))
@@ -325,6 +363,29 @@ class Hub(unittest.TestCase):
         view = W.hub().get(sid).client()["update"]
         self.assertFalse(view["available"], "the helper is the latest now")
         self.assertEqual(W.hub().replaced, replaced, "an update's hand-off is never a replaced connection")
+
+    def test_update_status_lines_are_logged_once_and_a_helpers_own_release_quietly(self):
+        """Every status is kept, but only news is logged: a state or version other than the machine's last, at most
+        one line a state a minute; a helper refusing the release it already runs (each welcome relays it) at DEBUG."""
+        sid, token = _machine(self.owner, "chatty")
+        helper, _ = self.connect(token, "0.1.6", 7)
+        with self.assertLogs("citar.workers", "INFO") as logged:
+            for n in range(40):
+                helper.send("update_status", state="refused" if n % 2 else "failed", version="0.2.0",
+                            message=f"say it again ({n})")
+            helper.send("update_status", state="applied", version="0.2.0", message="the end")
+            self.assertTrue(H.until(lambda: (W.hub().update_states.get(sid) or {}).get("state") == "applied", 5))
+        self.assertEqual(len(W.hub().update_log[sid]), 32, "every status kept, the last 32")
+        said = [line for line in logged.output if ": update " in line]
+        self.assertEqual(len(said), 3, said)          # failed, refused and applied once each
+        # a helper at 0.2.0 refusing 0.2.0 (already at it): kept, logged at DEBUG only
+        sid2, token2 = _machine(self.owner, "at the release")
+        at_it, _ = self.connect(token2, "0.2.0", 8)
+        with self.assertLogs("citar.workers", "DEBUG") as logged:
+            at_it.send("update_status", state="refused", version="0.2.0", message="already at 0.2.0")
+            self.assertTrue(H.until(lambda: (W.hub().update_states.get(sid2) or {}).get("state") == "refused", 5))
+        said = [line for line in logged.output if ": update " in line]
+        self.assertEqual([line.split(":", 1)[0] for line in said], ["DEBUG"], logged.output)
 
 
 def tearDownModule():

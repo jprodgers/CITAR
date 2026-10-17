@@ -131,6 +131,8 @@ POWER_SAMPLE_SECONDS = 10.0
 POWER_MIN_SECONDS = 30.0
 #: A draw above this, in watts, is no machine's reading and is left out of its row.
 POWER_W_MAX = 20000.0
+#: The shortest time between two log lines of one machine's ``update_status`` in one state (``record_update_status``).
+UPDATE_LOG_SECONDS = 60.0
 #: A GPU draw above this many times the sum of the power limits the machine's own scan reports (``gpu_draw_cap``) is
 #: no reading of that machine (a glitch, or a helper reporting what its cards cannot draw): left out of its row.
 POWER_LIMIT_MARGIN = 1.5
@@ -726,6 +728,8 @@ class WorkerHub:
         #: and its last few, oldest first (the tests read the order an update went through).
         self.update_states: dict = {}
         self.update_log: dict = {}
+        #: (server_id, state) -> when the hub's clock last logged such an ``update_status`` (``UPDATE_LOG_SECONDS``).
+        self._update_logged: dict = {}
         #: How many connections a newer one of their machine replaced (``shutdown`` ``replaced``): an update's
         #: hand-off never adds one.
         self.replaced = 0
@@ -1063,13 +1067,28 @@ class WorkerHub:
                 log.exception("could not send the helper manifest to %s", connection.server_id)
         return sent
 
-    def record_update_status(self, server_id: str, frame: dict) -> None:
-        """A helper's ``update_status``, kept for the machine across its reconnects."""
+    def record_update_status(self, server_id: str, frame: dict) -> bool:
+        """A helper's ``update_status``, kept for the machine across its reconnects. Returns whether it is news for the
+        log: a state or version other than the machine's last, and no line of that state for the machine within
+        ``UPDATE_LOG_SECONDS`` (a helper says its last status again at each connection; a modified one could send
+        them at wire speed)."""
+        now = self.clock.time()
         state = {"state": frame["state"], "version": frame.get("version"), "message": frame.get("message") or "",
-                 "at": self.clock.time()}
+                 "at": now}
         with self._lock:
+            last = self.update_states.get(server_id)
             self.update_states[server_id] = state
             self.update_log.setdefault(server_id, collections.deque(maxlen=32)).append(state)
+            if last is not None and (last["state"], last["version"]) == (state["state"], state["version"]):
+                return False
+            key = (server_id, state["state"])
+            logged = self._update_logged.get(key)
+            if logged is not None and 0 <= now - logged < UPDATE_LOG_SECONDS:
+                return False
+            if len(self._update_logged) > 4096:
+                self._update_logged.clear()
+            self._update_logged[key] = now
+            return True
 
     def broadcast(self, frame_text: str):
         """Send a frame to every connected helper."""
@@ -1450,10 +1469,13 @@ async def _frame(the_hub: WorkerHub, connection: WorkerConnection, raw: str) -> 
     elif t == "pong":
         pass
     elif t == "update_status":
-        the_hub.record_update_status(sid, data)
-        if data["state"] in ("failed", "refused", "applied", "restarting"):
-            log.info("the helper of %s: update %s %s: %s", sid, data["state"], data.get("version") or "",
-                     (data.get("message") or "")[:300])
+        news = the_hub.record_update_status(sid, data)
+        if news and data["state"] in ("failed", "refused", "applied", "restarting"):
+            # A helper refusing the release it already runs (each welcome relays it) is no news.
+            own = data["state"] == "refused" and bool(data.get("version")) \
+                and data.get("version") == connection.helper_version
+            log.log(logging.DEBUG if own else logging.INFO, "the helper of %s: update %s %s: %s", sid, data["state"],
+                    data.get("version") or "", (data.get("message") or "")[:300])
     elif t == "hello":
         connection.log_once("hello", logging.WARNING, "the helper of %s sent a second hello: ignored", sid)
     elif t in NOT_YET:
