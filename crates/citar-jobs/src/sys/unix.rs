@@ -32,6 +32,24 @@ pub(super) fn exposure(path: &Path) -> io::Result<Option<Exposure>> {
     Ok(Some(Exposure { who, fix: format!("chmod 600 {}", shell_quote(path)) }))
 }
 
+/// Asks the process `pid` to stop (`SIGTERM`): the helper's console supervisor passes a stop on
+/// to the helper it runs (design/phase4-helper.md P4.3.8), which the standard library's
+/// `Child::kill` (`SIGKILL`) cannot.
+///
+/// # Errors
+/// No such process, or not one this user may signal.
+pub fn terminate(pid: u32) -> io::Result<()> {
+    let pid = libc::pid_t::try_from(pid)
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no such process id"))?;
+    // SAFETY: kill takes plain integers; a pid above 0 names one process, never a group.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Sets this process's nice value to `n` (higher is lower priority; raising it needs no
 /// privilege).
 ///

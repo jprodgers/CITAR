@@ -324,6 +324,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "thiserror",
  "tokio",

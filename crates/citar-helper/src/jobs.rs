@@ -46,6 +46,11 @@
 //! - **Faults** ([`crate::faults`], a test build only): the jobs are counted as the host accepts
 //!   them, and a helper given `--test-fault` alters, abandons, signs with another key, over-reports
 //!   or holds the ones its modes name, for the verification gates.
+//! - **An update's hand-off** ([`JobSide::hand_off`], P4.3.8 step 7): no offer is taken any more,
+//!   the job host is ended, and nothing it says after that is relayed (it may be of the build the
+//!   swap replaces); [`JobSide::resume`] takes work again when the swap failed. A host that is of
+//!   another jobs build (one left from before a swap: it refuses the parent's `limits`, or the
+//!   parent refuses its `ready`) is never used, and this helper's own is started at once.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -111,10 +116,12 @@ pub enum HostEvent {
 }
 
 /// Why a job host could not be started.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StartFailure {
     /// It could not hold the limits (or not live under them).
     pub limits: bool,
+    /// It is of another jobs build than this helper (a host left from before a binary swap).
+    pub build: bool,
     pub message: String,
 }
 
@@ -214,6 +221,10 @@ enum Cmd {
     Benchmark(bool),
     LlmBusy(bool),
     Stop(oneshot::Sender<()>),
+    /// An update's hand-off: the host ended, no work taken, nothing relayed from it.
+    HandOff(oneshot::Sender<()>),
+    /// The hand-off's swap failed: work is taken again.
+    Resume,
 }
 
 /// The welcome's `jobs`, with what the hello they answer listed.
@@ -241,7 +252,8 @@ impl JobSide {
         log: Log,
     ) -> JobSide {
         let rules = Ruleset::shared();
-        let jobs_build = citar_jobs::jobs_build(rules);
+        // This binary's own (a test build that calls itself another version has another one).
+        let jobs_build = crate::version::jobs_build().to_owned();
         let verifiable = match hosts.self_test().await {
             Ok(()) => true,
             Err(why) => {
@@ -292,6 +304,8 @@ impl JobSide {
             faults: setup.faults.clone(),
             accepted_n: 0,
             delayed: Vec::new(),
+            handing_off: false,
+            build_retried: false,
         };
         side.publish();
         let task = tokio::spawn(side.run(rx));
@@ -369,6 +383,20 @@ impl JobSide {
         let (tx, rx) = oneshot::channel();
         self.send(Cmd::Stop(tx));
         let _done = tokio::time::timeout(within, rx).await;
+    }
+
+    /// An update's hand-off (P4.3.8 step 7): no offer is taken from now on (refused `busy`), the
+    /// job host is ended, and whatever it says from now on is dropped, never relayed. Returns once
+    /// the host has gone, or after `within`. The session hands off only when no run is live.
+    pub async fn hand_off(&self, within: Duration) {
+        let (tx, rx) = oneshot::channel();
+        self.send(Cmd::HandOff(tx));
+        let _done = tokio::time::timeout(within, rx).await;
+    }
+
+    /// The hand-off's swap failed: work is taken again (the next settings start a host).
+    pub fn resume(&self) {
+        self.send(Cmd::Resume);
     }
 }
 
@@ -510,6 +538,11 @@ struct Side {
     accepted_n: u64,
     /// Results held back before they are sent (`--test-fault hold:S`), and when each goes.
     delayed: Vec<(Instant, String)>,
+    /// An update's hand-off is under way: no work is taken, no host started.
+    handing_off: bool,
+    /// A host of another jobs build was refused and this helper's own started at once: the next
+    /// such refusal waits [`START_RETRY`] as any other.
+    build_retried: bool,
 }
 
 fn hardness(h: citar_jobs::limits::Hardness) -> Hardness {
@@ -559,8 +592,8 @@ impl Side {
                 done = started => {
                     let limits = self.starting.take().map(|(l, _)| l);
                     let done = done.unwrap_or_else(|e| Err(StartFailure {
-                        limits: false,
                         message: format!("the job host's start failed: {e}"),
+                        ..StartFailure::default()
                     }));
                     self.started(limits, done).await;
                 }
@@ -667,6 +700,20 @@ impl Side {
             Cmd::Stop(done) => {
                 self.stop();
                 let _told = done.send(());
+            }
+            Cmd::HandOff(done) => self.hand_off(done),
+            Cmd::Resume => {
+                if self.handing_off {
+                    self.log.info("the update was not installed: taking CPU work again");
+                }
+                self.handing_off = false;
+            }
+            Cmd::Offer { offer, .. } if self.handing_off => {
+                self.reject(
+                    &offer.run,
+                    RejectReason::Busy,
+                    "the helper is restarting for an update",
+                );
             }
             other if self.holding() => self.held.push_back(Parked::Cmd(other)),
             Cmd::Settings { ack, cpu } => self.settings(ack, cpu),
@@ -782,7 +829,7 @@ impl Side {
     }
 
     fn start_host(&mut self, limits: Requested) {
-        if self.starting.is_some() {
+        if self.starting.is_some() || self.handing_off {
             return;
         }
         self.log.info(format!(
@@ -834,6 +881,19 @@ impl Side {
                         self.start_host(w);
                         return;
                     }
+                }
+            }
+            Err(f) if f.build && !self.build_retried && !self.handing_off => {
+                // A host of another jobs build (one left from before a binary swap) is never
+                // used: this helper's own is started at once, and what waits for a host waits on.
+                self.build_retried = true;
+                self.log.warn(format!(
+                    "refused a job host of another jobs build ({}): starting this helper's own",
+                    clip(&f.message, 600)
+                ));
+                if let Some(l) = limits.or(self.want) {
+                    self.start_host(l);
+                    return;
                 }
             }
             Err(f) => {
@@ -1227,6 +1287,49 @@ impl Side {
         }
         self.host = None;
         self.runs.clear();
+    }
+
+    /// An update's hand-off: what waits for a host is answered (`busy`), the host is ended, and
+    /// its frames from now on are read and dropped until it has gone (at most [`ABORT_GRACE`]),
+    /// then `done` is told. No run is live when the session hands off; one that is (a hand-off
+    /// forced past its wait) is ended as a stop ends it, so the server gives it to another
+    /// machine.
+    fn hand_off(&mut self, done: oneshot::Sender<()>) {
+        self.handing_off = true;
+        let waiting: Vec<String> = self
+            .waiting_offers
+            .drain(..)
+            .map(|(o, _)| o.run)
+            .chain(self.held.iter().filter_map(|p| match p {
+                Parked::Cmd(Cmd::Offer { offer, .. }) => Some(offer.run.clone()),
+                _ => None,
+            }))
+            .collect();
+        for run in waiting {
+            self.reject(&run, RejectReason::Busy, "the helper is restarting for an update");
+        }
+        if self.runs.values().any(Run::live) {
+            self.stop();
+        }
+        if let Some((_, task)) = self.starting.take() {
+            task.abort();
+        }
+        self.want = None;
+        self.restart = false;
+        let Some(host) = self.host.take() else {
+            let _told = done.send(());
+            return;
+        };
+        self.log.info("ending the job host for the update's hand-off");
+        let Live { cmds, mut events, .. } = host;
+        // Its input closes: it ends its runs and exits; what it still says goes nowhere.
+        drop(cmds);
+        tokio::spawn(async move {
+            let _gone =
+                tokio::time::timeout(ABORT_GRACE, async { while events.recv().await.is_some() {} })
+                    .await;
+            let _told = done.send(());
+        });
     }
 
     async fn welcome(&mut self, w: Welcomed) {

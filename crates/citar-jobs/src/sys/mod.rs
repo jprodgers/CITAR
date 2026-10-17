@@ -4,7 +4,8 @@
 //! job host's limits (P4.3.6, 4-08: a Job Object and the process's committed memory on Windows;
 //! `setpriority` and `RLIMIT_DATA` on Linux; the background band and the resident size on macOS),
 //! and the job host's counting allocator ([`alloc`], P4.4.3), whose `GlobalAlloc` implementation
-//! is unsafe by the trait's definition. [`crate::limits`] decides what to hold and calls these.
+//! is unsafe by the trait's definition; on Unix also `SIGTERM` to a process (`terminate`, the
+//! helper's console supervisor passing a stop on to its child, P4.3.8, 4-13). [`crate::limits`] decides what to hold and calls these.
 //!
 //! **Owner-only files.** The helper's machine key (and, in 4-14, the Windows service's home) must
 //! be readable by the account that runs the helper and nobody else:
@@ -29,6 +30,8 @@ mod unix;
 #[allow(unsafe_code)]
 mod windows;
 
+#[cfg(unix)]
+pub use self::unix::terminate;
 #[cfg(target_os = "macos")]
 pub use self::unix::{background, resident_bytes};
 #[cfg(all(unix, not(target_os = "macos")))]

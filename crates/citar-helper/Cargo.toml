@@ -17,8 +17,14 @@ default-run = "citar-helper"
 dev-guard = []
 # --test-fault MODE, a helper that cheats on purpose for the verification gates (4-11).
 test-faults = []
-# --update-key FILE and CITAR_HELPER_VERSION at compile time, for the update gates (4-13).
+# --update-key FILE (an update key trusted at run time), and at compile time CITAR_HELPER_VERSION
+# (the version it calls itself) and CITAR_HELPER_JOBS_SALT (another jobs build, as another
+# release's), with the test hooks of the update gates (4-13, src/update).
 test-update-key = []
+# Phase 5's package-manager builds (Homebrew, Scoop, winget; design P4.3.8): updates default to
+# notify, and auto is refused ("update through your package manager"), so the helper never fights
+# the package manager over its own binary. The GitHub release assets are built without it.
+packaged = []
 # The conformance support (src/conformance: the fixtures' loaders, the matcher, the transcripts),
 # which reads files under this crate's source directory: for this crate's tests and the players of
 # the transcripts (4-03 on), never for the binary that ships. The tests turn it on through the
@@ -45,7 +51,9 @@ citar-jobs.workspace = true
 # as argparse allowed.
 clap.workspace = true
 # The connection (P4.3.3): one runtime, the socket, timers, Ctrl-C and SIGTERM.
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util"] }
+# The update (4-13): its download written as it comes (fs), the staged binary's self-test and the
+# console run's supervisor (process).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util", "fs", "process"] }
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 rustls.workspace = true
@@ -67,6 +75,8 @@ blake3.workspace = true
 sysinfo = { workspace = true, features = ["disk"] }
 # Local quiet hours, in the machine's own time zone.
 chrono.workspace = true
+# An update's download is checked against the signed manifest's SHA-256 (P4.3.8).
+sha2.workspace = true
 
 [dev-dependencies]
 # The transcripts run on tokio's paused clock (the fake clock, `setup.helper.clock`), and the

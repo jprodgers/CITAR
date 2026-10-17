@@ -531,6 +531,9 @@ pub fn resolve(src: &Sources<'_>, prompt: Option<&mut dyn Prompt>) -> Result<Con
         }
     };
     let updates = match opts.updates.as_deref().or(from_file) {
+        // A package manager's build reports updates and leaves installing them to the package
+        // manager (P4.3.8); `auto` given there is refused when an update comes (`crate::update`).
+        None if cfg!(feature = "packaged") => UpdatePolicy::Notify,
         None | Some("auto") => UpdatePolicy::Auto,
         Some("notify") => UpdatePolicy::Notify,
         Some("off") => UpdatePolicy::Off,
@@ -823,8 +826,16 @@ mod tests {
         };
         let base = r#""server_url": "http://127.0.0.1:1", "token": "t""#;
         let policy = |file: String, args: &[&str]| run(&file, args).map(|c| c.updates);
-        assert_eq!(policy(format!("{{{base}}}"), &[]), Ok(UpdatePolicy::Auto));
-        assert_eq!(policy(format!(r#"{{{base}, "updates": null}}"#), &[]), Ok(UpdatePolicy::Auto));
+        // A package manager's build reports updates and leaves installing them to it (P4.3.8).
+        let default =
+            if cfg!(feature = "packaged") { UpdatePolicy::Notify } else { UpdatePolicy::Auto };
+        assert_eq!(policy(format!("{{{base}}}"), &[]), Ok(default));
+        assert_eq!(policy(format!(r#"{{{base}, "updates": null}}"#), &[]), Ok(default));
+        assert_eq!(
+            policy(format!(r#"{{{base}, "updates": "auto"}}"#), &[]),
+            Ok(UpdatePolicy::Auto),
+            "auto said is auto, packaged or not (the updater refuses it there)"
+        );
         assert_eq!(policy(format!(r#"{{{base}, "updates": "off"}}"#), &[]), Ok(UpdatePolicy::Off));
         assert_eq!(
             policy(format!(r#"{{{base}, "updates": "off"}}"#), &["--updates", "notify"]),

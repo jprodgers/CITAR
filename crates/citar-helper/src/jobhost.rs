@@ -9,6 +9,14 @@
 //! the death and fails its runs (`memory` or `host`, with each run's last reported peak). Dropping
 //! the job side's handle ends the host: its standard input closes, it ends its runs and exits
 //! within two seconds, and is killed past three.
+//!
+//! A host of another jobs build (the program at this binary's path swapped since it started, or
+//! one left from before a swap) refuses the `limits` this helper gives it (`fatal` `build`), or
+//! its `ready` is refused here: either way it is ended and reported as such
+//! ([`StartFailure::build`]), and the job side starts this helper's own at once. In a
+//! `test-update-key` build, `CITAR_HELPER_TEST_STALE_HOST` names a program the first host is
+//! started from instead (the old binary an update kept as `<name>.old`): the update tests' stand-in
+//! for a job host left from before the swap (design/phase4-helper.md 4-13, gate 4).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -35,6 +43,8 @@ const DEATH_WAIT: Duration = Duration::from_secs(5);
 pub struct ChildHosts {
     pub program: PathBuf,
     pub log: Log,
+    /// A program the next host is started from instead, once (a test build's stale host).
+    pub stale: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl ChildHosts {
@@ -45,8 +55,48 @@ impl ChildHosts {
     pub fn this_binary(log: Log) -> Result<ChildHosts, String> {
         let program =
             std::env::current_exe().map_err(|e| format!("this program's own path: {e}"))?;
-        Ok(ChildHosts { program, log })
+        Ok(ChildHosts { program, log, stale: std::sync::Mutex::new(stale_host()) })
     }
+
+    /// The program the next host is started from: the stale one once, if a test build was given
+    /// one, else this binary.
+    fn next_program(&self) -> PathBuf {
+        let mut stale = self.stale.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match stale.take() {
+            Some(p) => {
+                self.log.warn(format!(
+                    "TEST: starting the job host from {} (CITAR_HELPER_TEST_STALE_HOST), a stand-in \
+                     for one left from before an update",
+                    p.display()
+                ));
+                p
+            }
+            None => self.program.clone(),
+        }
+    }
+}
+
+/// `CITAR_HELPER_TEST_STALE_HOST` in a `test-update-key` build (the module's doc).
+#[cfg(feature = "test-update-key")]
+fn stale_host() -> Option<PathBuf> {
+    std::env::var_os("CITAR_HELPER_TEST_STALE_HOST").filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+#[cfg(not(feature = "test-update-key"))]
+const fn stale_host() -> Option<PathBuf> {
+    None
+}
+
+/// Whether a start failed because the host is of another jobs build.
+fn is_build(e: &SpawnError) -> bool {
+    matches!(
+        e,
+        SpawnError::Build { .. }
+            | SpawnError::Refused(citar_jobs::host::Fatal {
+                code: citar_jobs::host::FatalCode::Build,
+                ..
+            })
+    )
 }
 
 /// The wrapper this machine starts hosts under, found once (a trial scope takes a moment).
@@ -76,7 +126,7 @@ impl Hosts for ChildHosts {
         jobs_build: String,
     ) -> BoxFuture<'static, Result<HostStart, StartFailure>> {
         let program = Program {
-            program: self.program.clone(),
+            program: self.next_program(),
             args: vec![OsString::from("job-host")],
             env: Vec::new(),
         };
@@ -89,13 +139,16 @@ impl Hosts for ChildHosts {
             let host = match started {
                 Ok(Ok(h)) => h,
                 Ok(Err(e)) => {
-                    let limits = e.is_limits();
-                    return Err(StartFailure { limits, message: describe(&e) });
+                    return Err(StartFailure {
+                        limits: e.is_limits(),
+                        build: is_build(&e),
+                        message: describe(&e),
+                    });
                 }
                 Err(e) => {
                     return Err(StartFailure {
-                        limits: false,
                         message: format!("the job host's start: {e}"),
+                        ..StartFailure::default()
                     });
                 }
             };
@@ -108,8 +161,8 @@ impl Hosts for ChildHosts {
                 .spawn(move || bridge(host, cmds_rx, &events_tx, &log));
             if let Err(e) = thread {
                 return Err(StartFailure {
-                    limits: false,
                     message: format!("no thread for the job host: {e}"),
+                    ..StartFailure::default()
                 });
             }
             Ok(HostStart { ready, cmds: cmds_tx, events: events_rx })
