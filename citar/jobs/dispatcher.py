@@ -1477,10 +1477,13 @@ class Dispatcher:
             if ack is not None:
                 after.append(lambda: ack(run.id))
             return
+        # the hash kept (and compared by verification) is one checked against the result itself: this server's by
+        # hashing it, a helper's by its claim's check, which holds the claim's, the outcome's and the result's as one
+        result_hash = outcome["result_hash"]
         rrow = self._run_row(s, run)
         rrow.state, rrow.ended_at = "done", _utc(wall)
         rrow.cpu_s, rrow.wall_s, rrow.paused_s, rrow.peak_mb = run.cpu_s, run.wall_s, run.paused_s, run.peak_mb
-        rrow.result, rrow.result_hash = result, outcome.get("result_hash")
+        rrow.result, rrow.result_hash = result, result_hash
         rrow.chain_head, rrow.rounds = chain.get("head"), chain.get("rounds")
         if not local:
             rrow.claim, rrow.signature = f.get("claim"), f.get("signature")
@@ -1507,7 +1510,7 @@ class Dispatcher:
         else:
             rrow.verdict = "reference" if local else "unchecked"
             row.state = "crashed" if crash else "accepted"
-            row.accepted_run, row.result_hash = run.id, outcome.get("result_hash")
+            row.accepted_run, row.result_hash = run.id, result_hash
             self.jobs.pop(job.id, None)
         started_wall = run.started_wall or run.offered_wall
         observed = max(0.0, wall - started_wall)
@@ -1606,7 +1609,7 @@ class Dispatcher:
         engine_api.verify_claim(job.kind, job.spec, job.spec_hash, job=job.id, run=run.id, machine=str(e.id),
                                 jobs_build=job.jobs_build, public_key=(srow.public_key if srow is not None else ""),
                                 claim=f.get("claim"), signature=f.get("signature"), result=outcome.get("result"),
-                                chain=outcome.get("chain") or {})
+                                result_hash=outcome.get("result_hash"), chain=outcome.get("chain") or {})
 
     def _replication(self, s, e, job: Job) -> Optional[str]:
         """Why a helper's primary result is checked by a replica (rule 1: decided only now, its result committed with

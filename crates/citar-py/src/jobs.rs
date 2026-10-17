@@ -288,13 +288,14 @@ create_exception!(
 /// Checks a helper's signed claim, its result and its chain for the run `run` of the job `job`
 /// (`kind`, `spec_json`, held to `spec_hash`) that the server offered to `machine` of jobs build
 /// `jobs_build`, whose registered key is `public_key` (P4.4.4): the signature against that key,
-/// the claim against those records and the spec's bots, the result's hash against the claim's,
-/// the chain's head and rounds against the claim's and its own fold, the result against its spec.
-/// `None`, or `ClaimRefused` with the verdict; a spec that does not check is `JobRefused`
-/// (`bad_spec`: the server's own record is wrong, not the helper).
+/// the claim against those records and the spec's bots, the result's hash against the claim's and
+/// against `result_hash` (the outcome's, which the server keeps), the chain's head and rounds
+/// against the claim's and its own fold, the result against its spec. `None`, or `ClaimRefused`
+/// with the verdict; a spec that does not check is `JobRefused` (`bad_spec`: the server's own
+/// record is wrong, not the helper).
 #[pyfunction]
 #[pyo3(signature = (kind, spec_json, spec_hash, job, run, machine, jobs_build, public_key, claim_json,
-                    signature, result_json, chain_json))]
+                    signature, result_json, result_hash, chain_json))]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_claim(
     py: Python<'_>,
@@ -309,6 +310,7 @@ pub fn verify_claim(
     claim_json: &[u8],
     signature: &str,
     result_json: &[u8],
+    result_hash: &str,
     chain_json: &[u8],
 ) -> PyResult<()> {
     let c = checked(py, kind_of(kind)?, spec_json, Some(spec_hash))?;
@@ -325,10 +327,10 @@ pub fn verify_claim(
         )
     })?;
     let expected = citar_jobs::Expected { job, run, machine, jobs_build, key: public_key };
+    let sent =
+        citar_jobs::Sent { claim: &claim, signature, result: &result, result_hash, chain: &chain };
     let rules = crate::rules::rules();
-    let out = guarded(py, || {
-        Ok(citar_jobs::verify_claim(rules, &c, &expected, &claim, signature, &result, &chain))
-    })?;
+    let out = guarded(py, || Ok(citar_jobs::verify_claim(rules, &c, &expected, &sent)))?;
     out.map_err(|e| claim_refused(e.verdict, e.why))
 }
 

@@ -11,7 +11,8 @@ gate 1).
   4·sqrt(p(1−p)/n) of p, and the two secrets sampling different jobs.
 - **Claims** through the binding (``engine_api.verify_claim``): an honest claim of the golden duel verifies; a changed
   byte in any claim field (not signed again: a bad signature; signed again: the claim names what the records do not),
-  in the result, in a digest or in the signature fails with its verdict and its reason.
+  in the result, in a digest or in the signature fails with its verdict and its reason, and so does an outcome whose
+  own result hash is not its result's (the honest hash beside an altered result, hashed into its signed claim).
 """
 from __future__ import annotations
 
@@ -192,13 +193,15 @@ class Claims(unittest.TestCase):
         cls.key = H.test_key()
         cls.H = H
 
-    def check(self, claim=None, signature=None, result=None, chain=None, key=None):
+    def check(self, claim=None, signature=None, result=None, chain=None, key=None, result_hash=None):
         f = self.frame
         engine_api.verify_claim("lab_game", self.spec, self.spec_hash, job=self.offer["job"], run=self.offer["run"],
                                 machine="sv_claims", jobs_build=self.offer["jobs_build"],
                                 public_key=key or self.key, claim=claim or f["claim"],
                                 signature=signature if signature is not None else f["signature"],
-                                result=result or f["outcome"]["result"], chain=chain or f["outcome"]["chain"])
+                                result=result or f["outcome"]["result"],
+                                result_hash=result_hash if result_hash is not None else f["outcome"]["result_hash"],
+                                chain=chain or f["outcome"]["chain"])
 
     def refused(self, verdict: str, words: str, **kw) -> None:
         with self.assertRaises(engine_api.ClaimRefused) as caught:
@@ -242,6 +245,22 @@ class Claims(unittest.TestCase):
                      signature=self.H.sign_claim(self.frame["claim"], seed=self.H.TEST_KEY_SEED + 1))
         self.refused("signature", "registered key", key="AAAA")
         self.refused("signature", "not text", signature=5)
+
+    def test_an_outcome_whose_own_hash_is_not_its_results(self):
+        """The outcome's ``result_hash`` is what the server keeps and compares: an altered result, hashed into a claim
+        signed again with the right key, beside the honest hash in the outcome, is a ``claim`` verdict, not a result
+        that a matching replica could settle as verified."""
+        honest = self.frame["outcome"]["result_hash"]
+        result = json.loads(json.dumps(self.frame["outcome"]["result"]))
+        next(iter(result["players"].values()))["score"] += 1
+        altered = engine_api.job_result_hash("lab_game", result)
+        claim = dict(self.frame["claim"], result_hash=altered)
+        signature = self.H.sign_claim(claim)
+        self.check(claim=claim, signature=signature, result=result, result_hash=altered)    # consistent: it holds
+        self.refused("claim", "the outcome names result", claim=claim, signature=signature, result=result,
+                     result_hash=honest)
+        self.refused("claim", "the outcome names result", result_hash="d" * 64)
+        self.refused("claim", "not text", result_hash=7)
 
 
 if __name__ == "__main__":

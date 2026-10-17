@@ -13,7 +13,8 @@
 //! **The server's check** ([`verify_claim`], P4.4.4, through the binding's `verify_claim`): the
 //! signature against the machine's registered key, the claim against the server's records (its
 //! job, run, machine, kind, spec hash, jobs build, the spec's bots and the key), the result's hash
-//! against the claim's, and the chain against the claim's head and rounds and its own fold, then
+//! against the claim's and the outcome's ([`Sent`]: the server keeps the outcome's hash, so it
+//! must be the result's), and the chain against the claim's head and rounds and its own fold, then
 //! the result against its spec ([`crate::result_fits`]). Each failure is one of P4.5.8's tampering
 //! verdicts ([`ClaimVerdict`]): a correct helper never produces one, so the server rejects the run
 //! and quarantines the machine and its owner.
@@ -145,6 +146,19 @@ pub struct Expected<'a> {
     pub key: &'a str,
 }
 
+/// What a helper's `job_result` frame carries (PROTOCOL.md): the claim and its signature, and the
+/// outcome's result, result hash and chain. The outcome's `result_hash` is checked as well as the
+/// claim's: the server keeps and compares the hash, so a hash nobody checked would let an altered
+/// result settle as verified beside an honest hash.
+#[derive(Clone, Copy, Debug)]
+pub struct Sent<'a> {
+    pub claim: &'a Value,
+    pub signature: &'a str,
+    pub result: &'a Value,
+    pub result_hash: &'a str,
+    pub chain: &'a Value,
+}
+
 /// A key's public half as the hello and the claim carry it: standard base64 of its 32 bytes.
 #[must_use]
 pub fn public_b64(key: &SigningKey) -> String {
@@ -164,8 +178,9 @@ pub fn verifying_key(b64: &str) -> Result<VerifyingKey, String> {
 
 /// Checks a run's signed claim, its result and its chain against the job `checked` describes and
 /// the server's records `expected` (P4.4.4): the signature against the registered key, the claim
-/// against the records, the result's hash, the chain's head, rounds and fold, and the result
-/// against its spec, in that order, the first failure its verdict.
+/// against the records, the result's hash (the claim's and the outcome's), the chain's head,
+/// rounds and fold, and the result against its spec, in that order, the first failure its verdict.
+/// Once it holds, the claim's result hash, the outcome's and the result's own are one.
 ///
 /// # Errors
 /// The first thing that does not hold, as a [`ClaimRefused`].
@@ -173,18 +188,15 @@ pub fn verify_claim(
     rules: &citar_engine::rules::Ruleset,
     checked: &Checked,
     expected: &Expected<'_>,
-    claim: &Value,
-    signature: &str,
-    result: &Value,
-    chain: &Value,
+    sent: &Sent<'_>,
 ) -> Result<(), ClaimRefused> {
     use ClaimVerdict::{ChainInconsistent, Claim as Named, Signature as Signed};
-    let claim = Claim::deserialize(claim)
+    let claim = Claim::deserialize(sent.claim)
         .map_err(|e| refused(Named, format!("the claim does not read: {e}")))?;
     let key = verifying_key(expected.key)
         .map_err(|e| refused(Signed, format!("the machine's registered key is {e}")))?;
     let sig = STANDARD
-        .decode(signature)
+        .decode(sent.signature)
         .ok()
         .and_then(|b| <[u8; 64]>::try_from(b).ok())
         .ok_or_else(|| refused(Signed, "the signature is not base64 of 64 bytes"))?;
@@ -210,7 +222,7 @@ pub fn verify_claim(
             format!("the claim names another {what} than the server's records"),
         ));
     }
-    let typed = JobResult::read(checked.kind, result)
+    let typed = JobResult::read(checked.kind, sent.result)
         .map_err(|e| refused(Named, format!("the result does not read: {e}")))?;
     let hash = typed.hash(checked.kind).map_err(|e| refused(Named, format!("the result: {e}")))?;
     if hash != claim.result_hash {
@@ -222,7 +234,16 @@ pub fn verify_claim(
             ),
         ));
     }
-    let chain = Chain::deserialize(chain)
+    if sent.result_hash != hash {
+        return Err(refused(
+            Named,
+            format!(
+                "the outcome names result {}, and the result sent hashes to {hash}",
+                sent.result_hash
+            ),
+        ));
+    }
+    let chain = Chain::deserialize(sent.chain)
         .map_err(|e| refused(ChainInconsistent, format!("the chain does not read: {e}")))?;
     if chain.head != claim.chain_head || u64::from(chain.rounds) != claim.rounds {
         return Err(refused(
@@ -301,19 +322,20 @@ mod tests {
     }
 
     /// A run of the golden `duel-a` as a helper would send it: its claim signed by a throwaway
-    /// key, the records the server keeps, the result and the chain.
-    struct Sent {
+    /// key, the records the server keeps, the result, its hash and the chain.
+    struct Frame {
         checked: Checked,
         signing: SigningKey,
         key: String,
         claim: Value,
         signature: String,
         result: Value,
+        result_hash: String,
         chain: Value,
     }
 
-    impl Sent {
-        fn honest() -> Sent {
+    impl Frame {
+        fn honest() -> Frame {
             let rules = citar_engine::rules::Ruleset::shared();
             let set = crate::golden::GoldenSet::committed().expect("the golden set");
             let job = &set.jobs[crate::golden::SELF_CHECK];
@@ -328,7 +350,7 @@ mod tests {
                 spec_hash: checked.hash.to_hex(),
                 jobs_build: "0f1e2d3c4b5a".to_owned(),
                 bots: checked.bots(),
-                result_hash,
+                result_hash: result_hash.clone(),
                 chain_head: job.chain_head.clone(),
                 rounds: u64::from(job.rounds),
                 key: key.clone(),
@@ -337,7 +359,7 @@ mod tests {
             let signature = c.sign(&signing);
             let claim = serde_json::to_value(&c).expect("a value");
             let chain = serde_json::to_value(job.chain()).expect("a value");
-            Sent { checked, signing, key, claim, signature, result, chain }
+            Frame { checked, signing, key, claim, signature, result, result_hash, chain }
         }
 
         fn check(&self) -> Result<(), ClaimRefused> {
@@ -348,15 +370,14 @@ mod tests {
                 jobs_build: "0f1e2d3c4b5a",
                 key: &self.key,
             };
-            verify_claim(
-                citar_engine::rules::Ruleset::shared(),
-                &self.checked,
-                &expected,
-                &self.claim,
-                &self.signature,
-                &self.result,
-                &self.chain,
-            )
+            let sent = Sent {
+                claim: &self.claim,
+                signature: &self.signature,
+                result: &self.result,
+                result_hash: &self.result_hash,
+                chain: &self.chain,
+            };
+            verify_claim(citar_engine::rules::Ruleset::shared(), &self.checked, &expected, &sent)
         }
 
         /// Signs the claim as it is now, as a cheater holding the machine's key would.
@@ -375,7 +396,7 @@ mod tests {
 
     #[test]
     fn an_honest_claim_verifies() {
-        assert_eq!(Sent::honest().check(), Ok(()));
+        assert_eq!(Frame::honest().check(), Ok(()));
     }
 
     #[test]
@@ -392,7 +413,7 @@ mod tests {
             ("key", "key"),
         ] {
             // changed after signing: the signature no longer covers it
-            let mut sent = Sent::honest();
+            let mut sent = Frame::honest();
             let changed = if field == "kind" {
                 Value::from("ranking_game")
             } else {
@@ -413,7 +434,7 @@ mod tests {
             ("rounds", Value::from(31)),
             ("bots", serde_json::json!(["basic1", "idle"])),
         ] {
-            let mut sent = Sent::honest();
+            let mut sent = Frame::honest();
             sent.claim[field] = value;
             assert_eq!(sent.check().expect_err(field).verdict, ClaimVerdict::Signature, "{field}");
             sent.resign();
@@ -423,7 +444,7 @@ mod tests {
                 "{field} re-signed"
             );
         }
-        let mut sent = Sent::honest();
+        let mut sent = Frame::honest();
         sent.claim["extra"] = Value::from(1);
         let e = sent.check().expect_err("an unknown key");
         assert_eq!(
@@ -436,34 +457,50 @@ mod tests {
     #[test]
     fn a_changed_result_digest_or_signature_fails_with_its_reason() {
         // one score of the result raised: the claim names another result
-        let mut sent = Sent::honest();
+        let mut sent = Frame::honest();
         let players = sent.result["players"].as_object_mut().expect("players");
         let first = players.values_mut().next().expect("a player");
         first["score"] = Value::from(first["score"].as_i64().expect("a score") + 1);
         let e = sent.check().expect_err("a changed result");
         assert_eq!(e.verdict, ClaimVerdict::Claim, "{e}");
         assert!(e.why.contains("hashes to"), "{e}");
+        // the same altered result, hashed into a claim signed again, beside the honest hash in the
+        // outcome (what the server keeps and compares): the outcome names another result
+        let honest_hash = sent.result_hash.clone();
+        let typed = JobResult::read(sent.checked.kind, &sent.result).expect("a result");
+        sent.claim["result_hash"] = Value::from(typed.hash(sent.checked.kind).expect("its hash"));
+        sent.resign();
+        assert_eq!(sent.result_hash, honest_hash);
+        let e = sent.check().expect_err("an outcome naming the honest hash");
+        assert_eq!(e.verdict, ClaimVerdict::Claim, "{e}");
+        assert!(e.why.contains("the outcome names result"), "{e}");
+        // and an honest result whose outcome alone names another hash
+        let mut sent = Frame::honest();
+        sent.result_hash = "d".repeat(64);
+        let e = sent.check().expect_err("an outcome naming another hash");
+        assert_eq!(e.verdict, ClaimVerdict::Claim, "{e}");
+        assert!(e.why.contains("the outcome names result"), "{e}");
         // one digest changed: the chain no longer folds to the head the claim names
-        let mut sent = Sent::honest();
+        let mut sent = Frame::honest();
         sent.chain["digests"][11] = one_byte(&sent.chain["digests"][11]);
         let e = sent.check().expect_err("a changed digest");
         assert_eq!(e.verdict, ClaimVerdict::ChainInconsistent, "{e}");
         assert!(e.why.contains("do not fold"), "{e}");
         // the signature changed in one byte, or made by another key
-        let mut sent = Sent::honest();
+        let mut sent = Frame::honest();
         let mut sig = STANDARD.decode(&sent.signature).expect("base64");
         sig[10] ^= 1;
         sent.signature = STANDARD.encode(sig);
         assert_eq!(sent.check().expect_err("a changed signature").verdict, ClaimVerdict::Signature);
-        let mut sent = Sent::honest();
+        let mut sent = Frame::honest();
         let c = Claim::deserialize(&sent.claim).expect("a claim");
         sent.signature = c.sign(&SigningKey::from_bytes(&[8; 32]));
         let e = sent.check().expect_err("another key");
         assert_eq!(e.verdict, ClaimVerdict::Signature, "{e}");
-        let mut sent = Sent::honest();
+        let mut sent = Frame::honest();
         sent.signature = "not a signature".to_owned();
         assert_eq!(sent.check().expect_err("no signature").verdict, ClaimVerdict::Signature);
-        let mut sent = Sent::honest();
+        let mut sent = Frame::honest();
         sent.key = "AAAA".to_owned();
         assert_eq!(sent.check().expect_err("no key").verdict, ClaimVerdict::Signature);
     }

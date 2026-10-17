@@ -539,18 +539,22 @@ ClaimRefused = _E.jobs.ClaimRefused
 
 
 def verify_claim(kind: str, spec: dict, spec_hash: str, *, job: str, run: str, machine: str, jobs_build: str,
-                 public_key: str, claim: Any, signature: Any, result: Any, chain: Any) -> None:
+                 public_key: str, claim: Any, signature: Any, result: Any, result_hash: Any, chain: Any) -> None:
     """Checks a helper's signed claim for its run (P4.4.4), by the same Rust as the helper's: the signature against
     the machine's registered ``public_key``, the claim against the server's records (``job``, ``run``, ``machine``,
-    ``kind``, the spec's hash and bots, ``jobs_build``, the key), the result's hash against the claim's, the chain's
-    head and rounds against the claim's and its own fold, then the result against its spec. Raises ClaimRefused with
-    its verdict; JobRefused (``bad_spec``) when the server's own spec does not check."""
-    if not isinstance(signature, str):
-        err = ClaimRefused("the signature is not text")
-        err.verdict = "signature"
-        raise err
+    ``kind``, the spec's hash and bots, ``jobs_build``, the key), the result's hash against the claim's and against
+    ``result_hash`` (the outcome's: once this returns, the claim's, the outcome's and the result's own are one, so the
+    hash the server keeps is one it checked), the chain's head and rounds against the claim's and its own fold, then
+    the result against its spec. Raises ClaimRefused with its verdict; JobRefused (``bad_spec``) when the server's own
+    spec does not check."""
+    for what, value, verdict in (("signature", signature, "signature"), ("outcome's result hash", result_hash,
+                                                                           "claim")):
+        if not isinstance(value, str):
+            err = ClaimRefused(f"the {what} is not text")
+            err.verdict = verdict
+            raise err
     _E.jobs.verify_claim(kind, _dumps(spec), spec_hash, job, run, machine, jobs_build, public_key or "",
-                         _dumps(claim), signature, _dumps(result), _dumps(chain))
+                         _dumps(claim), signature, _dumps(result), result_hash, _dumps(chain))
 
 
 def sample_fraction(secret: str, job: str) -> float:

@@ -56,7 +56,7 @@ pub mod sys;
 pub use self::build::{Flavour, jobs_build, jobs_build_of};
 pub use self::canary::{CanaryFailure, Inject, canary, canary_injected, self_check};
 pub use self::claim::{
-    CLAIM_DOMAIN, Claim, ClaimRefused, ClaimVerdict, Expected, sample_fraction, verify_claim,
+    CLAIM_DOMAIN, Claim, ClaimRefused, ClaimVerdict, Expected, Sent, sample_fraction, verify_claim,
 };
 pub use self::fit::{FitError, rebased, result_fits, result_fits_value};
 pub use self::hash::{

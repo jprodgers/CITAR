@@ -229,7 +229,14 @@ fn verify(
     let claim = serde_json::to_value(&frame.claim).expect("the claim");
     let result = Value::Object(frame.outcome.result.clone());
     let chain = serde_json::to_value(&frame.outcome.chain).expect("the chain");
-    citar_jobs::verify_claim(rules, &checked, &expected, &claim, &frame.signature, &result, &chain)
+    let sent = citar_jobs::Sent {
+        claim: &claim,
+        signature: &frame.signature,
+        result: &result,
+        result_hash: &frame.outcome.result_hash,
+        chain: &chain,
+    };
+    citar_jobs::verify_claim(rules, &checked, &expected, &sent)
 }
 
 #[tokio::test(start_paused = true)]

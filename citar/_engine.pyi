@@ -184,12 +184,12 @@ class jobs:
         """Checks the chain folds to its head from the spec hash's chain_0; JobRefused (bad_chain)."""
     @staticmethod
     def verify_claim(kind: str, spec_json: bytes, spec_hash: str, job: str, run: str, machine: str, jobs_build: str,
-                     public_key: str, claim_json: bytes, signature: str, result_json: bytes,
+                     public_key: str, claim_json: bytes, signature: str, result_json: bytes, result_hash: str,
                      chain_json: bytes) -> None:
         """Checks a helper's signed claim for a run the server offered to machine (P4.4.4): the signature against
-        its registered public_key, the claim against these records and the spec's bots, the result's hash, the
-        chain's head and rounds and its own fold, the result against its spec. ClaimRefused with its verdict;
-        JobRefused (bad_spec) for a spec that does not check."""
+        its registered public_key, the claim against these records and the spec's bots, the result's hash against
+        the claim's and result_hash (the outcome's), the chain's head and rounds and its own fold, the result against
+        its spec. ClaimRefused with its verdict; JobRefused (bad_spec) for a spec that does not check."""
     @staticmethod
     def sample_fraction(secret: bytes, job: str) -> float:
         """Where the server's keyed sample of the job falls, in [0, 1) (P4.5.8 rule 1): replicated below its
