@@ -1053,6 +1053,10 @@ class BenchmarkScheduler:
         try:
             load_s = self._ensure_model(run, job)
             llm = self._llm_config(run, job)
+            # its machine's standing as the job starts (P4.5.8 rule 11): whether its results count toward the global
+            # boards; a database read, so off the scheduler's lock
+            from ..jobs import trust
+            standing = trust.standing(job.get("server_id"))
         except Exception as e:
             with self.lock:
                 job.update({"status": "failed", "error": str(e), "finished": _now()})
@@ -1110,6 +1114,9 @@ class BenchmarkScheduler:
                 return
             s.ai_delay = 0
             s.owner_id = run.get("owner_id")
+            if standing is not None:
+                job["standing"] = standing
+                s.machines[job["server_id"]] = dict(standing)
             s.benchmark = {"run_id": run["id"], "job_id": job["id"], "run_name": run["name"], "suite_id": run["suite_id"],
                            "scenario": sc["name"], "scenario_id": sc["id"], "model": job["model"], "server": job["server_name"],
                            "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.turn_limit,
@@ -1312,7 +1319,8 @@ class BenchmarkScheduler:
                                 "run_id": run["id"], "run": run["name"], "job_id": job["id"],
                                 "game_id": job.get("game_id"), "owner_id": run.get("owner_id"),
                                 "scenario": job["scenario_name"], "seed": job.get("seed_used", job.get("seed")),
-                                "control": (job.get("control") or {}).get("id")})
+                                "control": (job.get("control") or {}).get("id"),
+                                "server_id": job.get("server_id"), "standing": job.get("standing")})
         return out
 
     # ------------------------------------------------------------------ views

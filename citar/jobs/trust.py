@@ -418,11 +418,13 @@ def vouched(tier: Optional[str], *, site: bool = False, owner_admin: bool = Fals
 
 def standing_of(row, owner) -> dict:
     """A machine row's standing as a model result records it when it runs (rule 11: "when they ran"): its tier and
-    whether it is :func:`vouched`. ``owner`` is its owner's row (or None)."""
+    whether it is :func:`vouched`. ``owner`` is its owner's row (or None). A machine with no owner is the site's as the
+    host is (administrators manage it: the configuration's machines, an account's deleted)."""
     from citar.auth import access
     tier = getattr(row, "trust_tier", None) or "new"
     admin = owner is not None and getattr(owner, "role", None) == "admin" and getattr(owner, "status", None) == "active"
-    return {"tier": tier, "vouched": vouched(tier, site=access.is_site_machine(row), owner_admin=admin)}
+    site = access.is_site_machine(row) or not getattr(row, "owner_id", None)
+    return {"tier": tier, "vouched": vouched(tier, site=site, owner_admin=admin)}
 
 
 def standing(server_id: Optional[str], session=None) -> Optional[dict]:
@@ -493,6 +495,15 @@ def vouched_now(ids) -> set:
                 if ok:
                     out.add(i)
     return out
+
+
+def not_counted(entries) -> set:
+    """Of ``entries`` (``(machine, standing)``: a benchmark job's, a probe run's), the machines whose model results
+    do not count now (rule 11): not :func:`vouched` when they ran, and not since. Their results carry the "unverified
+    machine" badge."""
+    ids = {str(sid) for sid, st in entries or ()
+           if sid and isinstance(st, dict) and st.get("vouched") is False}
+    return ids - vouched_now(ids) if ids else set()
 
 
 def forget_vouched() -> None:

@@ -2070,6 +2070,7 @@ class Dispatcher:
         before = srow.trust_tier or "new"
         srow.trust_tier, srow.trust = tier, trust
         if before != tier:
+            T.forget_vouched()          # the boards read its standing again (P4.5.8 rule 11)
             audit.record(s, "server.trust", actor=actor, object_type="server", object_id=srow.id,
                          changed={"from": before, "to": tier}, why=why[:300])
             lab.log(f"machine {srow.name}: {before} -> {tier} ({why})")

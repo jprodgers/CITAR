@@ -362,6 +362,11 @@ class Ledger:
         facts = servers.machine_facts(ev.machine) or {}
         classes = self.classes()
         flags = {k: True for k in ("overreported", "capped_tokens") if (ev.flags or {}).get(k)}
+        if facts.get("owner_id") and not (facts.get("server_resource") or facts.get("is_host")):
+            # an owned machine's trust tier when the step ran (design/phase4-helper.md P4.5.8 rule 11): model work is
+            # attributed, never re-verified, and its tier says how far its figures may be relied on (the site's own
+            # machines have no tier that matters)
+            flags["tier"] = facts.get("trust_tier") or "new"
         if facts.get("kind") == "api":
             u = ev.usage or {}
             cls = class_of(facts, "api", classes)

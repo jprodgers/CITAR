@@ -380,8 +380,9 @@ class GivenAndUsed(World):
         self.led.drain()
         over, ok = self.events()
         self.assertEqual((over.gen_s, over.reported_s, over.observed_s, over.credits, over.flags),
-                         (3.0, 10.0, 3.0, 3.0, {"overreported": True}))
-        self.assertEqual((ok.gen_s, ok.reported_s, ok.observed_s, ok.flags), (1.9, 1.9, 2.0, {}))
+                         (3.0, 10.0, 3.0, 3.0, {"overreported": True, "tier": "new"}))
+        self.assertEqual((ok.gen_s, ok.reported_s, ok.observed_s, ok.flags), (1.9, 1.9, 2.0, {"tier": "new"}),
+                         "its machine's tier when the step ran (P4.5.8 rule 11)")
         lease.release()
 
     def test_a_machines_class_follows_its_hardware_unless_pinned(self):

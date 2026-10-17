@@ -391,9 +391,13 @@ def board(pairs: list, scope=None) -> dict:
     and of games other members pool, another member's part of a line only when enough accounts are behind it
     (``aggregate.publishable``, per model and owners preset), and only their own pairs named (``games``; the others
     counted in ``pooled_pairs``); for an administrator (``scope`` None) every pair, each named. ``withheld`` names the
-    lines whose pooled part was held back, with how many accounts it had."""
+    lines whose pooled part was held back, with how many accounts it had. A pair whose model ran on a machine whose
+    results did not count when it ran (design/phase4-helper.md P4.5.8 rule 11: its job's ``standing``) is left out of
+    every board but its owner's (marked ``unverified_machine`` there) until an administrator trusts that machine;
+    ``unverified`` counts the pairs left out per line."""
     from . import aggregate
     withheld: dict = {}
+    pairs, unverified = _by_tier(pairs, scope)
     if scope is not None:
         pairs = [p for p in pairs if p.get("game_id") in scope.game_ids]
         by_line: dict = {}
@@ -408,7 +412,8 @@ def board(pairs: list, scope=None) -> dict:
         line["games"] = [{"run": p.get("run"), "run_id": p.get("run_id"), "job_id": p.get("job_id"),
                           "scenario": p.get("scenario"), "seed": p.get("seed"),
                           "score_diff": p["line"]["score_diff"], "deals": p["line"].get("deals"),
-                          "control": p.get("control")} for p in mine]
+                          "control": p.get("control"),
+                          **({"unverified_machine": True} if p.get("unverified_machine") else {})} for p in mine]
         line["pooled_pairs"] = line["pairs"] - len(mine)
     out = {"lines": lines, "bootstrap": {"resamples": BOOTSTRAP_RESAMPLES, "seed": BOOTSTRAP_SEED,
                                          "coverage": BOOTSTRAP_COVERAGE},
@@ -416,10 +421,38 @@ def board(pairs: list, scope=None) -> dict:
            "withheld": [{"model": k[0], "owners": k[1], "contributors": n,
                          "reason": f"Pooled pairs from {n} other account{'s' if n != 1 else ''}: at least "
                                    f"{aggregate.min_contributors()} are needed before they are shown."}
-                        for k, n in sorted(withheld.items())]}
+                        for k, n in sorted(withheld.items())],
+           "unverified": [{"model": k[0], "owners": k[1], "pairs": n,
+                           "reason": f"{n} pair{'s' if n != 1 else ''} played on machines no administrator has "
+                                     "trusted yet: left out of the board until one is (its earlier pairs then count "
+                                     "too)"}
+                          for k, n in sorted(unverified.items())]}
     if scope is not None:
         out["scope"] = scope.client()
     return out
+
+
+def _by_tier(pairs: list, scope=None) -> tuple:
+    """``pairs`` without those whose model ran on a machine whose results do not count (P4.5.8 rule 11: its job's
+    ``standing`` was not ``vouched`` and the machine is not since), but for the viewer's own (``scope.own_ids``; an
+    administrator has none), which stay marked ``unverified_machine``; with the pairs left out per line."""
+    from .jobs import trust
+    ids = {p.get("server_id") for p in pairs
+           if isinstance(p.get("standing"), dict) and p["standing"].get("vouched") is False and p.get("server_id")}
+    if not ids:
+        return pairs, {}
+    ok = trust.vouched_now(ids)
+    out, left = [], {}
+    for p in pairs:
+        st = p.get("standing")
+        if not (isinstance(st, dict) and st.get("vouched") is False and p.get("server_id") not in ok):
+            out.append(p)
+        elif scope is not None and p.get("game_id") in scope.own_ids:
+            out.append({**p, "unverified_machine": True})
+        else:
+            key = _line_key(p)
+            left[key] = left.get(key, 0) + 1
+    return out, left
 
 
 def _line_key(pair: dict) -> tuple:

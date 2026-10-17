@@ -158,6 +158,10 @@ class GameSession:
         # ``lease_ref`` and ``lease_label`` the work they serve and how it is named (a probe's turn case: probe_case,
         # its probe run).
         self.leases: dict = {}
+        # Each machine a model seat of this game ran on, with its standing when it ran (design/phase4-helper.md
+        # P4.5.8 rule 11: its tier, and whether its model results count toward the global boards): the worst seen
+        # (a machine quarantined mid-game is recorded so). Kept in the save, read by the boards (``scoring``).
+        self.machines: dict = {}
         self.lease_kind: Optional[str] = None
         self.lease_ref: Optional[tuple] = None
         self.lease_label: Optional[str] = None
@@ -946,6 +950,7 @@ class GameSession:
             return None
         # off every lock: the grant's concurrency and budget and the machine (its row read on first use) are database
         # reads
+        self._note_standing(sid)
         cap, access_grant = pool_seats.consumer_terms(self.owner_id, sid, self._cap_purpose())
         sched = prompt_scheduler.get()
         sched.machine(sid)
@@ -966,6 +971,20 @@ class GameSession:
                                 on_budget=lambda payload, pid=pid: self._budget_warning(pid, payload))
             self.leases[pid] = lease
             return lease
+
+    def _note_standing(self, sid: Optional[str]) -> None:
+        """The machine ``sid``'s standing as this game's seat runs on it (P4.5.8 rule 11), into ``machines``: the first
+        one seen, or a worse one (its model results no longer counting) over it. A database read: never under a
+        lock."""
+        if not sid:
+            return
+        from ..jobs import trust
+        st = trust.standing(sid)
+        if st is None:
+            return
+        prev = self.machines.get(sid)
+        if prev is None or (prev.get("vouched", True) and not st["vouched"]):
+            self.machines[sid] = st
 
     def _lease_kind(self) -> str:
         """The kind this game's seats' leases take."""
@@ -1778,7 +1797,7 @@ class GameSession:
         return {"id": self.id, "name": self.name, "created": self.created,
                 "seats": [{**asdict(s), "connected": False} for s in self.seats],
                 "spectator_token": self.spectator_token, "benchmark": self.benchmark, "usage_act": self.usage_act,
-                "crashed": self.crashed}
+                "crashed": self.crashed, "machines": dict(self.machines)}
 
     def _timeline(self):
         """The session's journal, its timeline: opened for a new game before its first save (``open_timeline``:
@@ -2002,6 +2021,8 @@ class GameSession:
             s.spectator_token = sess["spectator_token"]
         s.benchmark = sess.get("benchmark")
         s.usage_act = sess.get("usage_act")
+        if isinstance(sess.get("machines"), dict):
+            s.machines = {k: dict(v) for k, v in sess["machines"].items() if isinstance(v, dict)}
         if sess.get("crashed"):
             # a crash save: the state as the crash left it, for whoever debugs it, never to play on
             s.crashed = dict(sess["crashed"])
