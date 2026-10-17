@@ -17,7 +17,7 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_CALL_NOT_IMPLEMENTED, ERROR_SERVICE_SPECIFIC_ERROR, ERROR_SUCCESS, HANDLE,
-    LocalFree, NO_ERROR,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, NO_ERROR, SetHandleInformation,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -30,6 +30,9 @@ use windows_sys::Win32::Security::{
     INHERITED_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
     TokenElevation, TokenUser,
+};
+use windows_sys::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
@@ -800,4 +803,24 @@ pub fn run_service(
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Makes this process's standard input, output and error handles not inheritable, so that a
+/// process it starts with handles inherited (as the standard library starts every child) holds no
+/// copy of them: `citar-helper run --detach` starts the Run supervisor to outlive it, and a
+/// supervisor holding the pipe a script reads the detaching process's output from would keep that
+/// script waiting for the pipe to close for as long as the supervisor runs (design/phase4-helper.md
+/// P4.3.9). A handle that is absent or no handle at all is left as it is.
+pub fn keep_std_handles_to_self() {
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle takes one of the three constants and returns a handle this process
+        // owns, or null or INVALID_HANDLE_VALUE when there is none.
+        let h = unsafe { GetStdHandle(which) };
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            continue;
+        }
+        // SAFETY: `h` is this process's own standard handle; clearing its inherit flag changes
+        // nothing but whether children get a copy, and a failure (a pseudo-handle) is harmless.
+        unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0) };
+    }
 }

@@ -157,7 +157,16 @@ impl Log {
     /// # Errors
     /// The directory or the file cannot be made.
     pub fn to_file(&self, dir: &Path) -> std::io::Result<()> {
-        let file = Rotating::open(dir)?;
+        self.to_named_file(dir, "helper.log")
+    }
+
+    /// Also writes to the file `name` in `dir` (which it creates), rotated as `helper.log` is: the
+    /// Run supervisor's own log, `supervisor.log` beside the helper's (P4.3.9).
+    ///
+    /// # Errors
+    /// The directory or the file cannot be made.
+    pub fn to_named_file(&self, dir: &Path, name: &str) -> std::io::Result<()> {
+        let file = Rotating::open(dir, name)?;
         self.lock().file = Some(file);
         Ok(())
     }
@@ -309,9 +318,9 @@ struct Rotating {
 }
 
 impl Rotating {
-    fn open(dir: &Path) -> std::io::Result<Rotating> {
+    fn open(dir: &Path, name: &str) -> std::io::Result<Rotating> {
         std::fs::create_dir_all(dir)?;
-        let path = dir.join("helper.log");
+        let path = dir.join(name);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let size = file.metadata().map_or(0, |m| m.len());
         Ok(Rotating { path, file, size, retry_at: None, retry_every: RETRY_ROTATION, full: false })
@@ -437,7 +446,7 @@ mod tests {
     #[test]
     fn the_file_rotates_and_keeps_three() {
         let dir = scratch("rotate");
-        let mut f = Rotating::open(&dir).expect("a log file");
+        let mut f = Rotating::open(&dir, "helper.log").expect("a log file");
         let big = "x".repeat(1024 * 1024);
         for _ in 0..30 {
             f.write_line(&big);
@@ -448,7 +457,7 @@ mod tests {
         }
         drop(f);
         // Reopened, the size is the file's own.
-        let f = Rotating::open(&dir).expect("reopened");
+        let f = Rotating::open(&dir, "helper.log").expect("reopened");
         assert_eq!(f.size, size(&dir.join("helper.log")));
         drop(f);
         std::fs::remove_dir_all(&dir).expect("cleaned");
@@ -458,7 +467,7 @@ mod tests {
     /// older log was touched, the file stopped at [`HELD_BYTES`], and once the hold is gone the
     /// next rotation succeeds and writing resumes.
     fn held_then_released(dir: &Path, release: impl FnOnce()) {
-        let mut f = Rotating::open(dir).expect("a log file");
+        let mut f = Rotating::open(dir, "helper.log").expect("a log file");
         f.write_line("first");
         let before = names(dir);
         let big = "x".repeat(1024 * 1024);
@@ -485,7 +494,7 @@ mod tests {
     fn a_log_another_program_holds_grows_to_its_bound_and_rotates_once_released() {
         use std::os::windows::fs::OpenOptionsExt as _;
         let dir = scratch("held");
-        drop(Rotating::open(&dir).expect("made"));
+        drop(Rotating::open(&dir, "helper.log").expect("made"));
         // Another program's handle: read and write sharing, no delete sharing (as an editor or
         // PowerShell's Get-Content -Wait holds it), so the file cannot be renamed.
         const FILE_SHARE_READ: u32 = 1;
@@ -504,7 +513,7 @@ mod tests {
     fn a_log_that_cannot_be_renamed_grows_to_its_bound_and_rotates_once_it_can() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = scratch("held");
-        drop(Rotating::open(&dir).expect("made"));
+        drop(Rotating::open(&dir, "helper.log").expect("made"));
         // A directory nobody may write: the log is still appended to, but not renamed (unless
         // the test runs as root, which renames anyway: then there is nothing to check).
         let probe = dir.join("probe");

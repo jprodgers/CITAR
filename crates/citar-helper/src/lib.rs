@@ -21,6 +21,8 @@
 //! - [`update`]: self-update (P4.3.8): the signed manifest the server relays, checked again, the
 //!   download, its checks and the staged binary's self-test, the hand-off, the console run's
 //!   supervisor and the rollbacks;
+//! - [`service`]: the helper as a service (P4.3.9): systemd units, a LaunchAgent, Windows' Run
+//!   value with its supervisor and the Windows service, each printed by `--dry-run`;
 //! - [`app`]: what the binary does with its command line; [`version`]: `--version`;
 //! - `conformance` (only with the `conformance` feature, or in this crate's own unit tests): the
 //!   shared fixtures under `protocol/v2/`, the matcher language of their transcripts, and
@@ -30,7 +32,7 @@
 //!
 //! A library, so that tests drive the helper in-process; `src/main.rs` is the binary. 4-03 adds
 //! the configuration, the connection, keys, settings and the catalog, 4-04 the proxy, 4-06 the
-//! scan and the power samples, 4-10 the CPU jobs; updates and services arrive with 4-13 and 4-14.
+//! scan and the power samples, 4-10 the CPU jobs, 4-13 updates and 4-14 services.
 //! `src/bin/fake_probe.rs` is `citar-fake-probe`, a stand-in for the probe programs that only
 //! development and test builds make (`required-features = ["dev-guard"]`).
 
@@ -56,6 +58,7 @@ pub mod protocol;
 pub mod proxy;
 pub mod quiet;
 pub mod scan;
+pub mod service;
 pub mod session;
 pub mod settings;
 pub mod update;

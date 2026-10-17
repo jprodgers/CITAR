@@ -1,0 +1,33 @@
+citar-helper service install --system (a dry run: nothing is written, started or changed)
+1. make the folder /etc/systemd/system
+2. write /etc/systemd/system/citar-helper.service (mode 0644):
+    # The CITAR helper as a systemd service, written by `citar-helper service install --system` (design/phase4-helper.md P4.3.9).
+    # `citar-helper service uninstall` stops and removes it. Its log: helper/logs/helper.log in its home.
+    [Unit]
+    Description=CITAR helper (lends this machine to a CITAR server)
+    Documentation=https://github.com/jprodgers/CITAR/blob/main/docs/server/WORKERS.md
+    Wants=network-online.target
+    After=network-online.target
+
+    [Service]
+    Type=simple
+    User=alice
+    ExecStart="/opt/citar/citar-helper" run --service --home "/srv/citar-helper"
+    # 75: restart for an update; 1 and 2: a start that failed (an update's new binary is rolled
+    # back at its fourth); 78: refused for good, which a service run never exits with (it idles).
+    Restart=on-failure
+    RestartSec=15
+    RestartPreventExitStatus=78
+    NoNewPrivileges=yes
+
+    [Install]
+    WantedBy=multi-user.target
+3. run: systemctl daemon-reload
+4. run: systemctl enable citar-helper.service
+5. run: systemctl restart citar-helper.service
+
+citar-helper service uninstall --system (a dry run: nothing is written, started or changed)
+1. run: systemctl disable --now citar-helper.service (a failure is noted)
+2. remove /etc/systemd/system/citar-helper.service (if it is there)
+3. run: systemctl daemon-reload
+4. run: systemctl reset-failed citar-helper.service (a failure is noted)

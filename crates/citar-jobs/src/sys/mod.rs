@@ -48,8 +48,8 @@ pub use self::unix::{limit_data, nice};
 pub use self::unix::{terminate, user_id};
 #[cfg(windows)]
 pub use self::windows::{
-    Ace, AceKind, Dacl, JobObject, committed_bytes, current_user_sid, dacl, restrict_tree_to,
-    run_service,
+    Ace, AceKind, Dacl, JobObject, committed_bytes, current_user_sid, dacl,
+    keep_std_handles_to_self, restrict_tree_to, run_service,
 };
 
 /// Whether this process may install a system service: elevated on Windows (an administrator's

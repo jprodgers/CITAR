@@ -6,11 +6,13 @@
 //! argparse allowed. The flags work before or after the command; `run` is the default command.
 //!
 //! New in protocol 2: `--home`, `--no-llm`, `--cpu`, `--ca-file`, `--no-power`, `--updates`,
-//! `--service`, `--self-test`, and the `setup`, `scan [FILE]`, `update check|apply|rollback` (4-13)
-//! and (internal) `job-host` commands, and the hidden `--supervised` (a console run's supervisor
-//! gives it to the helper it runs after an update, P4.3.8). They make a few prefixes ambiguous that
-//! were not (`--serv`, `--no`, `--c`, `--se`), which are refused as argparse refuses an
-//! ambiguous one. `service` arrives with package 4-14. A `test-update-key` build also takes
+//! `--service`, `--self-test`, and the `setup`, `scan [FILE]`, `update check|apply|rollback` (4-13),
+//! `service install|uninstall|status|run [--user|--system] [--dry-run]` (4-14, P4.3.9) and
+//! (internal) `job-host` commands; `run --detach` (the Run value's: the Run supervisor, started with
+//! no window); and the hidden `--supervised` (a console run's supervisor gives it to the helper it
+//! runs after an update, P4.3.8) and `--supervisor` (what `--detach` starts). They make a few
+//! prefixes ambiguous that were not (`--serv`, `--no`, `--c`, `--se`, `--su`, `--de`), which are
+//! refused as argparse refuses an ambiguous one. A `test-update-key` build also takes
 //! `--update-key FILE`.
 
 use std::path::PathBuf;
@@ -58,6 +60,50 @@ pub enum Command {
         #[command(subcommand)]
         action: UpdateAction,
     },
+    /// Run the helper as a service: started with the machine (or at your sign-in) and again after
+    /// an update or a crash.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+/// What `service` does (design/phase4-helper.md P4.3.9).
+#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
+pub enum ServiceAction {
+    /// Install the helper as a service with this home (its helper.json: run setup first) and start
+    /// it: a systemd unit on Linux, a LaunchAgent on macOS, on Windows a Run value at sign-in
+    /// (--user) or a Windows service (--system, from an elevated prompt).
+    Install(ServiceChange),
+    /// Stop the service and remove it (the home, its settings and the machine key stay).
+    Uninstall(ServiceChange),
+    /// Say whether the service is installed and running (exit 0 when it runs, 3 when not).
+    Status(ServiceScope),
+    /// The Windows service's entry, which the service manager starts (elsewhere the same as
+    /// run --service).
+    Run,
+}
+
+/// Which service: this user's (the default) or the machine's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Args)]
+pub struct ServiceScope {
+    /// This user's (the default): started at sign-in (or by the user's service manager).
+    #[arg(long, conflicts_with = "system")]
+    pub user: bool,
+    /// The machine's: started with it, before anyone signs in (root on Linux, an elevated prompt on
+    /// Windows; not offered on macOS).
+    #[arg(long)]
+    pub system: bool,
+}
+
+/// A change to a service.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Args)]
+pub struct ServiceChange {
+    #[command(flatten)]
+    pub scope: ServiceScope,
+    /// Print what would be written and run, and change nothing.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
 }
 
 /// What `update` does.
@@ -160,6 +206,13 @@ pub struct Options {
     /// and the supervisor starts the new binary.
     #[arg(long, global = true, hide = true)]
     pub supervised: bool,
+    /// Start in the background with no window, under a supervisor that starts the helper again
+    /// after an update or a crash (what the Windows Run value runs; `service install --user`).
+    #[arg(long, global = true)]
+    pub detach: bool,
+    /// Be the Run supervisor (internal: what `--detach` starts).
+    #[arg(long, global = true, hide = true)]
+    pub supervisor: bool,
     /// Trust this update key too (a test build only): a file of base64 public keys, one a line.
     #[cfg(feature = "test-update-key")]
     #[arg(long = "update-key", global = true, value_name = "FILE")]
@@ -244,6 +297,25 @@ mod tests {
             Some(Command::Update { action: UpdateAction::Check })
         );
         assert!(parse(&["run", "--supervised"]).opts.supervised);
+        assert!(parse(&["run", "--detach", "--home", "/h"]).opts.detach);
+        assert!(parse(&["run", "--supervisor"]).opts.supervisor);
+        assert_eq!(
+            parse(&["service", "install", "--system", "--dry-run"]).command,
+            Some(Command::Service {
+                action: ServiceAction::Install(ServiceChange {
+                    scope: ServiceScope { user: false, system: true },
+                    dry_run: true
+                })
+            })
+        );
+        assert_eq!(
+            parse(&["service", "status", "--home", "/h"]).command,
+            Some(Command::Service { action: ServiceAction::Status(ServiceScope::default()) })
+        );
+        assert_eq!(
+            parse(&["service", "run"]).command,
+            Some(Command::Service { action: ServiceAction::Run })
+        );
         for bad in [
             &["--provider", "vllm"][..],
             &["--max-concurrent", "two"],
@@ -251,6 +323,9 @@ mod tests {
             &["bogus"],
             &["update"],
             &["update", "now"],
+            &["service"],
+            &["service", "install", "--user", "--system"],
+            &["service", "status", "--dry-run"],
         ] {
             let args = std::iter::once("citar-helper").chain(bad.iter().copied());
             assert!(Cli::try_parse_from(args).is_err(), "{bad:?}");
