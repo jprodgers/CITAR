@@ -598,6 +598,7 @@ class Dispatcher:
         self._queue_sig = sig
         specs = {e.get("name"): e for e in lab.load_queue() if e.get("name")}
         from citar import db
+        verdicts: list = []
         with db.session() as s:
             for name, spec in specs.items():
                 exp = self.exps.get(name)
@@ -607,7 +608,9 @@ class Dispatcher:
                     self._changed(s, exp, spec)
             for name in [n for n in self.exps if n not in specs]:
                 if not (lab.QUEUE / f"{name}.json").exists():
-                    self._deleted(s, self.exps.pop(name))
+                    verdicts += self._deleted(s, self.exps.pop(name))
+        if verdicts:
+            _step("a deleted experiment's verdicts", lambda: _ledger().verdicts(verdicts))
 
     def _owner(self, s, spec: dict) -> tuple:
         """(the consumer of an experiment's jobs, whether that is known): its owned item's owner, or nobody for the
@@ -718,11 +721,14 @@ class Dispatcher:
             s.execute(update(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
                                            CpuJob.state.in_(store.LIVE)).values(priority=priority))
 
-    def _deleted(self, s, exp: Exp) -> None:
+    def _deleted(self, s, exp: Exp) -> list:
         """An experiment deleted from the queue: its waiting and failed jobs cancelled (so one queued again under its
-        name plays its failed games again), its running ones aborted."""
+        name plays its failed games again), its running ones aborted. A job waiting for its replica is cancelled too:
+        its primary's event, ``pending``, and a remote replica's waiting for a tiebreak are given ``unverified`` (the
+        ledger's verdicts it returns, queued once the session commits): nothing will check them now."""
         from sqlalchemy import update
         from citar.db.models import CpuJob
+        verdicts = []
         for j in [j for j in self.jobs.values() if j.exp == exp.name]:
             row = s.get(CpuJob, j.id)
             if row is not None:
@@ -730,10 +736,15 @@ class Dispatcher:
             if j.run and j.run in self.runs:
                 run = self.runs[j.run]
                 self._abort(run, "its experiment was deleted")
+            if j.state == "settling":
+                verdicts += [{"activity": j.ref, "request_id": rid, "verification": "unverified",
+                              "why": "its experiment was deleted before its result was checked"}
+                             for rid in (j.primary, j.replica if j.need == "tiebreak" else None) if rid]
             self.jobs.pop(j.id, None)
         s.execute(update(CpuJob).where(CpuJob.item_kind == "lab_experiment", CpuJob.item_ref == exp.name,
                                        CpuJob.state == "failed").values(state="cancelled"))
         lab.log(f"experiment {exp.name} left the queue: its waiting games were cancelled")
+        return verdicts
 
     # -------------------------------------------------------------- results files
     def _read_lines(self, path: Path) -> tuple:
@@ -1463,7 +1474,10 @@ class Dispatcher:
                     raise engine_api.JobRefused(f"its result hashes to {got}, not {outcome.get('result_hash')}")
                 engine_api.job_result_fits(job.kind, job.spec, result, chain, job.spec_hash)
             else:
-                self._check_claim(s, e, run, job, f)
+                unchecked = self._check_claim(s, e, run, job, f)
+                if unchecked is not None:
+                    self._key_moved(s, e, run, job, unchecked, wall)
+                    return
         except engine_api.ClaimRefused as err:
             self._refused_claim(s, e, run, job, f, err, wall, after)
             return
@@ -1600,16 +1614,39 @@ class Dispatcher:
         from citar import settings as site
         return site.get().secret_key
 
-    def _check_claim(self, s, e, run: Run, job: Job, f: dict) -> None:
+    def _check_claim(self, s, e, run: Run, job: Job, f: dict) -> Optional[str]:
         """A helper's signed claim checked against the key its machine registered and the server's records (P4.4.4):
-        ``engine_api.ClaimRefused`` with its verdict when it does not hold."""
+        ``engine_api.ClaimRefused`` with its verdict when it does not hold, None when it holds. A check that cannot
+        be made returns why: the machine has no key now (its owner reset it, P4.3.7), or its signature fails against a
+        key registered after the run was offered (reset, and registered again by another helper). Neither says the
+        helper lied: the run was offered under a key that is gone."""
         from citar.db.models import Server
         srow = s.get(Server, e.id)
+        key = (srow.public_key if srow is not None else None) or ""
+        if not key:
+            return "its machine's key was reset before its result was checked"
         outcome = f.get("outcome") or {}
-        engine_api.verify_claim(job.kind, job.spec, job.spec_hash, job=job.id, run=run.id, machine=str(e.id),
-                                jobs_build=job.jobs_build, public_key=(srow.public_key if srow is not None else ""),
-                                claim=f.get("claim"), signature=f.get("signature"), result=outcome.get("result"),
-                                result_hash=outcome.get("result_hash"), chain=outcome.get("chain") or {})
+        try:
+            engine_api.verify_claim(job.kind, job.spec, job.spec_hash, job=job.id, run=run.id, machine=str(e.id),
+                                    jobs_build=job.jobs_build, public_key=key, claim=f.get("claim"),
+                                    signature=f.get("signature"), result=outcome.get("result"),
+                                    result_hash=outcome.get("result_hash"), chain=outcome.get("chain") or {})
+        except engine_api.ClaimRefused as err:
+            if (getattr(err, "verdict", None) == "signature" and srow.key_at is not None
+                    and _utc_ts(srow.key_at) > run.offered_wall):
+                return "its machine registered another key after the run was offered"
+            raise
+        return None
+
+    def _key_moved(self, s, e, run: Run, job: Job, why: str, wall: float) -> None:
+        """A helper's result whose claim could not be checked because its machine's key was reset or replaced since the
+        run was offered (``_check_claim``): no verdict on anyone. The run ends ``lost`` (neither an attempt, an abandon
+        nor a fault), is not acknowledged, and its game is offered again (a verification run's too). The helper's
+        next hello, under the key registered then, finds the run gone from what the server holds."""
+        log.warning("run %s on %s: its claim was not checked: %s", run.id, e.id, why)
+        self._end(s, run, "failed", {"code": "lost", "message": why}, wall)
+        self._requeue(s, run, attempt=False)
+        lab.log(f"{job.exp} #{job.i} on {e.name}: its result was not checked ({why}); its game is offered again")
 
     def _replication(self, s, e, job: Job) -> Optional[str]:
         """Why a helper's primary result is checked by a replica (rule 1: decided only now, its result committed with
@@ -1703,17 +1740,27 @@ class Dispatcher:
                 job.kind, job.spec, cpu_s=run.cpu_s, peak_mb=run.peak_mb or None)))
         ack = None if local else getattr(e, "ack", None)
         after.append(lambda: ack(run.id) if ack is not None else None)
+        # its event is written once what it decides is known (the list is read after the commit)
         after.append(lambda: _step(f"{job.ref}'s verification event", lambda: _ledger().events([event])))
         if primary is None or primary.state != "done":
             log.error("job %s's verification run %s has no primary result to compare with", job.id, run.id)
+            event["verification"] = "verified" if local else "unverified"
             self._prune.append(run.id)
+            return
+        if not local and not self._verifies_now(s, e):
+            # rule 2: only a verifier's replica checks a primary, and this machine stopped being one (unmarked, or its
+            # tier changed) while it played: its word decides nothing, and the job waits for a verifier's replica
+            rrow.error = {"code": "void", "why": "its machine no longer verifies others' results"}
+            event["verification"] = "unverified"
+            self._prune.append(run.id)
+            lab.log(f"{job.exp} #{job.i}: {e.name}'s replica checks nothing (it no longer verifies); another is "
+                    "offered")
             return
         if run.role == "tiebreak":
             self._tiebroken(s, job, row, primary, rrow, after)
             return
         if _same(primary, rrow):
-            counts = local or self._verifier_now(e)
-            self._settle_match(s, job, row, primary, [rrow], counts, after)
+            self._settle_match(s, job, row, primary, [rrow], True, after)
             return
         if local:
             self._caught(s, job, row, primary, rrow, after)
@@ -1724,10 +1771,19 @@ class Dispatcher:
         lab.log(f"{job.exp} #{job.i}: {e.name}'s replica disagrees with its primary; this server breaks the tie")
 
     def _verifier_now(self, e) -> bool:
-        """Whether a remote executor verifies now: its machine ``trusted`` and marked ``verifier``."""
+        """Whether a remote executor verifies now, as its executor last read its machine (the picks of a tick): its
+        machine ``trusted`` and marked ``verifier``."""
         row = getattr(e, "_row", None)
         trust = row.get("trust") if isinstance(row, dict) else _machine_trust(e.id)
         return T.is_verifier(_facts_of(e).get("trust_tier"), trust)
+
+    @staticmethod
+    def _verifies_now(s, e) -> bool:
+        """Whether a remote executor's machine verifies as this transaction reads its row (what a replica's result is
+        judged by: an administrator's change made this tick counts)."""
+        from citar.db.models import Server
+        srow = s.get(Server, e.id)
+        return srow is not None and T.is_verifier(srow.trust_tier, srow.trust)
 
     def _settle_match(self, s, job: Job, row, primary, checks: list, counts: bool, after: list) -> None:
         """A job whose primary its verification runs reproduced (rule 4): accepted, ``verified``, its line written
@@ -1736,27 +1792,42 @@ class Dispatcher:
         from citar.db.models import Server
         # a re-opened job's result was pruned with its line written: its mark says whether it was a crash
         crash = "crash" in (primary.result or {}) or bool((primary.error or {}).get("crashed"))
-        row.state = "crashed" if crash else "accepted"
-        row.accepted_run, row.result_hash = primary.id, primary.result_hash
+        exp = self.exps.get(job.exp)
+        # a re-opened job whose result was pruned keeps the line its results file holds; one the file has lost (and
+        # whose result is gone) cannot be lined again, and its game is played again, as a start's reconciliation does
+        kept = (job.reopened and primary.result is None and exp is not None
+                and (job.i, primary.id) in self._lines.get(str(exp.results), set()))
+        lost = job.reopened and primary.result is None and exp is not None and not kept
+        if lost:
+            row.state, row.accepted_run, row.result_hash = "queued", None, None
+        else:
+            row.state = "crashed" if crash else "accepted"
+            row.accepted_run, row.result_hash = primary.id, primary.result_hash
         primary.verdict, primary.error = "match", None
         for c in checks:
             c.verdict = "reference" if c.executor == "local" else "match"
         self.jobs.pop(job.id, None)
+        if lost:
+            view = self._view(row, exp)
+            self.jobs[view.id] = view
+            exp.settled.discard(job.i)
+            lab.log(f"{job.exp} #{job.i}: verified, but its line is missing and its result gone; played again")
         updates = [{"activity": job.ref, "request_id": primary.id, "verification": "verified"}]
         updates += [{"activity": job.ref, "request_id": c.id, "verification": "verified"} for c in checks
                     if c.executor != "local"]
         srow = s.get(Server, primary.machine_id)
         promoted = None
         if srow is not None:
+            # the match is counted when the last check of it came (a promotion is dated so, rule 9 reading it)
+            at = max((_aware(c.ended_at) for c in checks if c.ended_at is not None), default=None)
             tier, tr, promoted = T.on_match(srow.trust_tier or "new", dict(srow.trust or {}), T.settings(),
-                                            counts=counts, flags=dict(srow.flags or {}))
+                                            counts=counts, flags=dict(srow.flags or {}), now=at)
             if promoted:
                 self._set_tier(s, srow, tier, f"{tr.get('verified')} verified, streak {tr.get('streak')}", tr)
             else:
                 srow.trust = tr
-        exp = self.exps.get(job.exp)
         prune = [c.id for c in checks]
-        if job.reopened:
+        if job.reopened and not lost:
             # its line is in the results file already: its verification restored (the line below is appended only
             # when the file has lost it, as a start's reconciliation leaves it for its replica to settle)
             after.append(lambda: self._relabel(job.exp, job.kind, {primary.id: "verified"}))
@@ -1781,6 +1852,10 @@ class Dispatcher:
                     with open(lab.LAB / "crashes.log", "a", encoding="utf-8") as fh:
                         fh.write(f"--- {datetime.now():%Y-%m-%d %H:%M} {job.exp} #{job.i} final\n"
                                  f"{line.get('crash') or ''}\n")
+            elif kept:
+                # its line was there all along: its game is settled again (a start leaves a re-opened game out of
+                # the settled ones until its replica settles it)
+                exp.settled.add(job.i)
             _ledger().verdicts(updates)
             lab.log(f"{job.exp} #{job.i}: verified (its replica reproduced it)"
                     + (f"; {srow.name if srow is not None else primary.machine_id} is now {promoted}"
@@ -1820,6 +1895,7 @@ class Dispatcher:
             replica.verdict = "match"
             after.append(lambda r=replica.id: _ledger().verdicts([{"activity": job.ref, "request_id": r,
                                                                    "verification": "verified"}]))
+        job.replica = None              # judged: its event has its verdict
         if _same(primary, tiebreak):
             self._settle_match(s, job, row, primary, [tiebreak], True, after)
             return
@@ -1844,8 +1920,9 @@ class Dispatcher:
         """A machine quarantined (rule 7): no CPU job, and admission refuses it for anyone but its owner; its runs in
         flight aborted and their games played elsewhere; its results waiting for a replica withdrawn; with
         ``withdraw`` (always, but for an administrator who says otherwise), everything unverified it gave since
-        ``trust.since`` withdrawn (rule 8); on tampering its owner quarantined too; a verifier's matches re-opened
-        (rule 9). Returns the jobs withdrawn (the evidence lists them)."""
+        ``trust.since`` withdrawn (rule 8); on tampering its owner quarantined too; every match it made as a verifier
+        re-opened (rule 9), whether or not it is marked one now (an administrator may unmark a suspect verifier, or
+        take its tier, before quarantining it). Returns the jobs withdrawn (the evidence lists them)."""
         from citar.db.models import Server
         srow = s.get(Server, machine)
         if srow is None:
@@ -1877,8 +1954,8 @@ class Dispatcher:
         self._set_tier(s, srow, tier, ev.get("words") or ev.get("verdict") or "quarantined", tr, actor=actor)
         if owner_too and srow.owner_id:
             self._quarantine_owner(s, srow.owner_id, ev, actor=actor)
-        if T.is_verifier(*was):
-            self._reopen(s, machine, after)
+        # its matches as a verifier (none for a machine that never verified: the query finds nothing)
+        self._reopen(s, machine, after)
         return withdrawn
 
     def _quarantine_owner(self, s, owner: str, ev: dict, actor=None) -> None:
@@ -1922,6 +1999,13 @@ class Dispatcher:
         name = jrow.item_ref or ""
         i = store.game_of(jrow.ref)
         jrow.state = "withdrawn"
+        view = self.jobs.get(jrow.id)
+        if view is not None and view.need == "tiebreak" and view.replica:
+            # a remote verifier's replica that disagreed and waits for a tiebreak that will not come: its event,
+            # ``pending``, is given ``unverified`` (one the tiebreak judged has its verdict already, and no replica)
+            after.append(lambda rid=view.replica: _ledger().verdicts([{
+                "activity": jrow.ref, "request_id": rid, "verification": "unverified",
+                "why": "its job was withdrawn before a tiebreak"}]))
         if prow.verdict != "mismatch":
             prow.verdict = "rejected"       # a mismatch keeps its verdict, beside the withdrawal
         prow.error = {**(prow.error if isinstance(prow.error, dict) and prow.error.get("verdict") else {}),
@@ -1956,14 +2040,17 @@ class Dispatcher:
     def _reopen(self, s, verifier: str, after: list) -> None:
         """A quarantined verifier's matches re-opened (rule 9): every job its replica or tiebreak runs verified returns
         to ``unverified`` (its line and its primary's event say so) and waits for a fresh replica on this server; every
-        machine whose counters held those matches loses them, and returns to ``new`` below its tier's threshold."""
-        from collections import Counter
+        machine whose counters held those matches loses them (those it made before its last release were reset with
+        it), and one whose promotion to its present tier counted any of them (a match made at or before that
+        promotion) returns to ``new`` when it falls below that tier's threshold. A tier an administrator set was no
+        promotion: it stays, its counters alone taken back (``trust.lose_matches``)."""
+        from collections import defaultdict
         from sqlalchemy import select
         from citar.db.models import CpuJob, CpuJobRun, Server
         runs = list(s.scalars(select(CpuJobRun).where(CpuJobRun.machine_id == verifier,
                                                       CpuJobRun.role.in_(("replica", "tiebreak")),
                                                       CpuJobRun.verdict == "match")))
-        lost: Counter = Counter()
+        lost: dict = defaultdict(list)      # machine -> when each of its lost matches was counted
         relabel: dict = {}
         for r in runs:
             r.verdict = "rejected"
@@ -1974,7 +2061,7 @@ class Dispatcher:
             prow = s.get(CpuJobRun, jrow.accepted_run)
             if prow is None or prow.verdict != "match":
                 continue
-            lost[prow.machine_id] += 1
+            lost[prow.machine_id].append(_aware(r.ended_at) if r.ended_at is not None else None)
             crashed = jrow.state == "crashed"
             jrow.state = "settling"
             prow.verdict = "unchecked"
@@ -1994,15 +2081,24 @@ class Dispatcher:
         for (name, kind), labels in relabel.items():
             after.append(lambda n=name, k=kind, lb=labels: self._relabel(n, k, lb))
         sets = T.settings()
-        for machine, n in lost.items():
+        for machine, times in lost.items():
             srow = s.get(Server, machine)
             if srow is None or srow.trust_tier == "quarantined":
                 continue
-            tier, tr, demoted = T.lose_matches(srow.trust_tier or "new", dict(srow.trust or {}), n, sets)
-            self._set_tier(s, srow, tier, f"{n} match(es) against quarantined verifier {verifier} re-opened", tr)
+            tier, tr = srow.trust_tier or "new", dict(srow.trust or {})
+            since = T.since(tr)
+            if since is not None:
+                times = [t for t in times if t is None or t >= since]
+            if not times:
+                continue
+            promoted = T.promoted_at(tier, tr)
+            counted = sum(1 for t in times if promoted is not None and (t is None or t <= promoted))
+            tier, tr, _demoted = T.lose_matches(tier, tr, len(times), sets, counted=counted)
+            self._set_tier(s, srow, tier, f"{len(times)} match(es) against quarantined verifier {verifier} "
+                                          "re-opened", tr)
         if runs:
-            lab.log(f"verifier {verifier} quarantined: {sum(lost.values())} job(s) it verified wait for a fresh "
-                    "replica on this server")
+            lab.log(f"verifier {verifier} quarantined: {sum(len(t) for t in lost.values())} job(s) it verified wait "
+                    "for a fresh replica on this server")
 
     # -------------------------------------------------------------- results files after a verdict
     def _rewrite(self, name: str, kind: str, change) -> None:
@@ -2814,8 +2910,12 @@ def _same(a, b) -> bool:
 
 
 def _parted(a: Optional[list], b: Optional[list]) -> Optional[int]:
-    """The first round (1 for the first digest) where two chains' digests differ (``citar_jobs::parted_at``)."""
-    a, b = list(a or []), list(b or [])
+    """The first round (1 for the first digest) where two chains' digests differ (``citar_jobs::parted_at``), or None
+    when they hold the same digests or either side's are gone (a re-opened primary's were pruned with its line: no
+    round can be named)."""
+    if not a or not b:
+        return None
+    a, b = list(a), list(b)
     for n, (x, y) in enumerate(zip(a, b)):
         if x != y:
             return n + 1
@@ -2846,6 +2946,8 @@ def _event_verification(run, job) -> str:
         return "rejected"
     if run.executor == "local" or run.verdict in ("match", "reference"):
         return "verified"
+    if run.role != "primary" and run.verdict == "unchecked":
+        return "unverified"         # a helper's verification run that checked nothing (its machine stopped verifying)
     if job.state == "settling" and job.accepted_run != run.id:
         return "pending"
     return "unverified"
@@ -2865,7 +2967,12 @@ def _utc(wall: float) -> datetime:
 
 def _utc_ts(t: datetime) -> float:
     """A database time as a wall time: a naive one (SQLite gives them so) is UTC."""
-    return (t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t).timestamp()
+    return _aware(t).timestamp()
+
+
+def _aware(t: datetime) -> datetime:
+    """A database time with its zone: a naive one (SQLite gives them so) is UTC."""
+    return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t
 
 
 def _step(what: str, fn: Callable[[], Any]) -> None:
@@ -2988,6 +3095,8 @@ def change_trust(machine: str, *, tier: Optional[str] = None, withdraw: bool = F
                 tr = dict(before)
                 if tier != "trusted":
                     tr["verifier"] = False
+                # a tier an administrator set is no promotion: a quarantined verifier's matches never take it back
+                tr.pop("promoted", None)
                 d._set_tier(s, srow, tier, f"set by {who}", tr, actor=actor)
         if verifier is not None:
             tr = dict(srow.trust or {})

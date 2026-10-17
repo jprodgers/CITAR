@@ -24,8 +24,10 @@ job dispatcher (``citar.jobs.dispatcher``, the only writer of the machines' trus
    verdict (``result``, ``signature``, ``claim``, ``chain_inconsistent``) quarantines its owner too, a ``chain``
    verdict (hardware, or an incompatible build) the machine alone.
 5. **Release** (:func:`release`): back to ``new``, its counters reset and ``since`` now, no longer a verifier.
-6. **A quarantined verifier's matches are re-opened** (:func:`lose_matches`): each machine whose promotion counted
-   them loses them, and returns to ``new`` when it falls below its tier's threshold.
+6. **A quarantined verifier's matches are re-opened** (:func:`lose_matches`): each machine whose counters held them
+   loses them, and one whose promotion to its present tier counted any of them (``trust.promoted``: the tier and when
+   the match that made it was counted) returns to ``new`` when it falls below that tier's threshold. A tier an
+   administrator set, or matches made after the promotion, never demote.
 
 A key reset never changes any of this (P4.3.7): the trust is the machine's row's, not its key's.
 """
@@ -58,6 +60,9 @@ VERDICTS = TAMPERING + ("chain", "administrator")
 WORDS = {
     "result": "same chain, different result: tampering or an incompatible build",
     "chain": "the chains parted at round {round}: faulty hardware or an incompatible build",
+    # a chain verdict whose round cannot be named (a re-opened primary's digests were pruned with its line)
+    "chain_unknown": "the chains differ (the round where they parted is not known): faulty hardware or an "
+                     "incompatible build",
     "signature": "a bad signature: its claim does not verify against the machine's registered key",
     "claim": "a claim that does not hold: tampering or an incompatible build",
     "chain_inconsistent": "its digests do not fold to the head it claims: tampering or an incompatible build",
@@ -193,6 +198,11 @@ def _iso(now: datetime) -> str:
     return now.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _iso_exact(now: datetime) -> str:
+    """A time to the microsecond: a promotion's, compared with the times its matches were counted."""
+    return now.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
 def _when(text) -> Optional[datetime]:
     if not isinstance(text, str):
         return None
@@ -218,7 +228,9 @@ def on_match(tier: str, trust: dict, s: dict, *, counts: bool, flags: Optional[d
              now: Optional[datetime] = None) -> tuple:
     """A primary's result matched its replica: ``(tier, trust, promoted)``. Only a match against a verifier
     ``counts`` (the local executor, or a machine an administrator marked ``verifier``); it adds to ``verified`` and
-    ``streak``, and promotes one step when the next tier's threshold is met (``promoted`` the new tier, else None)."""
+    ``streak``, and promotes one step when the next tier's threshold is met (``promoted`` the new tier, else None).
+    ``now`` is when the match was counted; a promotion keeps it (``trust.promoted``, :func:`promoted_at`), so that
+    rule 9 can tell the matches it counted from those made after it."""
     now = now or datetime.now(timezone.utc)
     trust = dict(trust or {})
     if not counts or tier == "quarantined":
@@ -226,13 +238,26 @@ def on_match(tier: str, trust: dict, s: dict, *, counts: bool, flags: Optional[d
     trust["verified"] = int(trust.get("verified") or 0) + 1
     trust["streak"] = int(trust.get("streak") or 0) + 1
     trust["last_verified_at"] = _iso(now)
+    up = None
     if tier == "new" and trust["streak"] >= int(s["new_streak"]):
-        return "provisional", trust, "provisional"
-    if (tier == "provisional" and trust["verified"] >= int(s["promote_verified"])
+        up = "provisional"
+    elif (tier == "provisional" and trust["verified"] >= int(s["promote_verified"])
             and not int(trust.get("mismatches") or 0)
             and not overreported(flags, now, int(s["overreport_days"]))):
-        return "trusted", trust, "trusted"
-    return tier, trust, None
+        up = "trusted"
+    if up is None:
+        return tier, trust, None
+    trust["promoted"] = {"tier": up, "at": _iso_exact(now)}
+    return up, trust, up
+
+
+def promoted_at(tier: Optional[str], trust: Optional[dict]) -> Optional[datetime]:
+    """When the machine was promoted to ``tier`` (its present one) by its matches, or None when that tier was not a
+    promotion's (an administrator set it, or the machine is ``new``)."""
+    rec = (trust or {}).get("promoted")
+    if not isinstance(rec, dict) or rec.get("tier") != tier:
+        return None
+    return _when(rec.get("at"))
 
 
 def evidence(verdict: str, *, run: Optional[str] = None, job: Optional[str] = None, round: Optional[int] = None,
@@ -240,7 +265,8 @@ def evidence(verdict: str, *, run: Optional[str] = None, job: Optional[str] = No
     """What a quarantine's verdict says (kept as the machine's ``trust.last_mismatch`` and on its run): the verdict,
     its words, the run and job, the round where the chains parted (``chain``), the detail, and the verifier it was
     checked against."""
-    words = WORDS.get(verdict, verdict).format(round=round)
+    key = "chain_unknown" if verdict == "chain" and round is None else verdict
+    words = WORDS.get(key, verdict).format(round=round)
     out = {"verdict": verdict, "words": words, "at": _iso(now or datetime.now(timezone.utc))}
     for k, v in (("run", run), ("job", job), ("round", round), ("why", why[:500] if why else None),
                  ("against", against)):
@@ -258,6 +284,7 @@ def on_mismatch(trust: dict, ev: dict) -> tuple:
     trust["streak"] = 0
     trust["quarantined_at"] = ev.get("at")
     trust["verifier"] = False
+    trust.pop("promoted", None)
     return "quarantined", trust
 
 
@@ -277,20 +304,25 @@ def release(trust: dict, now: Optional[datetime] = None) -> tuple:
     trust["verifier"] = False
     trust["replicate"] = 0
     trust.pop("quarantined_at", None)
+    trust.pop("promoted", None)
     return "new", trust
 
 
-def lose_matches(tier: str, trust: dict, n: int, s: dict) -> tuple:
+def lose_matches(tier: str, trust: dict, n: int, s: dict, *, counted: int = 0) -> tuple:
     """A quarantined verifier's ``n`` matches taken from a machine whose counters held them (rule 9): ``(tier, trust,
-    demoted)``, back to ``new`` (``demoted`` True) when it falls below its tier's threshold: ``new_streak`` for a
-    ``provisional`` machine, ``promote_verified`` for a ``trusted`` one."""
+    demoted)``. ``counted`` of them were made at or before the machine's promotion to its present tier (a tier it was
+    promoted to: :func:`promoted_at`; the caller counts none for a tier an administrator set). Only then can it fall:
+    back to ``new`` (``demoted`` True) when its counters, the ``n`` taken off, are below its tier's threshold
+    (``new_streak`` for a ``provisional`` machine, ``promote_verified`` for a ``trusted`` one). Matches made after the
+    promotion are taken off the counters and never demote it: they did not earn its tier."""
     trust = dict(trust or {})
     trust["verified"] = max(0, int(trust.get("verified") or 0) - n)
     trust["streak"] = max(0, int(trust.get("streak") or 0) - n)
     below = ((tier == "provisional" and trust["streak"] < int(s["new_streak"]))
              or (tier == "trusted" and trust["verified"] < int(s["promote_verified"])))
-    if below:
+    if counted > 0 and below:
         trust["verifier"] = False
+        trust.pop("promoted", None)
         return "new", trust, True
     return tier, trust, False
 
