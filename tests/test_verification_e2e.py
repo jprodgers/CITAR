@@ -18,6 +18,11 @@ MB in its own ``helper.json``.
   accepted unverified, an administrator's ``replicate 1`` makes job 7 a verified match, job 8 is accepted unverified,
   and with the rate at 1 job 9 is replicated and mismatches: the machine is quarantined, and jobs 6 and 8 leave the
   results file, their events rejected.
+- **Credits** (package 4-12's gate 1, P4.5.7): ``cpu:3`` (300-round games, the helper at up to two cores' worth) is
+  credited at most 1.5 x its replica's CPU, flags ``overreported_cpu`` and stays ``provisional`` past the matches that
+  would make it ``trusted``; ``hold:2`` is credited at most 1.5 x its replica's CPU, flags ``capped_cpu`` only and is
+  promoted; an honest helper capped to a quarter of a core is credited its own CPU, flags nothing that blocks it, and is
+  promoted.
 """
 from __future__ import annotations
 
@@ -174,11 +179,11 @@ class Faulty(unittest.TestCase):
         servers.invalidate()
         return sid, raw
 
-    def helper(self, sid: str, token: str, *modes: str) -> H.RealHelper:
+    def helper(self, sid: str, token: str, *modes: str, ceiling: dict | None = None) -> H.RealHelper:
         """The real helper for ``sid`` (the cheating build, playing ``modes``; the honest one without), once its
-        executor is ready."""
+        executor is ready; ``ceiling`` what its owner lends in its own settings (``CEILING`` by default)."""
         home = Path(tempfile.mkdtemp(prefix="helper-", dir=_TMP))
-        (home / "helper.json").write_text(json.dumps({"cpu": CEILING}), encoding="utf-8")
+        (home / "helper.json").write_text(json.dumps({"cpu": ceiling or CEILING}), encoding="utf-8")
         extra = tuple(x for m in modes for x in ("--test-fault", m))
         binary = H.faults_binary() if modes else None
         helper = H.RealHelper(self.server.base, token, "http://127.0.0.1:9/v1", name=f"verify {sid}", home=home,
@@ -192,9 +197,9 @@ class Faulty(unittest.TestCase):
         self.assertTrue(H.until(ready, 90 * SLACK, 0.1), helper.text()[-3000:])
         return helper
 
-    def submit(self, name: str, games: int) -> str:
+    def submit(self, name: str, games: int, turns: int = 30) -> str:
         exp = lab.submit({"name": name, "games": games, "seed": 9500, "size": "duel", "maps": ["pangaea"],
-                          "turns": 30, "seats": [{"label": "a", "bot": "basic"}, {"label": "b", "bot": "basic"}]})
+                          "turns": turns, "seats": [{"label": "a", "bot": "basic"}, {"label": "b", "bot": "basic"}]})
         with db.session() as s:
             items.register(s, "lab_experiment", exp["name"], s.get(User, self.ids[self.owner]), exp["name"],
                            path=lab.QUEUE / f"{exp['name']}.json", collection=False)
@@ -331,6 +336,93 @@ class Faulty(unittest.TestCase):
         self.assertIn(seven, lined)
         for r in (six, eight):
             self.assertEqual(self.event(r).verification, "rejected")
+
+
+    # -------------------------------------------------------------- package 4-12's gate 1: credits
+    def lending(self, sid: str, cpu_percent: int) -> None:
+        """The site's figures for ``sid``: one thread at ``cpu_percent`` of the machine."""
+        with db.session() as s:
+            s.get(Server, sid).capabilities = {"cpu": {**SITE, "cpu_percent": cpu_percent}}
+        servers.invalidate()
+
+    def settled(self, sid: str, n: int) -> list:
+        """The machine's first ``n`` primary runs' events once each is settled (``verified``), or None."""
+        runs = self.primaries(sid)
+        if len(runs) < n:
+            return None
+        events = [self.event(r.id) for r in runs[:n]]
+        return events if all(e is not None and e.verification == "verified" for e in events) else None
+
+    def test_cpu_reported_three_times_over_is_capped_flagged_and_blocks_promotion(self):
+        """``cpu:3`` on 300-round duels (about a second of CPU each, at up to two cores' worth, so the server observes
+        about what it spent): each is credited at most 1.5 x its replica's CPU and over-reported; its matches make it
+        provisional, never trusted."""
+        self.settings(new_streak=1, promote_verified=2, provisional_rate=1.0)
+        sid, token = self.machine("over e2e")
+        self.lending(sid, two_cores())
+        self.helper(sid, token, "cpu:3", ceiling={**CEILING, "cpu_percent": two_cores()})
+        self.submit("e2e-over", 4, turns=300)
+        events = self.tick_until(lambda: self.settled(sid, 3), limit=180)
+        row = self.row(sid)
+        self.assertEqual(row.trust_tier, "provisional", "three verified matches, promote_verified 2: blocked")
+        self.assertGreaterEqual(int(row.trust["verified"]), 3)
+        self.assertGreaterEqual(row.flags["overreported_cpu"]["count"], 1)
+        replicas = self._replica_cpu(sid)
+        over = [e for e in events if e.flags.get("overreported_cpu")]
+        self.assertTrue(over, [(e.reported_s, e.observed_s) for e in events])
+        for e in events:
+            ref = replicas[e.request_id]
+            self.assertLessEqual(e.cpu_core_s, 1.5 * ref + 1e-6, (e.cpu_core_s, ref))
+            self.assertLessEqual(e.cpu_core_s, e.observed_s * 1.05 + 1 + 1e-6)
+            self.assertAlmostEqual(e.flags.get("reference_s"), ref, places=5)
+
+    def test_holding_results_is_capped_at_the_reference_and_still_promoted(self):
+        """``hold:2``: each result held two seconds, the held time reported as CPU (the server observes the hold):
+        credited at most 1.5 x its replica's CPU, ``capped_cpu`` only, and promoted to trusted."""
+        self.settings(new_streak=1, promote_verified=2, provisional_rate=1.0)
+        sid, token = self.machine("holder e2e")
+        self.helper(sid, token, "hold:2")
+        self.submit("e2e-hold", 3)
+        self.tick_until(lambda: self.row(sid).trust_tier == "trusted", limit=180)
+        events = self.tick_until(lambda: self.settled(sid, 2))
+        row = self.row(sid)
+        self.assertNotIn("overreported_cpu", row.flags or {})
+        self.assertGreaterEqual(row.flags["capped_cpu"]["count"], 2)
+        replicas = self._replica_cpu(sid)
+        for e in events:
+            self.assertGreaterEqual(e.reported_s, 2.0)
+            self.assertTrue(e.flags.get("capped_cpu"))
+            self.assertNotIn("overreported_cpu", e.flags)
+            self.assertAlmostEqual(e.cpu_core_s, 1.5 * replicas[e.request_id], places=5)
+
+    def test_an_honest_helper_capped_to_a_quarter_core_is_promoted(self):
+        """An honest helper held to a quarter of a core by its job host's hard limit: its games take four times as
+        long, its CPU is its own (the limit adds waiting, not CPU time), nothing blocks it, and it is promoted."""
+        self.settings(new_streak=1, promote_verified=2, provisional_rate=1.0)
+        sid, token = self.machine("quarter e2e")
+        quarter = max(1, round(25 / JH.machine_cpus()))
+        self.lending(sid, quarter)
+        self.helper(sid, token, ceiling={**CEILING, "cpu_percent": quarter})
+        self.submit("e2e-quarter", 3, turns=100)
+        self.tick_until(lambda: self.row(sid).trust_tier == "trusted", limit=180)
+        events = self.tick_until(lambda: self.settled(sid, 2))
+        row = self.row(sid)
+        self.assertNotIn("overreported_cpu", row.flags or {})
+        replicas = self._replica_cpu(sid)
+        for e in events:
+            self.assertNotIn("overreported_cpu", e.flags)
+            self.assertLessEqual(e.cpu_core_s, 1.5 * replicas[e.request_id] + 1e-6)
+
+    def _replica_cpu(self, sid: str) -> dict:
+        """Each of the machine's primary runs' replica's CPU seconds (this server's job host: the reference)."""
+        out = {}
+        with db.session() as s:
+            for p in s.scalars(select(CpuJobRun).where(CpuJobRun.machine_id == sid, CpuJobRun.role == "primary")):
+                r = s.scalar(select(CpuJobRun).where(CpuJobRun.job_id == p.job_id, CpuJobRun.role == "replica",
+                                                     CpuJobRun.verdict == "reference"))
+                if r is not None:
+                    out[p.id] = float(r.cpu_s)
+        return out
 
 
 if __name__ == "__main__":
