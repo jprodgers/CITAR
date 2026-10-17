@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use citar_jobs::update::{Asset, Manifest, VerifyingKey, newer, verify};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::log::{Log, clip};
@@ -58,6 +58,8 @@ pub const HEALTHY_AFTER: Duration = Duration::from_secs(60);
 pub const SELF_TEST_WAIT: Duration = Duration::from_secs(120);
 /// The most characters of an `update_status` message.
 pub const MESSAGE_CHARS: usize = 1000;
+/// How long a refusal's marking of a new binary healthy may take before the helper goes on.
+pub const HEARD_WAIT: Duration = Duration::from_secs(5);
 
 /// The downloads an updater started (the transcripts' `downloads`).
 #[derive(Clone, Debug, Default)]
@@ -128,7 +130,7 @@ enum Cmd {
     Disconnected,
     Offered(UpdateOffer),
     Welcomed,
-    Heard,
+    Heard(oneshot::Sender<()>),
     SwapFailed(String),
 }
 
@@ -212,9 +214,12 @@ impl Updater {
     }
 
     /// The server answered otherwise (a refusal the helper understood): a new binary works, and
-    /// counts as healthy.
-    pub fn heard(&self) {
-        self.send(Cmd::Heard);
+    /// counts as healthy. Returns once that is written (at most [`HEARD_WAIT`]), since a console
+    /// run may exit right after, and its supervisor reads the marker.
+    pub async fn heard(&self) {
+        let (tx, rx) = oneshot::channel();
+        self.send(Cmd::Heard(tx));
+        let _done = tokio::time::timeout(HEARD_WAIT, rx).await;
     }
 
     /// The hand-off's swap failed: the binary is the old one, which goes on and says `failed`.
@@ -327,7 +332,10 @@ impl Task {
             Cmd::Disconnected => self.out = None,
             Cmd::Offered(offer) => self.consider(offer).await,
             Cmd::Welcomed => self.welcome().await,
-            Cmd::Heard => self.mark_healthy().await,
+            Cmd::Heard(done) => {
+                self.mark_healthy().await;
+                let _told = done.send(());
+            }
             Cmd::SwapFailed(why) => {
                 let _none = self.ready.send(None);
                 let version = self.current.as_ref().and_then(|c| c.version.clone());

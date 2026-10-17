@@ -6,9 +6,11 @@
 //!
 //! - **The child exits 75:** it handed off (or rolled itself back): the binary in place is started
 //!   again at once, at most [`MAX_RESTARTS`] times a minute.
-//! - **The child exits before it was healthy** (`pending.json` there, `healthy.json` not): the
-//!   update failed. The old binary is restored, `failed.json` written for it to report, and it is
-//!   started in the new one's place.
+//! - **The child fails before it was healthy** (`pending.json` there, `healthy.json` not, and an
+//!   exit that is not 0, stopped by its owner, or 78, permanently refused by its server, which a
+//!   working binary gives too): the update failed. The old binary is restored, `failed.json`
+//!   written for it to report, and it is started in the new one's place. A new binary stopped before
+//!   it was healthy keeps its `pending.json`: its next start counts on.
 //! - **Anything else:** the supervisor exits with the child's code (0 stopped, 78 a permanent
 //!   refusal, another a crash), as the console run would have.
 //!
@@ -93,6 +95,7 @@ pub fn supervise(install: &Install, dir: &UpdateDir, args: &[OsString], log: &Lo
             }
             if let Some(p) = dir.pending()
                 && !dir.healthy_exists()
+                && !matches!(code, 0 | 78)
             {
                 let message = format!(
                     "{} exited with code {code} before it was healthy: {} is back",

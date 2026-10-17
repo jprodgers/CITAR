@@ -861,7 +861,7 @@ impl Helper {
             };
             if matches!(end, End::Permanent(_) | End::Upgrade(_) | End::Rate(_)) {
                 // The server answered, and this binary understood it: an update's new binary works.
-                updater.heard();
+                updater.heard().await;
             }
             let wait = match end {
                 End::Stopped => return Exit::Stopped,
