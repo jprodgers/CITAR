@@ -127,6 +127,8 @@ OFFER_TTL_SECONDS = 30.0
 SILENT_SECONDS = 300.0
 #: The server's backstop beyond a run's deadline (the executor enforces the deadline itself).
 EXPIRY_GRACE_SECONDS = 60.0
+#: How long an administrator's request waits for the tick's lock (``queued_view``) before it answers busy.
+VIEW_WAIT_SECONDS = 2.0
 #: A deadline is ten times the expected time, within these bounds (P4.5.5).
 DEADLINE_FACTOR, DEADLINE_MIN, DEADLINE_MAX = 10.0, 300.0, 6 * 3600.0
 #: The measured speed a deadline is scaled by is held within these: a measured speed is the reference's CPU over what
@@ -148,6 +150,10 @@ MEM_MAX = 1 << 20
 #: An executor that refused a job for a reason that holds for every job is offered nothing for a while: 2 s,
 #: doubling to 10 minutes (P4.2.5's re-offer backoff).
 REJECT_FIRST, REJECT_MAX = 2.0, 600.0
+
+
+class Busy(TimeoutError):
+    """The dispatcher's tick held its lock past a request's wait (``VIEW_WAIT_SECONDS``): the route answers 503."""
 
 
 def utcnow() -> datetime:
@@ -345,6 +351,9 @@ class Dispatcher:
         self.ticks = 0
         self.tick_ms = 0.0
         self.published: dict = {"dispatcher": {"alive": False}}
+        # the caps' figures as the last tick counted them (``hands_view``: administrators', so kept apart from
+        # ``published``, which the Lab page shows)
+        self.published_hands: dict = {"in_hand": {}, "settling": {}, "share": {}}
         self._queue_sig = None
         self._paused_exec: set = set()
         self._wake = threading.Event()
@@ -3130,25 +3139,32 @@ class Dispatcher:
                            "running": len(self.runs), "games_last_hour": len(self.finished),
                            "jobs_build": self.jobs_build},
             "running": running, "experiments": exps}
+        hands = dict(self._hands())
+        self.published_hands = {"in_hand": hands, "settling": dict(self._settling_by),
+                                "share": {k: {"new_replicas": r, "runs": t} for k, (r, t) in self._share.items()}}
 
     def hands_view(self) -> dict:
         """The caps' figures for administrators (P4.5.8 rule 3): each helper machine's work in hand (runs in flight and
         results waiting for a replica), the results waiting alone, and each verifier's share of new machines'
-        replicas against its runs while both waited."""
-        with self._tick_lock:
-            hands = dict(self._hands())
-            return {"in_hand": hands, "settling": dict(self._settling_by),
-                    "share": {k: {"new_replicas": r, "runs": t} for k, (r, t) in self._share.items()}}
+        replicas against its runs while both waited; as the last tick published them, so a request's thread never
+        waits for a tick (P3.9.2)."""
+        return self.published_hands
 
     def queued_view(self, limit: int = 500) -> list:
-        """The queued jobs in the order they would run, for administrators: each with why it waits."""
+        """The queued jobs in the order they would run, for administrators: each with why it waits. Read under the
+        tick's lock, waited for at most ``VIEW_WAIT_SECONDS`` (P3.9.2: a tick held up by the database must not hold
+        a request's thread with it): ``Busy`` past that."""
         now = self.clock()
-        with self._tick_lock:
+        if not self._tick_lock.acquire(timeout=VIEW_WAIT_SECONDS):
+            raise Busy("The job dispatcher is busy; try again in a moment.")
+        try:
             jobs = sorted((j for j in self.jobs.values() if j.state == "queued"),
                           key=lambda j: (-j.priority, j.created, j.i))[:limit]
             return [{"job": j.id, "exp": j.exp, "i": j.i, "kind": j.kind, "priority": j.priority,
                      "owner": j.owner_id, "mem_mb": j.mem_mb, "attempts": j.attempts,
                      "waiting": self.waiting(j, now)} for j in jobs]
+        finally:
+            self._tick_lock.release()
 
 
 #: ``_pick``'s memo: an executor not asked yet about a shape of job.

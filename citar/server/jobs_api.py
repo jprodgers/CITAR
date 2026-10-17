@@ -263,7 +263,10 @@ def admin_jobs(me: User = Depends(require_admin_hidden), s: Session = Depends(ge
     from ..jobs import dispatcher as jobs_dispatcher
     d = jobs_dispatcher.current()
     view = jobs_dispatcher.view()
-    queued = d.queued_view() if d is not None else []
+    try:
+        queued = d.queued_view() if d is not None else []
+    except jobs_dispatcher.Busy as exc:
+        raise HTTPException(503, str(exc))
     by_exp: dict = {}
     for q in queued:
         by_exp.setdefault(q["exp"], []).append(q)

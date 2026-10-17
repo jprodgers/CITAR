@@ -3,13 +3,16 @@ show, with the dispatcher, its local verifier and helpers in this process (``tes
 
 - ``GET /api/admin/verification`` and ``PUT /api/admin/verification``: a visitor 401, a member (a machine's owner
   too), a moderator "not found", an administrator 200; the settings' bounds (rates and the share 0 to 1, counts 1 to
-  10,000: an unknown name, a value past a bound, a fraction for a count, a boolean or a string, an empty body, 400 and
-  nothing changed), one audit row naming what changed, the dispatcher reading them at once.
+  10,000: an unknown name, a value past a bound, a fraction for a count, a boolean or a string, an empty body, and
+  numbers no float holds (infinity, a 400-digit count, not a number), 400 and nothing changed), one audit row naming
+  what changed, the dispatcher reading them at once.
 - What it shows once a cheat is caught: the quarantined machine with its evidence and withdrawn jobs, its quarantined
   owner with why, the mismatch, the withdrawal, the verifiers (this server's job host and a machine an administrator
   marked), the machines the credits' bounds flagged.
 - ``GET /api/admin/jobs``' verifiers and the caps on ``new`` machines; ``GET /api/machines/{id}/jobs``' flags and
-  measured speed for administrators; the Servers page's card's trust for a machine's owner and an administrator.
+  measured speed for administrators; the Servers page's card's trust for a machine's owner and an administrator;
+  a tick that holds its lock never holds ``GET /api/admin/jobs`` (the caps are the last tick's, the queued jobs' wait
+  bounded: 503).
 """
 from __future__ import annotations
 
@@ -18,8 +21,11 @@ import tests  # noqa: F401  (temporary saves folder and registry; must be import
 import os
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from sqlalchemy import select
 
@@ -156,6 +162,35 @@ class AdminVerification(TV.Verify):
         kinds = {(v["kind"], v["machine"]) for v in got["verifiers"]}
         self.assertEqual(kinds, {("local", "sv_host"), ("remote", verifier.sid)})
         self.assertEqual(got["tiers"].get("quarantined"), 1)
+
+    def test_a_tick_holding_its_lock_never_holds_the_administrators_request(self):
+        """4-12's review (P3.9.2: every wait has a timeout): ``GET /api/admin/jobs`` read the caps under the tick's lock
+        with no timeout. The caps are the last tick's figures now, and the queued jobs' wait is bounded: busy, 503."""
+        Lender(self, "Bob's", "bob")
+        self.submit("bob", duels("busy", 1))
+        d = self.make([self.verifier()])
+        d.tick()
+        held, release = threading.Event(), threading.Event()
+
+        def tick_stuck():
+            with d._tick_lock:
+                held.set()
+                release.wait(10)
+        t = threading.Thread(target=tick_stuck, daemon=True)
+        t.start()
+        self.addCleanup(t.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+        t0 = time.monotonic()
+        self.assertIn("in_hand", d.hands_view(), "the last tick's figures, at once")
+        with mock.patch.object(D, "VIEW_WAIT_SECONDS", 0.2):
+            r = self.call("zara", "GET", "/api/admin/jobs")
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertIn("busy", r.json()["detail"])
+        self.assertLess(time.monotonic() - t0, 5.0)
+        release.set()
+        t.join(10)
+        self.assertEqual(self.call("zara", "GET", "/api/admin/jobs").status_code, 200)
 
     def test_the_dispatchers_verifiers_and_caps_and_a_machines_flags(self):
         self.settings(new_per_owner=1)
