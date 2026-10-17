@@ -345,12 +345,22 @@ mod tests {
         assert_eq!(MANIFEST_DOMAIN, b"CITAR-HELPER-MANIFEST-V1\0");
     }
 
-    /// Phase 4 ships no key: the committed file is empty, so every build of this tree trusts
-    /// none and reports updates unavailable (P4.3.8; the owner's Phase 5 adds the public key).
+    /// The committed file reads as a key file: public keys only, at most two (P4.3.8). Phase 4
+    /// commits it empty; the owner's one-time setup adds the public line of the key whose private
+    /// half lives in the `helper-signing` environment, and this test holds either to the format,
+    /// so that commit keeps the suite green. No secret is ever in it.
     #[test]
-    fn the_committed_key_file_trusts_no_key() {
-        assert_eq!(trusted_keys(), Ok(Vec::new()));
-        assert!(UPDATE_KEYS.trim().is_empty(), "crates/citar-jobs/update-keys.pub stays empty");
+    fn the_committed_key_file_holds_public_keys_only() {
+        let keys = trusted_keys().expect("update-keys.pub reads as a key file");
+        assert!(keys.len() <= MAX_KEYS, "{} keys", keys.len());
+        // Each line a key's 44 characters of base64 (which `trusted_keys` read as a public key),
+        // a comment or nothing: a secret's JSON never reads as one.
+        for line in UPDATE_KEYS.lines().map(str::trim) {
+            assert!(
+                line.is_empty() || line.starts_with('#') || line.len() == 44,
+                "a public key a line, nothing else: {line:?}"
+            );
+        }
     }
 
     #[test]
