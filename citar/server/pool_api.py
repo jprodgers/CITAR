@@ -460,7 +460,7 @@ def worker_status(server_id: str, request: Request, p: Principal = Depends(princ
          "last_ip": t.last_ip, "revoked": t.revoked_at is not None}
         for t in s.query(WorkerToken).filter(WorkerToken.server_id == server.id)
         .order_by(WorkerToken.created_at.desc())]
-    from .workers import fingerprint
+    from .workers import fingerprint, update_view
     block = server.helper if isinstance(server.helper, dict) else None
     return {"online": connection is not None,
             "worker": connection.client() if connection else None,
@@ -471,6 +471,8 @@ def worker_status(server_id: str, request: Request, p: Principal = Depends(princ
                     "registered_at": server.key_at.isoformat() if server.key_at else None},
             # what it lends of its CPU in effect, each limit hard or soft (package 4-10)
             "cpu": _helper_cpu(server),
+            # the latest signed helper this server relays, and where its helper is with an update (package 4-13)
+            "update": update_view(server.id, str((block or {}).get("version") or "")),
             "tokens": tokens_out,
             "command": _worker_command(server), "args": _worker_args(server)}
 
