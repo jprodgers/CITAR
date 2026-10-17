@@ -48,7 +48,7 @@ worse than a smaller one that can.
 
 No. There is no telemetry, no analytics and no phoning home. The only outbound connections are to
 the model endpoints you configure — which may be entirely on your own machine — and, if you run a
-worker, to the CITAR server you pointed it at.
+helper (the CITAR helper, which lends your models), to the CITAR server you pointed it at.
 
 API keys go to your operating system's credential store and are never written to the project
 folder, a save file or a report.
@@ -103,9 +103,10 @@ inherent, not a bug, and it is why:
 
 ## Can I use my own ruleset or mod?
 
-Yes. Most content is data. A mod entry in `citar/data/custom/` in UnCiv format works as long as the
-engine knows the uniques it uses. To move to a newer UnCiv release, point
-`scripts/import_unciv.py` at a checkout and regenerate. See [MODDING.md](MODDING.md).
+Yes. Most content is data. Copy the ruleset (`crates/citar-engine/data/`), change it in UnCiv's
+format, check it with `citar ruleset check DIR`, and point `CITAR_RULESET_DIR` at it: no Rust
+toolchain needed, as long as the engine knows the uniques it uses. To move to a newer UnCiv release,
+point `scripts/import_unciv.py` at a checkout and regenerate. See [MODDING.md](MODDING.md).
 
 ## Can I drive CITAR from my own code?
 

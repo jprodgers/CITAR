@@ -14,8 +14,7 @@
     it never needs an administrator.
 
 .PARAMETER Worker
-    Install and configure the worker agent, which serves this machine's models to a CITAR server
-    somewhere else.
+    Replaced by the CITAR helper in 0.1.6: says where to download it, and installs nothing.
 
 .PARAMETER Version
     Install a specific release instead of the newest.
@@ -43,6 +42,14 @@ function Step($text) { Write-Host "==> " -ForegroundColor Cyan -NoNewline; Write
 function Ok($text)   { Write-Host "ok   " -ForegroundColor Green -NoNewline; Write-Host $text }
 function Warn($text) { Write-Host "warn " -ForegroundColor Yellow -NoNewline; Write-Host $text }
 function Fail($text) { Write-Host "error " -ForegroundColor Red -NoNewline; Write-Host $text; exit 1 }
+
+# ----------------------------------------------------------------------------- the helper
+if ($Worker) {
+    Write-Host "Since CITAR 0.1.6 a machine serves its models through the CITAR helper, a single program that"
+    Write-Host "replaced the Python worker. Download it from the Servers page of your CITAR server, or from"
+    Write-Host "https://github.com/jprodgers/CITAR/releases/latest, then run: citar-helper setup"
+    exit 2
+}
 
 # ----------------------------------------------------------------------------- uninstall
 if ($Uninstall) {
@@ -116,7 +123,7 @@ if ($LASTEXITCODE -ne 0) { Fail "Could not create a virtual environment in $Pref
 $venvPython = Join-Path $Prefix "Scripts\python.exe"
 & $venvPython -m pip install --quiet --upgrade pip wheel
 
-$extras = if ($Worker) { "worker,openai" } else { "all" }
+$extras = "all"
 $spec = if ($Version) { "citar[$extras]==$Version" } else { "citar[$extras]" }
 
 Step "Downloading CITAR and its dependencies"
@@ -129,7 +136,7 @@ Ok (& (Join-Path $Prefix "Scripts\citar.exe") --version)
 # go on launching the version that was current when it was made.
 Step "Putting citar on your PATH"
 New-Item -ItemType Directory -Force -Path $ShimDir | Out-Null
-foreach ($name in @("citar", "citar-admin", "citar-worker", "citar-mcp")) {
+foreach ($name in @("citar", "citar-admin", "citar-mcp")) {
     $target = Join-Path $Prefix "Scripts\$name.exe"
     if (-not (Test-Path $target)) { continue }
     $shim = Join-Path $ShimDir "$name.cmd"
@@ -153,6 +160,6 @@ if ($NoSetup) {
 }
 
 Step "Setting up"
-$setupFlag = if ($Worker) { "--worker" } else { "--local" }
+$setupFlag = "--local"
 & (Join-Path $Prefix "Scripts\citar.exe") setup $setupFlag
 exit $LASTEXITCODE

@@ -1,0 +1,183 @@
+{
+  "name": "job-abort-crossed-result",
+  "about": "The experiment of a run in play is deleted: the server aborts the run, and a result that crossed the abort is acknowledged (the helper forgets it) and dropped: no results line, no ledger event, the run aborted.",
+  "refs": ["P4.2.5", "P4.5.7"],
+  "plays": {"helper": "4-10", "hub": "4-10"},
+  "values": {
+    "bots": ["basic1"],
+    "job": "cj_0123456789abcdef",
+    "jobs_build": "0f1e2d3c4b5a",
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "machine": "sv_0123456789abcdef",
+    "ruleset": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+    "run": "cr_0123456789abcdef",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {
+    "helper": {
+      "config": {
+        "max_concurrent": 1,
+        "cpu": {"enabled": true, "threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]}
+      }
+    },
+    "hub": {
+      "machine": {
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "trust": "trusted"
+      },
+      "local_executor": false,
+      "verification": {"trusted_rate": 0}
+    }
+  },
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<id:jobs_build>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": {
+          "enabled": true,
+          "ceiling": {"threads": 1, "cpu_percent": 50, "memory_mb": 1024, "work": ["lab_game"]},
+          "limits": "<any>",
+          "verifiable": true,
+          "bots": "<id:bots>",
+          "ruleset": "<id:ruleset>"
+        },
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "welcome",
+        "protocol": 2,
+        "machine": {"id": "<id:machine>", "name": "<string>"},
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "ping_s": "<int:5..300>",
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<id:jobs_build>"},
+        "update": null,
+        "jobs": {"keep": [], "drop": [], "resend": []}
+      },
+      "within_s": 5
+    },
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": false, "slots": 1},
+          "cpu": {
+            "enabled": true,
+            "threads": 1,
+            "cpu_percent": 50,
+            "memory_mb": 1024,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": [],
+        "limits": "<any>"
+      }
+    },
+    {"act": {"side": "hub", "do": "queue_job"}},
+    {
+      "s2h": {
+        "t": "job_offer",
+        "job": "<id:job>",
+        "run": "<id:run>",
+        "kind": "lab_game",
+        "spec": "<golden:jobs/duel-a/spec>",
+        "spec_hash": "<golden:jobs/duel-a/spec_hash>",
+        "jobs_build": "<id:jobs_build>",
+        "deadline_s": "<number>",
+        "mem_mb": "<int>",
+        "priority": "<int:-100..100>",
+        "offer_ttl_s": 30
+      }
+    },
+    {"h2s": {"t": "job_accept", "run": "<id:run>"}, "within_s": 2},
+    {"act": {"side": "hub", "do": "delete_experiment"}},
+    {"host": {"finish": "<golden:jobs/duel-a>"}},
+    {"s2h": {"t": "job_abort", "run": "<id:run>", "reason": "<string>"}, "within_s": 5},
+    {
+      "h2s": {
+        "t": "job_result",
+        "run": "<id:run>",
+        "outcome": {
+          "result": "<golden:jobs/duel-a/result>",
+          "result_hash": "<golden:jobs/duel-a/result_hash>",
+          "chain": {
+            "head": "<golden:jobs/duel-a/chain_head>",
+            "rounds": "<golden:jobs/duel-a/rounds>",
+            "digests": "<golden:jobs/duel-a/digests>"
+          },
+          "cpu_s": "<number>",
+          "wall_s": "<number>",
+          "paused_s": "<number>",
+          "peak_mb": "<number>"
+        },
+        "claim": {
+          "v": 1,
+          "job": "<id:job>",
+          "run": "<id:run>",
+          "machine": "<id:machine>",
+          "kind": "lab_game",
+          "spec_hash": "<golden:jobs/duel-a/spec_hash>",
+          "jobs_build": "<id:jobs_build>",
+          "bots": "<golden:jobs/duel-a/bots>",
+          "result_hash": "<golden:jobs/duel-a/result_hash>",
+          "chain_head": "<golden:jobs/duel-a/chain_head>",
+          "rounds": "<golden:jobs/duel-a/rounds>",
+          "key": "<id:key>"
+        },
+        "signature": "<base64>"
+      },
+      "within_s": 2
+    },
+    {"s2h": {"t": "job_result_ack", "run": "<id:run>"}, "within_s": 5},
+    {
+      "state": {
+        "side": "hub",
+        "expect": {"run": {"id": "<id:run>", "state": "aborted"}, "result_lines": 0, "events": 0}
+      }
+    },
+    {"state": {"side": "helper", "expect": {"held_results": []}}}
+  ]
+}

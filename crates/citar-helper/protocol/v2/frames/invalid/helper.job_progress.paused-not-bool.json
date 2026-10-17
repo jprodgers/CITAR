@@ -1,0 +1,17 @@
+{
+  "frame": {
+    "t": "job_progress",
+    "ts": 1760000000.0,
+    "run": "cr_0123456789abcdef",
+    "round": 25,
+    "of": 30,
+    "elapsed_s": 3.6,
+    "cpu_s": 3.4,
+    "paused_s": 0.0,
+    "peak_mb": 58.25,
+    "paused": "yes"
+  },
+  "code": "type",
+  "path": "paused",
+  "why": "paused is a bool"
+}

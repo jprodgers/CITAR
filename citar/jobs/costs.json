@@ -1,0 +1,216 @@
+{
+ "measured": "2026-10-16",
+ "machine": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel (12 logical CPUs, Windows)",
+ "build": "0b412a18fe95",
+ "jobs_build": "f960a95d250c",
+ "method": "scripts/measure_job_costs.py: each cell 3 games through a job host of one thread and one core's worth; cpu_s the median of the runs' CPU seconds, peak_mb the largest counted peak; rounds the bucket of the games' turn limit (store.ROUND_BUCKET)",
+ "cells": [
+  {
+   "kind": "lab_game",
+   "size": "duel",
+   "seats": 2,
+   "rounds": 0,
+   "cpu_s": 0.047,
+   "peak_mb": 0.9,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "duel",
+   "seats": 2,
+   "rounds": 100,
+   "cpu_s": 0.156,
+   "peak_mb": 1.8,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "duel",
+   "seats": 2,
+   "rounds": 300,
+   "cpu_s": 1.234,
+   "peak_mb": 6.2,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "duel",
+   "seats": 2,
+   "rounds": 500,
+   "cpu_s": 1.812,
+   "peak_mb": 7.8,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "gargantuan",
+   "seats": 24,
+   "rounds": 100,
+   "cpu_s": 2.516,
+   "peak_mb": 22.5,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "gargantuan",
+   "seats": 24,
+   "rounds": 300,
+   "cpu_s": 25.109,
+   "peak_mb": 81.2,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "huge",
+   "seats": 12,
+   "rounds": 100,
+   "cpu_s": 1.203,
+   "peak_mb": 12.0,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "huge",
+   "seats": 12,
+   "rounds": 300,
+   "cpu_s": 11.188,
+   "peak_mb": 38.3,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "large",
+   "seats": 8,
+   "rounds": 100,
+   "cpu_s": 0.75,
+   "peak_mb": 7.2,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "large",
+   "seats": 8,
+   "rounds": 300,
+   "cpu_s": 6.141,
+   "peak_mb": 22.5,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "small",
+   "seats": 4,
+   "rounds": 0,
+   "cpu_s": 0.094,
+   "peak_mb": 1.7,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "small",
+   "seats": 4,
+   "rounds": 100,
+   "cpu_s": 0.328,
+   "peak_mb": 3.4,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "small",
+   "seats": 4,
+   "rounds": 300,
+   "cpu_s": 2.547,
+   "peak_mb": 10.0,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "small",
+   "seats": 4,
+   "rounds": 500,
+   "cpu_s": 3.531,
+   "peak_mb": 12.9,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "small",
+   "seats": 4,
+   "rounds": 750,
+   "cpu_s": 4.672,
+   "peak_mb": 17.5,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "standard",
+   "seats": 6,
+   "rounds": 100,
+   "cpu_s": 0.5,
+   "peak_mb": 5.4,
+   "samples": 3
+  },
+  {
+   "kind": "lab_game",
+   "size": "standard",
+   "seats": 6,
+   "rounds": 300,
+   "cpu_s": 4.641,
+   "peak_mb": 16.3,
+   "samples": 3
+  },
+  {
+   "kind": "ranking_game",
+   "size": "duel",
+   "seats": 2,
+   "rounds": 0,
+   "cpu_s": 0.031,
+   "peak_mb": 0.8,
+   "samples": 3
+  },
+  {
+   "kind": "reference_game",
+   "size": "duel",
+   "seats": 2,
+   "rounds": 0,
+   "cpu_s": 0.047,
+   "peak_mb": 0.8,
+   "samples": 3
+  },
+  {
+   "kind": "reference_game",
+   "size": "duel",
+   "seats": 2,
+   "rounds": 300,
+   "cpu_s": 1.516,
+   "peak_mb": 7.0,
+   "samples": 3
+  },
+  {
+   "kind": "reference_game",
+   "size": "small",
+   "seats": 4,
+   "rounds": 100,
+   "cpu_s": 0.328,
+   "peak_mb": 2.5,
+   "samples": 3
+  },
+  {
+   "kind": "reference_game",
+   "size": "small",
+   "seats": 4,
+   "rounds": 300,
+   "cpu_s": 2.562,
+   "peak_mb": 10.2,
+   "samples": 3
+  },
+  {
+   "kind": "reference_game",
+   "size": "standard",
+   "seats": 6,
+   "rounds": 300,
+   "cpu_s": 4.641,
+   "peak_mb": 15.6,
+   "samples": 3
+  }
+ ]
+}

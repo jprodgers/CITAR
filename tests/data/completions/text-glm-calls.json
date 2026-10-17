@@ -1,0 +1,81 @@
+{
+ "name": "text-glm-calls",
+ "note": "GLM-style calls (seen with Laguna) in native mode",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "Let me execute these decisions:<tool_call>set_civ_name<arg_key>name</arg_key><arg_value>Aurelia</arg_value><arg_key>leader</arg_key><arg_value>Consul</arg_value></tool_call><tool_call>found_city<arg_key>unit_id</arg_key><arg_value>1</arg_value><arg_key>name</arg_key><arg_value>Roma</arg_value></tool_call><tool_call>end_turn</tool_call>",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "Let me execute these decisions:<tool_call>set_civ_name<arg_key>name</arg_key><arg_value>Aurelia</arg_value><arg_key>leader</arg_key><arg_value>Consul</arg_value></tool_call><tool_call>found_city<arg_key>unit_id</arg_key><arg_value>1</arg_value><arg_key>name</arg_key><arg_value>Roma</arg_value></tool_call><tool_call>end_turn</tool_call>",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "set_civ_name",
+     "args": {
+      "name": "Aurelia",
+      "leader": "Consul"
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "name": "found_city",
+     "args": {
+      "unit_id": 1,
+      "name": "Roma"
+     }
+    },
+    {
+     "id": "<gen:3>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 3
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "Let me execute these decisions:<tool_call>set_civ_name<arg_key>name</arg_key><arg_value>Aurelia</arg_value><arg_key>leader</arg_key><arg_value>Consul</arg_value></tool_call><tool_call>found_city<arg_key>unit_id</arg_key><arg_value>1</arg_value><arg_key>name</arg_key><arg_value>Roma</arg_value></tool_call><tool_call>end_turn</tool_call>",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "set_civ_name",
+      "arguments": "{\"name\": \"Aurelia\", \"leader\": \"Consul\"}"
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "type": "function",
+     "function": {
+      "name": "found_city",
+      "arguments": "{\"unit_id\": 1, \"name\": \"Roma\"}"
+     }
+    },
+    {
+     "id": "<gen:3>",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

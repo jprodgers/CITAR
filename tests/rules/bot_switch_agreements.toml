@@ -1,0 +1,106 @@
+about = """
+The agreements switch. While the bot owns agreements it proposes, every diplo_every turns, an exchange
+of embassies to a civilization it has none with, and friendship to one it has embassies with and
+likes. When the seat's model owns agreements it proposes neither.
+"""
+from = "citar/bots/basic.py:2431-2444 (consider_diplomacy)"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0, diplo_every = 1 } }
+
+[[step]]
+set = { friendly = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 1, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0, diplo_every = 1 } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+  { op = "grant_tech", player = "all", tech = "Writing" },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { initiator = 0, responder = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[0].proposal"
+eq = { "0" = [{ type = "embassy" }], "1" = [{ type = "embassy" }] }
+
+[[step]]
+note = "With embassies, friendship."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+  { op = "grant_tech", player = "all", tech = "Writing" },
+  { op = "set_relation", a = 0, b = 1, embassies = true },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=friendly"
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = 'history[0].proposal["0"]'
+eq = [{ type = "declaration_of_friendship" }]
+
+[[step]]
+note = "With agreements the model's, no embassy and no friendship is proposed."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+  { op = "grant_tech", player = "all", tech = "Writing" },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+diplomacy = { agreements = "llm" }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+len = 0
+
+[[step]]
+op = "set_relation"
+args = { a = 0, b = 1, embassies = true }
+
+[[step]]
+op = "end_turn"
+args = { player = 1 }
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=friendly"
+diplomacy = { agreements = "llm" }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+len = 0

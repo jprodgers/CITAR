@@ -1,0 +1,5 @@
+{"format": 1,
+"walk": "blake3 over the canonical walk of the parsed files (DESIGN.md 5.2)",
+"ruleset_id": "3b89bbdfb807639c32c28f6c0ad8d1d2935355d61f86d43994fff824e5d8a389",
+"version": "2-3b89bbdfb807",
+"counts": {"techs":80,"units":127,"buildings":124,"nations":83,"policies":60}}

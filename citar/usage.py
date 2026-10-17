@@ -1,6 +1,13 @@
-"""Usage ledger: what every activity (game, benchmark game, probe run, lab game, report) used on which server, over
+"""Usage ledger: what every activity (game, benchmark game, probe run, lab game, report) held on which server, over
 time. Costs are *not* stored here: reports price the ledger with the server configs in force at the time, so fixing a
 wrong electricity rate later fixes every report.
+
+The work itself (a model's generation seconds and tokens, the host's CPU seconds) is in the compute ledger
+(``compute_events``, ``citar/ledger.py``; design/phase3-features.md P3.4.7), which costing reads beside this one
+(``read``'s ``work``): this ledger keeps the activities, the time each held a machine, and the power samples. The
+tracker measures the host's CPU per unit of work (``ledger.cpu_unit`` around a drive, an engine call, a chat answer, a
+report's build, a probe case) and, for a game's driver thread, its time outside those units by sampling; at each flush
+it hands the compute ledger one ``cpu`` event per activity.
 
 Files (saves/usage/, JSON lines, one writer per file so processes never interleave):
     server-YYYY-MM.jsonl        written by the CITAR server (games, benchmarks, probes, reports)
@@ -10,9 +17,10 @@ Files (saves/usage/, JSON lines, one writer per file so processes never interlea
 Row kinds:
     {"k": "act", "id", "kind", "name", "parent": {kind, id, name}, "ref": {...}, "t", ...}   an activity; later rows
                                                                                           for the same id update it
-    {"k": "span", "act", "srv", "model", "t0", "t1", "held", "busy", "cpu", "in", "out", "rsn", "cr", "cw", "req"}
-        one flush window (about a minute): seconds the activity held the server, seconds the model was generating,
-        CPU seconds on the host, tokens (input, output, reasoning, cache read, cache write) and model requests
+    {"k": "span", "act", "srv", "t0", "t1", "held"}
+        one flush window (about a minute): seconds the activity held the server. Spans written before package 3-10
+        also carry "model", "busy" (generation seconds), "cpu" (host CPU seconds) and tokens ("in", "out", "rsn",
+        "cr", "cw", "req"), which costing still reads; the compute ledger holds them now.
     {"k": "pw", "srv", "t0", "t1", "n", "gpu_w", "cpu_util"}    one minute of power samples
 """
 from __future__ import annotations
@@ -55,13 +63,18 @@ def append(writer: str, rows: list[dict]):
             time.sleep(0.1)
 
 
-def read(since: Optional[float] = None, until: Optional[float] = None) -> dict:
-    """All ledger rows between two timestamps: {"acts": {id: merged}, "spans": [...], "power": {srv: [...]}}."""
+def read(since: Optional[float] = None, until: Optional[float] = None, *, work: bool = False) -> dict:
+    """All ledger rows between two timestamps: {"acts": {id: merged}, "spans": [...], "power": {srv: [...]},
+    "work": [...]}. With ``work`` (what costing asks for: ``costing.compute``, a report's ``gather``), ``"work"`` is the
+    compute ledger's events in the range, in a span's shape (``work_rows``): the generation seconds, CPU seconds and
+    tokens costing prices; empty without a database, and without ``work`` (the activities alone are wanted, and every
+    model step is an event)."""
     acts: dict = {}
     spans: list = []
     power: dict = defaultdict(list)
+    done = work_rows(since, until) if work else []
     if not USAGE_DIR.exists():
-        return {"acts": acts, "spans": spans, "power": power}
+        return {"acts": acts, "spans": spans, "power": power, "work": done}
     lo = _month(since) if since else "0000-00"
     hi = _month(until) if until else "9999-99"
     for p in sorted(USAGE_DIR.glob("*.jsonl")):
@@ -94,21 +107,82 @@ def read(since: Optional[float] = None, until: Optional[float] = None) -> dict:
                 if (since and r["t1"] < since) or (until and r["t0"] > until):
                     continue
                 power[r["srv"]].append(r)
-    return {"acts": acts, "spans": spans, "power": dict(power)}
+    return {"acts": acts, "spans": spans, "power": dict(power), "work": done}
+
+
+#: The window a CPU event's seconds are spread over by costing when it names none (its ``observed_s``: the tracker's
+#: flush window, about a minute; a lab game's wall time), and the longest window a CPU event is looked for over.
+CPU_WINDOW_SECONDS = 60.0
+MAX_CPU_WINDOW_SECONDS = 7 * 86400.0
+
+
+def work_rows(since: Optional[float] = None, until: Optional[float] = None) -> list:
+    """The compute ledger's events between two timestamps as costing reads work (P3.4.7): one row per event,
+    ``{"act", "srv", "model", "t0", "t1", "busy", "cpu", "in", "out", "rsn", "cr", "cw", "req"}``, a model step's
+    generation seconds ending when it did, a CPU event's seconds over the window it was measured in (its
+    ``observed_s``: the tracker's flush window, a lab game's whole run; a minute when it names none). Empty in a
+    process without the server's database."""
+    from . import db
+    if not db.configured():
+        return []
+    try:
+        from datetime import timezone
+        from sqlalchemy import and_, or_, select
+        from .db.models import ComputeEvent
+        q = select(ComputeEvent.activity, ComputeEvent.machine_id, ComputeEvent.model, ComputeEvent.at,
+                   ComputeEvent.kind, ComputeEvent.gen_s, ComputeEvent.cpu_core_s, ComputeEvent.tokens_in,
+                   ComputeEvent.tokens_out, ComputeEvent.tokens_reasoning, ComputeEvent.tokens_cache_read,
+                   ComputeEvent.tokens_cache_write, ComputeEvent.observed_s)
+        if since is not None:
+            q = q.where(ComputeEvent.at >= datetime.fromtimestamp(since, timezone.utc))
+        if until is not None:
+            # an event ends at ``at``; one ending after ``until`` still counts when its window began before it (a lab
+            # game's CPU over its whole run)
+            q = q.where(or_(ComputeEvent.at <= datetime.fromtimestamp(until + CPU_WINDOW_SECONDS, timezone.utc),
+                            and_(ComputeEvent.kind == "cpu", ComputeEvent.observed_s > CPU_WINDOW_SECONDS,
+                                 ComputeEvent.at <= datetime.fromtimestamp(until + MAX_CPU_WINDOW_SECONDS,
+                                                                           timezone.utc))))
+        out = []
+        with db.session() as s:
+            for act, srv, model, at, kind, gen, cpu, tin, tout, rsn, cr, cw, observed in s.execute(q):
+                t1 = at.timestamp()
+                if kind == "cpu":
+                    window = float(observed) if observed and observed > 0 else CPU_WINDOW_SECONDS
+                    t0 = t1 - min(window, MAX_CPU_WINDOW_SECONDS)
+                    if until is not None and t0 > until:
+                        continue
+                    out.append({"act": act, "srv": srv, "t0": t0, "t1": t1, "busy": 0.0, "cpu": float(cpu or 0.0)})
+                else:
+                    out.append({"act": act, "srv": srv, "model": model or "?", "t0": t1 - max(float(gen or 0.0), 1e-3),
+                                "t1": t1, "busy": float(gen or 0.0), "cpu": 0.0, "in": int(tin or 0),
+                                "out": int(tout or 0), "rsn": int(rsn or 0), "cr": int(cr or 0), "cw": int(cw or 0),
+                                "req": 1})
+        return out
+    except Exception:
+        import logging
+        logging.getLogger("citar.usage").warning("could not read the compute ledger's events", exc_info=True)
+        return []
 
 
 # ----------------------------------------------------------------------------- the tracker (server process)
 class Tracker:
-    """Collects usage in the CITAR server process and writes it to the ledger about once a minute."""
+    """Collects usage in the CITAR server process and writes it to the ledger about once a minute: the time each
+    activity held a machine (sampled), and the host's CPU each spent (per unit of work, ``ledger.cpu_unit``, and a
+    game driver's time outside its units, sampled), which goes to the compute ledger."""
 
     def __init__(self, writer: str = "server"):
         self.writer = writer
         self.lock = threading.RLock()
         self.holders: dict[str, tuple] = {}               # key -> (act, fn() -> {srv: {"threads": [...]}} or None)
-        self.acc: dict = defaultdict(lambda: {"held": 0.0, "busy": 0.0, "cpu": 0.0, "models": defaultdict(lambda: defaultdict(float))})
+        self.acc: dict = defaultdict(lambda: {"held": 0.0})           # (act, srv) -> seconds held this window
+        self.cpu_acc: dict = defaultdict(float)                         # act -> CPU seconds this window
         self.window_start = time.time()
         self._last_sample = time.time()
-        self._thread_cpu: dict = {}                        # native thread id -> last cpu seconds
+        #: Per sampled thread: its CPU total and its units' total when it was last charged.
+        self._thread_cpu: dict = {}
+        #: Per thread: the CPU seconds of its units of work that have ended, and whether one runs on it now.
+        self._unit_cpu: dict = defaultdict(float)
+        self._open_units: dict = {}
         self._rows: list = []
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -147,24 +221,18 @@ class Tracker:
         if fn is not None:
             self._sample()
 
-    # ---- model calls
-    def llm(self, act_id: Optional[str], server_id: Optional[str], model: Optional[str], seconds: float,
-            input_tokens: int = 0, output_tokens: int = 0, reasoning_tokens: int = 0, cache_read: int = 0,
-            cache_write: int = 0, requests: int = 1):
-        """Record one model call: which server and model, how long, and how many tokens."""
-        if not act_id:
-            return
+    # ---- the host's CPU, per unit of work (``ledger.cpu_unit``)
+    def unit_started(self, tid: int, t0: float) -> None:
+        """A unit of work began on thread ``tid``: until it ends, sampling leaves that thread's time to it."""
         with self.lock:
-            a = self.acc[(act_id, server_id or "unassigned")]
-            a["busy"] += max(0.0, seconds)
-            m = a["models"][model or "?"]
-            m["busy"] += max(0.0, seconds)
-            m["in"] += input_tokens or 0
-            m["out"] += output_tokens or 0
-            m["rsn"] += reasoning_tokens or 0
-            m["cr"] += cache_read or 0
-            m["cw"] += cache_write or 0
-            m["req"] += requests
+            self._open_units[tid] = t0
+
+    def unit_ended(self, tid: int, act: str, seconds: float) -> None:
+        """A unit of work on thread ``tid`` used ``seconds`` of its CPU, for ``act``."""
+        with self.lock:
+            self._open_units.pop(tid, None)
+            self._unit_cpu[tid] += seconds
+            self.cpu_acc[act] += seconds
         self.start()
 
     # ---- background
@@ -218,46 +286,55 @@ class Tracker:
                 continue
             for srv, info in held.items():
                 with self.lock:
-                    a = self.acc[(act, srv)]
-                    a["held"] += dt
+                    self.acc[(act, srv)]["held"] += dt
                     for tid in (info or {}).get("threads") or []:
                         cur = times.get(tid)
-                        if cur is None:
-                            continue
-                        prev = self._thread_cpu.get(tid)
-                        self._thread_cpu[tid] = cur
-                        if prev is not None and cur >= prev:
-                            a["cpu"] += cur - prev
+                        if cur is not None:
+                            self._charge_thread(act, tid, cur)
         with self.lock:
             for act in done:
                 self.holders.pop(act, None)
 
+    def _charge_thread(self, act: str, tid: int, cur: float) -> None:
+        """Charge a game driver's thread's CPU outside its units of work (save writes and the like) to ``act``: its
+        CPU since it was last charged, less what its units measured meanwhile. While a unit runs on it the thread is
+        left for later, so a unit straddling a sample is never counted twice. Lock held."""
+        st = self._thread_cpu.get(tid)
+        units = self._unit_cpu[tid]
+        if st is None:
+            self._thread_cpu[tid] = (cur, units)
+            return
+        if tid in self._open_units:
+            return
+        other = (cur - st[0]) - (units - st[1])
+        self._thread_cpu[tid] = (cur, units)
+        if other > 0:
+            self.cpu_acc[act] += other
+
     def flush(self):
-        """Write pending ledger entries to disk."""
+        """Write pending ledger entries to disk (the activities and the time each held a machine), and hand the
+        compute ledger each activity's CPU seconds of the window as one ``cpu`` event on the host."""
         now = time.time()
         with self.lock:
             rows, self._rows = self._rows, []
             t0 = self.window_start
             self.window_start = now
-            acc, self.acc = self.acc, defaultdict(lambda: {"held": 0.0, "busy": 0.0, "cpu": 0.0,
-                                                           "models": defaultdict(lambda: defaultdict(float))})
+            acc, self.acc = self.acc, defaultdict(lambda: {"held": 0.0})
+            cpu, self.cpu_acc = self.cpu_acc, defaultdict(float)
+            # only a sampled thread needs its units' total (against its own baseline): a responder's thread, which
+            # nothing samples, would otherwise stay here for good
+            for tid in [tid for tid in self._unit_cpu if tid not in self._thread_cpu and tid not in self._open_units]:
+                del self._unit_cpu[tid]
         for (act, srv), a in acc.items():
-            base = {"k": "span", "act": act, "srv": srv, "t0": round(t0, 1), "t1": round(now, 1),
-                    "held": round(a["held"], 1), "cpu": round(a["cpu"], 2)}
-            if not a["models"]:
-                if base["held"] or base["cpu"]:
-                    rows.append({**base, "busy": 0.0})
-                continue
-            first = True
-            for model, m in a["models"].items():
-                row = {**base, "model": model, "busy": round(m["busy"], 2),
-                       **{f: int(m[f]) for f in TOKEN_FIELDS if m.get(f)}}
-                if not first:
-                    row["held"] = 0.0          # the hold belongs to the server once, not to each model on it
-                    row["cpu"] = 0.0
-                first = False
-                rows.append(row)
+            if round(a["held"], 1):
+                rows.append({"k": "span", "act": act, "srv": srv, "t0": round(t0, 1), "t1": round(now, 1),
+                             "held": round(a["held"], 1)})
         append(self.writer, rows)
+        if cpu:
+            from . import ledger
+            led = ledger.get()
+            for act, seconds in cpu.items():
+                led.cpu(act, seconds, at=now, window=now - t0)
 
 
 _tracker: Optional[Tracker] = None
@@ -275,12 +352,13 @@ def tracker() -> Tracker:
 
 # ----------------------------------------------------------------------------- game sessions
 def session_servers(s) -> dict:
-    """What a running game session holds right now: the host (its driver thread's CPU) and each LLM seat's server.
-    Returns None when the session is finished (the tracker then drops it)."""
+    """What a running game session holds right now: the host (its driver thread's CPU) and each machine one of its
+    leases is live on (design/phase3-features.md P3.3.5: a seat changed away, eliminated or made way holds nothing).
+    Nothing while it is paused or over; None when the session is finished (the tracker then drops it)."""
     if s.stopped:
         return None
     g = s.game
-    if s.paused or g.s.phase != "playing":
+    if s.paused or g.phase != "playing":
         return {}
     from . import servers as S
     out: dict = {}
@@ -289,9 +367,8 @@ def session_servers(s) -> dict:
     if host:
         drv = getattr(s, "_driver", None)
         out[host] = {"threads": [drv.native_id] if drv is not None and drv.native_id else []}
-    for seat in s.seats:
-        if seat.type == "llm" and seat.llm.get("server_id") and g.player(seat.player).alive:
-            out.setdefault(seat.llm["server_id"], {"threads": []})
+    for server_id in s.leased_machines():
+        out.setdefault(server_id, {"threads": []})
     return out
 
 
@@ -300,8 +377,12 @@ def track_session(s, kind: str = "game", parent: Optional[dict] = None, ref: Opt
     act = getattr(s, "usage_act", None) or f"game:{s.id}"
     s.usage_act = act
     t = tracker()
-    seats = [{"player": seat.player, "type": seat.type, "server_id": seat.llm.get("server_id") if seat.type == "llm" else None,
-              "model": seat.llm.get("model") if seat.type == "llm" else None} for seat in s.seats]
+    # every seat a model plays, with its task class (P3.6.7): its machine is held only while a lease of the game's is
+    # live on it (``session_servers``), and a hybrid seat's prompts are tickets, which hold none
+    seats = [{"player": seat.player, "type": seat.type,
+              "server_id": seat.llm.get("server_id") if seat.model_seat else None,
+              "model": seat.llm.get("model") if seat.model_seat else None,
+              "class": seat.task_class} for seat in s.seats]
     t.activity(act, kind, name or s.name, parent=parent, ref={"game_id": s.id, **(ref or {})}, seats=seats)
     t.register(act, lambda: session_servers(s))
     return act
@@ -312,28 +393,45 @@ def finish_session(s, **fields):
     act = getattr(s, "usage_act", None)
     if not act:
         return
-    g = s.game
-    majors = [p for p in g.s.players if p.kind == "major"]
+    summ = s.game.summary()
+    majors = [p for p in summ["players"] if p["kind"] == "major"]
     t = tracker()
-    t.update(act, turn=g.turn, phase=g.s.phase, winner=g.s.winner, victory=g.s.victory,
-             ended=time.time() if g.s.phase != "playing" else None,
-             alive={str(p.id): p.alive for p in majors}, **fields)
+    t.update(act, turn=summ["turn"], phase=summ["phase"], winner=summ["winner"], victory=summ["victory"],
+             ended=time.time() if summ["phase"] != "playing" else None,
+             alive={str(p["id"]): p["alive"] for p in majors}, **fields)
 
 
 # ----------------------------------------------------------------------------- power sampling
 class PowerSampler:
     """Samples this machine's power draw every few seconds and writes one row a minute: GPU watts (nvidia-smi, all
     GPUs) and CPU utilisation. Only one process on the machine samples at a time (a heartbeat lock file), so the
-    CITAR server and the lab runner can both start one."""
+    CITAR server and the lab runner can both start one.
 
-    def __init__(self, server_id: str, writer_lock: Optional[Path] = None):
+    ``server_id`` None follows the host: whichever machine is the host is looked up at each sample, so a host that
+    appears after the start (a fresh server-mode database's, imported when its first administrator is made) or one an
+    administrator chooses later is sampled from then on, without a restart."""
+
+    def __init__(self, server_id: Optional[str] = None, writer_lock: Optional[Path] = None):
         self.server_id = server_id
-        self.lock_path = writer_lock or USAGE_DIR / f"power-{server_id}.lock"
+        self._writer_lock = writer_lock
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._beat = 0.0
         self.nvsmi = None
         import shutil
         self.nvsmi = shutil.which("nvidia-smi")
+
+    def lock_path(self, server_id: str) -> Path:
+        """The heartbeat file of whoever samples ``server_id``."""
+        return self._writer_lock or USAGE_DIR / f"power-{server_id}.lock"
+
+    def target(self) -> Optional[str]:
+        """The machine sampled now: the one given, or the host (None while there is none)."""
+        if self.server_id:
+            return self.server_id
+        from . import servers as S
+        h = S.host()
+        return h["id"] if h else None
 
     def start(self):
         """Start sampling."""
@@ -345,18 +443,19 @@ class PowerSampler:
         """Stop sampling."""
         self._stop.set()
 
-    def _own_lock(self) -> bool:
+    def _own_lock(self, server_id: str) -> bool:
         """Whether this process is the one sampling, so two CITARs do not both measure."""
         me = f"{os.getpid()}"
+        path = self.lock_path(server_id)
         try:
-            if self.lock_path.exists():
-                txt = self.lock_path.read_text(encoding="utf-8").split()
+            if path.exists():
+                txt = path.read_text(encoding="utf-8").split()
                 if txt and txt[0] != me and time.time() - float(txt[1]) < 45:
                     return False
             # refresh the heartbeat every 20 s, not every sample (the folder may sync to the cloud)
-            if time.time() - getattr(self, "_beat", 0) > 20:
+            if time.time() - self._beat > 20:
                 USAGE_DIR.mkdir(parents=True, exist_ok=True)
-                self.lock_path.write_text(f"{me} {time.time():.0f}", encoding="utf-8")
+                path.write_text(f"{me} {time.time():.0f}", encoding="utf-8")
                 self._beat = time.time()
             return True
         except (OSError, ValueError, IndexError):
@@ -383,13 +482,18 @@ class PowerSampler:
             psutil = None
         gpu, cpu, n = [], [], 0
         start = time.time()
+        current = None
         if psutil:
             psutil.cpu_percent(None)
         while not self._stop.wait(SAMPLE_SECONDS):
             try:
                 from . import servers as S
-                sv = S.find(self.server_id)
-                if sv is None or sv["power"].get("sampling") == "off" or not self._own_lock():
+                sid = self.target()
+                if sid != current:
+                    # another machine (or the first): its own minute, its own heartbeat file
+                    gpu, cpu, n, start, current, self._beat = [], [], 0, time.time(), sid, 0.0
+                sv = S.find(sid) if sid else None
+                if sv is None or sv["power"].get("sampling") == "off" or not self._own_lock(sid):
                     gpu, cpu, n, start = [], [], 0, time.time()
                     continue
                 w = self._gpu_watts()
@@ -399,10 +503,10 @@ class PowerSampler:
                     cpu.append(psutil.cpu_percent(None) / 100.0)
                 n += 1
                 if time.time() - start >= 60:
-                    row = {"k": "pw", "srv": self.server_id, "t0": round(start, 1), "t1": round(time.time(), 1), "n": n,
+                    row = {"k": "pw", "srv": sid, "t0": round(start, 1), "t1": round(time.time(), 1), "n": n,
                            "cpu_util": round(sum(cpu) / len(cpu), 4) if cpu else None,
                            "gpu_w": round(sum(gpu) / len(gpu), 2) if gpu else None}
-                    append(f"power-{self.server_id}", [row])
+                    append(f"power-{sid}", [row])
                     gpu, cpu, n, start = [], [], 0, time.time()
             except Exception:
                 traceback.print_exc()
@@ -411,24 +515,33 @@ class PowerSampler:
 _sampler: Optional[PowerSampler] = None
 
 
-def start_power_sampler():
-    """Sample the host machine's power if the registry has a host with sampling on."""
+def start_power_sampler(follow_host: bool = False):
+    """Sample the host machine's power. ``follow_host`` (the CITAR server): start now whether or not there is a host
+    yet, sampling whichever machine is the host at each sample (``PowerSampler``); otherwise (the lab runner, a
+    process of its own) only when there is a host now, and that one."""
     global _sampler
+    if _sampler is not None:
+        return _sampler
+    if follow_host:
+        _sampler = PowerSampler(None)
+        _sampler.start()
+        return _sampler
     try:
         from . import servers as S
         h = S.host()
     except Exception:
         return None
-    if h is None or _sampler is not None:
-        return _sampler
+    if h is None:
+        return None
     _sampler = PowerSampler(h["id"])
     _sampler.start()
     return _sampler
 
 
-# ----------------------------------------------------------------------------- lab (separate process)
+# ----------------------------------------------------------------------------- lab games (the job dispatcher)
 def lab_game_rows(exp: str, i: int, res: dict, host_id: Optional[str], labels: Optional[list] = None) -> list[dict]:
-    """Ledger rows for one finished lab game (called by the lab runner)."""
+    """Usage rows for one finished lab game, its activity and the time its executor's machine held it (written by the
+    job dispatcher, ``citar.jobs.dispatcher``, as each game's result is accepted)."""
     fin = res.get("finished")
     try:
         t1 = datetime.fromisoformat(fin).timestamp() if fin else time.time()
@@ -443,6 +556,7 @@ def lab_game_rows(exp: str, i: int, res: dict, host_id: Optional[str], labels: O
              "turns": res.get("turns"), "winner_label": res.get("winner_label"), "victory": res.get("victory"),
              "ended": t1, "crash": bool(res.get("crash"))}]
     if host_id and secs > 0:
-        rows.append({"k": "span", "act": act, "srv": host_id, "t0": round(t0, 1), "t1": round(t1, 1), "held": round(secs, 1),
-                     "cpu": round(float(res.get("cpu_s") or secs), 2), "busy": 0.0, "est_cpu": res.get("cpu_s") is None})
+        # its CPU seconds are the compute ledger's (the dispatcher's event for the run, P4.5.7)
+        rows.append({"k": "span", "act": act, "srv": host_id, "t0": round(t0, 1), "t1": round(t1, 1),
+                     "held": round(secs, 1)})
     return rows

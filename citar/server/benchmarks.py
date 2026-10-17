@@ -23,8 +23,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .. import paths
+from .. import fsutil, paths
 from .. import servers as REG
+from . import ownership
 from .session import SAVE_DIR, SessionManager, GameSession
 
 def _bench_dir() -> Path:
@@ -47,6 +48,16 @@ DEFAULT_SETTINGS = {
 
 ACTIVE = ("loading", "running", "resuming", "paused")      # job states that hold a slot on their server
 FINISHED_SESSION_GRACE = 600                                 # seconds a finished benchmark game stays open for viewers
+#: The model seat's statuses that mean it is in the middle of its turn: thinking, or waiting for its machine (the
+#: prompt scheduler's queue, design/phase3-features.md P3.3.3), which a pause's grace waits out the same way; a hybrid
+#: seat's diplomat phase (``diplomat``) too.
+MID_TURN = ("thinking", "queued", "diplomat")
+#: A scenario's modes (design/phase3-features.md P3.6.9): ``full`` seats the model in an LLM seat that plays every turn
+#: (a lease on its machine); ``hybrid`` seats it in a hybrid seat (a bot plays the turns, the model decides the
+#: diplomacy the scenario's ``hybrid`` block hands it, on pooled prompts), paired with a bot-only control game.
+SCENARIO_MODES = ("full", "hybrid")
+#: What a hybrid scenario hands its model unless it says otherwise.
+HYBRID_DEFAULT_OWNERS = "all_but_war"
 
 
 def _new_id(prefix: str = "") -> str:
@@ -69,7 +80,8 @@ BENCH_NATION = "BenchmarkCiv"  # every seat plays the civilization without speci
 
 def default_scenario(**kw) -> dict:
     """A scenario with defaults that produce a short, meaningful benchmark game."""
-    sc = {"id": _new_id("sc_"), "name": "Duel — continents", "enabled": True, "map_size": "duel", "map_type": "continents",
+    sc = {"id": _new_id("sc_"), "name": "Duel — continents", "enabled": True, "mode": "full",
+          "map_size": "duel", "map_type": "continents",
           "speed": BENCH_SPEED, "difficulty": "Prince", "barbarians": "normal", "opponents": 1, "bot_aggression": 0.4,
           "seed": 7, "turn_limit": BENCH_TURNS, "max_turn_minutes": 30,
           "victories": {"Scientific": True, "Cultural": True, "Domination": True, "Diplomatic": True, "Time": True},
@@ -79,10 +91,37 @@ def default_scenario(**kw) -> dict:
     return sc
 
 
+def normalize_scenario_hybrid(block) -> dict:
+    """A hybrid scenario's ``hybrid`` block checked and completed (P3.6.9): ``owners`` a preset or a map, at least one
+    category the model's (``hybrid.normalize_hybrid``; kept as the preset's name when it is one), ``bot_profile`` the
+    hybrid seat's bot (None: the standard profile; "best" is pinned when each job starts, as a seat's is), ``handicap``
+    ``ai`` (the default, as a lobby hybrid seat's) or ``human``, which the control game copies with the scenario's
+    difficulty, ``prompt_every`` (1..50, 10) and ``phase_seconds`` (10..600, 180). The advisor is always off in a
+    benchmark. The opponents keep the scenario's own ``bot_profile``. Raises ValueError with the reason."""
+    from ..agents import hybrid
+    if block is None:
+        block = {}
+    if not isinstance(block, dict):
+        raise ValueError("A hybrid scenario's settings are an object: {\"owners\": ..., \"bot_profile\": ..., "
+                         "\"handicap\": ..., \"prompt_every\": ...}.")
+    checked = hybrid.normalize_hybrid({"owners": block.get("owners", HYBRID_DEFAULT_OWNERS),
+                                       "prompt_every": block.get("prompt_every", hybrid.PROMPT_EVERY_DEFAULT),
+                                       "phase_seconds": block.get("phase_seconds", hybrid.PHASE_SECONDS_DEFAULT),
+                                       "advisor": False}, benchmark=True)
+    profile = block.get("bot_profile")
+    if profile in ("", None):
+        profile = None
+    elif not isinstance(profile, str):
+        raise ValueError("A hybrid scenario's bot_profile is a bot profile's name.")
+    return {"owners": checked.get("preset") or checked["owners"], "bot_profile": profile,
+            "handicap": hybrid.check_handicap(block.get("handicap")), "prompt_every": checked["prompt_every"],
+            "phase_seconds": checked["phase_seconds"]}
+
+
 def _scenario_speed(sc: dict) -> str:
     """The game speed a scenario runs at, defaulting to Quick."""
-    from ..engine.rules import get_rules
-    return get_rules().resolve("speed", sc.get("speed")) or BENCH_SPEED
+    from .. import engine_api
+    return engine_api.resolve_name("speed", sc.get("speed")) or BENCH_SPEED
 
 
 def _seat_nations(sc: dict, n: int) -> list:
@@ -104,21 +143,41 @@ def default_model(model_id: str = "", **kw) -> dict:
 
 
 def resolve_group(group: dict) -> dict:
-    """A suite's server group joined with the registry: display fields and each model's key (so runs keep a readable
-    record even if the registry changes later)."""
-    sv = REG.find(group.get("server_id"))
-    if sv is None:
+    """A suite's machine joined with its row: display fields, how many of its games may run at once (``max_parallel``:
+    the row's slots, ``Server.max_concurrent``) and each model's key, so runs keep a readable record even if the
+    machine changes later. Every machine is a row (design/phase3-features.md P3.2.8) and its ``reach`` decides how
+    its seats play: one CITAR dials names models from its catalogue, with load profiles; a helper machine
+    (``pooled``) names them by key, what its helper reports, with no load profiles, because CITAR does not load or
+    unload models on somebody else's machine."""
+    sid = group.get("server_id")
+    row = REG.machine(sid) if isinstance(sid, str) else None
+    sv = REG.find(sid) if row is not None else None
+    if row is None or sv is None:
+        return {"id": sid, "server_id": sid, "missing": True, "pooled": False, "name": f"(deleted server {sid})",
+                "provider": None, "base_url": None, "max_parallel": 1,
+                "models": [dict(m, missing=True) for m in group.get("models") or [] if isinstance(m, dict)]}
+    helper = row["reach"] == "worker"
+    out = {"id": sid, "server_id": sid, "missing": False, "pooled": helper, "name": sv["name"],
+           "provider": "worker" if helper else sv["connection"]["provider"],
+           "base_url": None if helper else sv["connection"].get("base_url"),
+           "max_parallel": max(1, int(row["max_concurrent"] or 1)), "models": []}
+    known = set()
+    if helper:
         from ..pool import seats as pool_seats
-        pooled = pool_seats.lookup(group.get("server_id"))
-        if pooled is not None:
-            return _resolve_pooled(group, pooled)
-    out = {"id": group.get("server_id"), "server_id": group.get("server_id"), "missing": sv is None,
-           "name": sv["name"] if sv else f"(deleted server {group.get('server_id')})",
-           "provider": sv["connection"]["provider"] if sv else None, "base_url": sv["connection"].get("base_url") if sv else None,
-           "max_parallel": sv["connection"].get("max_parallel", 1) if sv else 1, "models": []}
+        stored = {m.get("key") for m in (row["config"].get("models") or []) if isinstance(m, dict)}
+        known = stored | {m.get("key") for m in pool_seats.live_models(sid)}
     for m in group.get("models") or []:
         mm = dict(m)
-        entry = REG.model_entry(sv, m.get("model_id") or m.get("model")) if sv else None
+        if helper:
+            key = m.get("model") or m.get("model_id")
+            mm["model_id"] = mm["model"] = key
+            mm["profile_id"] = mm["profile_name"] = None
+            mm["label"] = m.get("label") or key
+            if key not in known:
+                mm["missing"] = True
+            out["models"].append(mm)
+            continue
+        entry = REG.model_entry(sv, m.get("model_id") or m.get("model"))
         if entry:
             mm["model_id"], mm["model"] = entry["id"], entry["key"]
             prof = REG.profile(entry, m.get("profile_id"))
@@ -131,32 +190,17 @@ def resolve_group(group: dict) -> dict:
     return out
 
 
-def _resolve_pooled(group: dict, pooled: dict) -> dict:
-    """A suite group on a machine from the Servers page, played through its helper.
-
-    Models are named by key (what the helper reports); there are no load profiles, because CITAR does not
-    load or unload models on somebody else's machine. How many games may run on it at once is its
-    registration's max_parallel.
-    """
-    from ..pool import seats as pool_seats
-    known = {m.get("key") for m in (pooled["config"].get("models") or [])} | \
-        {m.get("key") for m in pool_seats.live_models(pooled["id"])}
-    out = {"id": pooled["id"], "server_id": pooled["id"], "missing": False, "pooled": True, "name": pooled["name"],
-           "provider": "worker", "base_url": None, "max_parallel": pool_seats.max_parallel(pooled), "models": []}
-    for m in group.get("models") or []:
-        mm = dict(m)
-        key = m.get("model") or m.get("model_id")
-        mm["model_id"] = mm["model"] = key
-        mm["profile_id"] = mm["profile_name"] = None
-        mm["label"] = m.get("label") or key
-        if key not in known:
-            mm["missing"] = True
-        out["models"].append(mm)
-    return out
-
-
 def normalize_suite(d: dict) -> dict:
-    """Fill defaults and ids so hand-written or older suite files keep working."""
+    """Fill defaults and ids so hand-written or older suite files keep working. A suite of the wrong shape (a
+    model entry that is a number, a name that is a list...) is a ValueError, which the routes answer with 400."""
+    try:
+        return _normalize_suite(d)
+    except (TypeError, AttributeError) as e:
+        raise ValueError(f"That is not a benchmark suite ({e}).") from None
+
+
+def _normalize_suite(d: dict) -> dict:
+    """``normalize_suite``'s work, on a suite of the right shape."""
     s = {"id": d.get("id") or _new_id("suite_"), "name": (d.get("name") or "Untitled suite").strip()[:80],
          "description": d.get("description") or "", "mode": d.get("mode") if d.get("mode") in ("sequential", "parallel") else "sequential",
          "repeats": max(1, min(20, int(d.get("repeats") or 1))), "created": d.get("created") or _now(), "updated": _now()}
@@ -183,6 +227,14 @@ def normalize_suite(d: dict) -> dict:
         base["turn_limit"] = max(0, int(base.get("turn_limit") or 0))
         base["speed"] = _scenario_speed(base)        # older suites used CIGAR speeds ("normal", ...)
         base.pop("villages", None)
+        base["mode"] = base.get("mode") if base.get("mode") in SCENARIO_MODES else "full"
+        if base["mode"] == "hybrid":
+            try:
+                base["hybrid"] = normalize_scenario_hybrid(base.get("hybrid"))
+            except ValueError as e:
+                raise ValueError(f"Scenario '{base.get('name')}': {e}") from None
+        else:
+            base.pop("hybrid", None)
         s["scenarios"].append(base)
     if not s["scenarios"]:
         s["scenarios"].append(default_scenario())
@@ -224,6 +276,9 @@ class BenchmarkScheduler:
         self._progress_dirty: set[str] = set()
         self._progress_flushed = 0.0
         self._clock = datetime.now     # overridable in tests
+        # the hybrid jobs' bot-only control games, cached here and shared by every model's run (P3.6.9)
+        from .controls import ControlGames
+        self.controls = ControlGames(self.dir / "controls")
         self._load()
         from ..pool import queue as work_queue
         work_queue.register("benchmark", self.queue_items, self.running_items)
@@ -248,7 +303,19 @@ class BenchmarkScheduler:
         if job["status"] != "paused":
             return job["status"]
         return {"restricted": "paused (quiet hours)", "quiet": "paused (quiet hours)", "user": "paused by a person",
-                "disconnect": "paused (model server unreachable)"}.get(job.get("pause_reason"), "paused")
+                "disconnect": "paused (model server unreachable)",
+                "budget": "paused (budget used up)"}.get(job.get("pause_reason"), "paused")
+
+    @staticmethod
+    def _set_waiting(job: dict, note) -> bool:
+        """Set what a queued job waits for (a ``pool.seats.note``, or None): the note, which the runs' route tells each
+        viewer with the names they may see (``work_access.with_waiting``), and its text naming no holder. Returns
+        whether it changed."""
+        if job.get("waiting_note") == note and (note is not None or job.get("waiting") is None):
+            return False
+        from ..pool import seats as pool_seats
+        job["waiting_note"], job["waiting"] = note, pool_seats.note_text(note)
+        return True
 
     @staticmethod
     def _preempted(job: dict) -> bool:
@@ -261,7 +328,8 @@ class BenchmarkScheduler:
                 "label": f"{job['label']} · {job['scenario_name']} #{job['repeat']}",
                 "server_id": self._machine(job) if job.get("game_id") else job["server_key"],
                 "server": job.get("server_name"), "created": job["created"],
-                "waiting": job.get("waiting") or ("paused for higher-priority work" if self._preempted(job) else None)}
+                "waiting": job.get("waiting") or ("paused for higher-priority work" if self._preempted(job) else None),
+                "waiting_note": job.get("waiting_note")}
 
     # ------------------------------------------------------------------ persistence
     def _load(self):
@@ -285,10 +353,11 @@ class BenchmarkScheduler:
                 self._log(f"Could not read run file {p.name}.")
 
     def _write(self, path: Path, data):
-        """Write a JSON file atomically."""
+        """Write a JSON file atomically, retrying while a reader (a report gathering a run, the page listing suites)
+        has it open."""
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-        tmp.replace(path)
+        fsutil.replace(tmp, path)
 
     def _save_run(self, run: dict):
         """Write one run to disk."""
@@ -314,9 +383,10 @@ class BenchmarkScheduler:
         """Mark a run as needing to be written."""
         self._dirty.add(run["id"])
 
-    def _log(self, msg: str):
-        """Append to the scheduler's log, which the Benchmarks page shows."""
-        self.log.append({"t": _now(), "msg": msg})
+    def _log(self, msg: str, run: Optional[str] = None):
+        """Append to the scheduler's log, which the Benchmarks page shows. ``run`` is the run a line is about: a
+        member's page shows only the lines of runs they may see (``status``)."""
+        self.log.append({"t": _now(), "msg": msg, "run": run})
         del self.log[:-200]
 
     # ------------------------------------------------------------------ settings
@@ -343,9 +413,9 @@ class BenchmarkScheduler:
     def list_suites(self) -> list[dict]:
         """Every saved suite, in summary."""
         out = []
-        for p in sorted(self.suites_dir.glob("*.json"), key=lambda p: -p.stat().st_mtime):
+        for p, _ in fsutil.newest_first(self.suites_dir.glob("*.json")):
             try:
-                s = json.loads(p.read_text(encoding="utf-8"))
+                s = json.loads(fsutil.read_text(p))       # one being saved would drop out of the list
                 out.append({"id": s["id"], "name": s["name"], "description": s.get("description", ""),
                             "updated": s.get("updated"), "mode": s.get("mode"),
                             "servers": [{"name": g["name"], "server_id": g["server_id"], "missing": g["missing"],
@@ -363,7 +433,7 @@ class BenchmarkScheduler:
         The id reaches this from a URL, so it is validated rather than trusted - a path separator here
         would be a way to read or write files outside the benchmark directory.
         """
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", suite_id or ""):
+        if not isinstance(suite_id, str) or not re.fullmatch(r"[A-Za-z0-9_\-]+", suite_id):
             raise KeyError(suite_id)
         return self.suites_dir / f"{suite_id}.json"
 
@@ -372,7 +442,7 @@ class BenchmarkScheduler:
         p = self._suite_path(suite_id)
         if not p.exists():
             raise KeyError(suite_id)
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(fsutil.read_text(p))
 
     def save_suite(self, data: dict) -> dict:
         """Create or replace a suite, after validating it."""
@@ -394,8 +464,14 @@ class BenchmarkScheduler:
         return models * scen * max(1, int(suite.get("repeats") or 1))
 
     # ------------------------------------------------------------------ runs
-    def create_run(self, suite: dict, name: Optional[str] = None) -> dict:
-        """Expand a suite into a run with one job per game."""
+    def create_run(self, suite: dict, name: Optional[str] = None, *, owner_id: Optional[str] = None,
+                   session=None) -> dict:
+        """Expand a suite into a run with one job per game. ``owner_id`` is the account starting it: the run is theirs
+        (design/phase3-features.md P3.2.4), its file records them, and its games' rows in the games index are theirs
+        too, at the run's visibility. With ``session`` (a request's), the run's row in ``owned_items`` is written and
+        committed there before any job can start: a job's thread writes its game's row while it holds this
+        scheduler's lock, so a request must not hold an open write while it waits for that lock (``tick``). A run made
+        without one (a script, a test) has no row until adoption gives it one, to the owner its file records."""
         suite = normalize_suite(suite)
         suite["servers"] = [resolve_group(g) for g in suite["servers"]]
         missing = [f"{g['name']}: {m.get('model') or m.get('model_id')}" for g in suite["servers"]
@@ -408,7 +484,7 @@ class BenchmarkScheduler:
                 for sv in suite["servers"]:
                     for m in [x for x in sv["models"] if x.get("enabled", True)]:
                         seed = sc.get("seed")
-                        jobs.append({
+                        job = {
                             "id": _new_id("job_"), "server_id": sv["id"], "server_name": sv["name"],
                             "server_key": sv["id"], "model_id": m["id"], "model": m["model"],
                             "profile": m.get("profile_name"),
@@ -416,15 +492,27 @@ class BenchmarkScheduler:
                             "repeat": rep + 1, "seed": (int(seed) + rep) if seed not in (None, "") else None,
                             "status": "queued", "pause_reason": None, "game_id": None, "created": _now(),
                             "started": None, "finished": None, "error": None, "result": None, "progress": None,
-                        })
+                            "mode": sc.get("mode") or "full",
+                        }
+                        if job["mode"] == "hybrid":
+                            from ..diplomacy_stats import owners_label
+                            # who decides what, as the leaderboard files the pair (a preset's name, or "custom")
+                            job["owners"] = owners_label(sc["hybrid"]["owners"])
+                        jobs.append(job)
         if not jobs:
             raise ValueError("This suite has no enabled models and scenarios to run.")
         run = {"id": _new_id("run_"), "name": name or suite["name"], "suite_id": suite["id"], "suite": suite,
-               "status": "running", "created": _now(), "started": _now(), "finished": None, "jobs": jobs}
+               "owner_id": owner_id, "status": "running", "created": _now(), "started": _now(), "finished": None,
+               "jobs": jobs}
+        if session is not None:
+            from .. import items
+            items.register(session, "benchmark_run", run["id"], owner_id, run["name"],
+                           path=self.runs_dir / f"{run['id']}.json")
+            session.commit()
         with self.lock:
             self.runs[run["id"]] = run
             self._touch(run)
-            self._log(f"Started run '{run['name']}' with {len(jobs)} jobs.")
+            self._log(f"Started run '{run['name']}' with {len(jobs)} jobs.", run["id"])
             self._flush()
         self.tick()
         return run
@@ -520,6 +608,8 @@ class BenchmarkScheduler:
             elif action == "retry" and job["status"] in ("failed", "cancelled"):
                 job.update({"status": "queued", "pause_reason": None, "game_id": None, "started": None, "finished": None,
                             "error": None, "result": None, "progress": None})
+                job.pop("control", None)        # a hybrid job's control is asked for again when it starts
+                job.pop("seed_used", None)
                 if run["status"] in ("done", "cancelled"):
                     run["status"], run["finished"] = "running", None
             else:
@@ -534,7 +624,10 @@ class BenchmarkScheduler:
         if job["status"] in ("running", "resuming"):
             s = self.manager.get(job["game_id"]) if job["game_id"] else None
             if s is not None:
-                s.suspend({"kind": "queue", "message": f"making way for {first['label']} (priority {first['priority']})"}
+                # the game's pause is shown to whoever may watch it: the work it makes way for is named by its kind
+                from ..pool import seats as pool_seats
+                what = pool_seats.kind_text(pool_seats.queue_holder(first)) if first else ""
+                s.suspend({"kind": "queue", "message": f"making way for {what} (priority {first['priority']})"}
                           if reason == "preempted" and first else None)
             job["status"], job["pause_reason"] = "paused", reason
         elif job["status"] == "paused" and reason == "user":
@@ -550,10 +643,10 @@ class BenchmarkScheduler:
         if s is not None:
             self._record_progress(run, job, s)
             try:
-                s.save("benchmark")
+                # saved as it stops, so no round its bots play after it is autosaved past it (GameSession.stop)
+                self.manager.delete(s.id, save_as="benchmark")
             except Exception:
                 pass
-            self.manager.delete(s.id)
         job.update({"status": "cancelled", "finished": _now(), "error": why, "pause_reason": None})
 
     def open_job_game(self, run_id: str, job_id: str) -> GameSession:
@@ -566,9 +659,15 @@ class BenchmarkScheduler:
             if s is not None:
                 return s
             folder = SAVE_DIR / job["game_id"]
-            for name in ("benchmark.citar", "autosave.citar"):
+            # a game the engine stopped shows as it stopped (its crash save loads read-only), not as its last autosave
+            crashes = sorted(p.name for p in folder.glob("crash-*.citar"))
+            for name in ("benchmark.citar", *crashes[-1:], "autosave.citar"):
                 if (folder / name).exists():
-                    s = self.manager.load(folder / name)
+                    # a job that is over is only looked at: its game holds no machine (P3.3.3), so a cancelled job's
+                    # benchmark lease never holds pooled prompts off the machine while somebody watches its recap
+                    s = self.manager.load(folder / name, leases=job["status"] not in ("done", "failed", "cancelled"))
+                    s.owner_id = run.get("owner_id") or s.owner_id
+                    ownership.claim_quietly(s, run.get("owner_id"), item=("benchmark_run", run["id"]))
                     if job["status"] in ("done", "failed", "cancelled"):
                         job["closed_view_at"] = _now()
                     return s
@@ -584,8 +683,10 @@ class BenchmarkScheduler:
         self._thread.start()
 
     def stop(self):
-        """Stop the scheduler thread and let running games finish their current turn."""
+        """Stop the scheduler thread and let running games finish their current turn. A control game under way is
+        dropped, and played again when its job next asks for it."""
         self._stop.set()
+        self.controls.stop()
 
     def _loop(self):
         """The scheduler thread: tick, sleep, repeat."""
@@ -611,13 +712,15 @@ class BenchmarkScheduler:
                                     "finished": _now()})
                     elif self.manager.get(job["game_id"]) is None:
                         try:
-                            self.manager.load(path)   # loads paused
+                            reloaded = self.manager.load(path)   # loads paused
+                            reloaded.owner_id = run.get("owner_id") or reloaded.owner_id
+                            ownership.claim_quietly(reloaded, run.get("owner_id"), item=("benchmark_run", run["id"]))
                         except Exception as e:
                             job.update({"status": "failed", "error": f"Could not reload the game: {e}", "finished": _now()})
                             continue
                         if job["status"] != "paused" or job["pause_reason"] != "user":
                             job["status"], job["pause_reason"] = "resuming", None
-                        self._log(f"Reloaded {job['label']} / {job['scenario_name']} after restart.")
+                        self._log(f"Reloaded {job['label']} / {job['scenario_name']} after restart.", run["id"])
                     self._touch(run)
             self._flush()
 
@@ -625,12 +728,17 @@ class BenchmarkScheduler:
         """One pass: check running jobs, start what can start, write what changed."""
         with self.lock:
             self._check_restrictions()
+            wanted: set = set()
             for run in sorted(self.runs.values(), key=lambda r: r["created"]):
                 if run["status"] in ("running", "paused"):
                     self._check_jobs(run)
                 else:
                     for job in run["jobs"]:
                         self._close_finished_view(job)
+                wanted |= self._check_controls(run)
+            # a control no job can pair with any more (its jobs cancelled, skipped or failed, or their runs deleted) is
+            # not played for nobody
+            self.controls.keep_only(wanted)
             self._start_jobs()
             self._flush()
 
@@ -655,7 +763,8 @@ class BenchmarkScheduler:
                             self._request_resume(run, job)
                             self._touch(run)
         for sid, st in list(self._restricted.items()):
-            sv = REG.find(sid)     # None for a Servers-page machine: its helper keeps its models loaded
+            # a helper machine's models are its helper's: CITAR never unloads them (its owner's quiet hours hold)
+            sv = None if REG.is_helper(sid) else REG.find(sid)
             grace = float(REG.restriction_config(sid).get("grace_minutes", 15)) * 60
             pending = False
             for run in self.runs.values():
@@ -670,8 +779,8 @@ class BenchmarkScheduler:
                         pending = True
                         continue
                     s = self.manager.get(job["game_id"]) if job["game_id"] else None
-                    mid_turn = bool(s and s.game.s.current == (s.benchmark or {}).get("llm_player", 0)
-                                    and s.agent_status.get((s.benchmark or {}).get("llm_player", 0)) == "thinking")
+                    mid_turn = bool(s and s.game.current == (s.benchmark or {}).get("llm_player", 0)
+                                    and s.agent_status.get((s.benchmark or {}).get("llm_player", 0)) in MID_TURN)
                     if mid_turn and _now() - st["since"] < grace:
                         pending = True
                         job["pause_pending"] = "restricted"
@@ -707,7 +816,10 @@ class BenchmarkScheduler:
                 job.update({"status": "cancelled", "error": "The game was closed.", "finished": _now()})
                 self._touch(run)
                 continue
-            if s.game.s.phase != "playing" or not s.game.player((s.benchmark or {}).get("llm_player", 0)).alive:
+            if s.crashed:
+                self._fail_crashed(run, job, s)
+                continue
+            if s.game.phase != "playing" or not s.game.is_alive((s.benchmark or {}).get("llm_player", 0)):
                 # once the model is eliminated the result is settled (performance 0), and the bots playing
                 # on would only hold the machine and the CPU for nothing
                 self._finish_job(run, job, s)
@@ -720,8 +832,9 @@ class BenchmarkScheduler:
                 # paused from the game screen, or by the game itself when a model server went away
                 job["status"], job["pause_reason"] = "paused", (s.pause_reason or {}).get("kind") or "user"
                 self._touch(run)
-            elif job["status"] == "paused" and job["pause_reason"] in ("user", "disconnect") and not s.paused:
-                job["status"], job["pause_reason"] = "running", None     # resumed from the game screen
+            elif job["status"] == "paused" and job["pause_reason"] in ("user", "disconnect", "budget") and not s.paused:
+                # resumed from the game screen, or by the game itself (its budget's period turned)
+                job["status"], job["pause_reason"] = "running", None
                 self._touch(run)
             self._queue_turn(run, job, s)
             if _now() - self._progress_at.get(job["id"], 0) > 5:
@@ -729,7 +842,7 @@ class BenchmarkScheduler:
         states = [j["status"] for j in run["jobs"]]
         if run["status"] == "running" and all(st in ("done", "failed", "cancelled") for st in states):
             run["status"], run["finished"] = "done", _now()
-            self._log(f"Run '{run['name']}' finished.")
+            self._log(f"Run '{run['name']}' finished.", run["id"])
             self._touch(run)
 
     PREEMPT_GRACE = 900        # seconds a model's turn in progress may run on before higher-priority work takes over
@@ -753,7 +866,7 @@ class BenchmarkScheduler:
                     self._touch(run)
                 return
             pid = (s.benchmark or {}).get("llm_player", 0)
-            mid_turn = s.game.s.current == pid and s.agent_status.get(pid) == "thinking"
+            mid_turn = s.game.current == pid and s.agent_status.get(pid) in MID_TURN
             since = job.setdefault("preempt_since", _now())
             if mid_turn and _now() - since < self.PREEMPT_GRACE:
                 if job.get("pause_pending") != "preempted":
@@ -763,15 +876,18 @@ class BenchmarkScheduler:
             job.pop("pause_pending", None)
             job.pop("preempt_since", None)
             self._pause_job(job, "preempted", first)
+            # the run's log is read by whoever may see the run: the work it made way for is named by its kind only
             self._log(f"{job['label']} · {job['scenario_name']} #{job['repeat']} paused on {job['server_name']} "
-                      f"for {first['label']} (priority {first['priority']}).")
+                      f"for {pool_seats.kind_text(pool_seats.queue_holder(first))} (priority {first['priority']}).",
+                      run["id"])
             self._touch(run)
         elif self._preempted(job) and run["status"] == "running" and machine not in self._restricted:
             ours = frozenset(j["game_id"] for r in self.runs.values() for j in r["jobs"] if j.get("game_id"))
             limit = self._server(run, job).get("max_parallel", 1)
             in_use = sum(1 for r in self.runs.values() for j in r["jobs"]
                          if j["status"] in ACTIVE and not self._preempted(j) and self._machine(j) == machine)
-            if in_use + len(pool_seats.occupied(machine, exclude=ours)) >= limit:
+            held = pool_seats.occupants(machine, exclude=ours)
+            if in_use + len(held) >= limit or self._mode_wait(run, job, machine, held) is not None:
                 return
             if work_queue.first_ahead(machine, (-prio, job["created"]), exclude=("benchmark", job["id"])) is None:
                 self._request_resume(run, job)
@@ -798,11 +914,12 @@ class BenchmarkScheduler:
                     busy[job["server_key"]] = busy.get(job["server_key"], 0) + 1
                 if job.get("game_id"):
                     ours.add(job["game_id"])
-        # Games that are not ours - somebody's lobby game, a probe - hold their machine too. A queued job
+        # Games that are not ours - somebody's lobby game, a probe run, a report's narrative - hold their machine too:
+        # each lease live on it counts against the machine's limit (design/phase3-features.md P3.3.5). A queued job
         # waits for them rather than fighting a running game for the machine's slot.
         others: dict[str, list] = {}
         for sid in {j["server_key"] for r in self.runs.values() for j in r["jobs"] if j["status"] == "queued"}:
-            others[sid] = pool_seats.occupied(sid, exclude=frozenset(ours))
+            others[sid] = pool_seats.occupants(sid, exclude=frozenset(ours))
         from ..pool import queue as work_queue
         for run in sorted(self.runs.values(), key=lambda r: (-work_queue.priority("benchmark", r["id"]), r["created"])):
             if run["status"] != "running":
@@ -819,19 +936,24 @@ class BenchmarkScheduler:
                 limit = self._server(run, job).get("max_parallel", 1)
                 held = others.get(job["server_key"]) or []
                 if busy.get(job["server_key"], 0) + len(held) >= limit:
-                    note = f"waiting: {job['server_name']} is in use by {', '.join(held)}" if held else None
-                    if job.get("waiting") != note:
-                        job["waiting"] = note
+                    note = pool_seats.note(f"waiting: {job['server_name']} is in use by ",
+                                           pool_seats.distinct(held)) if held else None
+                    if self._set_waiting(job, note):
+                        self._touch(run)
+                    continue
+                why = self._mode_wait(run, job, job["server_key"], held)
+                if why is not None:
+                    if self._set_waiting(job, why):
                         self._touch(run)
                     continue
                 first = work_queue.ahead_of(job["server_key"], "benchmark", (-prio, job["created"]))
                 if first is not None:
-                    note = f"waiting: {first['label']} goes first on {job['server_name']} (priority {first['priority']})"
-                    if job.get("waiting") != note:
-                        job["waiting"] = note
+                    note = pool_seats.note("waiting: ", [pool_seats.queue_holder(first)],
+                                           f" goes first on {job['server_name']} (priority {first['priority']})")
+                    if self._set_waiting(job, note):
                         self._touch(run)
                     continue
-                job["waiting"] = None
+                self._set_waiting(job, None)
                 busy[job["server_key"]] = busy.get(job["server_key"], 0) + 1
                 run_busy += 1
                 job["status"] = "loading"
@@ -839,6 +961,34 @@ class BenchmarkScheduler:
                 self._touch(run)
                 threading.Thread(target=self._in_job_thread,
                                  args=(self._launch_job, run["id"], job["id"]), daemon=True).start()
+
+    def _mode_wait(self, run: dict, job: dict, machine: str, held: list) -> Optional[dict]:
+        """Why ``job`` may not start (or resume) on ``machine`` beside the work of the other mode, as a waiting note
+        (``pool.seats.note``), or None (design/phase3-features.md P3.3.5, P3.6.9). A hybrid job holds no lease but counts
+        against its machine's job limit like any job (``_start_jobs``' ``busy``), and it never starts where a benchmark
+        lease is live, a full job of this scheduler's (active, paused for a person or quiet hours: it keeps its slot) or
+        anyone's (``held``: the machine's other leases): its prompts wait for benchmarks, so beside a full job they
+        would sit behind its steps for hours. And a full job never starts beside an active hybrid job of this
+        scheduler, whose prompts it would hold off the machine (its lease never lends, and drains pooled work first)."""
+        from ..pool import seats as pool_seats
+        # each job by the machine it really plays on (``_machine``: a machine registered again has a new id), as the
+        # resume path's ``machine`` is, so the rule holds there too
+        ours = [(r, j) for r in self.runs.values() for j in r["jobs"]
+                if j is not job and j["status"] in ACTIVE and not self._preempted(j) and self._machine(j) == machine]
+        if job.get("mode") == "hybrid":
+            holders = [{"kind": "benchmark", "id": r["id"], "label": f"benchmark run “{r['name']}”"}
+                       for r, j in ours if j.get("mode", "full") != "hybrid"]
+            holders += [h for h in pool_seats.distinct(held) if h.get("kind") == "benchmark"]
+            if holders:
+                return pool_seats.note(f"waiting: {job['server_name']} plays a full benchmark for ",
+                                       pool_seats.distinct(holders))
+        else:
+            holders = [{"kind": "benchmark", "id": r["id"], "label": f"benchmark run “{r['name']}”"}
+                       for r, j in ours if j.get("mode") == "hybrid"]
+            if holders:
+                return pool_seats.note(f"waiting: {job['server_name']} plays a hybrid benchmark for ",
+                                       pool_seats.distinct(holders))
+        return None
 
     # ------------------------------------------------------------------ job threads
     def _in_job_thread(self, what, run_id: str, job_id: str):
@@ -861,22 +1011,26 @@ class BenchmarkScheduler:
                 try:
                     run, job = self._job(run_id, job_id)
                 except KeyError:
-                    self._log(f"job thread failed after the run went away: {detail}")
+                    self._log(f"job thread failed after the run went away: {detail}", run_id)
                     return
                 job.update({"status": "failed", "error": detail, "finished": _now()})
-                self._log(f"{job.get('label', job_id)}: {detail}")
-                self.log.append({"t": _now(), "msg": traceback.format_exc()})
+                self._log(f"{job.get('label', job_id)}: {detail}", run_id)
+                self._log(traceback.format_exc(), run_id)
                 self._touch(run)
                 self._flush()
 
     def _ensure_model(self, run: dict, job: dict) -> float:
-        """Load the model a job needs, if CITAR manages loading on that server."""
+        """Load the model a job needs, if CITAR manages loading on that server. A hybrid job starts beside the machine's
+        lobby games and pooled prompts (it waits only for benchmark leases and the job limit, P3.3.5), so it loads its
+        model beside theirs (``shared``): it never unloads another model, nor reloads its own with another context,
+        under work it must not stop (P3.3.6)."""
         if self._server(run, job).get("pooled"):
             return 0.0              # somebody else's machine: its owner decides what is loaded
         sv = REG.get(job["server_id"])
         m = self._model_cfg(run, job)
         entry = REG.model_entry(sv, m.get("model_id") or m["model"])
-        return REG.ensure_model(sv, m["model"], REG.profile(entry, m.get("profile_id")))
+        return REG.ensure_model(sv, m["model"], REG.profile(entry, m.get("profile_id")),
+                                shared=job.get("mode") == "hybrid")
 
     def _llm_config(self, run: dict, job: dict) -> dict:
         """The seat's llm block: a reference into the registry plus suite overrides (resolved when the agent starts)."""
@@ -899,10 +1053,14 @@ class BenchmarkScheduler:
         try:
             load_s = self._ensure_model(run, job)
             llm = self._llm_config(run, job)
+            # its machine's standing as the job starts (P4.5.8 rule 11): whether its results count toward the global
+            # boards; a database read, so off the scheduler's lock
+            from ..jobs import trust
+            standing = trust.standing(job.get("server_id"))
         except Exception as e:
             with self.lock:
                 job.update({"status": "failed", "error": str(e), "finished": _now()})
-                self._log(f"{job['label']}: {e}")
+                self._log(f"{job['label']}: {e}", run["id"])
                 self._touch(run)
                 self._flush()
             return
@@ -924,13 +1082,29 @@ class BenchmarkScheduler:
                       **{k: sc[k] for k in ("map_edges", "river_density", "resources") if sc.get(k) is not None}}
             n_opp = int(sc.get("opponents") or 1)
             nations = _seat_nations(sc, n_opp + 1)
-            seats = [{"type": "llm", "civ_name": None, "llm": llm, "nation": nations[0]}]
+            hybrid = job.get("mode") == "hybrid"
+            if hybrid:
+                # the model as a hybrid seat with the advisor off (P3.6.9): its bot plays the turns, its model decides
+                # what the scenario hands it, on prompts that wait for benchmarks with no start deadline. The seed is
+                # drawn here when the scenario gives none, so the control game plays the very same game.
+                h = sc["hybrid"]
+                if config["seed"] is None:
+                    config["seed"] = secrets.randbelow(2 ** 31)
+                    job["seed_used"] = config["seed"]
+                seats = [{"type": "hybrid", "civ_name": None, "llm": llm, "nation": nations[0],
+                          "bot": {"aggression": float(sc.get("bot_aggression", 0.4)), "profile": h.get("bot_profile")},
+                          "handicap": h["handicap"],
+                          "hybrid": {"owners": h["owners"], "prompt_every": h["prompt_every"],
+                                     "phase_seconds": h["phase_seconds"], "advisor": False}}]
+            else:
+                seats = [{"type": "llm", "civ_name": None, "llm": llm, "nation": nations[0]}]
             seats += [{"type": "bot", "civ_name": None, "nation": nations[i + 1],
                        "difficulty": sc.get("bot_difficulty") or None,
                        "bot": {"aggression": float(sc.get("bot_aggression", 0.4)),
                                "profile": sc.get("bot_profile") or None}} for i in range(n_opp)]
             try:
                 s = self.manager.create(config, seats, name=f"Bench · {job['label']} · {sc['name']}"
+                                                            + (" (hybrid)" if hybrid else "")
                                                             + (f" #{job['repeat']}" if run["suite"]["repeats"] > 1 else ""),
                                         track=False, start=False)
             except Exception as e:
@@ -939,15 +1113,32 @@ class BenchmarkScheduler:
                 self._flush()
                 return
             s.ai_delay = 0
+            s.owner_id = run.get("owner_id")
+            if standing is not None:
+                job["standing"] = standing
+                s.machines[job["server_id"]] = dict(standing)
             s.benchmark = {"run_id": run["id"], "job_id": job["id"], "run_name": run["name"], "suite_id": run["suite_id"],
                            "scenario": sc["name"], "scenario_id": sc["id"], "model": job["model"], "server": job["server_name"],
-                           "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.total_turns(),
-                           "server_id": job["server_id"], "profile": job.get("profile")}
+                           "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.turn_limit,
+                           "server_id": job["server_id"], "profile": job.get("profile"), "mode": job.get("mode", "full")}
+            if hybrid:
+                s.benchmark["owners"] = job.get("owners")
+                try:
+                    # its control: the same game with the seat's bot deciding everything, played on the CPU meanwhile
+                    # (or already played for another model's job of this scenario and seed)
+                    from .controls import control_spec
+                    job["control"] = {"id": self.controls.ensure(control_spec(s.engine_config, s.seats, 0)),
+                                      "status": "queued"}
+                except Exception as e:
+                    job["control"] = {"id": None, "status": "failed", "error": f"{type(e).__name__}: {e}"[:300]}
+                    self._log(f"{job['label']}: its control game could not be set up: {e}", run["id"])
+            # the run's owner owns its games' rows, at the run's visibility (P3.2.4), before the first save syncs them
+            ownership.register_quietly(s, run.get("owner_id"), kind="benchmark", item=("benchmark_run", run["id"]))
             self.manager.track(s)
             s.autosave(force=True)
             s.start()       # only now: a game started before `benchmark` is set plays its first turn as a lobby game
             job.update({"status": "running", "game_id": s.id, "load_seconds": load_s, "tool_mode": llm.get("tool_mode")})
-            self._log(f"Started {job['label']} on {sc['name']} (game {s.id}).")
+            self._log(f"Started {job['label']} on {sc['name']} (game {s.id}).", run["id"])
             self._touch(run)
             self._flush()
 
@@ -969,6 +1160,8 @@ class BenchmarkScheduler:
             s = self.manager.get(job["game_id"])
             if s is None:
                 job.update({"status": "cancelled", "error": "The game was closed.", "finished": _now()})
+            elif s.crashed:
+                self._fail_crashed(run, job, s)
             elif self._machine(job) in self._restricted or run["status"] != "running":
                 job["status"], job["pause_reason"] = "paused", "restricted" if self._machine(job) in self._restricted else "user"
             else:
@@ -985,43 +1178,185 @@ class BenchmarkScheduler:
         self._progress_at[job["id"]] = _now()
         self._progress_dirty.add(run["id"])
 
+    def _fail_crashed(self, run: dict, job: dict, s: GameSession):
+        """Fail a job whose game the engine stopped (``GameSession._crashed``), and free its machine.
+
+        A crashed game takes no more moves, so the job can neither finish nor resume: left as an ordinary pause it
+        would hold its machine's slot and keep its run open for good, and a restart would replay it from its last
+        good autosave into the same crash. Its crash save stays in the game's folder for whoever debugs it, and
+        retrying the job plays a new game."""
+        try:
+            self._record_progress(run, job, s)       # reads still answer on a crashed game; the job fails regardless
+        except Exception:
+            self._log(f"{job['label']}: no progress read after the crash: {traceback.format_exc(limit=2)}", run["id"])
+        crash = s.crashed or {}
+        job.update({"status": "failed", "finished": _now(), "pause_reason": None,
+                    "error": f"The engine stopped on turn {crash.get('turn')}: {str(crash.get('message') or '')[:300]}"})
+        s.stop()
+        self._log(f"{job['label']} on {job['scenario_name']}: the engine stopped on turn {crash.get('turn')}.",
+                  run["id"])
+        self._touch(run)
+
     def _finish_job(self, run: dict, job: dict, s: GameSession):
         """Finish a job: final score, timing, and release the game."""
         self._record_progress(run, job, s)
         job["result"] = job["progress"]
+        if job.get("mode") == "hybrid":
+            try:
+                job["result"] = dict(job["result"], **self._hybrid_result(s))
+            except Exception as e:
+                # the job is done whatever its record says: a record that could not be read leaves it with no pair
+                # line, rather than a tick that fails on it for ever
+                self._log(f"{job['label']}: its diplomacy record could not be read: {e}", run["id"])
         job.update({"status": "done", "finished": _now(), "pause_reason": None})
-        if s.game.s.phase == "playing":
-            s.stop()                # the model was eliminated: stop the bots playing out a settled game
+        self._pair(job)
         try:
-            s.save("benchmark")
+            if s.game.phase == "playing":
+                # The model was eliminated: stop the bots playing out a settled game, saved in the same hold of the lock
+                # (GameSession.stop). Saved first and stopped after, a round they played in between was autosaved past
+                # benchmark.citar, and every later opening of the job's game forked a copy of its history.
+                s.stop(save_as="benchmark")
+            else:
+                s.save("benchmark")
         except Exception as e:
             job["error"] = f"Could not save the finished game: {e}"
-        self._log(f"Finished {job['label']} on {job['scenario_name']}: {job['result'].get('outcome')}.")
+        self._log(f"Finished {job['label']} on {job['scenario_name']}: {job['result'].get('outcome')}.", run["id"])
         self._touch(run)
 
-    # ------------------------------------------------------------------ views
-    def status(self) -> dict:
-        """What the scheduler is doing now, for the page header and the badge."""
-        with self.lock:
-            active = [j for r in self.runs.values() for j in r["jobs"] if j["status"] in ("running", "loading", "resuming")]
-            return {"restricted": REG.restriction_status(), "active_jobs": len(active),
-                    "queued_jobs": sum(1 for r in self.runs.values() if r["status"] == "running"
-                                       for j in r["jobs"] if j["status"] == "queued"),
-                    "log": self.log[-30:]}
+    # ------------------------------------------------------------------ hybrid jobs and their controls (P3.6.9)
+    @staticmethod
+    def _hybrid_result(s: GameSession) -> dict:
+        """What a finished hybrid job's result adds (P3.6.10): its seat's diplomacy record (the recorder's rows, and
+        their summary with how the game ended) and its fallbacks by cause. A record that broke off during the game
+        (``DiplomacyRecorder.broken``) says so (``incomplete``: the kind of error; its ``broken`` row has the turn) and
+        pairs nothing: its rows would miss entries, or value them late, while its control's record is whole."""
+        from ..diplomacy_stats import fallbacks_of, final_of, summarize
+        pid = (s.benchmark or {}).get("llm_player", 0)
+        with s.lock:
+            s._record_diplomacy()
+            rec = s._recorder(pid)
+            rows = rec.mine()
+            summary = summarize(rows, pid, final_of(s.game, pid))
+            fallbacks = fallbacks_of(s.metrics.data, pid)
+        diplomacy = {"rows": rows, "summary": summary}
+        if rec.broken is not None:
+            diplomacy["incomplete"] = rec.broken
+        return {"diplomacy": diplomacy, "fallbacks": fallbacks}
 
-    def list_runs(self) -> list[dict]:
-        """Every run with its jobs, for the Runs view."""
+    def _pair(self, job: dict) -> bool:
+        """A finished hybrid job's pair line, once its control has been played (``diplomacy_stats.pair_line``): on the
+        job's result as ``pair``. Returns whether the job changed."""
+        ctl = job.get("control") or {}
+        res = job.get("result") or {}
+        if job.get("mode") != "hybrid" or job["status"] != "done" or not ctl.get("id") or res.get("pair") \
+                or not res.get("diplomacy") or res["diplomacy"].get("incomplete"):
+            return False
+        rec = self.controls.get(ctl["id"])
+        if rec is None:
+            return False
+        from ..diplomacy_stats import pair_line
+        res["pair"] = pair_line(res["diplomacy"]["summary"], rec["summary"])
+        ctl["status"] = "done"
+        return True
+
+    @staticmethod
+    def _awaits_control(job: dict) -> bool:
+        """Whether a hybrid job still wants its control: it plays (its pair follows once both games are over), or it is
+        done with a whole diplomacy record and no pair line yet. A cancelled, skipped or failed job never pairs (a retry
+        asks for its control afresh), nor does a done one whose record could not be read or broke off."""
+        ctl = job.get("control") or {}
+        res = job.get("result") or {}
+        if job.get("mode") != "hybrid" or not ctl.get("id") or res.get("pair"):
+            return False
+        if job["status"] in ACTIVE:
+            return True
+        dip = res.get("diplomacy")
+        return job["status"] == "done" and isinstance(dip, dict) and not dip.get("incomplete")
+
+    def _check_controls(self, run: dict) -> set:
+        """Follow the control of each hybrid job that still wants one (``_awaits_control``, P3.6.9): its status on the
+        job, asked for again when this process has not (a restart), and the job's pair line once both games are over.
+        Returns the ids of the controls the run's jobs still want."""
+        wanted: set = set()
+        for job in run["jobs"]:
+            if not self._awaits_control(job):
+                continue
+            ctl = job["control"]
+            wanted.add(ctl["id"])
+            st = self.controls.status(ctl["id"])
+            if st["status"] == "missing":
+                try:
+                    self.controls.ensure(key=ctl["id"])
+                    st = self.controls.status(ctl["id"])
+                except KeyError:
+                    st = {"status": "failed", "error": "Its spec is gone; retry the job to play it again."}
+            changed = st["status"] != ctl.get("status") or st.get("error") != ctl.get("error")
+            if changed:
+                ctl["status"] = st["status"]
+                ctl.pop("error", None)
+                if st.get("error"):
+                    ctl["error"] = st["error"]
+            if self._pair(job) or changed:
+                self._touch(run)
+        return wanted
+
+    def pairs(self, visible: Optional[set] = None) -> list:
+        """Every finished hybrid job's pair (P3.6.10), of the runs in ``visible`` (None: every run): {"model", "owners"
+        (as the board files it), "line", "fallbacks", "run_id", "run", "job_id", "game_id", "owner_id", "scenario",
+        "seed", "control"}."""
+        out = []
+        with self.lock:
+            for run in self.runs.values():
+                if visible is not None and run["id"] not in visible:
+                    continue
+                for job in run["jobs"]:
+                    res = job.get("result") or {}
+                    if job.get("mode") != "hybrid" or job["status"] != "done" or not res.get("pair"):
+                        continue
+                    sc = next((x for x in run["suite"]["scenarios"] if x["id"] == job["scenario_id"]), {})
+                    out.append({"model": job["model"], "owners": (sc.get("hybrid") or {}).get("owners"),
+                                "line": res["pair"], "fallbacks": res.get("fallbacks") or {},
+                                "run_id": run["id"], "run": run["name"], "job_id": job["id"],
+                                "game_id": job.get("game_id"), "owner_id": run.get("owner_id"),
+                                "scenario": job["scenario_name"], "seed": job.get("seed_used", job.get("seed")),
+                                "control": (job.get("control") or {}).get("id"),
+                                "server_id": job.get("server_id"), "standing": job.get("standing")})
+        return out
+
+    # ------------------------------------------------------------------ views
+    def status(self, visible: Optional[set] = None, restricted: Optional[list] = None) -> dict:
+        """What the scheduler is doing now, for the page header and the badge. ``visible`` is the runs the caller may
+        see (None: every run, an administrator's view): the counts and the log cover only those, and a log line about
+        no run (a machine's quiet hours, the scheduler's own errors) is an administrator's. ``restricted`` is the
+        machines in their quiet hours the caller may see (``pool.visible_restrictions``; None: every one)."""
+        if restricted is None:
+            restricted = REG.restriction_status()
+        with self.lock:
+            runs = [r for r in self.runs.values() if visible is None or r["id"] in visible]
+            active = [j for r in runs for j in r["jobs"] if j["status"] in ("running", "loading", "resuming")]
+            log = [e for e in self.log if visible is None or e.get("run") in visible]
+            return {"restricted": restricted, "active_jobs": len(active),
+                    "queued_jobs": sum(1 for r in runs if r["status"] == "running"
+                                       for j in r["jobs"] if j["status"] == "queued"),
+                    "log": log[-30:]}
+
+    def list_runs(self, visible: Optional[set] = None) -> list[dict]:
+        """Every run with its jobs, for the Runs view; only the runs in ``visible`` when it is given."""
         with self.lock:
             out = []
             for run in sorted(self.runs.values(), key=lambda r: -r["created"]):
+                if visible is not None and run["id"] not in visible:
+                    continue
                 r = {k: v for k, v in run.items() if k != "suite"}
+                r["jobs"] = [_job_view(j) for j in run["jobs"]]
                 r["mode"] = run["suite"]["mode"]
                 r["servers"] = [{"id": sv["id"], "name": sv["name"], "base_url": sv.get("base_url"), "provider": sv.get("provider"),
                                  "max_parallel": sv.get("max_parallel", 1), "restricted_until":
                                  (lambda e: e.strftime("%H:%M") if e else None)(self.restricted_until(sv["id"]))}
                                 for sv in run["suite"]["servers"]]
                 r["scenarios"] = {sc["id"]: {"name": sc["name"], "turn_limit": sc.get("turn_limit"), "map_size": sc["map_size"],
-                                             "map_type": sc["map_type"], "opponents": sc.get("opponents")}
+                                             "map_type": sc["map_type"], "opponents": sc.get("opponents"),
+                                             "mode": sc.get("mode") or "full", "hybrid": sc.get("hybrid")}
                                   for sc in run["suite"]["scenarios"]}
                 r["summary"] = run_summary(run)
                 out.append(r)
@@ -1050,38 +1385,60 @@ def performance(scores: dict, llm: int, phase: str, winner, alive: dict) -> Opti
     return round(min(share, 95.0) if phase != "playing" else share, 1)
 
 
-def game_progress(s: GameSession) -> dict:
-    """Live progress of a benchmark game (called with the session lock held)."""
-    from ..engine.victory import score
+def game_progress(s: GameSession, llm_player: Optional[int] = None, model: Optional[str] = None) -> dict:
+    """Live progress of a benchmark game (called with the session lock held): of its model seat, ``s.benchmark``'s
+    ``llm_player`` and ``model`` unless given (the reports ask it of any model seat of any game). Reads only."""
     g = s.game
-    llm = (s.benchmark or {}).get("llm_player", 0)
-    majors = [p for p in g.s.players if p.kind == "major"]
-    scores = {p.id: (score(g, p.id)["total"] if p.alive else 0) for p in majors}
-    alive = {p.id: p.alive for p in majors}
-    rep = s.metrics.summary({llm: {"name": g.player(llm).name, "controller": "llm", "model": (s.benchmark or {}).get("model")}})[llm]
-    best_opp = max((scores[p.id] for p in majors if p.id != llm), default=0)
+    bench = s.benchmark or {}
+    llm = bench.get("llm_player", 0) if llm_player is None else llm_player
+    model = bench.get("model") if model is None else model
+    summ = g.summary()
+    majors = [p for p in summ["players"] if p["kind"] == "major"]
+    standings = g.standings()
+    scores = {p["id"]: (standings[p["id"]]["score"] if p["alive"] else 0) for p in majors}
+    alive = {p["id"]: p["alive"] for p in majors}
+    mine = standings[llm]
+    phase, winner, victory = summ["phase"], summ["winner"], summ["victory"]
+    rep = s.metrics.summary({llm: {"name": g.player_name(llm), "controller": "llm", "model": model}})[llm]
+    best_opp = max((scores[p["id"]] for p in majors if p["id"] != llm), default=0)
     outcome = "eliminated" if not alive.get(llm) else None
-    if g.s.phase != "playing":
-        outcome = "won" if g.s.winner == llm else ("eliminated" if not alive.get(llm) else f"lost ({g.s.victory or 'game over'})")
+    if phase != "playing":
+        outcome = "won" if winner == llm else ("eliminated" if not alive.get(llm) else f"lost ({victory or 'game over'})")
     series = [{"turn": e["turn"], "llm": (e["players"].get(str(llm)) or {}).get("score", 0),
                "best_bot": max([(v or {}).get("score", 0) for k, v in e["players"].items() if k != str(llm)] or [0])}
-              for e in g.s.stats[-400:]]
+              for e in g.stats(last=400)]
     status = s.agent_status.get(llm)
-    last_thought = next((t for t in reversed(g.s.thoughts) if t.get("player") == llm and t.get("kind") in (None, "reasoning", "system")), None)
+    last_thought = next((t for t in reversed(g.thoughts(llm)) if t.get("kind") in (None, "reasoning", "system")), None)
     return {
-        "turn": g.turn, "turn_limit": g.total_turns(), "phase": g.s.phase, "current_player": g.s.current,
-        "llm_to_move": g.s.current == llm and g.s.phase == "playing", "agent_status": status, "paused": s.paused,
-        "civ": g.player(llm).name, "score": scores.get(llm), "best_bot_score": best_opp, "alive": alive.get(llm),
-        "cities": len(g.player_cities(llm)), "techs": len(g.player(llm).techs),
-        "population": sum(c.pop for c in g.player_cities(llm)), "winner": g.s.winner, "victory": g.s.victory,
-        "outcome": outcome, "performance": performance(scores, llm, g.s.phase, g.s.winner, alive),
+        "turn": summ["turn"], "turn_limit": summ["turn_limit"], "phase": phase, "current_player": summ["current"],
+        "llm_to_move": summ["current"] == llm and phase == "playing", "agent_status": status, "paused": s.paused,
+        "civ": g.player_name(llm), "score": scores.get(llm), "best_bot_score": best_opp, "alive": alive.get(llm),
+        "cities": mine["cities"], "techs": mine["techs"],
+        "population": mine["population"], "winner": winner, "victory": victory,
+        "outcome": outcome, "performance": performance(scores, llm, phase, winner, alive),
         "turns_played": rep.get("turns", 0), "avg_turn_s": rep.get("avg_turn_s"), "max_turn_s": rep.get("max_turn_s"),
         "avg_errors": rep.get("avg_errors"), "avg_repeats": rep.get("avg_repeats"), "avg_tool_calls": rep.get("avg_tool_calls"),
         "malformed_calls": rep.get("malformed_calls"), "end_reasons": rep.get("end_reasons", {}),
         "output_tokens_per_s": rep.get("output_tokens_per_s"), "series": series,
         "last_thought": (last_thought["text"][:300] if last_thought else None),
+        # how long the job's model waited for pooled prompts to drain off its machine before its first request (each
+        # time its lease was made: a start, a reload, a resume after making way), and whether a drain was cut short by
+        # its bound, which leaves the job's timing out of the speed score (design/phase3-features.md P3.3.3)
+        "drain_s": bench.get("drain_s"), "contaminated": bool(bench.get("contaminated")),
         "updated": _now(),
     }
+
+
+def _job_view(job: dict) -> dict:
+    """A job as the runs' list shows it, always a copy (a listing marks its jobs, the "unverified machine" badge among
+    them, and the scheduler's own job is saved to its run's file and read by its thread): a hybrid job's result without
+    its diplomacy record's rows (hundreds a game; the run's file keeps them), its summary and pair line kept. A badge a
+    run's file kept from before 4-12's fix round is dropped: the listing decides it again."""
+    out = {k: v for k, v in job.items() if k != "unverified_machine"}
+    res = out.get("result")
+    if isinstance(res, dict) and isinstance(res.get("diplomacy"), dict):
+        out["result"] = {**res, "diplomacy": {k: v for k, v in res["diplomacy"].items() if k != "rows"}}
+    return out
 
 
 def run_summary(run: dict) -> dict:

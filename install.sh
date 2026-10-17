@@ -17,7 +17,7 @@
 #
 # Flags:
 #   --server            install for a public server (implies a system-wide prefix)
-#   --worker            install and configure the worker agent only
+#   --worker            replaced by the CITAR helper in 0.1.6: says where to download it
 #   --prefix DIR        where to install (default: ~/.local/share/citar-app, or /opt/citar)
 #   --version X.Y.Z     a specific release instead of the newest
 #   --from PATH         install from a local wheel or checkout instead of PyPI
@@ -56,7 +56,11 @@ usage() {
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--server)    MODE="server" ;;
-		--worker)    MODE="worker" ;;
+		--worker)
+			say "Since CITAR 0.1.6 a machine serves its models through the CITAR helper, a single program that"
+			say "replaced the Python worker. Download it from the Servers page of your CITAR server, or from"
+			say "https://github.com/jprodgers/CITAR/releases/latest, then run: citar-helper setup"
+			exit 2 ;;
 		--local)     MODE="local" ;;
 		--prefix)    PREFIX="${2:?--prefix needs a directory}"; shift ;;
 		--version)   VERSION="${2:?--version needs a version}"; shift ;;
@@ -160,10 +164,9 @@ VENV_PIP="$PREFIX/venv/bin/pip"
 $SUDO "$VENV_PIP" install --quiet --upgrade pip wheel
 
 # Extras by role: a home machine wants every provider client, a server does not need the local
-# model libraries, and a worker needs only what it takes to serve one.
+# model libraries.
 case "$MODE" in
 	server) EXTRAS="server" ;;
-	worker) EXTRAS="worker,openai" ;;
 	*)      EXTRAS="all" ;;
 esac
 if [ -n "$SOURCE" ]; then
@@ -184,7 +187,7 @@ ok "$INSTALLED installed"
 # ----------------------------------------------------------------------------- PATH
 step "Putting citar on your PATH"
 $SUDO mkdir -p "$BIN_DIR"
-for command_name in citar citar-admin citar-worker citar-mcp; do
+for command_name in citar citar-admin citar-mcp; do
 	[ -x "$PREFIX/venv/bin/$command_name" ] || continue
 	$SUDO ln -sf "$PREFIX/venv/bin/$command_name" "$BIN_DIR/$command_name"
 done
@@ -228,7 +231,6 @@ fi
 
 case "$MODE" in
 	server) SETUP_FLAG="--server" ;;
-	worker) SETUP_FLAG="--worker" ;;
 	*)      SETUP_FLAG="--local" ;;
 esac
 

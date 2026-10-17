@@ -3,7 +3,7 @@
     python scripts/import_unciv.py [path/to/Unciv]
 
 UnCiv (https://github.com/yairm210/Unciv) is licensed under the Mozilla Public License 2.0; the generated files in
-citar/data/ruleset/ are derived from its ruleset JSON and carry the same license (see citar/data/ruleset/NOTICE.md).
+crates/citar-engine/data/ruleset/ are derived from its ruleset JSON and carry the same license (see its NOTICE.md).
 
 Only numbers and rule text ("uniques") are kept. Graphics, sounds, colours, quotes, civilopedia text, leader dialogue,
 tutorial events and name lists for spies / great people are dropped. City name lists are kept only as default names.
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import unciv_json
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "citar" / "data" / "ruleset"
+OUT = ROOT / "crates" / "citar-engine" / "data" / "ruleset"
 DEFAULT_UNCIV = None
 RULESET = "android/assets/jsons/Civ V - Gods & Kings"
 
@@ -189,7 +189,7 @@ UnCiv is licensed under the **Mozilla Public License, v. 2.0**; these derived fi
 license. A copy of the MPL 2.0 is available at https://mozilla.org/MPL/2.0/.
 
 Only numeric values and rule text were imported. UnCiv's graphics, sounds, quotes, civilopedia text, leader
-dialogue and tutorials are not included. Local additions live in `citar/data/custom/` (for example BenchmarkCiv).
+dialogue and tutorials are not included. Local additions live in `custom/` beside it (for example BenchmarkCiv).
 """
 
 if __name__ == "__main__":

@@ -16,6 +16,21 @@ updates:
         patterns: ["*"]
     labels: ["dependencies"]
 
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      rust:
+        patterns: ["*"]
+    ignore:
+      # libm is pinned exactly and bumped by hand: a bump can change the last bit of a result,
+      # so it comes with re-blessed goldens (crates/citar-engine/DESIGN.md 2.6 and 7.5).
+      - dependency-name: "libm"
+    labels: ["dependencies"]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

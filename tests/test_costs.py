@@ -34,15 +34,19 @@ class CostTests(unittest.TestCase):
 
     def test_servers_page_machines_are_priced_under_old_ids_too(self):
         """A machine registered through the helper used to be left out of every cost report."""
-        from unittest import mock
+        from citar import db
+        from citar.db.models import Server
         plan = S.load()["electricity_plans"][0]["id"]
-        machine = {"id": "sv_desk", "name": "Desk", "kind": "owned", "config": {
-            "power": {"idle_w": 20, "cpu_max_w": 60, "gpu_max_w": 100},
-            "components": [{"name": "Desk", "price": 876.6, "purchased": "2026-01-01", "lifespan_years": 1}],
-            "costs": [{"from": "2000-01-01", "electricity_plan_id": plan}],
-            "former_ids": ["sv_desk_old"]}}
-        with mock.patch("citar.pool.seats.all_machines", lambda: [machine]):
-            reg = S.with_pooled()
+        config = {"power": {"idle_w": 20, "cpu_max_w": 60, "gpu_max_w": 100},
+                  "components": [{"name": "Desk", "price": 876.6, "purchased": "2026-01-01", "lifespan_years": 1}],
+                  "costs": [{"from": "2000-01-01", "electricity_plan_id": plan}],
+                  "former_ids": ["sv_desk_old"]}
+        if not db.configured():
+            db.configure()
+        with db.session() as s:
+            s.add(Server(id="sv_desk", name="Desk", kind="owned", provider="lmstudio", reach="worker", config=config))
+        self.addCleanup(lambda: S.delete("sv_desk"))
+        reg = S.with_pooled()
         self.assertEqual(reg["aliases"], {"sv_desk_old": "sv_desk"})
         spans = [{"act": a, "srv": srv, "t0": T0, "t1": T0 + 3600, "held": 3600, "busy": 1800, "cpu": 0, "model": "m"}
                  for a, srv in (("new", "sv_desk"), ("old", "sv_desk_old"))]
@@ -78,6 +82,39 @@ class CostTests(unittest.TestCase):
         c = r["acts"]["m"]["total"]
         self.assertAlmostEqual(c["kwh_dynamic"], 20 / 60 / 1000, places=9)    # 0.5 x 40 W for one minute
         self.assertAlmostEqual(c["energy_measured_h"], 60 / 3600)
+        # the host has no GPU watts, so samples of its CPU alone measure all of it: its metered minute counts
+        self.assertEqual(r["servers"]["sv_host"]["metered"]["minutes"], 1)
+
+    def test_a_minute_sampled_without_the_gpus_draw_keeps_the_gpus_estimate(self):
+        """A machine whose GPU draw its driver does not report (an AMD or Intel GPU, a Mac) samples its CPU alone: the
+        model's work on its GPU is still estimated from the busy time, and the minute is not called measured."""
+        reg = S.load()
+        spans = [{"act": "g", "srv": "sv_gpu", "t0": T0, "t1": T0 + 60, "held": 60, "busy": 60, "cpu": 0,
+                  "model": "dry-run"}]
+        sampled = {"sv_gpu": [{"k": "pw", "srv": "sv_gpu", "t0": T0, "t1": T0 + 60, "n": 6, "cpu_util": 0.1,
+                               "gpu_w": None}]}
+        unsampled = costing.compute(T0, T0 + 60, reg, ledger(spans))["acts"]["g"]["total"]
+        r = costing.compute(T0, T0 + 60, reg, ledger(spans, power=sampled))
+        c = r["acts"]["g"]["total"]
+        # busy the whole minute: the GPU's 300 W as estimated, plus the CPU's 10% of 100 W as sampled
+        self.assertAlmostEqual(c["kwh_dynamic"], (300 + 10) * 60 / 3600 / 1000, places=9)
+        self.assertAlmostEqual(unsampled["kwh_dynamic"], 300 * 60 / 3600 / 1000, places=9)
+        self.assertAlmostEqual(c["energy_estimated_h"], 60 / 3600)
+        self.assertEqual(c["energy_measured_h"], 0)
+        self.assertEqual(r["servers"]["sv_gpu"]["measured_minutes"], 0)
+        # nor is the machine's draw metered: its samples read no GPU, and it has GPU watts
+        self.assertNotIn("metered", r["servers"]["sv_gpu"])
+        # with no work on the GPU that minute there is nothing to estimate: the CPU's samples measure it
+        idle_gpu = [dict(spans[0], busy=0, cpu=30)]
+        c = costing.compute(T0, T0 + 60, reg, ledger(idle_gpu, power=sampled))["acts"]["g"]["total"]
+        self.assertAlmostEqual(c["kwh_dynamic"], 10 * 60 / 3600 / 1000, places=9)
+        self.assertAlmostEqual(c["energy_measured_h"], 60 / 3600)
+        self.assertEqual(c["energy_estimated_h"], 0)
+        # and a sample that read the GPU but not the CPU estimates the CPU's part from its CPU seconds (8 threads)
+        gpu_only = {"sv_gpu": [dict(sampled["sv_gpu"][0], cpu_util=None, gpu_w=150.0)]}
+        c = costing.compute(T0, T0 + 60, reg, ledger(idle_gpu, power=gpu_only))["acts"]["g"]["total"]
+        self.assertAlmostEqual(c["kwh_dynamic"], 30 / (60 * 8) * 100 * 60 / 3600 / 1000, places=9)   # its idle GPU: 0 W
+        self.assertAlmostEqual(c["energy_estimated_h"], 60 / 3600)
 
     def test_effective_dated_rates(self):
         reg = S.snapshot()
@@ -168,25 +205,47 @@ class KeystoreTests(unittest.TestCase):
 
 class LedgerAndReportTests(unittest.TestCase):
     def test_game_is_metered_and_reported(self):
+        """A game's held time is the usage ledger's, its work (each model step's generation seconds and tokens, the
+        host's CPU) the compute ledger's (design/phase3-features.md P3.4.7); a report prices both."""
         from citar.server.session import SessionManager
-        from citar import reports
+        from citar import db, ledger, reports
+        from citar.db.models import ComputeEvent
+        if not db.configured():
+            db.configure()
         mgr = SessionManager()
         seats = [{"type": "llm", "llm": S.seat_ref("sv_gpu", "m_gpu", dry_run_delay=0.05)}, {"type": "bot"}]
         s = mgr.create({"map_size": "duel", "map_type": "pangaea", "seed": 3, "turn_limit": 3, "barbarians": "off"}, seats, "metered")
         deadline = time.time() + 120
         tr = U.tracker()
-        while s.game.s.phase == "playing" and time.time() < deadline:
+        while s.game.phase == "playing" and time.time() < deadline:
             time.sleep(0.2)
             tr._sample()
-        self.assertNotEqual(s.game.s.phase, "playing")
+        self.assertNotEqual(s.game.phase, "playing")
         mgr.delete(s.id)
+        # The game's own units are each a few milliseconds, which Windows' thread clock (15.6 ms ticks) mostly reads
+        # as nothing; one more unit of the game's work that surely registers makes the host's CPU event certain.
+        with ledger.cpu_unit(s.cpu_activity):
+            t0 = time.thread_time()
+            while time.thread_time() - t0 < 0.05:
+                pass
         tr.flush()
-        led = U.read()
+        self.assertTrue(ledger.get().flush(30))
+        led = U.read(work=True)
         act = f"game:{s.id}"
         self.assertIn(act, led["acts"])
         mine = [sp for sp in led["spans"] if sp["act"] == act]
-        self.assertTrue(any(sp["srv"] == "sv_gpu" and sp.get("busy", 0) > 0 and sp.get("in", 0) > 0 for sp in mine), mine)
+        self.assertTrue(any(sp["srv"] == "sv_gpu" and sp.get("held", 0) > 0 for sp in mine), mine)
         self.assertTrue(any(sp["srv"] == "sv_host" for sp in mine))
+        self.assertFalse(any("busy" in sp or "in" in sp or "cpu" in sp for sp in mine),
+                         "the work is the compute ledger's now")
+        with db.session() as d:
+            steps = list(d.query(ComputeEvent).filter(ComputeEvent.activity == act, ComputeEvent.kind == "gpu"))
+            cpu = list(d.query(ComputeEvent).filter(ComputeEvent.activity == act, ComputeEvent.kind == "cpu"))
+        self.assertTrue(steps and all(e.machine_id == "sv_gpu" and e.task_class == "full" for e in steps))
+        self.assertTrue(any(e.gen_s > 0 and e.tokens_in > 0 for e in steps), [(e.gen_s, e.tokens_in) for e in steps])
+        self.assertTrue(cpu and all(e.provider_id is None and e.cpu_core_s > 0 for e in cpu), "the host's CPU, measured")
+        work = [w for w in led["work"] if w["act"] == act]
+        self.assertEqual(len(work), len(steps) + len(cpu))
         runner = reports.ReportRunner(Path(tempfile.mkdtemp(prefix="citar-reports-")))
         m = runner.start({"title": "Test", "preset": "everything", "sections": reports.ALL_SECTIONS,
                           "scope": {"items": [{"kind": "game", "id": s.id}]},
@@ -206,16 +265,20 @@ class LedgerAndReportTests(unittest.TestCase):
 
 
 class ReportQueueTests(unittest.TestCase):
-    def test_a_report_waits_in_the_machine_queue(self):
+    def test_a_reports_narrative_waits_in_its_machines_line(self):
         """A report whose analysis is written by a model used to run at once, busy machine or not, and was not in
-        the queue at all."""
-        from unittest import mock
+        any queue at all. Its narrative is a pooled prompt now (package 3-09): while a benchmark holds the machine, a
+        report without a model is built at once and the one with waits as a ticket in the machine's line (its place
+        its progress), in no job queue; it is built once the benchmark is gone."""
         from citar import reports
-        from citar.pool import queue as work_queue
-        busy = {"on": True}
+        from citar.pool import queue as work_queue, scheduler as S
+        S.reset()
+        self.addCleanup(S.reset)
         runner = reports.ReportRunner(Path(tempfile.mkdtemp(prefix="citar-reports-")))
-        runner.POLL_SECONDS = 0.2
-        with mock.patch("citar.pool.seats.occupied", lambda sid, exclude=frozenset(): ["game “x”"] if busy["on"] and sid == "sv_dryrun" else []):
+        self.addCleanup(shutil.rmtree, runner.dir, ignore_errors=True)
+        bench = S.get().lease("sv_dryrun", "dry-run", kind="benchmark", label="benchmark run “x”",
+                              ref=("benchmark", "x"))
+        try:
             plain = runner.start({"title": "No model", "sections": ["summary"]})
             m = runner.start({"title": "Written", "sections": ["summary"],
                               "narrative": {"enabled": True, "server_id": "sv_dryrun", "model_id": "m_dry"}})
@@ -223,19 +286,22 @@ class ReportQueueTests(unittest.TestCase):
             while runner.meta(plain["id"])["status"] != "done" and time.time() < deadline:
                 time.sleep(0.1)
             self.assertEqual(runner.meta(plain["id"])["status"], "done", "a report without a model does not wait")
-            time.sleep(0.6)
-            meta = runner.meta(m["id"])
-            self.assertEqual(meta["status"], "queued")
-            self.assertIn("in use by", meta["waiting"])
-            queued = [it for it in work_queue.waiting("sv_dryrun") if it["kind"] == "report"]
-            self.assertEqual([it["id"] for it in queued], [m["id"]])
-            busy["on"] = False
-            while runner.meta(m["id"])["status"] in ("queued", "running") and time.time() < deadline:
+            while not runner.meta(m["id"]).get("progress", "").startswith("Waiting for Dry run")                     and time.time() < deadline:
                 time.sleep(0.1)
+            meta = runner.meta(m["id"])
+            self.assertEqual(meta["status"], "running")
+            self.assertTrue(meta["progress"].startswith("Waiting for Dry run: 1st in line"), meta["progress"])
+            waiting = S.get().machine("sv_dryrun").view()["waiting"]
+            self.assertEqual([(t["class"], t["label"]) for t in waiting], [("report", "report “Written”")])
+            self.assertEqual([it for it in work_queue.waiting("sv_dryrun") if it["kind"] == "report"], [],
+                             "reports are in no job queue")
+        finally:
+            bench.release()
+        while runner.meta(m["id"])["status"] in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.1)
         meta = runner.meta(m["id"])
         self.assertEqual(meta["status"], "done", meta.get("error"))
         self.assertIn("Dry run narrative", runner.html_path(m["id"]).read_text(encoding="utf-8"))
-        shutil.rmtree(runner.dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

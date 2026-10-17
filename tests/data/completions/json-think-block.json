@@ -1,0 +1,39 @@
+{
+ "name": "json-think-block",
+ "note": "a think block before the object is skipped",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "<think>hmm</think>{\"tool\": \"end_turn\", \"args\": {}}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "<think>hmm</think>{\"tool\": \"end_turn\", \"args\": {}}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "<think>hmm</think>{\"tool\": \"end_turn\", \"args\": {}}"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

@@ -1,0 +1,80 @@
+{
+ "name": "text-plain-json-arguments",
+ "note": "plain calls with JSON arguments, parenthesised or not, and a bare name",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "set_research {\"tech\": \"pottery\"}\nunit_order({\"unit_id\": 3, \"order\": \"explore\"})\nend_turn",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "set_research {\"tech\": \"pottery\"}\nunit_order({\"unit_id\": 3, \"order\": \"explore\"})\nend_turn",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "set_research",
+     "args": {
+      "tech": "pottery"
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "name": "unit_order",
+     "args": {
+      "unit_id": 3,
+      "order": "explore"
+     }
+    },
+    {
+     "id": "<gen:3>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 3
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "set_research {\"tech\": \"pottery\"}\nunit_order({\"unit_id\": 3, \"order\": \"explore\"})\nend_turn",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "set_research",
+      "arguments": "{\"tech\": \"pottery\"}"
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "type": "function",
+     "function": {
+      "name": "unit_order",
+      "arguments": "{\"unit_id\": 3, \"order\": \"explore\"}"
+     }
+    },
+    {
+     "id": "<gen:3>",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

@@ -19,9 +19,14 @@ export class Forbidden extends Error {
   constructor(message) { super(message); this.name = "Forbidden"; }
 }
 
-async function request(method, url, body) {
-  const opts = { method, headers: {}, credentials: "same-origin" };
-  if (body !== undefined) {
+async function request(method, url, body, { headers = {}, conditional = false } = {}) {
+  const opts = { method, headers: { ...headers }, credentials: "same-origin" };
+  // A conditional request of the caller's own: the browser's cache stays out of it, so a 304 reaches the caller
+  // (which holds the body) rather than being answered from a copy the browser kept.
+  if (conditional) opts.cache = "no-store";
+  if (body instanceof FormData) {
+    opts.body = body;                      // the browser writes the multipart type with its boundary
+  } else if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
@@ -30,10 +35,11 @@ async function request(method, url, body) {
   }
   // A share link puts its key in the page URL; pass it along so link-shared games and reports
   // work for somebody who is not signed in.
-  const shareKey = new URLSearchParams((location.hash.split("?")[1] || "")).get("k");
-  if (shareKey) opts.headers["x-citar-share-key"] = shareKey;
+  const key = shareKey();
+  if (key) opts.headers["x-citar-share-key"] = key;
 
   const res = await fetch(url, opts);
+  if (conditional && res.status === 304) return { notModified: true, etag: res.headers.get("etag") };
   let data = null;
   try { data = await res.json(); } catch (e) { data = null; }
   if (!res.ok) {
@@ -46,7 +52,7 @@ async function request(method, url, body) {
     err.retryAfter = res.headers.get("retry-after");
     throw err;
   }
-  return data;
+  return conditional ? { notModified: false, data, etag: res.headers.get("etag") } : data;
 }
 
 export const api = {
@@ -61,10 +67,19 @@ export const api = {
   control: (gid, body) => request("POST", `/api/games/${gid}/control`, body),
   path: (gid, token, unitId, x, y) =>
     request("GET", `/api/games/${gid}/path?token=${encodeURIComponent(token)}&unit_id=${unitId}&x=${x}&y=${y}`),
-  view: (gid, token, asPlayer) =>
-    request("GET", `/api/games/${gid}/view?token=${encodeURIComponent(token)}` + (asPlayer != null ? `&as_player=${asPlayer}` : "")),
+  // The view, sent with the ETag of the copy in hand (design/phase3-features.md P3.5.8): {notModified: true} when that
+  // copy is still the view (304: nothing was built or sent), else {notModified: false, data, etag}.
+  view: (gid, token, asPlayer, etag = null) =>
+    request("GET", `/api/games/${gid}/view?token=${encodeURIComponent(token)}` + (asPlayer != null ? `&as_player=${asPlayer}` : ""),
+      undefined, { headers: etag ? { "If-None-Match": etag } : {}, conditional: true }),
   tool: (gid, token, tool, args = {}) =>
     request("POST", `/api/games/${gid}/tool?token=${encodeURIComponent(token)}`, { tool, args }),
+  // one chat as the seat sees it, with where its clock stands (the chat window, chat.js)
+  negotiation: (gid, token, nid) =>
+    request("GET", `/api/games/${gid}/negotiations/${nid}?token=${encodeURIComponent(token || "")}`),
+  // what the seat and civilization `other` could trade (the chat window's deal builder, chat.js)
+  tradeOptions: (gid, token, other) =>
+    request("GET", `/api/games/${gid}/trade-options/${other}?token=${encodeURIComponent(token || "")}`),
   replay: (gid, token) => request("GET", `/api/games/${gid}/replay?token=${encodeURIComponent(token || "")}`),
   save: (gid, name) => request("POST", `/api/games/${gid}/save`, { name }),
   saves: () => request("GET", "/api/saves"),
@@ -74,6 +89,7 @@ export const api = {
   metrics: (gid) => request("GET", `/api/games/${gid}/metrics`),
   compareModels: () => request("GET", "/api/metrics/compare"),
   modelScores: () => request("GET", "/api/models/scores"),
+  modelDiplomacy: () => request("GET", "/api/models/diplomacy"),
   maps: () => request("GET", "/api/maps"),
   map: (id) => request("GET", `/api/maps/${encodeURIComponent(id)}`),
   saveMap: (id, map) => request("PUT", `/api/maps/${encodeURIComponent(id)}`, map),
@@ -105,6 +121,13 @@ export const api = {
   probeOpen: (rid, c, rep) => request("POST", `/api/probe-runs/${rid}/open/${encodeURIComponent(c)}/${rep}`),
   lab: () => request("GET", "/api/lab"),
   labReport: (name) => request("GET", `/api/lab/report/${encodeURIComponent(name)}`),
+  labJobs: (name) => request("GET", `/api/lab/jobs?exp=${encodeURIComponent(name)}`),
+  adminJobs: () => request("GET", "/api/admin/jobs"),
+  adminVerification: () => request("GET", "/api/admin/verification"),
+  saveVerification: (settings) => request("PUT", "/api/admin/verification", settings),
+  labPause: () => request("POST", "/api/admin/jobs/pause"),
+  labResume: () => request("POST", "/api/admin/jobs/resume"),
+  labRetry: (name) => request("POST", `/api/admin/jobs/retry?exp=${encodeURIComponent(name)}`),
   botProfiles: () => request("GET", "/api/bots/profiles"),
   botProfile: (id) => request("GET", `/api/bots/profiles/${encodeURIComponent(id)}`),
   saveBotProfile: (id, body) => request("PUT", `/api/bots/profiles/${encodeURIComponent(id)}`, body),
@@ -160,6 +183,18 @@ export const api = {
   savePlan: (p) => request("POST", "/api/electricity-plans", p),
   deletePlan: (id) => request("DELETE", `/api/electricity-plans/${id}`),
   restricted: () => request("GET", "/api/servers/restricted"),
+  // the machine settings dialog (design/phase3-features.md P3.8)
+  machineSettings: (id) => request("GET", `/api/machines/${encodeURIComponent(id)}/settings`),
+  saveMachineSettings: (id, body) => request("PUT", `/api/machines/${encodeURIComponent(id)}/settings`, body),
+  applyScan: (id, sections) => request("POST", `/api/machines/${encodeURIComponent(id)}/hardware/apply`, { sections }),
+  // its helper's machine key and a scan now (design/phase4-helper.md P4.5.10)
+  resetMachineKey: (id) => request("POST", `/api/machines/${encodeURIComponent(id)}/key/reset`),
+  rescanMachine: (id) => request("POST", `/api/machines/${encodeURIComponent(id)}/rescan`),
+  // any of {trust_tier, withdraw, verifier} (a bare tier for the tier alone)
+  setMachineTrust: (id, change) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/trust`,
+    typeof change === "string" ? { trust_tier: change } : change),
+  replicateMachine: (id, n) => request("POST", `/api/admin/machines/${encodeURIComponent(id)}/replicate`, { n }),
+  setMachineClass: (id, body) => request("PUT", `/api/admin/machines/${encodeURIComponent(id)}/class`, body),
   // reports
   reports: () => request("GET", "/api/reports"),
   reportOptions: () => request("GET", "/api/reports/options"),
@@ -180,6 +215,8 @@ export const api = {
   changePassword: (current_password, new_password) =>
     request("POST", "/api/auth/password/change", { current_password, new_password }),
   updateProfile: (body) => request("PUT", "/api/auth/me", body),
+  uploadAvatar: (file) => { const form = new FormData(); form.append("file", file); return request("POST", "/api/auth/me/avatar", form); },
+  deleteAvatar: () => request("DELETE", "/api/auth/me/avatar"),
   sessions: () => request("GET", "/api/auth/sessions"),
   revokeSession: (id) => request("DELETE", `/api/auth/sessions/${id}`),
   revokeOtherSessions: () => request("POST", "/api/auth/sessions/revoke-others"),
@@ -188,6 +225,21 @@ export const api = {
   invites: (includeSpent = false) => request("GET", `/api/invites?include_spent=${includeSpent}`),
   createInvite: (body) => request("POST", "/api/invites", body),
   revokeInvite: (id) => request("DELETE", `/api/invites/${id}`),
+
+  // ---------------------------------------------------------------- people and the admin users page (P3.2.6, P3.2.7)
+  users: (q = "", offset = 0) => request("GET", `/api/users?q=${encodeURIComponent(q)}&offset=${offset}`),
+  user: (handle, as) => request("GET", `/api/users/${encodeURIComponent(handle)}` + (as ? `?as=${encodeURIComponent(as)}` : "")),
+  adminUsers: (params = {}) => request("GET", "/api/admin/users?" + new URLSearchParams(params)),
+  adminUser: (id) => request("GET", `/api/admin/users/${encodeURIComponent(id)}`),
+  patchAdminUser: (id, body) => request("PATCH", `/api/admin/users/${encodeURIComponent(id)}`, body),
+  // ---------------------------------------------------------------- the compute ledger (P3.4.4)
+  ledgerMe: (range = "30d") => request("GET", `/api/ledger/me?range=${encodeURIComponent(range)}`),
+  userRatio: (handle, range = "30d") => request("GET", `/api/users/${encodeURIComponent(handle)}/ratio?range=${encodeURIComponent(range)}`),
+  hardwareClasses: () => request("GET", "/api/admin/hardware-classes"),
+  createHardwareClass: (body) => request("POST", "/api/admin/hardware-classes", body),
+  updateHardwareClass: (id, body) => request("PUT", `/api/admin/hardware-classes/${encodeURIComponent(id)}`, body),
+  deleteHardwareClass: (id) => request("DELETE", `/api/admin/hardware-classes/${encodeURIComponent(id)}`),
+  adminAudit: (params = {}) => request("GET", "/api/admin/audit?" + new URLSearchParams(params)),
 
   // ---------------------------------------------------------------- server pool
   poolServers: (purpose = "game") => request("GET", `/api/pool/servers?purpose=${purpose}`),
@@ -217,7 +269,6 @@ export const api = {
     request("POST", `/api/pool/servers/${serverId}/workers/tokens`, { label }),
   revokeWorkerToken: (serverId, tokenId) =>
     request("DELETE", `/api/pool/servers/${serverId}/workers/tokens/${tokenId}`),
-  importRegistry: () => request("POST", "/api/pool/import-registry"),
 
   // ---------------------------------------------------------------- sharing
   gameSharing: (gid) => request("GET", `/api/games/${gid}/sharing`),
@@ -226,15 +277,59 @@ export const api = {
     request("POST", `/api/games/${gid}/sharing/users`, { handle, permission }),
   unshareGameWith: (gid, handle) =>
     request("DELETE", `/api/games/${gid}/sharing/users/${encodeURIComponent(handle)}`),
+  // a moderator's (or the owner's) take-down: private, a new link, and the reason the owner sees
+  unpublishGame: (gid, reason) => request("POST", `/api/games/${gid}/unpublish`, { reason }),
+  // every other shareable thing (a report, a benchmark run, a probe run, a scenario, a map, a bot profile...)
+  itemSharing: (kind, ref) => request("GET", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing`),
+  setItemVisibility: (kind, ref, visibility) =>
+    request("PUT", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing`, { visibility }),
+  rotateItemLink: (kind, ref) => request("POST", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing/rotate`),
+  shareItemWith: (kind, ref, handle, permission) =>
+    request("POST", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing/users`, { handle, permission }),
+  unshareItemWith: (kind, ref, handle) =>
+    request("DELETE", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing/users/${encodeURIComponent(handle)}`),
+  unpublishItem: (kind, ref, reason) =>
+    request("POST", `/api/items/${kind}/${encodeURIComponent(ref)}/unpublish`, { reason }),
 };
 
+// The share key the page was opened with (`#/...?k=<key>`), or "". A link-shared game or report carries its key in
+// the URL; every request passes it on (the x-citar-share-key header, or `k` where a header cannot go).
+export function shareKey() {
+  return new URLSearchParams(location.hash.split("?")[1] || "").get("k") || "";
+}
+
+// The page's own share key, as a query to append to a link (`?k=...`), so a link-shared game or report keeps it from
+// one of its pages to the next.
+function keyQuery() {
+  const key = shareKey();
+  return key ? `?k=${encodeURIComponent(key)}` : "";
+}
+
+// A game screen's address: with a seat or spectator token (`#/game/<gid>/<token>[/<player>]`), or with none for a
+// viewer the server knows by account or share key (`#/game/<gid>`, `#/game/<gid>/-/<player>` to look through one
+// civilization's eyes).
+export function gameLink(gid, token, asPlayer) {
+  const t = token ? encodeURIComponent(token) : "-";
+  const as = asPlayer != null && asPlayer !== "" ? `/${t}/${asPlayer}` : (token ? `/${t}` : "");
+  return `#/game/${gid}${as}${keyQuery()}`;
+}
+
+// A game's recap, with a token or none, as gameLink.
+export function replayLink(gid, token) {
+  return `#/replay/${gid}${token ? "/" + encodeURIComponent(token) : ""}${keyQuery()}`;
+}
+
+// The live game socket. A seat or spectator token, or none: a signed-in viewer is known by the session cookie, and a
+// link-shared game's viewer by the share key the page was opened with (`k`, which a socket can carry only in its URL).
 export function connectWS(gid, token, onMessage, onClose) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   let ws = null;
   let closed = false;
   let retry = 500;
+  const key = shareKey();
+  const query = `token=${encodeURIComponent(token || "")}` + (key ? `&k=${encodeURIComponent(key)}` : "");
   function open() {
-    ws = new WebSocket(`${proto}://${location.host}/ws/games/${gid}?token=${encodeURIComponent(token)}`);
+    ws = new WebSocket(`${proto}://${location.host}/ws/games/${gid}?${query}`);
     ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)); } catch (err) { console.error(err); } };
     ws.onopen = () => { retry = 500; };
     ws.onclose = () => {

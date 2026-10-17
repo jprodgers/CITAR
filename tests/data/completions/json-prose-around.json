@@ -1,0 +1,39 @@
+{
+ "name": "json-prose-around",
+ "note": "prose around the object",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "Here is my move: {\"thoughts\": \"wait\", \"calls\": [{\"tool\": \"end_turn\"}]} Thanks!",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "wait",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "Here is my move: {\"thoughts\": \"wait\", \"calls\": [{\"tool\": \"end_turn\"}]} Thanks!"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

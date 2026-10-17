@@ -1,0 +1,133 @@
+{
+ "about": "A lab game played by the Python result building (citar/lab.py play() before package 4-07 moved it to Rust), recorded for 4-07's parity gate: the Rust LabResult of `spec` equals `result` on every deterministic key (all but seconds, started_ts, cpu_s and finished).",
+ "recorded_at": "2026-10-15",
+ "build": {
+  "version": "0.1.5",
+  "build_id": "0b412a18fe95",
+  "engine_code": "b6dfa8c7df72fe1b",
+  "bot_code": "6722048c0ca36c7c",
+  "rules": "3b89bbdfb807639c32c28f6c0ad8d1d2935355d61f86d43994fff824e5d8a389"
+ },
+ "spec": {
+  "exp": "parity-duel-b",
+  "i": 1,
+  "seed": 4201,
+  "map_type": "pangaea",
+  "size": "duel",
+  "speed": "Quick",
+  "turns": 40,
+  "difficulty": "King",
+  "barbarians": "off",
+  "barbarian_difficulty": null,
+  "nation": "BenchmarkCiv",
+  "city_states": null,
+  "seats": [
+   {
+    "label": "idle",
+    "bot": "idle",
+    "nation": "Rome",
+    "params": {},
+    "aggression": null,
+    "difficulty": null
+   },
+   {
+    "label": "fixed",
+    "bot": "basic-1",
+    "aggression": 0.8,
+    "difficulty": "Warlord",
+    "params": {
+     "tech_noise": 0.2
+    }
+   }
+  ],
+  "ai_base_values": null
+ },
+ "result": {
+  "exp": "parity-duel-b",
+  "i": 1,
+  "seed": 4201,
+  "map": "pangaea",
+  "turns": 40,
+  "winner": 1,
+  "winner_label": "fixed",
+  "victory": "Time",
+  "players": {
+   "0": {
+    "label": "idle",
+    "bot": "idle",
+    "difficulty": "King",
+    "alive": true,
+    "levels": null,
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null,
+    "build": "0b412a18fe95",
+    "version": "idle",
+    "fingerprint": "9a4db41ad7f8",
+    "params": {},
+    "fixed_aggression": null,
+    "aggression": 0.306,
+    "score": 40,
+    "score_share": 0.2469,
+    "rank": 1,
+    "techs": 2,
+    "cities": 1,
+    "policies": 0,
+    "religion": "none",
+    "great_people": 0,
+    "spaceship": 0,
+    "unhappy_share": 0.0,
+    "checkpoints": {},
+    "era_turn": {},
+    "events": {
+     "city_founded": 1
+    },
+    "built_top": {}
+   },
+   "1": {
+    "label": "fixed",
+    "bot": "basic-1",
+    "difficulty": "Warlord",
+    "alive": true,
+    "levels": null,
+    "profile": null,
+    "profile_rev": null,
+    "profile_name": null,
+    "build": "0b412a18fe95",
+    "version": "basic-1",
+    "fingerprint": "bc63f10ad883",
+    "params": {
+     "tech_noise": 0.2
+    },
+    "fixed_aggression": 0.8,
+    "aggression": 0.8,
+    "score": 122,
+    "score_share": 0.7531,
+    "rank": 0,
+    "techs": 10,
+    "cities": 3,
+    "policies": 1,
+    "religion": "none",
+    "great_people": 0,
+    "spaceship": 0,
+    "unhappy_share": 0.0,
+    "checkpoints": {},
+    "era_turn": {},
+    "events": {
+     "city_founded": 3
+    },
+    "built_top": {
+     "Settler": 2,
+     "Scout": 1,
+     "Worker": 1
+    }
+   }
+  },
+  "seconds": 0.0,
+  "started_ts": 1792081920.4,
+  "cpu_s": 0.0,
+  "errors": [],
+  "engine": "0b412a18fe95",
+  "finished": "2026-10-15T12:32:00"
+ }
+}

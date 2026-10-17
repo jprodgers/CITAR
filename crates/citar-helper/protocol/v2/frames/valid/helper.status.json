@@ -1,0 +1,10 @@
+{
+  "frame": {
+    "t": "status",
+    "ts": 1760000000.0,
+    "quiet_until": null,
+    "llm_in_flight": 1,
+    "jobs_running": 2,
+    "jobs_paused": 0
+  }
+}

@@ -5,6 +5,14 @@
 # image. argon2-cffi is the reason a builder is needed at all: on a platform with no wheel it
 # compiles, and a build toolchain in a production image is both weight and attack surface.
 #
+# The package comes from a wheel in wheelhouse/, never from the source: it carries the Rust engine
+# (citar._engine), and building that here would put a Rust toolchain and a long compile into every
+# image build. CI's package job builds the wheel (manylinux_2_28, the release profile, no test
+# operations) and its docker job copies it there; a tests run keeps it as the artifact
+# `wheel-manylinux`. To build one yourself, use maturin's manylinux container, since a wheel built
+# on a newer Linux than this image's Debian 12 needs a newer glibc than the image has:
+#
+#   docker run --rm -v "$PWD":/io ghcr.io/pyo3/maturin build --release --out wheelhouse
 #   docker build -t citar .
 #   docker run -p 8765:8765 -v citar-state:/var/lib/citar citar
 #
@@ -27,27 +35,23 @@ ENV PATH="/opt/venv/bin:$PATH"
 WORKDIR /src
 RUN pip install --upgrade pip setuptools wheel
 
-# Dependencies first, from the project metadata alone. This layer is rebuilt only when the
-# dependency list changes, so editing the game engine does not re-download the world. `citar` is
-# installed with --no-deps afterwards, over the top of the environment this produced.
-COPY pyproject.toml README.md LICENSE NOTICE.md ./
-COPY citar/__init__.py ./citar/__init__.py
-RUN python - <<'PY' > /tmp/requirements.txt
-import re
-import tomllib
+# Dependencies first, from the project metadata alone: the [server] extra's requirements, which
+# scripts/ci/requirements.py reads out of pyproject.toml. This layer is rebuilt only when the
+# dependency list changes, so a new wheel does not re-download the world. `citar` is installed
+# with --no-deps afterwards, over the top of the environment this produced.
+COPY pyproject.toml ./
+COPY scripts/ci/requirements.py ./scripts/ci/requirements.py
+RUN python scripts/ci/requirements.py server > /tmp/requirements.txt \
+ && pip install -r /tmp/requirements.txt
 
-with open("pyproject.toml", "rb") as handle:
-    data = tomllib.load(handle)
-project = data["project"]
-wanted = list(project["dependencies"])
-for extra in ("anthropic", "oauth", "keyring", "worker"):   # the [server] extra, expanded
-    wanted += [d for d in project["optional-dependencies"][extra] if not d.startswith("citar[")]
-print("\n".join(sorted(set(wanted))))
-PY
-RUN pip install -r /tmp/requirements.txt
-
-COPY . .
-RUN pip install --no-deps .
+# The wheel. `wheelhouse*` rather than `wheelhouse/`: a COPY whose only source is missing fails
+# with Docker's own message, and this one says what to do. With several wheels there (another
+# platform's, an older build), pip takes the newest that installs on this one.
+COPY pyproject.toml wheelhouse* /tmp/wheelhouse/
+RUN ls /tmp/wheelhouse/*.whl >/dev/null 2>&1 || { \
+      echo "No wheel in wheelhouse/: build one first (see the top of the Dockerfile)." >&2; exit 1; } \
+ && pip install --no-deps --no-index --find-links /tmp/wheelhouse citar \
+ && python -c "import citar._engine"
 
 # --------------------------------------------------------------------------------- runtime
 FROM python:3.12-slim-bookworm AS runtime

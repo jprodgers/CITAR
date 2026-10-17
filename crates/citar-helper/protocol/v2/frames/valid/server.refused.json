@@ -1,0 +1,8 @@
+{
+  "frame": {
+    "t": "refused",
+    "ts": 1760000000.0,
+    "code": "token",
+    "message": "That worker token was refused: issue a new one on the Servers page."
+  }
+}

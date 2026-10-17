@@ -1,11 +1,13 @@
 """Session-level tests: AI seats, negotiation interrupts between agents, saves. Uses a scripted mock model."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+from tests import has_test_ops
+import json
 import time
 import unittest
 from unittest import mock
 
 from citar.agents.providers.base import Conversation, StepResult, ToolCall
-from citar.server.session import SessionManager, GameSession, load_save_file
+from citar.server.session import SessionManager, GameSession
 
 
 class ScriptedConversation(Conversation):
@@ -71,30 +73,33 @@ class SessionTests(unittest.TestCase):
                                      {"type": "bot"}])
             s.ai_delay = 0
             with s.lock:
-                s.game.meet(0, 1)
-                s.game.player(0).gold = 50       # UnCiv civs start with no gold
+                s.game.apply_ops([{"op": "meet", "a": 0, "b": 1},
+                                  {"op": "set_player", "player": 0, "gold": 50}])   # UnCiv civs start with no gold
             # Wait for what the assertions below actually need, not for a turn number. The turn
             # counter moves when the turn ends, which is not the same moment as the script for
             # that turn having run: on a fast machine this loop saw turn 3 and paused the game
             # before the negotiation script had been called at all, and the test failed with an
             # empty negotiation list.
             def ready():
-                negotiations = s.game.s.negotiations
+                negotiations = s.game.negotiations()
                 return (s.game.turn >= 3 and negotiations and negotiations[0]["status"] != "open"
                         and captured.get("results"))
 
             deadline = time.time() + 60
             while time.time() < deadline and not ready():
                 time.sleep(0.1)
-            s.paused = True
+            # Stopped, not only paused, while the scripted model is still patched in: the driver may already be past
+            # its look at the pause, and a turn it starts after the patch ends would ask for the unknown provider.
+            s.stop()
+            s._driver.join(10)
         self.assertGreaterEqual(s.game.turn, 3, s.errors)
-        self.assertEqual(s.game.player(0).name, "Mockonia")
-        negs = s.game.s.negotiations
+        self.assertEqual(s.game.player_name(0), "Mockonia")
+        negs = s.game.negotiations()
         self.assertTrue(negs, "negotiation should have been opened")
         self.assertIn(negs[0]["status"], ("accepted", "rejected", "expired"))
         results_text = " ".join(r[1] for r in captured.get("results", []))
         self.assertIn("negotiation", results_text)
-        self.assertTrue(any(t["player"] == 0 for t in s.game.s.thoughts))
+        self.assertTrue(s.game.thoughts(0))
         self.assertEqual(s.errors, [])
 
     def test_loop_guard_and_metrics(self):
@@ -127,8 +132,8 @@ class SessionTests(unittest.TestCase):
         self.assertGreaterEqual(first["repeats"], 4)
         self.assertEqual(first["stall_nudges"], 1)
         self.assertGreater(seat["tools"]["get_briefing"]["count"], 3)
-        self.assertEqual(s.game.player(0).name, "Loopia")
-        self.assertEqual(len(s.game.player_cities(0)), 1)
+        self.assertEqual(s.game.player_name(0), "Loopia")
+        self.assertEqual(s.game.standing(0)["cities"], 1)
 
     def test_closing_game_aborts_ai_turn(self):
         import threading
@@ -185,7 +190,10 @@ class SessionTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertGreaterEqual(s.game.turn, 2, "the turn should end when its time budget runs out")
             self.assertLess(time.time() - t0, 15, "a timed-out request must not be retried past the turn limit")
-        self.manager.delete(s.id)                   # stop its next turn, which has already started
+            # Stopped inside the patch: its next turn has already started, or starts any moment, and outside the
+            # patch it would make a real conversation for the "mock" provider and record that failure (CI, test.yml
+            # run 38871821775, macos / Python 3.12).
+            self.manager.delete(s.id)
         self.assertLessEqual(seen[0], 7)
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "time_limit")
@@ -215,11 +223,12 @@ class SessionTests(unittest.TestCase):
             self.manager.delete(s.id)     # inside the patch: turn 2 must not reach the real provider
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "end_turn")
-        self.assertFalse(any(e["type"] == "agent_error" for e in s.game.s.events))
+        self.assertFalse(any(e["type"] == "agent_error" for e in s.game.events()))
 
     def test_a_busy_machine_is_waited_for_not_treated_as_a_disconnect(self):
         """Two games sharing a machine take turns on its slot. 'Busy' must never pause a game or skip a turn,
-        however short the reconnect window."""
+        however short the reconnect window: the prompt scheduler absorbs it (it holds the machine's capacity at what
+        is in flight and queues the request again; design/phase3-features.md P3.3.3), so the seat names a machine."""
         free_at = time.time() + 3
 
         class Busy(ConnectionError):
@@ -232,12 +241,15 @@ class SessionTests(unittest.TestCase):
                 return super().step()
 
         ScriptedConversation.scripts = {}
-        with mock.patch("citar.agents.llm_agent.make_conversation", SharedConversation):
+        with mock.patch("citar.agents.llm_agent.make_conversation", SharedConversation), \
+                self.assertLogs("citar.scheduler", level="WARNING") as logged:
             s = self.manager.create({"map_size": "duel", "seed": 4, "on_disconnect": "pause", "reconnect_seconds": 1},
-                                    [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
+                                    [{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}},
+                                     {"type": "bot"}])
             self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the turn should be played once the slot frees")
             self.assertFalse(s.paused)
             self.manager.delete(s.id)
+        self.assertTrue(any("refused a request as busy" in line for line in logged.output), "the mismatch is logged")
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "end_turn")
 
@@ -256,7 +268,7 @@ class SessionTests(unittest.TestCase):
             self.manager.delete(s.id)
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "disconnected")
-        self.assertTrue(any(e["type"] == "agent_error" and "unreachable" in e["text"] for e in s.game.s.events))
+        self.assertTrue(any(e["type"] == "agent_error" and "unreachable" in e["text"] for e in s.game.events()))
 
     def test_disconnect_pause_policy_pauses_and_resumes(self):
         server_up = {"v": False}
@@ -282,7 +294,7 @@ class SessionTests(unittest.TestCase):
             self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the interrupted turn is replayed and finished")
             self.manager.delete(s.id)
         self.assertIsNone(s.info()["pause_reason"])
-        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
+        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.events()))
 
     def test_pausing_mid_turn_stops_the_turn_and_its_clock(self):
         """Pausing from the game screen used to let an AI's turn run on, and its duration kept counting."""
@@ -339,7 +351,7 @@ class SessionTests(unittest.TestCase):
             self.assertTrue(self._wait(lambda: not s.paused), "the game should resume when the hours end")
             self.assertTrue(self._wait(lambda: s.game.turn >= 2))
             self.manager.delete(s.id)
-        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
+        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.events()))
 
     def test_a_lobby_game_makes_way_for_higher_priority_work(self):
         from citar.pool import queue as work_queue
@@ -392,6 +404,36 @@ class SessionTests(unittest.TestCase):
             for sid in list(after.sessions):
                 after.delete(sid)
 
+    def test_a_game_paused_for_its_budget_comes_back_running_after_a_restart(self):
+        """A game paused because its machine's budget was spent resumes by itself when the budget's period turns, but
+        its watcher goes with the process: brought back paused, it waited for a person (review of 3-10). It comes back
+        running, as a disconnect's pause does; its seat's next request is refused again (and pauses it, watched) while
+        the budget is still spent. A person's pause stays."""
+        from citar.server.session import SAVE_DIR
+        budgeted = self.manager.create({"map_size": "duel", "seed": 12}, [{"type": "human"}, {"type": "bot"}],
+                                       name="budgeted")
+        held = self.manager.create({"map_size": "duel", "seed": 13}, [{"type": "human"}, {"type": "bot"}],
+                                   name="held by a person")
+        budgeted.suspend({"kind": "budget", "player": 1, "message": "The budget for “Bob's” is used up.",
+                          "since": time.time(), "until": time.time() + 3600, "budget": "b_x", "period": "2026-10-12"})
+        held.suspend({"kind": "user", "message": "Paused by alice."})
+        for s in (budgeted, held):
+            s.autosave(force=True)
+        marks = {s.id: json.loads((SAVE_DIR / s.id / "live.json").read_text(encoding="utf-8")) for s in (budgeted, held)}
+        self.assertEqual((marks[budgeted.id]["paused"], marks[held.id]["paused"]), (False, True))
+        for s in (budgeted, held):
+            s.stop()
+        after = SessionManager()
+        try:
+            after.restore_live()
+            self.assertEqual({budgeted.id, held.id} & set(after.sessions), {budgeted.id, held.id})
+            self.assertFalse(after.get(budgeted.id).paused, "the check that paused it runs again")
+            self.assertTrue(after.get(held.id).paused)
+        finally:
+            for sid in list(after.sessions):
+                after.delete(sid)
+
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_finished_games_leave_the_list_by_themselves(self):
         """A finished game stayed under current games until someone pressed Close."""
         from citar.server.session import SAVE_DIR
@@ -400,7 +442,7 @@ class SessionTests(unittest.TestCase):
         playing = self.manager.create({"map_size": "duel", "seed": 11}, [{"type": "human"}, {"type": "bot"}], name="playing")
         for s in (done, watched):
             with s.lock:
-                s.game.s.phase = "over"
+                s.game.test_ops([{"op": "end_game"}])
         watched.subscribers.append(lambda msg: None)
         t0 = time.time()
         self.assertEqual(self.manager.close_finished(t0), [], "players get a few minutes to see the result")
@@ -418,13 +460,14 @@ class SessionTests(unittest.TestCase):
         r = s.call_tool(pid, "end_turn", {})
         self.assertTrue(r["ok"], r)
         deadline = time.time() + 20
-        while time.time() < deadline and s.game.s.current != 0:
+        while time.time() < deadline and s.game.current != 0:
             time.sleep(0.1)
         path = s.save("unit-test")
-        data = load_save_file(path)
-        s2 = GameSession.from_save(data)
+        s.stop()        # a session holds its journal, so its saves are read once it has stopped (manager.load does it)
+        s2 = GameSession.from_save(path)
         self.assertEqual(s2.game.turn, s.game.turn)
         self.assertEqual(s2.seats[0].token, s.seats[0].token)
+        s2.stop()
         path.unlink()
 
     def test_wait_for_turn(self):

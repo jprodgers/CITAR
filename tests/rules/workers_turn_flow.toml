@@ -1,0 +1,130 @@
+about = """
+In the turn flow itself: a worker standing on its farm with movement left does a turn of work at the
+end of each of its owner's turns, and the farm is built when the work is done; an automated worker
+takes a job at the start of its owner's turn; a sleeping unit wakes when an enemy military unit it
+sees comes within three tiles, and its owner is told.
+"""
+from = "tests/test_engine.py::TurnTests::test_worker_builds_farm"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "A>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { worker = "=made[2].unit_ids[0]", sleeper = "=made[3].unit_ids[0]", enemy = "=made[4].unit_ids[0]" }
+
+[[step]]
+tool = "build_improvement"
+args = { unit_id = "=worker", improvement = "Farm" }
+as = "farm"
+
+[[step]]
+check = "farm"
+path = "turns"
+eq = 7
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=sleeper", order = "sleep" }
+
+[[step]]
+check = { what = "tile", at = "A>e" }
+path = "builds"
+eq = [["Farm", "=farm.turns"]]
+
+[[step]]
+note = "The end of Rome's turn: a turn of work."
+op = "end_turn"
+
+[[step]]
+check = { what = "tile", at = "A>e" }
+path = "builds"
+eq = [["Farm", "=farm.turns - 1"]]
+
+[[step]]
+op = "end_turn"
+
+[[step]]
+repeat = 6
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "tile", at = "A>e" }
+subset = { improvement = "Farm", builds = [] }
+
+[[step]]
+check = { what = "events", type = "improvement_built" }
+path = "[0]"
+subset = { text = "Civilization 1 finished Farm.", audience = [0] }
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+path = "activity"
+is_null = true
+
+[[step]]
+note = "Asleep with no enemy near, the warrior sleeps on."
+check = { what = "unit", unit = "=sleeper" }
+path = "activity"
+eq = "sleep"
+
+[[step]]
+note = "Cotton within Roma's borders, and the tech to improve it."
+ops = [
+  { op = "set_city", city = "=made[0].city_id", claim_radius = 2 },
+  { op = "grant_tech", player = 0, tech = "Calendar" },
+]
+
+[[step]]
+note = "Automated, the worker heads for the cotton."
+tool = "unit_order"
+args = { unit_id = "=worker", order = "automate" }
+as = "auto"
+
+[[step]]
+check = "auto"
+subset = { status = "working", job = "Plantation", tile = { x = "=x('L')", y = "=y('L')" } }
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+path = "activity"
+eq = "automate"
+
+[[step]]
+note = "An enemy warrior two tiles from the sleeper."
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+
+[[step]]
+op = "set_unit"
+args = { unit = "=enemy", at = "A>w>w>sw" }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "unit", unit = "=sleeper" }
+path = "activity"
+is_null = true
+
+[[step]]
+note = "At the start of Rome's turn the worker went on to the cotton and began the plantation."
+check = { what = "unit", unit = "=worker" }
+subset = { x = "=x('L')", y = "=y('L')", activity = "automate" }
+
+[[step]]
+check = { what = "tile", at = "L" }
+path = "builds[0][0]"
+eq = "Plantation"
+
+[[step]]
+check = { what = "events", type = "unit_woke", player = 0 }
+any = { path = "text", matches = "^Warrior #[0-9]+ woke up: enemy nearby[.]$" }

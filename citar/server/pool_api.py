@@ -1,16 +1,21 @@
 """HTTP API for the shared server pool: servers, groups, grants, windows and budgets.
 
-Separate from `admin_api.py`, which is the old single-tenant registry and stays administrator-only.
-These routes are per-owner: an ordinary account with the `register_servers` capability can add its
-own hardware, put it in a group and decide who may use it on what terms.
+Every machine is a row (design/phase3-features.md P3.2.8); ``admin_api.py`` keeps the registry's routes (a machine's
+configuration, model loading on the host, keys, electricity plans) with a gate per route. These routes are
+per-owner: an ordinary account with the `register_servers` capability can add its own hardware, put it in a group
+and decide who may use it on what terms. A machine the server dials itself (``reach = direct``) is an
+administrator's to add, unless it is the dry run (``pool.check_reach``: 403). Revoking a worker token, disabling a
+machine and deleting one drop its helper's connection once the change is committed (``WorkerHub.drop``).
 """
 from __future__ import annotations
 
 import logging
+import secrets
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -25,8 +30,23 @@ router = APIRouter(prefix="/api/pool")
 
 
 def _fail(exc: Exception, status: int = 400) -> HTTPException:
-    """Turn an internal error into an HTTP error."""
-    return HTTPException(status, str(exc))
+    """Turn an internal error into an HTTP error: 403 for a machine the caller may not make one CITAR dials."""
+    return HTTPException(403 if isinstance(exc, pool.ReachRefused) else status, str(exc))
+
+
+def _saved(s: Session) -> None:
+    """Commit the request's change before it answers. The request's session would otherwise commit only after the
+    answer is sent (FastAPI ends a request-scoped dependency after the response), and the Servers page reads a change
+    back at once: a card redrawn after its dialog saves would show what was there before."""
+    s.commit()
+
+
+def _drop(s: Session, server_id: str, reason: str, *, token_id: Optional[str] = None) -> None:
+    """Commit the request's change, then disconnect the machine's helper (P3.2.8): its next hello finds the change
+    and is refused, and nothing it was doing is waited for."""
+    from .workers import hub
+    s.commit()
+    hub().drop(server_id, reason, token_id=token_id)
 
 
 def _server(s: Session, server_id: str, viewer: Optional[User], permission: str) -> Server:
@@ -74,20 +94,11 @@ def _liveness(server_id: str) -> Optional[bool]:
         return None
 
 
-def _load(server_id: str) -> Optional[int]:
-    """How many activities currently hold this server."""
-    try:
-        from .workers import hub
-        return hub().in_flight(server_id)
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------- servers
 
 @router.get("/servers")
 def list_servers(request: Request, purpose: str = "game", p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Every server this account can see, each with whether it may be used right now and why not.
 
     Refused servers are included with their reason rather than hidden: somebody should be able to
@@ -97,8 +108,8 @@ def list_servers(request: Request, purpose: str = "game", p: Principal = Depends
     me = require_user(request, p)
     out = []
     for server in pool.servers_for(s, me):
-        decision = admission.check(s, me, server, purpose,
-                                   online=_liveness(server.id), in_flight=_load(server.id))
+        # no capacity step (P3.3.7): a machine busy right now queues the work, it does not refuse it
+        decision = admission.check(s, me, server, purpose, online=_liveness(server.id), in_flight=None)
         entry = pool.public_server(s, server, me)
         entry["admission"] = decision.client()
         entry["online"] = _liveness(server.id)
@@ -119,24 +130,24 @@ class ServerBody(BaseModel):
 @router.post("/servers")
 def create_server(body: ServerBody, request: Request,
                   me: User = Depends(require_cap("register_servers")),
-                  s: Session = Depends(get_db)):
+                  s: Session = Depends(get_db, scope="function")):
     """Register a machine, and issue its first worker token."""
     try:
         server = pool.create_server(s, me, body.config, group_id=body.group_id, reach=body.reach)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return pool.public_server(s, server, me)
 
 
 @router.get("/servers/{server_id}")
 def get_server(server_id: str, request: Request, p: Principal = Depends(principal),
-               s: Session = Depends(get_db)):
+               s: Session = Depends(get_db, scope="function")):
     """One machine's details. Cost configuration is included only for its owner."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.VIEW)
     out = pool.public_server(s, server, me)
-    out["admission"] = admission.check(s, me, server, online=_liveness(server_id),
-                                       in_flight=_load(server_id)).client()
+    out["admission"] = admission.check(s, me, server, online=_liveness(server_id), in_flight=None).client()
     return out
 
 
@@ -150,10 +161,11 @@ class ServerUpdate(BaseModel):
 
 @router.put("/servers/{server_id}")
 def update_server(server_id: str, body: ServerUpdate, request: Request,
-                  p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                  p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a machine's details."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
+    disabled = body.enabled is False and server.enabled
     if body.enabled is not None:
         server.enabled = body.enabled
         audit.record(s, "server.enabled" if body.enabled else "server.disabled", actor=me,
@@ -167,6 +179,13 @@ def update_server(server_id: str, body: ServerUpdate, request: Request,
         if body.group_id:
             _group(s, body.group_id, me, access.MANAGE)
         server.group_id = body.group_id or None
+    if disabled:
+        _drop(s, server.id, "its machine was disabled")
+    else:
+        _saved(s)
+        # the editor's "Requests at once" is the machine's slots: the scheduler and the connected helper get them now
+        from .machines_api import settings_changed
+        settings_changed(server.id)
     return pool.public_server(s, server, me)
 
 
@@ -180,7 +199,7 @@ class Costing(BaseModel):
 
 @router.put("/servers/{server_id}/costing")
 def set_costing(server_id: str, body: Costing, request: Request,
-                p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change what a machine costs to run: watts, hardware prices and the electricity plan."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
@@ -188,20 +207,21 @@ def set_costing(server_id: str, body: Costing, request: Request,
         pool.set_costing(s, me, server, body.model_dump())
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return pool.public_server(s, server, me)
 
 
 @router.get("/servers/{server_id}/rates")
-def machine_rates(server_id: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def machine_rates(server_id: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """What an hour on this machine costs, idle and with the model busy."""
-    from .. import costing, servers as registry
+    from .. import servers as registry
     me = require_user(request, p)
     _server(s, server_id, me, access.MANAGE)
     reg = registry.with_pooled()
     sv = next((x for x in reg["servers"] if x["id"] == server_id), None)
     if sv is None:
         raise HTTPException(404, "No such server.")
-    return {"idle": costing.hourly_profile(sv, reg, busy_fraction=0.0), "busy": costing.hourly_profile(sv, reg, busy_fraction=1.0)}
+    return pool.machine_rates(sv, reg, me)
 
 
 class QuietHours(BaseModel):
@@ -211,7 +231,7 @@ class QuietHours(BaseModel):
 
 @router.put("/servers/{server_id}/quiet-hours")
 def set_quiet_hours(server_id: str, body: QuietHours, request: Request,
-                    p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                    p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a machine's quiet hours, in its owner's time zone."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
@@ -219,41 +239,46 @@ def set_quiet_hours(server_id: str, body: QuietHours, request: Request,
         pool.set_quiet_hours(s, me, server, body.restricted_hours)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return pool.public_server(s, server, me)
 
 
 @router.delete("/servers/{server_id}")
 def delete_server(server_id: str, request: Request, p: Principal = Depends(principal),
-                  s: Session = Depends(get_db)):
-    """Remove a machine from the pool."""
+                  s: Session = Depends(get_db, scope="function")):
+    """Remove a machine from the pool: its row, then (once that is committed) its helper's connection and the key its
+    stored configuration keeps."""
+    from .. import servers as registry
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
-    pool.delete_server(s, me, server)
+    config = pool.delete_server(s, me, server)
+    _drop(s, server_id, "its machine was deleted")
+    registry.forget_key(server_id, config)
     return {"deleted": server_id}
 
 
 # ---------------------------------------------------------------------------- groups
 
 @router.get("/groups")
-def list_groups(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def list_groups(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """The server groups the viewer can see."""
     me = require_user(request, p)
     out = []
     for group in pool.groups_for(s, me):
         perms = access.on(s, me, group)
-        owner = s.get(User, group.owner_id)
+        owner = s.get(User, group.owner_id) if group.owner_id else None
         entry = {
             "id": group.id, "name": group.name, "description": group.description,
-            "visibility": group.visibility, "owner": owner.public() if owner else None,
+            "visibility": group.visibility, "owner": owner.public(me) if owner else None,
             "is_mine": group.owner_id == me.id, "can_manage": access.MANAGE in perms,
             "servers": [pool.public_server(s, sv, me)
                         for sv in s.query(Server).filter(Server.group_id == group.id)],
         }
         if access.MANAGE in perms:
+            # No share link: a group's machines are shared by its grants alone, and no route takes a group's key
+            # (a `link` group admits nobody by it yet), so a link would open nothing for whoever it was given to.
             entry["grants"] = [pool.grant_to_client(s, g, me)
                                for g in s.query(AccessGrant).filter(AccessGrant.group_id == group.id)]
-            entry["share_url"] = (f"/#/servers/groups/{group.id}?k={group.slug}"
-                                  if group.visibility == "link" else None)
         else:
             # A guest sees the terms that apply to *them*, not everybody else's grants.
             mine = admission.grants_for(s, me, group.id)
@@ -272,19 +297,20 @@ class GroupBody(BaseModel):
 @router.post("/groups")
 def create_group(body: GroupBody, request: Request,
                  me: User = Depends(require_cap("register_servers")),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Create a server group."""
     try:
         group = pool.create_group(s, me, name=body.name, description=body.description,
                                   visibility=body.visibility)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return {"id": group.id, "name": group.name, "visibility": group.visibility}
 
 
 @router.put("/groups/{group_id}")
 def update_group(group_id: str, body: GroupBody, request: Request,
-                 p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                 p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a group."""
     me = require_user(request, p)
     group = _group(s, group_id, me, access.MANAGE)
@@ -292,12 +318,13 @@ def update_group(group_id: str, body: GroupBody, request: Request,
     group.description = (body.description or "").strip()
     if body.visibility != group.visibility:
         access.set_visibility(s, group, body.visibility, actor=me)
+    _saved(s)
     return {"id": group.id, "name": group.name, "visibility": group.visibility}
 
 
 @router.delete("/groups/{group_id}")
 def delete_group(group_id: str, request: Request, p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Delete a group."""
     me = require_user(request, p)
     group = _group(s, group_id, me, access.MANAGE)
@@ -307,6 +334,7 @@ def delete_group(group_id: str, request: Request, p: Principal = Depends(princip
         server.group_id = None
     audit.record(s, "server_group.deleted", actor=me, object_type="server_group", object_id=group.id)
     s.delete(group)
+    _saved(s)
     return {"deleted": group_id}
 
 
@@ -324,10 +352,10 @@ class WindowBody(BaseModel):
 
 
 class BudgetBody(BaseModel):
-    """A spending budget: an amount, a period, and what happens when it is reached."""
+    """A spending budget, in credits: an amount, a period, and what happens when it is reached."""
     period: str = "month"
     amount: float = 0.0
-    currency: str = "USD"
+    unit: str = "credits"
     behavior: str = "hard"
 
 
@@ -346,7 +374,7 @@ class GrantBody(BaseModel):
 
 @router.post("/groups/{group_id}/grants")
 def create_grant(group_id: str, body: GrantBody, request: Request,
-                 p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                 p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Grant access to a group."""
     me = require_user(request, p)
     group = _group(s, group_id, me, access.MANAGE)
@@ -359,12 +387,13 @@ def create_grant(group_id: str, body: GrantBody, request: Request,
             budget=body.budget.model_dump() if body.budget else None)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return pool.grant_to_client(s, grant, me)
 
 
 @router.put("/grants/{grant_id}")
 def update_grant(grant_id: str, body: GrantBody, request: Request,
-                 p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                 p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a grant's terms."""
     me = require_user(request, p)
     grant = s.get(AccessGrant, grant_id)
@@ -386,21 +415,29 @@ def update_grant(grant_id: str, body: GrantBody, request: Request,
     except ValueError as exc:
         raise _fail(exc)
     audit.record(s, "grant.updated", actor=me, object_type="server_group", object_id=grant.group_id)
+    _saved(s)
+    # the work already running under the grant is held to its budget as it is now, from its next request (P3.4.6:
+    # leases and tickets are bound to the grant, not to the budget it had when they were made)
+    budgets.keeper().reload_grant(s, grant.id)
     return pool.grant_to_client(s, grant, me)
 
 
 @router.delete("/grants/{grant_id}")
 def revoke_grant(grant_id: str, request: Request, p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Revoke a grant."""
     me = require_user(request, p)
     grant = s.get(AccessGrant, grant_id)
     if grant is None:
         raise HTTPException(404, "No such grant.")
+    # the group's gate first: a grant of a group the caller may not see is a 404, as the group is
+    _group(s, grant.group_id, me, access.MANAGE)
     try:
         pool.revoke_grant(s, me, grant)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
+    budgets.keeper().reload_grant(s, grant_id)          # its budget went with it
     return {"revoked": grant_id}
 
 
@@ -408,7 +445,7 @@ def revoke_grant(grant_id: str, request: Request, p: Principal = Depends(princip
 
 @router.get("/servers/{server_id}/workers")
 def worker_status(server_id: str, request: Request, p: Principal = Depends(principal),
-                  s: Session = Depends(get_db)):
+                  s: Session = Depends(get_db, scope="function")):
     """Whether a worker is connected for this server, and which tokens exist."""
     from ..db.models import WorkerToken
     from .workers import hub
@@ -423,21 +460,36 @@ def worker_status(server_id: str, request: Request, p: Principal = Depends(princ
          "last_ip": t.last_ip, "revoked": t.revoked_at is not None}
         for t in s.query(WorkerToken).filter(WorkerToken.server_id == server.id)
         .order_by(WorkerToken.created_at.desc())]
+    from .workers import fingerprint
+    block = server.helper if isinstance(server.helper, dict) else None
     return {"online": connection is not None,
             "worker": connection.client() if connection else None,
+            # its helper's last hello (version, builds, target, protocol), kept on the row while it is offline
+            "helper": {k: block.get(k) for k in ("protocol", "version", "build", "jobs_build", "target", "label",
+                                                  "connected_at")} if block else None,
+            "key": {"fingerprint": fingerprint(server.public_key or "") or None,
+                    "registered_at": server.key_at.isoformat() if server.key_at else None},
+            # what it lends of its CPU in effect, each limit hard or soft (package 4-10)
+            "cpu": _helper_cpu(server),
             "tokens": tokens_out,
             "command": _worker_command(server), "args": _worker_args(server)}
 
 
+def _helper_cpu(server) -> Optional[dict]:
+    from ..machine_settings import helper_cpu
+    return helper_cpu(server)
+
+
 def _worker_args(server) -> str:
-    """The worker's arguments on their own, for the page to put after whichever helper file was downloaded."""
+    """The helper's arguments on their own, for the page to put after whichever helper file was downloaded."""
     from .. import settings as cfg
     return f"--server {cfg.get().public_origin} --token YOUR_TOKEN --name \"{server.name}\""
 
 
 def _worker_command(server) -> str:
-    """The exact command the machine's owner should run to connect it (with CITAR installed there)."""
-    return "python -m citar.worker " + _worker_args(server)
+    """The exact command the machine's owner should run to connect it, with the CITAR helper (``citar-helper``,
+    downloaded from this page) on its PATH."""
+    return "citar-helper " + _worker_args(server)
 
 
 class TokenBody(BaseModel):
@@ -447,7 +499,7 @@ class TokenBody(BaseModel):
 
 @router.post("/servers/{server_id}/workers/tokens")
 def create_worker_token(server_id: str, body: TokenBody, request: Request,
-                        p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                        p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Issue a worker token. The value is returned ONCE and only its hash is stored."""
     from ..auth import tokens as token_util
     from ..db.models import WorkerToken
@@ -461,6 +513,8 @@ def create_worker_token(server_id: str, body: TokenBody, request: Request,
     s.flush()
     audit.record(s, "worker.token_issued", actor=me, object_type="server", object_id=server.id,
                  label=row.label)
+    # the helper may connect with it the moment it is shown
+    _saved(s)
     return {
         "id": row.id, "token": raw, "prefix": row.prefix,
         "command": _worker_command(server).replace("YOUR_TOKEN", raw),
@@ -471,7 +525,7 @@ def create_worker_token(server_id: str, body: TokenBody, request: Request,
 
 @router.delete("/servers/{server_id}/workers/tokens/{token_id}")
 def revoke_worker_token(server_id: str, token_id: str, request: Request,
-                        p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                        p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Revoke a worker token, disconnecting anything using it."""
     from datetime import datetime, timezone
 
@@ -484,64 +538,156 @@ def revoke_worker_token(server_id: str, token_id: str, request: Request,
         raise HTTPException(404, "No such worker token.")
     row.revoked_at = datetime.now(timezone.utc)
     audit.record(s, "worker.token_revoked", actor=me, object_type="server", object_id=server.id)
+    _drop(s, server.id, "its worker token was revoked", token_id=token_id)
     return {"revoked": token_id}
 
 
+#: How many tests of machines one account may have waiting for their reply at once, over all machines: each holds a
+#: request (and one of the server's worker threads) until its reply or its ``wait`` (at most 120 s). On one machine an
+#: account has one at a time (the scheduler's ``one_per_consumer``).
+TESTS_PER_ACCOUNT = 2
+_tests_lock = threading.Lock()
+_tests_waiting: dict = {}         # user id -> tests of theirs waiting now
+
+
+def _test_begins(user_id: str) -> bool:
+    """Count a test of ``user_id``'s as waiting, unless they have ``TESTS_PER_ACCOUNT`` waiting already."""
+    with _tests_lock:
+        n = _tests_waiting.get(user_id, 0)
+        if n >= TESTS_PER_ACCOUNT:
+            return False
+        _tests_waiting[user_id] = n + 1
+        return True
+
+
+def _test_ends(user_id: str) -> None:
+    """A test of ``user_id``'s has its answer (or gave up)."""
+    with _tests_lock:
+        n = _tests_waiting.get(user_id, 0) - 1
+        if n > 0:
+            _tests_waiting[user_id] = n
+        else:
+            _tests_waiting.pop(user_id, None)
+
+
 @router.post("/servers/{server_id}/test")
-def test_server(server_id: str, request: Request, model: str = "", p: Principal = Depends(principal),
-                s: Session = Depends(get_db)):
+def test_server(server_id: str, request: Request, model: str = "",
+                wait: float = Query(120.0, ge=1.0, le=120.0), p: Principal = Depends(principal),
+                s: Session = Depends(get_db, scope="function")):
     """Send a trivial completion to a server and report what came back.
 
     The "is this thing actually working" button. Checking that a worker is *connected* is not the
     same as checking that the model behind it will answer — a worker can be online with LM Studio
     closed, or with the named model not loaded — and the difference is worth one round trip before
     somebody schedules a six-hour benchmark against it.
+
+    The completion is a ``test`` ticket of the prompt scheduler (design/phase3-features.md P3.3.3): a pooled prompt,
+    admitted as every one is (P3.3.7: ``partial_llm`` and a grant for ``pooled``, its concurrency the caller's cap), it
+    waits for a slot like any pooled prompt, on a model the helper has loaded (unless its owner allows swaps), and goes
+    through ``make_conversation`` like every model call. ``wait`` is how long the caller waits for the reply (1 to 120
+    seconds): then the ticket is cancelled, and the helper stops the generation and acknowledges, which frees its slot
+    (one that does not acknowledge leaves it draining, design/phase4-helper.md P4.5.3). A caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all
+    (another answers at once, ``code`` ``duplicate`` or ``too_many``), at most ``server_test``'s rate
+    (``citar.auth.ratelimit``; 429 past it), and the request's database connection is given back before the wait.
+    The test is an activity of its own in the compute ledger (``test:<id>``, design/phase3-features.md P3.4.2): used
+    by the caller, given by the machine's owner, counted against the grant's budget when it has one; it has no usage
+    record, so no cost report lists it.
     """
     import time as _time
 
-    from ..worker import protocol as P
-    from .workers import WorkerError, hub
+    from ..agents.providers import make_conversation
+    from ..auth import ratelimit
+    from ..pool import scheduler as prompt_scheduler
+    from .workers import hub
 
     me = require_user(request, p)
     server = _server(s, server_id, me, access.VIEW)
-    decision = admission.check(s, me, server, "game",
-                               online=_liveness(server.id), in_flight=_load(server.id))
+    try:
+        ratelimit.check("server_test", me.id)
+    except ratelimit.RateLimited as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": str(exc.retry_after)}) from None
+    from ..auth import policy
+    if not policy.can(me, "partial_llm"):
+        return {"ok": False, "stage": "admission", "reason": policy.denial(me, "partial_llm"), "code": "capability"}
+    decision = admission.check(s, me, server, "pooled", online=_liveness(server.id), in_flight=None)
     if not decision.allowed:
-        return {"ok": False, "stage": "admission", "reason": decision.reason}
+        return {"ok": False, "stage": "admission", "reason": decision.reason, "code": decision.code}
 
     connection = hub().get(server.id)
     if connection is None:
         return {"ok": False, "stage": "connection",
-                "reason": "No worker is connected for this server."}
+                "reason": "No worker is connected for this server." if server.reach == "worker" else
+                "The server dials this machine itself; this test is for a machine's CITAR helper."}
 
-    chosen = model or next((m.get("key") for m in connection.models
-                            # Embedding models cannot answer a chat completion; skip them so the
-                            # default pick is something that can actually reply.
-                            if m.get("key") and "embed" not in m["key"].lower()), None)
+    # Embedding models cannot answer a chat completion; skip them so the default pick is something that can
+    # actually reply, and a loaded one first: a pooled prompt never makes the helper load a model it was not asked to.
+    chat = [m for m in connection.models if m.get("key") and "embed" not in m["key"].lower()]
+    chosen = model or next((m["key"] for m in chat if m.get("loaded")), None) or next((m["key"] for m in chat), None)
     if not chosen:
         return {"ok": False, "stage": "model",
                 "reason": "The worker reported no chat-capable models."}
 
-    started = _time.time()
+    if not _test_begins(me.id):
+        return {"ok": False, "stage": "queue", "model": chosen, "code": "too_many",
+                "reason": f"You have {TESTS_PER_ACCOUNT} machine tests waiting already; try again once one has "
+                          "answered."}
+    grant = decision.grant
+    ticket, timer = None, None
     try:
-        answer = hub().submit(server.id, P.Request(
-            id=f"test-{me.id[:6]}-{int(started)}", model=chosen,
-            messages=[{"role": "user", "content": "Reply with exactly: CITAR OK"}],
-            # Enough headroom that a reasoning model still has budget left for a visible answer
-            # after its thinking: a 24-token cap produced 21 reasoning tokens and an empty reply,
-            # which looks like a broken server rather than a too-small budget.
-            tools=[], tool_mode="native", params={"max_tokens": 256, "temperature": 0},
-            timeout=120, activity="server-test"), timeout=120)
-    except WorkerError as exc:
-        return {"ok": False, "stage": "completion", "model": chosen, "reason": str(exc),
-                "refusal": exc.refusal, "retryable": exc.retryable}
+        ticket = prompt_scheduler.get().ticket(
+            server.id, chosen, cls="test", activity=f"test:{secrets.token_hex(6)}", consumer=me.id,
+            label=f"test of {server.name}", start_within=wait, steps=1,
+            cap=int(grant.concurrency or 0) if grant is not None else 0, one_per_consumer=True,
+            access_grant=budgets.keeper().bind(s, grant))
+        if ticket.state != "queued":
+            return {"ok": False, "stage": "queue", "model": chosen, "reason": ticket.reason,
+                    "code": ticket.error.code if ticket.error else None,
+                    "retry_at": ticket.retry_at.isoformat() if ticket.retry_at else None}
+        # nothing is written before the reply (the audit row comes after it): the request's database connection goes
+        # back to the pool for the wait, which may last minutes
+        s.commit()
+        # Enough headroom that a reasoning model still has budget left for a visible answer after its thinking: a
+        # 24-token cap produced 21 reasoning tokens and an empty reply, which looks like a broken server rather than
+        # a too-small budget.
+        conv = make_conversation({"provider": "worker", "server_id": server.id, "model": chosen, "max_tokens": 256,
+                                  "temperature": 0, "timeout": 120}, "", [], binding=ticket)
+        conv.messages.clear()                   # the request is the user's line alone, no system prompt
+        conv.add_user_text("Reply with exactly: CITAR OK")
+        conv.request_timeout = 120
+        timer = threading.Timer(wait, ticket.cancel, kwargs={"reason": f"given up after {wait:.0f} s"})
+        timer.daemon = True
+        started = _time.time()
+        timer.start()
+        try:
+            step = conv.step()
+        except prompt_scheduler.SchedulerError as exc:
+            return {"ok": False, "stage": "queue", "model": chosen, "reason": str(exc), "code": exc.code,
+                    "cancelled": ticket.state == "cancelled"}
+        except Exception as exc:
+            if ticket.state == "cancelled":
+                code = ticket.error.code if ticket.error is not None else "cancelled"
+                why = ("a benchmark took the machine" if code == "benchmark" else
+                       f"no reply within {wait:.0f} s")
+                return {"ok": False, "stage": "completion", "model": chosen, "cancelled": True, "code": code,
+                        "reason": f"The test was cancelled: {why} (its helper is told to stop generating it)."}
+            cause = exc.__cause__
+            return {"ok": False, "stage": "completion", "model": chosen, "reason": str(exc),
+                    "refusal": getattr(cause, "refusal", "") or getattr(exc, "refusal", ""),
+                    "retryable": bool(getattr(cause, "retryable", False))}
+    finally:
+        if timer is not None:
+            timer.cancel()
+        if ticket is not None:
+            ticket.close()
+        _test_ends(me.id)
 
     elapsed = round(_time.time() - started, 2)
     audit.record(s, "server.tested", actor=me, object_type="server", object_id=server.id,
                  model=chosen, seconds=elapsed)
-    return {"ok": True, "model": chosen, "seconds": elapsed,
-            "reply": (answer.get("text") or "").strip()[:400],
-            "usage": answer.get("usage") or {},
+    return {"ok": True, "model": chosen, "seconds": elapsed, "gen_s": round(conv.last_gen_s, 3),
+            "queue_s": round(conv.last_queue_s, 3),
+            "reply": (step.text or "").strip()[:400],
+            "usage": dict(conv.usage),
             "worker": {"hostname": connection.hostname, "provider": connection.provider}}
 
 
@@ -549,36 +695,21 @@ def test_server(server_id: str, request: Request, model: str = "", p: Principal 
 
 @router.get("/availability")
 def availability(request: Request, purpose: str = "game", p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """What this account could run right now, and when the rest becomes available.
 
-    This is what the lobby asks before offering model seats.
+    This is what the lobby asks before offering model seats. Only machines the account may see are named, usable or
+    not: another member's private machine, or one of the site's nobody shared, is 404 to it anywhere else (P3.9.1).
     """
     me = require_user(request, p)
     now = datetime.now(timezone.utc)
     usable, blocked = [], []
     for server, decision in admission.usable_servers(s, me, purpose, now=now,
-                                                     liveness=_liveness, load=_load):
+                                                     liveness=_liveness,
+                                                     only=lambda row: pool.visible(s, me, row)):
         entry = {"id": server.id, "name": server.name, "provider": server.provider,
                  "models": [m.get("key") for m in (server.config or {}).get("models") or []],
                  **decision.client()}
         (usable if decision.allowed else blocked).append(entry)
     return {"purpose": purpose, "usable": usable, "blocked": blocked,
             "viewer_tz": me.tz, "now": now.isoformat()}
-
-
-# ---------------------------------------------------------------------------- migration
-
-@router.post("/import-registry")
-def import_registry(request: Request, p: Principal = Depends(principal),
-                    s: Session = Depends(get_db)):
-    """Bring config/servers.json into the database as this account's servers. Idempotent."""
-    me = require_user(request, p)
-    if me.role != "admin":
-        raise HTTPException(403, "Only an administrator can import the legacy server registry.")
-    try:
-        result = pool.import_registry(s, me)
-    except Exception as exc:
-        log.exception("registry import failed")
-        raise _fail(exc)
-    return result

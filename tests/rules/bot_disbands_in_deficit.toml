@@ -1,0 +1,93 @@
+about = """
+A bot losing gold every turn, with too little in the treasury to last the deficit horizon, disbands
+its spare units (one per gold of deficit, at least one), keeping a unit for each city; with gold to
+spare it keeps them all.
+"""
+from = "citar/bots/basic.py:1607-1613 (manage_gold), 1739-1766 (_spare_units)"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
+
+[[step]]
+note = "Sixteen warriors around one city cost more than it earns."
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "set_player", player = 0, gold = 5 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>ne" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>nw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>se" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>sw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w>w" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e>e>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>ne>ne" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>se>se" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>sw>sw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>nw>nw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e>ne" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w>sw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>se>e" },
+]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "units"
+len = 16
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "units"
+absent = false
+as = "left"
+
+[[step]]
+set = { n = "=len(left)" }
+
+[[step]]
+note = "Some were disbanded, a few: one per gold of deficit."
+check = "n"
+lt = 16
+ge = 12
+
+[[step]]
+note = "The same empire with gold to last keeps every unit."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "set_player", player = 0, gold = 500 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>ne" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>nw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>se" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>sw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w>w" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e>e>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>ne>ne" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>se>se" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>sw>sw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>nw>nw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e>ne" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w>sw" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>se>e" },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "units"
+len = 16

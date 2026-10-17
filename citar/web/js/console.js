@@ -92,7 +92,8 @@ function policySection(data) {
     ["registration", "Who may sign up", "select", ["open", "invite", "closed"],
      "Invite-only needs neither e-mail nor a captcha, which is why it is the safe default."],
     ["probation_enabled", "New accounts start on probation", "bool", null,
-     "A new account can play and watch, but cannot register hardware, invite anyone or publish."],
+     "A new account can play, watch and share with members, but cannot register hardware, invite anyone or "
+     + "publish to the whole internet (the publish_global permission)."],
     ["default_invite_quota", "Invitations each member may send", "number", null,
      "Above zero, the community can grow without an administrator."],
     ["default_max_concurrent_games", "Games one account may run at once", "number", null,

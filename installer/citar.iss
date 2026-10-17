@@ -67,8 +67,9 @@ Name: "addtopath"; Description: "Add the &citar command to my PATH"; \
   Flags: unchecked
 
 [Files]
-; The whole PyInstaller folder. recursesubdirs picks up the ruleset, the web client and the
-; migrations, which citar.paths resolves relative to the executable.
+; The whole PyInstaller folder. recursesubdirs picks up the web client and the migrations, which
+; citar.paths resolves relative to the executable, and the engine's extension (_engine.pyd, with
+; the ruleset compiled in).
 Source: "..\dist\CITAR\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

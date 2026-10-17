@@ -8,7 +8,7 @@ browser hands on to a third party through the Referer header.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from .. import settings
 from ..auth import (accounts, audit, captcha, invites, mailer, oauth, passwords, policy,
-                    ratelimit, sessions)
+                    profiles, ratelimit, sessions)
 from ..auth.deps import Principal, get_db, principal, require_user
 from ..db.models import Invite, User
 
@@ -86,7 +86,7 @@ class SignupBody(BaseModel):
 
 
 @router.post("/api/auth/signup")
-async def signup(body: SignupBody, request: Request, response: Response, s: Session = Depends(get_db)):
+async def signup(body: SignupBody, request: Request, response: Response, s: Session = Depends(get_db, scope="function")):
     """Create an account, subject to the registration mode, the captcha and the invitation."""
     ip = ratelimit.client_ip(request)
     _limit("signup_ip", ip, s)
@@ -155,7 +155,7 @@ class LoginBody(BaseModel):
 
 
 @router.post("/api/auth/login")
-def login(body: LoginBody, request: Request, response: Response, s: Session = Depends(get_db)):
+def login(body: LoginBody, request: Request, response: Response, s: Session = Depends(get_db, scope="function")):
     """Sign in and start a session."""
     ip = ratelimit.client_ip(request)
     _limit("login_ip", ip)
@@ -174,13 +174,13 @@ def login(body: LoginBody, request: Request, response: Response, s: Session = De
     row, raw = sessions.start(s, user, ip=ip, user_agent=_ua(request))
     sessions.set_cookie(response, raw)
     audit.record(s, "auth.login", actor=user, ip=ip, method="password")
-    return {"ok": True, "user": user.public(full=True), "csrf_token": row.csrf_token,
+    return {"ok": True, "user": user.account(), "csrf_token": row.csrf_token,
             "capabilities": policy.capabilities(user)}
 
 
 @router.post("/api/auth/logout")
 def logout(request: Request, response: Response, p: Principal = Depends(principal),
-           s: Session = Depends(get_db)):
+           s: Session = Depends(get_db, scope="function")):
     """End the current session."""
     if p.auth_session is not None:
         sessions.revoke(s, p.auth_session)
@@ -195,7 +195,7 @@ def logout(request: Request, response: Response, p: Principal = Depends(principa
 # ============================================================================ email verification
 
 @router.get("/auth/verify")
-def verify_email(token: str = "", s: Session = Depends(get_db)):
+def verify_email(token: str = "", s: Session = Depends(get_db, scope="function")):
     """Where the link in the confirmation email lands."""
     try:
         user, _row = accounts.consume_email_token(s, token, "verify")
@@ -212,7 +212,7 @@ class ResendBody(BaseModel):
 
 
 @router.post("/api/auth/verify/resend")
-async def resend_verification(body: ResendBody, request: Request, s: Session = Depends(get_db)):
+async def resend_verification(body: ResendBody, request: Request, s: Session = Depends(get_db, scope="function")):
     """Send another verification e-mail.
 
     Answers identically whether or not the address exists, because a different answer is a way to test
@@ -242,7 +242,7 @@ class ForgotBody(BaseModel):
 
 
 @router.post("/api/auth/password/forgot")
-async def forgot_password(body: ForgotBody, request: Request, s: Session = Depends(get_db)):
+async def forgot_password(body: ForgotBody, request: Request, s: Session = Depends(get_db, scope="function")):
     """Send a password reset link. Answers identically for unknown addresses."""
     ip = ratelimit.client_ip(request)
     _limit("reset_request", ip, s)
@@ -275,7 +275,7 @@ class ResetBody(BaseModel):
 
 
 @router.post("/api/auth/password/reset")
-async def reset_password(body: ResetBody, request: Request, s: Session = Depends(get_db)):
+async def reset_password(body: ResetBody, request: Request, s: Session = Depends(get_db, scope="function")):
     """Set a new password from a reset link. The token in the link is the credential."""
     ip = ratelimit.client_ip(request)
     _limit("reset_attempt", ip, s)
@@ -306,7 +306,7 @@ class ChangePasswordBody(BaseModel):
 
 @router.post("/api/auth/password/change")
 async def change_password(body: ChangePasswordBody, request: Request,
-                          p: Principal = Depends(principal), s: Session = Depends(get_db)):
+                          p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Change a password, which requires the current one."""
     user = require_user(request, p)
     # An account that has only ever used SSO has no password to confirm; it is setting a first one,
@@ -354,7 +354,7 @@ def oauth_start(provider: str, request: Request, next: str = "/", invite: str = 
 
 @router.get("/api/auth/oauth/{provider}/callback")
 async def oauth_callback(provider: str, request: Request, code: str = "", state: str = "",
-                         error: str = "", error_description: str = "", s: Session = Depends(get_db)):
+                         error: str = "", error_description: str = "", s: Session = Depends(get_db, scope="function")):
     """Return from a provider, sign the person in, and send them where they were going."""
     ip = ratelimit.client_ip(request)
 
@@ -495,7 +495,7 @@ def _resolve_oauth_user(s: Session, provider: str, profile: dict, carried: dict,
 
 @router.post("/api/auth/oauth/{provider}/unlink")
 def oauth_unlink(provider: str, request: Request, p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """Disconnect a sign-in provider from this account."""
     user = require_user(request, p)
     try:
@@ -510,20 +510,31 @@ def oauth_unlink(provider: str, request: Request, p: Principal = Depends(princip
 # ============================================================================ the account itself
 
 class ProfileBody(BaseModel):
-    """The editable parts of a profile."""
+    """The editable parts of an account: its settings, and its profile (design/phase3-features.md P3.2.6): the bio, up
+    to three links, each field's visibility (`private`, `server`, `global`) and whether it is in the directory. The
+    profile's parts are checked by ``citar.auth.profiles`` (a wrong shape is a 400 with the rule, not a 422)."""
     display_name: Optional[str] = None
     tz: Optional[str] = None
     data_sharing: Optional[str] = None
     locale: Optional[str] = None
+    bio: Optional[Any] = None
+    links: Optional[Any] = None
+    field_visibility: Optional[Any] = None
+    listed: Optional[Any] = None
 
 
 @router.put("/api/auth/me")
 def update_profile(body: ProfileBody, request: Request, p: Principal = Depends(principal),
-                   s: Session = Depends(get_db)):
-    """Change the caller's own profile."""
+                   s: Session = Depends(get_db, scope="function")):
+    """Change the caller's own account and profile. Every part of the profile is checked before any is changed: a
+    bio over 1,000 characters, a fourth link, a link that is not http or https, an unknown field or level is a 400,
+    and a `global` field on probation a 403."""
     user = require_user(request, p)
-    if body.display_name is not None:
-        user.display_name = body.display_name.strip()[:80]
+    try:
+        profiles.update(s, user, display_name=body.display_name, bio=body.bio, links=body.links,
+                        field_visibility=body.field_visibility, listed=body.listed, ip=p.ip)
+    except profiles.ProfileError as exc:
+        raise HTTPException(exc.status, str(exc))
     if body.tz is not None:
         user.tz = _clean_tz(body.tz)
     if body.locale is not None:
@@ -535,11 +546,11 @@ def update_profile(body: ProfileBody, request: Request, p: Principal = Depends(p
             audit.record(s, "user.data_sharing", actor=user, object_type="user", object_id=user.id,
                          ip=p.ip, to=body.data_sharing)
         user.data_sharing = body.data_sharing
-    return {"ok": True, "user": user.public(full=True)}
+    return {"ok": True, "user": user.account()}
 
 
 @router.get("/api/auth/sessions")
-def list_sessions(p: Principal = Depends(principal), s: Session = Depends(get_db)):
+def list_sessions(p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
     """Every session this account has open, with where and when each began."""
     user = p.user
     if user is None:
@@ -550,7 +561,7 @@ def list_sessions(p: Principal = Depends(principal), s: Session = Depends(get_db
 
 @router.delete("/api/auth/sessions/{session_id}")
 def revoke_session(session_id: str, request: Request, p: Principal = Depends(principal),
-                   s: Session = Depends(get_db)):
+                   s: Session = Depends(get_db, scope="function")):
     """End one session - how somebody signs out a device they no longer have."""
     user = require_user(request, p)
     if not sessions.revoke_by_id(s, user, session_id):
@@ -562,7 +573,7 @@ def revoke_session(session_id: str, request: Request, p: Principal = Depends(pri
 
 @router.post("/api/auth/sessions/revoke-others")
 def revoke_other_sessions(request: Request, p: Principal = Depends(principal),
-                          s: Session = Depends(get_db)):
+                          s: Session = Depends(get_db, scope="function")):
     """End every session except this one."""
     user = require_user(request, p)
     count = accounts.revoke_all_sessions(s, user, keep=p.auth_session.id if p.auth_session else None)
@@ -573,20 +584,22 @@ def revoke_other_sessions(request: Request, p: Principal = Depends(principal),
 # ============================================================================ invitations
 
 @router.get("/api/invites/check")
-def check_invite(code: str, s: Session = Depends(get_db)):
-    """Lets the signup form say 'you have been invited as a moderator' before anything is created."""
+def check_invite(code: str, s: Session = Depends(get_db, scope="function")):
+    """Lets the signup form say 'you have been invited as a moderator' before anything is created. The inviter is
+    named as a visitor may see the account (the handle, the display name only when it is `global`): whoever holds a
+    code has no account yet."""
     try:
         invite = invites.check(s, code)
     except invites.InviteError as exc:
         raise _fail(exc)
     creator = accounts.by_id(s, invite.created_by)
     return {"ok": True, "role": invite.role, "email": invite.email, "note": invite.note,
-            "invited_by": creator.name if creator else None}
+            "invited_by": creator.public(None)["display_name"] if creator else None}
 
 
 @router.get("/api/invites")
 def list_invites(include_spent: bool = False, p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
+                 s: Session = Depends(get_db, scope="function")):
     """The caller's invitations, and how many they may still send."""
     if p.user is None:
         raise HTTPException(401, "Sign in to do that.")
@@ -606,7 +619,7 @@ class InviteBody(BaseModel):
 
 @router.post("/api/invites")
 async def create_invite(body: InviteBody, request: Request, p: Principal = Depends(principal),
-                        s: Session = Depends(get_db)):
+                        s: Session = Depends(get_db, scope="function")):
     """Mint an invitation code."""
     user = require_user(request, p)
     try:
@@ -631,7 +644,7 @@ async def create_invite(body: InviteBody, request: Request, p: Principal = Depen
 
 @router.delete("/api/invites/{invite_id}")
 def revoke_invite(invite_id: str, request: Request, p: Principal = Depends(principal),
-                  s: Session = Depends(get_db)):
+                  s: Session = Depends(get_db, scope="function")):
     """Revoke an unused invitation."""
     user = require_user(request, p)
     invite = s.get(Invite, invite_id)

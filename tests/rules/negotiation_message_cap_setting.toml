@@ -1,0 +1,45 @@
+about = """
+A negotiation holds at most the ruleset's 30 messages, or as many as the game's own settings say
+(diplomacy.max_chat_messages), but never fewer than 2. Each side's view gives the cap.
+"""
+from = "tests/test_negotiation_chat.py::MessageCapTests::test_the_ruleset_cap_is_30_and_a_game_can_set_its_own"
+
+[[step]]
+ops = [{ op = "meet", a = 0, b = 1 }]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 0 }
+subset = { max_messages = 30, messages = 1, you_initiated = true, your_move = false }
+
+[[step]]
+new_game = { diplomacy = { max_chat_messages = 4 } }
+
+[[step]]
+ops = [{ op = "meet", a = 0, b = 1 }]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+subset = { max_messages = 4, messages = 1, you_initiated = false, your_move = true }
+
+[[step]]
+new_game = { diplomacy = { max_chat_messages = 1 } }
+
+[[step]]
+ops = [{ op = "meet", a = 0, b = 1 }]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 0 }
+path = "max_messages"
+eq = 2

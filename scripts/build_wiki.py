@@ -102,14 +102,18 @@ def resolve(link: str, source: Path) -> str:
 
 
 def convert(source: Path, text: str) -> str:
-    """Rewrite every relative link in *text* for the wiki."""
+    """Rewrite every relative link in *text* for the wiki. An image (`![alt](path)`) points at the repository's raw
+    file: its `blob` address is a web page, which a wiki page cannot show as a picture."""
     def replace(match: re.Match) -> str:
-        label, link = match.group(1), match.group(2)
+        bang, label, link = match.group(1), match.group(2), match.group(3)
         if link.startswith(("http://", "https://", "mailto:", "#")):
             return match.group(0)
-        return f"[{label}]({resolve(link, source)})"
+        target = resolve(link, source)
+        if bang and target.startswith(f"{REPO}/blob/"):
+            target = f"{REPO}/raw/" + target[len(f"{REPO}/blob/"):]
+        return f"{bang}[{label}]({target})"
 
-    return re.sub(r"\[([^\]]*)\]\(([^)\s]+)\)", replace, text)
+    return re.sub(r"(!?)\[([^\]]*)\]\(([^)\s]+)\)", replace, text)
 
 
 def sidebar() -> str:

@@ -1,5 +1,6 @@
 """Collects everything a report needs for its scope: priced activities from the usage ledger, game outcomes and AI
-metrics from save files, benchmark runs, probe runs and lab experiments, joined on the server registry."""
+metrics from save files, benchmark runs, probe runs and lab experiments, joined on the server registry. What a
+member's report may gather is cut to what its owner may see (``reach.Reach``, design/phase3-features.md P3.2.4)."""
 from __future__ import annotations
 
 import json
@@ -9,7 +10,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 
-from .. import costing, servers as S, usage as U
+from .. import costing, fsutil, servers as S, usage as U
+from .reach import Reach, pooled_models
 
 _save_cache: dict = {}
 
@@ -42,8 +44,12 @@ def _config_label(sv: Optional[dict], model: Optional[str]) -> str:
 
 
 def _game_details(game_id: str) -> Optional[dict]:
-    """Outcome and AI metrics of a saved game (benchmark.citar, else autosave.citar), cached by file time."""
-    from ..server.session import SAVE_DIR, load_save_file, GameSession
+    """Outcome and AI metrics of a game: the live session's while it runs in this process, else its save's
+    (benchmark.citar, else autosave.citar, opened only to be read), cached by file time."""
+    from ..server.session import SAVE_DIR, GameSession, all_sessions
+    live = next((s for s in all_sessions() if s.id == game_id and not s.stopped), None)
+    if live is not None:
+        return _details_of(game_id, live)
     folder = SAVE_DIR / game_id
     path = next((folder / n for n in ("benchmark.citar", "autosave.citar") if (folder / n).exists()), None)
     if path is None:
@@ -52,28 +58,39 @@ def _game_details(game_id: str) -> Optional[dict]:
     if key in _save_cache:
         return _save_cache[key]
     try:
-        data = load_save_file(path)
-        s = GameSession.from_save(data)
+        # read only: the history is read under the journal's shared lock, and nothing is written or forked
+        s = GameSession.from_save(path, read_only=True)
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
-    from ..server.benchmarks import game_progress
-    llm_seats = [seat for seat in s.seats if seat.type == "llm"]
-    out = {"game_id": game_id, "name": s.name, "turn": s.game.turn, "phase": s.game.s.phase, "victory": s.game.s.victory,
-           "winner": s.game.s.winner, "seats": []}
-    for seat in llm_seats:
-        s.benchmark = dict(s.benchmark or {}, llm_player=seat.player, model=seat.llm.get("model"))
-        try:
-            with s.lock:
-                prog = game_progress(s)
-        except Exception:
-            prog = {}
-        players = {seat.player: {"name": s.game.player(seat.player).name, "controller": "llm", "model": seat.llm.get("model")}}
-        summ = s.metrics.summary(players).get(seat.player, {})
-        prog.pop("series", None)
-        out["seats"].append({"player": seat.player, "server_id": seat.llm.get("server_id"), "model": seat.llm.get("model"),
-                             "progress": prog, "metrics": summ})
+    out = _details_of(game_id, s)
     s.stop()
     _save_cache[key] = out
+    return out
+
+
+def _details_of(game_id: str, s) -> dict:
+    """Outcome and AI metrics of a session's game, the benchmark's view of each model seat. Reads the session under
+    its lock (the live one's driver changes the game and the metrics) and changes nothing of it: the session may be a
+    game playing in the lobby, whose ``benchmark`` (None) decides how it is paused, restored and closed."""
+    from ..server.benchmarks import game_progress
+    with s.lock:
+        g = s.game
+        out = {"game_id": game_id, "name": s.name, "turn": g.turn, "phase": g.phase, "victory": g.victory,
+               "winner": g.winner, "seats": []}
+        # every seat a model plays, with its task class (P3.6.7): an LLM seat plays every turn, a hybrid seat's model
+        # is asked its diplomacy a prompt at a time
+        for seat in [seat for seat in s.seats if seat.model_seat]:
+            model = seat.llm.get("model")
+            try:
+                prog = game_progress(s, llm_player=seat.player, model=model)
+            except Exception:
+                prog = {}
+            players = {seat.player: {"name": g.player_name(seat.player), "controller": seat.type, "model": model}}
+            summ = s.metrics.summary(players).get(seat.player, {})
+            prog.pop("series", None)
+            out["seats"].append({"player": seat.player, "server_id": seat.llm.get("server_id"), "model": model,
+                                 "controller": seat.type, "class": seat.task_class, "progress": prog,
+                                 "metrics": summ})
     return out
 
 
@@ -86,7 +103,7 @@ def _benchmark_runs(run_ids: set) -> list[dict]:
         if not p.exists():
             continue
         try:
-            run = json.loads(p.read_text(encoding="utf-8"))
+            run = json.loads(fsutil.read_text(p))     # the scheduler replaces it as the run goes
         except (OSError, ValueError):
             continue
         run["summary"] = run_summary(run)
@@ -101,7 +118,7 @@ def _probe_runs(run_ids: set) -> list[dict]:
     for rid in run_ids:
         d = RUNS / rid
         try:
-            run = json.loads((d / "run.json").read_text(encoding="utf-8"))
+            run = json.loads(fsutil.read_text(d / "run.json"))     # the probe runner replaces it as the run goes
         except (OSError, ValueError):
             continue
         results = []
@@ -149,7 +166,7 @@ def _in_scope(a: dict, info: dict, scope: dict, servers_by_id: dict) -> bool:
         if not ok:
             return False
     want_srv = set(scope.get("servers") or [])
-    if want_srv and not (want_srv & set(a["servers"])):
+    if want_srv and not (want_srv & set(a.get("ran_on") or a["servers"])):
         return False
     want_models = set(scope.get("models") or [])
     if want_models:
@@ -159,28 +176,37 @@ def _in_scope(a: dict, info: dict, scope: dict, servers_by_id: dict) -> bool:
     return True
 
 
-def gather(spec: dict, progress=lambda msg: None) -> dict:
-    """Collect everything a report needs from the ledger and the run records.
+def gather(spec: dict, progress=lambda msg: None, *, reach: Optional[Reach] = None) -> dict:
+    """Collect everything a report needs from the ledger and the run records, as far as ``reach`` goes (the report
+    owner's: everything for an administrator's report and by default).
 
     Separate from pricing and from rendering, so that what is measured, what it cost and how it is
     presented can each be changed without disturbing the other two.
     """
+    reach = reach or Reach()
     since, until = time_range(spec)
-    reg = S.with_pooled()
-    servers_by_id = {s["id"]: s for s in reg["servers"]}
-    servers_by_id.update({old: servers_by_id[new] for old, new in (reg.get("aliases") or {}).items() if new in servers_by_id})
+    full = S.with_pooled()
+    reg = reach.registry(full)
+    servers_by_id = {s["id"]: s for s in full["servers"]}
+    servers_by_id.update({old: servers_by_id[new] for old, new in (full.get("aliases") or {}).items() if new in servers_by_id})
+    servers_by_id = reach.labels(servers_by_id)
     basis = (spec.get("options") or {}).get("electricity_basis", "full")
+    pooling = spec.get("pooling") or "own"
     progress("Reading the usage ledger")
-    ledger = U.read(since, until)
+    ledger = U.read(since, until, work=True)
+    seen = reach.ledger(ledger)
     if since is None:       # "all time": from the first recorded use
-        since = min((float(sp["t0"]) for sp in ledger["spans"]), default=until - 86400)
+        since = min((float(sp["t0"]) for sp in seen["spans"]), default=until - 86400)
     progress("Pricing usage")
-    cost = costing.compute(since, until, reg, ledger)
+    # priced over the whole ledger, so a minute a machine shared is split among everyone who held it; then cut
+    cost = reach.cost(costing.compute(since, until, full, ledger))
     scope = spec.get("scope") or {}
     acts = []
     bench_ids, probe_ids, lab_exps = set(), set(), set()
     game_ids = []
-    for act_id, a in cost["acts"].items():
+    # a report of pooled figures only has no activities of its own
+    in_scope = cost["acts"].items() if pooling != "pooled" else ()
+    for act_id, a in in_scope:
         info = a["info"]
         if not _in_scope(a, info, scope, servers_by_id):
             continue
@@ -224,14 +250,20 @@ def gather(spec: dict, progress=lambda msg: None) -> dict:
             "symbol": reg.get("currency_symbol", "$"), "currency": reg.get("currency", "USD"), "basis": basis,
             "cost": cost, "acts": sorted(acts, key=lambda r: r["start"] or 0), "servers_by_id": servers_by_id,
             "benchmark_runs": _benchmark_runs(bench_ids), "probe_runs": _probe_runs(probe_ids), "lab": _lab(lab_exps),
-            "ledger_rows": len(ledger["spans"])}
+            "ledger_rows": len(seen["spans"]), "pooling": pooling, "reach": "everything" if reach.everything else "owner"}
+    if pooling in ("pooled", "both"):
+        progress("Pooled figures")
+        try:
+            data["pooled"] = pooled_models(None if reach.everything else reach.owner_id)
+        except Exception as e:          # the report's own figures still stand without them
+            data["pooled_error"] = f"{type(e).__name__}: {e}"
     lo = (spec.get("options") or {}).get("lifespan_range") or [2, 6]
     if "depreciation" in sections:
         progress("Depreciation sensitivity")
         sens = {}
         ids = {r["id"] for r in acts}
         for years in range(int(lo[0]), int(lo[1]) + 1):
-            alt = costing.compute(since, until, reg, ledger, lifespan_override=years)
+            alt = reach.cost(costing.compute(since, until, full, ledger, lifespan_override=years))
             sens[years] = {"allocated": sum(costing.total(a["total"], basis) for k, a in alt["acts"].items() if k in ids),
                            "depreciation": sum(a["total"]["depreciation"] for k, a in alt["acts"].items() if k in ids)}
         data["sensitivity"] = sens
@@ -284,6 +316,10 @@ def config_rollup(data: dict) -> dict:
             if g.get("phase") != "playing":
                 c["finished"] += 1
             for seat in g["seats"]:
+                if seat.get("class") == "partial":
+                    # a hybrid seat's game is its bot's play (P3.6.7): its performance, wins and turns are not the
+                    # model's (its diplomacy is measured against a control game, P3.6.10)
+                    continue
                 p, m = seat.get("progress") or {}, seat.get("metrics") or {}
                 if p.get("performance") is not None:
                     c["perf"].append(p["performance"])

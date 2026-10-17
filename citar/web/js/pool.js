@@ -1,20 +1,36 @@
-// The server pool: your machines, the groups you share them in, and who may use them when.
+// The Servers page (#/pool): every machine the viewer owns or may use, the ones the server connects to itself
+// (direct: the host, its online APIs, a dry run) and the ones behind a CITAR helper alike, each on a card with the
+// dialogs that edit it (servers.js), and the server groups that share machines with who may use them on what terms
+// (design/phase3-features.md P3.2.8). `#/pool/<id>` opens a machine and `#/pool/groups/<gid>` shows a group; the
+// page's old addresses (`#/servers`, `#/servers/<id>`) lead here (machines.js, app.js).
 //
-// The availability editor is the interesting part. A window is entered in the *owner's* zone and
-// shown to everyone else in theirs, because "midnight to 6am" means the owner's midnight and a
-// viewer in Tokyo needs to know that is their afternoon.
-import { api } from "./api.js";
-import { el, clear, toast, modal, confirmBox } from "./util.js";
+// Every request goes through servers.js's `call`, which asks machines.js's gates first: a member's page shows no
+// control, and calls no route, that an administrator's alone would take.
+//
+// The availability editor is the interesting part. A window is entered in the *owner's* zone and shown to everyone
+// else in theirs, because "midnight to 6am" means the owner's midnight and a viewer in Tokyo needs to know that is
+// their afternoon.
+import { el, clear, toast, modal, confirmBox, keepPlace, prompt } from "./util.js";
 import { pageHeader } from "./nav.js";
 import { helperCard } from "./helper.js";
-import { openCostEditor } from "./servers.js";
+import { openMachineSettings } from "./machine_settings.js";
+import { cpuInEffectText, poolTarget } from "./machines.js";
+import { evidenceText, flagText, speedText, trustLine } from "./trustrules.js";
+import {
+  KIND, KEYED, PROVIDER, addDirectMachine, call, describeConn, describeQuiet, loadRegistry, may, money, openConnection,
+  openCosts, openHardware, openKey, openPlans, openQuietHours, openSettings, viewer,
+} from "./servers.js";
 import * as auth from "./auth.js";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// what a grant may be limited to (citar.pool.admission.PURPOSES): "game" is a model seat that plays every turn,
+// "pooled" one prompt at a time (a report's written analysis, a probe's offer or message, a machine test, later a
+// hybrid seat's diplomacy)
 const PURPOSES = [
-  ["game", "Ordinary games"], ["benchmark", "Benchmarks"], ["probe", "Probes"],
-  ["scenario", "Scenarios"], ["lab", "Lab runs"],
+  ["game", "Ordinary games"], ["pooled", "Pooled prompts"], ["benchmark", "Benchmarks"], ["probe", "Probes"],
+  ["scenario", "Scenarios"], ["lab", "Lab (CPU work)"],
 ];
+const ICON = { owned: "🖥", leased: "☁", api: "🔑", test: "🧪" };
 
 function hhmm(minutes) {
   if (minutes >= 1440) return "24:00";
@@ -26,15 +42,19 @@ function minutesOf(text) {
   return (parseInt(h, 10) || 0) * 60 + (parseInt(m, 10) || 0);
 }
 
-function statusPill(server) {
-  if (!server.enabled) return el("span", { class: "pill" }, "disabled");
-  if (server.online === true) return el("span", { class: "pill live" }, "● online");
-  if (server.online === false) return el("span", { class: "pill quiet" }, "offline");
-  return el("span", { class: "pill" }, "direct");
+// What the gates read of a card's machine: its registry view when the viewer manages it (`reg`: reach, is_host, the
+// connection), else what the pool lists to anyone who may see it.
+const gateOf = (m) => m.reg || m;
+
+function statusPill(m) {
+  if (!m.enabled) return el("span", { class: "pill", title: "Nothing runs on it until it is enabled again" }, "disabled");
+  if (m.reach !== "worker") return el("span", { class: "pill", title: "The server connects to this machine itself" }, "direct");
+  if (m.online === true) return el("span", { class: "pill live", title: "Its CITAR helper is connected" }, "● helper online");
+  return el("span", { class: "pill quiet", title: "Its CITAR helper is not connected" }, "helper offline");
 }
 
-function admissionLine(server) {
-  const a = server.admission || {};
+function admissionLine(m) {
+  const a = m.admission || {};
   if (a.allowed) return el("span", { class: "good small" }, "available to you now");
   return el("span", { class: "muted small" }, a.reason || "not available to you");
 }
@@ -141,12 +161,12 @@ function grantDialog(group, existing, onSaved) {
       note: note.value,
       windows: windows.value(),
       budget: amount > 0
-        ? { period: budgetPeriod.value, amount, currency: "USD", behavior: budgetBehavior.value }
+        ? { period: budgetPeriod.value, amount, unit: "credits", behavior: budgetBehavior.value }
         : null,
     };
     try {
-      if (existing) await api.updateGrant(existing.id, body);
-      else await api.createGrant(group.id, body);
+      if (existing) await call("updateGrant", group, existing.id, body);
+      else await call("createGrant", group, group.id, body);
       toast("Access saved.", "good");
       m.close();
       onSaved();
@@ -160,42 +180,79 @@ function grantDialog(group, existing, onSaved) {
       el("div", { class: "field" },
         el("span", { class: "field-label" }, "What they may run"),
         el("div", { class: "col" }, ...purposeBoxes.map((p) => p.node)),
-        el("span", { class: "muted small" }, "Nothing ticked means every kind of work.")),
+        el("span", { class: "muted small" }, "Nothing ticked means every kind of model work. Lab (CPU work) is lent "
+          + "only when it is ticked: the lab's games then run on these machines' CPUs, within each machine's own CPU "
+          + "settings, for the accounts this grant names.")),
       el("div", { class: "field" },
         el("span", { class: "field-label" }, "Allowed hours"), windows.node),
       el("label", { class: "field" },
         el("span", { class: "field-label" }, "Simultaneous games"), concurrency,
         el("span", { class: "muted small" }, "0 uses the server's own limit.")),
       el("div", { class: "field" },
-        el("span", { class: "field-label" }, "Spend cap"),
+        el("span", { class: "field-label" }, "Spend cap (credits)"),
         el("div", { class: "row gap wrap" }, budgetAmount, budgetPeriod),
         budgetBehavior,
         el("span", { class: "muted small" },
-          "Accounting only — nobody is charged and no money moves. The cap is measured from the "
-          + "usage ledger and stops work being scheduled. Periods end at your midnight.")),
+          "Accounting only — nobody is charged and no money moves. Credits are the compute ledger's unit "
+          + "(about one per GPU generation-second); the cap stops work being scheduled. Periods end at your midnight.")),
       el("label", { class: "field" }, el("span", { class: "field-label" }, "Note"), note)),
     footer: [el("button", { onclick: () => m.close() }, "Cancel"),
              el("button", { class: "primary", onclick: save }, "Save")],
   });
 }
 
-// ---------------------------------------------------------------------------- worker dialog
+// ---------------------------------------------------------------------------- the helper and its tokens
 
-async function workerDialog(server) {
+/** What the machine's helper is (its version, build, target and protocol, from its last hello) and the fingerprint of
+ *  the machine key it registered, with "Reset key…" (design/phase4-helper.md P4.3.7, P4.5.11): the owner checks the
+ *  fingerprint against `citar-helper --version` on the machine, and resets the key when the helper was reinstalled or
+ *  its token was used by someone else first. */
+function helperFacts(info, m, refresh) {
+  const h = info.helper || null;
+  const key = info.key || {};
+  const rows = [];
+  if (h) {
+    rows.push(el("span", { class: "muted small" },
+      `CITAR helper ${h.version || "?"} · protocol ${h.protocol || 2} · build ${h.build || "?"}`
+      + (h.target ? ` · ${h.target}` : "")));
+    rows.push(el("span", { class: "muted small" }, `CPU: ${cpuInEffectText(info.cpu)}`));
+  }
+  rows.push(el("div", { class: "row gap wrap" },
+    el("span", { class: "muted small" }, key.fingerprint
+      ? ["Machine key ", el("code", {}, key.fingerprint)] : "No machine key registered yet: its helper's next hello registers one."),
+    key.fingerprint ? el("button", {
+      class: "small danger",
+      title: "Forget this key: the next helper to connect with a token of this machine registers its own",
+      onclick: async () => {
+        if (!(await confirmBox("Reset the machine key?",
+              "The next helper that connects with one of this machine's tokens registers its own key; a helper "
+              + "connected now is made to reconnect, and registers its key at once. Do this after reinstalling the "
+              + "helper. If the fingerprint is not the one citar-helper --version prints on your machine, someone "
+              + "else's helper used a token: revoke this machine's tokens first and issue a new one, or theirs may "
+              + "register again."))) return;
+        try { await call("resetMachineKey", gateOf(m), m.id); toast("Key reset.", "good"); refresh(); }
+        catch (e) { toast(e.message, "error"); }
+      },
+    }, "Reset key…") : null));
+  return el("div", { class: "col" }, ...rows);
+}
+
+async function helperDialog(m) {
   const body = el("div", { class: "col gap" }, el("span", { class: "muted" }, "Loading…"));
-  const m = modal({ title: `Worker for “${server.name}”`, content: body });
+  const dialog = modal({ title: `Helper for “${m.name}”`, content: body });
 
   const refresh = async () => {
     clear(body);
     try {
-      const info = await api.workerStatus(server.id);
+      const info = await call("workerStatus", gateOf(m), m.id);
       body.append(
         el("div", { class: "row gap" },
           info.online ? el("span", { class: "pill live" }, "● connected")
                       : el("span", { class: "pill quiet" }, "not connected"),
           info.worker ? el("span", { class: "muted" },
             `${info.worker.hostname} · ${info.worker.models.length} models · `
-            + `${info.worker.in_flight}/${info.worker.max_concurrent} busy`) : null),
+            + `${info.worker.in_flight}/${info.worker.slots} busy`) : null),
+        helperFacts(info, m, refresh),
         el("p", { class: "muted" },
           "The helper dials out to this server, so nothing on your machine needs to be reachable "
           + "from the internet. Run it where the model is:"),
@@ -214,8 +271,8 @@ async function workerDialog(server) {
                 class: "danger small",
                 onclick: async () => {
                   if (!(await confirmBox("Revoke this token?",
-                        "Any worker using it disconnects immediately and cannot reconnect."))) return;
-                  try { await api.revokeWorkerToken(server.id, t.id); refresh(); }
+                        "A helper using it disconnects at once and cannot connect with it again."))) return;
+                  try { await call("revokeWorkerToken", gateOf(m), m.id, t.id); refresh(); }
                   catch (e) { toast(e.message, "error"); }
                 },
               }, "Revoke")))
@@ -224,13 +281,13 @@ async function workerDialog(server) {
           class: "primary",
           onclick: async () => {
             try {
-              const created = await api.createWorkerToken(server.id, "");
+              const created = await call("createWorkerToken", gateOf(m), m.id, "");
               clear(body);
               body.append(
                 el("h3", {}, "New worker token"),
                 el("p", { class: "warn-box" }, created.warning),
                 helperCard({ args: created.args }),
-                el("p", { class: "muted small" }, "With CITAR installed on that machine instead:"),
+                el("p", { class: "muted small" }, "Or, with the helper on that machine's PATH:"),
                 el("pre", { class: "code-block" }, created.command),
                 el("button", {
                   class: "primary",
@@ -245,219 +302,402 @@ async function workerDialog(server) {
     }
   };
   refresh();
+  return dialog;
 }
 
-// ---------------------------------------------------------------------------- page
+// ---------------------------------------------------------------------------- the page
 
+/** The Servers page. The address may name a machine to open (`#/pool/<id>`) or a group to show (`#/pool/groups/<gid>`). */
 export async function renderPool(root) {
   if (!auth.user()) { auth.renderSignInWall(root); return {}; }
   clear(root);
   root.appendChild(pageHeader("pool"));
   const page = el("div", { class: "page" });
+  const head = el("div");
+  const notice = el("div");                 // what the address asked for and the page could not show; never redrawn
+  const body = el("div");
+  page.append(head, notice, body);
   root.appendChild(page);
-  const me = auth.user();
 
-  const reload = () => renderPool(root);
-
-  let groups = [];
-  let servers = [];
+  let data = null;
+  const refresh = async () => {
+    const [pool, sharing, reg] = await Promise.all([call("poolServers", null, "game"), call("poolGroups", null), loadRegistry()]);
+    const regs = new Map(reg.servers.map((sv) => [sv.id, sv]));
+    const machines = pool.servers.map((s) => ({ ...s, reg: regs.get(s.id) || null }));
+    data = { machines, groups: sharing.groups, reg };
+    keepPlace(page, () => { drawHead(head, data, refresh); drawBody(body, data, refresh); });
+  };
+  const quiet = () => refresh().catch((e) => toast(e.message, "error"));
   try {
-    [{ groups }, { servers }] = await Promise.all([api.poolGroups(), api.poolServers()]);
+    await refresh();
   } catch (e) {
+    if (e.name === "NotSignedIn") throw e;
     page.appendChild(el("p", { class: "bad" }, e.message));
     return {};
   }
 
-  // ------------------------------------------------------------------ my servers
-  const mine = servers.filter((s) => s.is_mine);
-  const shared = servers.filter((s) => !s.is_mine);
-
-  page.appendChild(el("div", { class: "row between wrap" },
-    el("h1", {}, "Servers"),
-    auth.can("register_servers")
-      ? el("div", { class: "row gap" },
-          el("button", { onclick: () => newGroupDialog(reload) }, "New group"),
-          el("button", { class: "primary", onclick: () => newServerDialog(groups, reload) },
-             "Add a server"))
-      : null));
-
-  if (!auth.can("register_servers")) {
-    page.appendChild(el("p", { class: "muted" },
-      "Your account cannot register servers yet. New accounts gain this once an administrator "
-      + "clears them."));
+  // the machine or group the address names
+  // (one the viewer may not see reads as one that is not there: the server answers 404 for both)
+  const target = poolTarget(location.hash);
+  const missing = (what) => notice.appendChild(el("div", { class: "card not-found" },
+    el("p", {}, `That ${what} is not here, or it has not been shared with you.`)));
+  if (target.machine) {
+    const m = data.machines.find((x) => x.id === target.machine);
+    const card = m && body.querySelector(`[data-machine="${CSS.escape(m.id)}"]`);
+    if (!card) missing("machine");
+    else {
+      focus(card);
+      if (m.reg) openConnection(m.reg, quiet);
+    }
+  } else if (target.group) {
+    const card = body.querySelector(`[data-group="${CSS.escape(target.group)}"]`);
+    if (card) focus(card);
+    else missing("group");
   }
 
-  page.appendChild(el("h2", {}, "Your machines"));
-  page.appendChild(helperCard({ compact: mine.length > 0 }));
-  if (!mine.length) {
-    page.appendChild(el("p", { class: "muted" },
-      "None yet. Add a server, then run the CITAR helper on the machine that has the model — it "
-      + "connects outward, so you do not need to open any ports."));
-  }
-  for (const server of mine) {
-    page.appendChild(serverCard(server, groups, reload));
-  }
-
-  if (shared.length) {
-    page.appendChild(el("h2", {}, "Shared with you"));
-    for (const server of shared) page.appendChild(serverCard(server, groups, reload));
-  }
-
-  // ------------------------------------------------------------------ groups
-  page.appendChild(el("h2", {}, "Groups and access"));
-  if (!groups.length) {
-    page.appendChild(el("p", { class: "muted" },
-      "A group is how you share machines. Put servers in one, then grant access to it."));
-  }
-  for (const group of groups) {
-    page.appendChild(groupCard(group, reload));
-  }
-
-  return {};
+  // live status (a helper connecting, quiet hours starting) without disturbing a dialog or the reader's place
+  const timer = setInterval(() => {
+    if (!document.body.contains(page)) { clearInterval(timer); return; }
+    if (!document.querySelector(".modal-back")) refresh().catch(() => {});
+  }, 20000);
+  return { destroy() { clearInterval(timer); } };
 }
 
-function serverCard(server, groups, reload) {
-  const a = server.admission || {};
-  return el("section", { class: "card" },
+function focus(card) {
+  card.classList.add("focus");
+  card.scrollIntoView({ block: "center" });
+}
+
+function drawHead(head, data, refresh) {
+  const reload = () => refresh().catch((e) => toast(e.message, "error"));
+  clear(head).append(
     el("div", { class: "row between wrap" },
-      el("div", { class: "row gap" },
-        el("h3", {}, server.name), statusPill(server),
-        server.restricted_until ? el("span", { class: "pill quiet", title: "Quiet hours: all work on this machine is paused" },
-          `🌙 quiet until ${server.restricted_until}`) : null,
-        server.is_mine ? null : el("span", { class: "muted small" },
-          `owned by ${server.owner ? server.owner.display_name : "someone else"}`)),
-      el("div", { class: "row gap" },
-        server.can_manage
-          ? el("button", { class: "small", onclick: () => workerDialog(server) }, "Worker")
-          : null,
-        server.can_manage
-          ? el("button", { class: "small", onclick: () => quietHoursDialog(server, reload) }, "Quiet hours")
-          : null,
-        server.can_manage
-          ? el("button", { class: "small", title: "Watts, hardware prices and the electricity plan, for the cost reports",
-              onclick: () => openCostEditor(server, async (body) => { await api.setMachineCosting(server.id, body); reload(); }) }, "Power & costs")
-          : null,
-        el("button", {
-          class: "small",
-          onclick: async (e) => {
-            e.target.disabled = true;
-            e.target.textContent = "Testing…";
-            try {
-              const r = await api.testPoolServer(server.id);
-              if (r.ok) {
-                toast(`${server.name}: ${r.model} replied in ${r.seconds}s`, "good", 7000);
-              } else {
-                toast(`${server.name}: ${r.reason}`, "warn", 9000);
-              }
-            } catch (err) { toast(err.message, "error", 9000); }
-            e.target.disabled = false;
-            e.target.textContent = "Test";
-          },
-        }, "Test"),
-        server.can_manage
-          ? el("button", {
-              class: "danger small",
-              onclick: async () => {
-                if (!(await confirmBox(`Remove “${server.name}”?`,
-                      "Its worker tokens are revoked. Games already running are unaffected."))) return;
-                try { await api.deletePoolServer(server.id); toast("Removed.", "good"); reload(); }
-                catch (e) { toast(e.message, "error"); }
-              },
-            }, "Remove")
-          : null)),
-    el("div", { class: "row gap wrap small muted" },
-      el("span", {}, server.provider),
-      server.hardware_summary && server.hardware_summary.cpu
-        ? el("span", {}, server.hardware_summary.cpu) : null,
-      (server.hardware_summary && (server.hardware_summary.gpus || []).length)
-        ? el("span", {}, server.hardware_summary.gpus.join(", ")) : null,
-      el("span", {}, `${(server.models || []).length} model(s)`)),
-    (server.models || []).length
-      ? el("div", { class: "row gap wrap", style: { marginTop: "6px" } },
-          ...server.models.slice(0, 10).map((m) => el("span", { class: "chip" }, m.label || m.key)))
-      : null,
-    (server.restricted_hours && server.restricted_hours.enabled && (server.restricted_hours.windows || []).length)
-      ? el("div", { class: "small muted", style: { marginTop: "6px" } },
-          `🌙 Quiet hours (nothing runs): ${describeQuiet(server.restricted_hours)} ${server.owner_tz || ""}`)
-      : null,
-    el("div", { style: { marginTop: "8px" } }, admissionLine(server)));
+      el("h1", {}, "Servers"),
+      el("div", { class: "row gap wrap" },
+        may("savePlan") ? el("button", { onclick: () => openPlans(reload) }, "⚡ Electricity plans") : null,
+        may("serverSettings") ? el("button", { onclick: () => openSettings(reload) }, "⚙ Settings") : null,
+        may("createPoolGroup") ? el("button", { onclick: () => newGroupDialog(reload) }, "New group") : null,
+        may("createPoolServer") ? el("button", { class: "primary", onclick: () => addMachineDialog(data.groups, reload) }, "+ Add a machine") : null)),
+    el("p", { class: "muted" }, "The machines that run models: the ones this server connects to itself and the ones behind a CITAR helper, ",
+      "yours and the ones shared with you. Games, benchmarks and probes pick a model from here, and reports cost the work with these settings."),
+    may("createPoolServer") ? null : el("p", { class: "muted" },
+      "Your account cannot register machines yet. New accounts gain this once an administrator clears them."),
+    (data.reg.restricted || []).length
+      ? el("div", { class: "row wrap" }, ...data.reg.restricted.map((r) =>
+          el("span", { class: "pill quiet" }, `🌙 ${r.name}: quiet hours until ${r.until} (its work is paused)`)))
+      : null);
 }
 
-const QUIET_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-function describeQuiet(rh) {
-  if (!rh || !rh.enabled || !(rh.windows || []).length) return "No quiet hours.";
-  return rh.windows.map((w) => `${w.days.length === 7 ? "every day" : w.days.map((d) => QUIET_DAYS[d]).join(" ")} ${w.start}–${w.end}`).join("; ");
+// The sections a machine goes in: for an administrator the site's machines (the host, the online APIs, any with no
+// owner), their own, and the members'; for a member their own and the ones shared with them.
+function sections(machines) {
+  const admin = viewer().admin;
+  const site = (m) => !!(m.reg && (m.reg.is_host || m.reg.server_resource)) || !m.owner;
+  const order = { owned: 0, leased: 1, api: 2, test: 3 };
+  const sorted = [...machines].sort((a, b) => (!!(b.reg && b.reg.is_host) - !!(a.reg && a.reg.is_host))
+    || ((order[a.kind] ?? 9) - (order[b.kind] ?? 9)) || a.name.localeCompare(b.name));
+  if (admin) {
+    return [
+      ["This server's machines", sorted.filter(site), "The host and the services the site provides: administrators', whoever is named their owner."],
+      ["Your machines", sorted.filter((m) => !site(m) && m.is_mine), null],
+      ["Members' machines", sorted.filter((m) => !site(m) && !m.is_mine), "Each member's own; you manage them as an administrator."],
+    ];
+  }
+  return [
+    ["Your machines", sorted.filter((m) => m.can_manage), null],
+    ["Shared with you", sorted.filter((m) => !m.can_manage), "Machines a group shares with you, on its terms."],
+  ];
 }
 
-// Quiet hours belong to the machine and apply to everyone, its owner included: games, benchmarks and probes on it
-// finish the turn in progress, pause, and carry on by themselves when the hours end.
-function quietHoursDialog(server, reload) {
-  const rh = JSON.parse(JSON.stringify(server.restricted_hours || { enabled: false, windows: [], grace_minutes: 15 }));
-  rh.windows = rh.windows || [];
-  const body = el("div", { class: "col gap" });
-  const draw = () => {
-    clear(body);
-    body.append(
-      el("p", { class: "muted" }, "The hours this machine must REST. Nothing runs on it then, for anyone, you included: games, benchmark jobs and probe runs ",
-        "finish the AI turn in progress, pause, and resume by themselves when the hours end. A window that ends before it ",
-        `starts runs overnight into the next morning. Times are in the owner's time zone (${server.owner_tz || "UTC"}).`),
-      el("label", { class: "row gap" }, el("input", { type: "checkbox", checked: !!rh.enabled, onchange: (e) => { rh.enabled = e.target.checked; } }),
-        " Quiet hours on"));
-    rh.windows.forEach((w, i) => {
-      const days = el("div", { class: "row gap wrap" }, ...QUIET_DAYS.map((d, n) => el("label", { class: "small" },
-        el("input", { type: "checkbox", checked: w.days.includes(n), onchange: (e) => {
-          w.days = e.target.checked ? [...new Set([...w.days, n])].sort() : w.days.filter((x) => x !== n);
-        } }), d)));
-      body.append(el("div", { class: "row gap wrap" },
-        el("input", { type: "time", value: w.start, onchange: (e) => { w.start = e.target.value; } }), el("span", {}, "→"),
-        el("input", { type: "time", value: w.end, onchange: (e) => { w.end = e.target.value; } }), days,
-        el("button", { class: "small danger", onclick: () => { rh.windows.splice(i, 1); draw(); } }, "✕")));
-    });
-    body.append(el("div", { class: "row gap wrap" },
-      el("button", { class: "small", onclick: () => { rh.windows.push({ days: [0, 1, 2, 3, 4, 5, 6], start: "22:00", end: "06:00" }); rh.enabled = true; draw(); } }, "+ window"),
-      el("button", { class: "small", onclick: () => { rh.windows = [{ days: [0, 1, 2, 3, 4, 5, 6], start: "22:00", end: "06:00" }]; rh.enabled = true; draw(); } }, "Every night 22:00–06:00")));
+function drawBody(body, data, refresh) {
+  const reload = () => refresh().catch((e) => toast(e.message, "error"));
+  clear(body);
+  const parts = sections(data.machines);
+  const mine = parts.find(([title]) => title === "Your machines")[1];
+  for (const [title, list, note] of parts) {
+    if (title === "Your machines") {
+      body.appendChild(el("h2", {}, title));
+      body.appendChild(helperCard({ compact: mine.length > 0 }));
+      if (!list.length) {
+        body.appendChild(el("p", { class: "muted" },
+          "None yet. Add a machine, then run the CITAR helper on the computer that has the model: it connects outward, "
+          + "so you do not need to open any ports."));
+      }
+    } else {
+      if (!list.length) continue;
+      body.appendChild(el("h2", {}, title));
+    }
+    if (note) body.appendChild(el("p", { class: "muted small" }, note));
+    for (const m of list) body.appendChild(machineCard(m, data, reload));
+  }
+
+  body.appendChild(el("h2", {}, "Groups and access"));
+  if (!data.groups.length) {
+    body.appendChild(el("p", { class: "muted" },
+      "A group is how you share machines: put machines in one (Sharing, on a machine's card), then give access to it."));
+  }
+  for (const group of data.groups) body.appendChild(groupCard(group, data.machines, reload));
+}
+
+// The models a card shows: what a connected helper reports (loaded ones marked), else the catalogue.
+function modelChips(m) {
+  const live = m.reach === "worker" && m.online && (m.live_models || []).length;
+  const list = live ? m.live_models.filter((x) => x.key) : m.reg ? m.reg.models.filter((x) => x.enabled) : (m.models || []);
+  return list.map((x) => el("span", { class: `pill model-chip${x.loaded ? " live" : ""}`, title: x.key + (x.loaded ? " — loaded" : ""), "data-key": x.key },
+    x.label || x.key));
+}
+
+function machineCard(m, data, reload) {
+  const g = gateOf(m);
+  const reg = m.reg;
+  const helper = m.reach === "worker";
+  const provider = reg ? reg.connection.provider : m.provider;
+  const rates = el("span", { class: "muted small" });
+  const models = el("div", { class: "row wrap", style: { marginTop: "6px" } });
+  const chips = modelChips(m);
+  models.append(el("span", { class: "muted small" }, chips.length ? "Models:" : helper ? "No models reported yet." : "No models in the catalog yet."), ...chips);
+  // a group the viewer is not given (another member's, on an administrator's page) is named only as "shared"
+  const group = m.group_id ? data.groups.find((x) => x.id === m.group_id) || { name: "its owner's group" } : null;
+  const card = el("section", { class: "card server-card", "data-machine": m.id },
+    el("div", { class: "row wrap" },
+      el("span", { class: "server-icon" }, ICON[m.kind] || "🖥"),
+      el("h3", {}, m.name),
+      el("span", { class: "pill" }, KIND[m.kind] || m.kind),
+      reg && reg.is_host ? el("span", { class: "pill live", title: "The machine running CITAR: it runs the game engine and scripted bots" }, "runs CITAR") : null,
+      statusPill(m),
+      m.restricted_until ? el("span", { class: "pill quiet", title: "Quiet hours: all work on this machine is paused" }, `🌙 quiet until ${m.restricted_until}`) : null,
+      group ? el("span", { class: "pill", title: "Shared through this group" }, `shared: ${group.name}`) : null,
+      // an administrator's card: what the prompt scheduler (P3.3.4), the credits' bounds and the class check (P4.5.7)
+      // noticed of its helper
+      ...Object.entries(m.flags || {}).map(([key, f]) => {
+        const t = flagText(key, f);
+        return t ? el("span", { class: `pill ${t[0]}`, title: t[2] }, `⚠ ${t[1]}`) : null;      // the row spaces them
+      }),
+      m.is_mine || !m.owner ? null : el("span", { class: "muted small" }, `owned by ${m.owner.display_name || m.owner.handle}`)),
+    el("div", { class: "muted", style: { marginTop: "4px" } }, reg ? describeConn(reg) : `${PROVIDER[provider] || provider}${helper ? ", through its CITAR helper" : ""}`),
+    hardwareLine(m),
+    reg ? el("div", { class: "row wrap", style: { marginTop: "2px" } },
+      helper || !["owned", "leased"].includes(m.kind) ? null : el("span", { class: "muted small" }, reg.power.idle_w != null
+        ? `Power: idle ${reg.power.idle_w} W, +${reg.power.cpu_max_w ?? 0} W CPU, +${reg.power.gpu_max_w ?? 0} W GPU (${reg.power.source})` : "Power: not set"),
+      rates,
+      el("span", { class: "muted small" }, describeQuiet(reg.restricted_hours, helper ? m.owner_tz : null)),
+      !helper && reg.key_status && reg.key_status.backend !== "none" ? el("span", { class: reg.key_status.present ? "good small" : "warn small" },
+        reg.key_status.present ? "🔑 key stored" : reg.key_status.locked ? "🔒 key file locked" : "🔑 no key yet") : null)
+      : el("div", { class: "muted small", style: { marginTop: "2px" } }, describeQuiet(m.restricted_hours, helper ? m.owner_tz : null)),
+    reg && reg.issues.length ? el("ul", { class: "issues" }, ...reg.issues.map((i) => el("li", { class: "warn small" }, i))) : null,
+    models,
+    el("div", { style: { marginTop: "6px" } }, admissionLine(m)),
+    trustBlock(m, reload),
+    actions(m, data, reload));
+  if (reg && m.kind !== "test" && may("serverRates", g)) {
+    call("serverRates", g, m.id).then((r) => {
+      rates.textContent = m.kind === "api" ? (r.idle.total ? `Fixed ${money(r.idle.total)}/h + tokens` : "Pay per token") :
+        `An hour costs ≈ ${money(r.idle.total)} idle · ${money(r.busy.total)} busy`;
+    }).catch(() => {});
+  }
+  // which catalogue models LM Studio has loaded right now, on a machine the server drives
+  if (reg && provider === "lmstudio" && !helper && reg.models.some((x) => x.enabled) && may("serverState", g)) {
+    call("serverState", g, m.id).then((st) => {
+      if (!st.supported) return;
+      for (const chip of models.querySelectorAll(".model-chip")) {
+        const s = st.models[chip.dataset.key];
+        if (s && s.loaded) { chip.classList.add("live"); chip.title += ` — loaded${s.context ? ` (${s.context.toLocaleString()} ctx)` : ""}`; }
+      }
+    }).catch(() => {});
+  }
+  return card;
+}
+
+// ---------------------------------------------------------------------------- its trust (design/phase4-helper.md P4.5.11)
+
+/** A helper machine's trust on its card: its tier with its verified count and streak, to its owner and
+ *  administrators; to an administrator also the last mismatch with its evidence, its measured speed beside its CPU
+ *  class and its verifier mark, with Quarantine… or Release, Mark as verifier (a trusted machine) and Replicate…. The
+ *  server makes every change through its job dispatcher (P4.5.8 rule 10). */
+function trustBlock(m, reload) {
+  const t = m.trust;
+  if (!t) return null;
+  const g = gateOf(m);
+  const rows = [el("div", { class: "row gap wrap" },
+    el("span", { class: `small trust trust-${t.tier}` }, trustLine(t)),
+    t.verifier ? el("span", { class: "pill good", title: "It replays other machines' results: its matches count "
+      + "toward their promotion" }, "verifier") : null)];
+  if (!may("setMachineTrust", g)) return el("div", { class: "col", style: { marginTop: "4px" } }, ...rows);
+  if (t.last_mismatch) {
+    rows.push(el("span", { class: t.tier === "quarantined" ? "bad small" : "muted small" },
+      `Last mismatch: ${evidenceText(t.last_mismatch)}`));
+  }
+  rows.push(el("span", { class: "muted small" }, speedText(t.speed, t.cpu_class),
+    t.replicate ? ` · its next ${t.replicate} result${t.replicate === 1 ? "" : "s"} checked by replicas` : ""));
+  const change = async (body, done) => {
+    try { await call("setMachineTrust", g, m.id, body); toast(done, "good"); reload(); }
+    catch (e) { toast(e.message, "error", 9000); }
   };
-  draw();
-  const m = modal({
-    title: `Quiet hours — when ${server.name} must rest`, content: body,
-    footer: [el("button", { onclick: () => m.close() }, "Cancel"),
+  const button = (label, onclick, title) => el("button", { class: "small", onclick, title }, label);
+  const controls = [];
+  if (t.tier === "quarantined") {
+    controls.push(button("Release", () => change({ trust_tier: "new" }, `${m.name} released: new again.`),
+      "Back to new: its counters reset and its standing from now; its owner, if quarantined, is released apart "
+      + "(the admin users page)"));
+  } else {
+    controls.push(button("Quarantine…", () => quarantineDialog(m, t, change),
+      "It plays no CPU job and serves nobody but its owner"));
+  }
+  if (t.tier === "trusted") {
+    controls.push(button(t.verifier ? "Unmark verifier" : "Mark as verifier",
+      () => change({ verifier: !t.verifier }, t.verifier ? `${m.name} verifies nobody now.` : `${m.name} is a verifier.`),
+      "A verifier replays other owners' machines' sampled results; this server always verifies too"));
+  }
+  if (t.tier !== "quarantined" && may("replicateMachine", g)) {
+    controls.push(button("Replicate…", async () => {
+      const text = await prompt(`Replicate ${m.name}'s next results`, "How many of its next results a replica checks "
+        + "whatever its tier's rate (1 to 100):", "1");
+      if (text == null) return;
+      const n = Number(text);
+      if (!Number.isInteger(n) || n < 1 || n > 100) { toast("A whole number from 1 to 100.", "error"); return; }
+      try { await call("replicateMachine", g, m.id, n); toast(`Its next ${n} result(s) will be checked.`, "good"); reload(); }
+      catch (e) { toast(e.message, "error"); }
+    }, "Have its next results checked by replicas, whatever its tier's sample says"));
+  }
+  rows.push(el("div", { class: "row gap wrap" }, ...controls));
+  return el("div", { class: "col trust-block", style: { marginTop: "4px" } }, ...rows);
+}
+
+/** Quarantine by hand: with or without withdrawing every result it gave unverified since its standing began. */
+function quarantineDialog(m, t, change) {
+  const withdraw = el("input", { type: "checkbox", checked: true });
+  const since = t.since ? `since ${new Date(t.since).toLocaleString()} (its last release)` : "since it was registered";
+  const dialog = modal({
+    title: `Quarantine “${m.name}”?`, narrow: true,
+    content: el("div", { class: "col gap" },
+      el("p", {}, "It plays no CPU job and serves nobody but its owner until it is released. Its runs in flight are "
+        + "stopped and their games played elsewhere; its results waiting for a replica are withdrawn."),
+      el("label", { class: "checkrow" }, withdraw,
+        ` Also withdraw every result it gave unverified ${since}: their lines leave the results files, their credits `
+        + "are rejected and their games are played again.")),
+    footer: [el("button", { onclick: () => dialog.close() }, "Cancel"),
+      el("button", { class: "danger", onclick: () => {
+        dialog.close();
+        change({ trust_tier: "quarantined", withdraw: withdraw.checked }, `${m.name} is quarantined.`);
+      } }, "Quarantine")],
+  });
+}
+
+function hardwareLine(m) {
+  if (m.kind === "api" || m.kind === "test") return null;
+  if (m.reg) return m.reg.hardware_summary ? el("div", { style: { marginTop: "2px" } }, m.reg.hardware_summary) : null;
+  const h = m.hardware_summary || {};
+  const parts = [h.cpu, ...(h.gpus || []), h.ram_gb ? `${h.ram_gb} GB RAM` : null].filter(Boolean);
+  return parts.length ? el("div", { class: "small", style: { marginTop: "2px" } }, parts.join(" · ")) : null;
+}
+
+// The card's controls: each shown only when its route would take it from this viewer.
+function actions(m, data, reload) {
+  const g = gateOf(m);
+  const reg = m.reg;
+  const helper = m.reach === "worker";
+  const provider = reg ? reg.connection.provider : m.provider;
+  const button = (label, onclick, attrs = {}) => el("button", { class: "small", onclick, ...attrs }, label);
+  const out = [];
+  if (helper && may("testPoolServer", g)) {
+    out.push(button("Test", async (e) => {
+      e.target.disabled = true; e.target.textContent = "Testing…";
+      try {
+        const r = await call("testPoolServer", g, m.id);
+        if (r.ok) toast(`${m.name}: ${r.model} replied in ${r.seconds}s`, "good", 7000);
+        else toast(`${m.name}: ${r.reason}`, "warn", 9000);
+      } catch (err) { toast(err.message, "error", 9000); }
+      e.target.disabled = false; e.target.textContent = "Test";
+    }, { title: "Send the model a one-line request through the helper" }));
+  } else if (!helper && reg && provider !== "none" && may("detectModels", g)) {
+    out.push(button("Test connection", async () => {
+      try { const r = await call("detectModels", g, m.id); toast(r.ok ? `${m.name}: ${r.models.length} model(s) available` : r.error, r.ok ? "info" : "error"); }
+      catch (e) { toast(e.message, "error"); }
+    }));
+  }
+  if (reg && may("saveServer", g)) {
+    out.push(button("Connection & models", () => openConnection(reg, reload), { class: "small primary" }));
+    if (m.kind !== "api" && m.kind !== "test") out.push(button("Hardware & power", () => openHardware(reg, reload)));
+    if (m.kind !== "test") out.push(button("Costs", () => openCosts(reg, reload)));
+  }
+  if (may("machineSettings", g)) {
+    out.push(button("Machine settings…", () => openMachineSettings(m, reload),
+      { title: "Slots, model swaps and CPU sharing; what its helper's reports may change; its class and trust tier" }));
+  }
+  if (may("setQuietHours", g)) out.push(button("Quiet hours", () => openQuietHours(m, reload)));
+  if (reg && KEYED.includes(provider) && may("storeKey", g)) out.push(button("API key", () => openKey(reg, reload)));
+  if (helper && may("workerStatus", g)) out.push(button("Helper", () => helperDialog(m), { title: "Its worker tokens and how to run the helper" }));
+  if (may("updatePoolServer", g)) {
+    out.push(button("Sharing", () => sharingDialog(m, data.groups, reload), { title: "The group that shares it" }));
+    out.push(button(m.enabled ? "Disable" : "Enable", async () => {
+      if (m.enabled && !(await confirmBox(`Disable “${m.name}”?`, "Nothing new runs on it until you enable it again"
+        + (helper ? ", and its helper is disconnected at once." : "."))) ) return;
+      try { await call("updatePoolServer", g, m.id, { enabled: !m.enabled }); reload(); } catch (e) { toast(e.message, "error"); }
+    }));
+  }
+  if (may("deletePoolServer", g)) {
+    out.push(button("Remove", async () => {
+      if (!(await confirmBox(`Remove “${m.name}”?`, "Its worker tokens and its stored API key go with it, and a connected helper is "
+        + "disconnected. Past usage stays in the ledger but can no longer be costed."))) return;
+      try { await call("deletePoolServer", g, m.id); toast("Removed.", "good"); reload(); } catch (e) { toast(e.message, "error"); }
+    }, { class: "small danger" }));
+  }
+  return out.length ? el("div", { class: "row wrap gap", style: { marginTop: "8px" } }, ...out) : null;
+}
+
+// Which group shares a machine: everyone the group's access reaches may use it, on those terms.
+function sharingDialog(m, groups, reload) {
+  const mine = groups.filter((x) => x.can_manage);
+  // the group it is in stays the choice until another is picked, also one this page does not list (another
+  // member's group, on an administrator's page): saving must never unshare it by accident
+  const current = m.group_id && !mine.some((x) => x.id === m.group_id)
+    ? (groups.find((x) => x.id === m.group_id) || { id: m.group_id, name: "its owner's group" }) : null;
+  const select = el("select", {},
+    el("option", { value: "", selected: !m.group_id }, "— not shared —"),
+    ...mine.map((x) => el("option", { value: x.id, selected: x.id === m.group_id }, x.name)),
+    current ? el("option", { value: current.id, selected: true }, `${current.name} (as it is)`) : null);
+  const dialog = modal({
+    title: `Sharing “${m.name}”`, narrow: true,
+    content: el("div", { class: "col gap" },
+      el("p", { class: "muted" }, "A machine is shared through a server group: whoever the group gives access to may use it, on the terms ",
+        "of their access (what they may run, the hours, a spend cap). The groups and their access are at the foot of this page."),
+      el("label", { class: "field" }, el("span", { class: "field-label" }, "Group"), select),
+      mine.length ? null : el("p", { class: "muted small" }, "You have no group yet: make one with New group.")),
+    footer: [el("button", { onclick: () => dialog.close() }, "Cancel"),
       el("button", { class: "primary", onclick: async () => {
         try {
-          const saved = await api.setQuietHours(server.id, rh);
-          toast(`${server.name}: ${describeQuiet(saved.restricted_hours)}`, "good", 6000);
-          m.close(); reload();
+          await call("updatePoolServer", gateOf(m), m.id, { group_id: select.value || null });
+          toast(select.value ? "Shared." : "No longer shared.", "good");
+          dialog.close(); reload();
         } catch (e) { toast(e.message, "error"); }
       } }, "Save")],
   });
 }
 
-function groupCard(group, reload) {
+function groupCard(group, machines, reload) {
   const grants = group.grants || [];
-  return el("section", { class: "card" },
+  const inside = machines.filter((m) => m.group_id === group.id).map((m) => m.name);
+  return el("section", { class: "card", "data-group": group.id },
     el("div", { class: "row between wrap" },
       el("div", { class: "col" },
         el("h3", {}, group.name),
         group.description ? el("span", { class: "muted small" }, group.description) : null,
         el("span", { class: "muted small" },
-          `${(group.servers || []).length} server(s)`
-          + (group.is_mine ? "" : ` · owned by ${group.owner ? group.owner.display_name : "someone"}`))),
-      group.can_manage
-        ? el("div", { class: "row gap" },
-            el("button", { class: "small primary", onclick: () => grantDialog(group, null, reload) },
-               "Give access"),
-            el("button", {
-              class: "danger small",
-              onclick: async () => {
-                if (!(await confirmBox(`Delete group “${group.name}”?`,
-                      "The servers in it stay registered; they simply stop being shared."))) return;
-                try { await api.deletePoolGroup(group.id); toast("Deleted.", "good"); reload(); }
-                catch (e) { toast(e.message, "error"); }
-              },
-            }, "Delete"))
-        : null),
+          `${(group.servers || []).length} machine(s)` + (inside.length ? `: ${inside.join(", ")}` : "")
+          + (group.is_mine ? "" : ` · owned by ${group.owner ? group.owner.display_name || group.owner.handle : "someone"}`))),
+      el("div", { class: "row gap" },
+        may("createGrant", group) ? el("button", { class: "small primary", onclick: () => grantDialog(group, null, reload) }, "Give access") : null,
+        may("deletePoolGroup", group) ? el("button", {
+          class: "danger small",
+          onclick: async () => {
+            if (!(await confirmBox(`Delete group “${group.name}”?`,
+                  "The machines in it stay registered; they simply stop being shared."))) return;
+            try { await call("deletePoolGroup", group, group.id); toast("Deleted.", "good"); reload(); }
+            catch (e) { toast(e.message, "error"); }
+          },
+        }, "Delete") : null)),
     ...(grants.length
-      ? grants.map((g) => grantRow(group, g, reload))
+      ? grants.map((x) => grantRow(group, x, reload))
       : [el("p", { class: "muted small" },
           group.can_manage ? "Nobody has access yet." : "You have no access terms here.")]));
 }
@@ -470,20 +710,18 @@ function grantRow(group, grant, reload) {
       el("div", { class: "col" },
         el("strong", {},
           grant.subject_type === "everyone" ? "Everyone"
-            : (grant.subject ? grant.subject.display_name : "somebody")),
+            : (grant.subject ? grant.subject.display_name || grant.subject.handle : "somebody")),
         el("span", { class: "muted small" }, `may run ${grant.purpose_label}`)),
       el("div", { class: "row gap" },
         grant.open_now ? el("span", { class: "pill live", title: "Inside the allowed hours" }, "allowed now")
                        : el("span", { class: "pill quiet", title: "Outside the allowed hours" }, "not allowed now"),
-        group.can_manage
-          ? el("button", { class: "small", onclick: () => grantDialog(group, grant, reload) }, "Edit")
-          : null,
-        group.can_manage
+        may("updateGrant", group) ? el("button", { class: "small", onclick: () => grantDialog(group, grant, reload) }, "Edit") : null,
+        may("revokeGrant", group)
           ? el("button", {
               class: "danger small",
               onclick: async () => {
                 if (!(await confirmBox("Revoke this access?", "They lose access immediately."))) return;
-                try { await api.revokeGrant(grant.id); toast("Revoked.", "good"); reload(); }
+                try { await call("revokeGrant", group, grant.id); toast("Revoked.", "good"); reload(); }
                 catch (e) { toast(e.message, "error"); }
               },
             }, "Revoke")
@@ -496,6 +734,8 @@ function grantRow(group, grant, reload) {
       budget.limited
         ? el("span", { class: budget.exhausted ? "bad" : "muted" }, `💳 ${budget.label}`)
         : null,
+      // a soft budget past its amount lets the work go on, and says so here (design/phase3-features.md P3.4.6)
+      budget.warning ? el("span", { class: "warn" }, budget.warning) : null,
       grant.concurrency ? el("span", { class: "muted" }, `${grant.concurrency} at once`) : null),
     budget.limited
       ? el("div", { class: "meter" },
@@ -507,7 +747,7 @@ function grantRow(group, grant, reload) {
     grant.note ? el("div", { class: "muted small" }, grant.note) : null);
 }
 
-// ---------------------------------------------------------------------------- dialogs
+// ---------------------------------------------------------------------------- adding things
 
 function newGroupDialog(reload) {
   const name = el("input", { placeholder: "Home GPUs" });
@@ -516,7 +756,7 @@ function newGroupDialog(reload) {
     title: "New server group", narrow: true,
     content: el("div", { class: "col gap" },
       el("p", { class: "muted" },
-        "A group is the unit of sharing: you put machines in it and grant access to the group."),
+        "A group is the unit of sharing: you put machines in it and give access to the group."),
       el("label", { class: "field" }, el("span", { class: "field-label" }, "Name"), name),
       el("label", { class: "field" }, el("span", { class: "field-label" }, "Description"), description)),
     footer: [el("button", { onclick: () => m.close() }, "Cancel"),
@@ -524,7 +764,7 @@ function newGroupDialog(reload) {
                class: "primary",
                onclick: async () => {
                  try {
-                   await api.createPoolGroup({ name: name.value, description: description.value });
+                   await call("createPoolGroup", null, { name: name.value, description: description.value });
                    m.close(); toast("Group created.", "good"); reload();
                  } catch (e) { toast(e.message, "error"); }
                },
@@ -533,24 +773,47 @@ function newGroupDialog(reload) {
   setTimeout(() => name.focus(), 40);
 }
 
-function newServerDialog(groups, reload) {
+// The kinds of machine the viewer may add: a helper machine and the dry run for anyone who may register machines; the
+// machines this server connects to itself (an address on its network, an online API) for administrators alone.
+function addMachineDialog(groups, reload) {
+  const admin = viewer().admin;
+  const choice = (title, sub, run) => el("button", { class: "choice", onclick: () => { m.close(); run(); } },
+    el("b", {}, title), el("div", { class: "muted small" }, sub));
+  const direct = (kind, provider, title, sub) => choice(title, sub, () => addDirectMachine(kind, provider, title, reload));
+  const m = modal({
+    title: "Add a machine", narrow: true,
+    content: el("div", { class: "col" },
+      choice("🖥 A machine running the CITAR helper", "LM Studio or Ollama on your computer, wherever it is: the helper connects out to this "
+        + "server, so no ports need opening.", () => helperMachineDialog(groups, reload)),
+      direct("test", "dryrun", "🧪 Dry run", "A pretend model for checking setups: it dials nothing and costs nothing."),
+      admin ? el("h3", { class: "section" }, "Machines this server connects to itself") : null,
+      admin ? direct("owned", "lmstudio", "🖥 A PC running LM Studio", "This PC, another linked through LM Studio's LM Link, or one on the network") : null,
+      admin ? direct("owned", "ollama", "🖥 A PC running Ollama", "Local or network Ollama server") : null,
+      admin ? direct("owned", "none", "🖥 A PC without a model runtime", "E.g. the machine that only runs CITAR's engine and bots") : null,
+      admin ? direct("leased", "openai_compatible", "☁ A rented or cloud machine", "vLLM, llama.cpp server, LM Studio… on hardware you rent (fixed monthly and/or hourly costs)") : null,
+      admin ? direct("api", "anthropic", "🔑 Anthropic API (Claude)", "Pay per token; prices filled in for current Claude models") : null,
+      admin ? direct("api", "openai_compatible", "🔑 Another online API", "OpenAI-compatible service billed per token") : null,
+      admin ? null : el("p", { class: "muted small" }, "A machine this server connects to itself (a PC on its network, an online API) is an "
+        + "administrator's to add: it would make the server reach an address on its own network.")),
+  });
+}
+
+function helperMachineDialog(groups, reload) {
   const name = el("input", { placeholder: "Desktop with the 4090" });
   const provider = el("select", {},
     el("option", { value: "lmstudio" }, "LM Studio"),
     el("option", { value: "ollama" }, "Ollama"),
-    el("option", { value: "openai_compatible" }, "OpenAI-compatible endpoint"),
-    el("option", { value: "anthropic" }, "Anthropic API"));
+    el("option", { value: "openai_compatible" }, "OpenAI-compatible endpoint"));
   const kind = el("select", {},
     el("option", { value: "owned" }, "owned hardware"),
-    el("option", { value: "leased" }, "leased / rented"),
-    el("option", { value: "api" }, "paid API"));
+    el("option", { value: "leased" }, "leased / rented"));
   const group = el("select", {},
     el("option", { value: "" }, "— not shared —"),
     ...groups.filter((g) => g.is_mine).map((g) => el("option", { value: g.id }, g.name)));
   const concurrent = el("input", { type: "number", min: "1", value: "1", style: { width: "90px" } });
 
   const m = modal({
-    title: "Add a server",
+    title: "Add a machine with the CITAR helper",
     content: el("div", { class: "col gap" },
       el("p", { class: "muted" },
         "Register the machine here, then run the CITAR helper on it. The helper connects outward to "
@@ -562,13 +825,13 @@ function newServerDialog(groups, reload) {
         el("span", { class: "field-label" }, "Group"), group,
         el("span", { class: "muted small" }, "Leave unshared to keep it to yourself for now.")),
       el("label", { class: "field" },
-        el("span", { class: "field-label" }, "Simultaneous requests"), concurrent)),
+        el("span", { class: "field-label" }, "Requests at once"), concurrent)),
     footer: [el("button", { onclick: () => m.close() }, "Cancel"),
              el("button", {
                class: "primary",
                onclick: async () => {
                  try {
-                   const created = await api.createPoolServer({
+                   const created = await call("createPoolServer", { isNew: true }, {
                      config: {
                        name: name.value, kind: kind.value,
                        connection: { provider: provider.value,
@@ -577,11 +840,12 @@ function newServerDialog(groups, reload) {
                      group_id: group.value || null, reach: "worker",
                    });
                    m.close();
-                   toast("Server added — now issue a worker token.", "good");
-                   workerDialog(created);
+                   toast("Machine added — now issue a worker token for its helper.", "good");
+                   reload();
+                   helperDialog(created);
                  } catch (e) { toast(e.message, "error"); }
                },
-             }, "Add server")],
+             }, "Add machine")],
   });
   setTimeout(() => name.focus(), 40);
 }

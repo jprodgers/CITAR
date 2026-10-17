@@ -1,0 +1,2983 @@
+{
+ "phase_a": {
+  "costing": {
+   "acts": {
+    "b": {
+     "busy_h": 0.183333333,
+     "cpu_h": 0.166666667,
+     "cr": 1000000.0,
+     "cw": 40000.0,
+     "depreciation": 0.06473306,
+     "energy_dynamic": 0.000315206,
+     "energy_estimated_h": 1.5,
+     "energy_idle": 0.0075825,
+     "energy_measured_h": 0.0,
+     "fixed": 0.014000896,
+     "held_h": 2.366666667,
+     "hourly": 0.0,
+     "in": 2200000.0,
+     "kwh_dynamic": 0.00093533,
+     "kwh_idle": 0.0225,
+     "out": 220000.0,
+     "req": 0.0,
+     "rsn": 0.0,
+     "tokens": 16.2,
+     "unpriced_kwh": 0.0,
+     "unpriced_tokens": 0
+    },
+    "g": {
+     "busy_h": 1.166666667,
+     "cpu_h": 0.666666667,
+     "cr": 0.0,
+     "cw": 0.0,
+     "depreciation": 0.113325348,
+     "energy_dynamic": 0.067631704,
+     "energy_estimated_h": 2.5,
+     "energy_idle": 0.0240225,
+     "energy_measured_h": 0.0,
+     "fixed": 0.005040323,
+     "held_h": 3.0,
+     "hourly": 0.0,
+     "in": 140000.0,
+     "kwh_dynamic": 0.244307726,
+     "kwh_idle": 0.0825,
+     "out": 14000.0,
+     "req": 0.0,
+     "rsn": 0.0,
+     "tokens": 0.0,
+     "unpriced_kwh": 0.0,
+     "unpriced_tokens": 0
+    },
+    "r": {
+     "busy_h": 0.0,
+     "cpu_h": 0.0,
+     "cr": 0.0,
+     "cw": 0.0,
+     "depreciation": 0.0,
+     "energy_dynamic": 0.0,
+     "energy_estimated_h": 0.0,
+     "energy_idle": 0.0,
+     "energy_measured_h": 0.0,
+     "fixed": 0.0,
+     "held_h": 0.0,
+     "hourly": 0.0,
+     "in": 0.0,
+     "kwh_dynamic": 0.0,
+     "kwh_idle": 0.0,
+     "out": 0.0,
+     "req": 0.0,
+     "rsn": 0.0,
+     "tokens": 0.0,
+     "unpriced_kwh": 0.0,
+     "unpriced_tokens": 0
+    }
+   },
+   "currency": "EUR",
+   "servers": {
+    "sv_claude": {
+     "calendar": {
+      "depreciation": 0.0,
+      "fixed": 74.435483871,
+      "hours": 2721.0
+     },
+     "utilization": 0.000122504
+    },
+    "sv_helper": {},
+    "sv_host": {
+     "calendar": {
+      "depreciation": 117.425770021,
+      "fixed": 5.134408602,
+      "hours": 2721.0
+     },
+     "utilization": 0.001102536
+    },
+    "sv_lan": {
+     "calendar": {
+      "depreciation": 132.219616701,
+      "fixed": 0.0,
+      "hours": 2721.0
+     },
+     "utilization": 0.000367512
+    },
+    "sv_test": {
+     "calendar": {
+      "depreciation": 0.0,
+      "fixed": 0.0,
+      "hours": 2721.0
+     },
+     "utilization": 0.0
+    }
+   },
+   "symbol": "€"
+  },
+  "describe_seat:claude": {
+   "label": "Opus 5",
+   "missing_server": false,
+   "model": "claude-opus-5",
+   "profile": null,
+   "restricted_until": null,
+   "server": "Anthropic API",
+   "server_id": "sv_claude"
+  },
+  "describe_seat:claude_custom": {
+   "label": "claude-custom-1",
+   "missing_server": false,
+   "model": "claude-custom-1",
+   "profile": null,
+   "restricted_until": null,
+   "server": "Anthropic API",
+   "server_id": "sv_claude"
+  },
+  "describe_seat:dry": {
+   "label": "dry-run",
+   "missing_server": false,
+   "model": "dry-run",
+   "profile": null,
+   "restricted_until": null,
+   "server": "Dry run (no model)",
+   "server_id": "sv_test"
+  },
+  "describe_seat:host_by_key": {
+   "label": "qwen/qwen3.8-27b",
+   "missing_server": false,
+   "model": "qwen/qwen3.8-27b",
+   "profile": "My preset",
+   "restricted_until": "06:00",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host"
+  },
+  "describe_seat:host_long": {
+   "label": "Gemma 4 E2B",
+   "missing_server": false,
+   "model": "google/gemma-4-e2b",
+   "profile": "Long context",
+   "restricted_until": "06:00",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host"
+  },
+  "describe_seat:host_unknown_model": {
+   "label": "not/in-catalog",
+   "missing_server": false,
+   "model": "not/in-catalog",
+   "profile": null,
+   "restricted_until": "06:00",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host"
+  },
+  "describe_seat:lan": {
+   "label": "Llama",
+   "missing_server": false,
+   "model": "llama-4-scout",
+   "profile": null,
+   "restricted_until": null,
+   "server": "Desktop on the LAN",
+   "server_id": "sv_lan"
+  },
+  "describe_seat:missing": {
+   "label": "x",
+   "missing_server": true,
+   "model": "x",
+   "profile": null,
+   "restricted_until": null,
+   "server": null,
+   "server_id": "sv_nope"
+  },
+  "find:None": null,
+  "find:sv_claude": {
+   "components": [],
+   "connection": {
+    "base_url": "",
+    "dry_run_delay": 1.0,
+    "key": {
+     "backend": "file",
+     "env": ""
+    },
+    "lmstudio_device": "",
+    "manage_loading": false,
+    "max_parallel": 4,
+    "provider": "anthropic",
+    "timeout": null
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 20.0,
+     "default_price": null,
+     "electricity_plan_id": null,
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "",
+   "hardware": {
+    "source": "none"
+   },
+   "id": "sv_claude",
+   "kind": "api",
+   "models": [
+    {
+     "default_profile": null,
+     "enabled": true,
+     "id": "m_opus",
+     "inference": {
+      "effort": "medium",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "native"
+     },
+     "info": {},
+     "key": "claude-opus-5",
+     "label": "Opus 5",
+     "price": null,
+     "profiles": []
+    },
+    {
+     "default_profile": null,
+     "enabled": true,
+     "id": "m_custom",
+     "inference": {
+      "effort": "",
+      "max_tokens": 8000,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "native"
+     },
+     "info": {},
+     "key": "claude-custom-1",
+     "label": "",
+     "price": {
+      "cache_read": 0.15,
+      "cache_write": 2.0,
+      "input": 1.5,
+      "output": 7.5
+     },
+     "profiles": []
+    }
+   ],
+   "name": "Anthropic API",
+   "notes": "billed monthly",
+   "power": {
+    "cpu_max_w": null,
+    "gpu_max_w": null,
+    "idle_w": null,
+    "measured_overhead_pct": 10.0,
+    "sampling": "auto",
+    "source": "unset"
+   },
+   "restricted_hours": {
+    "enabled": false,
+    "grace_minutes": 15.0,
+    "unload_models": true,
+    "windows": []
+   }
+  },
+  "find:sv_host": {
+   "components": [
+    {
+     "id": "c_laptop",
+     "lifespan_years": 5.0,
+     "name": "Laptop",
+     "price": 2191.5,
+     "purchased": "2025-01-01",
+     "resale": 300.0,
+     "retired": null
+    }
+   ],
+   "connection": {
+    "base_url": "http://localhost:1234/v1",
+    "dry_run_delay": 1.0,
+    "key": {
+     "backend": "none",
+     "env": ""
+    },
+    "lmstudio_device": "",
+    "manage_loading": true,
+    "max_parallel": 2,
+    "provider": "lmstudio",
+    "timeout": 900.0
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": "ep_home",
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    },
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": "ep_tou",
+     "fixed_monthly": 5.0,
+     "fixed_note": "insurance",
+     "from": "2026-06-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "The machine CITAR runs on.",
+   "hardware": {
+    "cpu": {
+     "cores": 12,
+     "model": "Ryzen AI 9",
+     "threads": 24
+    },
+    "format": "citar-hardware",
+    "gpus": [
+     {
+      "name": "Radeon 890M",
+      "unified_memory": true,
+      "vendor": "AMD",
+      "vram_gb": 0
+     }
+    ],
+    "hostname": "laptop",
+    "memory": {
+     "ram_gb": 64,
+     "unified": true
+    },
+    "physical_disks": [
+     {
+      "size_gb": 2000
+     }
+    ],
+    "source": "collected"
+   },
+   "id": "sv_host",
+   "kind": "owned",
+   "models": [
+    {
+     "default_profile": "p_default",
+     "enabled": true,
+     "id": "m_gemma",
+     "inference": {
+      "effort": "",
+      "max_tokens": 4096,
+      "max_tool_calls_per_turn": 120,
+      "reasoning_effort": "low",
+      "temperature": 0.7,
+      "tool_mode": "native"
+     },
+     "info": {
+      "max_context": 131072,
+      "params": "2B",
+      "tool_use": true
+     },
+     "key": "google/gemma-4-e2b",
+     "label": "Gemma 4 E2B",
+     "price": null,
+     "profiles": [
+      {
+       "context": 32768,
+       "eval_batch": null,
+       "exclusive": true,
+       "extra": "",
+       "fields": [],
+       "flash_attention": null,
+       "gpu": "max",
+       "id": "p_default",
+       "k_cache_quant": "",
+       "keep_in_memory": null,
+       "loaded_by": "citar",
+       "main_gpu": null,
+       "name": "Default",
+       "num_experts": null,
+       "offload_kv_to_gpu": null,
+       "parallel": null,
+       "split_strategy": "",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": null,
+       "use_defaults": false,
+       "v_cache_quant": ""
+      },
+      {
+       "context": 131072,
+       "eval_batch": 512,
+       "exclusive": false,
+       "extra": "--speculative-draft-mtp --identifier gemma-long",
+       "fields": [
+        {
+         "key": "llm.load.numCpuExpertLayersRatio",
+         "value": 0.5
+        }
+       ],
+       "flash_attention": true,
+       "gpu": "0.5",
+       "id": "p_long",
+       "k_cache_quant": "q8_0",
+       "keep_in_memory": null,
+       "loaded_by": "citar",
+       "main_gpu": 0,
+       "name": "Long context",
+       "num_experts": null,
+       "offload_kv_to_gpu": false,
+       "parallel": 2,
+       "split_strategy": "evenly",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": 3600,
+       "use_defaults": false,
+       "v_cache_quant": "q8_0"
+      }
+     ]
+    },
+    {
+     "default_profile": "p_manual",
+     "enabled": false,
+     "id": "m_qwen",
+     "inference": {
+      "effort": "",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "json"
+     },
+     "info": {},
+     "key": "qwen/qwen3.8-27b",
+     "label": "",
+     "price": null,
+     "profiles": [
+      {
+       "context": 0,
+       "eval_batch": null,
+       "exclusive": true,
+       "extra": "",
+       "fields": [],
+       "flash_attention": null,
+       "gpu": "auto",
+       "id": "p_manual",
+       "k_cache_quant": "",
+       "keep_in_memory": null,
+       "loaded_by": "manual",
+       "main_gpu": null,
+       "name": "My preset",
+       "num_experts": null,
+       "offload_kv_to_gpu": null,
+       "parallel": null,
+       "split_strategy": "",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": null,
+       "use_defaults": false,
+       "v_cache_quant": ""
+      }
+     ]
+    }
+   ],
+   "name": "Laptop (this PC)",
+   "notes": "",
+   "power": {
+    "cpu_max_w": 55.0,
+    "gpu_max_w": 40.0,
+    "idle_w": 15.0,
+    "measured_overhead_pct": 10.0,
+    "sampling": "off",
+    "source": "manual"
+   },
+   "restricted_hours": {
+    "enabled": true,
+    "grace_minutes": 10.0,
+    "unload_models": true,
+    "windows": [
+     {
+      "days": [
+       6
+      ],
+      "end": "02:30",
+      "start": "02:00"
+     },
+     {
+      "days": [
+       0,
+       1,
+       2,
+       3,
+       4
+      ],
+      "end": "06:00",
+      "start": "23:00"
+     }
+    ]
+   }
+  },
+  "find:sv_lan": {
+   "components": [
+    {
+     "id": "c_gpu",
+     "lifespan_years": 4.0,
+     "name": "GPU",
+     "price": 1753.2,
+     "purchased": "2024-06-01",
+     "resale": 400.0,
+     "retired": null
+    },
+    {
+     "id": "c_box",
+     "lifespan_years": 10.0,
+     "name": "Box",
+     "price": 876.6,
+     "purchased": "2020-01-01",
+     "resale": 0,
+     "retired": "2027-01-01"
+    }
+   ],
+   "connection": {
+    "base_url": "http://192.168.1.50:8080/v1",
+    "dry_run_delay": 1.0,
+    "key": {
+     "backend": "env",
+     "env": "CITAR_TEST_LAN_KEY"
+    },
+    "lmstudio_device": "",
+    "manage_loading": false,
+    "max_parallel": 1,
+    "provider": "openai_compatible",
+    "timeout": 600.0
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": "ep_home",
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "",
+   "hardware": {
+    "cpu": {
+     "model": "Desktop CPU",
+     "threads": 16
+    },
+    "source": "manual"
+   },
+   "id": "sv_lan",
+   "kind": "owned",
+   "models": [
+    {
+     "default_profile": null,
+     "enabled": true,
+     "id": "m_llama",
+     "inference": {
+      "effort": "",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 200,
+      "reasoning_effort": "",
+      "temperature": 0.2,
+      "tool_mode": "native"
+     },
+     "info": {},
+     "key": "llama-4-scout",
+     "label": "Llama",
+     "price": null,
+     "profiles": []
+    }
+   ],
+   "name": "Desktop on the LAN",
+   "notes": "",
+   "power": {
+    "cpu_max_w": 120.0,
+    "gpu_max_w": 350.0,
+    "idle_w": 60.0,
+    "measured_overhead_pct": 5.0,
+    "sampling": "off",
+    "source": "manual"
+   },
+   "restricted_hours": {
+    "enabled": false,
+    "grace_minutes": 15.0,
+    "unload_models": true,
+    "windows": []
+   }
+  },
+  "find:sv_nope": null,
+  "find:sv_test": {
+   "components": [],
+   "connection": {
+    "base_url": "",
+    "dry_run_delay": 0.25,
+    "key": {
+     "backend": "none",
+     "env": ""
+    },
+    "lmstudio_device": "",
+    "manage_loading": false,
+    "max_parallel": 4,
+    "provider": "dryrun",
+    "timeout": null
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": null,
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "",
+   "hardware": {
+    "source": "none"
+   },
+   "id": "sv_test",
+   "kind": "test",
+   "models": [
+    {
+     "default_profile": null,
+     "enabled": true,
+     "id": "m_dry",
+     "inference": {
+      "effort": "",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "auto"
+     },
+     "info": {},
+     "key": "dry-run",
+     "label": "",
+     "price": null,
+     "profiles": []
+    }
+   ],
+   "name": "Dry run (no model)",
+   "notes": "",
+   "power": {
+    "cpu_max_w": null,
+    "gpu_max_w": null,
+    "idle_w": null,
+    "measured_overhead_pct": 10.0,
+    "sampling": "auto",
+    "source": "unset"
+   },
+   "restricted_hours": {
+    "enabled": false,
+    "grace_minutes": 15.0,
+    "unload_models": true,
+    "windows": []
+   }
+  },
+  "get:sv_claude": {
+   "components": [],
+   "connection": {
+    "base_url": "",
+    "dry_run_delay": 1.0,
+    "key": {
+     "backend": "file",
+     "env": ""
+    },
+    "lmstudio_device": "",
+    "manage_loading": false,
+    "max_parallel": 4,
+    "provider": "anthropic",
+    "timeout": null
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 20.0,
+     "default_price": null,
+     "electricity_plan_id": null,
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "",
+   "hardware": {
+    "source": "none"
+   },
+   "id": "sv_claude",
+   "kind": "api",
+   "models": [
+    {
+     "default_profile": null,
+     "enabled": true,
+     "id": "m_opus",
+     "inference": {
+      "effort": "medium",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "native"
+     },
+     "info": {},
+     "key": "claude-opus-5",
+     "label": "Opus 5",
+     "price": null,
+     "profiles": []
+    },
+    {
+     "default_profile": null,
+     "enabled": true,
+     "id": "m_custom",
+     "inference": {
+      "effort": "",
+      "max_tokens": 8000,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "native"
+     },
+     "info": {},
+     "key": "claude-custom-1",
+     "label": "",
+     "price": {
+      "cache_read": 0.15,
+      "cache_write": 2.0,
+      "input": 1.5,
+      "output": 7.5
+     },
+     "profiles": []
+    }
+   ],
+   "name": "Anthropic API",
+   "notes": "billed monthly",
+   "power": {
+    "cpu_max_w": null,
+    "gpu_max_w": null,
+    "idle_w": null,
+    "measured_overhead_pct": 10.0,
+    "sampling": "auto",
+    "source": "unset"
+   },
+   "restricted_hours": {
+    "enabled": false,
+    "grace_minutes": 15.0,
+    "unload_models": true,
+    "windows": []
+   }
+  },
+  "get:sv_host": {
+   "components": [
+    {
+     "id": "c_laptop",
+     "lifespan_years": 5.0,
+     "name": "Laptop",
+     "price": 2191.5,
+     "purchased": "2025-01-01",
+     "resale": 300.0,
+     "retired": null
+    }
+   ],
+   "connection": {
+    "base_url": "http://localhost:1234/v1",
+    "dry_run_delay": 1.0,
+    "key": {
+     "backend": "none",
+     "env": ""
+    },
+    "lmstudio_device": "",
+    "manage_loading": true,
+    "max_parallel": 2,
+    "provider": "lmstudio",
+    "timeout": 900.0
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": "ep_home",
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    },
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": "ep_tou",
+     "fixed_monthly": 5.0,
+     "fixed_note": "insurance",
+     "from": "2026-06-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "The machine CITAR runs on.",
+   "hardware": {
+    "cpu": {
+     "cores": 12,
+     "model": "Ryzen AI 9",
+     "threads": 24
+    },
+    "format": "citar-hardware",
+    "gpus": [
+     {
+      "name": "Radeon 890M",
+      "unified_memory": true,
+      "vendor": "AMD",
+      "vram_gb": 0
+     }
+    ],
+    "hostname": "laptop",
+    "memory": {
+     "ram_gb": 64,
+     "unified": true
+    },
+    "physical_disks": [
+     {
+      "size_gb": 2000
+     }
+    ],
+    "source": "collected"
+   },
+   "id": "sv_host",
+   "kind": "owned",
+   "models": [
+    {
+     "default_profile": "p_default",
+     "enabled": true,
+     "id": "m_gemma",
+     "inference": {
+      "effort": "",
+      "max_tokens": 4096,
+      "max_tool_calls_per_turn": 120,
+      "reasoning_effort": "low",
+      "temperature": 0.7,
+      "tool_mode": "native"
+     },
+     "info": {
+      "max_context": 131072,
+      "params": "2B",
+      "tool_use": true
+     },
+     "key": "google/gemma-4-e2b",
+     "label": "Gemma 4 E2B",
+     "price": null,
+     "profiles": [
+      {
+       "context": 32768,
+       "eval_batch": null,
+       "exclusive": true,
+       "extra": "",
+       "fields": [],
+       "flash_attention": null,
+       "gpu": "max",
+       "id": "p_default",
+       "k_cache_quant": "",
+       "keep_in_memory": null,
+       "loaded_by": "citar",
+       "main_gpu": null,
+       "name": "Default",
+       "num_experts": null,
+       "offload_kv_to_gpu": null,
+       "parallel": null,
+       "split_strategy": "",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": null,
+       "use_defaults": false,
+       "v_cache_quant": ""
+      },
+      {
+       "context": 131072,
+       "eval_batch": 512,
+       "exclusive": false,
+       "extra": "--speculative-draft-mtp --identifier gemma-long",
+       "fields": [
+        {
+         "key": "llm.load.numCpuExpertLayersRatio",
+         "value": 0.5
+        }
+       ],
+       "flash_attention": true,
+       "gpu": "0.5",
+       "id": "p_long",
+       "k_cache_quant": "q8_0",
+       "keep_in_memory": null,
+       "loaded_by": "citar",
+       "main_gpu": 0,
+       "name": "Long context",
+       "num_experts": null,
+       "offload_kv_to_gpu": false,
+       "parallel": 2,
+       "split_strategy": "evenly",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": 3600,
+       "use_defaults": false,
+       "v_cache_quant": "q8_0"
+      }
+     ]
+    },
+    {
+     "default_profile": "p_manual",
+     "enabled": false,
+     "id": "m_qwen",
+     "inference": {
+      "effort": "",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "json"
+     },
+     "info": {},
+     "key": "qwen/qwen3.8-27b",
+     "label": "",
+     "price": null,
+     "profiles": [
+      {
+       "context": 0,
+       "eval_batch": null,
+       "exclusive": true,
+       "extra": "",
+       "fields": [],
+       "flash_attention": null,
+       "gpu": "auto",
+       "id": "p_manual",
+       "k_cache_quant": "",
+       "keep_in_memory": null,
+       "loaded_by": "manual",
+       "main_gpu": null,
+       "name": "My preset",
+       "num_experts": null,
+       "offload_kv_to_gpu": null,
+       "parallel": null,
+       "split_strategy": "",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": null,
+       "use_defaults": false,
+       "v_cache_quant": ""
+      }
+     ]
+    }
+   ],
+   "name": "Laptop (this PC)",
+   "notes": "",
+   "power": {
+    "cpu_max_w": 55.0,
+    "gpu_max_w": 40.0,
+    "idle_w": 15.0,
+    "measured_overhead_pct": 10.0,
+    "sampling": "off",
+    "source": "manual"
+   },
+   "restricted_hours": {
+    "enabled": true,
+    "grace_minutes": 10.0,
+    "unload_models": true,
+    "windows": [
+     {
+      "days": [
+       6
+      ],
+      "end": "02:30",
+      "start": "02:00"
+     },
+     {
+      "days": [
+       0,
+       1,
+       2,
+       3,
+       4
+      ],
+      "end": "06:00",
+      "start": "23:00"
+     }
+    ]
+   }
+  },
+  "get:sv_lan": {
+   "components": [
+    {
+     "id": "c_gpu",
+     "lifespan_years": 4.0,
+     "name": "GPU",
+     "price": 1753.2,
+     "purchased": "2024-06-01",
+     "resale": 400.0,
+     "retired": null
+    },
+    {
+     "id": "c_box",
+     "lifespan_years": 10.0,
+     "name": "Box",
+     "price": 876.6,
+     "purchased": "2020-01-01",
+     "resale": 0,
+     "retired": "2027-01-01"
+    }
+   ],
+   "connection": {
+    "base_url": "http://192.168.1.50:8080/v1",
+    "dry_run_delay": 1.0,
+    "key": {
+     "backend": "env",
+     "env": "CITAR_TEST_LAN_KEY"
+    },
+    "lmstudio_device": "",
+    "manage_loading": false,
+    "max_parallel": 1,
+    "provider": "openai_compatible",
+    "timeout": 600.0
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": "ep_home",
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "",
+   "hardware": {
+    "cpu": {
+     "model": "Desktop CPU",
+     "threads": 16
+    },
+    "source": "manual"
+   },
+   "id": "sv_lan",
+   "kind": "owned",
+   "models": [
+    {
+     "default_profile": null,
+     "enabled": true,
+     "id": "m_llama",
+     "inference": {
+      "effort": "",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 200,
+      "reasoning_effort": "",
+      "temperature": 0.2,
+      "tool_mode": "native"
+     },
+     "info": {},
+     "key": "llama-4-scout",
+     "label": "Llama",
+     "price": null,
+     "profiles": []
+    }
+   ],
+   "name": "Desktop on the LAN",
+   "notes": "",
+   "power": {
+    "cpu_max_w": 120.0,
+    "gpu_max_w": 350.0,
+    "idle_w": 60.0,
+    "measured_overhead_pct": 5.0,
+    "sampling": "off",
+    "source": "manual"
+   },
+   "restricted_hours": {
+    "enabled": false,
+    "grace_minutes": 15.0,
+    "unload_models": true,
+    "windows": []
+   }
+  },
+  "get:sv_nope": {
+   "error": "ServerError",
+   "message": "No server 'sv_nope'."
+  },
+  "get:sv_test": {
+   "components": [],
+   "connection": {
+    "base_url": "",
+    "dry_run_delay": 0.25,
+    "key": {
+     "backend": "none",
+     "env": ""
+    },
+    "lmstudio_device": "",
+    "manage_loading": false,
+    "max_parallel": 4,
+    "provider": "dryrun",
+    "timeout": null
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": null,
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "",
+   "hardware": {
+    "source": "none"
+   },
+   "id": "sv_test",
+   "kind": "test",
+   "models": [
+    {
+     "default_profile": null,
+     "enabled": true,
+     "id": "m_dry",
+     "inference": {
+      "effort": "",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "auto"
+     },
+     "info": {},
+     "key": "dry-run",
+     "label": "",
+     "price": null,
+     "profiles": []
+    }
+   ],
+   "name": "Dry run (no model)",
+   "notes": "",
+   "power": {
+    "cpu_max_w": null,
+    "gpu_max_w": null,
+    "idle_w": null,
+    "measured_overhead_pct": 10.0,
+    "sampling": "auto",
+    "source": "unset"
+   },
+   "restricted_hours": {
+    "enabled": false,
+    "grace_minutes": 15.0,
+    "unload_models": true,
+    "windows": []
+   }
+  },
+  "host": {
+   "components": [
+    {
+     "id": "c_laptop",
+     "lifespan_years": 5.0,
+     "name": "Laptop",
+     "price": 2191.5,
+     "purchased": "2025-01-01",
+     "resale": 300.0,
+     "retired": null
+    }
+   ],
+   "connection": {
+    "base_url": "http://localhost:1234/v1",
+    "dry_run_delay": 1.0,
+    "key": {
+     "backend": "none",
+     "env": ""
+    },
+    "lmstudio_device": "",
+    "manage_loading": true,
+    "max_parallel": 2,
+    "provider": "lmstudio",
+    "timeout": 900.0
+   },
+   "costs": [
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": "ep_home",
+     "fixed_monthly": 0,
+     "fixed_note": "",
+     "from": "2000-01-01",
+     "hourly_rate": 0,
+     "note": ""
+    },
+    {
+     "api_fixed_monthly": 0,
+     "default_price": null,
+     "electricity_plan_id": "ep_tou",
+     "fixed_monthly": 5.0,
+     "fixed_note": "insurance",
+     "from": "2026-06-01",
+     "hourly_rate": 0,
+     "note": ""
+    }
+   ],
+   "created": 1767225600.0,
+   "description": "The machine CITAR runs on.",
+   "hardware": {
+    "cpu": {
+     "cores": 12,
+     "model": "Ryzen AI 9",
+     "threads": 24
+    },
+    "format": "citar-hardware",
+    "gpus": [
+     {
+      "name": "Radeon 890M",
+      "unified_memory": true,
+      "vendor": "AMD",
+      "vram_gb": 0
+     }
+    ],
+    "hostname": "laptop",
+    "memory": {
+     "ram_gb": 64,
+     "unified": true
+    },
+    "physical_disks": [
+     {
+      "size_gb": 2000
+     }
+    ],
+    "source": "collected"
+   },
+   "id": "sv_host",
+   "kind": "owned",
+   "models": [
+    {
+     "default_profile": "p_default",
+     "enabled": true,
+     "id": "m_gemma",
+     "inference": {
+      "effort": "",
+      "max_tokens": 4096,
+      "max_tool_calls_per_turn": 120,
+      "reasoning_effort": "low",
+      "temperature": 0.7,
+      "tool_mode": "native"
+     },
+     "info": {
+      "max_context": 131072,
+      "params": "2B",
+      "tool_use": true
+     },
+     "key": "google/gemma-4-e2b",
+     "label": "Gemma 4 E2B",
+     "price": null,
+     "profiles": [
+      {
+       "context": 32768,
+       "eval_batch": null,
+       "exclusive": true,
+       "extra": "",
+       "fields": [],
+       "flash_attention": null,
+       "gpu": "max",
+       "id": "p_default",
+       "k_cache_quant": "",
+       "keep_in_memory": null,
+       "loaded_by": "citar",
+       "main_gpu": null,
+       "name": "Default",
+       "num_experts": null,
+       "offload_kv_to_gpu": null,
+       "parallel": null,
+       "split_strategy": "",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": null,
+       "use_defaults": false,
+       "v_cache_quant": ""
+      },
+      {
+       "context": 131072,
+       "eval_batch": 512,
+       "exclusive": false,
+       "extra": "--speculative-draft-mtp --identifier gemma-long",
+       "fields": [
+        {
+         "key": "llm.load.numCpuExpertLayersRatio",
+         "value": 0.5
+        }
+       ],
+       "flash_attention": true,
+       "gpu": "0.5",
+       "id": "p_long",
+       "k_cache_quant": "q8_0",
+       "keep_in_memory": null,
+       "loaded_by": "citar",
+       "main_gpu": 0,
+       "name": "Long context",
+       "num_experts": null,
+       "offload_kv_to_gpu": false,
+       "parallel": 2,
+       "split_strategy": "evenly",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": 3600,
+       "use_defaults": false,
+       "v_cache_quant": "q8_0"
+      }
+     ]
+    },
+    {
+     "default_profile": "p_manual",
+     "enabled": false,
+     "id": "m_qwen",
+     "inference": {
+      "effort": "",
+      "max_tokens": null,
+      "max_tool_calls_per_turn": 150,
+      "reasoning_effort": "",
+      "temperature": null,
+      "tool_mode": "json"
+     },
+     "info": {},
+     "key": "qwen/qwen3.8-27b",
+     "label": "",
+     "price": null,
+     "profiles": [
+      {
+       "context": 0,
+       "eval_batch": null,
+       "exclusive": true,
+       "extra": "",
+       "fields": [],
+       "flash_attention": null,
+       "gpu": "auto",
+       "id": "p_manual",
+       "k_cache_quant": "",
+       "keep_in_memory": null,
+       "loaded_by": "manual",
+       "main_gpu": null,
+       "name": "My preset",
+       "num_experts": null,
+       "offload_kv_to_gpu": null,
+       "parallel": null,
+       "split_strategy": "",
+       "strict_vram_cap": null,
+       "try_mmap": null,
+       "ttl": null,
+       "use_defaults": false,
+       "v_cache_quant": ""
+      }
+     ]
+    }
+   ],
+   "name": "Laptop (this PC)",
+   "notes": "",
+   "power": {
+    "cpu_max_w": 55.0,
+    "gpu_max_w": 40.0,
+    "idle_w": 15.0,
+    "measured_overhead_pct": 10.0,
+    "sampling": "off",
+    "source": "manual"
+   },
+   "restricted_hours": {
+    "enabled": true,
+    "grace_minutes": 10.0,
+    "unload_models": true,
+    "windows": [
+     {
+      "days": [
+       6
+      ],
+      "end": "02:30",
+      "start": "02:00"
+     },
+     {
+      "days": [
+       0,
+       1,
+       2,
+       3,
+       4
+      ],
+      "end": "06:00",
+      "start": "23:00"
+     }
+    ]
+   }
+  },
+  "issues:sv_claude": [],
+  "issues:sv_host": [],
+  "issues:sv_lan": [],
+  "issues:sv_test": [],
+  "list_servers": [
+   {
+    "components": [
+     {
+      "id": "c_laptop",
+      "lifespan_years": 5.0,
+      "name": "Laptop",
+      "price": 2191.5,
+      "purchased": "2025-01-01",
+      "resale": 300.0,
+      "retired": null
+     }
+    ],
+    "connection": {
+     "base_url": "http://localhost:1234/v1",
+     "dry_run_delay": 1.0,
+     "key": {
+      "backend": "none",
+      "env": ""
+     },
+     "lmstudio_device": "",
+     "manage_loading": true,
+     "max_parallel": 2,
+     "provider": "lmstudio",
+     "timeout": 900.0
+    },
+    "costs": [
+     {
+      "api_fixed_monthly": 0,
+      "default_price": null,
+      "electricity_plan_id": "ep_home",
+      "fixed_monthly": 0,
+      "fixed_note": "",
+      "from": "2000-01-01",
+      "hourly_rate": 0,
+      "note": ""
+     },
+     {
+      "api_fixed_monthly": 0,
+      "default_price": null,
+      "electricity_plan_id": "ep_tou",
+      "fixed_monthly": 5.0,
+      "fixed_note": "insurance",
+      "from": "2026-06-01",
+      "hourly_rate": 0,
+      "note": ""
+     }
+    ],
+    "created": 1767225600.0,
+    "description": "The machine CITAR runs on.",
+    "hardware": {
+     "cpu": {
+      "cores": 12,
+      "model": "Ryzen AI 9",
+      "threads": 24
+     },
+     "format": "citar-hardware",
+     "gpus": [
+      {
+       "name": "Radeon 890M",
+       "unified_memory": true,
+       "vendor": "AMD",
+       "vram_gb": 0
+      }
+     ],
+     "hostname": "laptop",
+     "memory": {
+      "ram_gb": 64,
+      "unified": true
+     },
+     "physical_disks": [
+      {
+       "size_gb": 2000
+      }
+     ],
+     "source": "collected"
+    },
+    "id": "sv_host",
+    "kind": "owned",
+    "models": [
+     {
+      "default_profile": "p_default",
+      "enabled": true,
+      "id": "m_gemma",
+      "inference": {
+       "effort": "",
+       "max_tokens": 4096,
+       "max_tool_calls_per_turn": 120,
+       "reasoning_effort": "low",
+       "temperature": 0.7,
+       "tool_mode": "native"
+      },
+      "info": {
+       "max_context": 131072,
+       "params": "2B",
+       "tool_use": true
+      },
+      "key": "google/gemma-4-e2b",
+      "label": "Gemma 4 E2B",
+      "price": null,
+      "profiles": [
+       {
+        "context": 32768,
+        "eval_batch": null,
+        "exclusive": true,
+        "extra": "",
+        "fields": [],
+        "flash_attention": null,
+        "gpu": "max",
+        "id": "p_default",
+        "k_cache_quant": "",
+        "keep_in_memory": null,
+        "loaded_by": "citar",
+        "main_gpu": null,
+        "name": "Default",
+        "num_experts": null,
+        "offload_kv_to_gpu": null,
+        "parallel": null,
+        "split_strategy": "",
+        "strict_vram_cap": null,
+        "try_mmap": null,
+        "ttl": null,
+        "use_defaults": false,
+        "v_cache_quant": ""
+       },
+       {
+        "context": 131072,
+        "eval_batch": 512,
+        "exclusive": false,
+        "extra": "--speculative-draft-mtp --identifier gemma-long",
+        "fields": [
+         {
+          "key": "llm.load.numCpuExpertLayersRatio",
+          "value": 0.5
+         }
+        ],
+        "flash_attention": true,
+        "gpu": "0.5",
+        "id": "p_long",
+        "k_cache_quant": "q8_0",
+        "keep_in_memory": null,
+        "loaded_by": "citar",
+        "main_gpu": 0,
+        "name": "Long context",
+        "num_experts": null,
+        "offload_kv_to_gpu": false,
+        "parallel": 2,
+        "split_strategy": "evenly",
+        "strict_vram_cap": null,
+        "try_mmap": null,
+        "ttl": 3600,
+        "use_defaults": false,
+        "v_cache_quant": "q8_0"
+       }
+      ]
+     },
+     {
+      "default_profile": "p_manual",
+      "enabled": false,
+      "id": "m_qwen",
+      "inference": {
+       "effort": "",
+       "max_tokens": null,
+       "max_tool_calls_per_turn": 150,
+       "reasoning_effort": "",
+       "temperature": null,
+       "tool_mode": "json"
+      },
+      "info": {},
+      "key": "qwen/qwen3.8-27b",
+      "label": "",
+      "price": null,
+      "profiles": [
+       {
+        "context": 0,
+        "eval_batch": null,
+        "exclusive": true,
+        "extra": "",
+        "fields": [],
+        "flash_attention": null,
+        "gpu": "auto",
+        "id": "p_manual",
+        "k_cache_quant": "",
+        "keep_in_memory": null,
+        "loaded_by": "manual",
+        "main_gpu": null,
+        "name": "My preset",
+        "num_experts": null,
+        "offload_kv_to_gpu": null,
+        "parallel": null,
+        "split_strategy": "",
+        "strict_vram_cap": null,
+        "try_mmap": null,
+        "ttl": null,
+        "use_defaults": false,
+        "v_cache_quant": ""
+       }
+      ]
+     }
+    ],
+    "name": "Laptop (this PC)",
+    "notes": "",
+    "power": {
+     "cpu_max_w": 55.0,
+     "gpu_max_w": 40.0,
+     "idle_w": 15.0,
+     "measured_overhead_pct": 10.0,
+     "sampling": "off",
+     "source": "manual"
+    },
+    "restricted_hours": {
+     "enabled": true,
+     "grace_minutes": 10.0,
+     "unload_models": true,
+     "windows": [
+      {
+       "days": [
+        6
+       ],
+       "end": "02:30",
+       "start": "02:00"
+      },
+      {
+       "days": [
+        0,
+        1,
+        2,
+        3,
+        4
+       ],
+       "end": "06:00",
+       "start": "23:00"
+      }
+     ]
+    }
+   },
+   {
+    "components": [],
+    "connection": {
+     "base_url": "",
+     "dry_run_delay": 1.0,
+     "key": {
+      "backend": "file",
+      "env": ""
+     },
+     "lmstudio_device": "",
+     "manage_loading": false,
+     "max_parallel": 4,
+     "provider": "anthropic",
+     "timeout": null
+    },
+    "costs": [
+     {
+      "api_fixed_monthly": 20.0,
+      "default_price": null,
+      "electricity_plan_id": null,
+      "fixed_monthly": 0,
+      "fixed_note": "",
+      "from": "2000-01-01",
+      "hourly_rate": 0,
+      "note": ""
+     }
+    ],
+    "created": 1767225600.0,
+    "description": "",
+    "hardware": {
+     "source": "none"
+    },
+    "id": "sv_claude",
+    "kind": "api",
+    "models": [
+     {
+      "default_profile": null,
+      "enabled": true,
+      "id": "m_opus",
+      "inference": {
+       "effort": "medium",
+       "max_tokens": null,
+       "max_tool_calls_per_turn": 150,
+       "reasoning_effort": "",
+       "temperature": null,
+       "tool_mode": "native"
+      },
+      "info": {},
+      "key": "claude-opus-5",
+      "label": "Opus 5",
+      "price": null,
+      "profiles": []
+     },
+     {
+      "default_profile": null,
+      "enabled": true,
+      "id": "m_custom",
+      "inference": {
+       "effort": "",
+       "max_tokens": 8000,
+       "max_tool_calls_per_turn": 150,
+       "reasoning_effort": "",
+       "temperature": null,
+       "tool_mode": "native"
+      },
+      "info": {},
+      "key": "claude-custom-1",
+      "label": "",
+      "price": {
+       "cache_read": 0.15,
+       "cache_write": 2.0,
+       "input": 1.5,
+       "output": 7.5
+      },
+      "profiles": []
+     }
+    ],
+    "name": "Anthropic API",
+    "notes": "billed monthly",
+    "power": {
+     "cpu_max_w": null,
+     "gpu_max_w": null,
+     "idle_w": null,
+     "measured_overhead_pct": 10.0,
+     "sampling": "auto",
+     "source": "unset"
+    },
+    "restricted_hours": {
+     "enabled": false,
+     "grace_minutes": 15.0,
+     "unload_models": true,
+     "windows": []
+    }
+   },
+   {
+    "components": [
+     {
+      "id": "c_gpu",
+      "lifespan_years": 4.0,
+      "name": "GPU",
+      "price": 1753.2,
+      "purchased": "2024-06-01",
+      "resale": 400.0,
+      "retired": null
+     },
+     {
+      "id": "c_box",
+      "lifespan_years": 10.0,
+      "name": "Box",
+      "price": 876.6,
+      "purchased": "2020-01-01",
+      "resale": 0,
+      "retired": "2027-01-01"
+     }
+    ],
+    "connection": {
+     "base_url": "http://192.168.1.50:8080/v1",
+     "dry_run_delay": 1.0,
+     "key": {
+      "backend": "env",
+      "env": "CITAR_TEST_LAN_KEY"
+     },
+     "lmstudio_device": "",
+     "manage_loading": false,
+     "max_parallel": 1,
+     "provider": "openai_compatible",
+     "timeout": 600.0
+    },
+    "costs": [
+     {
+      "api_fixed_monthly": 0,
+      "default_price": null,
+      "electricity_plan_id": "ep_home",
+      "fixed_monthly": 0,
+      "fixed_note": "",
+      "from": "2000-01-01",
+      "hourly_rate": 0,
+      "note": ""
+     }
+    ],
+    "created": 1767225600.0,
+    "description": "",
+    "hardware": {
+     "cpu": {
+      "model": "Desktop CPU",
+      "threads": 16
+     },
+     "source": "manual"
+    },
+    "id": "sv_lan",
+    "kind": "owned",
+    "models": [
+     {
+      "default_profile": null,
+      "enabled": true,
+      "id": "m_llama",
+      "inference": {
+       "effort": "",
+       "max_tokens": null,
+       "max_tool_calls_per_turn": 200,
+       "reasoning_effort": "",
+       "temperature": 0.2,
+       "tool_mode": "native"
+      },
+      "info": {},
+      "key": "llama-4-scout",
+      "label": "Llama",
+      "price": null,
+      "profiles": []
+     }
+    ],
+    "name": "Desktop on the LAN",
+    "notes": "",
+    "power": {
+     "cpu_max_w": 120.0,
+     "gpu_max_w": 350.0,
+     "idle_w": 60.0,
+     "measured_overhead_pct": 5.0,
+     "sampling": "off",
+     "source": "manual"
+    },
+    "restricted_hours": {
+     "enabled": false,
+     "grace_minutes": 15.0,
+     "unload_models": true,
+     "windows": []
+    }
+   },
+   {
+    "components": [],
+    "connection": {
+     "base_url": "",
+     "dry_run_delay": 0.25,
+     "key": {
+      "backend": "none",
+      "env": ""
+     },
+     "lmstudio_device": "",
+     "manage_loading": false,
+     "max_parallel": 4,
+     "provider": "dryrun",
+     "timeout": null
+    },
+    "costs": [
+     {
+      "api_fixed_monthly": 0,
+      "default_price": null,
+      "electricity_plan_id": null,
+      "fixed_monthly": 0,
+      "fixed_note": "",
+      "from": "2000-01-01",
+      "hourly_rate": 0,
+      "note": ""
+     }
+    ],
+    "created": 1767225600.0,
+    "description": "",
+    "hardware": {
+     "source": "none"
+    },
+    "id": "sv_test",
+    "kind": "test",
+    "models": [
+     {
+      "default_profile": null,
+      "enabled": true,
+      "id": "m_dry",
+      "inference": {
+       "effort": "",
+       "max_tokens": null,
+       "max_tool_calls_per_turn": 150,
+       "reasoning_effort": "",
+       "temperature": null,
+       "tool_mode": "auto"
+      },
+      "info": {},
+      "key": "dry-run",
+      "label": "",
+      "price": null,
+      "profiles": []
+     }
+    ],
+    "name": "Dry run (no model)",
+    "notes": "",
+    "power": {
+     "cpu_max_w": null,
+     "gpu_max_w": null,
+     "idle_w": null,
+     "measured_overhead_pct": 10.0,
+     "sampling": "auto",
+     "source": "unset"
+    },
+    "restricted_hours": {
+     "enabled": false,
+     "grace_minutes": 15.0,
+     "unload_models": true,
+     "windows": []
+    }
+   }
+  ],
+  "model_entry:sv_host:None": null,
+  "model_entry:sv_host:google/gemma-4-e2b": {
+   "default_profile": "p_default",
+   "enabled": true,
+   "id": "m_gemma",
+   "inference": {
+    "effort": "",
+    "max_tokens": 4096,
+    "max_tool_calls_per_turn": 120,
+    "reasoning_effort": "low",
+    "temperature": 0.7,
+    "tool_mode": "native"
+   },
+   "info": {
+    "max_context": 131072,
+    "params": "2B",
+    "tool_use": true
+   },
+   "key": "google/gemma-4-e2b",
+   "label": "Gemma 4 E2B",
+   "price": null,
+   "profiles": [
+    {
+     "context": 32768,
+     "eval_batch": null,
+     "exclusive": true,
+     "extra": "",
+     "fields": [],
+     "flash_attention": null,
+     "gpu": "max",
+     "id": "p_default",
+     "k_cache_quant": "",
+     "keep_in_memory": null,
+     "loaded_by": "citar",
+     "main_gpu": null,
+     "name": "Default",
+     "num_experts": null,
+     "offload_kv_to_gpu": null,
+     "parallel": null,
+     "split_strategy": "",
+     "strict_vram_cap": null,
+     "try_mmap": null,
+     "ttl": null,
+     "use_defaults": false,
+     "v_cache_quant": ""
+    },
+    {
+     "context": 131072,
+     "eval_batch": 512,
+     "exclusive": false,
+     "extra": "--speculative-draft-mtp --identifier gemma-long",
+     "fields": [
+      {
+       "key": "llm.load.numCpuExpertLayersRatio",
+       "value": 0.5
+      }
+     ],
+     "flash_attention": true,
+     "gpu": "0.5",
+     "id": "p_long",
+     "k_cache_quant": "q8_0",
+     "keep_in_memory": null,
+     "loaded_by": "citar",
+     "main_gpu": 0,
+     "name": "Long context",
+     "num_experts": null,
+     "offload_kv_to_gpu": false,
+     "parallel": 2,
+     "split_strategy": "evenly",
+     "strict_vram_cap": null,
+     "try_mmap": null,
+     "ttl": 3600,
+     "use_defaults": false,
+     "v_cache_quant": "q8_0"
+    }
+   ]
+  },
+  "model_entry:sv_host:m_gemma": {
+   "default_profile": "p_default",
+   "enabled": true,
+   "id": "m_gemma",
+   "inference": {
+    "effort": "",
+    "max_tokens": 4096,
+    "max_tool_calls_per_turn": 120,
+    "reasoning_effort": "low",
+    "temperature": 0.7,
+    "tool_mode": "native"
+   },
+   "info": {
+    "max_context": 131072,
+    "params": "2B",
+    "tool_use": true
+   },
+   "key": "google/gemma-4-e2b",
+   "label": "Gemma 4 E2B",
+   "price": null,
+   "profiles": [
+    {
+     "context": 32768,
+     "eval_batch": null,
+     "exclusive": true,
+     "extra": "",
+     "fields": [],
+     "flash_attention": null,
+     "gpu": "max",
+     "id": "p_default",
+     "k_cache_quant": "",
+     "keep_in_memory": null,
+     "loaded_by": "citar",
+     "main_gpu": null,
+     "name": "Default",
+     "num_experts": null,
+     "offload_kv_to_gpu": null,
+     "parallel": null,
+     "split_strategy": "",
+     "strict_vram_cap": null,
+     "try_mmap": null,
+     "ttl": null,
+     "use_defaults": false,
+     "v_cache_quant": ""
+    },
+    {
+     "context": 131072,
+     "eval_batch": 512,
+     "exclusive": false,
+     "extra": "--speculative-draft-mtp --identifier gemma-long",
+     "fields": [
+      {
+       "key": "llm.load.numCpuExpertLayersRatio",
+       "value": 0.5
+      }
+     ],
+     "flash_attention": true,
+     "gpu": "0.5",
+     "id": "p_long",
+     "k_cache_quant": "q8_0",
+     "keep_in_memory": null,
+     "loaded_by": "citar",
+     "main_gpu": 0,
+     "name": "Long context",
+     "num_experts": null,
+     "offload_kv_to_gpu": false,
+     "parallel": 2,
+     "split_strategy": "evenly",
+     "strict_vram_cap": null,
+     "try_mmap": null,
+     "ttl": 3600,
+     "use_defaults": false,
+     "v_cache_quant": "q8_0"
+    }
+   ]
+  },
+  "model_entry:sv_host:m_qwen": {
+   "default_profile": "p_manual",
+   "enabled": false,
+   "id": "m_qwen",
+   "inference": {
+    "effort": "",
+    "max_tokens": null,
+    "max_tool_calls_per_turn": 150,
+    "reasoning_effort": "",
+    "temperature": null,
+    "tool_mode": "json"
+   },
+   "info": {},
+   "key": "qwen/qwen3.8-27b",
+   "label": "",
+   "price": null,
+   "profiles": [
+    {
+     "context": 0,
+     "eval_batch": null,
+     "exclusive": true,
+     "extra": "",
+     "fields": [],
+     "flash_attention": null,
+     "gpu": "auto",
+     "id": "p_manual",
+     "k_cache_quant": "",
+     "keep_in_memory": null,
+     "loaded_by": "manual",
+     "main_gpu": null,
+     "name": "My preset",
+     "num_experts": null,
+     "offload_kv_to_gpu": null,
+     "parallel": null,
+     "split_strategy": "",
+     "strict_vram_cap": null,
+     "try_mmap": null,
+     "ttl": null,
+     "use_defaults": false,
+     "v_cache_quant": ""
+    }
+   ]
+  },
+  "model_entry:sv_host:nope": null,
+  "model_price:sv_claude": {
+   "claude-custom-1": {
+    "cache_read": 0.15,
+    "cache_write": 2.0,
+    "input": 1.5,
+    "output": 7.5
+   },
+   "claude-opus-5": {
+    "cache_read": 0.5,
+    "cache_write": 6.25,
+    "input": 5.0,
+    "output": 25.0
+   }
+  },
+  "model_price:sv_host": {
+   "google/gemma-4-e2b": null,
+   "qwen/qwen3.8-27b": null
+  },
+  "model_price:sv_lan": {
+   "llama-4-scout": null
+  },
+  "model_price:sv_test": {
+   "dry-run": null
+  },
+  "plan:None": null,
+  "plan:ep_tou": {
+   "id": "ep_tou",
+   "name": "Time of use",
+   "periods": [
+    {
+     "fee_allocation": "none",
+     "fixed_monthly": 0,
+     "from": "2000-01-01",
+     "household_kwh_month": null,
+     "note": "",
+     "rate_kwh": 0.1,
+     "share_pct": 0,
+     "tiers": [],
+     "tou": [
+      {
+       "days": [
+        0,
+        1,
+        2,
+        3,
+        4
+       ],
+       "end": "21:00",
+       "name": "peak",
+       "rate_kwh": 0.4,
+       "start": "16:00"
+      }
+     ],
+     "type": "tou"
+    }
+   ]
+  },
+  "profile:None": null,
+  "profile:m_gemma:None": {
+   "context": 32768,
+   "eval_batch": null,
+   "exclusive": true,
+   "extra": "",
+   "fields": [],
+   "flash_attention": null,
+   "gpu": "max",
+   "id": "p_default",
+   "k_cache_quant": "",
+   "keep_in_memory": null,
+   "loaded_by": "citar",
+   "main_gpu": null,
+   "name": "Default",
+   "num_experts": null,
+   "offload_kv_to_gpu": null,
+   "parallel": null,
+   "split_strategy": "",
+   "strict_vram_cap": null,
+   "try_mmap": null,
+   "ttl": null,
+   "use_defaults": false,
+   "v_cache_quant": ""
+  },
+  "profile:m_gemma:p_default": {
+   "context": 32768,
+   "eval_batch": null,
+   "exclusive": true,
+   "extra": "",
+   "fields": [],
+   "flash_attention": null,
+   "gpu": "max",
+   "id": "p_default",
+   "k_cache_quant": "",
+   "keep_in_memory": null,
+   "loaded_by": "citar",
+   "main_gpu": null,
+   "name": "Default",
+   "num_experts": null,
+   "offload_kv_to_gpu": null,
+   "parallel": null,
+   "split_strategy": "",
+   "strict_vram_cap": null,
+   "try_mmap": null,
+   "ttl": null,
+   "use_defaults": false,
+   "v_cache_quant": ""
+  },
+  "profile:m_gemma:p_long": {
+   "context": 131072,
+   "eval_batch": 512,
+   "exclusive": false,
+   "extra": "--speculative-draft-mtp --identifier gemma-long",
+   "fields": [
+    {
+     "key": "llm.load.numCpuExpertLayersRatio",
+     "value": 0.5
+    }
+   ],
+   "flash_attention": true,
+   "gpu": "0.5",
+   "id": "p_long",
+   "k_cache_quant": "q8_0",
+   "keep_in_memory": null,
+   "loaded_by": "citar",
+   "main_gpu": 0,
+   "name": "Long context",
+   "num_experts": null,
+   "offload_kv_to_gpu": false,
+   "parallel": 2,
+   "split_strategy": "evenly",
+   "strict_vram_cap": null,
+   "try_mmap": null,
+   "ttl": 3600,
+   "use_defaults": false,
+   "v_cache_quant": "q8_0"
+  },
+  "profile:m_gemma:p_nope": {
+   "context": 32768,
+   "eval_batch": null,
+   "exclusive": true,
+   "extra": "",
+   "fields": [],
+   "flash_attention": null,
+   "gpu": "max",
+   "id": "p_default",
+   "k_cache_quant": "",
+   "keep_in_memory": null,
+   "loaded_by": "citar",
+   "main_gpu": null,
+   "name": "Default",
+   "num_experts": null,
+   "offload_kv_to_gpu": null,
+   "parallel": null,
+   "split_strategy": "",
+   "strict_vram_cap": null,
+   "try_mmap": null,
+   "ttl": null,
+   "use_defaults": false,
+   "v_cache_quant": ""
+  },
+  "registry:electricity_plans": [
+   {
+    "id": "ep_home",
+    "name": "Home",
+    "periods": [
+     {
+      "fee_allocation": "household_kwh",
+      "fixed_monthly": 10.0,
+      "from": "2000-01-01",
+      "household_kwh_month": 500.0,
+      "note": "old rate",
+      "rate_kwh": 0.2,
+      "share_pct": 0,
+      "tiers": [],
+      "tou": [],
+      "type": "flat"
+     },
+     {
+      "fee_allocation": "household_kwh",
+      "fixed_monthly": 12.0,
+      "from": "2026-01-01",
+      "household_kwh_month": 500.0,
+      "note": "",
+      "rate_kwh": 0.25,
+      "share_pct": 0,
+      "tiers": [],
+      "tou": [],
+      "type": "flat"
+     }
+    ]
+   },
+   {
+    "id": "ep_tou",
+    "name": "Time of use",
+    "periods": [
+     {
+      "fee_allocation": "none",
+      "fixed_monthly": 0,
+      "from": "2000-01-01",
+      "household_kwh_month": null,
+      "note": "",
+      "rate_kwh": 0.1,
+      "share_pct": 0,
+      "tiers": [],
+      "tou": [
+       {
+        "days": [
+         0,
+         1,
+         2,
+         3,
+         4
+        ],
+        "end": "21:00",
+        "name": "peak",
+        "rate_kwh": 0.4,
+        "start": "16:00"
+       }
+      ],
+      "type": "tou"
+     }
+    ]
+   }
+  ],
+  "registry:settings": {
+   "currency": "EUR",
+   "currency_symbol": "€",
+   "host_server_id": "sv_host"
+  },
+  "resolve_llm:claude": {
+   "api_key": "sk-ant-fixture-0123456789",
+   "effort": "high",
+   "max_tool_calls_per_turn": 150,
+   "model": "claude-opus-5",
+   "model_id": "m_opus",
+   "provider": "anthropic",
+   "server": "Anthropic API",
+   "server_id": "sv_claude"
+  },
+  "resolve_llm:claude_custom": {
+   "api_key": "sk-ant-fixture-0123456789",
+   "max_tokens": 8000,
+   "max_tool_calls_per_turn": 150,
+   "model": "claude-custom-1",
+   "model_id": "m_custom",
+   "provider": "anthropic",
+   "server": "Anthropic API",
+   "server_id": "sv_claude"
+  },
+  "resolve_llm:dry": {
+   "dry_run_delay": 0,
+   "max_tool_calls_per_turn": 150,
+   "model": "dry-run",
+   "model_id": "m_dry",
+   "provider": "dryrun",
+   "server": "Dry run (no model)",
+   "server_id": "sv_test"
+  },
+  "resolve_llm:host_by_key": {
+   "base_url": "http://localhost:1234/v1",
+   "load": {
+    "context": 0,
+    "eval_batch": null,
+    "exclusive": true,
+    "extra": "",
+    "fields": [],
+    "flash_attention": null,
+    "gpu": "auto",
+    "id": "p_manual",
+    "k_cache_quant": "",
+    "keep_in_memory": null,
+    "loaded_by": "manual",
+    "main_gpu": null,
+    "name": "My preset",
+    "num_experts": null,
+    "offload_kv_to_gpu": null,
+    "parallel": null,
+    "split_strategy": "",
+    "strict_vram_cap": null,
+    "try_mmap": null,
+    "ttl": null,
+    "use_defaults": false,
+    "v_cache_quant": ""
+   },
+   "max_tool_calls_per_turn": 150,
+   "model": "qwen/qwen3.8-27b",
+   "model_id": "m_qwen",
+   "profile_id": "p_manual",
+   "provider": "openai_compatible",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host",
+   "timeout": 900.0,
+   "tool_mode": "json"
+  },
+  "resolve_llm:host_long": {
+   "base_url": "http://localhost:1234/v1",
+   "load": {
+    "context": 131072,
+    "eval_batch": 512,
+    "exclusive": false,
+    "extra": "--speculative-draft-mtp --identifier gemma-long",
+    "fields": [
+     {
+      "key": "llm.load.numCpuExpertLayersRatio",
+      "value": 0.5
+     }
+    ],
+    "flash_attention": true,
+    "gpu": "0.5",
+    "id": "p_long",
+    "k_cache_quant": "q8_0",
+    "keep_in_memory": null,
+    "loaded_by": "citar",
+    "main_gpu": 0,
+    "name": "Long context",
+    "num_experts": null,
+    "offload_kv_to_gpu": false,
+    "parallel": 2,
+    "split_strategy": "evenly",
+    "strict_vram_cap": null,
+    "try_mmap": null,
+    "ttl": 3600,
+    "use_defaults": false,
+    "v_cache_quant": "q8_0"
+   },
+   "max_tokens": 4096,
+   "max_tool_calls_per_turn": 80,
+   "model": "google/gemma-4-e2b",
+   "model_id": "m_gemma",
+   "persona": "a trader",
+   "profile_id": "p_long",
+   "provider": "openai_compatible",
+   "reasoning_effort": "high",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host",
+   "temperature": 0.7,
+   "timeout": 900.0,
+   "tool_mode": "native"
+  },
+  "resolve_llm:host_unknown_model": {
+   "base_url": "http://localhost:1234/v1",
+   "load": {
+    "context": 32768,
+    "eval_batch": null,
+    "exclusive": true,
+    "extra": "",
+    "fields": [],
+    "flash_attention": null,
+    "gpu": "max",
+    "id": "p_default",
+    "k_cache_quant": "",
+    "keep_in_memory": null,
+    "loaded_by": "citar",
+    "main_gpu": null,
+    "name": "Default",
+    "num_experts": null,
+    "offload_kv_to_gpu": null,
+    "parallel": null,
+    "split_strategy": "",
+    "strict_vram_cap": null,
+    "try_mmap": null,
+    "ttl": null,
+    "use_defaults": false,
+    "v_cache_quant": ""
+   },
+   "max_tool_calls_per_turn": 150,
+   "model": "not/in-catalog",
+   "profile_id": "p_default",
+   "provider": "openai_compatible",
+   "reasoning_effort": "low",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host",
+   "timeout": 900.0,
+   "tool_mode": "native"
+  },
+  "resolve_llm:inline_admin": {
+   "base_url": "u",
+   "model": "x",
+   "provider": "dryrun"
+  },
+  "resolve_llm:inline_member": {
+   "error": "ServerError",
+   "message": "This seat has no machine: only an administrator can give a seat a model configuration of its own. Pick a machine for this seat."
+  },
+  "resolve_llm:lan": {
+   "api_key": "lan-fixture-key",
+   "base_url": "http://192.168.1.50:8080/v1",
+   "max_tool_calls_per_turn": 200,
+   "max_turn_seconds": 600,
+   "model": "llama-4-scout",
+   "model_id": "m_llama",
+   "provider": "openai_compatible",
+   "server": "Desktop on the LAN",
+   "server_id": "sv_lan",
+   "temperature": 0.2,
+   "timeout": 600.0,
+   "tool_mode": "native"
+  },
+  "resolve_llm:missing": {
+   "error": "ServerError",
+   "message": "No server 'sv_nope'."
+  },
+  "resolve_llm_nokey:claude": {
+   "effort": "high",
+   "max_tool_calls_per_turn": 150,
+   "model": "claude-opus-5",
+   "model_id": "m_opus",
+   "provider": "anthropic",
+   "server": "Anthropic API",
+   "server_id": "sv_claude"
+  },
+  "resolve_llm_nokey:claude_custom": {
+   "max_tokens": 8000,
+   "max_tool_calls_per_turn": 150,
+   "model": "claude-custom-1",
+   "model_id": "m_custom",
+   "provider": "anthropic",
+   "server": "Anthropic API",
+   "server_id": "sv_claude"
+  },
+  "resolve_llm_nokey:dry": {
+   "dry_run_delay": 0,
+   "max_tool_calls_per_turn": 150,
+   "model": "dry-run",
+   "model_id": "m_dry",
+   "provider": "dryrun",
+   "server": "Dry run (no model)",
+   "server_id": "sv_test"
+  },
+  "resolve_llm_nokey:host_by_key": {
+   "base_url": "http://localhost:1234/v1",
+   "load": {
+    "context": 0,
+    "eval_batch": null,
+    "exclusive": true,
+    "extra": "",
+    "fields": [],
+    "flash_attention": null,
+    "gpu": "auto",
+    "id": "p_manual",
+    "k_cache_quant": "",
+    "keep_in_memory": null,
+    "loaded_by": "manual",
+    "main_gpu": null,
+    "name": "My preset",
+    "num_experts": null,
+    "offload_kv_to_gpu": null,
+    "parallel": null,
+    "split_strategy": "",
+    "strict_vram_cap": null,
+    "try_mmap": null,
+    "ttl": null,
+    "use_defaults": false,
+    "v_cache_quant": ""
+   },
+   "max_tool_calls_per_turn": 150,
+   "model": "qwen/qwen3.8-27b",
+   "model_id": "m_qwen",
+   "profile_id": "p_manual",
+   "provider": "openai_compatible",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host",
+   "timeout": 900.0,
+   "tool_mode": "json"
+  },
+  "resolve_llm_nokey:host_long": {
+   "base_url": "http://localhost:1234/v1",
+   "load": {
+    "context": 131072,
+    "eval_batch": 512,
+    "exclusive": false,
+    "extra": "--speculative-draft-mtp --identifier gemma-long",
+    "fields": [
+     {
+      "key": "llm.load.numCpuExpertLayersRatio",
+      "value": 0.5
+     }
+    ],
+    "flash_attention": true,
+    "gpu": "0.5",
+    "id": "p_long",
+    "k_cache_quant": "q8_0",
+    "keep_in_memory": null,
+    "loaded_by": "citar",
+    "main_gpu": 0,
+    "name": "Long context",
+    "num_experts": null,
+    "offload_kv_to_gpu": false,
+    "parallel": 2,
+    "split_strategy": "evenly",
+    "strict_vram_cap": null,
+    "try_mmap": null,
+    "ttl": 3600,
+    "use_defaults": false,
+    "v_cache_quant": "q8_0"
+   },
+   "max_tokens": 4096,
+   "max_tool_calls_per_turn": 80,
+   "model": "google/gemma-4-e2b",
+   "model_id": "m_gemma",
+   "persona": "a trader",
+   "profile_id": "p_long",
+   "provider": "openai_compatible",
+   "reasoning_effort": "high",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host",
+   "temperature": 0.7,
+   "timeout": 900.0,
+   "tool_mode": "native"
+  },
+  "resolve_llm_nokey:host_unknown_model": {
+   "base_url": "http://localhost:1234/v1",
+   "load": {
+    "context": 32768,
+    "eval_batch": null,
+    "exclusive": true,
+    "extra": "",
+    "fields": [],
+    "flash_attention": null,
+    "gpu": "max",
+    "id": "p_default",
+    "k_cache_quant": "",
+    "keep_in_memory": null,
+    "loaded_by": "citar",
+    "main_gpu": null,
+    "name": "Default",
+    "num_experts": null,
+    "offload_kv_to_gpu": null,
+    "parallel": null,
+    "split_strategy": "",
+    "strict_vram_cap": null,
+    "try_mmap": null,
+    "ttl": null,
+    "use_defaults": false,
+    "v_cache_quant": ""
+   },
+   "max_tool_calls_per_turn": 150,
+   "model": "not/in-catalog",
+   "profile_id": "p_default",
+   "provider": "openai_compatible",
+   "reasoning_effort": "low",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host",
+   "timeout": 900.0,
+   "tool_mode": "native"
+  },
+  "resolve_llm_nokey:lan": {
+   "base_url": "http://192.168.1.50:8080/v1",
+   "max_tool_calls_per_turn": 200,
+   "max_turn_seconds": 600,
+   "model": "llama-4-scout",
+   "model_id": "m_llama",
+   "provider": "openai_compatible",
+   "server": "Desktop on the LAN",
+   "server_id": "sv_lan",
+   "temperature": 0.2,
+   "timeout": 600.0,
+   "tool_mode": "native"
+  },
+  "resolve_llm_nokey:missing": {
+   "error": "ServerError",
+   "message": "No server 'sv_nope'."
+  },
+  "restricted_at:sv_host:2026-09-24T05:59:00": {
+   "datetime": "2026-09-24T06:00:00"
+  },
+  "restricted_at:sv_host:2026-09-25T23:30:00": {
+   "datetime": "2026-09-26T06:00:00"
+  },
+  "restricted_at:sv_host:2026-09-26T02:10:00": {
+   "datetime": "2026-09-26T06:00:00"
+  },
+  "restricted_at:sv_host:2026-09-26T03:00:00": {
+   "datetime": "2026-09-26T06:00:00"
+  },
+  "restricted_at:sv_host:2026-09-27T00:30:00": null,
+  "restricted_now:None": null,
+  "restricted_now:sv_claude": null,
+  "restricted_now:sv_host": {
+   "datetime": "2026-09-24T06:00:00"
+  },
+  "restricted_now:sv_lan": null,
+  "restricted_now:sv_nope": null,
+  "restricted_now:sv_test": null,
+  "restricted_text:none": "",
+  "restricted_text:sv_host": "06:00",
+  "restriction_config:None": {},
+  "restriction_config:sv_claude": {
+   "enabled": false,
+   "grace_minutes": 15.0,
+   "unload_models": true,
+   "windows": []
+  },
+  "restriction_config:sv_host": {
+   "enabled": true,
+   "grace_minutes": 10.0,
+   "unload_models": true,
+   "windows": [
+    {
+     "days": [
+      6
+     ],
+     "end": "02:30",
+     "start": "02:00"
+    },
+    {
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4
+     ],
+     "end": "06:00",
+     "start": "23:00"
+    }
+   ]
+  },
+  "restriction_config:sv_lan": {
+   "enabled": false,
+   "grace_minutes": 15.0,
+   "unload_models": true,
+   "windows": []
+  },
+  "restriction_config:sv_nope": {},
+  "restriction_config:sv_test": {
+   "enabled": false,
+   "grace_minutes": 15.0,
+   "unload_models": true,
+   "windows": []
+  },
+  "restriction_status": [
+   {
+    "id": "sv_host",
+    "name": "Laptop (this PC)",
+    "until": "06:00",
+    "until_ts": 1790244000.0
+   }
+  ],
+  "seat_ref:bad_model": {
+   "error": "ServerError",
+   "message": "Laptop (this PC) has no model 'nope'."
+  },
+  "seat_ref:bad_server": {
+   "error": "ServerError",
+   "message": "No server 'sv_nope'."
+  },
+  "seat_ref:claude": {
+   "model": "claude-opus-5",
+   "model_id": "m_opus",
+   "profile_id": null,
+   "provider": "anthropic",
+   "server": "Anthropic API",
+   "server_id": "sv_claude"
+  },
+  "seat_ref:host": {
+   "model": "google/gemma-4-e2b",
+   "model_id": "m_gemma",
+   "persona": "p",
+   "profile_id": "p_long",
+   "provider": "lmstudio",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host"
+  },
+  "seat_ref:host_default_profile": {
+   "model": "google/gemma-4-e2b",
+   "model_id": "m_gemma",
+   "profile_id": "p_default",
+   "provider": "lmstudio",
+   "server": "Laptop (this PC)",
+   "server_id": "sv_host"
+  },
+  "server_name:None": "server",
+  "server_name:sv_claude": "Anthropic API",
+  "server_name:sv_host": "Laptop (this PC)",
+  "server_name:sv_lan": "Desktop on the LAN",
+  "server_name:sv_nope": "sv_nope",
+  "server_name:sv_test": "Dry run (no model)"
+ },
+ "phase_b": {
+  "costing": {
+   "acts": {
+    "b": {
+     "busy_h": 0.183333333,
+     "cpu_h": 0.166666667,
+     "cr": 1000000.0,
+     "cw": 40000.0,
+     "depreciation": 0.06473306,
+     "energy_dynamic": 0.000315206,
+     "energy_estimated_h": 1.5,
+     "energy_idle": 0.0075825,
+     "energy_measured_h": 0.0,
+     "fixed": 0.014000896,
+     "held_h": 2.366666667,
+     "hourly": 0.0,
+     "in": 2200000.0,
+     "kwh_dynamic": 0.00093533,
+     "kwh_idle": 0.0225,
+     "out": 220000.0,
+     "req": 0.0,
+     "rsn": 0.0,
+     "tokens": 16.2,
+     "unpriced_kwh": 0.0,
+     "unpriced_tokens": 0
+    },
+    "g": {
+     "busy_h": 1.166666667,
+     "cpu_h": 0.666666667,
+     "cr": 0.0,
+     "cw": 0.0,
+     "depreciation": 0.113325348,
+     "energy_dynamic": 0.067631704,
+     "energy_estimated_h": 2.5,
+     "energy_idle": 0.0240225,
+     "energy_measured_h": 0.0,
+     "fixed": 0.005040323,
+     "held_h": 3.0,
+     "hourly": 0.0,
+     "in": 140000.0,
+     "kwh_dynamic": 0.244307726,
+     "kwh_idle": 0.0825,
+     "out": 14000.0,
+     "req": 0.0,
+     "rsn": 0.0,
+     "tokens": 0.0,
+     "unpriced_kwh": 0.0,
+     "unpriced_tokens": 0
+    },
+    "r": {
+     "busy_h": 0.111111111,
+     "cpu_h": 0.0,
+     "cr": 0.0,
+     "cw": 0.0,
+     "depreciation": 0.0,
+     "energy_dynamic": 0.0,
+     "energy_estimated_h": 0.0,
+     "energy_idle": 0.0,
+     "energy_measured_h": 0.0,
+     "fixed": 0.0,
+     "held_h": 0.166666667,
+     "hourly": 0.0,
+     "in": 0.0,
+     "kwh_dynamic": 0.0,
+     "kwh_idle": 0.0,
+     "out": 0.0,
+     "req": 0.0,
+     "rsn": 0.0,
+     "tokens": 0.0,
+     "unpriced_kwh": 0.0,
+     "unpriced_tokens": 0
+    }
+   },
+   "currency": "EUR",
+   "servers": {
+    "sv_claude": {
+     "calendar": {
+      "depreciation": 0.0,
+      "fixed": 74.435483871,
+      "hours": 2721.0
+     },
+     "utilization": 0.000122504
+    },
+    "sv_helper": {
+     "calendar": {
+      "depreciation": 0.0,
+      "fixed": 0.0,
+      "hours": 2721.0
+     },
+     "utilization": 6.1252e-05
+    },
+    "sv_host": {
+     "calendar": {
+      "depreciation": 117.425770021,
+      "fixed": 5.134408602,
+      "hours": 2721.0
+     },
+     "utilization": 0.001102536
+    },
+    "sv_lan": {
+     "calendar": {
+      "depreciation": 132.219616701,
+      "fixed": 0.0,
+      "hours": 2721.0
+     },
+     "utilization": 0.000367512
+    },
+    "sv_test": {
+     "calendar": {
+      "depreciation": 0.0,
+      "fixed": 0.0,
+      "hours": 2721.0
+     },
+     "utilization": 0.0
+    }
+   },
+   "symbol": "€"
+  },
+  "describe_seat:helper": {
+   "label": "mistral/small-4",
+   "missing_server": false,
+   "model": "mistral/small-4",
+   "pooled": true,
+   "profile": null,
+   "restricted_until": "07:00",
+   "server": "Bob's GPU box",
+   "server_id": "sv_helper"
+  },
+  "resolve_llm:helper": {
+   "max_tokens": 1000,
+   "model": "mistral/small-4",
+   "model_id": "mistral/small-4",
+   "provider": "worker",
+   "reconnect_seconds": 30,
+   "server": "Bob's GPU box",
+   "server_id": "sv_helper",
+   "tool_mode": "json"
+  },
+  "resolve_llm:helper_no_model": {
+   "model": "",
+   "model_id": "",
+   "provider": "worker",
+   "server": "Bob's GPU box",
+   "server_id": "sv_helper",
+   "tool_mode": "native"
+  },
+  "restricted_now:helper": {
+   "datetime": "2026-09-24T07:00:00"
+  },
+  "restricted_text:helper": "07:00",
+  "restriction_config:helper": {
+   "enabled": true,
+   "grace_minutes": 5,
+   "windows": [
+    {
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ],
+     "end": "07:00",
+     "start": "22:00"
+    }
+   ]
+  },
+  "restriction_status": [
+   {
+    "id": "sv_host",
+    "name": "Laptop (this PC)",
+    "until": "06:00",
+    "until_ts": 1790244000.0
+   },
+   {
+    "id": "sv_helper",
+    "name": "Bob's GPU box",
+    "until": "07:00",
+    "until_ts": 1790247600.0
+   }
+  ],
+  "seat_ref:helper": {
+   "model": "mistral/small-4",
+   "model_id": "mistral/small-4",
+   "persona": "p",
+   "profile_id": null,
+   "provider": "worker",
+   "server": "Bob's GPU box",
+   "server_id": "sv_helper"
+  },
+  "server_name:helper": "Bob's GPU box"
+ }
+}

@@ -26,7 +26,7 @@ def _new_turn(pid: int, turn: int) -> dict:
     """A blank record for one seat's turn."""
     return {
         "player": pid, "turn": turn, "started": time.time(), "ended": None, "wall_s": None,
-        "model_steps": 0, "model_s": 0.0, "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+        "model_steps": 0, "model_s": 0.0, "queue_s": 0.0, "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
         "tool_calls": 0, "actions_ok": 0, "queries": 0, "errors": 0, "repeats": 0, "malformed": 0,
         "blocked_repeats": 0, "stall_nudges": 0, "by_tool": {}, "signatures": {}, "error_samples": [],
         "end_reason": None, "controller": None, "model": None,
@@ -43,10 +43,15 @@ class Metrics:
     Counted per turn rather than per game on purpose. A model that loops for two hundred calls in one
     turn and behaves for the rest is a different problem from one that is slightly repetitive
     throughout, and a per-game average hides the difference.
+
+    Only an open turn's record changes: every change goes through ``current`` (or ``_open``), and a record that is
+    closed (ended, interrupted or superseded) is never changed again, nor is a negotiation's once it is recorded.
+    ``json_parts`` relies on it to encode each settled record once.
     """
     def __init__(self, data: Optional[dict] = None):
         self.data = data or {"turns": [], "negotiations": []}
         self._open: dict[int, dict] = {}
+        self._encoded: dict[str, _Encoded] = {}      # per list in ``data``: its settled records, encoded (json_parts)
         for rec in self.data["turns"]:
             if rec.get("ended") is None and not rec.get("interrupted"):
                 # A turn that was in progress when the game was saved: the server stopped mid-turn, so its timing
@@ -54,6 +59,45 @@ class Metrics:
                 # the turn is replayed and measured again from scratch.
                 rec["interrupted"] = True
                 rec["end_reason"] = "interrupted"
+
+    def json_parts(self) -> list[bytes]:
+        """The metrics as JSON in pieces, whose concatenation (``b"".join``) is ``json.dumps(self.data)``'s bytes: what a
+        save takes under the session's lock (``GameSession._snapshot``), and joins on its writer thread.
+
+        The records grow by one a seat a turn, so dumping them whole at every autosave cost time under the lock that
+        grew with the game (25 to 29 ms at the end of a 24-seat gargantuan game, against P2.5.3's 10 ms budget for
+        everything a save does under the lock). A record that is no longer open never changes again (see the class), so
+        each is encoded once, by the first save that finds it settled, and kept: a save encodes the records settled
+        since the last one and the open turn's, whatever the game's length. Called with the session's lock held.
+        """
+        if not all(isinstance(key, str) for key in self.data):
+            return [json.dumps(self.data).encode()]      # json's own spelling of other keys; never the server's
+        parts = [b"{"]
+        for i, (key, value) in enumerate(self.data.items()):
+            parts.append((", " if i else "").encode() + json.dumps(key).encode() + b": ")
+            if key in ("turns", "negotiations", "diplomat", "diplomat_refusals", "diplomacy") and isinstance(value, list):
+                parts.extend(self._list_parts(key, value))
+            else:
+                parts.append(json.dumps(value).encode())
+        parts.append(b"}")
+        return parts
+
+    def _list_parts(self, key: str, records: list) -> list[bytes]:
+        """One of ``data``'s lists as JSON pieces: its settled prefix from the cache (extended by the records settled
+        since), then the rest encoded afresh (the open turn's record, and any after it)."""
+        enc = self._encoded.get(key)
+        if enc is None or enc.of is not records or enc.done > len(records):
+            enc = self._encoded[key] = _Encoded(records)      # a list replaced or cut: encoded again from the start
+        open_ids = {id(r) for r in self._open.values()} if key == "turns" else ()
+        k = enc.done
+        while k < len(records) and id(records[k]) not in open_ids:
+            k += 1
+        if k > enc.done:
+            block = ", ".join(json.dumps(r) for r in records[enc.done:k])
+            enc.blocks.append(((", " if enc.done else "") + block).encode())
+            enc.done = k
+        rest = [((", " if i else "") + json.dumps(r)).encode() for i, r in enumerate(records[k:], start=k)]
+        return [b"[", *enc.blocks, *rest, b"]"]
 
     @staticmethod
     def _valid(rec: dict) -> bool:
@@ -131,8 +175,12 @@ class Metrics:
 
     # ------------------------------------------------------------------
     def tool_call(self, pid: int, name: str, args: dict, kind: str, ok: bool, seconds: float, error: Optional[str] = None,
-                  blocked_repeat: bool = False):
-        """Record one tool call: its result, timing, and whether it repeated an earlier one."""
+                  blocked_repeat: bool = False, expected: bool = False):
+        """Record one tool call: its result, timing, and whether it repeated an earlier one.
+
+        ``expected`` marks a refusal that is news rather than a mistake - an end_turn the agent held back because an
+        answer arrived while it waited - so it is not counted as an error against the model.
+        """
         rec = self.current(pid)
         if rec is None:
             return
@@ -144,7 +192,7 @@ class Metrics:
             rec["queries"] += 1
         elif ok:
             rec["actions_ok"] += 1
-        if not ok and not blocked_repeat:
+        if not ok and not blocked_repeat and not expected:
             rec["errors"] += 1
             t["errors"] += 1
             if error and len(rec["error_samples"]) < 12:
@@ -158,13 +206,16 @@ class Metrics:
             rec["repeats"] += 1
 
     def model_step(self, pid: int, seconds: float, input_tokens: int = 0, output_tokens: int = 0,
-                   reasoning_tokens: int = 0, malformed: int = 0):
-        """Record one model step: its duration and its tokens."""
+                   reasoning_tokens: int = 0, malformed: int = 0, queue_s: float = 0.0):
+        """Record one model step: its generation time (``seconds``: what the model spent on it, bounded by what the
+        server observed), the time it waited for the machine apart (``queue_s``, never counted as the model's), and its
+        tokens (design/phase3-features.md P3.3.4)."""
         rec = self.current(pid)
         if rec is None:
             return
         rec["model_steps"] += 1
         rec["model_s"] = round(rec["model_s"] + seconds, 3)
+        rec["queue_s"] = round(rec.get("queue_s", 0.0) + max(0.0, queue_s or 0.0), 3)
         rec["peak_prompt_tokens"] = max(rec.get("peak_prompt_tokens", 0), input_tokens or 0)
         rec["slowest_step_s"] = round(max(rec.get("slowest_step_s", 0.0), seconds), 2)
         rec["input_tokens"] += input_tokens or 0
@@ -172,16 +223,68 @@ class Metrics:
         rec["reasoning_tokens"] += reasoning_tokens or 0
         rec["malformed"] += malformed or 0
 
+    def bot_actions(self, pid: int, counts: Optional[dict]):
+        """Add a bot's actions to its turn's record: ``counts`` is ``{tool: [taken, refused]}``, what one drive or one
+        answer of the bot did (``EngineGame.drive``'s ``actions`` for the seat, or ``answer``'s).
+
+        A bot's actions never pass through the session's tool calls, so its turn has no per-tool rows (``by_tool``,
+        ``tool_calls``); these counts stand in for them. Kept per tool, summed over the turn's drives."""
+        rec = self.current(pid)
+        if rec is None or not counts:
+            return
+        acts = rec.setdefault("bot_actions", {})
+        for tool, pair in counts.items():
+            taken, refused = (list(pair) + [0, 0])[:2]
+            have = acts.setdefault(tool, [0, 0])
+            have[0] += int(taken or 0)
+            have[1] += int(refused or 0)
+
     def bump(self, pid: int, field: str, n: int = 1):
         """Increment a counter on the current turn."""
         rec = self.current(pid)
         if rec is not None:
             rec[field] = rec.get(field, 0) + n
 
-    def negotiation(self, pid: int, seconds: float, steps: int, input_tokens: int, output_tokens: int):
-        """Record a negotiation handled during this turn."""
+    #: How a model seat's answer to a chat ended (design/phase3-features.md P3.5.7): its model answered; the chat clock
+    #: declined for it when its time ran out; its fallback answered (a hybrid seat's bot) or, for a full model seat,
+    #: it declined because its model could not answer (``cause``: chat.CAUSES); the chat closed before it answered.
+    NEGOTIATION_OUTCOMES = ("answered", "declined_late", "fallback", "closed")
+
+    def negotiation(self, pid: int, seconds: float, steps: int, input_tokens: int, output_tokens: int, *,
+                    nid: Optional[int] = None, gen_s: float = 0.0, queue_s: float = 0.0,
+                    outcome: Optional[str] = None, cause: Optional[str] = None):
+        """Record a model seat's answer to a chat (one exchange, or the chat clock's decline): the chat (``nid``), the
+        time it took, its steps and tokens, its generation and queue time apart, how it ended (``outcome``) and, for a
+        fallback or a late decline, why (``cause``)."""
         self.data["negotiations"].append({"player": pid, "t": time.time(), "seconds": round(seconds, 3), "steps": steps,
-                                          "input_tokens": input_tokens, "output_tokens": output_tokens})
+                                          "input_tokens": input_tokens, "output_tokens": output_tokens, "nid": nid,
+                                          "gen_s": round(gen_s or 0.0, 3), "queue_s": round(queue_s or 0.0, 3),
+                                          "outcome": outcome, "cause": cause})
+
+    #: How a hybrid seat's diplomat phase ended (design/phase3-features.md P3.6.11): the model stopped or used its
+    #: steps; its time ran out; its ticket did not start in time (or the seat has no machine); the machine or its
+    #: admission refused it; the model failed; the seat was halted.
+    DIPLOMAT_OUTCOMES = ("done", "timeout", "skipped", "refused", "failed", "cancelled")
+
+    #: What a diplomat phase's row keeps (``diplomat``). Never free text: the game's viewers read its metrics
+    #: (``GET /api/games/{gid}/metrics``), and a refusal's or a provider's words can name another member's machine.
+    DIPLOMAT_FIELDS = ("triggers", "steps", "gen_s", "queue_s", "input_tokens", "output_tokens", "tools", "outcome",
+                       "cause")
+
+    def diplomat(self, pid: int, turn: int, row: dict, seconds: float = 0.0):
+        """Record one diplomat phase of a hybrid seat (P3.6.11): ``row`` holds its triggers, steps, ``gen_s``,
+        ``queue_s``, tokens, ``outcome`` (``DIPLOMAT_OUTCOMES``) with its ``cause`` code when it did not run, and the
+        tools it called ({"tool", "ok"}); anything else in it is not kept (``DIPLOMAT_FIELDS``)."""
+        self.data.setdefault("diplomat", []).append({"player": pid, "turn": turn, "t": time.time(),
+                                                     "seconds": round(seconds, 3),
+                                                     **{k: row.get(k) for k in self.DIPLOMAT_FIELDS}})
+
+    def diplomat_refusal(self, pid: int, tool: str, why: str, *, chat: bool = False):
+        """A hybrid seat's model called a tool the session refused (P3.6.6): ``why`` is ``category`` (none of its
+        categories gives it that tool) or ``veto`` (the bot values the deal below zero), in a phase or a chat
+        (``chat``). The refusal's words are the model's, in its tool result, not the metrics'."""
+        self.data.setdefault("diplomat_refusals", []).append({
+            "player": pid, "t": time.time(), "tool": tool, "why": why, "chat": bool(chat)})
 
     # ------------------------------------------------------------------
     def summary(self, players: dict) -> dict:
@@ -190,7 +293,7 @@ class Metrics:
         for pid, info in players.items():
             turns = [r for r in self.data["turns"] if r["player"] == pid and self._valid(r)]
             if not turns:
-                out[pid] = {**info, "turns": 0}
+                out[pid] = {**info, "turns": 0, **_diplomat_totals(self.data, pid)}
                 continue
             walls = [r["wall_s"] for r in turns]
             model_s = sum(r["model_s"] for r in turns)
@@ -219,6 +322,7 @@ class Metrics:
                 agg["per_turn"] = round(agg["count"] / n, 2)
                 agg["avg_ms"] = round(agg["seconds"] / max(1, agg["count"]) * 1000, 1)
                 agg["seconds"] = round(agg["seconds"], 2)
+            bot = _bot_totals(turns)
             out[pid] = {
                 **info,
                 "turns": n,
@@ -228,6 +332,10 @@ class Metrics:
                 "total_s": round(sum(walls), 1),
                 "avg_model_steps": round(sum(r["model_steps"] for r in turns) / n, 2),
                 "avg_step_s": round(model_s / max(1, sum(r["model_steps"] for r in turns)), 2),
+                # generation time and the time waited for the machine, per turn, apart (P3.3.4): the speed score
+                # reads the first only
+                "avg_model_s": round(model_s / n, 2),
+                "avg_queue_s": round(sum(r.get("queue_s", 0.0) for r in turns) / n, 2),
                 "avg_tool_calls": round(tool_calls / n, 2),
                 "avg_actions_ok": round(sum(r["actions_ok"] for r in turns) / n, 2),
                 "avg_queries": round(sum(r["queries"] for r in turns) / n, 2),
@@ -251,17 +359,109 @@ class Metrics:
                                       key=lambda d: -d["max_times_in_a_turn"])[:10],
                 "top_errors": sorted(({"error": k, "count": v} for k, v in errors.items()), key=lambda d: -d["count"])[:10],
             }
+            if bot:
+                taken = sum(a["taken"] for a in bot.values())
+                refused = sum(a["refused"] for a in bot.values())
+                for agg in bot.values():
+                    agg["per_turn"] = round(agg["taken"] / n, 2)
+                out[pid]["bot_actions"] = bot
+                out[pid]["avg_bot_actions"] = round(taken / n, 2)
+                out[pid]["bot_refusal_rate"] = round(refused / max(1, taken + refused), 3)
             negs = [x for x in self.data["negotiations"] if x["player"] == pid]
             if negs:
                 out[pid]["negotiation_replies"] = len(negs)
                 out[pid]["avg_negotiation_s"] = round(statistics.mean(x["seconds"] for x in negs), 1)
+                # chat answers by how they ended (P3.5.7); a row from before 0.1.6 has none and counts as answered
+                answers: dict = {}
+                causes: dict = {}
+                for x in negs:
+                    how = x.get("outcome") or "answered"
+                    answers[how] = answers.get(how, 0) + 1
+                    if x.get("cause"):
+                        causes[x["cause"]] = causes.get(x["cause"], 0) + 1
+                out[pid]["chat_answers"] = answers
+                if causes:
+                    out[pid]["chat_fallback_causes"] = causes
+                timed = [x for x in negs if x.get("outcome") in ("answered", "closed", "fallback") and x.get("steps")]
+                if timed:
+                    out[pid]["avg_chat_gen_s"] = round(statistics.mean(x.get("gen_s", 0.0) for x in timed), 2)
+                    out[pid]["avg_chat_queue_s"] = round(statistics.mean(x.get("queue_s", 0.0) for x in timed), 2)
+            out[pid].update(_diplomat_totals(self.data, pid))
         return out
 
     def turn_rows(self) -> list[dict]:
-        """Every turn as a row, which is what the CSV export and the charts are built from."""
+        """Every turn as a row, which is what the CSV export and the charts are built from. A bot's turn has no
+        per-tool rows: its ``top_tools`` are its actions taken (``bot_actions``), and ``bot_actions`` is kept as the
+        record has it, ``{tool: [taken, refused]}``."""
         rows = []
         for r in self.data["turns"]:
             row = {k: v for k, v in r.items() if k not in ("signatures", "by_tool", "error_samples")}
-            row["top_tools"] = ", ".join(f"{k}x{v['count']}" for k, v in sorted(r["by_tool"].items(), key=lambda kv: -kv[1]["count"])[:6])
+            if r.get("by_tool"):
+                row["top_tools"] = ", ".join(f"{k}x{v['count']}" for k, v in sorted(r["by_tool"].items(), key=lambda kv: -kv[1]["count"])[:6])
+            else:
+                acts = r.get("bot_actions") or {}
+                row["top_tools"] = ", ".join(f"{k}x{v[0]}" for k, v in sorted(acts.items(), key=lambda kv: -kv[1][0])[:6] if v[0])
             rows.append(row)
         return rows
+
+
+class _Encoded:
+    """The settled prefix of one of a Metrics' lists, encoded (``Metrics.json_parts``): ``blocks`` joined are the JSON
+    of ``of[:done]`` without its brackets, each block holding the records one save found newly settled."""
+
+    __slots__ = ("of", "done", "blocks")
+
+    def __init__(self, of: list):
+        self.of, self.done, self.blocks = of, 0, []
+
+
+def _bot_totals(turns: list[dict]) -> dict:
+    """A bot seat's actions over its turns, by tool: {"taken", "refused", "max_in_turn"}; empty for a seat that is no
+    bot (or a bot recorded before its actions were counted)."""
+    out: dict = {}
+    for r in turns:
+        for tool, (taken, refused) in (r.get("bot_actions") or {}).items():
+            agg = out.setdefault(tool, {"taken": 0, "refused": 0, "max_in_turn": 0})
+            agg["taken"] += taken
+            agg["refused"] += refused
+            agg["max_in_turn"] = max(agg["max_in_turn"], taken)
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]["taken"]))
+
+
+def _diplomat_totals(data: dict, pid: int) -> dict:
+    """A hybrid seat's diplomat over the game (P3.6.11), for the stats screen: its phases by outcome, the generation
+    and queue time of those that ran, the tools they called, and the calls the session refused (by ``category`` or the
+    bot's ``veto``). Empty for a seat with no diplomat."""
+    phases = [x for x in data.get("diplomat") or [] if x.get("player") == pid]
+    refused = [x for x in data.get("diplomat_refusals") or [] if x.get("player") == pid]
+    if not phases and not refused:
+        return {}
+    out: dict = {"diplomat_phases": len(phases)}
+    outcomes: dict = {}
+    tools: dict = {}
+    for x in phases:
+        outcomes[x.get("outcome")] = outcomes.get(x.get("outcome"), 0) + 1
+        for t in x.get("tools") or []:
+            tools[t.get("tool")] = tools.get(t.get("tool"), 0) + 1
+    out["diplomat_outcomes"] = outcomes
+    ran = [x for x in phases if x.get("steps")]
+    if ran:
+        out["avg_diplomat_gen_s"] = round(statistics.mean(x.get("gen_s", 0.0) for x in ran), 2)
+        out["avg_diplomat_queue_s"] = round(statistics.mean(x.get("queue_s", 0.0) for x in ran), 2)
+        out["avg_diplomat_steps"] = round(statistics.mean(x.get("steps", 0) for x in ran), 2)
+    if tools:
+        out["diplomat_tools"] = dict(sorted(tools.items(), key=lambda kv: -kv[1]))
+    if refused:
+        why: dict = {}
+        for x in refused:
+            why[x.get("why")] = why.get(x.get("why"), 0) + 1
+        out["diplomat_refused"] = why
+    return out
+
+
+def bot_actions_text(acts: Optional[dict]) -> str:
+    """A turn's ``bot_actions`` as one line for the CSV: "move_unit 12 (2 refused), found_city 1"."""
+    parts = []
+    for tool, (taken, refused) in sorted((acts or {}).items(), key=lambda kv: -kv[1][0]):
+        parts.append(f"{tool} {taken}" + (f" ({refused} refused)" if refused else ""))
+    return ", ".join(parts)

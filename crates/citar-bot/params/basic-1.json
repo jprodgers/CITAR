@@ -1,0 +1,4077 @@
+{
+  "engine": "basic-1",
+  "groups": [
+    {
+      "name": "Personality",
+      "help": "Temperament switches. Aggression itself (0-1) is set per profile or per seat.",
+      "params": [
+        {
+          "key": "aggressive_above",
+          "default": 0.55,
+          "type": "float",
+          "label": "Aggressive above",
+          "help": "Aggression above this uses the aggressive policy order.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "war_prep_rate",
+          "default": 1.0,
+          "type": "float",
+          "label": "War preparation rate",
+          "help": "Multiplier on the per-turn chance of starting to prepare a war against a weaker neighbour.",
+          "min": 0,
+          "max": 5,
+          "unit": "x"
+        }
+      ]
+    },
+    {
+      "name": "Research",
+      "help": "How technologies are valued. The bot beelines the best value per cost over the prerequisite path.",
+      "params": [
+        {
+          "key": "tech_mode",
+          "default": "classic",
+          "type": "choice",
+          "label": "Valuation mode",
+          "help": "classic: flat building stats; potential: estimated empire-wide yield of what the tech unlocks.",
+          "choices": [
+            "classic",
+            "potential"
+          ]
+        },
+        {
+          "key": "tech_cost_exp",
+          "default": 0.8,
+          "type": "float",
+          "label": "Cost exponent",
+          "help": "Score = value / cost^this. Lower favours expensive, valuable techs.",
+          "min": 0,
+          "max": 1.5,
+          "unit": ""
+        },
+        {
+          "key": "tech_path_value",
+          "default": 0.5,
+          "type": "float",
+          "label": "Prerequisite value share",
+          "help": "Share of each prerequisite's own value added to the goal.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "tech_noise",
+          "default": 0.1,
+          "type": "float",
+          "label": "Randomness",
+          "help": "Scores are multiplied by a random factor in 1 +- this.",
+          "min": 0,
+          "max": 0.5,
+          "unit": ""
+        },
+        {
+          "key": "tech_base_value",
+          "default": 1.0,
+          "type": "float",
+          "label": "Base value",
+          "help": "Value every tech starts with.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "tech_building_base",
+          "default": 3,
+          "type": "int",
+          "label": "Per building unlocked",
+          "help": "Classic mode: flat value per building unlocked.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "tw_food",
+          "default": 1.2,
+          "type": "float",
+          "label": "Building food weight",
+          "help": "Classic mode: weight of a building's food.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "tw_production",
+          "default": 1.3,
+          "type": "float",
+          "label": "Building production weight",
+          "help": "Classic mode.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "tw_gold",
+          "default": 0.9,
+          "type": "float",
+          "label": "Building gold weight",
+          "help": "Classic mode.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "tw_science",
+          "default": 1.1,
+          "type": "float",
+          "label": "Building science weight",
+          "help": "Classic mode.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "tw_culture",
+          "default": 0.8,
+          "type": "float",
+          "label": "Building culture weight",
+          "help": "Classic mode.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "tw_faith",
+          "default": 0.6,
+          "type": "float",
+          "label": "Building faith weight",
+          "help": "Classic mode.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "tw_happiness",
+          "default": 1.8,
+          "type": "float",
+          "label": "Building happiness weight",
+          "help": "Classic mode.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "tech_building_unique",
+          "default": 1,
+          "type": "int",
+          "label": "Per building rule",
+          "help": "Classic mode: value per special rule of a building.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "tech_wonder",
+          "default": 2,
+          "type": "int",
+          "label": "Wonder bonus",
+          "help": "Classic mode: extra value for unlocking a wonder.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "pot_base",
+          "default": 2,
+          "type": "int",
+          "label": "Potential: per building",
+          "help": "Potential mode: flat value per building unlocked.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "pot_specialist",
+          "default": 0.5,
+          "type": "float",
+          "label": "Potential: per specialist slot",
+          "help": "Potential mode.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "tech_default_power",
+          "default": 8,
+          "type": "int",
+          "label": "Default unit strength",
+          "help": "Strength assumed when the civ has no land military unit yet (to judge upgrades).",
+          "min": 1,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "tech_civilian_unit",
+          "default": 3,
+          "type": "int",
+          "label": "Per civilian unit",
+          "help": "Value of unlocking a non-military unit.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "tech_unit_min_gain",
+          "default": 1.05,
+          "type": "float",
+          "label": "Unit upgrade threshold",
+          "help": "A new military unit counts only when it is this many times stronger than the best we have.",
+          "min": 1,
+          "max": 2,
+          "unit": "x"
+        },
+        {
+          "key": "tech_unit_base",
+          "default": 4,
+          "type": "int",
+          "label": "Stronger unit: base",
+          "help": "Value of a stronger military unit ...",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "tech_unit_gain",
+          "default": 8,
+          "type": "int",
+          "label": "Stronger unit: per strength gain",
+          "help": "... plus this per 100% strength gain ...",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "tech_unit_war_mult",
+          "default": 2.2,
+          "type": "float",
+          "label": "Stronger unit: at war",
+          "help": "... times this while at war ...",
+          "min": 1,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "tech_unit_aggr_base",
+          "default": 0.6,
+          "type": "float",
+          "label": "Stronger unit: aggression base",
+          "help": "... times (this + aggression).",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "tech_improvement",
+          "default": 3,
+          "type": "int",
+          "label": "Per improvement",
+          "help": "Value per tile improvement unlocked.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "tech_reveal",
+          "default": 3,
+          "type": "int",
+          "label": "Per resource revealed",
+          "help": "Value per resource revealed.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "tech_lux_needed",
+          "default": 14,
+          "type": "int",
+          "label": "New luxury (needed)",
+          "help": "Improving a luxury we own none of while happiness is short.",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "tech_lux",
+          "default": 7,
+          "type": "int",
+          "label": "New luxury",
+          "help": "Improving a luxury we own none of otherwise.",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "tech_lux_hap_margin",
+          "default": 3,
+          "type": "int",
+          "label": "Happiness is short below",
+          "help": "Happiness counts as short below (cities + this).",
+          "min": -10,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "tech_strategic",
+          "default": 3,
+          "type": "int",
+          "label": "Strategic resource",
+          "help": "Improving a strategic resource in our borders.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "tech_unique",
+          "default": 2,
+          "type": "int",
+          "label": "Per tech rule",
+          "help": "Value per special rule of the tech itself.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "tech_space_era",
+          "default": 5,
+          "type": "int",
+          "label": "Space race from era",
+          "help": "Era from which spaceship techs get a bonus.",
+          "min": 0,
+          "max": 8,
+          "unit": ""
+        },
+        {
+          "key": "tech_space",
+          "default": 25,
+          "type": "int",
+          "label": "Spaceship tech bonus",
+          "help": "Bonus for techs unlocking spaceship parts or projects.",
+          "min": 0,
+          "max": 100,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "Building value",
+      "help": "What cities build. UnCiv mode values every option and builds the best value per remaining production; classic mode uses fixed priorities. Building values come from simulating the city with the building added and weighting the difference.",
+      "params": [
+        {
+          "key": "prod_mode",
+          "default": "unciv",
+          "type": "choice",
+          "label": "Production mode",
+          "help": "unciv: UnCiv's ConstructionAutomation; classic: fixed priorities.",
+          "choices": [
+            "unciv",
+            "classic"
+          ]
+        },
+        {
+          "key": "u_food",
+          "default": 3.6,
+          "type": "float",
+          "label": "Food",
+          "help": "UnCiv mode: value per point of food a building adds.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "u_production",
+          "default": 2.0,
+          "type": "float",
+          "label": "Production",
+          "help": "UnCiv mode: per point of production.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "u_gold",
+          "default": 0.67,
+          "type": "float",
+          "label": "Gold",
+          "help": "UnCiv mode: per point of gold.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "u_science",
+          "default": 2.0,
+          "type": "float",
+          "label": "Science",
+          "help": "UnCiv mode: per point of science.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "u_culture",
+          "default": 1.0,
+          "type": "float",
+          "label": "Culture",
+          "help": "UnCiv mode: per point of culture.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "u_faith",
+          "default": 1.0,
+          "type": "float",
+          "label": "Faith",
+          "help": "UnCiv mode: per point of faith.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "u_happiness",
+          "default": 1.0,
+          "type": "float",
+          "label": "Happiness",
+          "help": "UnCiv mode: per point of happiness.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "u_happiness_low",
+          "default": 6.0,
+          "type": "float",
+          "label": "Happiness multiplier when low",
+          "help": "Happiness weight multiplier while happiness is low (UnCiv: x3).",
+          "min": 1,
+          "max": 20,
+          "unit": "x"
+        },
+        {
+          "key": "u_happiness_low_below",
+          "default": 10,
+          "type": "int",
+          "label": "Happiness is low below",
+          "help": "Low means below this, or below the number of cities.",
+          "min": -10,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "u_gold_broke_mult",
+          "default": 3.0,
+          "type": "float",
+          "label": "Gold multiplier when broke",
+          "help": "Gold weight multiplier with negative gold and income.",
+          "min": 1,
+          "max": 10,
+          "unit": "x"
+        },
+        {
+          "key": "u_culture_first_mult",
+          "default": 2.0,
+          "type": "float",
+          "label": "First culture multiplier",
+          "help": "Culture weight multiplier in a city with little culture.",
+          "min": 1,
+          "max": 10,
+          "unit": "x"
+        },
+        {
+          "key": "u_culture_first_below",
+          "default": 2.0,
+          "type": "float",
+          "label": "Little culture below",
+          "help": "A city has little culture below this per turn.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "u_carryover_share",
+          "default": 0.5,
+          "type": "float",
+          "label": "Food carry-over",
+          "help": "Granary-style food kept on growth: value share of the food saved.",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "u_gpp",
+          "default": 1.5,
+          "type": "float",
+          "label": "Great person points",
+          "help": "Per great person point a building adds.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "u_specialist",
+          "default": 0.5,
+          "type": "float",
+          "label": "Specialist slot",
+          "help": "Per specialist slot a building adds.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "u_defense_war",
+          "default": 1.0,
+          "type": "float",
+          "label": "Defence at war",
+          "help": "Walls/castle value factor while at war ...",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "u_defense_peace",
+          "default": 0.5,
+          "type": "float",
+          "label": "Defence at peace",
+          "help": "... and at peace ...",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "u_defense_threat_mult",
+          "default": 2.0,
+          "type": "float",
+          "label": "Defence under threat",
+          "help": "... doubled (this) when enemies are near the city.",
+          "min": 1,
+          "max": 10,
+          "unit": "x"
+        },
+        {
+          "key": "u_city_health",
+          "default": 4.0,
+          "type": "float",
+          "label": "City health",
+          "help": "Value of added city hit points, relative to current maximum.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "u_city_strength",
+          "default": 4.0,
+          "type": "float",
+          "label": "City strength",
+          "help": "Value of added city strength, relative to current.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "u_city_strength_offset",
+          "default": 3.0,
+          "type": "float",
+          "label": "City strength offset",
+          "help": "Added to current strength in that ratio.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "u_wonder_bonus",
+          "default": 12.0,
+          "type": "float",
+          "label": "Wonder bonus",
+          "help": "Flat value added to a world wonder.",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "u_national_wonder_share",
+          "default": 0.5,
+          "type": "float",
+          "label": "National wonder share",
+          "help": "Share of the wonder bonus a national wonder gets.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "u_wonder_gate",
+          "default": false,
+          "type": "bool",
+          "label": "Gate wonders",
+          "help": "UnCiv: wonders only in above-average-production cities of an empire with enough population."
+        },
+        {
+          "key": "wonder_gate_pop",
+          "default": 12,
+          "type": "int",
+          "label": "Wonder gate population",
+          "help": "Empire population needed for wonders when gated.",
+          "min": 0,
+          "max": 100,
+          "unit": ""
+        },
+        {
+          "key": "u_victory_building",
+          "default": 1500.0,
+          "type": "float",
+          "label": "Victory building",
+          "help": "Value of a building that wins the game (e.g. Utopia).",
+          "min": 0,
+          "max": 5000,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "Build priorities",
+      "help": "UnCiv mode: the value of units and projects against buildings, and when each is wanted.",
+      "params": [
+        {
+          "key": "u_settler",
+          "default": 30.0,
+          "type": "float",
+          "label": "Settler",
+          "help": "Value of a settler.",
+          "min": 0,
+          "max": 200,
+          "unit": ""
+        },
+        {
+          "key": "settler_site_range",
+          "default": 12,
+          "type": "int",
+          "label": "Settler site range",
+          "help": "Only build settlers when a site is this close.",
+          "min": 1,
+          "max": 30,
+          "unit": "tiles"
+        },
+        {
+          "key": "settler_per_cities",
+          "default": 3,
+          "type": "int",
+          "label": "Settlers per cities",
+          "help": "At most one settler in flight per this many cities (at least one).",
+          "min": 1,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "settler_min_pop",
+          "default": 2,
+          "type": "int",
+          "label": "Settler minimum size",
+          "help": "A city must be at least this size to build a settler.",
+          "min": 1,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "settler_min_hap",
+          "default": 2,
+          "type": "int",
+          "label": "Settler minimum happiness",
+          "help": "Build settlers while happiness is at least this ...",
+          "min": -20,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "settler_min_hap_small",
+          "default": 0,
+          "type": "int",
+          "label": "... with a small empire",
+          "help": "... or at least this with a small empire.",
+          "min": -20,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "settler_small_empire",
+          "default": 3,
+          "type": "int",
+          "label": "Small empire below",
+          "help": "Empire counts as small below this many cities.",
+          "min": 1,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "u_worker",
+          "default": 1.0,
+          "type": "float",
+          "label": "Worker",
+          "help": "Value of a worker (scaled by how many are missing).",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "workers_per_city",
+          "default": 1.8,
+          "type": "float",
+          "label": "Workers per city",
+          "help": "Target workers per city (UnCiv).",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "workers_full_until",
+          "default": 5,
+          "type": "int",
+          "label": "Full worker target up to",
+          "help": "Up to this many cities the full target applies ...",
+          "min": 1,
+          "max": 30,
+          "unit": ""
+        },
+        {
+          "key": "workers_extra_share",
+          "default": 0.72,
+          "type": "float",
+          "label": "Worker target after that",
+          "help": "... then this share of it per extra city.",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "worker_count_offset",
+          "default": 0.17,
+          "type": "float",
+          "label": "Worker urgency offset",
+          "help": "Value = want / (workers + this): smaller makes the first worker more urgent.",
+          "min": 0.01,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "worker_unimproved",
+          "default": 0.0,
+          "type": "float",
+          "label": "Workers per unimproved tile",
+          "help": "Extra wanted workers per worked, unimproved land tile.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "u_boat",
+          "default": 6.0,
+          "type": "float",
+          "label": "Work boat",
+          "help": "Value of a work boat when a sea resource needs one.",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "boat_search_radius",
+          "default": 6,
+          "type": "int",
+          "label": "Work boat search",
+          "help": "Sea resources this close to a city count.",
+          "min": 1,
+          "max": 15,
+          "unit": "tiles"
+        },
+        {
+          "key": "u_scout",
+          "default": 4.0,
+          "type": "float",
+          "label": "Scout",
+          "help": "Value of a scout while no rival city is known.",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "scout_until_turn",
+          "default": 150,
+          "type": "int",
+          "label": "Scouts until turn",
+          "help": "No scouts are built after this turn.",
+          "min": 0,
+          "max": 500,
+          "unit": "turn"
+        },
+        {
+          "key": "u_seeker",
+          "default": 6.0,
+          "type": "float",
+          "label": "Explorer",
+          "help": "Value of a unit sent to find rivals when still alone.",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "seek_after_turn",
+          "default": 30,
+          "type": "int",
+          "label": "Look for rivals after",
+          "help": "Still alone after this turn: send units exploring.",
+          "min": 0,
+          "max": 300,
+          "unit": "turn"
+        },
+        {
+          "key": "seek_military_after",
+          "default": 45,
+          "type": "int",
+          "label": "Explore with military after",
+          "help": "After this turn explorers are military units, not scouts.",
+          "min": 0,
+          "max": 300,
+          "unit": "turn"
+        },
+        {
+          "key": "u_military",
+          "default": 1.0,
+          "type": "float",
+          "label": "Military",
+          "help": "Value of a military unit (scaled by need, below).",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "u_offense",
+          "default": 3.0,
+          "type": "float",
+          "label": "Offensive build-up",
+          "help": "Military value multiplier while preparing or fighting a war with too small an army (times 0.5 + aggression).",
+          "min": 0,
+          "max": 20,
+          "unit": "x"
+        },
+        {
+          "key": "mil_base",
+          "default": 1.0,
+          "type": "float",
+          "label": "Military need: base",
+          "help": "Need = this + sqrt(cities / (army + 1)) x scale.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "mil_scale",
+          "default": 0.5,
+          "type": "float",
+          "label": "Military need: scale",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "mil_war_mult",
+          "default": 2.0,
+          "type": "float",
+          "label": "Military need at war",
+          "help": "Multiplier while at war.",
+          "min": 1,
+          "max": 10,
+          "unit": "x"
+        },
+        {
+          "key": "mil_offense_aggr_base",
+          "default": 0.5,
+          "type": "float",
+          "label": "Offense: aggression base",
+          "help": "Offensive multiplier is u_offense x (this + aggression).",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "mil_barbarian_min",
+          "default": 2.0,
+          "type": "float",
+          "label": "Barbarians near: minimum",
+          "help": "Military need is at least this with barbarians in sight.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "mil_below_avg_div",
+          "default": 5.0,
+          "type": "float",
+          "label": "Weak city divisor",
+          "help": "Military need is divided by this in below-average production cities.",
+          "min": 1,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "mil_army_full_div",
+          "default": 3.0,
+          "type": "float",
+          "label": "Army complete divisor",
+          "help": "Divided by this when the army target is met (at peace).",
+          "min": 1,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "peace_army_min",
+          "default": 7,
+          "type": "int",
+          "label": "Peacetime army cap",
+          "help": "At peace, stop building military above max(this, cities x per city) ...",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "peace_army_per_city",
+          "default": 5,
+          "type": "int",
+          "label": "... per city",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "military_min_gold",
+          "default": -50.0,
+          "type": "float",
+          "label": "Military gold floor",
+          "help": "No new military below this much gold.",
+          "min": -1000,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "u_project",
+          "default": 40.0,
+          "type": "float",
+          "label": "Project",
+          "help": "Value of a project (Apollo, Manhattan...) in a strong city ...",
+          "min": 0,
+          "max": 500,
+          "unit": ""
+        },
+        {
+          "key": "u_project_low",
+          "default": 10.0,
+          "type": "float",
+          "label": "... in a weak city",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": ""
+        },
+        {
+          "key": "u_spaceship",
+          "default": 1500.0,
+          "type": "float",
+          "label": "Spaceship part",
+          "help": "Value of a spaceship part in a strong city.",
+          "min": 0,
+          "max": 5000,
+          "unit": ""
+        },
+        {
+          "key": "u_space_program",
+          "default": 1500.0,
+          "type": "float",
+          "label": "Space program",
+          "help": "Extra value of the building that enables spaceship parts (Apollo Program) in a strong city.",
+          "min": 0,
+          "max": 5000,
+          "unit": ""
+        },
+        {
+          "key": "space_reserve",
+          "default": 3,
+          "type": "int",
+          "label": "Keep for the spaceship",
+          "help": "From the space era (see Research), keep this many of each resource spaceship parts need (Aluminum) free: no units or buildings that would use them. 0 = off.",
+          "min": 0,
+          "max": 6,
+          "unit": ""
+        },
+        {
+          "key": "garrison_after_turn",
+          "default": 12,
+          "type": "int",
+          "label": "Garrison after turn",
+          "help": "An empty city builds a defender first after this turn (sooner with enemies in sight).",
+          "min": 0,
+          "max": 100,
+          "unit": "turn"
+        },
+        {
+          "key": "danger_ratio",
+          "default": 0.5,
+          "type": "float",
+          "label": "City in danger at",
+          "help": "A city is in danger when nearby enemy strength exceeds this share of its defence.",
+          "min": 0,
+          "max": 5,
+          "unit": "x"
+        }
+      ]
+    },
+    {
+      "name": "Classic production",
+      "help": "Priorities used only when production mode is classic.",
+      "params": [
+        {
+          "key": "c_escort",
+          "default": 140,
+          "type": "int",
+          "label": "Escort for a waiting settler",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": ""
+        },
+        {
+          "key": "c_danger",
+          "default": 1000.0,
+          "type": "float",
+          "label": "Defender in danger",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": ""
+        },
+        {
+          "key": "c_garrison",
+          "default": 300.0,
+          "type": "float",
+          "label": "Garrison an empty city",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": ""
+        },
+        {
+          "key": "c_military_min_gpt",
+          "default": 1.0,
+          "type": "float",
+          "label": "Military needs income",
+          "help": "Peacetime units only with at least this gold per turn.",
+          "min": -50,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "c_army_offense",
+          "default": 90.0,
+          "type": "float",
+          "label": "Army (war): base",
+          "help": "Priority = (base + aggr x aggression) x (short base + short scale x shortfall).",
+          "min": 0,
+          "max": 500,
+          "unit": ""
+        },
+        {
+          "key": "c_army_offense_aggr",
+          "default": 70.0,
+          "type": "float",
+          "label": "Army (war): per aggression",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": ""
+        },
+        {
+          "key": "c_army_peace",
+          "default": 25.0,
+          "type": "float",
+          "label": "Army (peace): base",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": ""
+        },
+        {
+          "key": "c_army_peace_aggr",
+          "default": 35.0,
+          "type": "float",
+          "label": "Army (peace): per aggression",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": ""
+        },
+        {
+          "key": "c_army_short_base",
+          "default": 0.6,
+          "type": "float",
+          "label": "Army shortfall base",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "c_army_short_scale",
+          "default": 1.4,
+          "type": "float",
+          "label": "Army shortfall scale",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "settler_prio",
+          "default": 130,
+          "type": "int",
+          "label": "Settler (early)",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": ""
+        },
+        {
+          "key": "settler_prio_late",
+          "default": 75,
+          "type": "int",
+          "label": "Settler (late)",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": ""
+        },
+        {
+          "key": "settler_prio_until",
+          "default": 90,
+          "type": "int",
+          "label": "Early settlers until turn",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "turn"
+        },
+        {
+          "key": "settler_prio_per_city",
+          "default": 6,
+          "type": "int",
+          "label": "Settler priority per city",
+          "help": "Subtracted per city owned.",
+          "min": 0,
+          "max": 100,
+          "unit": ""
+        },
+        {
+          "key": "c_scout_needed",
+          "default": 80.0,
+          "type": "float",
+          "label": "Scout (alone)",
+          "help": "Priority while no rival city is known ...",
+          "min": 0,
+          "max": 1000,
+          "unit": ""
+        },
+        {
+          "key": "c_scout_after_turn",
+          "default": 15,
+          "type": "int",
+          "label": "... after turn",
+          "help": "",
+          "min": 0,
+          "max": 300,
+          "unit": "turn"
+        },
+        {
+          "key": "c_scout",
+          "default": 30.0,
+          "type": "float",
+          "label": "Scout (otherwise)",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": ""
+        },
+        {
+          "key": "c_scout_early_turns",
+          "default": 30,
+          "type": "int",
+          "label": "Scouts early until",
+          "help": "Scouts are built until this turn even with contact.",
+          "min": 0,
+          "max": 300,
+          "unit": "turn"
+        },
+        {
+          "key": "c_seeker",
+          "default": 150.0,
+          "type": "float",
+          "label": "Explorer (alone)",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": ""
+        },
+        {
+          "key": "c_worker_extra",
+          "default": 1,
+          "type": "int",
+          "label": "Extra workers (small)",
+          "help": "Workers wanted = cities + this for small empires.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "c_worker_extra_until",
+          "default": 2,
+          "type": "int",
+          "label": "Small empire up to",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "c_worker_urgent_div",
+          "default": 2,
+          "type": "int",
+          "label": "Urgent below cities /",
+          "help": "Workers are urgent below cities / this.",
+          "min": 1,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "c_worker_urgent",
+          "default": 100.0,
+          "type": "float",
+          "label": "Worker (urgent)",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": ""
+        },
+        {
+          "key": "c_worker",
+          "default": 50.0,
+          "type": "float",
+          "label": "Worker",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": ""
+        },
+        {
+          "key": "c_boat",
+          "default": 45.0,
+          "type": "float",
+          "label": "Work boat",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": ""
+        },
+        {
+          "key": "c_boat_retry_turns",
+          "default": 25,
+          "type": "int",
+          "label": "Work boat retry",
+          "help": "Turns before another boat is queued in the same city.",
+          "min": 0,
+          "max": 200,
+          "unit": "turns"
+        },
+        {
+          "key": "c_building_scale",
+          "default": 12.0,
+          "type": "float",
+          "label": "Building scale",
+          "help": "Priority = value x scale / (1 + turns / turns scale).",
+          "min": 0,
+          "max": 100,
+          "unit": ""
+        },
+        {
+          "key": "c_building_turns",
+          "default": 12.0,
+          "type": "float",
+          "label": "Building turns scale",
+          "help": "",
+          "min": 1,
+          "max": 100,
+          "unit": ""
+        },
+        {
+          "key": "c_project",
+          "default": 350,
+          "type": "int",
+          "label": "Project",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": ""
+        },
+        {
+          "key": "c_spaceship",
+          "default": 400.0,
+          "type": "float",
+          "label": "Spaceship part",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "Classic building value",
+      "help": "Building values used only in classic production mode.",
+      "params": [
+        {
+          "key": "w_food",
+          "default": 1.2,
+          "type": "float",
+          "label": "Food",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_production",
+          "default": 1.3,
+          "type": "float",
+          "label": "Production",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_gold",
+          "default": 0.9,
+          "type": "float",
+          "label": "Gold",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_science",
+          "default": 1.1,
+          "type": "float",
+          "label": "Science",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_culture",
+          "default": 0.8,
+          "type": "float",
+          "label": "Culture",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_faith",
+          "default": 0.6,
+          "type": "float",
+          "label": "Faith",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_happiness",
+          "default": 1.8,
+          "type": "float",
+          "label": "Happiness",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_hap_margin",
+          "default": 2,
+          "type": "int",
+          "label": "Happiness wanted",
+          "help": "Happiness is wanted up to cities + this.",
+          "min": -10,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "w_hap_unhappy",
+          "default": 3.0,
+          "type": "float",
+          "label": "Happiness when unhappy",
+          "help": "Happiness multiplier when unhappy ...",
+          "min": 0,
+          "max": 20,
+          "unit": "x"
+        },
+        {
+          "key": "w_hap_low",
+          "default": 1.8,
+          "type": "float",
+          "label": "... when short",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": "x"
+        },
+        {
+          "key": "w_hap_ok",
+          "default": 0.4,
+          "type": "float",
+          "label": "... otherwise",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": "x"
+        },
+        {
+          "key": "w_gold_broke",
+          "default": 1.5,
+          "type": "float",
+          "label": "Gold when broke",
+          "help": "Extra per gold with negative income.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_gpp",
+          "default": 1.5,
+          "type": "float",
+          "label": "Great person points",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_specialist",
+          "default": 1.2,
+          "type": "float",
+          "label": "Specialist slot",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_def_strength_div",
+          "default": 2.0,
+          "type": "float",
+          "label": "City strength divisor",
+          "help": "Defence value = strength / this + health / divisor ...",
+          "min": 1,
+          "max": 100,
+          "unit": ""
+        },
+        {
+          "key": "w_def_health_div",
+          "default": 25.0,
+          "type": "float",
+          "label": "City health divisor",
+          "help": "",
+          "min": 1,
+          "max": 500,
+          "unit": ""
+        },
+        {
+          "key": "w_def_border",
+          "default": 3.0,
+          "type": "float",
+          "label": "Defence at war or threatened",
+          "help": "... times this at war or threatened ...",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "w_def_interior",
+          "default": 0.3,
+          "type": "float",
+          "label": "Defence otherwise",
+          "help": "... or this.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "unique_bonus",
+          "default": 0.5,
+          "type": "float",
+          "label": "Per building rule",
+          "help": "Per rule text the simulation can't see.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "wonder_mult",
+          "default": 1.2,
+          "type": "float",
+          "label": "Wonder multiplier",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": "x"
+        },
+        {
+          "key": "wonder_bonus",
+          "default": 2.0,
+          "type": "float",
+          "label": "Wonder bonus",
+          "help": "",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "wonder_min_pop",
+          "default": 0,
+          "type": "int",
+          "label": "Wonder empire population",
+          "help": "UnCiv-style gate: wonders only with this much population.",
+          "min": 0,
+          "max": 100,
+          "unit": ""
+        },
+        {
+          "key": "wonder_avg_prod",
+          "default": false,
+          "type": "bool",
+          "label": "Wonders in strong cities",
+          "help": "Only in cities producing at least the empire average."
+        },
+        {
+          "key": "w_small_city_pop",
+          "default": 2,
+          "type": "int",
+          "label": "Small city up to",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "w_small_city_mult",
+          "default": 0.8,
+          "type": "float",
+          "label": "Small city multiplier",
+          "help": "Building values in small cities.",
+          "min": 0,
+          "max": 2,
+          "unit": "x"
+        }
+      ]
+    },
+    {
+      "name": "Expansion",
+      "help": "Where and when to found cities, and how settlers travel.",
+      "params": [
+        {
+          "key": "site_min_score",
+          "default": 14.0,
+          "type": "float",
+          "label": "Minimum site score",
+          "help": "Sites scoring below this are ignored.",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        },
+        {
+          "key": "site_new_lux",
+          "default": 0.0,
+          "type": "float",
+          "label": "New luxury at site",
+          "help": "Site bonus per luxury type we don't own yet.",
+          "min": 0,
+          "max": 30,
+          "unit": ""
+        },
+        {
+          "key": "site_lux_radius",
+          "default": 2,
+          "type": "int",
+          "label": "New luxury within",
+          "help": "Luxuries this close to a site count for that bonus.",
+          "min": 1,
+          "max": 5,
+          "unit": "tiles"
+        },
+        {
+          "key": "site_distance_cost",
+          "default": 1.5,
+          "type": "float",
+          "label": "Site distance cost",
+          "help": "Subtracted from a site's score per tile from our nearest city.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "site_radius",
+          "default": 9,
+          "type": "int",
+          "label": "Site search radius",
+          "help": "",
+          "min": 3,
+          "max": 20,
+          "unit": "tiles"
+        },
+        {
+          "key": "site_min_distance",
+          "default": 4,
+          "type": "int",
+          "label": "Minimum distance to our cities",
+          "help": "",
+          "min": 2,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "site_spacing",
+          "default": 4,
+          "type": "int",
+          "label": "Spacing between planned sites",
+          "help": "",
+          "min": 2,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "site_candidates",
+          "default": 6,
+          "type": "int",
+          "label": "Sites planned",
+          "help": "How many sites are kept in the plan.",
+          "min": 1,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "site_blacklist_turns",
+          "default": 30,
+          "type": "int",
+          "label": "Avoid failed sites for",
+          "help": "",
+          "min": 0,
+          "max": 200,
+          "unit": "turns"
+        },
+        {
+          "key": "settler_rank_cost",
+          "default": 1.5,
+          "type": "float",
+          "label": "Settler: rank cost",
+          "help": "A settler picks min(distance + rank x this).",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "settler_found_here_dist",
+          "default": 10,
+          "type": "int",
+          "label": "Found in place within",
+          "help": "With no site, found where standing if within this of our cities.",
+          "min": 0,
+          "max": 30,
+          "unit": "tiles"
+        },
+        {
+          "key": "settler_danger_margin",
+          "default": 1,
+          "type": "int",
+          "label": "Settler danger margin",
+          "help": "An enemy within its reach + this is a danger.",
+          "min": 0,
+          "max": 5,
+          "unit": "tiles"
+        },
+        {
+          "key": "settler_max_retreats",
+          "default": 3,
+          "type": "int",
+          "label": "Retreats before giving up a site",
+          "help": "",
+          "min": 1,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "escort_min_hp",
+          "default": 50,
+          "type": "int",
+          "label": "Escort minimum health",
+          "help": "",
+          "min": 0,
+          "max": 100,
+          "unit": "hp"
+        },
+        {
+          "key": "escort_radius",
+          "default": 6,
+          "type": "int",
+          "label": "Escort search radius",
+          "help": "",
+          "min": 1,
+          "max": 20,
+          "unit": "tiles"
+        },
+        {
+          "key": "target_cities",
+          "default": 0,
+          "type": "int",
+          "label": "Target cities",
+          "help": "Stop founding cities at this many (0 = no limit).",
+          "min": 0,
+          "max": 50,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "Cities",
+      "help": "Citizens, focus and growth.",
+      "params": [
+        {
+          "key": "small_city_focus",
+          "default": null,
+          "type": "choice",
+          "label": "Small city focus",
+          "help": "e.g. food: non-capital cities below the size below grow first.",
+          "choices": [
+            null,
+            "food",
+            "production",
+            "gold",
+            "science"
+          ]
+        },
+        {
+          "key": "small_city_pop",
+          "default": 8,
+          "type": "int",
+          "label": "Small city below",
+          "help": "",
+          "min": 1,
+          "max": 30,
+          "unit": ""
+        },
+        {
+          "key": "unhappy_avoid_growth",
+          "default": false,
+          "type": "bool",
+          "label": "Stop big cities growing when unhappy",
+          "help": "While unhappy (-75% growth everywhere), the biggest cities stop growing so the rest grow normally."
+        },
+        {
+          "key": "avoid_growth_div",
+          "default": 4,
+          "type": "int",
+          "label": "Biggest 1 in",
+          "help": "The biggest 1 in this many cities stop growing.",
+          "min": 1,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "avoid_growth_min_pop",
+          "default": 6,
+          "type": "int",
+          "label": "... when at least size",
+          "help": "",
+          "min": 1,
+          "max": 30,
+          "unit": ""
+        },
+        {
+          "key": "avoid_growth_release",
+          "default": 2,
+          "type": "int",
+          "label": "Resume growth at happiness",
+          "help": "",
+          "min": -10,
+          "max": 20,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "Army",
+      "help": "How big the army is and which units it builds.",
+      "params": [
+        {
+          "key": "army_per_city",
+          "default": 1.0,
+          "type": "float",
+          "label": "Army per city",
+          "help": "Army target = cities x (this + aggr x aggression) + base ...",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "army_per_city_aggr",
+          "default": 0.6,
+          "type": "float",
+          "label": "... per city per aggression",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "army_base",
+          "default": 1.0,
+          "type": "float",
+          "label": "... + base",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "army_war_per_city",
+          "default": 1.0,
+          "type": "float",
+          "label": "At war: + per city",
+          "help": "... + cities x this + extra while at war or preparing ...",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "army_war_extra",
+          "default": 3.0,
+          "type": "float",
+          "label": "At war: + extra",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "army_per_threatened_city",
+          "default": 1.0,
+          "type": "float",
+          "label": "Per threatened city",
+          "help": "... + this per threatened city.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "siege_per_units",
+          "default": 3,
+          "type": "int",
+          "label": "Siege: one per",
+          "help": "When attacking, one siege unit per this many field units.",
+          "min": 1,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "min_field_melee",
+          "default": 2,
+          "type": "int",
+          "label": "Minimum melee in the field",
+          "help": "Only melee units capture cities.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "ranged_chance",
+          "default": 0.3,
+          "type": "float",
+          "label": "Chance to prefer ranged",
+          "help": "",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "unit_ranged_pref",
+          "default": 1.15,
+          "type": "float",
+          "label": "Ranged when preferred",
+          "help": "Ranged strength multiplier when ranged is preferred ...",
+          "min": 0,
+          "max": 3,
+          "unit": "x"
+        },
+        {
+          "key": "unit_ranged_nopref",
+          "default": 0.85,
+          "type": "float",
+          "label": "... otherwise",
+          "help": "",
+          "min": 0,
+          "max": 3,
+          "unit": "x"
+        },
+        {
+          "key": "unit_siege_defensive",
+          "default": 0.5,
+          "type": "float",
+          "label": "Siege when defending",
+          "help": "Value of siege units when not attacking.",
+          "min": 0,
+          "max": 2,
+          "unit": "x"
+        },
+        {
+          "key": "unit_mobile_defensive",
+          "default": 0.8,
+          "type": "float",
+          "label": "Mounted/armor when defending",
+          "help": "",
+          "min": 0,
+          "max": 2,
+          "unit": "x"
+        },
+        {
+          "key": "unit_cost_exp",
+          "default": 0.35,
+          "type": "float",
+          "label": "Unit cost exponent",
+          "help": "Unit value = strength / cost^this.",
+          "min": 0,
+          "max": 1.5,
+          "unit": ""
+        },
+        {
+          "key": "promo_in_city",
+          "default": [
+            "Cover"
+          ],
+          "type": "list",
+          "label": "Promotions in a city",
+          "help": "Promotion lines taken by units standing in a city.",
+          "options": [
+            "Shock",
+            "Drill",
+            "Accuracy",
+            "Barrage",
+            "Bombardment",
+            "Targeting",
+            "Interception",
+            "Cover"
+          ],
+          "presets": {}
+        },
+        {
+          "key": "promo_lines",
+          "default": [
+            "Shock",
+            "Drill",
+            "Accuracy",
+            "Barrage",
+            "Bombardment",
+            "Targeting",
+            "Interception"
+          ],
+          "type": "list",
+          "label": "Promotion lines",
+          "help": "Promotion lines taken otherwise (else the first available).",
+          "options": [
+            "Shock",
+            "Drill",
+            "Accuracy",
+            "Barrage",
+            "Bombardment",
+            "Targeting",
+            "Interception",
+            "Cover"
+          ],
+          "presets": {}
+        }
+      ]
+    },
+    {
+      "name": "Tactics",
+      "help": "Fighting, healing, garrisons, sieges.",
+      "params": [
+        {
+          "key": "threat_radius",
+          "default": 4,
+          "type": "int",
+          "label": "Threat radius",
+          "help": "Enemy units this close count as a threat to a city.",
+          "min": 1,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "threat_near_dist",
+          "default": 2,
+          "type": "int",
+          "label": "Close threat within",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "threat_near_weight",
+          "default": 1.0,
+          "type": "float",
+          "label": "Close threat weight",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "threat_far_weight",
+          "default": 0.6,
+          "type": "float",
+          "label": "Distant threat weight",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "atk_city_loss_weight",
+          "default": 1.6,
+          "type": "float",
+          "label": "City attack: damage taken weight",
+          "help": "Attack value = damage dealt - damage taken x this.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "atk_siege_city_mult",
+          "default": 1.5,
+          "type": "float",
+          "label": "Siege unit vs city",
+          "help": "Damage dealt multiplier for siege units attacking a city.",
+          "min": 0,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "atk_city_min_hp",
+          "default": 40,
+          "type": "int",
+          "label": "City attack: keep health",
+          "help": "Melee units don't attack a city if left below this.",
+          "min": 0,
+          "max": 100,
+          "unit": "hp"
+        },
+        {
+          "key": "atk_unit_loss_weight",
+          "default": 1.3,
+          "type": "float",
+          "label": "Unit attack: damage taken weight",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "atk_kill_mult",
+          "default": 3.0,
+          "type": "float",
+          "label": "Kill multiplier",
+          "help": "Damage dealt counts this many times when it kills.",
+          "min": 1,
+          "max": 10,
+          "unit": "x"
+        },
+        {
+          "key": "atk_unit_min_hp",
+          "default": 25,
+          "type": "int",
+          "label": "Unit attack: keep health",
+          "help": "",
+          "min": 0,
+          "max": 100,
+          "unit": "hp"
+        },
+        {
+          "key": "siege_city_pref",
+          "default": 3.0,
+          "type": "float",
+          "label": "Focus on the besieged city",
+          "help": "Attack value multiplier on the city under siege.",
+          "min": 0,
+          "max": 10,
+          "unit": "x"
+        },
+        {
+          "key": "siege_move_first",
+          "default": true,
+          "type": "bool",
+          "label": "Siege units move first",
+          "help": "Ranged units in a siege move into range and sight of the city before shooting."
+        },
+        {
+          "key": "siege_approach_extra",
+          "default": 3,
+          "type": "int",
+          "label": "Siege approach range",
+          "help": "Ranged units within range + this close in.",
+          "min": 0,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "heal_below_hp",
+          "default": 50,
+          "type": "int",
+          "label": "Heal below",
+          "help": "",
+          "min": 0,
+          "max": 100,
+          "unit": "hp"
+        },
+        {
+          "key": "heal_city_radius",
+          "default": 4,
+          "type": "int",
+          "label": "Heal in a city within",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": "tiles"
+        },
+        {
+          "key": "naval_heal_hp",
+          "default": 60,
+          "type": "int",
+          "label": "Ships heal below",
+          "help": "",
+          "min": 0,
+          "max": 100,
+          "unit": "hp"
+        },
+        {
+          "key": "garrison_mode",
+          "default": "all",
+          "type": "choice",
+          "label": "Garrisons",
+          "help": "all: every city keeps a unit (the whole army can end up in cities); exposed: only the capital and cities near a foreign city, a barbarian camp or enemies in sight.",
+          "choices": [
+            "all",
+            "exposed"
+          ]
+        },
+        {
+          "key": "garrison_exposed_radius",
+          "default": 6,
+          "type": "int",
+          "label": "Exposed within",
+          "help": "A foreign city or barbarian camp this close makes a city exposed.",
+          "min": 1,
+          "max": 20,
+          "unit": "tiles"
+        },
+        {
+          "key": "garrison_radius",
+          "default": 10,
+          "type": "int",
+          "label": "Garrison empty cities within",
+          "help": "",
+          "min": 0,
+          "max": 30,
+          "unit": "tiles"
+        },
+        {
+          "key": "defend_radius",
+          "default": 8,
+          "type": "int",
+          "label": "Defend a city within",
+          "help": "",
+          "min": 0,
+          "max": 30,
+          "unit": "tiles"
+        },
+        {
+          "key": "defend_radius_campaign",
+          "default": 5,
+          "type": "int",
+          "label": "... while campaigning",
+          "help": "",
+          "min": 0,
+          "max": 30,
+          "unit": "tiles"
+        },
+        {
+          "key": "campaign_defend_ratio",
+          "default": 0.4,
+          "type": "float",
+          "label": "Campaign: defend when",
+          "help": "While campaigning, only turn back when threat exceeds this share of the city's defence.",
+          "min": 0,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "defend_distance_cost",
+          "default": 2,
+          "type": "int",
+          "label": "Defence distance cost",
+          "help": "Pick the city with most threat - distance x this.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "camp_city_radius",
+          "default": 14,
+          "type": "int",
+          "label": "Clear camps near our cities",
+          "help": "",
+          "min": 0,
+          "max": 40,
+          "unit": "tiles"
+        },
+        {
+          "key": "camp_unit_radius",
+          "default": 16,
+          "type": "int",
+          "label": "Clear camps within reach",
+          "help": "",
+          "min": 0,
+          "max": 40,
+          "unit": "tiles"
+        },
+        {
+          "key": "ruin_radius",
+          "default": 5,
+          "type": "int",
+          "label": "Ancient ruins within",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": "tiles"
+        },
+        {
+          "key": "approach_fallback_radius",
+          "default": 3,
+          "type": "int",
+          "label": "Approach fallback",
+          "help": "",
+          "min": 1,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "general_front_radius",
+          "default": 4,
+          "type": "int",
+          "label": "Generals follow the front",
+          "help": "Enemies within this of a unit mark the front.",
+          "min": 0,
+          "max": 20,
+          "unit": "tiles"
+        },
+        {
+          "key": "scout_disband_turn",
+          "default": 60,
+          "type": "int",
+          "label": "Disband idle scouts after",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "turn"
+        },
+        {
+          "key": "boat_seek_radius",
+          "default": 8,
+          "type": "int",
+          "label": "Work boats look within",
+          "help": "",
+          "min": 1,
+          "max": 30,
+          "unit": "tiles"
+        },
+        {
+          "key": "spare_obsolete_mult",
+          "default": 0.5,
+          "type": "float",
+          "label": "Obsolete unit value",
+          "help": "When disbanding to save gold.",
+          "min": 0,
+          "max": 1,
+          "unit": "x"
+        },
+        {
+          "key": "spare_garrison_value",
+          "default": 30,
+          "type": "int",
+          "label": "Garrison value",
+          "help": "Added to a garrison's value when choosing what to disband.",
+          "min": 0,
+          "max": 200,
+          "unit": ""
+        },
+        {
+          "key": "keep_units_per_city",
+          "default": 1,
+          "type": "int",
+          "label": "Keep units per city",
+          "help": "Never disband below this many per city.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "War",
+      "help": "When to start a war, how to gather, when to advance.",
+      "params": [
+        {
+          "key": "war_min_turn",
+          "default": 50,
+          "type": "int",
+          "label": "No wars before turn",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "turn"
+        },
+        {
+          "key": "war_max_threat",
+          "default": 0.15,
+          "type": "float",
+          "label": "Only when safe",
+          "help": "Start only while total threat is below this share of our power.",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "war_power_ratio",
+          "default": 1.35,
+          "type": "float",
+          "label": "Start: power ratio",
+          "help": "Prepare against a neighbour when our power > theirs x (ratio - aggr x aggression).",
+          "min": 0.5,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "war_power_ratio_aggr",
+          "default": 0.5,
+          "type": "float",
+          "label": "Start: aggression discount",
+          "help": "",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "war_chance",
+          "default": 0.02,
+          "type": "float",
+          "label": "Start: chance per turn",
+          "help": "Chance per turn per candidate = (chance + aggr x aggression) x war preparation rate.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "war_chance_aggr",
+          "default": 0.15,
+          "type": "float",
+          "label": "Start: chance per aggression",
+          "help": "",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "war_prep_timeout",
+          "default": 40,
+          "type": "int",
+          "label": "Give up preparing after",
+          "help": "",
+          "min": 1,
+          "max": 200,
+          "unit": "turns"
+        },
+        {
+          "key": "war_abort_ratio",
+          "default": 1.15,
+          "type": "float",
+          "label": "Abort below power ratio",
+          "help": "Stop preparing when power < theirs x (ratio - aggr x aggression).",
+          "min": 0.5,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "war_abort_ratio_aggr",
+          "default": 0.4,
+          "type": "float",
+          "label": "Abort: aggression discount",
+          "help": "",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "war_need_min",
+          "default": 4,
+          "type": "int",
+          "label": "Declare: minimum army",
+          "help": "Field units needed = clamp(cities / div + base, min, max).",
+          "min": 0,
+          "max": 30,
+          "unit": ""
+        },
+        {
+          "key": "war_need_max",
+          "default": 8,
+          "type": "int",
+          "label": "Declare: maximum needed",
+          "help": "",
+          "min": 0,
+          "max": 30,
+          "unit": ""
+        },
+        {
+          "key": "war_need_city_div",
+          "default": 2,
+          "type": "int",
+          "label": "Declare: cities divisor",
+          "help": "",
+          "min": 1,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "war_need_base",
+          "default": 2,
+          "type": "int",
+          "label": "Declare: base",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "prep_gather",
+          "default": true,
+          "type": "bool",
+          "label": "Gather before declaring",
+          "help": "Assemble the field army at a rally point before declaring, then advance at once."
+        },
+        {
+          "key": "prep_gather_radius",
+          "default": 3,
+          "type": "int",
+          "label": "Gathered within",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "overwhelm_units",
+          "default": 2,
+          "type": "int",
+          "label": "Overwhelming: units",
+          "help": "Declare with at least this many units ...",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "overwhelm_ratio",
+          "default": 4.0,
+          "type": "float",
+          "label": "Overwhelming: power ratio",
+          "help": "... when our power exceeds theirs this many times.",
+          "min": 1,
+          "max": 20,
+          "unit": "x"
+        },
+        {
+          "key": "declare_ratio",
+          "default": 1.35,
+          "type": "float",
+          "label": "Declare: power ratio",
+          "help": "Declare when power > theirs x (ratio - aggr x aggression).",
+          "min": 0.5,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "declare_ratio_aggr",
+          "default": 0.4,
+          "type": "float",
+          "label": "Declare: aggression discount",
+          "help": "",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "war_target_max_dist",
+          "default": 99,
+          "type": "int",
+          "label": "Target within",
+          "help": "Only attack cities this close to one of ours; with none in reach, a war is fought defensively (99 = anywhere on our continent).",
+          "min": 3,
+          "max": 99,
+          "unit": "tiles"
+        },
+        {
+          "key": "war_overseas",
+          "default": false,
+          "type": "bool",
+          "label": "Wars overseas",
+          "help": "Once units can embark (Optics), rival cities on other continents count as targets; the rally point is on the target's continent, so the army sails there."
+        },
+        {
+          "key": "war_target_pick",
+          "default": "smallest",
+          "type": "choice",
+          "label": "Chosen war target",
+          "help": "smallest: the rival's smallest reachable city (nearest breaks ties); nearest: its nearest city.",
+          "choices": [
+            "smallest",
+            "nearest"
+          ]
+        },
+        {
+          "key": "target_pop_weight",
+          "default": 0.5,
+          "type": "float",
+          "label": "Target: population weight",
+          "help": "Target score = distance + size x this - bonus if damaged; lowest wins.",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "target_damaged_bonus",
+          "default": 6,
+          "type": "int",
+          "label": "Target: damaged city bonus",
+          "help": "",
+          "min": 0,
+          "max": 30,
+          "unit": ""
+        },
+        {
+          "key": "gather_radius",
+          "default": 4,
+          "type": "int",
+          "label": "Gathered: within",
+          "help": "Units within this of the rally point or target count as gathered.",
+          "min": 0,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "advance_min",
+          "default": 3,
+          "type": "int",
+          "label": "Advance: minimum units",
+          "help": "Advance with clamp(field army x share, min, max) gathered.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "advance_max",
+          "default": 8,
+          "type": "int",
+          "label": "Advance: units enough",
+          "help": "",
+          "min": 0,
+          "max": 30,
+          "unit": ""
+        },
+        {
+          "key": "advance_share",
+          "default": 0.6,
+          "type": "float",
+          "label": "Advance: share of field army",
+          "help": "",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "advance_hold_min",
+          "default": 2,
+          "type": "int",
+          "label": "Fall back below",
+          "help": "Return to the rally point with fewer than this near the target.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "weak_city_health",
+          "default": 0.5,
+          "type": "float",
+          "label": "Weak target: health",
+          "help": "A target at or below this share of health is weak ...",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "weak_power_ratio",
+          "default": 3.0,
+          "type": "float",
+          "label": "Weak target: power",
+          "help": "... or when its owner's power x this is below ours.",
+          "min": 1,
+          "max": 20,
+          "unit": "x"
+        },
+        {
+          "key": "weak_min_units",
+          "default": 2,
+          "type": "int",
+          "label": "Weak target: units",
+          "help": "Advance on a weak target with this many field units.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "siege_ready_dist",
+          "default": 2,
+          "type": "int",
+          "label": "Siege ready within",
+          "help": "Melee close in once a ranged unit is this close ...",
+          "min": 0,
+          "max": 5,
+          "unit": "tiles"
+        },
+        {
+          "key": "siege_ready_health",
+          "default": 0.5,
+          "type": "float",
+          "label": "... or city health below",
+          "help": "",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "rally_radius",
+          "default": 2,
+          "type": "int",
+          "label": "At the rally point within",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "rally_min_dist",
+          "default": 4,
+          "type": "int",
+          "label": "Rally point: min distance",
+          "help": "From the target.",
+          "min": 1,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "rally_max_dist",
+          "default": 5,
+          "type": "int",
+          "label": "Rally point: max distance",
+          "help": "",
+          "min": 1,
+          "max": 15,
+          "unit": "tiles"
+        },
+        {
+          "key": "rally_cover_bonus",
+          "default": 2,
+          "type": "int",
+          "label": "Rally point: cover bonus",
+          "help": "Hills and woods count as this many tiles closer.",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "melee_standoff",
+          "default": 2,
+          "type": "int",
+          "label": "Melee stand-off",
+          "help": "Melee units wait this far from the city until the siege is ready.",
+          "min": 0,
+          "max": 5,
+          "unit": "tiles"
+        }
+      ]
+    },
+    {
+      "name": "Peace and diplomacy",
+      "help": "Peace offers, embassies, friendships, research agreements, luxury trades.",
+      "params": [
+        {
+          "key": "war_long_turns",
+          "default": 25,
+          "type": "int",
+          "label": "War is long after",
+          "help": "The bot then looks for peace.",
+          "min": 1,
+          "max": 200,
+          "unit": "turns"
+        },
+        {
+          "key": "peace_min_turns",
+          "default": 10,
+          "type": "int",
+          "label": "No peace offers before",
+          "help": "",
+          "min": 0,
+          "max": 100,
+          "unit": "turns"
+        },
+        {
+          "key": "peace_offer_chance",
+          "default": 0.35,
+          "type": "float",
+          "label": "Peace offer chance",
+          "help": "Per turn, when losing or in a long war.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "losing_ratio",
+          "default": 0.9,
+          "type": "float",
+          "label": "Losing below power ratio",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "siege_progress_units",
+          "default": 2,
+          "type": "int",
+          "label": "Siege progressing: units",
+          "help": "A siege with this many units within ...",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "siege_progress_radius",
+          "default": 3,
+          "type": "int",
+          "label": "... tiles",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": "tiles"
+        },
+        {
+          "key": "siege_progress_health",
+          "default": 0.8,
+          "type": "float",
+          "label": "... and city health below",
+          "help": "... is progressing: no peace offer.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "diplo_every",
+          "default": 10,
+          "type": "int",
+          "label": "Diplomacy every",
+          "help": "Turns between embassy/friendship/agreement offers to a civ.",
+          "min": 1,
+          "max": 50,
+          "unit": "turns"
+        },
+        {
+          "key": "friend_max_ratio",
+          "default": 2.0,
+          "type": "float",
+          "label": "Friendship: not if stronger",
+          "help": "No friendship offers when our power is this many times theirs.",
+          "min": 0,
+          "max": 20,
+          "unit": "x"
+        },
+        {
+          "key": "friend_chance",
+          "default": 0.4,
+          "type": "float",
+          "label": "Friendship chance",
+          "help": "Chance = this - aggr x aggression.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "friend_chance_aggr",
+          "default": 0.3,
+          "type": "float",
+          "label": "Friendship chance per aggression",
+          "help": "",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "ra_gold_margin",
+          "default": 100,
+          "type": "int",
+          "label": "Research agreement reserve",
+          "help": "Gold kept beyond the agreement's cost.",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "lux_trade_every",
+          "default": 3,
+          "type": "int",
+          "label": "Luxury trade every",
+          "help": "",
+          "min": 1,
+          "max": 50,
+          "unit": "turns"
+        },
+        {
+          "key": "lux_spare_at",
+          "default": 2,
+          "type": "int",
+          "label": "Spare luxury at",
+          "help": "A luxury is spare with this many copies.",
+          "min": 1,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "lux_sell_gpt",
+          "default": 3,
+          "type": "int",
+          "label": "Sell a luxury for",
+          "help": "Gold per turn asked when they have no luxury to swap.",
+          "min": 0,
+          "max": 50,
+          "unit": "gold"
+        },
+        {
+          "key": "lux_buyer_min_gold",
+          "default": 20,
+          "type": "int",
+          "label": "Buyer needs gold",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "lux_buy",
+          "default": false,
+          "type": "bool",
+          "label": "Buy luxuries",
+          "help": "While happiness is short, offer gold per turn for a luxury type we lack to a civ with a spare (bots otherwise only offer their own surplus)."
+        },
+        {
+          "key": "lux_buy_gpt",
+          "default": 2,
+          "type": "int",
+          "label": "Pay for a luxury",
+          "help": "Gold per turn offered for a luxury we lack.",
+          "min": 1,
+          "max": 20,
+          "unit": "gold"
+        },
+        {
+          "key": "lux_buy_hap_margin",
+          "default": 2,
+          "type": "int",
+          "label": "Buy luxuries below happiness",
+          "help": "Happiness is short below cities + this.",
+          "min": -10,
+          "max": 30,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "Deals",
+      "help": "What deal items are worth, in gold. The same values judge offers made and received.",
+      "params": [
+        {
+          "key": "deal_gpt",
+          "default": 0.8,
+          "type": "float",
+          "label": "Gold per turn",
+          "help": "Value per gold per turn per turn of the deal.",
+          "min": 0,
+          "max": 2,
+          "unit": ""
+        },
+        {
+          "key": "deal_lux_needed",
+          "default": 60,
+          "type": "int",
+          "label": "Luxury we need",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_lux_spare",
+          "default": 15,
+          "type": "int",
+          "label": "Spare luxury",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_strategic_needed",
+          "default": 45,
+          "type": "int",
+          "label": "Strategic we lack: base",
+          "help": "... + per era.",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_strategic_needed_per_era",
+          "default": 15,
+          "type": "int",
+          "label": "Strategic we lack: per era",
+          "help": "",
+          "min": 0,
+          "max": 200,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_strategic_spare_per_era",
+          "default": 12,
+          "type": "int",
+          "label": "Spare strategic: per era",
+          "help": "",
+          "min": 0,
+          "max": 200,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_open_borders",
+          "default": 12,
+          "type": "int",
+          "label": "Open borders",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_embassy",
+          "default": 8,
+          "type": "int",
+          "label": "Embassy",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_peace",
+          "default": 120,
+          "type": "int",
+          "label": "Peace",
+          "help": "Value of peace when not clearly stronger.",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_peace_strong_ratio",
+          "default": 1.3,
+          "type": "float",
+          "label": "Clearly stronger above",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "deal_peace_when_strong",
+          "default": 60,
+          "type": "int",
+          "label": "Peace cost when stronger",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_peace_while_winning",
+          "default": 150,
+          "type": "int",
+          "label": "Peace cost mid-campaign",
+          "help": "Cost of peace while our campaign against them is young and we are not weaker.",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_peace_campaign_turns",
+          "default": 40,
+          "type": "int",
+          "label": "Campaign is young for",
+          "help": "",
+          "min": 0,
+          "max": 200,
+          "unit": "turns"
+        },
+        {
+          "key": "deal_peace_campaign_ratio",
+          "default": 0.8,
+          "type": "float",
+          "label": "Not weaker above",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "deal_friendship",
+          "default": 25,
+          "type": "int",
+          "label": "Friendship or pact",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_friendship_refuse",
+          "default": 80,
+          "type": "int",
+          "label": "Refuse friendship",
+          "help": "Cost when we dislike them or plan war.",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_ra",
+          "default": 40,
+          "type": "int",
+          "label": "Research agreement",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_ra_margin",
+          "default": 50,
+          "type": "int",
+          "label": "Research agreement reserve",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_ra_refuse",
+          "default": 100,
+          "type": "int",
+          "label": "Refuse research agreement",
+          "help": "When we can't afford it.",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_map_get",
+          "default": 25,
+          "type": "int",
+          "label": "Their map",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_map_give",
+          "default": 20,
+          "type": "int",
+          "label": "Our map",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_city",
+          "default": 300,
+          "type": "int",
+          "label": "City: base",
+          "help": "",
+          "min": 0,
+          "max": 5000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_city_per_pop",
+          "default": 60,
+          "type": "int",
+          "label": "City: per citizen",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_tech_get",
+          "default": 0.6,
+          "type": "float",
+          "label": "Tech received",
+          "help": "Share of its research cost.",
+          "min": 0,
+          "max": 3,
+          "unit": ""
+        },
+        {
+          "key": "deal_tech_give",
+          "default": 0.9,
+          "type": "float",
+          "label": "Tech given",
+          "help": "",
+          "min": 0,
+          "max": 3,
+          "unit": ""
+        },
+        {
+          "key": "deal_ally_war",
+          "default": 200,
+          "type": "int",
+          "label": "They join our war",
+          "help": "Them declaring on someone we fight or plan to fight.",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_other_war",
+          "default": 20,
+          "type": "int",
+          "label": "They declare on someone else",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_war_cost",
+          "default": 250,
+          "type": "int",
+          "label": "Us declaring: base cost",
+          "help": "Cost = base + risk x max(0, their power / ours - from) ...",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_war_risk",
+          "default": 250,
+          "type": "int",
+          "label": "Us declaring: risk",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_war_risk_from",
+          "default": 0.5,
+          "type": "float",
+          "label": "Us declaring: risk from ratio",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "deal_war_city_state",
+          "default": 300,
+          "type": "int",
+          "label": "Declaring on a city-state",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_war_betrayal",
+          "default": 400,
+          "type": "int",
+          "label": "Betraying a friend",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "deal_war_planned_share",
+          "default": 0.3,
+          "type": "float",
+          "label": "Already planned share",
+          "help": "Share of the cost when we meant to fight them anyway.",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "deal_war_mult",
+          "default": 1.3,
+          "type": "float",
+          "label": "War cost multiplier",
+          "help": "... times (this - aggr x aggression).",
+          "min": 0,
+          "max": 5,
+          "unit": "x"
+        },
+        {
+          "key": "deal_war_mult_aggr",
+          "default": 0.6,
+          "type": "float",
+          "label": "War cost per aggression",
+          "help": "",
+          "min": 0,
+          "max": 5,
+          "unit": ""
+        },
+        {
+          "key": "counter_rounds",
+          "default": 4,
+          "type": "int",
+          "label": "Counter-offers up to",
+          "help": "Counter-offers the bot makes in one negotiation; after that it rejects.",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "counter_max_gap",
+          "default": 150,
+          "type": "int",
+          "label": "Counter within",
+          "help": "Counter (ask for gold) when a deal is short by less than this.",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "counter_margin",
+          "default": 10,
+          "type": "int",
+          "label": "Counter margin",
+          "help": "Gold added on top of the shortfall.",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        }
+      ]
+    },
+    {
+      "name": "Gold",
+      "help": "Reserves, purchases, deficits.",
+      "params": [
+        {
+          "key": "gold_reserve",
+          "default": 60,
+          "type": "int",
+          "label": "Reserve",
+          "help": "Gold kept back = this + per era x era.",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "gold_reserve_per_era",
+          "default": 25,
+          "type": "int",
+          "label": "Reserve per era",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "buy_cap",
+          "default": 60,
+          "type": "int",
+          "label": "Purchase cap",
+          "help": "Most spent on one item = max(this + per era x era (+ settler), spare x share).",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "buy_cap_per_era",
+          "default": 60,
+          "type": "int",
+          "label": "Purchase cap per era",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "buy_cap_settler",
+          "default": 40,
+          "type": "int",
+          "label": "Purchase cap: settler extra",
+          "help": "",
+          "min": 0,
+          "max": 500,
+          "unit": "gold"
+        },
+        {
+          "key": "buy_cap_spare_share",
+          "default": 0.6,
+          "type": "float",
+          "label": "Purchase cap: share of spare",
+          "help": "",
+          "min": 0,
+          "max": 1,
+          "unit": ""
+        },
+        {
+          "key": "deficit_horizon",
+          "default": 8,
+          "type": "int",
+          "label": "Deficit horizon",
+          "help": "Act on negative income when gold would run out within this.",
+          "min": 0,
+          "max": 100,
+          "unit": "turns"
+        },
+        {
+          "key": "gold_focus_deficit",
+          "default": 3,
+          "type": "int",
+          "label": "Gold focus below",
+          "help": "Put the biggest city on gold focus below -this per turn.",
+          "min": 0,
+          "max": 100,
+          "unit": "gold"
+        },
+        {
+          "key": "gold_focus_release",
+          "default": 8,
+          "type": "int",
+          "label": "Release gold focus above",
+          "help": "",
+          "min": -50,
+          "max": 100,
+          "unit": "gold"
+        }
+      ]
+    },
+    {
+      "name": "City-states",
+      "help": "Gold gifts to city-states.",
+      "params": [
+        {
+          "key": "cs_gift_mode",
+          "default": "classic",
+          "type": "choice",
+          "label": "Gift mode",
+          "help": "classic: gift the most-liked city-state when rich; typed: gift the type we need where a gift crosses a threshold.",
+          "choices": [
+            "classic",
+            "typed"
+          ]
+        },
+        {
+          "key": "cs_gift_gold",
+          "default": 350,
+          "type": "int",
+          "label": "Classic: gift above",
+          "help": "Gift when gold exceeds this + per era x era.",
+          "min": 0,
+          "max": 5000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_gift_gold_per_era",
+          "default": 80,
+          "type": "int",
+          "label": "Classic: per era",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_gift_focus_influence",
+          "default": 30,
+          "type": "int",
+          "label": "Classic: prefer influence above",
+          "help": "",
+          "min": 0,
+          "max": 200,
+          "unit": ""
+        },
+        {
+          "key": "cs_gift_amount",
+          "default": 250,
+          "type": "int",
+          "label": "Classic: gift",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_typed_reserve",
+          "default": 200,
+          "type": "int",
+          "label": "Typed: reserve",
+          "help": "Gold kept = this + per era x era ...",
+          "min": 0,
+          "max": 5000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_typed_reserve_per_era",
+          "default": 60,
+          "type": "int",
+          "label": "Typed: reserve per era",
+          "help": "",
+          "min": 0,
+          "max": 1000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_typed_min_spare",
+          "default": 150,
+          "type": "int",
+          "label": "Typed: spare needed",
+          "help": "... plus at least this to spend.",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_typed_amount",
+          "default": 250,
+          "type": "int",
+          "label": "Typed: gift",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_typed_big_above",
+          "default": 500,
+          "type": "int",
+          "label": "Typed: big gift above",
+          "help": "Spare gold above which the big gift is used.",
+          "min": 0,
+          "max": 5000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_typed_big_amount",
+          "default": 500,
+          "type": "int",
+          "label": "Typed: big gift",
+          "help": "",
+          "min": 0,
+          "max": 5000,
+          "unit": "gold"
+        },
+        {
+          "key": "cs_typed_hap_margin",
+          "default": 2,
+          "type": "int",
+          "label": "Typed: need happiness below",
+          "help": "Cities + this.",
+          "min": -10,
+          "max": 20,
+          "unit": ""
+        },
+        {
+          "key": "cs_w_mercantile_unhappy",
+          "default": 3.0,
+          "type": "float",
+          "label": "Mercantile (need happiness)",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_w_mercantile",
+          "default": 1.2,
+          "type": "float",
+          "label": "Mercantile",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_w_maritime",
+          "default": 2.0,
+          "type": "float",
+          "label": "Maritime",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_w_cultured",
+          "default": 1.5,
+          "type": "float",
+          "label": "Cultured",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_w_religious",
+          "default": 0.8,
+          "type": "float",
+          "label": "Religious",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_w_militaristic",
+          "default": 0.6,
+          "type": "float",
+          "label": "Militaristic",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_v_friend",
+          "default": 1.0,
+          "type": "float",
+          "label": "Becoming friends",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_v_ally",
+          "default": 2.0,
+          "type": "float",
+          "label": "Becoming allies",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_v_defend",
+          "default": 1.5,
+          "type": "float",
+          "label": "Keeping an alliance",
+          "help": "",
+          "min": 0,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "cs_typed_defend_margin",
+          "default": 15,
+          "type": "int",
+          "label": "Alliance at risk within",
+          "help": "A rival within this influence of ours.",
+          "min": 0,
+          "max": 100,
+          "unit": ""
+        },
+        {
+          "key": "cs_typed_safe_lead",
+          "default": 30,
+          "type": "int",
+          "label": "Safe alliance lead",
+          "help": "No more gifts with this lead over every rival ...",
+          "min": 0,
+          "max": 200,
+          "unit": ""
+        },
+        {
+          "key": "cs_typed_safe_above_ally",
+          "default": 20,
+          "type": "int",
+          "label": "... and this above the ally threshold",
+          "help": "",
+          "min": 0,
+          "max": 200,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "Religion",
+      "help": "Beliefs and faith spending.",
+      "params": [
+        {
+          "key": "belief_mode",
+          "default": "prefs",
+          "type": "choice",
+          "label": "Belief choice",
+          "help": "prefs: the ranked lists below; unciv: UnCiv's AI weights.",
+          "choices": [
+            "prefs",
+            "unciv"
+          ]
+        },
+        {
+          "key": "beliefs_pantheon",
+          "default": [
+            "Goddess of Love",
+            "Fertility Rites",
+            "Religious Settlements",
+            "God of Craftsman",
+            "Sacred Waters",
+            "Ancestor Worship",
+            "Monument to the Gods",
+            "Goddess of the Hunt",
+            "Stone Circles",
+            "Oral Tradition"
+          ],
+          "type": "order",
+          "label": "Pantheon beliefs",
+          "help": "In order of preference.",
+          "options": [
+            "Goddess of Love",
+            "Fertility Rites",
+            "Religious Settlements",
+            "God of Craftsman",
+            "Sacred Waters",
+            "Ancestor Worship",
+            "Monument to the Gods",
+            "Goddess of the Hunt",
+            "Stone Circles",
+            "Oral Tradition",
+            "Tradition",
+            "God of War",
+            "Messenger of the Gods"
+          ],
+          "presets": {}
+        },
+        {
+          "key": "beliefs_founder",
+          "default": [
+            "Ceremonial Burial",
+            "Tithe",
+            "Church Property",
+            "Peace Loving",
+            "Pilgrimage",
+            "Initiation Rites",
+            "Interfaith Dialogue",
+            "World Church",
+            "Papal Primacy"
+          ],
+          "type": "order",
+          "label": "Founder beliefs",
+          "help": "",
+          "options": [
+            "Ceremonial Burial",
+            "Tithe",
+            "Church Property",
+            "Peace Loving",
+            "Pilgrimage",
+            "Initiation Rites",
+            "Interfaith Dialogue",
+            "World Church",
+            "Papal Primacy"
+          ],
+          "presets": {}
+        },
+        {
+          "key": "beliefs_follower",
+          "default": [
+            "Pagodas",
+            "Religious Center",
+            "Feed the World",
+            "Mosques",
+            "Cathedrals",
+            "Religious Community",
+            "Swords into Ploughshares",
+            "Peace Gardens",
+            "Divine inspiration",
+            "Guruship",
+            "Asceticism",
+            "Choral Music",
+            "Liturgical Drama",
+            "Monasteries",
+            "Religious Art",
+            "Holy Warriors"
+          ],
+          "type": "order",
+          "label": "Follower beliefs",
+          "help": "",
+          "options": [
+            "Pagodas",
+            "Religious Center",
+            "Feed the World",
+            "Mosques",
+            "Cathedrals",
+            "Religious Community",
+            "Swords into Ploughshares",
+            "Peace Gardens",
+            "Divine inspiration",
+            "Guruship",
+            "Asceticism",
+            "Choral Music",
+            "Liturgical Drama",
+            "Monasteries",
+            "Religious Art",
+            "Holy Warriors"
+          ],
+          "presets": {}
+        },
+        {
+          "key": "beliefs_enhancer",
+          "default": [
+            "Religious Texts",
+            "Itinerant Preachers",
+            "Missionary Zeal",
+            "Reliquary",
+            "Messiah",
+            "Holy Order",
+            "Just War",
+            "Religious Unity",
+            "Defender of the Faith"
+          ],
+          "type": "order",
+          "label": "Enhancer beliefs",
+          "help": "",
+          "options": [
+            "Religious Texts",
+            "Itinerant Preachers",
+            "Missionary Zeal",
+            "Reliquary",
+            "Messiah",
+            "Holy Order",
+            "Just War",
+            "Religious Unity",
+            "Defender of the Faith"
+          ],
+          "presets": {}
+        },
+        {
+          "key": "pantheon_unciv",
+          "default": [
+            "Fertility Rites",
+            "God of Craftsman",
+            "Religious Settlements",
+            "Tradition",
+            "Ancestor Worship",
+            "Goddess of Love",
+            "Monument to the Gods",
+            "God of War",
+            "Messenger of the Gods"
+          ],
+          "type": "order",
+          "label": "Pantheon (unciv mode)",
+          "help": "Pantheon order when belief choice is unciv.",
+          "options": [
+            "Fertility Rites",
+            "God of Craftsman",
+            "Religious Settlements",
+            "Tradition",
+            "Ancestor Worship",
+            "Goddess of Love",
+            "Monument to the Gods",
+            "God of War",
+            "Messenger of the Gods",
+            "Sacred Waters",
+            "Goddess of the Hunt",
+            "Stone Circles",
+            "Oral Tradition"
+          ],
+          "presets": {}
+        },
+        {
+          "key": "faith_buildings",
+          "default": true,
+          "type": "bool",
+          "label": "Buy faith buildings",
+          "help": "Buy faith-only buildings (Pagoda, Mosque, Cathedral) before missionaries."
+        },
+        {
+          "key": "faith_min",
+          "default": 200,
+          "type": "int",
+          "label": "Spend faith above",
+          "help": "",
+          "min": 0,
+          "max": 5000,
+          "unit": "faith"
+        },
+        {
+          "key": "faith_building_keep",
+          "default": 50,
+          "type": "int",
+          "label": "Faith kept after a building",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": "faith"
+        },
+        {
+          "key": "faith_missionary_keep",
+          "default": 100,
+          "type": "int",
+          "label": "Faith kept after a missionary",
+          "help": "",
+          "min": 0,
+          "max": 2000,
+          "unit": "faith"
+        },
+        {
+          "key": "max_missionaries",
+          "default": 2,
+          "type": "int",
+          "label": "Missionaries at once",
+          "help": "",
+          "min": 0,
+          "max": 20,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "name": "Policies and great people",
+      "help": "",
+      "params": [
+        {
+          "key": "policy_order_peaceful",
+          "default": "rationalism_early",
+          "type": "order",
+          "label": "Policy order (peaceful)",
+          "help": "Branch order below the aggressive threshold.",
+          "options": [
+            "Tradition",
+            "Liberty",
+            "Honor",
+            "Piety",
+            "Patronage",
+            "Commerce",
+            "Rationalism",
+            "Freedom",
+            "Order",
+            "Autocracy"
+          ],
+          "presets": {
+            "default": [
+              "Tradition",
+              "Liberty",
+              "Piety",
+              "Patronage",
+              "Rationalism",
+              "Commerce",
+              "Freedom",
+              "Order",
+              "Honor",
+              "Autocracy"
+            ],
+            "rationalism_early": [
+              "Tradition",
+              "Liberty",
+              "Rationalism",
+              "Patronage",
+              "Commerce",
+              "Piety",
+              "Freedom",
+              "Order",
+              "Honor",
+              "Autocracy"
+            ],
+            "liberty_first": [
+              "Liberty",
+              "Tradition",
+              "Rationalism",
+              "Commerce",
+              "Patronage",
+              "Piety",
+              "Freedom",
+              "Order",
+              "Honor",
+              "Autocracy"
+            ]
+          }
+        },
+        {
+          "key": "policy_order_aggressive",
+          "default": null,
+          "type": "order",
+          "label": "Policy order (aggressive)",
+          "help": "",
+          "options": [
+            "Tradition",
+            "Liberty",
+            "Honor",
+            "Piety",
+            "Patronage",
+            "Commerce",
+            "Rationalism",
+            "Freedom",
+            "Order",
+            "Autocracy"
+          ],
+          "presets": {
+            "default": [
+              "Honor",
+              "Tradition",
+              "Liberty",
+              "Commerce",
+              "Rationalism",
+              "Autocracy",
+              "Patronage",
+              "Piety",
+              "Order",
+              "Freedom"
+            ],
+            "rationalism_early": [
+              "Tradition",
+              "Liberty",
+              "Rationalism",
+              "Patronage",
+              "Commerce",
+              "Piety",
+              "Freedom",
+              "Order",
+              "Honor",
+              "Autocracy"
+            ],
+            "liberty_first": [
+              "Liberty",
+              "Tradition",
+              "Rationalism",
+              "Commerce",
+              "Patronage",
+              "Piety",
+              "Freedom",
+              "Order",
+              "Honor",
+              "Autocracy"
+            ]
+          }
+        },
+        {
+          "key": "policy_picks_per_turn",
+          "default": 4,
+          "type": "int",
+          "label": "Policies per turn",
+          "help": "Most policies adopted in one turn.",
+          "min": 1,
+          "max": 10,
+          "unit": ""
+        },
+        {
+          "key": "free_gp_early",
+          "default": "Great Scientist",
+          "type": "choice",
+          "label": "Free great person (early)",
+          "help": "",
+          "choices": [
+            "Great Scientist",
+            "Great Engineer",
+            "Great Merchant",
+            "Great Artist",
+            "Great Writer",
+            "Great Musician",
+            "Great Prophet",
+            "Great General",
+            "Great Admiral"
+          ]
+        },
+        {
+          "key": "free_gp_late",
+          "default": "Great Engineer",
+          "type": "choice",
+          "label": "Free great person (late)",
+          "help": "",
+          "choices": [
+            "Great Scientist",
+            "Great Engineer",
+            "Great Merchant",
+            "Great Artist",
+            "Great Writer",
+            "Great Musician",
+            "Great Prophet",
+            "Great General",
+            "Great Admiral"
+          ]
+        },
+        {
+          "key": "free_gp_switch_era",
+          "default": 4,
+          "type": "int",
+          "label": "Late from era",
+          "help": "",
+          "min": 0,
+          "max": 8,
+          "unit": ""
+        }
+      ]
+    }
+  ]
+}

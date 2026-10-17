@@ -1,0 +1,32 @@
+about = """
+An action that is none of accept, counter, reject and reply (nor an alias of reject) is refused with
+the valid ones, and the negotiation is left as it was.
+"""
+from = "tests/test_negotiation_chat.py::MessageTests::test_an_unknown_action_is_refused_with_the_valid_ones"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "haggle", message = "Fine." }
+error = "action must be one of: accept, counter, reject, reply (decline, withdraw and end also mean reject)."
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 7, action = "reply", message = "Fine." }
+error = "No negotiation with id 7."
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "open", awaiting = 1 }

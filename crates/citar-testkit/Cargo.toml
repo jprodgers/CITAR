@@ -1,0 +1,47 @@
+[package]
+name = "citar-testkit"
+description = "Every integration test of the CITAR engine: rule scripts, properties, goldens, agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
+# The bots, which drive seats in the Phase 2 tests, the fixture sweep, chaos and the soak
+# (DESIGN.md P2.3.11).
+citar-bot.workspace = true
+serde.workspace = true
+# raw_value: a fixture's state is handed to the converter as the text Python wrote.
+serde_json = { workspace = true, features = ["raw_value"] }
+blake3.workspace = true
+# The refcheck fixtures are gzipped.
+flate2.workspace = true
+# Rule scripts are TOML, and their `matches` checks regular expressions (DESIGN.md 9.3).
+toml.workspace = true
+regex.workspace = true
+# The fuzz targets' bytes, read as tool calls (`fuzz::fuzz_one`, DESIGN.md 9.5).
+arbitrary.workspace = true
+
+[features]
+default = ["checks"]
+# The engine's invariants and cache oracle in every build, release included (DESIGN.md 9.4): the
+# golden sets, chaos and the properties ask them (`citar_testkit::checks`). citar-bench builds
+# testkit without it, and turns the checks off in every game it times (`citar_bench::unchecked`),
+# since a command that selects both crates unifies the feature back on.
+checks = ["citar-engine/checks"]
+# The engine's memo counters, which the soak slices read (DESIGN.md 10).
+stats = ["citar-engine/stats"]
+
+[dev-dependencies]
+proptest.workspace = true
+# One trial per rule script, so that nextest lists each (tests/rules.rs).
+libtest-mimic.workspace = true
+
+[[test]]
+name = "rules"
+harness = false
+
+[lints]
+workspace = true

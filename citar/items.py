@@ -1,0 +1,598 @@
+"""Owned items: every file-backed job type has an owner and a visibility (design/phase3-features.md P3.2.4).
+
+Benchmark suites and runs, probes and probe runs, lab experiments, scenarios, maps, bot profiles and reports keep
+their files where they always were. What they gain is a row in ``owned_items`` (kind, ref: the item's id on disk),
+written by whatever creates the item and marked deleted by whatever deletes it, which says who owns it and who may
+see it, on the same ladder as a game (``access.on``; an ACL entry's object type is the row's kind). This module is
+the only writer of those rows, and the one gate every item route goes through:
+
+    row, perms = items.require(sdb, "probe", pid, me, access.MANAGE)     # 404 for a stranger, 403 for a viewer
+    refs = items.visible_refs(sdb, "map", me)                             # what a listing may show
+
+A file with no row is nobody's, so no route serves it: ``require`` answers 404 for everyone. Such files exist only
+where something wrote one without registering it (a crash between the two, a file copied in by hand, a lab
+experiment queued from the command line with no database at hand, everything from before 0.1.6); ``adopt_orphans``
+registers them, to the account the file itself names when it names one, else to the first administrator, private,
+with one audit row. It runs at every boot that has an administrator, and from ``accounts.on_first_admin`` when the
+first one is made on a fresh server-mode database (``policy`` marker ``orphans_adopted``). Until then those files
+answer 404, so a half-written file never becomes an unowned, unguarded object.
+
+System items are the shipped content (the built-in bot profiles): ``owner_id`` null, ``global``, managed by
+administrators only, registered at boot.
+
+Python lines this replaces: the item routes' bare ``require_user`` (app.py's benchmarks, maps, scenarios, probes,
+probe runs, lab and queue routes; bots_api.py's admin-only writes; admin_api.py's admin-only reports).
+"""
+from __future__ import annotations
+
+import gzip
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator, Optional, Tuple
+
+from fastapi import HTTPException
+from sqlalchemy import select
+
+from . import db, fsutil, paths
+from .auth import access, audit
+from .db.models import ITEM_KINDS, AclEntry, OwnedItem, User
+
+log = logging.getLogger("citar.items")
+
+KINDS = ITEM_KINDS
+
+#: How each kind is named in a message ("No such benchmark run.").
+NOUNS = {"benchmark_suite": "benchmark suite", "benchmark_run": "benchmark run", "probe": "probe",
+         "probe_run": "probe run", "lab_experiment": "lab experiment", "scenario": "scenario", "map": "map",
+         "bot_profile": "bot profile", "report": "report"}
+
+#: The capability that creating an item of each kind needs (P3.2.4). Changing one needs MANAGE on it instead.
+CREATE_CAPS = {"benchmark_suite": "run_benchmarks", "benchmark_run": "run_benchmarks", "probe": "run_probes",
+               "probe_run": "run_probes", "lab_experiment": "run_lab", "scenario": "create_games",
+               "map": "create_games", "bot_profile": "edit_bots", "report": "run_reports"}
+
+
+def check_kind(kind: str) -> str:
+    """``kind`` when it is an item kind; a 404 otherwise (a URL naming no kind names nothing)."""
+    if kind not in KINDS:
+        raise HTTPException(404, "No such item.")
+    return kind
+
+
+def noun(kind: str) -> str:
+    """A kind as a message names it."""
+    return NOUNS.get(kind, "item")
+
+
+def _now() -> datetime:
+    """The current time, UTC."""
+    return datetime.now(timezone.utc)
+
+
+def _owner_id(owner) -> Optional[str]:
+    """An owner given as an account or an id, as an id."""
+    if owner is None:
+        return None
+    return owner.id if isinstance(owner, User) else str(owner)
+
+
+def relpath(path) -> Optional[str]:
+    """A file's path as a row keeps it: relative to the state directory, with forward slashes, or absolute when the
+    file lives elsewhere (``CITAR_BENCH_DIR`` may point outside it)."""
+    if path is None:
+        return None
+    p = Path(path).resolve()
+    try:
+        return p.relative_to(paths.state_dir().resolve()).as_posix()
+    except ValueError:
+        return p.as_posix()
+
+
+def file_path(row: OwnedItem) -> Optional[Path]:
+    """Where a row's file is (``relpath`` undone), or None for a row that names none."""
+    if not row.path:
+        return None
+    p = Path(row.path)
+    return p if p.is_absolute() else paths.state_dir() / p
+
+
+# ---------------------------------------------------------------------------- rows
+
+def get(session, kind: str, ref: str, *, deleted: bool = False) -> Optional[OwnedItem]:
+    """An item's row by its kind and id on disk; a deleted one only with ``deleted``."""
+    row = session.scalar(select(OwnedItem).where(OwnedItem.kind == kind, OwnedItem.ref == str(ref)))
+    if row is not None and row.deleted_at is not None and not deleted:
+        return None
+    return row
+
+
+def register(session, kind: str, ref: str, owner, name: str = "", *, path=None,
+             visibility: str = access.PRIVATE, meta: Optional[dict] = None, collection: bool = False,
+             actor: Optional[User] = None, audit_row: bool = True) -> OwnedItem:
+    """The row for an item just written to disk.
+
+    A new item gets a row owned by ``owner`` (an account, an id, or None for a system item) at ``visibility``. An
+    item that has a live row keeps its owner, visibility, sharing and slug, and only takes the new name, path and
+    meta: saving changes the item, never who owns it (the route checked MANAGE). An id whose item was deleted is a
+    new item: nothing of the old one carries over, its allowlist and its share link included. ``actor`` is recorded
+    in the audit row of a new item (the owner when not given). Adoption and the shipped items pass ``audit_row``
+    False: nobody made those items, and adoption writes one row for everything it adopted."""
+    check_kind(kind)
+    access.check_visibility(visibility)
+    row = get(session, kind, ref, deleted=True)
+    if row is not None and row.deleted_at is None:
+        if name:
+            row.name = str(name)[:160]
+        if path is not None:
+            row.path = relpath(path)
+        if meta is not None:
+            row.meta = dict(meta)
+        row.updated_at = _now()
+        session.flush()
+        return row
+    if row is not None:
+        # a deleted item's row goes, with its allowlist: the new item gets an id, a link and a history of its own
+        # (an old unpublish must not show on it), while the audit log keeps the old one's under its id
+        for entry in session.scalars(select(AclEntry).where(AclEntry.object_type == kind,
+                                                            AclEntry.object_id == row.id)):
+            session.delete(entry)
+        session.delete(row)
+        session.flush()
+    row = OwnedItem(kind=kind, ref=str(ref))
+    session.add(row)
+    row.owner_id = _owner_id(owner)
+    row.name = str(name or ref)[:160]
+    row.visibility = visibility
+    row.path = relpath(path)
+    row.meta = dict(meta or {})
+    row.collection = bool(collection)
+    row.updated_at = _now()
+    session.flush()
+    if audit_row:
+        who = actor if actor is not None else (owner if isinstance(owner, User)
+                                               else session.get(User, row.owner_id) if row.owner_id else None)
+        audit.record(session, f"{kind}.created", actor=who, object_type=kind, object_id=row.id, ref=row.ref,
+                     owner=row.owner_id, visibility=visibility)
+    return row
+
+
+def rename(session, kind: str, ref: str, name: str) -> Optional[OwnedItem]:
+    """Give an item's row a new name (None when it has none)."""
+    row = get(session, kind, ref)
+    if row is not None and name:
+        row.name = str(name)[:160]
+        row.updated_at = _now()
+    return row
+
+
+def delete(session, kind: str, ref: str, *, actor: Optional[User] = None) -> Optional[OwnedItem]:
+    """Mark an item's row deleted (``deleted_at``): it leaves every listing and every route answers 404. The caller
+    removes the files."""
+    row = get(session, kind, ref)
+    if row is None:
+        return None
+    row.deleted_at = _now()
+    audit.record(session, f"{kind}.deleted", actor=actor, object_type=kind, object_id=row.id, ref=row.ref)
+    return row
+
+
+# ---------------------------------------------------------------------------- the gate
+
+def resolve(session, kind: str, ref: str, viewer: Optional[User], *,
+            slug: Optional[str] = None) -> Tuple[Optional[OwnedItem], access.Access]:
+    """What ``viewer`` may do with an item: its live row (None when it has none) and the permissions. An item with no
+    row grants nothing, to administrators either: it is nobody's until it is adopted."""
+    row = get(session, kind, ref)
+    if row is None:
+        return None, access.Access(set(), object_type=kind, object_id=str(ref),
+                                   viewer_id=viewer.id if viewer is not None else None)
+    return row, access.on(session, viewer, row, slug=slug)
+
+
+def require(session, kind: str, ref: str, viewer: Optional[User], permission: str = access.VIEW, *,
+            slug: Optional[str] = None) -> Tuple[OwnedItem, access.Access]:
+    """An item ``viewer`` has ``permission`` on, with the permissions; 404 when they cannot see it (or it has no row),
+    403 when they can see it but not do this (``Access.require``)."""
+    check_kind(kind)
+    row, perms = resolve(session, kind, ref, viewer, slug=slug)
+    perms.require(permission)
+    return row, perms
+
+
+def check_create(user: User, kind: str) -> None:
+    """The capability a new item of ``kind`` needs (``CREATE_CAPS``), as the 403 ``require_cap`` gives."""
+    from .auth.deps import check_cap
+    check_cap(user, CREATE_CAPS[check_kind(kind)])
+
+
+#: What follows an item's visibility when it changes (its sharing route, an unpublish), by kind: a benchmark run's
+#: games follow the run (registered by the server's app, which knows the runs).
+VISIBILITY_HOOKS: dict = {}
+
+
+def visibility_changed(session, row: OwnedItem) -> None:
+    """Run the kind's hook after ``row``'s visibility changed."""
+    hook = VISIBILITY_HOOKS.get(row.kind)
+    if hook is not None:
+        hook(session, row)
+
+
+def writable(session, kind: str, ref: str, user: User, *, exists: bool) -> Optional[OwnedItem]:
+    """The gate on saving an item under ``ref``, before anything is written: replacing a live item needs MANAGE on it
+    (404 when the caller cannot see it, 403 when they only see it); a new one needs the kind's capability
+    (``CREATE_CAPS``). ``exists`` says whether a file is already there: a file with no row is nobody's to take, so it
+    is a 404 until adoption gives it an owner. Returns the live row, or None for a new item (the caller registers it
+    once its file is written)."""
+    row = get(session, kind, ref)
+    if row is not None:
+        access.on(session, user, row).require(access.MANAGE)
+        return row
+    if exists:
+        raise HTTPException(404, f"No such {noun(kind)}.")
+    check_create(user, kind)
+    return None
+
+
+def visible_refs(session, kind: str, viewer: Optional[User]) -> set:
+    """The ids on disk of the items of ``kind`` a listing may show ``viewer`` (``access.visible_filter``: `global`
+    ones for everyone, `server` ones for members, their own and those shared with them; every live one for
+    administrators; `link` ones never)."""
+    return set(session.scalars(select(OwnedItem.ref).where(OwnedItem.kind == kind,
+                                                           access.visible_filter(OwnedItem, viewer))))
+
+
+def keyed_ref(session, kind: str, slug: Optional[str]) -> Optional[str]:
+    """The item of ``kind`` a share key opens (``slug``: a `link` or `global` item's), or None. A listing shows it to
+    whoever presents the key, which is how a link to a page that lists items opens on that item; without the key it
+    stays unlisted (P3.2.3)."""
+    if not slug or len(slug) > 120:
+        return None
+    return session.scalar(select(OwnedItem.ref).where(
+        OwnedItem.kind == kind, OwnedItem.slug == slug, OwnedItem.deleted_at.is_(None),
+        OwnedItem.visibility.in_((access.LINK, access.GLOBAL))).limit(1))
+
+
+def listed(session, kind: str, viewer: Optional[User], *, slug: Optional[str] = None) -> Optional[set]:
+    """What a listing of ``kind`` shows ``viewer``: ``visible_refs``, plus the item a share key ``slug`` opens
+    (``keyed_ref``), or None (everything, files that have no row yet included) for an administrator in good
+    standing. A suspended or deleted account's key opens nothing, as ``access.on`` gives it nothing."""
+    if viewer is not None and viewer.role == "admin" and viewer.status == "active":
+        return None
+    refs = visible_refs(session, kind, viewer)
+    keyed = keyed_ref(session, kind, slug) if viewer is None or viewer.status not in ("suspended", "deleted") else None
+    if keyed is not None:
+        refs.add(keyed)
+    return refs
+
+
+def visible(session, kind: str, viewer: Optional[User], *, limit: int = 500) -> list:
+    """The rows of ``kind`` a listing may show ``viewer``, newest first."""
+    return list(session.scalars(select(OwnedItem).where(OwnedItem.kind == kind,
+                                                        access.visible_filter(OwnedItem, viewer))
+                                .order_by(OwnedItem.created_at.desc()).limit(limit)))
+
+
+def everyones_refs(session, kind: str) -> set:
+    """The ids on disk of the live items of ``kind`` every member may see: `global` and `server` ones (the shipped
+    items among them): what a choice the server makes for whoever asks picks from ("Best bot")."""
+    return set(session.scalars(select(OwnedItem.ref).where(
+        OwnedItem.kind == kind, OwnedItem.deleted_at.is_(None),
+        OwnedItem.visibility.in_((access.GLOBAL, access.SERVER)))))
+
+
+#: How many ids go in one ``IN (...)`` (SQLite's older builds allow 999 parameters in a statement).
+_CHUNK = 500
+
+
+def permissions_by_ref(session, kind: str, viewer: Optional[User], refs, *, slug: Optional[str] = None) -> dict:
+    """``Access.client()`` for each of ``refs`` that has a live row, for a listing to say which controls to show (with
+    the share key ``slug`` the listing was asked with, which opens its one item). Two queries per few hundred items
+    rather than two per item: the pages that list items poll every few seconds."""
+    refs = list(dict.fromkeys(str(r) for r in refs))
+    rows: list = []
+    for i in range(0, len(refs), _CHUNK):
+        rows += session.scalars(select(OwnedItem).where(OwnedItem.kind == kind, OwnedItem.deleted_at.is_(None),
+                                                        OwnedItem.ref.in_(refs[i:i + _CHUNK])))
+    acl: dict = {}
+    if viewer is not None:
+        ids = [row.id for row in rows]
+        for i in range(0, len(ids), _CHUNK):
+            for object_id, granted in access.acl_permissions_for(session, kind, ids[i:i + _CHUNK],
+                                                                 viewer.id).items():
+                acl[object_id] = granted
+    return {row.ref: access.on(session, viewer, row, slug=slug,
+                               acl=acl.get(row.id, set()) if viewer is not None else None).client()
+            for row in rows}
+
+
+def visibility_of(session, kind: str, ref: str) -> str:
+    """An item's visibility (`private` when it has no row)."""
+    row = get(session, kind, ref)
+    return row.visibility if row is not None else access.PRIVATE
+
+
+def client(session, row: OwnedItem, perms: access.Access, viewer: Optional[User]) -> dict:
+    """An item's sharing as the browser shows it to ``viewer``: its owner (as the viewer may see the account,
+    ``User.public``), visibility, the caller's permissions; for whoever manages it, its share link, who it is shared
+    with and its last unpublish."""
+    from . import settings
+    owner = session.get(User, row.owner_id) if row.owner_id else None
+    out = {"kind": row.kind, "ref": row.ref, "id": row.id, "name": row.name, "visibility": row.visibility,
+           "owner": owner.public(viewer) if owner is not None else None, "system": row.owner_id is None,
+           "created_at": row.created_at.isoformat() if row.created_at else None, **perms.client()}
+    if access.MANAGE in perms:
+        base = settings.get().public_origin
+        url = access.share_url(row, base)
+        if url:
+            out["share_url"] = url
+        page = public_url(row, base)
+        if page:
+            out["public_url"] = page
+        out["shared_with"] = access.shared_with(session, row, viewer)
+        out["unpublished"] = access.last_unpublished(session, row, perms.viewer_id)
+    return out
+
+
+def public_url(row: OwnedItem, base: str) -> Optional[str]:
+    """A report's page for people with no account (``/r/{slug}``, ``share_api``): by its share key when it is shared
+    by `link`, by its id when it is `global`; None for anything else."""
+    if row.kind != "report" or row.visibility not in (access.LINK, access.GLOBAL):
+        return None
+    return f"{base.rstrip('/')}/r/{row.slug if row.visibility == access.LINK else row.ref}"
+
+
+# ---------------------------------------------------------------------------- system items
+
+def system_items() -> Iterator[Tuple[str, str, str]]:
+    """The shipped content, as (kind, ref, name): the built-in bot profiles. The shipped build has no example
+    scenarios or maps."""
+    from .bots import profiles
+    for p in profiles.BUILTIN:
+        yield "bot_profile", p["id"], p["name"]
+
+
+def register_system(session) -> int:
+    """Give every shipped item its row, owned by nobody and `global` (only administrators manage it); returns how
+    many rows were made. A row the shipped id already has keeps its sharing, but never an owner."""
+    made = 0
+    for kind, ref, name in system_items():
+        row = get(session, kind, ref, deleted=True)
+        if row is None or row.deleted_at is not None:
+            register(session, kind, ref, None, name, visibility=access.GLOBAL, audit_row=False)
+            made += 1
+        elif row.owner_id is not None:
+            log.warning("the shipped %s %s had an owner; it is the server's", kind, ref)
+            row.owner_id = None
+    return made
+
+
+# ---------------------------------------------------------------------------- adoption
+
+def _json_object(p: Path) -> dict:
+    """A JSON file's object ({} for any other JSON value); raises when the file does not read as JSON. Read retried:
+    adoption also runs when the first administrator is made, with the server running, and a run, report or experiment
+    with no row yet may be replacing its file."""
+    d = json.loads(fsutil.read_text(p))
+    return d if isinstance(d, dict) else {}
+
+
+def _on_disk(kind: str) -> Iterator[Tuple[str, Path]]:
+    """Every item of ``kind`` on disk, as (ref, the path its row keeps), from the folders' listings alone: adoption
+    reads a file only when its id has no row, so a start costs a listing per folder, not a parse per item."""
+    if kind in ("benchmark_suite", "benchmark_run"):
+        folder = paths.bench_path("suites" if kind == "benchmark_suite" else "runs")
+        for p in sorted(folder.glob("*.json")) if folder.exists() else ():
+            yield p.stem, p
+    elif kind == "probe":
+        from . import probes
+        for p in sorted(probes.BASE.glob("*.json")) if probes.BASE.exists() else ():
+            yield p.stem, p
+    elif kind == "probe_run":
+        from . import probes
+        for p in sorted(probes.RUNS.glob("*/run.json")) if probes.RUNS.exists() else ():
+            yield p.parent.name, p.parent
+    elif kind == "lab_experiment":
+        from . import lab
+        for folder in (lab.QUEUE, lab.DONE):
+            for p in sorted(folder.glob("*.json")) if folder.exists() else ():
+                yield p.stem, p
+    elif kind == "scenario":
+        from . import engine_api
+        folder = engine_api.scenario_dir()
+        for p in sorted(folder.glob("*.citarscn")) if folder.exists() else ():
+            yield p.stem, p
+    elif kind == "map":
+        from . import engine_api
+        folder = engine_api.map_dir()
+        for p in sorted(folder.glob("*.json")) if folder.exists() else ():
+            yield p.stem, p
+    elif kind == "bot_profile":
+        from .bots import profiles
+        builtin = {b["id"] for b in profiles.BUILTIN}
+        folder = profiles.PROFILES_DIR
+        for p in sorted(folder.glob("*.json")) if folder.exists() else ():
+            if p.stem not in builtin:
+                yield p.stem, p
+    elif kind == "report":
+        from .reports import REPORTS
+        for p in sorted(REPORTS.glob("*/meta.json")) if REPORTS.exists() else ():
+            yield p.parent.name, p.parent / "report.html"
+
+
+def _describe(kind: str, path: Path) -> Tuple[Optional[str], Optional[str]]:
+    """What an item's file says of it: (its name, the owner id it records), either None when it says none. Raises
+    whatever reading it raises (a truncated or corrupt file): the caller decides what an unreadable file becomes."""
+    if kind == "scenario":
+        d = json.loads(gzip.decompress(fsutil.read_bytes(path)).decode("utf-8"))
+        return (d.get("name") if isinstance(d, dict) else None), None
+    if kind == "probe_run":
+        d = _json_object(path / "run.json")
+    elif kind == "report":
+        d = _json_object(path.parent / "meta.json")
+        return d.get("title"), d.get("owner_id")
+    else:
+        d = _json_object(path)
+    owner = d.get("owner_id") if kind in ("benchmark_suite", "benchmark_run", "probe", "probe_run",
+                                          "lab_experiment") else None
+    return d.get("name"), owner
+
+
+#: The longest id and path a row keeps (``OwnedItem.ref``, ``OwnedItem.path``): a file whose id or path would not
+#: fit is left, logged, for whoever put it there to rename (PostgreSQL refuses a longer value, which would stop
+#: the whole adoption).
+_REF_MAX = OwnedItem.__table__.c.ref.type.length
+_PATH_MAX = OwnedItem.__table__.c.path.type.length
+
+
+def first_admin(session) -> Optional[User]:
+    """The account strays are adopted by: the local owner in local mode, else the oldest active administrator."""
+    local = session.scalar(select(User).where(User.is_local_owner.is_(True), User.role == "admin",
+                                              User.status == "active"))
+    if local is not None:
+        return local
+    return session.scalar(select(User).where(User.role == "admin", User.status == "active")
+                          .order_by(User.created_at, User.id).limit(1))
+
+
+def adopt_orphans(session, owner: User) -> dict:
+    """Register every item file with no row (P3.2.4): to the account its file records (a run's or a report's
+    ``owner_id``) when that account exists, else to ``owner``; private. Also gives ``owner`` the games index's rows
+    that have no owner (``ownership.adopt_orphans``). One audit row when anything was adopted (the items get none of
+    their own: nobody made them now), and the ``orphans_adopted`` marker either way. Returns the count per kind (and
+    ``game``).
+
+    Only files whose id has no live row are read. A file that does not read (half-written, truncated, corrupt) is
+    still adopted, under its id, by ``owner``: private, so it is nobody else's, and an administrator's to remove
+    through its route; it is logged so it can be looked at."""
+    from .auth import policy
+    from .server import ownership
+    counts: dict = {}
+    for kind in KINDS:
+        known = set(session.scalars(select(OwnedItem.ref).where(OwnedItem.kind == kind,
+                                                                OwnedItem.deleted_at.is_(None))))
+        for ref, path in _on_disk(kind):
+            if ref in known:
+                continue
+            known.add(ref)
+            if len(ref) > _REF_MAX or len(relpath(path) or "") > _PATH_MAX:
+                log.warning("not adopting %s %s: its id or path is too long for a row (%s)", kind, ref[:40], path)
+                continue
+            try:
+                name, recorded = _describe(kind, path)
+            except Exception as e:      # whatever a damaged file raises (EOFError, zlib.error, UnicodeError...)
+                log.warning("%s %s does not read (%s: %s); adopted under its id", kind, ref, type(e).__name__, e)
+                name, recorded = None, None
+            holder = session.get(User, recorded) if isinstance(recorded, str) and recorded else None
+            if holder is None or holder.status == "deleted":
+                holder = owner
+            register(session, kind, ref, holder, str(name or ref), path=path, actor=owner, audit_row=False)
+            counts[kind] = counts.get(kind, 0) + 1
+    games = ownership.adopt_orphans(session, owner)
+    if games:
+        counts["game"] = games
+    if counts:
+        audit.record(session, "migration.items_adopted", actor=owner, **counts)
+        log.warning("adopted %s for %s", ", ".join(f"{n} {k}" for k, n in sorted(counts.items())), owner.handle)
+    policy.set_marker(session, "orphans_adopted", {"at": _now().isoformat(), "by": owner.id, "counts": counts})
+    return counts
+
+
+def _offline_db() -> Optional[str]:
+    """Open the server's database for a command-line tool, when it already exists with this version's tables: a tool
+    never creates, migrates or renames one, which is the server's business at its start. None when it is open, else
+    why not."""
+    from sqlalchemy import inspect
+    from . import settings
+    if not db.configured():
+        url = settings.get().db_url
+        if url.startswith("sqlite"):
+            file = url.split("///", 1)[-1]
+            if not file or file == ":memory:" or not Path(file).exists():
+                return "there is no server database here yet (the server adopts it when it starts)"
+        db.configure(url)
+    if "owned_items" not in inspect(db.engine()).get_table_names():
+        return "the server database is from another version (the server adopts it when it starts)"
+    return None
+
+
+def _offline_owner(s, owner_handle: Optional[str]):
+    """The account a command-line tool's item belongs to: ``owner_handle``'s, else the first administrator's; a
+    reason (text) when there is none."""
+    if owner_handle:
+        from .auth import accounts
+        owner = accounts.by_handle(s, owner_handle)
+        return owner if owner is not None else f"no account '{owner_handle}'"
+    owner = first_admin(s)
+    return owner if owner is not None else "the server has no administrator yet (it adopts this once one is made)"
+
+
+def offline_admin_refusal(owner_handle: Optional[str] = None) -> str:
+    """Why an item that must be an administrator's (a ranking or reference experiment of the lab, design/
+    phase4-helper.md P4.4.1) cannot be ``owner_handle``'s: '' when that account (or, by default, the first
+    administrator) is an administrator, or when there is no server database to ask yet (the first administrator
+    adopts it when the server starts)."""
+    try:
+        if _offline_db() is not None:
+            return ""
+        with db.session() as s:
+            owner = _offline_owner(s, owner_handle)
+            if isinstance(owner, str):
+                return owner if owner_handle else ""
+            return "" if owner.role == "admin" else f"{owner.handle} is not an administrator"
+    except Exception as e:      # nothing to check against: the server's adoption decides
+        log.warning("could not check the owner %s", owner_handle, exc_info=True)
+        return "" if not owner_handle else f"could not check {owner_handle} ({type(e).__name__}: {e})"
+
+
+def register_offline(kind: str, ref: str, name: str, path, owner_handle: Optional[str] = None, *,
+                     collection: bool = False) -> str:
+    """Register an item a command-line tool just wrote (``citar lab submit``), owned by ``owner_handle`` or else the
+    first administrator, when the server's database is there to write to; returns what was done, for the tool to
+    print. ``collection`` marks it the server's own data collection (a ranking or reference experiment: nobody's
+    credits pay for its compute). The database is opened only when it already exists with this version's tables
+    (:func:`_offline_db`). Anything not registered here is adopted at the server's next start (``adopt_orphans``, to
+    the owner its file records)."""
+    try:
+        why = _offline_db()
+        if why is not None:
+            return f"not registered: {why}"
+        with db.session() as s:
+            owner = _offline_owner(s, owner_handle)
+            if isinstance(owner, str):
+                return f"not registered: {owner}"
+            register(s, kind, ref, owner, name, path=path, collection=collection)
+            return f"registered to {owner.handle}" + (" as the server's own collection" if collection else "")
+    except Exception as e:      # the file is written; registering it is a convenience the next start repeats
+        log.warning("could not register %s %s", kind, ref, exc_info=True)
+        return f"not registered ({type(e).__name__}: {e}); the server adopts it when it starts"
+
+
+def on_boot() -> Optional[dict]:
+    """At the server's start, once the runners are back: the system items' rows, then adoption when there is an
+    administrator (a fresh server-mode database has none until ``create-admin`` or the setup flow makes one, which
+    adopts through ``accounts.on_first_admin``). Returns what was adopted, None when nobody could adopt.
+
+    Never raises: neither is a reason for the server not to start. Each runs in a transaction of its own, so a
+    failed adoption (logged) keeps the shipped items' rows and is tried again at the next start; meanwhile what it
+    did not adopt answers 404, as before."""
+    from .auth import policy
+    if not db.configured():
+        return None
+    try:
+        with db.session() as s:
+            register_system(s)
+    except Exception:
+        log.warning("could not register the shipped items", exc_info=True)
+    try:
+        with db.session() as s:
+            admin = first_admin(s)
+            if admin is None:
+                log.info("No administrator yet: item files without an owner stay unreachable until one is made.")
+                return None
+            return adopt_orphans(s, admin)
+    except Exception:
+        policy.invalidate()                      # the marker it may have cached was rolled back
+        log.warning("adopting the item files nobody owns failed; the next start tries again", exc_info=True)
+        return None

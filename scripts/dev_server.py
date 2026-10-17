@@ -24,6 +24,43 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DIR = Path(tempfile.gettempdir()) / "citar-dev"
 
 
+def instance_env(base: Path, port: int, *, host: str = "127.0.0.1", server: bool = False,
+                 registration: str = "open", environ=None) -> dict:
+    """The environment an instance on ``base`` and ``port`` runs with: every directory, the database and the
+    configuration under ``base``, nothing of the per-user data directory or the checkout's config. Built on
+    ``environ`` (``os.environ`` by default), whose own settings for the secret key, the mail sink and debug win.
+    ``scripts/qa_phase3.py`` gives its ``admin_cli`` calls the same one, so they reach the same database."""
+    env = dict(os.environ if environ is None else environ)
+    env["CITAR_DATA_DIR"] = str(base)
+    env["CITAR_STATE_DIR"] = str(base)
+    env["CITAR_SAVE_DIR"] = str(base / "saves")
+    env["CITAR_CONFIG_DIR"] = str(base / "config")
+    env["CITAR_BENCH_DIR"] = str(base / "benchmarks")
+    env["CITAR_DB_URL"] = "sqlite:///" + (base / "citar.db").as_posix()
+    env["CITAR_HOST"] = host
+    env["CITAR_PORT"] = str(port)
+    env["CITAR_REGISTRATION"] = registration
+    env.setdefault("CITAR_DEBUG", "1")
+    if server:
+        env["CITAR_MODE"] = "server"
+        # Browsers are opened at localhost, and an Origin of http://localhost:8800 does not match
+        # http://127.0.0.1:8800 — same machine, different origin, and every write would be refused.
+        host_for_origin = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
+        env["CITAR_PUBLIC_ORIGIN"] = f"http://{host_for_origin}:{port}"
+        # A development box has no TLS; relaxing this is exactly what the flag is for, and server
+        # mode refuses to start otherwise.
+        env["CITAR_REQUIRE_HTTPS"] = "0"
+        env["CITAR_BEHIND_PROXY"] = "0"
+        env.setdefault("CITAR_SECRET_KEY", "dev-only-secret-key-not-for-any-real-deployment")
+        # Server mode refuses the log transport, so point at a sink that is obviously not real.
+        env.setdefault("CITAR_SMTP_HOST", "localhost")
+        env.setdefault("CITAR_MAIL_FROM", "citar@localhost")
+    else:
+        env["CITAR_MODE"] = "local"
+        env["CITAR_MAIL_TRANSPORT"] = "log"     # links printed to the terminal
+    return env
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--port", type=int, default=8799)
@@ -42,32 +79,8 @@ def main() -> int:
     (base / "saves").mkdir(parents=True, exist_ok=True)
     (base / "config").mkdir(parents=True, exist_ok=True)
 
-    os.environ["CITAR_DATA_DIR"] = str(base)
-    os.environ["CITAR_SAVE_DIR"] = str(base / "saves")
-    os.environ["CITAR_CONFIG_DIR"] = str(base / "config")
-    os.environ["CITAR_DB_URL"] = "sqlite:///" + (base / "citar.db").as_posix()
-    os.environ["CITAR_HOST"] = args.host
-    os.environ["CITAR_PORT"] = str(args.port)
-    os.environ["CITAR_REGISTRATION"] = args.registration
-    os.environ.setdefault("CITAR_DEBUG", "1")
-
-    if args.server:
-        os.environ["CITAR_MODE"] = "server"
-        # Browsers are opened at localhost, and an Origin of http://localhost:8800 does not match
-        # http://127.0.0.1:8800 — same machine, different origin, and every write would be refused.
-        host_for_origin = "localhost" if args.host in ("127.0.0.1", "0.0.0.0") else args.host
-        os.environ["CITAR_PUBLIC_ORIGIN"] = f"http://{host_for_origin}:{args.port}"
-        # A development box has no TLS; relaxing this is exactly what the flag is for, and server
-        # mode refuses to start otherwise.
-        os.environ["CITAR_REQUIRE_HTTPS"] = "0"
-        os.environ["CITAR_BEHIND_PROXY"] = "0"
-        os.environ.setdefault("CITAR_SECRET_KEY", "dev-only-secret-key-not-for-any-real-deployment")
-        # Server mode refuses the log transport, so point at a sink that is obviously not real.
-        os.environ.setdefault("CITAR_SMTP_HOST", "localhost")
-        os.environ.setdefault("CITAR_MAIL_FROM", "citar@localhost")
-    else:
-        os.environ["CITAR_MODE"] = "local"
-        os.environ["CITAR_MAIL_TRANSPORT"] = "log"     # links printed to the terminal
+    os.environ.update(instance_env(base, args.port, host=args.host, server=args.server,
+                                   registration=args.registration))
 
     sys.path.insert(0, str(ROOT))
     print(f"CITAR dev instance\n  state : {base}\n  mode  : {os.environ['CITAR_MODE']}"

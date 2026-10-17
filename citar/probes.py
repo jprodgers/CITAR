@@ -24,6 +24,15 @@ A probe file (saves/probes/<id>.json):
 Deal item types are the negotiation items (gold, gold_per_turn, resource, tech, city, open_borders, embassy,
 peace_treaty, declaration_of_friendship, research_agreement, defensive_pact, declare_war).
 Runs live in saves/probes/runs/<run id>/ (run.json, results.jsonl and one save per case for inspection).
+
+A case's model calls go through the prompt scheduler (design/phase3-features.md P3.3.3, P3.3.5): each answer of an
+offer or message case is a ``probe`` ticket (a pooled prompt, admitted for ``pooled`` when it is made), and a turn case
+holds a ``probe_case`` lease for the case only, lending nothing. So a run holds its machine only while a turn case
+plays, and its offer and message cases run beside a lobby game on the slots its seat lends between its turns; an answer
+the machine cuts off (the seat needing its slot back, a benchmark taking the machine) is asked again, never scored as
+the model's. A run waits at the job level (``pool.queue``, saying what for) for a benchmark that holds its machine
+(before every case, and when one takes the machine mid-answer: an answer's ticket does not wait for benchmarks), for
+work that ranks ahead of it there, and before a turn case for the leases that fill its machine's slots.
 """
 from __future__ import annotations
 
@@ -36,15 +45,34 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .fsutil import replace as _fs_replace
+from .fsutil import newest_first as _fs_newest, read_text as _fs_read, replace as _fs_replace
 from typing import Optional
 
-from .engine.game import ActionError
-from . import paths
+from . import engine_api, paths
+from .engine_api import ActionError
 
 BASE = paths.saves_path("probes")
 RUNS = BASE / "runs"
 CASE_KINDS = ("offer", "message", "turn")
+#: A run's modes (design/phase3-features.md P3.6.9): the model plays its seat (``full``), or decides the diplomacy a
+#: hybrid seat hands it beside the seat's bot (``hybrid``).
+RUN_MODES = ("full", "hybrid")
+#: How long one answer of an offer or message case may wait to start (its ticket's deadline), the helper's coming back
+#: after a temporary refusal (offline, quiet hours) included: two of a lobby seat's longest turns, on whose idle slot a
+#: probe's prompt runs.
+PROBE_START_SECONDS = 3600.0
+#: The longest pause between two tries of a temporarily refused answer.
+PROBE_RETRY_SECONDS = 15.0
+#: How an answer's ticket can end by the machine's doing rather than the model's (the scheduler's codes): the lobby seat
+#: whose idle slot it borrowed needed it back (``yielded``), the borrowed time ran out (``borrow_cap``), a benchmark took
+#: the machine (``benchmark``). The answer is asked again on a fresh ticket while the negotiation still waits for it, at
+#: most ``PROBE_ANSWER_TRIES`` times in all; a case whose answer never ran whole records why and is not scored.
+INTERRUPTIONS = ("yielded", "borrow_cap", "benchmark")
+PROBE_ANSWER_TRIES = 3
+#: How the scheduler ends a ticket that did not run its answer: the case is not the model's to score.
+NOT_RUN = ("cancelled", "expired", "disabled") + INTERRUPTIONS
+# What the scripted counterparty says with each answer: every negotiation entry carries a message
+SCRIPT_LINES = {"accept": "Agreed.", "reject": "No deal.", "counter": "How about this instead?", "reply": "Noted."}
 
 
 class ProbeError(ValueError):
@@ -60,6 +88,40 @@ class _CaseInvalid(Exception):
 # ----------------------------------------------------------------------------
 # probe files
 # ----------------------------------------------------------------------------
+def case_purposes(probe: dict, cases=None, mode: str = "full") -> tuple:
+    """What a run of ``probe`` (its ``cases`` by id, every case when none are named) is admitted for (P3.3.7):
+    ``probe`` for its turn cases, which hold a lease each, ``pooled`` for its offer and message cases, whose answers
+    are pooled prompts. A hybrid run (``mode``, P3.6.9) holds no lease: its subject's model answers and its turn cases'
+    diplomat phases are all pooled prompts."""
+    if mode == "hybrid":
+        return ("pooled",)
+    chosen = [c for c in probe.get("cases") or [] if isinstance(c, dict) and (not cases or c.get("id") in cases)]
+    kinds = {c.get("kind") or "offer" for c in chosen}
+    out = (("probe",) if "turn" in kinds else ()) + (("pooled",) if kinds & {"offer", "message"} else ())
+    return out or ("probe",)
+
+
+def hybrid_settings(mode: str, llm: dict, owners=None, bot_profile=None) -> Optional[dict]:
+    """A run's hybrid settings (design/phase3-features.md P3.6.9), checked: None for a ``full`` run; for a ``hybrid``
+    one, ``owners`` (a preset or a map, ``trade_only`` when none is given; through ``hybrid.normalize_hybrid``, its
+    refusals the reasons) and ``bot_profile`` (the hybrid seat's bot; None for the standard one). A hybrid run asks a
+    model, never the scripted bot. Raises ProbeError."""
+    if mode not in RUN_MODES:
+        raise ProbeError(f"A probe run's mode is {' or '.join(RUN_MODES)}.")
+    if mode != "hybrid":
+        return None
+    if (llm or {}).get("provider") == "bot":
+        raise ProbeError("A hybrid probe run asks a model: pick a model, not the scripted bot.")
+    from .agents.hybrid import normalize_hybrid
+    try:
+        block = normalize_hybrid({"owners": owners if owners is not None else "trade_only", "advisor": False})
+    except ValueError as e:
+        raise ProbeError(str(e)) from None
+    if bot_profile not in (None, "") and not isinstance(bot_profile, str):
+        raise ProbeError("bot_profile is a bot profile's name.")
+    return {"owners": block.get("preset") or block["owners"], "bot_profile": bot_profile or None}
+
+
 def slug(name: str) -> str:
     """A filesystem-safe identifier from a name."""
     s = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
@@ -75,16 +137,15 @@ def _path(pid: str) -> Path:
 
 def validate(data: dict) -> dict:
     """Checks a probe's structure (not its deal items; those are checked by the game when a case runs)."""
-    from .engine import scenario as S
     if not isinstance(data, dict):
         raise ProbeError("A probe must be a JSON object.")
     if not data.get("scenario"):
         raise ProbeError("A probe needs a scenario id.")
     try:
-        scn = S.load_scenario(data["scenario"])
+        scn = engine_api.load_scenario(data["scenario"])
     except ActionError as e:
         raise ProbeError(str(e))
-    majors = [p["id"] for p in scn["state"]["players"] if p.get("kind") == "major"]
+    majors = [p["id"] for p in engine_api.state_summary(scn["state"])["majors"]]
     for k in ("subject", "counterparty"):
         if k in data and data[k] is not None and int(data[k]) not in majors:
             raise ProbeError(f"{k} must be a major civilization of the scenario ({majors}).")
@@ -128,16 +189,18 @@ def validate(data: dict) -> dict:
 
 
 def list_probes() -> list[dict]:
-    """Every saved probe, in summary."""
+    """Every saved probe, in summary, with what a run of all its cases is admitted for (``purposes``,
+    ``case_purposes``), so the run dialog can show a machine's refusal before the run is asked."""
     BASE.mkdir(parents=True, exist_ok=True)
     out = []
-    for p in sorted(BASE.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for p, st in _fs_newest(BASE.glob("*.json")):
         try:
-            d = json.loads(p.read_text(encoding="utf-8"))
+            d = json.loads(_fs_read(p))
             out.append({"id": d.get("id"), "name": d.get("name"), "description": d.get("description", ""),
                         "scenario": d.get("scenario"), "cases": len(d.get("cases") or []), "repeats": d.get("repeats", 1),
                         "subject": d.get("subject"), "counterparty": d.get("counterparty"),
-                        "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds")})
+                        "purposes": list(case_purposes(d)),
+                        "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")})
         except (OSError, ValueError):
             continue
     return out
@@ -148,7 +211,7 @@ def load_probe(pid: str) -> dict:
     p = _path(pid)
     if not p.exists():
         raise ProbeError(f"No probe '{pid}'.")
-    return json.loads(p.read_text(encoding="utf-8"))
+    return json.loads(_fs_read(p))
 
 
 def save_probe(data: dict) -> dict:
@@ -189,27 +252,52 @@ def example_probe(scenario_id: str, subject: int = 1, counterparty: int = 0) -> 
 # ----------------------------------------------------------------------------
 def _items_text(g, items) -> str:
     """A deal's items as text, for the record of what was offered."""
-    from .engine.diplomacy import describe_items
     try:
-        return describe_items(g, items or [])
+        return g.describe_items(items or [])
     except Exception:
         return json.dumps(items)
 
 
 def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_path: Optional[Path] = None,
-             live: Optional[dict] = None, should_stop=lambda: False, usage_act: Optional[str] = None) -> dict:
-    """Plays one case on a fresh copy of the scenario and returns its record."""
-    from .engine import scenario as S, diplomacy as D, tools
+             live: Optional[dict] = None, should_stop=lambda: False, usage_act: Optional[str] = None,
+             owner_id: Optional[str] = None, run_id: Optional[str] = None, run_name: Optional[str] = None,
+             on_ticket=None, wait_benchmark=None, hybrid: Optional[dict] = None) -> dict:
+    """Plays one case on a fresh copy of the scenario and returns its record. ``owner_id`` is the probe run's owner,
+    the case game's owner (``GameSession.owner_id``) and the consumer of its prompts. A model subject's answers in an
+    offer or message case are ``probe`` tickets, one per answer (``_answer``), and its turn in a turn case plays on a
+    ``probe_case`` lease the case's seat holds for the case only (released when the case's game stops); both name the
+    run (``run_id``, ``run_name``) on the Queue page. ``on_ticket(ticket)`` is told of each answer's ticket while it
+    is asked, and ``on_ticket(None)`` after (the runner cancels it when the run is stopped); ``wait_benchmark()`` waits
+    while a benchmark holds the machine (the runner's job-level wait, which says so) and returns whether it waited.
+    An answer that was not asked or did not run whole (refused, cut off, stopped) is the case's ``error``: its outcome
+    is ``error`` (``stopped`` for a stopped run) and it is not scored (``passed`` None).
+
+    ``hybrid`` (a hybrid run's settings: ``owners``, ``bot_profile``; design/phase3-features.md P3.6.9) seats the
+    subject as a hybrid seat whose model owns those categories: an offer or message goes to its bot first and to its
+    model only when the bot leaves it to the model (``_hybrid_answer``), and the record says which side answered each
+    time (``answers``, ``answered_by``); a turn case plays the bot's turn, then a diplomat phase with every trigger
+    forced (``HybridAgent.force_phase``), its row in ``diplomat``."""
     subject, cp = probe["subject"], probe.get("counterparty")
     seats = [None] * len(scn.get("seats") or [])
     seats = [{} for _ in range(max(len(seats), subject + 1, (cp or 0) + 1))]
     is_bot = llm_cfg.get("provider") == "bot"       # the scripted bot as the subject: the baseline
-    seats[subject] = {"type": "bot", "bot": {"aggression": float(llm_cfg.get("aggression", 0.4)),
-                                             "profile": llm_cfg.get("profile")}} if is_bot \
-        else {"type": "llm", "llm": llm_cfg}
+    is_hybrid = bool(hybrid) and not is_bot
+    if is_bot:
+        seats[subject] = {"type": "bot", "bot": {"aggression": float(llm_cfg.get("aggression", 0.4)),
+                                                 "profile": llm_cfg.get("profile")}}
+    elif is_hybrid:
+        # the advisor stays off: a probe asks the model, not the bot's view of the case
+        seats[subject] = {"type": "hybrid", "llm": llm_cfg, "bot": {"profile": hybrid.get("bot_profile")},
+                          "hybrid": {"owners": hybrid.get("owners"), "advisor": False, "prompt_every": 50}}
+    else:
+        seats[subject] = {"type": "llm", "llm": llm_cfg}
     if cp is not None:
         seats[cp] = {"type": "script"}
     s = manager.create_from_scenario(scn, seats, name=f"probe {probe['id']}/{case['id']}", register=False, start=False)
+    s.owner_id = owner_id
+    s.lease_kind = "probe_case"         # a turn case's model calls hold the machine for the case only, lending nothing
+    if run_id:
+        s.lease_ref, s.lease_label = ("probe", run_id), f"probe run “{run_name or run_id}”"
     g = s.game
     if usage_act:
         # the case's model calls and the time it holds the servers go to the probe run's usage record
@@ -221,8 +309,9 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
            "outcome": None, "passed": None, "subject_messages": [], "counter_offers": [], "tool_calls": [],
            "thoughts": [], "error": None}
     t0 = time.time()
-    thought_mark = len(g.s.thoughts)
+    thought_mark = g.thought_count()
     calls: list = []
+    not_run = False                     # an answer the machine did not run: the case is not the model's to score
     orig_call = s.call_tool
 
     def recording_call(pid, name, args=None, *a, **kw):
@@ -233,47 +322,80 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                           "error": (res.get("error") or "")[:300] or None})
         return res
     s.call_tool = recording_call        # every call the model makes, queries and failures included
+    if is_bot or is_hybrid:
+        # The bot's actions never pass through call_tool: its turn is a drive and its answers go through
+        # EngineGame.answer. Each drive's counts for the subject are recorded as its calls instead.
+        orig_drive = s.drive_bots
+
+        def recording_drive(pid):
+            """Record the subject's actions in each drive of its turn."""
+            stop = orig_drive(pid)
+            _record_bot_actions(calls, (stop.get("actions") or {}).get(subject))
+            return stop
+        s.drive_bots = recording_drive
     if live is not None:
         live.update({"case": case["id"], "session": s, "since": t0})
     try:
         with s.lock:
-            S.apply_ops(g, (probe.get("setup") or []) + (case.get("setup") or []))
-        agent = s.get_agent(subject)
+            g.apply_ops((probe.get("setup") or []) + (case.get("setup") or []))
+        # a model's answers are pooled prompts with no lease (P3.3.3), its turn a lease's: the bot asks no machine; a
+        # hybrid subject's model is asked pooled prompts only, its bot first
+        prompts = case["kind"] in ("offer", "message") and not is_bot and not is_hybrid
+        agent = s.prompt_agent(subject) if prompts else s.get_agent(subject)
+        if is_hybrid:
+            rec["answers"] = []
         if case["kind"] in ("offer", "message"):
             with s.lock:
                 if not g.has_met(cp, subject):
                     g.meet(cp, subject)
-                saved_current = g.s.current
-                g.s.current = cp            # negotiations are opened on the opener's turn
-                try:
-                    give = case.get("give") if case["kind"] == "offer" else None
-                    receive = case.get("receive") if case["kind"] == "offer" else None
-                    if case["kind"] == "offer":
-                        give, receive = give or [], receive or []
-                    r = D.open_negotiation(g, cp, subject, case["message"], give, receive)
-                finally:
-                    g.s.current = saved_current
+                give = case.get("give") if case["kind"] == "offer" else None
+                receive = case.get("receive") if case["kind"] == "offer" else None
+                if case["kind"] == "offer":
+                    give, receive = give or [], receive or []
+                r = g.open_negotiation_as(cp, subject, case["message"], give, receive)
                 rec["offer_text"] = None
                 nid = r["negotiation_id"]
-                prop = D.get_negotiation(g, nid)["proposal"]
+                prop = g.negotiation(nid)["proposal"]
                 if prop:
-                    rec["offer_text"] = (f"{g.player(cp).name} gives {_items_text(g, prop[str(cp)])}; "
-                                         f"{g.player(subject).name} gives {_items_text(g, prop[str(subject)])}")
+                    rec["offer_text"] = (f"{g.player_name(cp)} gives {_items_text(g, prop[str(cp)])}; "
+                                         f"{g.player_name(subject)} gives {_items_text(g, prop[str(subject)])}")
                     try:
                         # the subject's side too, so an impossible request is reported rather than "no response"
-                        D.validate_items(g, subject, cp, prop[str(subject)], prop)
+                        g.validate_items(subject, cp, prop[str(subject)], prop)
                     except ActionError as e:
                         rec["outcome"] = "invalid_case"
                         rec["error"] = f"The subject cannot give what the case asks: {e}"
                         raise _CaseInvalid()
             followups = list(case.get("followups") or [])
-            for _round in range(g.rules.const["diplomacy"]["max_negotiation_exchanges"] + 1):
+            for _round in range(g.max_chat_messages() + 1):
                 if should_stop():
                     rec["outcome"] = "stopped"
                     break
-                agent.respond_negotiation(s, subject, nid)
+                if is_hybrid:
+                    side, refused = _hybrid_answer(s, agent, subject, nid, calls, on_ticket=on_ticket,
+                                                   should_stop=should_stop, usage_act=usage_act, owner_id=owner_id,
+                                                   run_id=run_id, run_name=run_name, wait_benchmark=wait_benchmark)
+                    rec["answers"].append(side)
+                    if refused:
+                        rec["error"], not_run = refused, True
+                        rec["outcome"] = "stopped" if should_stop() else "error"
+                        break
+                    answer = None
+                elif prompts:
+                    refused = _answer(s, agent, subject, nid, on_ticket=on_ticket, should_stop=should_stop,
+                                      usage_act=usage_act, owner_id=owner_id, run_id=run_id, run_name=run_name,
+                                      wait_benchmark=wait_benchmark)
+                    if refused:
+                        rec["error"], not_run = refused, True
+                        rec["outcome"] = "stopped" if should_stop() else "error"
+                        break
+                    answer = None
+                else:
+                    answer = agent.respond_negotiation(s, subject, nid)
+                if is_bot and isinstance(answer, dict):
+                    _record_bot_actions(calls, answer.get("actions"))
                 with s.lock:
-                    n = D.get_negotiation(g, nid)
+                    n = g.negotiation(nid)
                     last = n["history"][-1] if n["history"] else {}
                     if last.get("by") == subject:
                         if last.get("message"):
@@ -282,8 +404,8 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                             prop = last["proposal"]
                             rec["counter_offers"].append({
                                 "subject_gives": prop.get(str(subject), []), "subject_asks": prop.get(str(cp), []),
-                                "text": f"{g.player(subject).name} gives {_items_text(g, prop.get(str(subject)))}; "
-                                        f"{g.player(cp).name} gives {_items_text(g, prop.get(str(cp)))}"})
+                                "text": f"{g.player_name(subject)} gives {_items_text(g, prop.get(str(subject)))}; "
+                                        f"{g.player_name(cp)} gives {_items_text(g, prop.get(str(cp)))}"})
                     if n["status"] != "open":
                         rec["outcome"] = {"accepted": "accept"}.get(n["status"], n["status"])
                         if n["status"] == "rejected":
@@ -298,41 +420,62 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                     rec["outcome"] = last.get("action") or "reply"
                     if followups:
                         f = followups.pop(0)
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, **f})
+                        # every negotiation entry carries a message; a case written without one gets a plain line
+                        g.execute(cp, "respond_negotiation",
+                                  {"negotiation_id": nid, "message": SCRIPT_LINES.get(f.get("action"), "Noted."), **f})
                         continue
                     policy = case.get("on_counter", "leave" if case["kind"] == "message" else "reject")
                     if policy == "leave":
                         break
                     action = "accept" if policy == "accept" and n["proposal"] and n["proposal_by"] == subject else "reject"
                     try:
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, "action": action})
+                        g.execute(cp, "respond_negotiation", {"negotiation_id": nid, "action": action,
+                                                              "message": SCRIPT_LINES[action]})
                     except ActionError:
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, "action": "reject"})
+                        g.execute(cp, "respond_negotiation", {"negotiation_id": nid, "action": "reject",
+                                                              "message": SCRIPT_LINES["reject"]})
                     if action == "accept":
                         rec["outcome"] = "counter_accepted_by_script"
                     break
             with s.lock:
-                n = D.get_negotiation(g, nid)
-                rec["negotiation"] = D.negotiation_view(g, n, cp)
+                n = g.negotiation(nid)
+                rec["negotiation"] = g.negotiation_view(nid, cp)
                 if n.get("deal_id") is not None:
-                    deal = next((d for d in g.s.deals if d.get("id") == n["deal_id"]), None)
+                    deal = g.deal(n["deal_id"])
                     rec["deal"] = deal.get("summary") if deal else None
         elif case["kind"] == "turn":
             with s.lock:
-                if g.s.current != subject:
-                    g.s.current = subject
-                    g.s.turn_started = False
-                    g.begin_turn()
+                g.force_turn(subject)
                 s._track_turn()
+                began = (g.turn, g.current)
+            if hasattr(agent, "wait_cap"):
+                # Nobody answers a chat in a turn case (the other seats are scripts, and the case's session runs no
+                # chat clock): a chat the subject opens is closed at once rather than at its safety cap, and its turn
+                # goes on to its end.
+                agent.wait_cap = 0.0
+            if is_hybrid:
+                agent.force_phase = True    # the bot's turn, then a diplomat phase whatever its triggers say
             agent.play_turn(s, subject)
             with s.lock:
-                ended = any(c["tool"] == "end_turn" and c["ok"] for c in calls)
-                rec["end_reason"] = "end_turn" if ended or is_bot else \
+                if is_hybrid:
+                    phases = [x for x in s.metrics.data.get("diplomat") or [] if x.get("player") == subject]
+                    rec["diplomat"] = [{k: x.get(k) for k in ("turn", "triggers", "steps", "outcome", "cause",
+                                                              "tools")} for x in phases]
+                    ran = any(x.get("outcome") in ("done", "timeout") for x in phases)
+                    rec["answered_by"] = "model" if ran else "bot"
+                if is_bot or is_hybrid:
+                    # the drive ends the bot's turn itself, with no end_turn call: the turn moving on is its end_turn
+                    ended = not s.crashed and ((g.turn, g.current) != began or g.phase != "playing")
+                    if ended:
+                        calls.append({"tool": "end_turn", "args": None, "ok": True, "error": None, "count": 1})
+                else:
+                    ended = any(c["tool"] == "end_turn" and c["ok"] for c in calls)
+                rec["end_reason"] = "end_turn" if ended else \
                     ((s.metrics.current(subject) or {}).get("end_reason") or "no_end_turn")
             rec["outcome"] = rec["end_reason"]
         with s.lock:
-            rec["thoughts"] = [{"kind": t.get("kind"), "text": t.get("text")} for t in g.s.thoughts[thought_mark:]
-                               if t.get("player") == subject][-40:]
+            rec["thoughts"] = [{"kind": t.get("kind"), "text": t.get("text")}
+                               for t in g.thoughts(subject, since=thought_mark)][-40:]
             rec["tool_calls"] = calls
     except _CaseInvalid:
         pass
@@ -348,17 +491,152 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                                                        "cache_read_input_tokens", "cache_creation_input_tokens") if k in usage}
         if save_path is not None:
             try:
-                data = s.to_save()
-                import gzip
-                save_path.parent.mkdir(parents=True, exist_ok=True)
-                with gzip.open(save_path, "wt", encoding="utf-8") as f:
-                    json.dump(data, f)
+                s.save_copy(save_path)      # beside it, its own journal: the case's game stands apart from the run's
                 rec["save"] = str(save_path)
             except Exception:
                 pass
         s.stop()
-    rec["passed"] = _check(case, rec)
+    if s.crashed:
+        # the engine stopped mid-case (GameSession._crashed): whatever the subject did before it, the case did not run
+        rec["outcome"] = "error"
+        rec["error"] = f"The engine stopped on turn {s.crashed['turn']}: {str(s.crashed['message'])[:300]}"
+        rec["passed"] = False
+        return rec
+    if is_hybrid and rec.get("answers"):
+        rec["answered_by"] = rec["answers"][0]      # who answered the case's offer or message: the bot or the model
+    rec["passed"] = None if not_run else _check(case, rec)
     return rec
+
+
+def _answer(s, agent, subject: int, nid: int, *, on_ticket, should_stop, usage_act: Optional[str],
+            owner_id: Optional[str], run_id: Optional[str], run_name: Optional[str],
+            wait_benchmark=None) -> Optional[str]:
+    """One answer of a model subject to the case's negotiation, as a ``probe`` ticket on its machine (P3.3.3): admitted
+    for ``pooled`` when it is made (``pool.seats.ticket``, with ``run_probes``), following the run's queue priority, at
+    most ``PROBE_START_SECONDS`` to start (``_probe_ticket``). Stopping the run cancels the ticket (``on_ticket``; a stop
+    that lands while the ticket is made is noticed here, since the runner found nothing to cancel then). An answer the
+    machine cut off (``INTERRUPTIONS``: the lobby seat whose idle slot it borrowed took it back, its borrowed time ran
+    out, a benchmark took the machine) is asked again on a fresh ticket while the negotiation still waits for it, up to
+    ``PROBE_ANSWER_TRIES`` times: contention is not the model's failure. Returns why the answer was not asked or did not
+    run whole (a refusal, an expiry, a cancel, the tries spent), else None: what the model did is the case's. A subject
+    with no machine to play on (``NoMachineAgent``) answers nothing, as before."""
+    if not hasattr(agent, "binding"):
+        agent.respond_negotiation(s, subject, nid)
+        return None
+    tries = 0
+    while True:
+        ticket, why = _probe_ticket(s, agent, should_stop=should_stop, usage_act=usage_act, owner_id=owner_id,
+                                    run_id=run_id, run_name=run_name, wait_benchmark=wait_benchmark)
+        if ticket is None:
+            return why
+        if on_ticket is not None:
+            on_ticket(ticket)
+        if should_stop():
+            ticket.cancel("stopped")
+        agent.binding = ticket
+        try:
+            agent.respond_negotiation(s, subject, nid)
+        finally:
+            agent.binding = None
+            if on_ticket is not None:
+                on_ticket(None)
+            ticket.close()
+        code = ticket.error.code if ticket.error is not None else None
+        if code not in NOT_RUN or not _awaits(s, nid, subject):
+            return None                 # the model answered, or chose not to: that is the case's result
+        if code in INTERRUPTIONS and not should_stop():
+            tries += 1
+            if tries < PROBE_ANSWER_TRIES:
+                continue
+            return f"The answer was cut off {tries} times by the machine's other work: {ticket.reason}"
+        return f"The prompt did not run: {ticket.reason}"
+
+
+def _hybrid_answer(s, agent, subject: int, nid: int, calls: list, **kw) -> tuple:
+    """A hybrid subject's answer to the case's negotiation (P3.6.5, P3.6.9): its bot first (``EngineGame.answer``),
+    which answers what it owns and leaves the rest to the model; then, for what it left, the model, as a ``probe``
+    ticket (``_answer``) through its chat machinery (``HybridAgent.model``: the diplomat's prompt, the chat tools of its
+    categories, the veto). Returns (who answered: ``bot``, ``model``, or ``none`` when the model left the chat waiting
+    or its answer did not run: a ticket refused or expired, cut off by the machine; why the model's answer did not
+    run, or None)."""
+    with s.lock:
+        g = s.game
+        n = g.negotiation_head(nid)
+        if n["status"] != "open" or n["awaiting"] != subject:
+            return "none", None
+        r = g.answer(subject, nid, agent.bot)
+        s.metrics.bot_actions(subject, r.get("actions"))
+        _record_bot_actions(calls, r.get("actions"))
+        if r["outcome"] == "done":
+            return "bot", None
+    model = agent.model(s, subject)
+    if model is None:
+        return "none", f"The model was not asked: {agent.last_error or 'the seat has no machine'}"
+    agent.system_text(s, subject)
+    refused = _answer(s, model, subject, nid, **kw)
+    if refused:
+        return "none", refused          # the model never answered: its prompt did not run (whole)
+    return ("none" if _awaits(s, nid, subject) else "model"), None
+
+
+def _probe_ticket(s, agent, *, should_stop, usage_act: Optional[str], owner_id: Optional[str],
+                  run_id: Optional[str], run_name: Optional[str], wait_benchmark=None) -> tuple:
+    """The ticket one answer is asked on (``_answer``): (the ticket, None) once one is queued, else (None, why not).
+    A refusal that says "not yet" (the helper offline, the machine's quiet hours, a grant's window) is tried again
+    within ``PROBE_START_SECONDS``. The ticket does not wait for benchmarks: one refused because a benchmark holds the
+    machine waits for it at the job level (``wait_benchmark``: the run says what it waits for, as long as the benchmark
+    lasts, and the answer's window starts again after), rather than as a prompt that waits silently for an hour and
+    expires; without the runner's wait it is tried again within the window."""
+    from .pool import queue as work_queue, seats as pool_seats
+    cfg = getattr(agent, "cfg", None) or {}
+    sid = cfg.get("server_id") or None
+    deadline = time.perf_counter() + PROBE_START_SECONDS
+    while True:
+        if should_stop():
+            return None, "The prompt was not asked: the run was stopped."
+        ticket = pool_seats.ticket(
+            sid, cfg.get("model") or "", cls="probe", consumer=owner_id, capability="run_probes",
+            activity=usage_act, label=f"probe run “{run_name or run_id or s.name}”",
+            ref=("probe", run_id) if run_id else None,
+            priority=work_queue.priority("probe", run_id) if run_id else 0,
+            start_within=max(1.0, deadline - time.perf_counter()),
+            steps=getattr(agent, "max_negotiation_calls", 20), wait_for_benchmark=False)
+        if ticket.state == "queued":
+            return ticket, None
+        error = ticket.error
+        benchmark = error is not None and error.code == "benchmark"
+        if benchmark and wait_benchmark is not None and wait_benchmark():
+            deadline = max(deadline, time.perf_counter() + PROBE_START_SECONDS)
+            continue
+        clears = (error.retry_at - datetime.now()).total_seconds() if error is not None and error.retry_at else None
+        now = time.perf_counter()
+        if error is None or not (error.temporary or benchmark) or should_stop() or now >= deadline or (
+                clears is not None and now + clears > deadline):
+            return None, f"The prompt was not asked: {ticket.reason}"
+        # a benchmark's last request still draining (the runner saw no benchmark to wait for) clears within seconds
+        wake = now + (1.0 if benchmark and wait_benchmark is not None else PROBE_RETRY_SECONDS)
+        if clears is not None:
+            wake = min(wake, now + max(1.0, clears))
+        while time.perf_counter() < min(wake, deadline) and not should_stop():
+            time.sleep(0.25)
+
+
+def _awaits(s, nid: int, subject: int) -> bool:
+    """Whether the case's negotiation still waits for the subject's answer."""
+    with s.lock:
+        n = s.game.negotiation_head(nid)
+        return n["status"] == "open" and n["awaiting"] == subject
+
+
+def _record_bot_actions(calls: list, counts) -> None:
+    """Add the bot subject's actions from one drive or one answer (``{tool: [taken, refused]}``) to a case's calls:
+    one entry per tool taken (``ok``, with its ``count``) and one per tool refused."""
+    for tool, pair in (counts or {}).items():
+        taken, refused = (list(pair) + [0, 0])[:2]
+        for ok, n in ((True, taken), (False, refused)):
+            if n and len(calls) < 400:
+                calls.append({"tool": tool, "args": None, "ok": ok, "error": None if ok else "refused by the engine",
+                              "count": int(n)})
 
 
 def _check(case: dict, rec: dict) -> Optional[bool]:
@@ -379,6 +657,13 @@ def _check(case: dict, rec: dict) -> Optional[bool]:
     return ok
 
 
+def _set_waiting(run: dict, note: Optional[dict]) -> None:
+    """What a queued run waits for (a ``pool.seats.note``, or None): the note, which the run's route tells each viewer
+    with the names they may see (``work_access.with_waiting``), and its text naming no holder."""
+    from .pool import seats as pool_seats
+    run["waiting_note"], run["waiting"] = note, pool_seats.note_text(note)
+
+
 # ----------------------------------------------------------------------------
 # the runner (one run at a time: runs usually share a single GPU)
 # ----------------------------------------------------------------------------
@@ -396,6 +681,7 @@ class ProbeRunner:
         self.lock = threading.Lock()
         self.queue: list[str] = []
         self.lives: dict = {}                       # run id -> what it is doing now (shown on the Probes page)
+        self.asking: dict = {}                      # run id -> the ticket its case's answer is asked on now
         self._workers: dict = {}                    # machine -> the thread running a run on it
         self._loaded: dict = {}                     # server id -> model this runner loaded there
         self._thread: Optional[threading.Thread] = None
@@ -428,7 +714,7 @@ class ProbeRunner:
         p = self._run_dir(rid) / "run.json"
         if not p.exists():
             raise ProbeError(f"No run '{rid}'.")
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(_fs_read(p))
 
     def results(self, rid: str) -> list[dict]:
         """The per-case results of a run."""
@@ -446,16 +732,27 @@ class ProbeRunner:
     def list_runs(self) -> list[dict]:
         """Every run, newest first."""
         out = []
-        for p in sorted(RUNS.glob("*/run.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for p, _ in _fs_newest(RUNS.glob("*/run.json")):
             try:
-                out.append(json.loads(p.read_text(encoding="utf-8")))
+                out.append(json.loads(_fs_read(p)))
             except (OSError, ValueError):
                 pass
         return out
 
     def start(self, probe_id: str, llm: dict, repeats: Optional[int] = None, name: str = "",
-              cases: Optional[list] = None) -> dict:
-        """Start a probe run against a model."""
+              cases: Optional[list] = None, *, owner_id: Optional[str] = None, session=None,
+              mode: str = "full", owners=None, bot_profile: Optional[str] = None) -> dict:
+        """Start a probe run against a model. ``owner_id`` is the account starting it (design/phase3-features.md
+        P3.2.4): the run is theirs, its file records them, and the games its cases play are theirs. With ``session``
+        (a request's) the run's row in ``owned_items`` is written and committed there before the run is queued; a run
+        started without one (a script, a test) has no row until adoption gives it one, to the owner its file
+        records.
+
+        ``mode`` ``hybrid`` (P3.6.9) seats the model as a hybrid seat whose model decides ``owners`` (a preset or a
+        map, as a hybrid seat's; ``trade_only`` when none is given) beside ``bot_profile``'s bot (the standard one by
+        default): the run records which side answered each case. A hybrid run needs a model subject, not the scripted
+        bot. Raises ProbeError for a mode or settings that are not allowed."""
+        hybrid = hybrid_settings(mode, llm, owners, bot_profile)
         probe = validate(load_probe(probe_id))
         n_rep = max(1, min(50, int(repeats or probe.get("repeats") or 1)))
         chosen = [c for c in probe["cases"] if not cases or c["id"] in cases]
@@ -470,10 +767,21 @@ class ProbeRunner:
             if sv is None:
                 raise ProbeError(f"No server '{llm['server_id']}'.")
             model = f"{model} @ {sv['name']}"
+        if hybrid is not None:
+            from .diplomacy_stats import owners_label
+            model = f"{model} (hybrid: {owners_label(hybrid['owners']).replace('_', ' ')})"
+        from .jobs import trust
+        standing = trust.standing(llm.get("server_id"))
         run = {"id": rid, "name": name or f"{probe['name']} · {model}", "probe": probe, "llm": {k: v for k, v in llm.items() if k != "api_key"},
                "repeats": n_rep, "jobs": [{"case": c["id"], "rep": r} for c in chosen for r in range(n_rep)],
                "status": "queued", "done": 0, "created": time.time(), "started": None, "finished": None,
-               "summary": {}, "error": None}
+               "summary": {}, "error": None, "owner_id": owner_id, "mode": mode, "hybrid": hybrid,
+               # its machine's standing when it was started (P4.5.8 rule 11): an "unverified machine" badge otherwise
+               "standing": standing}
+        if session is not None:
+            from . import items
+            items.register(session, "probe_run", rid, owner_id, run["name"], path=self._run_dir(rid))
+            session.commit()
         self._write(run)
         with self.lock:
             self.queue.append(rid)
@@ -490,6 +798,9 @@ class ProbeRunner:
                 self._write(run)
             else:
                 self._stop_run.add(rid)
+        ticket = self.asking.get(rid)
+        if ticket is not None:
+            ticket.cancel("stopped")        # an answer waiting for its machine stops waiting
         return run
 
     def delete(self, rid: str):
@@ -581,27 +892,19 @@ class ProbeRunner:
 
     def _run(self, rid: str):
         """Execute one run: every case, in order, with the configured repeats."""
-        from .engine import scenario as S
         run = self.get_run(rid)
         probe = run["probe"]
-        scn = S.load_scenario(probe["scenario"])
+        scn = engine_api.load_scenario(probe["scenario"])
         done = {(r["case"], r.get("rep", 0)) for r in self.results(rid)}
         run["status"], run["started"] = "running", run.get("started") or time.time()
         self._write(run)
         cases = {c["id"]: c for c in probe["cases"]}
         act = f"probe:{rid}"
         from . import usage
-        from .pool import seats as pool_seats
         usage.tracker().activity(act, "probe", run["name"], parent={"kind": "probe", "id": probe["id"], "name": probe["name"]},
                                  ref={"probe_run": rid, "scenario": probe.get("scenario")},
                                  server_id=run["llm"].get("server_id"), model=run["llm"].get("model"))
-        server_id = run["llm"].get("server_id")
-        self._wait_free(rid, server_id)
-        pool_seats.claim(server_id, f"probe run “{run['name']}”")
-        try:
-            self._run_cases(rid, run, probe, scn, done, cases, act)
-        finally:
-            pool_seats.release(server_id, f"probe run “{run['name']}”")
+        self._run_cases(rid, run, probe, scn, done, cases, act)
 
     def queue_items(self) -> list[dict]:
         """Queued runs, for the shared work queue (see citar.pool.queue)."""
@@ -615,7 +918,8 @@ class ProbeRunner:
                 continue
             out.append({"kind": "probe", "id": rid, "group": rid, "run": run["name"], "label": run["name"],
                         "server_id": run["llm"].get("server_id"), "server": run["llm"].get("server"),
-                        "created": run.get("created") or 0, "waiting": run.get("waiting")})
+                        "created": run.get("created") or 0, "waiting": run.get("waiting"),
+                        "waiting_note": run.get("waiting_note")})
         return out
 
     def running_items(self) -> list[dict]:
@@ -636,13 +940,14 @@ class ProbeRunner:
     def _make_way(self, rid: str, run: dict) -> bool:
         """Between cases: if higher-priority work is waiting for this run's machine, put the run back in the queue
         (it keeps its rank and carries on from the next case). Returns True if it did."""
-        from .pool import queue as work_queue
+        from .pool import queue as work_queue, seats as pool_seats
         first = work_queue.preempting(run["llm"].get("server_id"), "probe", rid, work_queue.priority("probe", rid))
         if first is None:
             return False
         run = self.get_run(rid)
         run["status"] = "queued"
-        run["waiting"] = f"paused for {first['label']} (priority {first['priority']})"
+        _set_waiting(run, pool_seats.note("paused for ", [pool_seats.queue_holder(first)],
+                                          f" (priority {first['priority']})"))
         self._write(run)
         with self.lock:
             if rid not in self.queue:
@@ -658,9 +963,35 @@ class ProbeRunner:
             it["priority"] = work_queue.priority("probe", it["group"])
         return [it["id"] for it in sorted(items, key=work_queue.rank)]
 
+    @staticmethod
+    def _benchmarks(server_id) -> list:
+        """The benchmark runs holding a machine (a live benchmark lease), each once: a probe run waits for them before
+        every case (no pooled prompt starts beside a benchmark, and a turn case's lease would share the machine with
+        its steps). Lobby games and pooled prompts do not hold an offer or message case up: its prompts run on the
+        slots a lobby seat lends, as the scheduler's rules allow (P3.3.3, P3.3.5)."""
+        from .pool import seats as pool_seats
+        return [h for h in pool_seats.holders(server_id) if h.get("kind") == "benchmark"]
+
+    @staticmethod
+    def _slots_held(server_id) -> list:
+        """What fills a machine's slots with leases (a lobby game's seat, another run's turn case), each once, or
+        nothing while a slot is left: a turn case's own lease, which never lends, waits for one, as a benchmark job
+        does (the job-level rule: fewer leases than the machine's slots, P3.3.5). A helper machine whose helper is
+        offline is taken at its row's number."""
+        from . import servers
+        from .pool import scheduler as prompt_scheduler, seats as pool_seats
+        occs = pool_seats.occupants(server_id)
+        if not occs:
+            return []
+        machine = prompt_scheduler.get().machine(server_id)
+        slots = machine.capacity() if machine is not None else None
+        if slots is None:
+            slots = int((servers.machine_settings(server_id) or {}).get("slots") or 1)
+        return pool_seats.distinct(occs) if len(occs) >= max(1, slots) else []
+
     def _machine_busy(self, rid: str) -> bool:
-        """Whether a queued run cannot start yet - its machine is in use, or higher-priority work is waiting for
-        it; if so, the run says what it is waiting for."""
+        """Whether a queued run cannot start yet - a benchmark holds its machine, or higher-priority work is waiting
+        for it; if so, the run says what it is waiting for."""
         from .pool import seats as pool_seats
         from .pool import queue as work_queue
         try:
@@ -668,45 +999,73 @@ class ProbeRunner:
         except ProbeError:
             return False
         server_id = run["llm"].get("server_id")
-        held = pool_seats.occupied(server_id)
-        note = f"waiting for {', '.join(held)}" if held else None
+        held = self._benchmarks(server_id)
+        note = pool_seats.note("waiting for ", held) if held else None
         if not held and server_id:
             first = work_queue.ahead_of(server_id, "probe", (-work_queue.priority("probe", rid), run.get("created") or 0))
             if first is not None:
-                held = [first["label"]]
-                note = f"waiting: {first['label']} goes first (priority {first['priority']})"
+                held = [pool_seats.queue_holder(first)]
+                note = pool_seats.note("waiting: ", held, f" goes first (priority {first['priority']})")
         status = "waiting (machine busy)" if held else "queued"
-        if run.get("waiting") != note or run["status"] != status:
-            run["waiting"], run["status"] = note, status
+        if run.get("waiting_note") != note or run.get("waiting") != pool_seats.note_text(note) \
+                or run["status"] != status:
+            _set_waiting(run, note)
+            run["status"] = status
             self._write(run)
         return bool(held)
 
-    def _wait_free(self, rid: str, server_id):
-        """Wait while the run's machine is being used by a game, so the run does not fight it for the slot."""
+    #: How often a run waiting for its machine looks again (it notices a stop at once).
+    BENCHMARK_POLL_SECONDS = 15.0
+
+    def _wait_benchmark(self, rid: str, server_id) -> bool:
+        """Wait while a benchmark holds the run's machine: before every case, and when one took the machine from an
+        answer (``run_case``'s ``wait_benchmark``). Returns whether it waited."""
+        return self._wait_machine(rid, server_id, full=False)
+
+    def _wait_machine(self, rid: str, server_id, *, full: bool) -> bool:
+        """Wait, saying so, while a benchmark holds the run's machine (``_benchmarks``) and, before a turn case
+        (``full``: a lease of its own that never lends), while leases fill its slots (``_slots_held``), so the case
+        never plays its turn beside a benchmark's steps or step by step against a lobby game's seat (P3.3.5). The run's
+        status and waiting note say what it waits for; the live panel's case is put back after. Returns whether it
+        waited; a stopped run stops waiting at once."""
         from .pool import seats as pool_seats
-        waited = False
+        waited, before = False, self.lives.get(rid)
         while server_id and rid not in self._stop_run:
-            held = pool_seats.occupied(server_id)
+            held = self._benchmarks(server_id) or (self._slots_held(server_id) if full else [])
             if not held:
                 break
-            if not waited:
-                waited = True
-                run = self.get_run(rid)
+            note = pool_seats.note("waiting for ", held)
+            run = self.get_run(rid)
+            if not waited or run.get("waiting_note") != note:
                 run["status"] = "waiting (machine busy)"
-                run["waiting"] = f"waiting for {', '.join(held)}"
+                _set_waiting(run, note)
                 self._write(run)
-                self._set_live(rid, {"run": rid, "case": f"(waiting: the machine is in use by {', '.join(held)})",
-                                     "since": time.time()})
-            time.sleep(15)
+            if not waited:
+                # the live panel is shown to whoever may see the run: what holds the machine is the run's waiting
+                # note, which its route tells each viewer as they may see it
+                self._set_live(rid, {"run": rid, "case": "(waiting: the machine is in use)", "since": time.time()})
+            waited = True
+            wake = time.perf_counter() + self.BENCHMARK_POLL_SECONDS
+            while time.perf_counter() < wake and rid not in self._stop_run:
+                time.sleep(0.25)
         if waited:
             run = self.get_run(rid)
-            run["status"], run["waiting"] = "running", None
+            run["status"] = "running"
+            _set_waiting(run, None)
             self._write(run)
+            if before is not None:
+                self.lives[rid] = before
+        return waited
 
     def _run_cases(self, rid, run, probe, scn, done, cases, act):
-        """Every case of a run, in order, with the configured repeats."""
+        """Every case of a run, in order, with the configured repeats, each once no benchmark holds the machine
+        (``_wait_machine``): a turn case also once a slot is free of leases, then on a lease for the case; an offer or
+        message case on tickets."""
         from . import usage
         self._prepare_model(run)
+        server_id = run["llm"].get("server_id")
+        model_subject = run["llm"].get("provider") != "bot"
+        hybrid = run.get("hybrid") if run.get("mode") == "hybrid" else None
         for job in run["jobs"]:
             if rid in self._stop_run:
                 break
@@ -717,10 +1076,22 @@ class ProbeRunner:
                 return
             if self._wait_quiet(rid, run["llm"]):
                 self._prepare_model(run)
+            if model_subject:
+                # a hybrid subject's turn case holds no lease (its phase is a pooled prompt): only a benchmark waits it
+                self._wait_machine(rid, server_id, full=cases[job["case"]].get("kind") == "turn" and not hybrid)
+                if rid in self._stop_run:
+                    break
             self._set_live(rid, {"run": rid, "case": job["case"], "rep": job["rep"], "since": time.time()})
-            rec = run_case(self.manager, scn, probe, cases[job["case"]], run["llm"],
-                           save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar", live=self.lives[rid],
-                           should_stop=lambda: rid in self._stop_run, usage_act=act)
+            from . import ledger
+            # the case's own CPU on this thread is the run's (P3.4.3); its game's drives are units of their own
+            with ledger.cpu_unit(act):
+                rec = run_case(self.manager, scn, probe, cases[job["case"]], run["llm"],
+                               save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar",
+                               live=self.lives[rid], should_stop=lambda: rid in self._stop_run, usage_act=act,
+                               owner_id=run.get("owner_id"), run_id=rid, run_name=run.get("name"),
+                               on_ticket=lambda t: self.asking.__setitem__(rid, t) if t is not None
+                               else self.asking.pop(rid, None),
+                               wait_benchmark=lambda: self._wait_benchmark(rid, server_id), hybrid=hybrid)
             rec["rep"] = job["rep"]
             with open(self._run_dir(rid) / "results.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, default=str) + "\n")
@@ -743,7 +1114,8 @@ class ProbeRunner:
     # ---------------------------------------------------------------- models
     def _prepare_model(self, run: dict) -> bool:
         """Loads the run's model with its load profile on a server CITAR manages (LM Studio), swapping out a model this
-        runner loaded earlier but never one the user loaded."""
+        runner loaded earlier but never one the user loaded. The prompt scheduler is told at once (``models_changed``),
+        so an answer's ticket made next reads the model now loaded rather than the list it cached a moment ago."""
         from . import servers
         llm = run["llm"]
         sv = servers.find(llm.get("server_id"))
@@ -763,6 +1135,9 @@ class ProbeRunner:
             run = self.get_run(run["id"])
             run["error"] = f"Could not load {model}: {e}"
             self._write(run)
+        finally:
+            from .pool import scheduler as prompt_scheduler
+            prompt_scheduler.get().models_changed(sv["id"])
         return True
 
     def _wait_quiet(self, rid: str, llm: dict) -> bool:
@@ -795,9 +1170,10 @@ class ProbeRunner:
         if s is not None:
             try:
                 with s.lock:
-                    subj = next((seat.player for seat in s.seats if seat.type == "llm"), None)
+                    # the subject: the seat a model plays (P3.6.7: an LLM seat, or a hybrid seat's model)
+                    subj = next((seat.player for seat in s.seats if seat.model_seat), None)
                     live["thoughts"] = [{"kind": t.get("kind"), "text": (t.get("text") or "")[:1500]}
-                                        for t in s.game.s.thoughts if t.get("player") == subj][-6:]
+                                        for t in (s.game.thoughts(subj) if subj is not None else [])][-6:]
             except Exception:
                 pass
         if live.get("since"):
@@ -809,11 +1185,15 @@ class ProbeRunner:
 
 
 def summarize(results: list[dict]) -> dict:
-    """Summarise a run: pass rates per case, and what the model did."""
+    """Summarise a run: pass rates per case, and what the model did (a hybrid run's: which side answered, ``answered_by``
+    counted per case)."""
     by_case: dict = {}
     for r in results:
         c = by_case.setdefault(r["case"], {"runs": 0, "outcomes": {}, "passed": 0, "checked": 0, "seconds": 0.0})
         c["runs"] += 1
+        if r.get("answered_by"):
+            sides = c.setdefault("answered_by", {})
+            sides[r["answered_by"]] = sides.get(r["answered_by"], 0) + 1
         c["outcomes"][r.get("outcome") or "?"] = c["outcomes"].get(r.get("outcome") or "?", 0) + 1
         c["seconds"] += r.get("seconds") or 0
         if r.get("passed") is not None:

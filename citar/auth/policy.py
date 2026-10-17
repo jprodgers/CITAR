@@ -26,27 +26,44 @@ from ..db.models import CAPABILITIES, Setting, User
 #: hardware and analysing results is the point of the site, not a privilege. What `user` cannot do
 #: by default is publish to the whole internet, which is the one action with consequences outside
 #: this server.
+#:
+#: The owned items' capabilities (design/phase3-features.md P3.2.4): benchmarks and probes are a member's by
+#: default; the lab (it runs on the server's own CPU) and bot editing (profiles are what every benchmark is measured
+#: against) stay with administrators unless an administrator grants them. `full_llm` and `partial_llm` are on for
+#: everyone: they are the hooks a later restriction turns off (P3.3.7).
 ROLE_DEFAULTS: dict = {
     "user": {
         "create_games": True,
         "register_servers": True,
         "run_reports": True,
-        "publish_public": False,
+        "publish_global": False,
         "invite": False,
+        "run_benchmarks": True,
+        "run_probes": True,
+        "run_lab": False,
+        "edit_bots": False,
+        "full_llm": True,
+        "partial_llm": True,
     },
     "moderator": {
         "create_games": True,
         "register_servers": True,
         "run_reports": True,
-        "publish_public": True,
+        "publish_global": True,
         "invite": True,
+        "run_benchmarks": True,
+        "run_probes": True,
+        "run_lab": False,
+        "edit_bots": False,
+        "full_llm": True,
+        "partial_llm": True,
     },
     "admin": dict.fromkeys(CAPABILITIES, True),
 }
 
 #: Probation is the holding state for a brand-new account: it can play and watch but cannot add
 #: hardware, invite anyone or publish. These are the capabilities it loses until it is cleared.
-PROBATION_DENIES = ("register_servers", "invite", "publish_public")
+PROBATION_DENIES = ("register_servers", "invite", "publish_global")
 
 DEFAULTS: dict = {
     # open | invite | closed. Boots from CITAR_REGISTRATION, then lives here.
@@ -71,6 +88,10 @@ DEFAULTS: dict = {
     "closed_message": "CITAR is currently invite-only.",
 }
 
+#: Rows of the same table that are no policy: the server registry's electricity plans and currency
+#: (``citar.servers.REGISTRY_KEYS``), which ``citar.servers`` reads and writes itself.
+NOT_POLICY = ("electricity_plans", "registry_currency")
+
 _lock = threading.RLock()
 _cache: dict = {}
 _loaded = False
@@ -86,6 +107,8 @@ def _load() -> dict:
         try:
             with db.session() as s:
                 for row in s.query(Setting).all():
+                    if row.key in NOT_POLICY:
+                        continue
                     values[row.key] = row.value.get("v") if isinstance(row.value, dict) else row.value
         except Exception:
             # First boot, before migrations have run. Defaults are correct until the table exists.
@@ -135,6 +158,37 @@ def set(key: str, value: Any, *, session=None, actor: Optional[User] = None) -> 
     return value
 
 
+#: What the server records in the same table for itself, beside the operator's policy: one-time work that has been
+#: done (design/phase3-features.md P3.2.4's `orphans_adopted`; P3.2.8's `registry_imported`). Not policy: the console
+#: cannot set them (``set`` refuses a key that is not in DEFAULTS), and they are read from the table, never the cache.
+MARKERS = ("orphans_adopted", "registry_imported")
+
+
+def marker(session, key: str) -> Any:
+    """A marker's value, None when it was never set, read from the database in ``session``."""
+    if key not in MARKERS:
+        raise KeyError(f"Unknown marker {key!r}.")
+    row = session.get(Setting, key)
+    if row is None:
+        return None
+    return row.value.get("v") if isinstance(row.value, dict) else row.value
+
+
+def set_marker(session, key: str, value: Any) -> Any:
+    """Record a marker in ``session``'s transaction."""
+    if key not in MARKERS:
+        raise KeyError(f"Unknown marker {key!r}.")
+    row = session.get(Setting, key)
+    if row is None:
+        session.add(Setting(key=key, value={"v": value}))
+    else:
+        row.value = {"v": value}
+    with _lock:
+        if _loaded:
+            _cache[key] = value
+    return value
+
+
 def invalidate():
     """Drop the cache; the next read reloads from the database."""
     global _loaded
@@ -166,8 +220,37 @@ def can(user: Optional[User], capability: str) -> bool:
     overrides = user.caps or {}
     if capability in overrides:
         return bool(overrides[capability])
-    role_defaults = get("role_defaults") or ROLE_DEFAULTS
-    return bool((role_defaults.get(user.role) or {}).get(capability, False))
+    # Role defaults an admin saved before a capability existed (or after one was renamed) do not name
+    # it: the built-in default applies, rather than a silent False for everyone.
+    stored = (get("role_defaults") or {}).get(user.role) or {}
+    if capability in stored:
+        return bool(stored[capability])
+    return bool((ROLE_DEFAULTS.get(user.role) or {}).get(capability, False))
+
+
+def denial(user: Optional[User], capability: str) -> str:
+    """Why ``user`` may not do ``capability``, so the person can act on it rather than guessing: the 403 of a route
+    that needs it (``deps.require_cap``), and of a model seat or a pooled prompt its account may not use
+    (``pool.seats.authorize``)."""
+    if user is not None and user.status == "probation" and capability in PROBATION_DENIES:
+        return ("New accounts cannot do that yet. An administrator can lift the restriction — "
+                "it is there to keep automated signups from registering servers or publishing.")
+    friendly = {
+        "register_servers": "Your account is not allowed to register servers.",
+        "run_reports": "Your account is not allowed to build reports.",
+        "publish_global": "Your account is not allowed to publish to the whole internet.",
+        "create_games": "Your account is not allowed to start games.",
+        "invite": "Your account cannot create invitations.",
+        "run_benchmarks": "Your account is not allowed to run benchmarks.",
+        "run_probes": "Your account is not allowed to run probes.",
+        "run_lab": "Lab experiments run on this server's own CPU; an administrator has to allow your account to "
+                   "queue them.",
+        "edit_bots": "Bot profiles are what every benchmark is measured against; an administrator has to allow your "
+                     "account to edit them.",
+        "full_llm": "Your account is not allowed to seat a model that plays every turn.",
+        "partial_llm": "Your account is not allowed to use pooled prompts.",
+    }
+    return friendly.get(capability, f"Your account lacks the {capability} permission.")
 
 
 def capabilities(user: Optional[User]) -> dict:

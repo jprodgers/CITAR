@@ -1,0 +1,59 @@
+about = """
+A sack may burn a building and kill a citizen, but never a wonder or the palace: sacked over and
+over, a capital keeps its wonder, its palace, its owner and at least one citizen.
+"""
+from = "tests/test_barbarians.py::SackTests::test_sack_never_burns_wonders_or_the_palace"
+
+[config]
+barbarians = "normal"
+barbarian_aggression = 100
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 5, buildings = ["The Pyramids", "Monument", "Granary", "Library"] },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id" }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+path = "buildings"
+subset = ["Granary", "Library", "Monument", "Palace", "The Pyramids"]
+
+[[step]]
+op = "set_turn"
+args = { turn = 200 }
+
+[[step]]
+repeat = 6
+steps = [
+  { op = "sack_city", args = { city = "=roma" } },
+  { check = { what = "game" }, path = "turn", ge = 200, as = "turn" },
+  { op = "set_turn", args = { turn = "=turn + 5" } },
+]
+
+[[step]]
+check = { what = "events", type = "city_sacked" }
+len = 6
+
+[[step]]
+check = { what = "city", city = "=roma" }
+path = "buildings"
+subset = ["Palace", "The Pyramids"]
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { owner = 0 }
+as = "after"
+
+[[step]]
+check = "after"
+path = "pop"
+ge = 1
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "capital"
+eq = "=roma"

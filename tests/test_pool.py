@@ -276,30 +276,36 @@ class Admission(PoolFixtures):
             self.assertTrue(decision.allowed)
 
     def test_reservation_counts_against_the_cap_before_any_cost_is_known(self):
-        """The whole point of reserving: a long game must not be able to blow past the cap while
-        its real cost is still unknown."""
+        """The whole point of reserving: a request must not be able to blow past the cap while its real cost is
+        still unknown. The keeper's holds (in memory, per request: P3.4.6) count in the budget's state."""
+        keeper = budgets.reset_keeper()
         with db.session() as s:
             grant = self._grant(s, budget={"period": "month", "amount": 10.0, "behavior": "hard"})
             grant_id = grant.id
-            budgets.reserve(s, grant, "act-running", amount=9.99)
+            bid = keeper.handle(s, grant)
+        keeper.reserve(bid, "act-running", self.guest_id, 9.5)
         with db.session() as s:
             grant = s.get(AccessGrant, grant_id)
             state = budgets.state(s, grant)
-            self.assertAlmostEqual(state.reserved, 9.99, places=2)
-            # Not technically exhausted (9.99 < 10.00), but far too little left to admit new work.
+            self.assertAlmostEqual(state.reserved, 9.5, places=2)
+            # Not technically exhausted (9.5 < 10.00), but too little left to admit new work.
             self.assertLess(state.remaining, budgets.MIN_RESERVE)
             refused = admission.check(s, s.get(User, self.guest_id), s.get(Server, self.server_id))
             self.assertEqual(refused.code, "budget")
+        with self.assertRaises(budgets.BudgetExceeded):
+            keeper.reserve(bid, "act-next", self.guest_id, 1.0)
 
     def test_releasing_a_reservation_frees_the_headroom(self):
+        keeper = budgets.reset_keeper()
         with db.session() as s:
             grant = self._grant(s, budget={"period": "month", "amount": 10.0})
             grant_id = grant.id
-            budgets.reserve(s, grant, "act-doomed", amount=9.99)
-        with db.session() as s:
-            budgets.release(s, "act-doomed")
+            bid = keeper.handle(s, grant)
+        hold = keeper.reserve(bid, "act-doomed", self.guest_id, 9.99)
+        keeper.release(hold)
         with db.session() as s:
             self.assertFalse(budgets.state(s, s.get(AccessGrant, grant_id)).exhausted)
+            self.assertEqual(budgets.state(s, s.get(AccessGrant, grant_id)).reserved, 0.0)
 
     def test_concurrency_limit_is_reported_as_busy(self):
         with db.session() as s:
@@ -317,7 +323,7 @@ class Admission(PoolFixtures):
             refused = admission.check(s, s.get(User, self.guest_id), s.get(Server, self.server_id),
                                       online=False)
             self.assertEqual(refused.code, "offline")
-            self.assertIn("citar-worker", refused.reason)
+            self.assertIn("citar-helper", refused.reason)
 
     def test_disabled_server_is_refused_even_for_its_owner(self):
         with db.session() as s:
@@ -343,14 +349,20 @@ class Admission(PoolFixtures):
             self.assertFalse(decision.allowed)
 
     def test_the_general_pool_example(self):
-        """'One user might add a server for the general pool available at all hours.'"""
+        """'One user might add a server for the general pool available at all hours.' A grant with no purposes lends
+        every kind of model work, and never CPU work (lab runs: design/phase4-helper.md P4.5.5)."""
         with db.session() as s:
             self._grant(s, concurrency=2)
         with db.session() as s:
             guest, server = s.get(User, self.guest_id), s.get(Server, self.server_id)
             for purpose in admission.PURPOSES:
-                self.assertTrue(admission.check(s, guest, server, purpose, in_flight=0).allowed,
-                                f"{purpose} should be allowed in the general pool")
+                allowed = admission.check(s, guest, server, purpose, in_flight=0)
+                if purpose in admission.CPU_PURPOSES:
+                    self.assertFalse(allowed.allowed, f"{purpose} needs a grant that lists it")
+                    self.assertEqual(allowed.code, "purpose")
+                    self.assertIn("lists it", allowed.reason)
+                else:
+                    self.assertTrue(allowed.allowed, f"{purpose} should be allowed in the general pool")
             # Two slots granted, so one in flight is still fine.
             self.assertTrue(admission.check(s, guest, server, in_flight=1).allowed)
             self.assertFalse(admission.check(s, guest, server, in_flight=2).allowed)

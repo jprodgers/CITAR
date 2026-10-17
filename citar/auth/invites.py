@@ -106,6 +106,9 @@ def redeem(session, invite: Invite, user: User, *, ip: Optional[str] = None) -> 
         user.status = "active"
     audit.record(session, "invite.redeemed", actor=user, object_type="invite", object_id=invite.id,
                  ip=ip, role=invite.role, invited_by=invite.created_by)
+    if user.role == "admin":
+        from .accounts import on_first_admin
+        on_first_admin(session, user)
 
 
 def revoke(session, invite: Invite, actor: User, *, ip: Optional[str] = None) -> None:

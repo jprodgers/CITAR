@@ -124,6 +124,19 @@ env $(grep -v '^#' citar.env | xargs) citar serve
 Migrations run at startup, so deploying a new version is: install, restart. `deploy/citar.service`
 is a unit file to adapt.
 
+The [lab](Scripted-bots) (bot-vs-bot experiments) runs inside the server: its job dispatcher plays queued
+experiments on a job host, a child process of the server (so inside `citar.service`'s `MemoryMax`), under
+the host machine's CPU settings. In server mode they default to one game at a time, half the machine and
+min(1,024 MB, a quarter of the memory): about 240 MB on a 961 MB box, held by `RLIMIT_DATA` (a system service
+has no user manager to make a cgroup scope, so the CPU share is soft: `nice` and the one thread). An
+administrator changes them in the host's Machine settings. Queue experiments with
+`python -m citar.lab submit SPEC.json` as the service user; they show on the Queue and Lab pages.
+
+**Moving from 0.1.5:** the `citar-lab.service` unit of 0.1.5 ran a separate runner, which 0.1.6 retires
+(`citar lab run` exits 2, so the unit would restart into that every 30 s). Disable and remove it:
+`sudo systemctl disable --now citar-lab && sudo rm /etc/systemd/system/citar-lab.service && sudo systemctl
+daemon-reload`.
+
 ---
 
 ## After it is up
@@ -173,7 +186,7 @@ shared machine that is the difference between one service restarting and all of 
 
 ## Lending GPUs to the server
 
-A worker lets somebody's home machine serve models to the server without opening a port on their
+The CITAR helper lets somebody's home machine serve models to the server without opening a port on their
 router — the connection is outbound. [WORKERS.md](Workers).
 
 ---

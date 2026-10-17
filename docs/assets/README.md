@@ -5,11 +5,12 @@ the same drawing. Do not edit it by hand; edit the script.
 
 ## Screenshots
 
-There are none yet, and there should be. If you are adding some, these are the ones the
+There are few yet, and there should be more. If you are adding some, these are the ones the
 documentation would use, with the names it expects:
 
 | File | What it should show |
 |---|---|
+| `chat.png` | A chat docked left of End Turn: an AI's answer, a reply being written and the deal builder open (in `PLAYING.md`; taken from the browser checklist's E1 on a QA server, so it has no real names in it) |
 | `game.png` | A mid-game map with cities, units and a unit panel open. The hero image |
 | `lobby.png` | The lobby with a game being created, showing the seat types |
 | `benchmarks.png` | A benchmark run in progress, with per-game progress and scores |

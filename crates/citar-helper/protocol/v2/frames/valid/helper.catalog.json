@@ -1,0 +1,10 @@
+{
+  "frame": {
+    "t": "catalog",
+    "ts": 1760000000.0,
+    "models": [
+      {"key": "google/gemma-4-e2b", "label": "Gemma 4 E2B", "context": 131072, "loaded": true},
+      {"key": "qwen3-8b", "label": "Qwen3 8B", "context": null, "loaded": false}
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 """Report which functions and classes have no docstring.
 
     python scripts/docstring_coverage.py               # per-module summary, worst first
-    python scripts/docstring_coverage.py citar/engine  # only under that path
+    python scripts/docstring_coverage.py citar/server  # only under that path
     python scripts/docstring_coverage.py --list MODULE # the undocumented names in one module
     python scripts/docstring_coverage.py --strict       # non-zero exit if any module lacks one
 
@@ -48,8 +48,6 @@ def files(base: Path):
     for path in sorted(base.rglob("*.py")):
         if any(part in SKIP for part in path.parts):
             continue
-        if path.name.startswith("frozen_"):
-            continue                      # snapshots of the bot, frozen on purpose
         yield path
 
 

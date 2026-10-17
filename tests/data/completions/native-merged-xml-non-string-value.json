@@ -1,0 +1,65 @@
+{
+ "name": "native-merged-xml-non-string-value",
+ "note": "a repaired call whose other arguments are not strings",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "",
+   "reasoning": null,
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "unit_order",
+      "arguments": "{\"unit_id\": 4, \"order\": \"fortify</parameter>\\n</function>\", \"path\": [1, 2]}"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "name": "unit_order",
+     "args": {
+      "unit_id": 4,
+      "order": "fortify",
+      "path": [
+       1,
+       2
+      ]
+     }
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "unit_order",
+      "arguments": "{\"unit_id\": 4, \"order\": \"fortify\", \"path\": [1, 2]}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

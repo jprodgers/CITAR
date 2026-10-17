@@ -1,6 +1,7 @@
 // AI performance metrics: per-game stats modal and cross-game model comparison.
 import { api } from "./api.js";
 import { el, clear, modal, fmt } from "./util.js";
+import { CATEGORIES, controllerLabel, diplomatText, modelCategories, outcomeText } from "./seats.js";
 
 const COLORS = ["#e04040", "#3c78d8", "#e8c547", "#8e44ad", "#27ae60", "#e67e22", "#17becf", "#f06292"];
 
@@ -18,7 +19,9 @@ function reasonsText(r) {
 const HELP = {
   "Avg turn": "Wall-clock time from the start of the seat's turn to its end (includes tool execution and waiting on negotiations).",
   "Steps/turn": "Model requests per turn. Fewer is better for the same quality of play.",
-  "Step time": "Average seconds per model request.",
+  "Step time": "Average generation seconds per model request (time spent waiting for the machine is not included).",
+  "Model/turn": "Generation seconds per turn: the model's own time, which the speed score reads.",
+  "Waited/turn": "Seconds per turn the seat's requests waited for their machine (a slot busy with other work). Never counted as the model's time.",
   "Calls/turn": "Tool calls per turn (queries + actions).",
   "OK actions": "Successful game actions per turn.",
   "Errors/turn": "Tool calls rejected by the game (invalid orders).",
@@ -32,8 +35,24 @@ const HELP = {
   "Context": "Context length the model was loaded with (LM Studio). Below ~24k, models lose their briefing mid-turn.",
   "Slowest call": "Slowest single model request (model loading shows up here).",
   "Cold starts": "Turns where the model was not loaded when the turn began (LM Studio swapping models between seats).",
+  "Bot actions/turn": "Actions a scripted bot took per turn (its actions do not pass through tool calls, so the columns before are empty for it).",
   "Turn ends": "How turns ended: end_turn (clean), stalled, step_limit, time_limit, tool_limit, no_tool_calls, error, cancelled, ended_by_server. Turns interrupted by a server restart are excluded from all stats.",
 };
+
+// How a seat's chat answers ended (design/phase3-features.md P3.5.7): answered by its model, declined by the chat
+// clock when its time ran out, a fallback (a full model seat declines when its model could not answer; a hybrid seat's
+// bot answers), or closed before an answer; the causes of fallbacks and late declines apart.
+const CHAT_OUTCOMES = { answered: "answered", declined_late: "declined late", fallback: "fallback", closed: "closed first" };
+
+function chatAnswersText(s) {
+  const answers = s.chat_answers || {};
+  const parts = Object.entries(CHAT_OUTCOMES).filter(([k]) => answers[k]).map(([k, label]) => `${answers[k]} ${label}`);
+  const causes = Object.entries(s.chat_fallback_causes || {}).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`);
+  let text = `Chat answers: ${s.negotiation_replies}${parts.length ? ` (${parts.join(", ")})` : ""}, average ${secs(s.avg_negotiation_s)}`;
+  if (s.avg_chat_gen_s != null) text += `; model ${secs(s.avg_chat_gen_s)}, waited for the machine ${secs(s.avg_chat_queue_s)}`;
+  if (causes.length) text += `; causes: ${causes.join(", ")}`;
+  return text;
+}
 
 function th(label) {
   return el("th", { title: HELP[label] || "" }, label, HELP[label] ? el("span", { class: "muted" }, " ⓘ") : null);
@@ -51,7 +70,7 @@ export async function openMetrics(gid) {
     clear(content);
     const seats = Object.entries(rep.summary).map(([pid, s]) => ({ pid: +pid, ...s }));
     if (selected == null) {
-      const firstAI = seats.find((s) => s.controller === "llm" && s.turns) || seats.find((s) => s.turns);
+      const firstAI = seats.find((s) => ["llm", "hybrid"].includes(s.controller) && s.turns) || seats.find((s) => s.turns);
       selected = firstAI ? firstAI.pid : 0;
     }
     content.appendChild(el("div", { class: "row" },
@@ -62,17 +81,19 @@ export async function openMetrics(gid) {
 
     const table = el("table", { class: "list" }, el("tr", {},
       th("Civ"), th("Controller"), th("Turns"), th("Avg turn"), th("Median"), th("Max"), th("Steps/turn"), th("Step time"),
-      th("Calls/turn"), th("OK actions"), th("Errors/turn"), th("Repeats/turn"), th("Blocked"), th("Malformed"),
+      th("Model/turn"), th("Waited/turn"), th("Calls/turn"), th("OK actions"), th("Errors/turn"), th("Repeats/turn"), th("Blocked"), th("Malformed"),
       th("Stall nudges"), th("Out tok/turn"), th("Tok/s"), th("Peak prompt"), th("Context"), th("Slowest call"),
-      th("Cold starts"), th("Turn ends")));
+      th("Cold starts"), th("Bot actions/turn"), th("Turn ends")));
     for (const s of seats) {
       const tr = el("tr", { style: { cursor: "pointer", background: s.pid === selected ? "#1d2c47" : "" }, onclick: () => { selected = s.pid; draw(); } },
         el("td", {}, el("span", { class: "swatch", style: { background: COLORS[s.pid % COLORS.length] } }), s.name),
-        el("td", {}, s.controller === "llm" ? s.model || "llm" : s.controller),
+        el("td", {}, controllerLabel(s)),
         el("td", {}, s.turns));
       if (s.turns) {
         tr.append(el("td", {}, secs(s.avg_turn_s)), el("td", {}, secs(s.median_turn_s)), el("td", {}, secs(s.max_turn_s)),
           el("td", {}, fmt(s.avg_model_steps, 1)), el("td", {}, s.avg_model_steps ? secs(s.avg_step_s) : "–"),
+          el("td", {}, s.avg_model_steps ? secs(s.avg_model_s) : "–"),
+          el("td", { class: s.avg_queue_s > 60 ? "warn" : "" }, s.avg_model_steps ? secs(s.avg_queue_s) : "–"),
           el("td", {}, fmt(s.avg_tool_calls, 1)), el("td", {}, fmt(s.avg_actions_ok, 1)),
           el("td", { class: s.avg_errors > 2 ? "warn" : "" }, fmt(s.avg_errors, 1)),
           el("td", { class: s.avg_repeats > 2 ? "bad" : "" }, fmt(s.avg_repeats, 1)),
@@ -82,6 +103,7 @@ export async function openMetrics(gid) {
           el("td", { class: s.context_length && s.context_length < 24000 ? "bad" : "" }, s.context_length ? s.context_length.toLocaleString() : "–"),
           el("td", {}, s.slowest_step_s ? secs(s.slowest_step_s) : "–"),
           el("td", { class: s.turns_model_not_loaded ? "warn" : "" }, s.turns_model_not_loaded ?? "–"),
+          el("td", {}, s.avg_bot_actions != null ? fmt(s.avg_bot_actions, 1) : "–"),
           el("td", {}, reasonsText(s.end_reasons)));
       }
       table.appendChild(tr);
@@ -101,6 +123,11 @@ export async function openMetrics(gid) {
           el("td", { class: t.max_in_turn >= 6 ? "warn" : "" }, t.max_in_turn), el("td", { class: t.errors ? "warn" : "" }, t.errors),
           el("td", {}, t.avg_ms)));
       }
+      // a scripted bot's actions: taken and refused per tool (its turns have no tool calls)
+      for (const [name, a] of Object.entries(s.bot_actions || {})) {
+        tools.appendChild(el("tr", {}, el("td", {}, name), el("td", {}, a.taken), el("td", {}, a.per_turn),
+          el("td", {}, a.max_in_turn), el("td", { class: a.refused ? "warn" : "", title: "refused" }, a.refused), el("td", {}, "–")));
+      }
       const repeats = el("div", { class: "col" }, ...(s.top_repeats.length ? s.top_repeats.map((r) =>
         el("div", {}, el("b", {}, `×${r.max_times_in_a_turn} `), el("code", {}, r.call))) : [el("span", { class: "muted" }, "No repeated identical calls.")]));
       const errors = el("div", { class: "col" }, ...(s.top_errors.length ? s.top_errors.map((r) =>
@@ -112,18 +139,43 @@ export async function openMetrics(gid) {
           el("td", { class: r.repeats > 2 ? "bad" : "" }, r.repeats), el("td", {}, r.malformed), el("td", {}, r.output_tokens),
           el("td", { class: r.end_reason && r.end_reason !== "end_turn" ? "warn" : "" }, r.end_reason || "…"), el("td", {}, r.top_tools))));
       content.append(
-        el("h3", { class: "section" }, `Details — ${s.name}${s.model ? " (" + s.model + ")" : ""}`),
+        el("h3", { class: "section" }, `Details — ${s.name}${s.controller === "hybrid" ? ` (${controllerLabel(s)})` : s.model ? " (" + s.model + ")" : ""}`),
         s.settings ? el("div", { class: "muted" }, Object.entries(s.settings).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(" · ")) : null,
         el("div", { class: "grid2" },
           el("div", {}, el("h4", {}, "Tool usage"), tools),
           el("div", {}, el("h4", {}, "Most repeated identical calls"), repeats, el("h4", { class: "section" }, "Most common errors"), errors)),
         el("h4", { class: "section" }, "Recent turns"), el("div", { style: { overflowX: "auto" } }, turnsTable));
-      if (s.negotiation_replies) content.appendChild(el("div", { class: "muted" }, `Negotiation replies: ${s.negotiation_replies}, average ${secs(s.avg_negotiation_s)}`));
+      if (s.negotiation_replies) content.appendChild(el("div", { class: "muted" }, chatAnswersText(s)));
     }
+    if (s && s.controller === "hybrid") content.appendChild(diplomatSection(s, (rep.diplomat || []).filter((r) => r.player === s.pid)));
     if (content.parentElement) content.parentElement.scrollTop = scroll;
   }
   await draw();
   timer = setInterval(() => { if (!document.body.contains(content)) clearInterval(timer); else draw(); }, 5000);
+}
+
+// A hybrid seat's diplomat (design/phase3-features.md P3.6.11): who decides what, its calls summed up, and its recent
+// calls, each with what called it, how it ended (codes only: a refusal's words are never in the metrics), its steps,
+// its model and queue time and the tools it used (refused ones struck).
+function diplomatSection(s, rows) {
+  const name = (k) => (CATEGORIES.find(([c]) => c === k) || [k, k])[1];
+  const mine = modelCategories(s.owners || {});
+  const theirs = CATEGORIES.map(([k]) => k).filter((k) => !mine.includes(k));
+  const recent = rows.slice(-15).reverse();
+  const table = el("table", { class: "list diplomat-rows" }, el("tr", {}, ...["Turn", "Ended", "Called because", "Steps", "Model", "Waited", "Tools"].map((h) => el("th", {}, h))),
+    ...recent.map((r) => el("tr", {},
+      el("td", {}, r.turn), el("td", { class: r.outcome && r.outcome !== "done" ? "warn" : "" }, outcomeText(r)),
+      el("td", { class: "small" }, (r.triggers || []).join("; ") || "–"),
+      el("td", {}, r.steps ?? "–"), el("td", {}, secs(r.gen_s)), el("td", {}, secs(r.queue_s)),
+      el("td", { class: "small" }, ...(r.tools || []).map((t, i) => el("span", { title: t.ok ? "" : "refused",
+        style: t.ok ? {} : { textDecoration: "line-through" } }, `${i ? ", " : ""}${t.tool}`))))));
+  const tools = Object.entries(s.diplomat_tools || {}).map(([k, v]) => `${k} ${v}`).join(", ");
+  return el("div", { class: "col diplomat-section" },
+    el("h4", { class: "section" }, "Diplomat"),
+    el("div", { class: "muted" }, `The model decides: ${mine.map(name).join(", ") || "nothing"}. The bot decides: ${theirs.map(name).join(", ") || "nothing"}.`),
+    el("div", {}, diplomatText(s) || "Not called yet."),
+    tools ? el("div", { class: "muted small" }, `Tools: ${tools}`) : null,
+    recent.length ? el("div", { style: { overflowX: "auto" } }, table) : null);
 }
 
 function drawTurnChart(canvas, turns, seats) {
@@ -157,7 +209,8 @@ function drawTurnChart(canvas, turns, seats) {
 export async function renderComparison(card) {
   clear(card);
   card.appendChild(el("div", { class: "row" }, el("h2", { style: { margin: 0 } }, "Model comparison"),
-    el("span", { class: "muted" }, "Aggregated over running and saved games (autosaves)."), el("span", { class: "grow" }),
+    el("span", { class: "muted" }, "Aggregated over running and saved games (autosaves): yours, and the games other members pool " +
+      "(an administrator's cover every game)."), el("span", { class: "grow" }),
     el("button", { class: "small", onclick: () => renderComparison(card) }, "Refresh")));
   let rows;
   try { rows = await api.compareModels(); } catch (e) { card.appendChild(el("p", { class: "bad" }, e.message)); return; }
@@ -166,7 +219,15 @@ export async function renderComparison(card) {
   const table = el("table", { class: "list" }, el("tr", {}, ...["Model", "Games", "Turns", "Avg turn", "Max turn", "Steps/turn", "Calls/turn",
     "Errors/turn", "Repeats/turn", "Malformed", "Stall nudges", "Out tok/turn", "Tok/s", "Clean ends", "Turn ends"].map((h) => th(h))));
   for (const r of rows) {
-    table.appendChild(el("tr", { title: r.games_list.join("\n") },
+    // a model whose pooled figures need more accounts behind them: named, with the reason, and no numbers
+    if (r.withheld) {
+      table.appendChild(el("tr", {}, el("td", {}, el("b", {}, r.model)), el("td", { colspan: 14, class: "muted" }, r.reason)));
+      continue;
+    }
+    // your own games are named; other members' pooled games are counted, never named
+    const games = [...(r.games_list || []), r.pooled_games ? `+ ${r.pooled_games} pooled game(s) of other members` : null,
+      r.pooled_withheld ? `(pooled games of ${r.pooled_withheld} other account(s) left out: too few to show)` : null];
+    table.appendChild(el("tr", { title: games.filter(Boolean).join("\n") },
       el("td", {}, el("b", {}, r.model)), el("td", {}, r.games), el("td", {}, r.turns), el("td", {}, secs(r.avg_turn_s)),
       el("td", {}, secs(r.max_turn_s)), el("td", {}, r.avg_model_steps), el("td", {}, r.avg_tool_calls),
       el("td", {}, r.avg_errors), el("td", { class: r.avg_repeats > 2 ? "bad" : "" }, r.avg_repeats), el("td", {}, r.malformed_calls),

@@ -1,0 +1,42 @@
+about = """
+A negotiation that waits on the player must be answered before its turn ends: the refusal says so first,
+naming the other side, the negotiation and how to answer. Answered, the turn ends.
+"""
+from = "tests/test_negotiation_chat.py::EndTurnTests::test_end_turn_waits_for_your_own_answer"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?", give = [{ type = "gold", amount = 20 }] }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "counter", message = "Double it.", receive = [{ type = "gold", amount = 40 }] }
+
+[[step]]
+tool = "end_turn"
+error = "Answer Civilization 2 in negotiation #1 first: respond_negotiation(negotiation_id=1, action='accept', 'counter', 'reply' or 'reject', message=...). You cannot end your turn while a negotiation waits on you."
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "accept", message = "Done." }
+
+[[step]]
+tool = "end_turn"
+
+[[step]]
+check = { what = "game" }
+path = "current"
+eq = 1
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 160

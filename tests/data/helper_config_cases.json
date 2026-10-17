@@ -1,0 +1,1313 @@
+{
+  "format": 1,
+  "about": "What protocol 1's build_config (citar/worker/__main__.py) makes of each case: \"expect\", the WorkerConfig fields the Rust helper's settings must equal, or \"error\", its SystemExit message. {dir} is the case's directory: the home (CITAR_DATA_DIR) holding helper.json, and where the other files are. stdin is no terminal, so no first-run question is asked. A case \"migrated\" is a 0.1.5 helper.json, which must lend no CPU. A case marked \"fix\" is answered differently by the Rust helper on purpose (see \"fixes\"), its \"helper\" being the Rust answer. Recorded by python -m tests.test_helper_config_cases --record; 4-05 deletes the Python worker, and this file stays the record.",
+  "fields": [
+    "server_url",
+    "token",
+    "base_url",
+    "provider",
+    "api_key_env",
+    "max_concurrent",
+    "name",
+    "quiet_hours",
+    "models",
+    "insecure",
+    "collect_hardware",
+    "hardware_file"
+  ],
+  "fixes": {},
+  "cases": [
+    {
+      "name": "helper.json alone",
+      "args": [],
+      "files": {
+        "helper.json": {
+          "server_url": "https://citar.example.com",
+          "token": "cwt_helperjson",
+          "base_url": "http://localhost:11434/v1",
+          "provider": "ollama",
+          "max_concurrent": 2,
+          "name": "Framework Desktop",
+          "quiet_hours": [
+            "22:00-06:00"
+          ],
+          "models": [
+            "gemma",
+            "qwen"
+          ]
+        }
+      },
+      "expect": {
+        "server_url": "https://citar.example.com",
+        "token": "cwt_helperjson",
+        "base_url": "http://localhost:11434/v1",
+        "provider": "ollama",
+        "api_key_env": "",
+        "max_concurrent": 2,
+        "name": "Framework Desktop",
+        "quiet_hours": [
+          [
+            0,
+            1320,
+            1440
+          ],
+          [
+            1,
+            0,
+            360
+          ],
+          [
+            1,
+            1320,
+            1440
+          ],
+          [
+            2,
+            0,
+            360
+          ],
+          [
+            2,
+            1320,
+            1440
+          ],
+          [
+            3,
+            0,
+            360
+          ],
+          [
+            3,
+            1320,
+            1440
+          ],
+          [
+            4,
+            0,
+            360
+          ],
+          [
+            4,
+            1320,
+            1440
+          ],
+          [
+            5,
+            0,
+            360
+          ],
+          [
+            5,
+            1320,
+            1440
+          ],
+          [
+            6,
+            0,
+            360
+          ],
+          [
+            6,
+            1320,
+            1440
+          ],
+          [
+            0,
+            0,
+            360
+          ]
+        ],
+        "models": [
+          "gemma",
+          "qwen"
+        ],
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "a 0.1.5 first-run helper.json",
+      "migrated": true,
+      "args": [],
+      "files": {
+        "helper.json": {
+          "server_url": "https://citar.example.com",
+          "token": "cwt_first_run"
+        }
+      },
+      "expect": {
+        "server_url": "https://citar.example.com",
+        "token": "cwt_first_run",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "worker.json by --config, helper.json ignored",
+      "args": [
+        "--config",
+        "{dir}/worker.json"
+      ],
+      "files": {
+        "helper.json": {
+          "server_url": "https://ignored.example.com",
+          "token": "cwt_ignored",
+          "name": "ignored"
+        },
+        "worker.json": {
+          "server_url": "https://citar.example.com",
+          "token": "cwt_workerjson",
+          "base_url": "http://localhost:1234/v1",
+          "max_concurrent": 1,
+          "quiet_hours": [
+            [
+              0,
+              0,
+              360
+            ],
+            [
+              1,
+              0,
+              360
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "server_url": "https://citar.example.com",
+        "token": "cwt_workerjson",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [
+          [
+            0,
+            0,
+            360
+          ],
+          [
+            1,
+            0,
+            360
+          ]
+        ],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "environment only",
+      "args": [],
+      "env": {
+        "CITAR_WORKER_SERVER": "https://env.example.com",
+        "CITAR_WORKER_TOKEN": "cwt_from_env",
+        "CITAR_WORKER_BASE_URL": "http://env-host:1234/v1",
+        "CITAR_WORKER_PROVIDER": "ollama",
+        "CITAR_WORKER_API_KEY_ENV": "ENV_KEY_VAR",
+        "CITAR_WORKER_MAX_CONCURRENT": "5",
+        "CITAR_WORKER_NAME": "env-name",
+        "CITAR_WORKER_HARDWARE_FILE": "/env/hardware.json"
+      },
+      "expect": {
+        "server_url": "https://env.example.com",
+        "token": "cwt_from_env",
+        "base_url": "http://env-host:1234/v1",
+        "provider": "ollama",
+        "api_key_env": "ENV_KEY_VAR",
+        "max_concurrent": 5,
+        "name": "env-name",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": "/env/hardware.json"
+      }
+    },
+    {
+      "name": "flags over file over environment",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--max-concurrent",
+        "3"
+      ],
+      "env": {
+        "CITAR_WORKER_SERVER": "https://env.example.com",
+        "CITAR_WORKER_TOKEN": "cwt_from_env",
+        "CITAR_WORKER_BASE_URL": "http://env-host:1234/v1",
+        "CITAR_WORKER_PROVIDER": "ollama",
+        "CITAR_WORKER_API_KEY_ENV": "ENV_KEY_VAR",
+        "CITAR_WORKER_MAX_CONCURRENT": "5",
+        "CITAR_WORKER_NAME": "env-name",
+        "CITAR_WORKER_HARDWARE_FILE": "/env/hardware.json"
+      },
+      "files": {
+        "helper.json": {
+          "server_url": "https://file.example.com",
+          "token": "cwt_from_file",
+          "base_url": "http://file-host:11434/v1",
+          "provider": "openai_compatible",
+          "max_concurrent": 2,
+          "name": "file-name"
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://file-host:11434/v1",
+        "provider": "openai_compatible",
+        "api_key_env": "ENV_KEY_VAR",
+        "max_concurrent": 3,
+        "name": "file-name",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": "/env/hardware.json"
+      }
+    },
+    {
+      "name": "file over environment",
+      "args": [],
+      "env": {
+        "CITAR_WORKER_SERVER": "https://env.example.com",
+        "CITAR_WORKER_TOKEN": "cwt_from_env",
+        "CITAR_WORKER_BASE_URL": "http://env-host:1234/v1",
+        "CITAR_WORKER_PROVIDER": "ollama",
+        "CITAR_WORKER_API_KEY_ENV": "ENV_KEY_VAR",
+        "CITAR_WORKER_MAX_CONCURRENT": "5",
+        "CITAR_WORKER_NAME": "env-name",
+        "CITAR_WORKER_HARDWARE_FILE": "/env/hardware.json"
+      },
+      "files": {
+        "helper.json": {
+          "server_url": "https://file.example.com",
+          "token": "cwt_from_file",
+          "base_url": "http://file-host:11434/v1",
+          "provider": "openai_compatible",
+          "max_concurrent": 2,
+          "name": "file-name"
+        }
+      },
+      "expect": {
+        "server_url": "https://file.example.com",
+        "token": "cwt_from_file",
+        "base_url": "http://file-host:11434/v1",
+        "provider": "openai_compatible",
+        "api_key_env": "ENV_KEY_VAR",
+        "max_concurrent": 2,
+        "name": "file-name",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": "/env/hardware.json"
+      }
+    },
+    {
+      "name": "every protocol 1 flag",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--base-url",
+        "http://gpu-box:8080/v1",
+        "--provider",
+        "openai",
+        "--api-key-env",
+        "MY_API_KEY",
+        "--max-concurrent",
+        "4",
+        "--name",
+        "flag-name",
+        "--model",
+        "a",
+        "--model",
+        "b",
+        "--quiet",
+        "22:00-06:00",
+        "--quiet",
+        "Sat 00:00-09:00",
+        "--insecure",
+        "--hardware",
+        "{dir}/hw.json"
+      ],
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://gpu-box:8080/v1",
+        "provider": "openai",
+        "api_key_env": "MY_API_KEY",
+        "max_concurrent": 4,
+        "name": "flag-name",
+        "quiet_hours": [
+          [
+            0,
+            1320,
+            1440
+          ],
+          [
+            1,
+            0,
+            360
+          ],
+          [
+            1,
+            1320,
+            1440
+          ],
+          [
+            2,
+            0,
+            360
+          ],
+          [
+            2,
+            1320,
+            1440
+          ],
+          [
+            3,
+            0,
+            360
+          ],
+          [
+            3,
+            1320,
+            1440
+          ],
+          [
+            4,
+            0,
+            360
+          ],
+          [
+            4,
+            1320,
+            1440
+          ],
+          [
+            5,
+            0,
+            360
+          ],
+          [
+            5,
+            1320,
+            1440
+          ],
+          [
+            6,
+            0,
+            360
+          ],
+          [
+            6,
+            1320,
+            1440
+          ],
+          [
+            0,
+            0,
+            360
+          ],
+          [
+            5,
+            0,
+            540
+          ]
+        ],
+        "models": [
+          "a",
+          "b"
+        ],
+        "insecure": true,
+        "collect_hardware": true,
+        "hardware_file": "{dir}/hw.json"
+      }
+    },
+    {
+      "name": "a flag of 0 or empty text is not given",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--max-concurrent",
+        "0",
+        "--name",
+        ""
+      ],
+      "env": {
+        "CITAR_WORKER_NAME": "env-name"
+      },
+      "files": {
+        "helper.json": {
+          "max_concurrent": 2
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 2,
+        "name": "env-name",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "empty or null file values fall through to the environment",
+      "args": [],
+      "env": {
+        "CITAR_WORKER_SERVER": "https://env.example.com",
+        "CITAR_WORKER_TOKEN": "cwt_env",
+        "CITAR_WORKER_NAME": "env-name"
+      },
+      "files": {
+        "helper.json": {
+          "server_url": "",
+          "token": null,
+          "name": "",
+          "base_url": null
+        }
+      },
+      "expect": {
+        "server_url": "https://env.example.com",
+        "token": "cwt_env",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "env-name",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "empty variables take the defaults",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "env": {
+        "CITAR_WORKER_BASE_URL": "",
+        "CITAR_WORKER_PROVIDER": "",
+        "CITAR_WORKER_MAX_CONCURRENT": ""
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "the defaults",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "quiet hours across midnight",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--quiet",
+        "22:00-06:00"
+      ],
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [
+          [
+            0,
+            1320,
+            1440
+          ],
+          [
+            1,
+            0,
+            360
+          ],
+          [
+            1,
+            1320,
+            1440
+          ],
+          [
+            2,
+            0,
+            360
+          ],
+          [
+            2,
+            1320,
+            1440
+          ],
+          [
+            3,
+            0,
+            360
+          ],
+          [
+            3,
+            1320,
+            1440
+          ],
+          [
+            4,
+            0,
+            360
+          ],
+          [
+            4,
+            1320,
+            1440
+          ],
+          [
+            5,
+            0,
+            360
+          ],
+          [
+            5,
+            1320,
+            1440
+          ],
+          [
+            6,
+            0,
+            360
+          ],
+          [
+            6,
+            1320,
+            1440
+          ],
+          [
+            0,
+            0,
+            360
+          ]
+        ],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "quiet hours by weekday",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--quiet",
+        "Sat 00:00-09:00",
+        "--quiet",
+        "Sunday 23:00-01:30"
+      ],
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [
+          [
+            5,
+            0,
+            540
+          ],
+          [
+            6,
+            1380,
+            1440
+          ],
+          [
+            0,
+            0,
+            90
+          ]
+        ],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "quiet hours in whole hours",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--quiet",
+        "8-17"
+      ],
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [
+          [
+            0,
+            480,
+            1020
+          ],
+          [
+            1,
+            480,
+            1020
+          ],
+          [
+            2,
+            480,
+            1020
+          ],
+          [
+            3,
+            480,
+            1020
+          ],
+          [
+            4,
+            480,
+            1020
+          ],
+          [
+            5,
+            480,
+            1020
+          ],
+          [
+            6,
+            480,
+            1020
+          ]
+        ],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "quiet hours all day",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--quiet",
+        "Wed 22:00-22:00"
+      ],
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [
+          [
+            2,
+            1320,
+            1440
+          ],
+          [
+            3,
+            0,
+            1320
+          ]
+        ],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "quiet flags replace the file's",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--quiet",
+        "03:00-04:00"
+      ],
+      "files": {
+        "helper.json": {
+          "quiet_hours": [
+            "Mon 01:00-02:00"
+          ]
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [
+          [
+            0,
+            180,
+            240
+          ],
+          [
+            1,
+            180,
+            240
+          ],
+          [
+            2,
+            180,
+            240
+          ],
+          [
+            3,
+            180,
+            240
+          ],
+          [
+            4,
+            180,
+            240
+          ],
+          [
+            5,
+            180,
+            240
+          ],
+          [
+            6,
+            180,
+            240
+          ]
+        ],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "quiet hours from the file as text and numbers",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "files": {
+        "helper.json": {
+          "quiet_hours": [
+            "Tue 09:00-10:00",
+            [
+              3,
+              0,
+              60
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [
+          [
+            1,
+            540,
+            600
+          ],
+          [
+            3,
+            0,
+            60
+          ]
+        ],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "an unknown weekday",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--quiet",
+        "Xyz 01:00-02:00"
+      ],
+      "error": "Unknown weekday in quiet hours: 'Xyz'"
+    },
+    {
+      "name": "a window without a dash",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--quiet",
+        "2200"
+      ],
+      "error": "Quiet hours look like 22:00-06:00, not '2200'"
+    },
+    {
+      "name": "the model list from the file",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "files": {
+        "helper.json": {
+          "models": [
+            "m1",
+            "m2",
+            "m3"
+          ]
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": [
+          "m1",
+          "m2",
+          "m3"
+        ],
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "model flags replace the file's",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--model",
+        "only"
+      ],
+      "files": {
+        "helper.json": {
+          "models": [
+            "m1",
+            "m2"
+          ]
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": [
+          "only"
+        ],
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "an empty model list is none",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "files": {
+        "helper.json": {
+          "models": []
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "--no-hardware",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--no-hardware"
+      ],
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": false,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "--hardware over the environment's file",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag",
+        "--hardware",
+        "{dir}/mine.json"
+      ],
+      "env": {
+        "CITAR_WORKER_HARDWARE_FILE": "/env/hw.json"
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": "{dir}/mine.json"
+      }
+    },
+    {
+      "name": "the hardware file from the file",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "files": {
+        "helper.json": {
+          "hardware_file": "/f/hw.json"
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": "/f/hw.json"
+      }
+    },
+    {
+      "name": "insecure from the file",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "files": {
+        "helper.json": {
+          "insecure": true
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": true,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "max_concurrent as text in the environment",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "env": {
+        "CITAR_WORKER_MAX_CONCURRENT": "3"
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 3,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "max_concurrent as text in the file",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "files": {
+        "helper.json": {
+          "max_concurrent": "4"
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 4,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "the API key's variable from the file",
+      "args": [
+        "--server",
+        "https://flag.example.com",
+        "--token",
+        "cwt_from_flag"
+      ],
+      "files": {
+        "helper.json": {
+          "api_key_env": "OPENROUTER_KEY",
+          "provider": "openai_compatible"
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_from_flag",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "openai_compatible",
+        "api_key_env": "OPENROUTER_KEY",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "protocol 2's keys are ignored by protocol 1 and change nothing it reads",
+      "args": [],
+      "files": {
+        "helper.json": {
+          "server_url": "https://citar.example.com",
+          "token": "cwt_v2",
+          "cpu": {
+            "enabled": true,
+            "threads": 2
+          },
+          "updates": "notify",
+          "stream": false,
+          "no_power": true
+        }
+      },
+      "expect": {
+        "server_url": "https://citar.example.com",
+        "token": "cwt_v2",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    },
+    {
+      "name": "a missing token",
+      "args": [
+        "--server",
+        "https://citar.example.com"
+      ],
+      "error": "Give --token (or CITAR_WORKER_TOKEN): issue one on the Servers page."
+    },
+    {
+      "name": "a missing server",
+      "args": [
+        "--token",
+        "cwt_only"
+      ],
+      "error": "Give --server (or CITAR_WORKER_SERVER): the CITAR server to connect to."
+    },
+    {
+      "name": "nothing given",
+      "args": [],
+      "error": "Give --server (or CITAR_WORKER_SERVER): the CITAR server to connect to."
+    },
+    {
+      "name": "a missing --config file",
+      "args": [
+        "--config",
+        "{dir}/absent.json"
+      ],
+      "error": "No such config file: {dir}/absent.json"
+    },
+    {
+      "name": "a token from the file, the server from a flag",
+      "args": [
+        "--server",
+        "https://flag.example.com"
+      ],
+      "files": {
+        "helper.json": {
+          "token": "cwt_file_token"
+        }
+      },
+      "expect": {
+        "server_url": "https://flag.example.com",
+        "token": "cwt_file_token",
+        "base_url": "http://localhost:1234/v1",
+        "provider": "lmstudio",
+        "api_key_env": "",
+        "max_concurrent": 1,
+        "name": "",
+        "quiet_hours": [],
+        "models": null,
+        "insecure": false,
+        "collect_hardware": true,
+        "hardware_file": ""
+      }
+    }
+  ]
+}

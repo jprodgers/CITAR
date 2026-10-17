@@ -1,0 +1,9 @@
+{
+  "frame": {
+    "t": "update_status",
+    "ts": 1760000000.0,
+    "state": "available",
+    "version": "0.1.7",
+    "message": "CITAR helper 0.1.7 is available; updates are set to notify."
+  }
+}

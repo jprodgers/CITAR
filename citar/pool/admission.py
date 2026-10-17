@@ -1,10 +1,16 @@
 """Admission control: may this person run this work on that server, right now?
 
-Every LLM seat in a game passes through `check()` before the game starts. The checks run in a fixed
-order, cheapest and most absolute first, and each failure produces a **specific, quotable reason**:
+Every model seat in a game passes through `check()` before the game starts, and every pooled prompt when its ticket
+is made. The checks run in a fixed order, cheapest and most absolute first, and each failure produces a **specific,
+quotable reason**:
 
     grant exists  ->  purpose allowed  ->  inside a window  ->  budget remains
                   ->  concurrency slot free  ->  server actually online
+
+**Admission decides who may, the prompt scheduler when** (design/phase3-features.md P3.3.7): leases and tickets are
+admitted with ``in_flight=None``, which skips the concurrency step, so a busy machine queues the work rather than
+refusing it, and the grant's ``concurrency`` becomes the scheduler's cap on that person's running requests
+(``Decision.grant``). The step stays for a caller that asks it with a count.
 
 A generic "access denied" is close to useless here. The interesting cases are all temporary — the
 overnight box opens at midnight, the budget resets on the 1st, somebody else has the only slot — and
@@ -24,17 +30,24 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from ..auth import access
 from ..db.models import AccessGrant, AvailabilityWindow, Server, ServerGroup, User
 from . import budgets, windows
 
 log = logging.getLogger("citar.admission")
 
-PURPOSES = ("game", "benchmark", "probe", "scenario", "lab")
+#: The kinds of work a grant may be limited to. ``game`` is a model seat that plays every turn (task class *full*),
+#: ``pooled`` one prompt at a time (task class *partial*: a hybrid seat's diplomacy and chat answers, a probe's offer
+#: and message cases, a report's written analysis, the Servers page's test; design/phase3-features.md P3.3.7).
+PURPOSES = ("game", "pooled", "benchmark", "probe", "scenario", "lab")
 
 PURPOSE_LABELS = {
-    "game": "ordinary games", "benchmark": "benchmarks", "probe": "probes",
-    "scenario": "scenarios", "lab": "lab runs",
+    "game": "ordinary games", "pooled": "pooled prompts", "benchmark": "benchmarks", "probe": "probes",
+    "scenario": "scenarios", "lab": "lab runs (CPU work)",
 }
+#: The purposes that are CPU work: lent only by a grant that lists them (design/phase4-helper.md P4.5.5), never by an
+#: empty list, and never by an administrator's own standing.
+CPU_PURPOSES = ("lab",)
 
 
 @dataclass
@@ -112,8 +125,11 @@ def grants_for(session, user: Optional[User], group_id: str) -> list:
 
 
 def _purpose_ok(grant: AccessGrant, purpose: str) -> bool:
-    """An empty purpose list means every purpose, which is the common case."""
+    """An empty purpose list means every model purpose, which is the common case, and never CPU work (``lab``): a
+    grant made to lend a GPU for games never lends the CPU (P4.5.5). CPU work is opt-in per grant."""
     allowed = grant.purposes or []
+    if purpose in CPU_PURPOSES:
+        return purpose in allowed
     return not allowed or purpose in allowed
 
 
@@ -134,10 +150,24 @@ def check(session, user: Optional[User], server: Server, purpose: str = "game", 
     if not server.enabled:
         return _deny("disabled", f"“{server.name}” has been switched off by its owner.",
                      server=server)
+    if server.trust_tier == "quarantined" and not (server.owner_id == user.id and not access.is_site_machine(server)):
+        # a machine that returned a wrong game is relied on for nobody else, its model work included
+        # (design/phase4-helper.md P4.5.8 rule 7); its owner may still use it
+        return _deny("quarantined", f"“{server.name}” is quarantined: its results did not check out, so it serves "
+                                    "nobody but its owner until an administrator releases it.", server=server)
+    if purpose != "lab" and not _takes_model_work(server):
+        # its machine settings turned its LLM capability off (design/phase3-features.md P3.8): the prompt scheduler
+        # would refuse every request, so the work is refused here, with the reason, before anything is made
+        return _deny("disabled", f"“{server.name}” takes no model work: its owner turned it off in its machine "
+                                 "settings.", server=server)
 
     # The owner may always use their own hardware, and administrators are not gated by grants. Both
-    # still respect the server being switched off, above.
-    if server.owner_id == user.id or user.role == "admin":
+    # still respect the server being switched off, above. The site's machines (the host, its online
+    # APIs) are no member's own, whoever imported them (access.is_site_machine). CPU work is the
+    # exception for administrators: an administrator's own lab experiment runs on a member's machine
+    # only under a grant listing ``lab``, as a member's does (P4.5.5).
+    own = server.owner_id == user.id and not access.is_site_machine(server)
+    if own or (user.role == "admin" and purpose not in CPU_PURPOSES):
         return _check_capacity(session, server, None, online=online, in_flight=in_flight, now=now)
 
     if not server.group_id:
@@ -169,6 +199,12 @@ def check(session, user: Optional[User], server: Server, purpose: str = "game", 
                                 server=server)
 
 
+def _takes_model_work(server: Server) -> bool:
+    """Whether a machine's capabilities let it take model work (``capabilities.llm.enabled``, on by default)."""
+    from ..machine_settings import capabilities
+    return capabilities(server.capabilities)["llm"]["enabled"]
+
+
 #: How informative each refusal is. A higher-ranked reason is shown in preference to a lower one,
 #: because it tells the person more about what would actually let them through.
 _RANK = {"no_grant": 0, "purpose": 1, "concurrency": 2, "offline": 3, "window": 4, "budget": 5}
@@ -186,6 +222,11 @@ def _check_grant(session, user: User, server: Server, grant: AccessGrant, purpos
     group_name = group.name if group else "that group"
 
     if not _purpose_ok(grant, purpose):
+        if not grant.purposes:
+            return _deny("purpose",
+                         f"Your access to “{group_name}” is for every kind of model work, which does not include "
+                         f"{PURPOSE_LABELS.get(purpose, purpose)}: its owner lends the CPU only with a grant that "
+                         "lists it.", grant=grant, server=server)
         allowed = ", ".join(PURPOSE_LABELS.get(p, p) for p in (grant.purposes or []))
         return _deny("purpose",
                      f"Your access to “{group_name}” is limited to {allowed}, "
@@ -218,8 +259,8 @@ def _check_grant(session, user: User, server: Server, grant: AccessGrant, purpos
                      (f"The budget for “{group_name}” is used up "
                       if used_up else
                       f"The budget for “{group_name}” has too little left to start new work ")
-                     + f"({budget_state.currency} {budget_state.committed:.2f} of "
-                     f"{budget_state.limit:.2f} {budgets.period_label(budget_state.period, budget_state.key)}). "
+                     + f"({budget_state.committed:.2f} of {budget_state.limit:.2f} {budget_state.unit} "
+                     f"{budgets.period_label(budget_state.period, budget_state.key)}). "
                      + (f"It resets {windows._relative(period_end, now)}."
                         if budget_state.period != "total"
                         else "Its owner would have to raise it."),
@@ -242,7 +283,7 @@ def _check_capacity(session, server: Server, grant: Optional[AccessGrant], *,
     if online is False:
         return _deny("offline",
                      f"“{server.name}” is offline — its worker is not connected. "
-                     "The owner needs to start the CITAR helper (citar-worker) on that machine.",
+                     "The owner needs to start the CITAR helper (citar-helper) on that machine.",
                      server=server, grant=grant)
 
     limit = grant.concurrency if (grant and grant.concurrency) else (server.max_concurrent or 1)
@@ -257,15 +298,19 @@ def _check_capacity(session, server: Server, grant: Optional[AccessGrant], *,
 # ---------------------------------------------------------------------------- choosing
 
 def usable_servers(session, user: Optional[User], purpose: str = "game", *,
-                   now: Optional[datetime] = None, liveness=None, load=None) -> list:
+                   now: Optional[datetime] = None, liveness=None, load=None, only=None) -> list:
     """Every server this user could run `purpose` on, with the decision attached.
 
     Returns refused servers too, each with its reason — the lobby shows them greyed out with "opens
     in 4h 12m" rather than hiding them, so somebody can see what exists and why they cannot use it.
+    ``only(server)``, when given, chooses which servers are considered at all (the ones the user may
+    see: a refused machine they cannot see is not named to them).
     """
     now = now or datetime.now(timezone.utc)
     out = []
     for server in session.scalars(select(Server).order_by(Server.name)):
+        if only is not None and not only(server):
+            continue
         online = liveness(server.id) if liveness else None
         in_flight = load(server.id) if load else None
         decision = check(session, user, server, purpose, now=now, online=online, in_flight=in_flight)

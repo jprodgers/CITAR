@@ -8,6 +8,7 @@ __pycache__
 *.pyc
 *.egg-info
 build
+# dist stays out; the image installs its package from wheelhouse/ (the Dockerfile says why).
 dist
 installer/output
 installer/build

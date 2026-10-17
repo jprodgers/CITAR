@@ -6,7 +6,11 @@ Every protected route declares its requirement instead of checking by hand:
     def create(body: dict, me: User = Depends(require_cap("register_servers"))):
 
 The dependency and the route share one database session per request (FastAPI caches a dependency's
-result for the request), so reading the caller and doing the work happen in one transaction.
+result for the request). What resolving the caller writes (a sign-in's `last_seen_at`, a revocation,
+the local owner's session) is committed before the route runs (`principal`), so the route's work
+starts with no write of the request's open: under SQLite an open write holds the database's write
+lock, and anything the route calls that writes from a session of its own on the same thread (the
+games index when a game is closed or loaded) would wait out the busy timeout behind it.
 
 Local mode signs the owner in here. It is worth being precise about what that does and does not
 mean: it mints a genuine session for a genuine admin account, and every check below then runs
@@ -30,7 +34,14 @@ log = logging.getLogger("citar.deps")
 
 
 def get_db() -> Iterator[Session]:
-    """A database session for the request, shared by every dependency in it."""
+    """A database session for the request, shared by every dependency in it.
+
+    Always taken as ``Depends(get_db, scope="function")``: its commit then runs when the route returns, before the
+    answer is sent. FastAPI's default for a dependency with ``yield`` (``scope="request"``) runs it after the response
+    has gone, so a caller's next request could read what the last one changed as it stood before (3-19's QA: a share
+    link just rotated still opened the game), and a commit that failed did so after a 200. One scope everywhere also
+    keeps one session per request: FastAPI caches a dependency per scope. ``test_access.test_every_route_commits_
+    before_it_answers`` holds every route to it."""
     with db.session() as s:
         yield s
 
@@ -59,7 +70,7 @@ class Principal:
             return {"authenticated": False, "user": None, "capabilities": {}}
         return {
             "authenticated": True,
-            "user": self.user.public(full=True),
+            "user": self.user.account(),
             "capabilities": policy.capabilities(self.user),
             "csrf_token": self.auth_session.csrf_token if self.auth_session else "",
             "session_id": self.auth_session.id if self.auth_session else "",
@@ -67,11 +78,14 @@ class Principal:
         }
 
 
-def principal(request: Request, response: Response, s: Session = Depends(get_db)) -> Principal:
+def principal(request: Request, response: Response, s: Session = Depends(get_db, scope="function")) -> Principal:
     """Resolve the caller. Never raises — routes that need an account ask for `require_user`."""
     ip = ratelimit.client_ip(request)
-    row = sessions.resolve(s, sessions.cookie_from(request))
-    user = sessions.user_for(s, row)
+    # Nothing is flushed while the caller is resolved, so what it changes (a sign-in's last_seen_at,
+    # a revocation) is still pending below, where it is committed only if there is any.
+    with s.no_autoflush:
+        row = sessions.resolve(s, sessions.cookie_from(request))
+        user = sessions.user_for(s, row)
 
     if user is None and settings.get().local:
         # Loopback-only process, single operator: skip the login form, but still make a real session.
@@ -79,8 +93,14 @@ def principal(request: Request, response: Response, s: Session = Depends(get_db)
         row, raw = _local_session(s, user, request)
         if raw is not None:
             sessions.set_cookie(response, raw)
+        s.commit()
         return Principal(user, row, ip, local_auto=True)
 
+    # What resolving the caller wrote is committed now (see the module's docstring); with
+    # expire_on_commit=False the account and its session stay usable for the route. A request that
+    # changed nothing (most of them: last_seen_at moves once a minute) keeps its connection.
+    if s.new or s.dirty or s.deleted:
+        s.commit()
     if user is not None:
         request.state.citar_user_id = user.id
     return Principal(user, row, ip)
@@ -143,14 +163,18 @@ def optional_user(p: Principal = Depends(principal)) -> Optional[User]:
     return p.user
 
 
-def require_role(role: str) -> Callable:
-    """`moderator` or `admin`. Ranked, so an admin satisfies a moderator requirement."""
+def require_role(role: str, *, hide: bool = False) -> Callable:
+    """`moderator` or `admin`. Ranked, so an admin satisfies a moderator requirement. With ``hide``, a signed-in
+    account below the role gets 404, as if the route were not there (the admin users page and the audit log,
+    design/phase3-features.md P3.2.7: a member learns nothing of them); a visitor still gets 401."""
 
     def dependency(request: Request, p: Principal = Depends(principal)) -> User:
         """Resolve the caller and refuse anyone below the required role."""
+        if hide and p.user is not None and not p.user.at_least(role):
+            raise HTTPException(404, "Not Found")
         user = require_user(request, p)
         if not user.at_least(role):
-            raise HTTPException(403, f"That needs {role} access.")
+            raise HTTPException(404, "Not Found") if hide else HTTPException(403, f"That needs {role} access.")
         return user
 
     return dependency
@@ -163,25 +187,18 @@ def require_cap(capability: str) -> Callable:
         """Resolve the caller and refuse anyone without the required capability."""
         user = require_user(request, p)
         if not policy.can(user, capability):
-            raise HTTPException(403, _denial_message(user, capability))
+            raise HTTPException(403, policy.denial(user, capability))
         return user
 
     return dependency
 
 
-def _denial_message(user: User, capability: str) -> str:
-    """Say *why*, so the person can act on it rather than guessing."""
-    if user.status == "probation" and capability in policy.PROBATION_DENIES:
-        return ("New accounts cannot do that yet. An administrator can lift the restriction — "
-                "it is there to keep automated signups from registering servers or publishing.")
-    friendly = {
-        "register_servers": "Your account is not allowed to register servers.",
-        "run_reports": "Your account is not allowed to build reports.",
-        "publish_public": "Your account is not allowed to publish to the public internet.",
-        "create_games": "Your account is not allowed to start games.",
-        "invite": "Your account cannot create invitations.",
-    }
-    return friendly.get(capability, f"Your account lacks the {capability} permission.")
+def check_cap(user: User, capability: str) -> User:
+    """``require_cap`` for a route that learns only in its body which capability it needs (creating an item rather
+    than changing one it may manage): raises the same 403, with the same reason."""
+    if not policy.can(user, capability):
+        raise HTTPException(403, policy.denial(user, capability))
+    return user
 
 
 # Convenience aliases the routers read more clearly with.

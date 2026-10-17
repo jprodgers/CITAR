@@ -1,0 +1,33 @@
+{
+ "name": "text-gemma4-cut-off",
+ "note": "Gemma 4's syntax cut off before its closing brace: no call",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "respond_negotiation{action:<|\"|>reply<|\"|>,message:<|\"|>Hi<|\"|>",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "length",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "respond_negotiation{action:<|\"|>reply<|\"|>,message:<|\"|>Hi<|\"|>",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "length",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "respond_negotiation{action:<|\"|>reply<|\"|>,message:<|\"|>Hi<|\"|>"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

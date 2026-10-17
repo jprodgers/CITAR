@@ -5,9 +5,14 @@ who owns it, who may see it, whether its results feed the public averages. Keepi
 means the engine stays unaware that accounts exist — the turn driver has no business importing
 permission code — and it means a game's sharing survives a restart even though the session does not.
 
-The row is created when a game is created and kept in step at the points that matter (turn
-advanced, game finished, game deleted). It is not written on every engine event: a 330-turn
-benchmark game would otherwise be a few thousand needless writes.
+The row is created when a game is created and kept in step at the points that matter
+(design/phase3-features.md P3.2.5): once a round, from the session's save writer after the round's
+autosave is on the disk (off the game's lock, so it costs the game nothing), and when the session
+stops. Its status is `playing` while the game is, `finished` once it is over, `closed` when the
+session stopped before the end, and `playing` again when it is loaded. It is not written on every
+engine event: a 330-turn benchmark game would otherwise be a few thousand needless writes. A game
+loaded from disk without a row gets one (`index_loaded`), and at boot the rows left `playing` with no
+live session are closed (`close_orphans`).
 
 Two kinds of caller reach a game, and both must keep working:
 
@@ -32,11 +37,28 @@ from ..db.models import User
 
 log = logging.getLogger("citar.ownership")
 
+#: The statuses that count as a live game: a lobby game (`kind = game`) in one of them counts against
+#: its owner's game limit, and at boot one with no session is closed.
+LIVE_STATUSES = ("setup", "playing")
+
+
+def status_for(phase: Optional[str], stopped: bool = False) -> str:
+    """A row's status for the engine's phase (`playing` or `over`): `finished` once the game is over;
+    while it plays, `playing`, or `closed` when its session stopped before the end."""
+    if phase == "over":
+        return "finished"
+    if phase == "playing":
+        return "closed" if stopped else "playing"
+    return "setup"
+
 
 def register(session, gs, owner: Optional[User], *, kind: str = "game",
-             visibility: str = "private", data_sharing: Optional[str] = None,
-             save_path: Optional[str] = None) -> GameRow:
-    """Create (or refresh) the index row for a live session."""
+             visibility: str = access.PRIVATE, data_sharing: Optional[str] = None,
+             save_path: Optional[str] = None, item: Optional[Tuple[str, str]] = None) -> GameRow:
+    """Create (or refresh) the index row for a live session, and give the session its owner. ``item`` = (kind, ref) is
+    the owned item a run's game is part of (a benchmark job's run), kept in the row's ``meta``: the compute ledger asks
+    it whether the game's work is the server's own data collection (P3.4.2)."""
+    access.check_visibility(visibility)
     row = session.get(GameRow, gs.id)
     if row is None:
         row = GameRow(id=gs.id)
@@ -48,40 +70,141 @@ def register(session, gs, owner: Optional[User], *, kind: str = "game",
     # A game inherits the owner's default, so somebody who has opted out of pooling does not have to
     # remember to opt out again for every game they start.
     row.data_sharing = data_sharing or (owner.data_sharing if owner is not None else "pool")
-    row.status = getattr(gs.game.s, "phase", "setup") or "setup"
-    row.turn = getattr(gs.game, "turn", 0)
+    _apply(row, getattr(gs.game, "turn", 0), getattr(gs.game, "phase", None), stopped=False)
+    row.deleted_at = None
     if save_path:
         row.save_path = save_path
     row.meta = {"seats": [{"player": s.player, "type": s.type, "name": s.name} for s in gs.seats]}
+    if item:
+        row.meta["item"] = [str(item[0]), str(item[1])]
     session.flush()
+    gs.owner_id = row.owner_id
     return row
 
 
-def sync(session, gs) -> Optional[GameRow]:
-    """Update turn and status from the live session."""
-    row = session.get(GameRow, gs.id)
+def _apply(row: GameRow, turn: int, phase: Optional[str], *, stopped: bool) -> None:
+    """Put a turn and the status of a phase on a row."""
+    now = datetime.now(timezone.utc)
+    row.turn = int(turn or 0)
+    row.status = status_for(phase, stopped)
+    if row.status == "finished":
+        if row.finished_at is None:
+            row.finished_at = now
+    else:
+        row.finished_at = None
+    row.updated_at = now
+
+
+def sync(session, gid: str, *, turn: int, phase: Optional[str], stopped: bool = False) -> Optional[GameRow]:
+    """Put a game's turn and status on its row (none for a game without one)."""
+    row = session.get(GameRow, gid)
     if row is None:
         return None
-    row.turn = getattr(gs.game, "turn", row.turn)
-    phase = getattr(gs.game.s, "phase", None)
-    if phase:
-        row.status = phase
-        if phase == "finished" and row.finished_at is None:
-            row.finished_at = datetime.now(timezone.utc)
-    row.updated_at = datetime.now(timezone.utc)
+    _apply(row, turn, phase, stopped=stopped)
     return row
 
 
-def sync_quietly(gs) -> None:
-    """Best-effort sync from engine code that has no database session of its own.
+def sync_quietly(gid: str, *, turn: int, phase: Optional[str], stopped: bool = False) -> None:
+    """``sync`` in a database session of its own, from the session's save writer (after a round's
+    autosave) or from its stop, never with the game's lock held.
 
-    Never raises: a game in progress must not stop because the index could not be written.
+    Never raises: a game in progress must not stop because the index could not be written. Does nothing in a
+    process that has not opened its database (a command-line tool playing games without a server).
     """
+    if not db.configured():
+        return
     try:
         with db.session() as s:
-            sync(s, gs)
+            sync(s, gid, turn=turn, phase=phase, stopped=stopped)
     except Exception:
-        log.debug("could not sync game row for %s", getattr(gs, "id", "?"), exc_info=True)
+        log.warning("could not put turn %s (%s%s) on the row of game %s", turn, phase, ", stopped" if stopped else "",
+                    gid, exc_info=True)
+
+
+def index_loaded(gs, kind: Optional[str] = None) -> Optional[str]:
+    """A session just loaded from disk (the load route, ``restore_live``, a benchmark's reload, a probe
+    case opened to be looked at): give a game without a row one (``register_existing``, owned by nobody,
+    private, of ``kind`` when the caller knows it), mark its row as loaded (`playing`, or `finished` for a
+    game that is over), and return the row's owner for the session. Never raises: an index that cannot
+    be written leaves the game owned by nobody, which only administrators reach. Nothing in a process
+    that has not opened its database."""
+    if not db.configured():
+        return None
+    try:
+        with db.session() as s:
+            row = s.get(GameRow, gs.id)
+            if row is None:
+                row = register_existing(s, gs, None, kind=kind)
+            else:
+                _apply(row, gs.game.turn, gs.game.phase, stopped=False)
+            return row.owner_id if row is not None else None
+    except Exception:
+        log.warning("could not index loaded game %s", getattr(gs, "id", "?"), exc_info=True)
+        return None
+
+
+def register_quietly(gs, owner_id: Optional[str], *, kind: str, item: Optional[Tuple[str, str]] = None) -> None:
+    """Index a game a run of somebody's just made (a benchmark job's game; design/phase3-features.md P3.2.4): its
+    row has the run's owner and the visibility of the run's item ``item`` = (kind, ref), private when the run has
+    no row yet. In a database session of its own, from the runner's thread, before the game starts; never with the
+    game's lock held. Never raises (a game that could not be indexed is the server's, reached by administrators);
+    nothing in a process that has not opened its database."""
+    if not db.configured():
+        return
+    try:
+        from .. import items
+        with db.session() as s:
+            owner = s.get(User, owner_id) if owner_id else None
+            visibility = items.visibility_of(s, *item) if item else access.PRIVATE
+            register(s, gs, owner, kind=kind, visibility=visibility,
+                     data_sharing=None if owner is not None else "private", item=item)
+    except Exception:
+        log.warning("could not index game %s of %s", getattr(gs, "id", "?"), item, exc_info=True)
+
+
+def claim_quietly(gs, owner_id: Optional[str], *, item: Optional[Tuple[str, str]] = None) -> None:
+    """Give a game loaded again for a run (a benchmark job reloaded after a restart or opened to be watched, a probe
+    case opened to be looked at) its run's owner, when its row has none: ``index_loaded`` makes an ownerless row for
+    a save it does not know. The row takes the owner's pooling default and the visibility of the run's item ``item``
+    = (kind, ref); the session takes the owner. Never raises; nothing without a database or an owner."""
+    if not owner_id or not db.configured():
+        return
+    try:
+        from .. import items
+        with db.session() as s:
+            row = s.get(GameRow, gs.id)
+            owner = s.get(User, owner_id)
+            if row is None or owner is None or row.owner_id is not None:
+                return
+            row.owner_id = owner.id
+            row.data_sharing = owner.data_sharing or "pool"
+            if item:
+                row.visibility = items.visibility_of(s, *item)
+                row.meta = {**(row.meta or {}), "item": [str(item[0]), str(item[1])]}
+            gs.owner_id = owner.id
+    except Exception:
+        log.warning("could not give game %s its run's owner", getattr(gs, "id", "?"), exc_info=True)
+
+
+def close_orphans(live_ids) -> list:
+    """Close every row left `setup` or `playing` with no live session (a failed restore, a deleted
+    save folder, a crash between registration and the first save), so no row counts against a
+    game limit for a game that is not there. Run at boot once the lobby games, the benchmarks and
+    the probes are back; logs a line per row. Returns the ids closed."""
+    from sqlalchemy import select as _select
+    live = set(live_ids)
+    closed = []
+    with db.session() as s:
+        for row in s.scalars(_select(GameRow).where(GameRow.status.in_(LIVE_STATUSES),
+                                                    GameRow.deleted_at.is_(None))):
+            if row.id in live:
+                continue
+            row.status = "closed"
+            row.updated_at = datetime.now(timezone.utc)
+            closed.append(row.id)
+            log.warning("game %s (%s) was %s with no live session: marked closed", row.id, row.name,
+                        "being played" if row.turn else "set up")
+    return closed
 
 
 def row_for(session, gid: str) -> Optional[GameRow]:
@@ -142,6 +265,25 @@ def visible_ids(session, viewer: Optional[User]) -> Optional[set]:
     return set(rows)
 
 
+#: How many ids go in one ``IN (...)`` (SQLite's older builds allow 999 parameters in a statement).
+_CHUNK = 500
+
+
+def manageable_ids(session, viewer: Optional[User], ids) -> set:
+    """Which of the games ``ids`` this viewer may manage (load, delete their saves: ``access.MANAGE``), as
+    ``access.on`` decides for each: an administrator every one with a row, an owner theirs, an ACL entry its own.
+    Two queries per few hundred games rather than two per game, for a listing (the lobby's Saved games)."""
+    ids = list(dict.fromkeys(str(i) for i in ids if i))
+    if viewer is None or not ids:
+        return set()
+    rows: list = []
+    acl: dict = {}
+    for i in range(0, len(ids), _CHUNK):
+        rows += session.scalars(select(GameRow).where(GameRow.id.in_(ids[i:i + _CHUNK])))
+        acl.update(access.acl_permissions_for(session, "game", ids[i:i + _CHUNK], viewer.id))
+    return {row.id for row in rows if access.on(session, viewer, row, acl=acl.get(row.id, set())).can(access.MANAGE)}
+
+
 def delete(session, gid: str, *, actor: Optional[User]) -> None:
     """Mark the index row deleted. The save files are handled by the caller."""
     row = session.get(GameRow, gid)
@@ -152,41 +294,60 @@ def delete(session, gid: str, *, actor: Optional[User]) -> None:
         audit.record(session, "game.deleted", actor=actor, object_type="game", object_id=gid)
 
 
-def to_client(row: Optional[GameRow], perms: access.Access, *, base_url: str = "") -> dict:
-    """The sharing block the browser shows next to a game."""
+def to_client(row: Optional[GameRow], perms: access.Access, viewer: Optional[User], *, base_url: str = "") -> dict:
+    """The sharing block the browser shows next to a game, for ``viewer`` (None: a visitor). Its owner appears as the
+    viewer may see the account (``User.public`` for the viewer: the handle, and the display name and avatar only where they
+    show to the viewer; a `global` game's list is read by visitors). The share URL (``access.share_url``) goes
+    to whoever manages the game: for `link` it carries the key, for `server` and `global` it does not."""
     if row is None:
-        return {"owner_id": None, "visibility": "private", "data_sharing": "pool", **perms.client()}
+        return {"owner_id": None, "owner": None, "visibility": access.PRIVATE, "data_sharing": "pool",
+                **perms.client()}
+    from sqlalchemy.orm import object_session
+    session = object_session(row)
+    owner = session.get(User, row.owner_id) if row.owner_id and session is not None else None
     out = {
         "owner_id": row.owner_id,
+        "owner": owner.public(viewer) if owner is not None else None,
         "visibility": row.visibility,
         "data_sharing": row.data_sharing,
         "kind": row.kind,
+        "status": row.status,
         **perms.client(),
     }
-    if access.MANAGE in perms and row.visibility in ("link", "public") and base_url:
-        out["share_url"] = f"{base_url.rstrip('/')}/#/game/{row.id}?k={row.slug}"
+    if access.MANAGE in perms and base_url:
+        url = access.share_url(row, base_url)
+        if url:
+            out["share_url"] = url
     return out
 
 
 # ---------------------------------------------------------------------------- migration
 
 def adopt_orphans(session, owner: User) -> int:
-    """Give every unowned game to `owner`.
-
-    Runs once when a single-user installation gains accounts: everything that existed before there
-    were owners belongs to the person who has been running the server.
-    """
-    rows = list(session.scalars(select(GameRow).where(GameRow.owner_id.is_(None))))
+    """Give every unowned game row to `owner`, with `owner`'s pooling default (a row nobody owned pooled
+    nothing: `register_existing`), and the live session its owner. Part of the items' adoption
+    (``items.adopt_orphans``: at boot when an administrator exists, and when the first one is made),
+    which writes the audit row; returns how many rows were adopted."""
+    from .session import all_sessions
+    rows = list(session.scalars(select(GameRow).where(GameRow.owner_id.is_(None), GameRow.deleted_at.is_(None))))
+    live = {s.id: s for s in all_sessions()}
     for row in rows:
         row.owner_id = owner.id
-    if rows:
-        audit.record(session, "migration.games_adopted", actor=owner, count=len(rows))
+        row.data_sharing = owner.data_sharing or "pool"
+        if row.id in live:
+            live[row.id].owner_id = owner.id
     return len(rows)
 
 
-def register_existing(session, gs, owner: Optional[User]) -> Optional[GameRow]:
-    """Index a session that has no row yet — a game loaded from a save written before accounts."""
+def register_existing(session, gs, owner: Optional[User], *, kind: Optional[str] = None) -> Optional[GameRow]:
+    """Index a session that has no row yet: a game loaded from a save whose row is gone (the database
+    was renamed aside for 0.1.6's, or the save came from elsewhere), or a probe case opened to be looked
+    at. ``kind`` is the caller's when it knows it (`probe`); otherwise `benchmark` for a benchmark's game
+    and `game` for the rest. A row with no owner pools nothing (`data_sharing = private`): nobody chose
+    to pool it, and whoever comes to own it (the load route) sets their own default. Returns None when it
+    has one."""
     if session.get(GameRow, gs.id) is not None:
         return None
-    kind = "benchmark" if getattr(gs, "benchmark", None) else "game"
-    return register(session, gs, owner, kind=kind, visibility="private")
+    kind = kind or ("benchmark" if getattr(gs, "benchmark", None) else "game")
+    return register(session, gs, owner, kind=kind, visibility=access.PRIVATE,
+                    data_sharing=None if owner is not None else "private")

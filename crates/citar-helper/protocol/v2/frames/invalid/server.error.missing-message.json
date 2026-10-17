@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "error", "ts": 1760000000.0, "id": ""},
+  "code": "missing",
+  "path": "message",
+  "why": "a v1 refusal with no message"
+}

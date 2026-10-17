@@ -1,0 +1,38 @@
+about = """
+Handing a seat to another controller re-derives its handicap and automatic decisions from the new
+controller, except what the seat set explicitly, before or now: those settings outlast the change.
+"""
+from = "tests/test_controllers.py::DefaultTests::test_a_new_controller_rederives_what_was_not_set_explicitly"
+
+[config]
+players = [{ controller = "bot", auto = { un_vote = false } }, {}]
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { handicap = "ai", auto = { un_vote = false, conquest = true, free_picks = true } }
+
+[[step]]
+op = "set_controller"
+args = { player = 0, controller = "human" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { controller = "human", handicap = "human", auto = { un_vote = false, conquest = false, free_picks = false } }
+
+[[step]]
+op = "set_controller"
+args = { player = 0, controller = "bot", handicap = "human" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { controller = "bot", handicap = "human", auto = { un_vote = false, conquest = true, free_picks = true }, overrides = { handicap = "human", auto = { un_vote = false } } }
+
+[[step]]
+note = "A bad setting is refused, and the seat keeps what it had."
+op = "set_controller"
+args = { player = 0, controller = "llm", handicap = "deity" }
+error = "handicap must be 'human' or 'ai', not 'deity'."
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { controller = "bot", handicap = "human" }

@@ -1,0 +1,64 @@
+{
+  "frame": {
+    "t": "job_offer",
+    "ts": 1760000000.0,
+    "job": "cj_0123456789abcdef",
+    "run": "cr_0123456789abcdef",
+    "kind": "lab_game",
+    "spec": [
+      {
+        "exp": "prince-baseline",
+        "i": 3,
+        "seed": 1003,
+        "map_type": "continents",
+        "size": "duel",
+        "speed": "Quick",
+        "turns": 30,
+        "difficulty": "Prince",
+        "barbarians": "normal",
+        "barbarian_difficulty": "Prince",
+        "nation": null,
+        "city_states": 0,
+        "ai_base_values": null,
+        "map_edges": "wrap",
+        "river_density": "normal",
+        "resources": "standard",
+        "seats": [
+          {
+            "label": "A",
+            "bot": "basic1",
+            "difficulty": "Prince",
+            "params": {},
+            "aggression": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": null,
+            "nation": null
+          },
+          {
+            "label": "B",
+            "bot": "basic1",
+            "difficulty": "Prince",
+            "params": {"war_weight": 1.2},
+            "aggression": 0.6,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": null,
+            "nation": null
+          }
+        ]
+      }
+    ],
+    "spec_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+    "jobs_build": "0f1e2d3c4b5a",
+    "deadline_s": 900,
+    "mem_mb": 256,
+    "priority": 5,
+    "offer_ttl_s": 30
+  },
+  "code": "type",
+  "path": "spec",
+  "why": "a spec is an object"
+}

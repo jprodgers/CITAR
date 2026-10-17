@@ -1,0 +1,13 @@
+{
+  "frame": {
+    "t": "job_failed",
+    "ts": 1760000000.0,
+    "run": "cr_0123456789abcdef",
+    "code": "cosmic_ray",
+    "message": "The memory limit (1024 MB) ended the job host.",
+    "retryable": true
+  },
+  "code": "value",
+  "path": "code",
+  "why": "a code the protocol does not name"
+}

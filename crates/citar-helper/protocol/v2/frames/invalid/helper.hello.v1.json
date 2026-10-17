@@ -1,0 +1,18 @@
+{
+  "frame": {
+    "t": "hello",
+    "ts": 1760000000.0,
+    "token": "cwt_example_0123456789abcdef0123456789abcdef",
+    "version": 1,
+    "worker_version": "0.1.5",
+    "hostname": "framework",
+    "provider": "lmstudio",
+    "models": [],
+    "max_concurrent": 1,
+    "hardware": null,
+    "platform": "Windows 11"
+  },
+  "code": "protocol",
+  "path": "protocol",
+  "why": "a 0.1.5 hello: version 1 and no protocol"
+}
