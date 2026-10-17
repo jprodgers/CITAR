@@ -197,8 +197,9 @@ def delete_server(session, actor: User, server: Server) -> dict:
     remove its key with (``servers.forget_key``) once this is committed."""
     access.on(session, actor, server).require(access.MANAGE)
     config = dict(server.config or {})
+    # its owner kept, so a mismatch found after the deletion still quarantines them (``Dispatcher._owner_of_gone``)
     audit.record(session, "server.deleted", actor=actor, object_type="server", object_id=server.id,
-                 name=server.name)
+                 name=server.name, owner_id=server.owner_id)
     session.delete(server)
     return config
 
@@ -278,6 +279,15 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
         # server observed, P3.3.4), for an administrator's card; Phase 4's trust tiers read it too
         base["flags"] = dict(server.flags or {})
         base["trust_tier"] = server.trust_tier or "new"
+    if base["can_manage"] and server.reach == "worker":
+        # its trust (design/phase4-helper.md P4.5.11): its tier with its verified count and streak to its owner; to an
+        # administrator also the last mismatch with its evidence, its measured speed beside its CPU class, its
+        # ``verifier`` mark, when its standing began and what an administrator asked replicated
+        from ..jobs import trust
+        admin = viewer is not None and viewer.role == "admin"
+        base["trust_tier"] = server.trust_tier or "new"
+        base["trust"] = trust.card(server, admin=admin,
+                                   cpu_class=trust.cpu_class_of(session, server) if admin else None)
     config = server.config or {}
     # Safe for anyone who can see the server at all: what it can run, and roughly what it is. Read from the row as
     # stored, so read as text and figures whatever shape a helper's report or an old write left there: one machine's

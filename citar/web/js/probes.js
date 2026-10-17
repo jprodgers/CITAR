@@ -8,6 +8,7 @@ import { pageHeader, secs, bar } from "./nav.js";
 import { llmForm, defaultLLM } from "./lobby.js";
 import { CATEGORIES, PRESETS, modelCategories, ownersMap, presetOf } from "./seats.js";
 import { answeredText } from "./diplomacy.js";
+import { UNVERIFIED_MACHINE } from "./trustrules.js";
 
 const ITEM_TYPES = ["gold", "gold_per_turn", "resource", "tech", "city", "open_borders", "embassy", "peace_treaty",
   "declaration_of_friendship", "research_agreement", "defensive_pact", "declare_war"];
@@ -110,7 +111,9 @@ function drawRuns(card, runs, ctx) {
     for (const c of Object.values((r.summary || {}).cases || {})) for (const [k, v] of Object.entries(c.outcomes)) outcomes[k] = (outcomes[k] || 0) + v;
     const open = openRuns.has(r.id);
     table.appendChild(el("tr", { class: "clickable", onclick: () => { open ? openRuns.delete(r.id) : openRuns.add(r.id); ctx.redrawRuns(); } },
-      el("td", {}, el("b", {}, r.name), el("div", { class: "muted small" }, `${r.provider || ""} ${r.model || ""}${r.mode === "hybrid" ? " · hybrid" : ""} · ${new Date(r.created * 1000).toLocaleString()}`)),
+      el("td", {}, el("b", {}, r.name), r.unverified_machine ? [" ", el("span", { class: "pill warn small", title: UNVERIFIED_MACHINE },
+        "unverified machine")] : null,
+      el("div", { class: "muted small" }, `${r.provider || ""} ${r.model || ""}${r.mode === "hybrid" ? " · hybrid" : ""} · ${new Date(r.created * 1000).toLocaleString()}`)),
       el("td", {}, el("span", { class: `pill ${r.status === "running" ? "live" : r.status === "finished" ? "good" : r.status === "failed" ? "bad" : ""}`, title: r.waiting || null }, r.status)),
       el("td", {}, bar(r.done / Math.max(1, r.total), `${r.done} / ${r.total}`)),
       el("td", {}, r.summary && r.summary.pass_rate != null ? `${Math.round(r.summary.pass_rate * 100)}%` : "–"),

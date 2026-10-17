@@ -796,6 +796,9 @@ class Deadlines(Lab):
             ((100.0, 50, 1, 1, 1.0), 2000.0),               # the VPS: one vCPU at half
             ((100.0, 100, 4, 4, 2.0), 500.0),               # a machine measured twice as fast
             ((100.0, 100, 4, 4, 0.5), 2000.0),              # half as fast
+            ((100.0, 100, 4, 4, 0.001), 4000.0),            # an over-reporter's own measure: a quarter at most
+            ((100.0, 100, 4, 4, 1000.0), 300.0),            # four times as fast at most (the floor here)
+            ((1000.0, 100, 4, 4, 1000.0), 2500.0),
             ((5000.0, 100, 4, 4, 1.0), 6 * 3600.0),         # the 6-hour ceiling
             ((0.0, 0, 0, 0, 0.0), 300.0),                   # nothing known: the floor
         ]
@@ -1615,6 +1618,35 @@ class Remote(Lab):
         e.disconnected(conn)                # its helper went: the executor stays, offered nothing
         self.refused("bob", duels("off-line", 1), "its helper is not connected", connect=False)
         self.assertEqual(self.offers(conn), [])
+
+    def test_helpers_not_connected_are_counted_not_listed(self):
+        """Helpers whose connection went stay executors until they come back: past one, why a game waits counts them
+        rather than naming each (the connected executors' reasons are what matter), and the routes tell it in its own
+        words (4-12: the Lab page's waiting line had become a list of every machine ever connected)."""
+        from citar.server.jobs_api import told_waiting
+        e, conn = self.connect()
+        e.disconnected(conn)
+        with db.session() as s:
+            other = Server(owner_id=self.ids["bob"], name="Bob's laptop", kind="owned", provider="lmstudio",
+                           reach="worker", max_concurrent=1, group_id=self.group_id, trust_tier="trusted")
+            s.add(other)
+            s.flush()
+            other_id = other.id
+        servers.invalidate()
+        self.registry.get(other_id, "Bob's laptop")         # never connected
+        self.submit("bob", duels("two-gone", 1))
+        host = Fake("sv_host", name="this server")
+        host.state, host.reason = "off", "CPU work is off in the host's machine settings"
+        d = self.dispatcher([host], remotes=self.registry)
+        d.tick()
+        d.tick()
+        exp = d.published["experiments"]["two-gone"]
+        self.assertEqual(exp["waiting"], "this server: CPU work is off in the host's machine settings; 2 helper "
+                                          "machines whose helpers are not connected")
+        self.assertNotIn("Bob's PC", exp["waiting"])
+        told = told_waiting(exp, lambda machine, kind: {"name": "this server" if kind == "local" else "a machine"})
+        self.assertEqual(told, exp["waiting"])
+        self.assertTrue(all(j.state == "queued" for j in d.jobs.values()))
 
     def test_cpu_off_on_the_site(self):
         self.refused("bob", duels("site-off", 1), "CPU work is off in its machine settings", site_cpu=False)

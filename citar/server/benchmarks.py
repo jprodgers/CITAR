@@ -1053,6 +1053,10 @@ class BenchmarkScheduler:
         try:
             load_s = self._ensure_model(run, job)
             llm = self._llm_config(run, job)
+            # its machine's standing as the job starts (P4.5.8 rule 11): whether its results count toward the global
+            # boards; a database read, so off the scheduler's lock
+            from ..jobs import trust
+            standing = trust.standing(job.get("server_id"))
         except Exception as e:
             with self.lock:
                 job.update({"status": "failed", "error": str(e), "finished": _now()})
@@ -1110,6 +1114,9 @@ class BenchmarkScheduler:
                 return
             s.ai_delay = 0
             s.owner_id = run.get("owner_id")
+            if standing is not None:
+                job["standing"] = standing
+                s.machines[job["server_id"]] = dict(standing)
             s.benchmark = {"run_id": run["id"], "job_id": job["id"], "run_name": run["name"], "suite_id": run["suite_id"],
                            "scenario": sc["name"], "scenario_id": sc["id"], "model": job["model"], "server": job["server_name"],
                            "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.turn_limit,
@@ -1312,7 +1319,8 @@ class BenchmarkScheduler:
                                 "run_id": run["id"], "run": run["name"], "job_id": job["id"],
                                 "game_id": job.get("game_id"), "owner_id": run.get("owner_id"),
                                 "scenario": job["scenario_name"], "seed": job.get("seed_used", job.get("seed")),
-                                "control": (job.get("control") or {}).get("id")})
+                                "control": (job.get("control") or {}).get("id"),
+                                "server_id": job.get("server_id"), "standing": job.get("standing")})
         return out
 
     # ------------------------------------------------------------------ views
@@ -1422,12 +1430,15 @@ def game_progress(s: GameSession, llm_player: Optional[int] = None, model: Optio
 
 
 def _job_view(job: dict) -> dict:
-    """A job as the runs' list shows it: a hybrid job's result without its diplomacy record's rows (hundreds a game;
-    the run's file keeps them), its summary and pair line kept."""
-    res = job.get("result")
-    if not isinstance(res, dict) or not isinstance(res.get("diplomacy"), dict):
-        return job
-    return {**job, "result": {**res, "diplomacy": {k: v for k, v in res["diplomacy"].items() if k != "rows"}}}
+    """A job as the runs' list shows it, always a copy (a listing marks its jobs, the "unverified machine" badge among
+    them, and the scheduler's own job is saved to its run's file and read by its thread): a hybrid job's result without
+    its diplomacy record's rows (hundreds a game; the run's file keeps them), its summary and pair line kept. A badge a
+    run's file kept from before 4-12's fix round is dropped: the listing decides it again."""
+    out = {k: v for k, v in job.items() if k != "unverified_machine"}
+    res = out.get("result")
+    if isinstance(res, dict) and isinstance(res.get("diplomacy"), dict):
+        out["result"] = {**res, "diplomacy": {k: v for k, v in res["diplomacy"].items() if k != "rows"}}
+    return out
 
 
 def run_summary(run: dict) -> dict:

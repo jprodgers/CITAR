@@ -15,6 +15,12 @@ other members pool (``aggregate.scope_for``: the game's row says `pool` and its 
 model's pooled part only when enough other accounts are behind it (``aggregate.publishable``); other members'
 games are counted, never named. An administrator's are made from every game, as before. Python lines this
 replaces: ``_reports`` reading every save whatever its owner's choice (``scoring.py:87-115`` at ``d93345a``).
+
+Model results by tier (design/phase4-helper.md P4.5.8 rule 11, ``_by_tier``): a model seat that ran on a machine
+whose results did not count when it ran (a member's machine not yet ``trusted``: ``trust.vouched``, recorded in the
+game as ``machines``) counts toward these boards once an administrator trusts that machine, its earlier games with it;
+until then it is left out of every board but its owner's own figures (where it is marked "unverified machine"), and
+each model's left-out games are counted (``unverified``).
 """
 from __future__ import annotations
 
@@ -24,7 +30,7 @@ from typing import Optional
 
 from .. import aggregate, engine_api, fsutil
 from .metrics import Metrics
-from .session import SAVE_DIR, SessionManager
+from .session import SAVE_DIR, SessionManager, seat_machines_of
 
 
 def viewer_scope(session, viewer) -> Optional[aggregate.Scope]:
@@ -69,7 +75,10 @@ def _digest_save(path: Path) -> Optional[dict]:
     if bench and bench.get("llm_player") in dry:
         bench = None
     digest = {"game_id": sess.get("id") or path.parent.name, "name": sess.get("name", path.parent.name),
-              "turn": state["turn"], "summary": summary, "benchmark": bench}
+              "turn": state["turn"], "summary": summary, "benchmark": bench,
+              "unvouched": _unvouched(sess.get("machines"), [(st.get("player"), st.get("type"), st.get("llm"))
+                                                             for st in seats],
+                                      seat_machines_of(sess.get("seat_machines")))}
     _digest_cache[key] = (mtime, digest)
     return digest
 
@@ -132,7 +141,9 @@ def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
             hybrid = {st.player for st in s.seats if st.type == "hybrid"}
             summary = {pid: row for pid, row in s.metrics_report()["summary"].items()
                        if pid not in dry and pid not in hybrid}
-            out[s.id] = {"name": s.name, "turn": s.game.turn, "summary": summary, "benchmark": bench}
+            out[s.id] = {"name": s.name, "turn": s.game.turn, "summary": summary, "benchmark": bench,
+                         "unvouched": _unvouched(s.machines, [(st.player, st.type, st.llm) for st in s.seats],
+                                                 s.seat_machines)}
     if SAVE_DIR.exists():
         seen = set(out)
         for p, _ in fsutil.newest_first(SAVE_DIR.glob("*/*.citar")):
@@ -144,6 +155,79 @@ def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
             if d:
                 out[gid] = d
     return out
+
+
+def _unvouched(machines, seats, seat_machines: Optional[dict] = None) -> dict:
+    """A game's model seats that ran on a machine whose results did not count when they ran (P4.5.8 rule 11):
+    ``{player: [machine, ...]}``. A seat's machines are every one it leased (``seat_machines``: one it played most of
+    the game on before it moved to a trusted machine counts against it) and the one it names now, as ``machines``
+    records it (a benchmark job's standing when it started; all a game saved before 4-12's fix round records). A game
+    from before rule 11 records neither: every seat counts."""
+    seat_machines = seat_machines if isinstance(seat_machines, dict) else {}
+    machines = machines if isinstance(machines, dict) else {}
+    if not machines and not seat_machines:
+        return {}
+    out = {}
+    for pid, kind, llm in seats:
+        if kind not in ("llm", "hybrid") or not isinstance(pid, int):
+            continue
+        mine = seat_machines.get(pid)
+        bad = {sid for sid, st in (mine.items() if isinstance(mine, dict) else ())
+               if isinstance(st, dict) and st.get("vouched") is False}
+        sid = llm.get("server_id") if isinstance(llm, dict) else None
+        st = machines.get(sid) if sid else None
+        if isinstance(st, dict) and st.get("vouched") is False:
+            bad.add(sid)
+        if bad:
+            out[pid] = sorted(bad)
+    return out
+
+
+#: Why a model's games are left out of the boards (P4.5.8 rule 11).
+UNVERIFIED_NOTE = ("played on machines no administrator has trusted yet: left out of the boards until one is (its "
+                   "earlier games then count too)")
+
+
+def _by_tier(reports: dict, scope: Optional[aggregate.Scope]) -> tuple:
+    """``reports`` with the model results of machines whose results do not count (P4.5.8 rule 11: not
+    ``trust.vouched`` when they ran, and not since) left out, and per model the games left out of them: ``(reports,
+    {model: set of game ids})``. A member's own game keeps them, its seats marked ``unverified_seats`` (their own
+    figures are theirs); every other viewer's board, an administrator's whole-site one included, leaves them out."""
+    from ..jobs import trust
+    ids = {sid for rep in reports.values() for sids in (rep.get("unvouched") or {}).values() for sid in sids}
+    if not ids:
+        return reports, {}
+    ok = trust.vouched_now(ids)
+    out, left = {}, {}
+    for gid, rep in reports.items():
+        bad = {pid for pid, sids in (rep.get("unvouched") or {}).items() if any(sid not in ok for sid in sids)}
+        if not bad:
+            out[gid] = rep
+            continue
+        rep = dict(rep)
+        if scope is not None and gid in scope.own_ids:
+            rep["unverified_seats"] = bad
+            out[gid] = rep
+            continue
+        summary = dict(rep["summary"])
+        for pid in bad:
+            row = summary.pop(pid, None)
+            if row and row.get("turns") and row.get("controller") == "llm":
+                left.setdefault(_label(row), set()).add(gid)
+        rep["summary"] = summary
+        b = rep.get("benchmark")
+        if b and b.get("llm_player") in bad:
+            if b.get("model"):
+                left.setdefault(b["model"], set()).add(gid)
+            rep["benchmark"] = None
+        out[gid] = rep
+    return out, left
+
+
+def _left_out(left: dict) -> list:
+    """The models whose games ``_by_tier`` left out, with how many (none named)."""
+    return [{"model": m, "games": len(g), "reason": f"{len(g)} game{'s' if len(g) != 1 else ''} {UNVERIFIED_NOTE}"}
+            for m, g in sorted(left.items(), key=lambda kv: str(kv[0])) if m not in (None, "llm")]
 
 
 def _label(row: dict):
@@ -174,17 +258,22 @@ def _withheld_note(contributors: int) -> str:
 
 
 def compare_models(manager: SessionManager, reports: Optional[dict] = None,
-                   scope: Optional[aggregate.Scope] = None) -> list[dict]:
+                   scope: Optional[aggregate.Scope] = None, left: Optional[dict] = None) -> list[dict]:
     """Aggregate AI metrics per model across running games and saved games (latest save per game): every game for an
     administrator (``scope`` None); for a member, their own games and the pooled ones (``viewer_scope``), a model's
     pooled part only when enough accounts are behind it, and only their own games named (``games_list``; the
     others are counted in ``pooled_games``). A model whose figures were all withheld is a row with ``withheld``
-    and the reason."""
+    and the reason. A model seat on a machine whose results do not count (P4.5.8 rule 11, ``_by_tier``) is left out
+    but in its owner's own figures, where its game is marked; ``unverified_games`` counts the games left out (``left``:
+    a caller that already left them out passes what it counted)."""
     reports = reports if reports is not None else _reports(manager, None if scope is None else scope.game_ids)
+    if left is None:
+        reports, left = _by_tier(reports, scope)
     allowed, withheld = _published(reports, scope)
     by_model: dict = {}
     for gid, rep in reports.items():
         bench = rep.get("benchmark") or {}
+        unverified = rep.get("unverified_seats") or ()
         for pid, row in rep["summary"].items():
             if not row.get("turns"):
                 continue
@@ -226,7 +315,8 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None,
             for k, v in row["end_reasons"].items():
                 agg["end_reasons"][k] = agg["end_reasons"].get(k, 0) + v
             if scope is None or gid in scope.own_ids:
-                agg["game_list"].append(f"{rep['name']} (T{rep['turn']})")
+                agg["game_list"].append(f"{rep['name']} (T{rep['turn']})"
+                                        + (" · unverified machine" if pid in unverified else ""))
             else:
                 agg["pooled_games"] += 1
     out = []
@@ -251,6 +341,7 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None,
             "stall_nudges": agg["stall_nudges"], "clean_turn_end_rate": round(clean_ends / t, 3),
             "end_reasons": agg["end_reasons"], "games_list": agg["game_list"], "pooled_games": agg["pooled_games"],
             "pooled_withheld": withheld.get(agg["model"]),
+            "unverified_games": len(left.get(agg["model"], ())),
         })
     out.sort(key=lambda r: (r["controller"] != "llm", r["avg_turn_s"] if r["avg_turn_s"] is not None else math.inf))
     shown = {r["model"] for r in out}
@@ -303,8 +394,9 @@ def model_scores(manager: SessionManager, weights: dict, scope: Optional[aggrega
     score only when they are their own (``games``; ``pooled_games`` counts the rest), and is told which models' pooled
     figures were withheld (``withheld``) and what their scope holds (``scope``)."""
     reports = _reports(manager, None if scope is None else scope.game_ids)
+    reports, left = _by_tier(reports, scope)
     allowed, withheld = _published(reports, scope)
-    metrics = {m["model"]: m for m in compare_models(manager, reports, scope)
+    metrics = {m["model"]: m for m in compare_models(manager, reports, scope, left=left)
                if m["controller"] == "llm" and not m.get("withheld")}
     bench: dict[str, list] = {}
     pooled: dict[str, int] = {}
@@ -315,7 +407,8 @@ def model_scores(manager: SessionManager, weights: dict, scope: Optional[aggrega
         if allowed is not None and gid not in allowed.get(b["model"], ()):
             continue
         own = scope is None or gid in scope.own_ids
-        bench.setdefault(b["model"], []).append({**b, "game_id": gid, "game": rep["name"], "_own": own})
+        mark = {"unverified_machine": True} if b.get("llm_player") in (rep.get("unverified_seats") or ()) else {}
+        bench.setdefault(b["model"], []).append({**b, "game_id": gid, "game": rep["name"], "_own": own, **mark})
         if not own:
             pooled[b["model"]] = pooled.get(b["model"], 0) + 1
     wb, wr, ws = (float(weights.get(k, 0)) for k in ("benchmark", "reliability", "speed"))
@@ -343,10 +436,13 @@ def model_scores(manager: SessionManager, weights: dict, scope: Optional[aggrega
                             key=lambda g: -g["turns"]),
             "pooled_games": pooled.get(model, 0),
             "pooled_withheld": withheld.get(model),
+            "unverified_games": len(left.get(model, ())),
             "metrics": m,
         })
     rows.sort(key=lambda r: (r["overall"] is None, -(r["overall"] or 0), -(r["benchmark"] or 0)))
-    out = {"weights": {"benchmark": wb, "reliability": wr, "speed": ws}, "models": rows}
+    out = {"weights": {"benchmark": wb, "reliability": wr, "speed": ws}, "models": rows,
+           # the models' games left out for their machines (P4.5.8 rule 11), counted, never named
+           "unverified": _left_out(left)}
     if scope is not None:
         shown = {r["model"] for r in rows}
         out["scope"] = scope.client()

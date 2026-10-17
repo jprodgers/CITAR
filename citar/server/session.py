@@ -158,6 +158,16 @@ class GameSession:
         # ``lease_ref`` and ``lease_label`` the work they serve and how it is named (a probe's turn case: probe_case,
         # its probe run).
         self.leases: dict = {}
+        # Each machine a model seat of this game ran on, with its standing when it ran (design/phase4-helper.md
+        # P4.5.8 rule 11: its tier, and whether its model results count toward the global boards), the worst seen:
+        # per seat (``seat_machines``: {player: {machine: standing}}, so a seat that played on an untrusted machine
+        # before it moved to a trusted one is known by it), and per machine over the game (``machines``, as a
+        # benchmark job records its own). Read when a seat's lease is made and again at most every
+        # ``STANDING_SECONDS`` while it lasts (``_note_standing``), so a machine quarantined mid-game is recorded so.
+        # Kept in the save, read by the boards (``scoring``).
+        self.machines: dict = {}
+        self.seat_machines: dict = {}
+        self._standing_read: dict = {}           # (player, machine) -> when its standing was last read (monotonic)
         self.lease_kind: Optional[str] = None
         self.lease_ref: Optional[tuple] = None
         self.lease_label: Optional[str] = None
@@ -936,6 +946,7 @@ class GameSession:
         from ..pool import scheduler as prompt_scheduler, seats as pool_seats
         lease, new_owner = self._live_lease(pid, sid, model, kind)
         if lease is not None:
+            self._note_standing(sid, pid, renewing=True)        # at most every STANDING_SECONDS: a database read
             if new_owner:
                 # made when the game was registered, before its owner was known (a save loaded by a member whose game
                 # had no owner yet): the owner's grant caps it, and its budget counts it, from now on (a database
@@ -946,6 +957,7 @@ class GameSession:
             return None
         # off every lock: the grant's concurrency and budget and the machine (its row read on first use) are database
         # reads
+        self._note_standing(sid, pid)
         cap, access_grant = pool_seats.consumer_terms(self.owner_id, sid, self._cap_purpose())
         sched = prompt_scheduler.get()
         sched.machine(sid)
@@ -966,6 +978,37 @@ class GameSession:
                                 on_budget=lambda payload, pid=pid: self._budget_warning(pid, payload))
             self.leases[pid] = lease
             return lease
+
+    #: How often a live lease's machine has its standing read again (P4.5.8 rule 11): a machine quarantined, or
+    #: given another tier, mid-game is recorded within this.
+    STANDING_SECONDS = 60.0
+
+    def _note_standing(self, sid: Optional[str], pid: Optional[int] = None, *, renewing: bool = False) -> None:
+        """The machine ``sid``'s standing as seat ``pid`` runs on it (P4.5.8 rule 11), into ``seat_machines`` and
+        ``machines``: the first one seen, or a worse one (its model results no longer counting) over it. Made with
+        each new lease, and for a live one (``renewing``) at most every ``STANDING_SECONDS``. A database read: never
+        under a lock."""
+        if not sid:
+            return
+        now = time.monotonic()
+        key = (pid, sid)
+        if renewing:
+            at = self._standing_read.get(key)
+            if at is not None and now - at < self.STANDING_SECONDS:
+                return
+        self._standing_read[key] = now
+        from ..jobs import trust
+        st = trust.standing(sid)
+        if st is None:
+            return
+        prev = self.machines.get(sid)
+        if prev is None or (prev.get("vouched", True) and not st["vouched"]):
+            self.machines[sid] = dict(st)
+        if isinstance(pid, int):
+            seat = self.seat_machines.setdefault(pid, {})
+            prev = seat.get(sid)
+            if prev is None or (prev.get("vouched", True) and not st["vouched"]):
+                seat[sid] = dict(st)
 
     def _lease_kind(self) -> str:
         """The kind this game's seats' leases take."""
@@ -1778,7 +1821,8 @@ class GameSession:
         return {"id": self.id, "name": self.name, "created": self.created,
                 "seats": [{**asdict(s), "connected": False} for s in self.seats],
                 "spectator_token": self.spectator_token, "benchmark": self.benchmark, "usage_act": self.usage_act,
-                "crashed": self.crashed}
+                "crashed": self.crashed, "machines": dict(self.machines),
+                "seat_machines": {str(pid): dict(m) for pid, m in list(self.seat_machines.items())}}
 
     def _timeline(self):
         """The session's journal, its timeline: opened for a new game before its first save (``open_timeline``:
@@ -2002,6 +2046,9 @@ class GameSession:
             s.spectator_token = sess["spectator_token"]
         s.benchmark = sess.get("benchmark")
         s.usage_act = sess.get("usage_act")
+        if isinstance(sess.get("machines"), dict):
+            s.machines = {k: dict(v) for k, v in sess["machines"].items() if isinstance(v, dict)}
+        s.seat_machines = seat_machines_of(sess.get("seat_machines"))
         if sess.get("crashed"):
             # a crash save: the state as the crash left it, for whoever debugs it, never to play on
             s.crashed = dict(sess["crashed"])
@@ -2799,3 +2846,19 @@ class SessionManager:
                     j.unlink()
             except OSError:
                 pass
+
+
+def seat_machines_of(saved) -> dict:
+    """A save's ``seat_machines`` as a session holds it (``{player: {machine: standing}}``; JSON's keys are text). A save
+    from before 4-12's fix round has none: ``{}``, and the boards read its seats' machines from ``machines``."""
+    out: dict = {}
+    if not isinstance(saved, dict):
+        return out
+    for pid, machines in saved.items():
+        try:
+            player = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(machines, dict):
+            out[player] = {str(k): dict(v) for k, v in machines.items() if isinstance(v, dict)}
+    return out

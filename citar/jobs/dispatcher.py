@@ -127,8 +127,14 @@ OFFER_TTL_SECONDS = 30.0
 SILENT_SECONDS = 300.0
 #: The server's backstop beyond a run's deadline (the executor enforces the deadline itself).
 EXPIRY_GRACE_SECONDS = 60.0
+#: How long an administrator's request waits for the tick's lock (``queued_view``) before it answers busy.
+VIEW_WAIT_SECONDS = 2.0
 #: A deadline is ten times the expected time, within these bounds (P4.5.5).
 DEADLINE_FACTOR, DEADLINE_MIN, DEADLINE_MAX = 10.0, 300.0, 6 * 3600.0
+#: The measured speed a deadline is scaled by is held within these: a measured speed is the reference's CPU over what
+#: the helper reported, so an over-reporting helper would otherwise slow its own measure and stretch its deadlines
+#: toward the ceiling, holding the games it takes for hours (4-12's review).
+DEADLINE_SPEED_MIN, DEADLINE_SPEED_MAX = 0.25, 4.0
 #: A machine with this many expired or abandoned runs within the window gets no offer for the window (P4.5.5).
 ABANDONS, ABANDON_WINDOW = 3, 3600.0
 #: The observed bound on a run's CPU seconds: a game is one thread (P4.5.7).
@@ -144,6 +150,10 @@ MEM_MAX = 1 << 20
 #: An executor that refused a job for a reason that holds for every job is offered nothing for a while: 2 s,
 #: doubling to 10 minutes (P4.2.5's re-offer backoff).
 REJECT_FIRST, REJECT_MAX = 2.0, 600.0
+
+
+class Busy(TimeoutError):
+    """The dispatcher's tick held its lock past a request's wait (``VIEW_WAIT_SECONDS``): the route answers 503."""
 
 
 def utcnow() -> datetime:
@@ -163,8 +173,9 @@ def share(cpu_percent: float, cpus: int, threads: int) -> float:
 def deadline_s(cost_cpu_s: float, cpu_percent: float, cpus: int, threads: int, speed: float = 1.0) -> float:
     """A run's deadline (P4.5.5): ten times what it is expected to take, ``clamp(10 x expected, 300 s, 6 h)``, where
     expected is the job's reference cost divided by the executor's share of a core per game and by its measured
-    speed (``trust.speed``, 1 until known)."""
-    expected = max(0.0, float(cost_cpu_s)) / share(cpu_percent, cpus, threads) / max(1e-3, float(speed or 1.0))
+    speed (``trust.speed``, 1 until known, held from ``DEADLINE_SPEED_MIN`` to ``DEADLINE_SPEED_MAX``)."""
+    speed = min(DEADLINE_SPEED_MAX, max(DEADLINE_SPEED_MIN, float(speed or 1.0)))
+    expected = max(0.0, float(cost_cpu_s)) / share(cpu_percent, cpus, threads) / speed
     return float(min(DEADLINE_MAX, max(DEADLINE_MIN, DEADLINE_FACTOR * expected)))
 
 
@@ -340,6 +351,9 @@ class Dispatcher:
         self.ticks = 0
         self.tick_ms = 0.0
         self.published: dict = {"dispatcher": {"alive": False}}
+        # the caps' figures as the last tick counted them (``hands_view``: administrators', so kept apart from
+        # ``published``, which the Lab page shows)
+        self.published_hands: dict = {"in_hand": {}, "settling": {}, "share": {}}
         self._queue_sig = None
         self._paused_exec: set = set()
         self._wake = threading.Event()
@@ -358,6 +372,7 @@ class Dispatcher:
         self._requests: deque = deque()     # administrators' retries and trust changes, served at the next tick
         self._share: dict = {}              # executor -> (new machines' replicas, runs) while both waited (rule 3)
         self._hands_at, self._hands_cache, self._settling_by = -1, None, {}
+        self._load_verdicts: list = []      # what ``_load`` settled (an older jobs build's results), sent after its commit
         self.jobs_build = engine_api.jobs_build()
         self.started_at = utcnow()
         for e in self._own:
@@ -563,13 +578,23 @@ class Dispatcher:
                  .where(CpuJobRun.state == "done",
                         CpuJobRun.ended_at >= datetime.fromtimestamp(since, timezone.utc),
                         ~exists().where(ComputeEvent.activity == CpuJob.ref, ComputeEvent.request_id == CpuJobRun.id)))
-            for run, job in s.execute(q):
+            for run, job in list(s.execute(q)):
                 reference = None if run.executor == "local" else self.costs.of(job.kind, job.spec or {})["cpu_s"]
+                if run.executor != "local" and run.role == "primary" and run.verdict == "match":
+                    # settled by a replica: its reference is the replica's own (P4.5.7), as its settling wrote it
+                    checks = list(s.scalars(select(CpuJobRun).where(
+                        CpuJobRun.job_id == job.id, CpuJobRun.role.in_(("replica", "tiebreak")),
+                        CpuJobRun.verdict.in_(("reference", "match")))))
+                    reference = self._reference_of(checks) or reference
                 verification = _event_verification(run, job)
                 row = self._event_row(run.id, job.ref, job.owner_id, run.machine_id, run.executor, run.role,
                                       run.cpu_s, _observed(run), reference, run.ended_at, verification)
                 if verification == "rejected":
                     row["credits"], row["cpu_core_s"] = 0.0, 0.0
+                elif (run.error or {}).get("code") == "old_build" and run.role == "primary":
+                    # set aside after an upgrade (``_settle_old_build``): its void verdict came before this event
+                    row["credits"], row["cpu_core_s"] = 0.0, 0.0
+                    row["flags"] = {**row["flags"], "void": str((run.error or {}).get("message") or "")[:300]}
                 rows.append(row)
         if rows:
             log.info("writing %d CPU event(s) the ledger had not written", len(rows))
@@ -609,6 +634,8 @@ class Dispatcher:
             for name in [n for n in self.exps if n not in specs]:
                 if not (lab.QUEUE / f"{name}.json").exists():
                     verdicts += self._deleted(s, self.exps.pop(name))
+        verdicts += self._load_verdicts
+        self._load_verdicts = []
         if verdicts:
             _step("a deleted experiment's verdicts", lambda: _ledger().verdicts(verdicts))
 
@@ -654,6 +681,12 @@ class Dispatcher:
                 view.run = run.id
                 self.jobs[job.id] = view
                 self.runs[run.id] = run
+            elif (job.state == "settling" and job.id not in self.jobs
+                  and job.jobs_build != self.jobs_build):
+                if self._settle_old_build(s, job, exp):
+                    exp.settled.add(i)
+                else:
+                    self.jobs[job.id] = self._view(job, exp)        # played again, of this build
             elif job.state == "settling" and job.id not in self.jobs:
                 view = self._settling_view(s, job, exp)
                 if view is not None:
@@ -670,6 +703,78 @@ class Dispatcher:
                 row.state = "cancelled"
             self.jobs.pop(j.id, None)
         exp.advance()
+
+    def _settle_old_build(self, s, job, exp: Exp) -> bool:
+        """A result that waited for its replica when the server last stopped, from a jobs build this server no longer
+        plays (it was upgraded meanwhile): no verifier will ever reproduce it (this server's job host plays its own
+        build, and every helper's follows), so what it waited for decides (its primary's ``replicating`` mark):
+
+        - **sampled** (rule 1's keyed sample) or **re-opened** (rule 9): accepted as an unsampled result is,
+          ``unverified`` (rule 4), its line written by the reconciliation that follows. It counts no match; were its
+          machine caught later, it is withdrawn with the rest of its unverified results (rule 8).
+        - **new** (a new machine's results are always replicated, rule 1), **asked** (an administrator's ``replicate``,
+          rule 10), or **disputed** (a remote verifier's replica disagreed, and the tiebreak it waits for cannot be
+          played now): never accepted unchecked. The result is set aside and its game played again, of this build:
+          no verdict on anyone (no attempt, no quarantine, no match), its event ``unverified`` with no credits (the
+          lab never used it, so nobody pays for it and nobody earns by it; a waiting replica's event ``unverified``
+          too), and an administrator's ask given back to the machine (its next result is replicated instead).
+
+        Returns whether it was settled; False: the job is ``queued`` again with this server's jobs build (so too a job
+        with no primary result to accept), for the caller to offer."""
+        from sqlalchemy import select
+        from citar.db.models import CpuJobRun, Server
+        runs = list(s.scalars(select(CpuJobRun).where(CpuJobRun.job_id == job.id).order_by(CpuJobRun.offered_at)))
+        primary = next((r for r in runs if r.id == job.accepted_run), None) if job.accepted_run else None
+        if primary is None:
+            done = [r for r in runs if r.role == "primary" and r.state == "done" and r.verdict == "unchecked"]
+            primary = done[-1] if done else None
+        mark = (primary.error if primary is not None and isinstance(primary.error, dict) else None) or {}
+        reopened = primary is not None and job.accepted_run == primary.id
+        disputed = next((r for r in reversed(runs) if r.role == "replica" and r.state == "done"
+                         and r.verdict == "mismatch"), None)
+        why = "reopened" if reopened else str(mark.get("why") or "sampled")
+        for r in runs:
+            if r.role != "primary" and r.state in ("offered", "running"):
+                held = self._held_remote.pop(job.id, None)
+                if held is not None and held.executor is not None:
+                    held.executor.in_flight.discard(held.id)
+                r.state, r.ended_at = "aborted", utcnow()
+                r.error = {"code": "old_build", "message": "its job's jobs build is no longer played"}
+        game = store.game_of(job.ref)
+        if primary is not None and disputed is None and why not in ("new", "asked"):
+            crashed = "crash" in (primary.result or {}) or bool(mark.get("crashed"))
+            job.state = "crashed" if crashed else "accepted"
+            job.accepted_run, job.result_hash = primary.id, primary.result_hash
+            primary.verdict, primary.error = "unchecked", None
+            self._load_verdicts.append({"activity": job.ref, "request_id": primary.id, "verification": "unverified"})
+            lab.log(f"{exp.name} #{game}: its result waited for a replica of jobs build {job.jobs_build}, which this "
+                    "server no longer plays: accepted unverified")
+            return True
+        reason = ("a verifier's replica disagreed with it" if disputed is not None else
+                  {"new": "every result of a new machine is checked",
+                   "asked": "an administrator asked for its check"}.get(why, "nothing to accept"))
+        words = (f"its result waited for a replica of jobs build {job.jobs_build}, which no verifier plays now, and "
+                 f"is not accepted unchecked ({reason}): its game is played again")
+        if primary is not None:
+            primary.verdict = None
+            primary.error = {"code": "old_build", "why": why if disputed is None else "disputed",
+                             "message": words[:300]}
+            self._load_verdicts.append({"activity": job.ref, "request_id": primary.id, "verification": "unverified",
+                                        "why": words[:300], "cpu_core_s": 0.0, "credits": 0.0,
+                                        "flags": {"void": words[:300]}})
+        if disputed is not None:
+            self._load_verdicts.append({"activity": job.ref, "request_id": disputed.id, "verification": "unverified",
+                                        "why": words[:300]})
+        if why == "asked" and primary is not None:
+            srow = s.get(Server, primary.machine_id)
+            if srow is not None and srow.trust_tier in ("provisional", "trusted"):
+                tr = dict(srow.trust or {})
+                tr["replicate"] = int(tr.get("replicate") or 0) + 1
+                srow.trust = tr
+        job.state, job.jobs_build = "queued", self.jobs_build
+        job.accepted_run, job.result_hash = None, None
+        lab.log(f"{exp.name} #{game}: {words}")
+        return False
 
     def _settling_view(self, s, job, exp: Exp) -> Optional[Job]:
         """A ``settling`` job as the view holds it after a start (P4.5.8): its primary (its accepted run when it was
@@ -1535,8 +1640,11 @@ class Dispatcher:
             line = self._line(job.kind, job.exp, job.i, job.spec, result, run.machine, run.id, e.kind, run.cpu_s,
                               run.wall_s, started_wall, ended, "reference" if local else "unverified")
         verification = "verified" if local else ("pending" if why else "unverified")
+        reference = None if local else self.costs.of(job.kind, job.spec)["cpu_s"]
         event = self._event_row(run.id, job.ref, job.owner_id, run.machine, e.kind, run.role, run.cpu_s, observed,
-                                None if local else self.costs.of(job.kind, job.spec)["cpu_s"], ended, verification)
+                                reference, ended, verification)
+        if not local:
+            self._note_cpu(s, run.machine, run.id, event["flags"], run.cpu_s, observed, reference)
         take = getattr(e, "hold", None)
         hold = take(run.id) if take is not None else None
         usage_line = line or self._line(job.kind, job.exp, job.i, job.spec, result, run.machine, run.id, e.kind,
@@ -1724,10 +1832,12 @@ class Dispatcher:
         local = e.kind == "local"
         rrow.verdict = "reference" if local else "unchecked"
         started_wall = run.started_wall or run.offered_wall
-        event = self._event_row(run.id, job.ref, None, run.machine, e.kind, run.role, run.cpu_s,
-                                max(0.0, wall - started_wall), None if local else self.costs.of(job.kind,
-                                                                                               job.spec)["cpu_s"],
+        observed = max(0.0, wall - started_wall)
+        reference = None if local else self.costs.of(job.kind, job.spec)["cpu_s"]
+        event = self._event_row(run.id, job.ref, None, run.machine, e.kind, run.role, run.cpu_s, observed, reference,
                                 rrow.ended_at, "verified" if local else "pending")
+        if not local:
+            self._note_cpu(s, run.machine, run.id, event["flags"], run.cpu_s, observed, reference)
         primary = s.get(CpuJobRun, job.primary) if job.primary else None
         job.run = None
         take = getattr(e, "hold", None)
@@ -1815,6 +1925,12 @@ class Dispatcher:
         updates = [{"activity": job.ref, "request_id": primary.id, "verification": "verified"}]
         updates += [{"activity": job.ref, "request_id": c.id, "verification": "verified"} for c in checks
                     if c.executor != "local"]
+        # its reference cost is now its replica's own CPU seconds (P4.5.7: this job's, not its shape's in the cost
+        # table): the primary's credits bounded again by it, and the machine's speed measured against it
+        reference = self._reference_of(checks)
+        remote_primary = primary.executor != "local"
+        if remote_primary and reference is not None:
+            updates[0].update(self._rebound(primary, reference))
         srow = s.get(Server, primary.machine_id)
         promoted = None
         if srow is not None:
@@ -1822,10 +1938,15 @@ class Dispatcher:
             at = max((_aware(c.ended_at) for c in checks if c.ended_at is not None), default=None)
             tier, tr, promoted = T.on_match(srow.trust_tier or "new", dict(srow.trust or {}), T.settings(),
                                             counts=counts, flags=dict(srow.flags or {}), now=at)
+            measured = remote_primary and reference is not None and counts
+            if measured:
+                tr = T.speed_sample(tr, reference, primary.cpu_s)
             if promoted:
                 self._set_tier(s, srow, tier, f"{tr.get('verified')} verified, streak {tr.get('streak')}", tr)
             else:
                 srow.trust = tr
+            if measured and T.speed_of(tr) is not None:
+                self._class_check(s, srow)
         prune = [c.id for c in checks]
         if job.reopened and not lost:
             # its line is in the results file already: its verification restored (the line below is appended only
@@ -1862,6 +1983,111 @@ class Dispatcher:
                        if promoted else ""))
         after.append(lambda: _step(f"{job.ref}'s settling", written))
 
+    # -------------------------------------------------------------- credits (P4.5.7)
+    @staticmethod
+    def _reference_of(checks: list) -> Optional[float]:
+        """A replicated job's reference cost: the CPU seconds of the verification run that reproduced it (this
+        server's when one of them is: the reference machine's), or None when none says."""
+        ordered = sorted(checks, key=lambda c: c.executor != "local")
+        for c in ordered:
+            if isinstance(c.cpu_s, (int, float)) and c.cpu_s > 0:
+                return float(c.cpu_s)
+        return None
+
+    def _rebound(self, primary, reference: float) -> dict:
+        """A remote primary's event bounded again once a replica reproduced it (P4.5.7): ``cpu_core_s = min(reported,
+        observed x 1.05 + 1, 1.5 x the replica's own CPU seconds)``, its credits at its machine's class rate, its
+        flags as that bound sets them. What ``Ledger.verdicts`` writes over the event with its verdict (a budget
+        settlement moves by the difference)."""
+        cpu, flags = bounded_cpu(primary.cpu_s, _observed(primary), reference)
+        return {"cpu_core_s": round(cpu, 6), "credits": round(self._cpu_credits(primary.machine_id, cpu), 6),
+                "flags": {**flags, "reference_s": round(reference, 6)},
+                "unflag": [k for k in ("overreported_cpu", "capped_cpu") if k not in flags]}
+
+    @staticmethod
+    def _cpu_credits(machine: Optional[str], cpu: float) -> float:
+        """Credits for ``cpu`` core-seconds on ``machine``: at its CPU class's rate (3-10), the class an administrator
+        pinned or its hardware's."""
+        from citar import ledger as compute, servers
+        facts = (servers.machine_facts(machine) or {}) if machine else {}
+        cls = compute.class_of(facts, "cpu", _ledger().classes())
+        return compute.credits_for("cpu", cpu_core_s=cpu, rate=cls["rate"] if cls else 0.0)
+
+    def _note_cpu(self, s, machine: str, run_id: str, flags: dict, reported: float, observed: float,
+                  reference: Optional[float]) -> None:
+        """A helper's run whose CPU seconds passed a bound (P4.5.7), counted on its machine's row with the figures:
+        ``flags.overreported_cpu`` (more than the server observed of it, ``observed x 1.05 + 1``: a game is one thread,
+        so no honest helper reaches it; it blocks the machine's promotion to ``trusted`` for ``overreport_days``, rule
+        6) and ``flags.capped_cpu`` (more than 1.5 times the job's reference cost: informational, since a slow honest
+        machine passes it too). The first of each kind writes an audit row."""
+        hits = [k for k in ("overreported_cpu", "capped_cpu") if flags.get(k)]
+        if not hits:
+            return
+        from citar.auth import audit
+        from citar.db.models import Server
+        srow = s.get(Server, machine)
+        if srow is None:
+            return
+        mf = dict(srow.flags or {})
+        detail = {"run": run_id, "reported_s": round(float(reported or 0.0), 3),
+                  "observed_s": round(float(observed or 0.0), 3),
+                  "reference_s": round(float(reference), 3) if reference else None}
+        for k in hits:
+            old = mf.get(k) if isinstance(mf.get(k), dict) else {}
+            mf[k] = {**detail, "count": int(old.get("count") or 0) + 1, "last": utcnow().isoformat()}
+            if not old:
+                audit.record(s, f"server.{k}", object_type="server", object_id=machine, **detail)
+        srow.flags = mf
+        if "overreported_cpu" in hits:
+            lab.log(f"machine {srow.name}: its helper reported {detail['reported_s']} CPU s for run {run_id}, which "
+                    f"the server observed {detail['observed_s']} s of; credited the observed bound, and it is not "
+                    "promoted to trusted meanwhile")
+
+    def _class_check(self, s, srow) -> None:
+        """``flags.class_suspect`` on the measured machines of ``srow``'s CPU class (P4.5.7): each one whose measured
+        speed (``trust.speed``) is under half the median of the others' (``trust.class_bar``: those that did not
+        over-report their CPU, the trusted ones alone when there are any) is flagged, for an administrator to pin its
+        class (``class_override``); one back in line loses the flag. Quarantined machines are left out of it. The
+        first flag of a machine writes an audit row."""
+        from sqlalchemy import select
+        from citar import ledger as compute
+        from citar.auth import audit
+        from citar.db.models import Server
+        classes = _ledger().classes()
+
+        def class_id(row) -> Optional[str]:
+            facts = {"hardware": (row.config or {}).get("hardware") or {}, "class_override": bool(row.class_override),
+                     "gpu_class_id": row.gpu_class_id, "cpu_class_id": row.cpu_class_id}
+            c = compute.class_of(facts, "cpu", classes)
+            return c["id"] if c else None
+        mine = class_id(srow)
+        peers = [r for r in s.scalars(select(Server).where(Server.reach == "worker"))
+                 if (r.trust_tier or "new") != "quarantined" and T.speed_of(r.trust) is not None
+                 and class_id(r) == mine]
+        name = next((c["name"] for c in classes if c["id"] == mine), mine)
+        now = utcnow()
+        at = now.isoformat()
+        days = int(T.settings()["overreport_days"])
+        for r in peers:
+            speed = T.speed_of(r.trust)
+            bar = T.class_bar([o for o in peers if o.id != r.id], now, days)
+            median = T.class_suspect(speed, [T.speed_of(o.trust) for o in bar])
+            flags = dict(r.flags or {})
+            had = isinstance(flags.get("class_suspect"), dict)
+            if median is not None:
+                flags["class_suspect"] = {"speed": speed, "class_median": round(median, 3), "class": mine,
+                                          "class_name": name, "peers": len(bar), "at": at}
+                if not had:
+                    audit.record(s, "server.class_suspect", object_type="server", object_id=r.id, speed=speed,
+                                 class_median=round(median, 3), cpu_class=mine)
+                    lab.log(f"machine {r.name}: measured at {speed} of the reference, under half its CPU class's "
+                            f"median ({median:.3g}): its class may be wrong (an administrator can pin it)")
+            elif had:
+                flags.pop("class_suspect", None)
+            else:
+                continue
+            r.flags = flags
+
     def _caught(self, s, job: Job, row, primary, reference, after: list, others: tuple = ()) -> None:
         """A primary this server's own run disagrees with (rule 5): the primary's machine is quarantined with the
         verdict (``result``: the same chain and another result, tampering or an incompatible build; ``chain``: the
@@ -1873,8 +2099,9 @@ class Dispatcher:
         reference.verdict = "reference"
         for o in others:
             o.verdict = o.verdict or "unchecked"
-        self._withdraw_job(s, row, primary, ev["words"], after, rejected=True)
-        self._quarantine(s, primary.machine_id, ev, owner_too=T.tampering(verdict), withdraw=True, after=after)
+        caught = self._withdraw_job(s, row, primary, ev["words"], after, rejected=True)
+        self._quarantine(s, primary.machine_id, ev, owner_too=T.tampering(verdict), withdraw=True, after=after,
+                         caught=[caught] if caught else [])
 
     def _tiebroken(self, s, job: Job, row, primary, tiebreak, after: list) -> None:
         """This server's tiebreak between a primary and a remote verifier's replica that disagree (rule 5): every
@@ -1908,6 +2135,7 @@ class Dispatcher:
         before = srow.trust_tier or "new"
         srow.trust_tier, srow.trust = tier, trust
         if before != tier:
+            T.forget_vouched()          # the boards read its standing again (P4.5.8 rule 11)
             audit.record(s, "server.trust", actor=actor, object_type="server", object_id=srow.id,
                          changed={"from": before, "to": tier}, why=why[:300])
             lab.log(f"machine {srow.name}: {before} -> {tier} ({why})")
@@ -1916,20 +2144,24 @@ class Dispatcher:
                 ex._row_at = -1e18          # its executor reads the row (its trust) again at its next refresh
 
     def _quarantine(self, s, machine: str, ev: dict, *, owner_too: bool, withdraw: bool, after: list,
-                    actor=None) -> list:
+                    actor=None, caught: list = ()) -> list:
         """A machine quarantined (rule 7): no CPU job, and admission refuses it for anyone but its owner; its runs in
         flight aborted and their games played elsewhere; its results waiting for a replica withdrawn; with
         ``withdraw`` (always, but for an administrator who says otherwise), everything unverified it gave since
         ``trust.since`` withdrawn (rule 8); on tampering its owner quarantined too; every match it made as a verifier
         re-opened (rule 9), whether or not it is marked one now (an administrator may unmark a suspect verifier, or
-        take its tier, before quarantining it). Returns the jobs withdrawn (the evidence lists them)."""
+        take its tier, before quarantining it). ``caught`` is the job its mismatch withdrew already (``_caught``),
+        listed first. Returns the jobs withdrawn (the evidence lists them).
+
+        A machine deleted while a result of its waited for its replica is quarantined all the same, from its runs: its
+        owner deletes it as soon as a result is sampled, so the deletion must not keep its other cheats or its owner's
+        standing. Everything unverified it gave since its registration is withdrawn (its id is never reused), its
+        owner found by ``_owner_of_gone``, and one ``server.trust`` audit row keeps the verdict."""
         from citar.db.models import Server
         srow = s.get(Server, machine)
-        if srow is None:
-            return []
-        was = (srow.trust_tier or "new", dict(srow.trust or {}))
-        tier, tr = T.on_mismatch(dict(srow.trust or {}), ev)
-        withdrawn: list = []
+        was = (srow.trust_tier or "new", dict(srow.trust or {})) if srow is not None else ("deleted", {})
+        tier, tr = T.on_mismatch(dict(was[1]), ev)
+        withdrawn: list = list(caught)
         # its runs in flight: stopped, their games played elsewhere (nothing they did counts against the games)
         for run in [r for r in self.runs.values() if r.machine == machine]:
             self._asked.discard(run.id)
@@ -1951,12 +2183,42 @@ class Dispatcher:
         if withdrawn:
             ev = {**ev, "withdrawn": len(withdrawn), "withdrawn_jobs": withdrawn[:100]}
             tr["last_mismatch"] = ev
-        self._set_tier(s, srow, tier, ev.get("words") or ev.get("verdict") or "quarantined", tr, actor=actor)
-        if owner_too and srow.owner_id:
-            self._quarantine_owner(s, srow.owner_id, ev, actor=actor)
+        why = ev.get("words") or ev.get("verdict") or "quarantined"
+        if srow is not None:
+            self._set_tier(s, srow, tier, why, tr, actor=actor)
+            owner = srow.owner_id
+        else:
+            from citar.auth import audit
+            owner = self._owner_of_gone(s, machine, ev.get("run"))
+            audit.record(s, "server.trust", actor=actor, object_type="server", object_id=machine,
+                         changed={"from": "deleted", "to": tier}, why=why[:300], deleted=True,
+                         machine_run=ev.get("run"), withdrawn=len(withdrawn))
+            lab.log(f"deleted machine {machine}: quarantined ({why})")
+        if owner_too and owner:
+            self._quarantine_owner(s, owner, ev, actor=actor)
         # its matches as a verifier (none for a machine that never verified: the query finds nothing)
         self._reopen(s, machine, after)
         return withdrawn
+
+    @staticmethod
+    def _owner_of_gone(s, machine: str, run_id: Optional[str]) -> Optional[str]:
+        """A deleted machine's owner: the one its deletion's audit row names (``owner_id``, written since 4-12's fix
+        round), else the provider of the caught run's ledger event, else of any event of the machine's (the owner when
+        the run was offered; a site machine's events name nobody)."""
+        from sqlalchemy import select
+        from citar.db.models import AuditLog, ComputeEvent
+        for entry in s.scalars(select(AuditLog).where(AuditLog.action == "server.deleted",
+                                                      AuditLog.object_id == machine).order_by(AuditLog.id.desc())):
+            owner = (entry.detail or {}).get("owner_id")
+            if owner:
+                return str(owner)
+        q = select(ComputeEvent.provider_id).where(ComputeEvent.machine_id == machine[:40],
+                                                   ComputeEvent.provider_id.is_not(None))
+        if run_id:
+            owner = s.scalar(q.where(ComputeEvent.request_id == run_id[:64]).limit(1))
+            if owner:
+                return owner
+        return s.scalar(q.order_by(ComputeEvent.at.desc()).limit(1))
 
     def _quarantine_owner(self, s, owner: str, ev: dict, actor=None) -> None:
         """A tampering verdict's owner quarantined (rule 7): every machine of theirs refused CPU work, a new one too,
@@ -2180,16 +2442,18 @@ class Dispatcher:
                    verification: Optional[str] = None) -> dict:
         """A finished run's ``cpu`` event (P4.5.7): given by the executor's machine's owner (nobody for the host),
         used by the job's owner for a primary run and by nobody for a replica or a tiebreak (verification is the
-        server's own work), its CPU bounded. Its ``verification``: ``verified`` for the host's, else what verification
-        has made of it so far (``pending`` while a replica checks it, ``unverified`` when accepted without one); the
-        writer's later verdicts move it (``Ledger.verdicts``). Its ``request_id`` is the run's, so a run has one event
-        (``_repair_events``)."""
-        from citar import ledger as compute, servers
+        server's own work), its CPU bounded (by what the server observed and, for a helper's run, by 1.5 times
+        ``reference``: the cost table's figure for the job's shape, until a replica gives the job's own). Its
+        ``verification``: ``verified`` for the host's, else what verification has made of it so far (``pending``
+        while a replica checks it, ``unverified`` when accepted without one); the writer's later verdicts move it
+        (``Ledger.verdicts``). Its ``request_id`` is the run's, so a run has one event (``_repair_events``)."""
+        from citar import servers
         facts = servers.machine_facts(machine) or {}
         provider = None if executor == "local" or facts.get("server_resource") or not facts else facts.get("owner_id")
         consumer = consumer if role == "primary" else None
         cpu, flags = bounded_cpu(cpu_s, observed, reference)
-        cls = compute.class_of(facts, "cpu", _ledger().classes())
+        if reference is not None and reference > 0:
+            flags["reference_s"] = round(float(reference), 6)
         if isinstance(at, datetime) and at.tzinfo is None:
             at = at.replace(tzinfo=timezone.utc)
         return {"at": at if isinstance(at, datetime) else utcnow(), "activity": activity[:160],
@@ -2198,7 +2462,7 @@ class Dispatcher:
                 "cpu_core_s": round(cpu, 6), "reported_s": round(float(cpu_s or 0.0), 6),
                 "observed_s": round(float(observed or 0.0), 3), "tokens_in": 0, "tokens_out": 0,
                 "tokens_reasoning": 0, "tokens_cache_read": 0, "tokens_cache_write": 0,
-                "credits": round(compute.credits_for("cpu", cpu_core_s=cpu, rate=cls["rate"] if cls else 0.0), 6),
+                "credits": round(Dispatcher._cpu_credits(machine, cpu), 6),
                 "flags": flags, "self_use": consumer == provider,
                 "verification": verification or ("verified" if executor == "local" else "unverified"),
                 "request_id": run_id[:64]}
@@ -2595,17 +2859,25 @@ class Dispatcher:
         now = self.clock() if now is None else now
         if lab.paused() is not None:
             return "the lab is paused", []
-        parts = []
+        parts, gone = [], []
         for e in self.executors:
             why = self._available(e, now) or e.refuses(job)
             if why is None and e.free <= 0:
                 why = "every thread is playing"
             if why is not None:
-                parts.append((e, why))
-        if len(parts) < len(self.executors):
+                # a helper whose connection went stays an executor until it comes back: such helpers are counted, not
+                # listed one by one (the reason that matters is the connected executors')
+                (gone if e.kind != "local" and not getattr(e, "online", True) else parts).append((e, why))
+        if len(parts) + len(gone) < len(self.executors):
             return "next in line", []
-        if not parts:
+        if not parts and not gone:
             return "no executor takes CPU work", []
+        if len(gone) > 1:
+            told = [{"machine": e.id, "kind": e.kind, "why": why} for e, why in parts]
+            gone_why = f"{len(gone)} helper machines whose helpers are not connected"
+            text = "; ".join([f"{self.label(e)}: {why}" for e, why in parts] + [gone_why])
+            return text, told + [{"machine": None, "kind": "remote", "why": gone_why}]
+        parts += gone
         return ("; ".join(f"{self.label(e)}: {why}" for e, why in parts),
                 [{"machine": e.id, "kind": e.kind, "why": why} for e, why in parts])
 
@@ -2867,16 +3139,32 @@ class Dispatcher:
                            "running": len(self.runs), "games_last_hour": len(self.finished),
                            "jobs_build": self.jobs_build},
             "running": running, "experiments": exps}
+        hands = dict(self._hands())
+        self.published_hands = {"in_hand": hands, "settling": dict(self._settling_by),
+                                "share": {k: {"new_replicas": r, "runs": t} for k, (r, t) in self._share.items()}}
+
+    def hands_view(self) -> dict:
+        """The caps' figures for administrators (P4.5.8 rule 3): each helper machine's work in hand (runs in flight and
+        results waiting for a replica), the results waiting alone, and each verifier's share of new machines'
+        replicas against its runs while both waited; as the last tick published them, so a request's thread never
+        waits for a tick (P3.9.2)."""
+        return self.published_hands
 
     def queued_view(self, limit: int = 500) -> list:
-        """The queued jobs in the order they would run, for administrators: each with why it waits."""
+        """The queued jobs in the order they would run, for administrators: each with why it waits. Read under the
+        tick's lock, waited for at most ``VIEW_WAIT_SECONDS`` (P3.9.2: a tick held up by the database must not hold
+        a request's thread with it): ``Busy`` past that."""
         now = self.clock()
-        with self._tick_lock:
+        if not self._tick_lock.acquire(timeout=VIEW_WAIT_SECONDS):
+            raise Busy("The job dispatcher is busy; try again in a moment.")
+        try:
             jobs = sorted((j for j in self.jobs.values() if j.state == "queued"),
                           key=lambda j: (-j.priority, j.created, j.i))[:limit]
             return [{"job": j.id, "exp": j.exp, "i": j.i, "kind": j.kind, "priority": j.priority,
                      "owner": j.owner_id, "mem_mb": j.mem_mb, "attempts": j.attempts,
                      "waiting": self.waiting(j, now)} for j in jobs]
+        finally:
+            self._tick_lock.release()
 
 
 #: ``_pick``'s memo: an executor not asked yet about a shape of job.

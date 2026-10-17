@@ -10,6 +10,7 @@ import { pageHeader, secs, bar } from "./nav.js";
 import { abDialog } from "./bots.js";
 import * as auth from "./auth.js";
 import { JOB_STATE, executorText, progressText, verificationBadge } from "./labrules.js";
+import { verificationCounts, waitsForVerifier } from "./trustrules.js";
 
 const openReports = new Map();   // experiment name -> report text (null while loading)
 const openGames = new Map();     // experiment name -> its jobs (null while loading)
@@ -100,10 +101,15 @@ function drawTop(card, d, rules, refresh) {
       stat("Queue finishes in", active.length ? eta(d.eta_minutes) : "queue empty",
         "Estimate: remaining games × median minutes per game for that experiment, spread over the threads."),
       stalled.length ? stat("Stalled", stalled.map((e) => e.name).join(", "), "Games that failed three times (an administrator's Retry, or the server's next start, plays them again), or an experiment that cannot be played; see the log.", "bad") : null),
-    el("div", { class: "lab-executors" }, ...executors.map((e) => el("div", { class: "small" },
+    el("div", { class: "lab-executors" }, ...executors.filter((e) => e.kind === "local" || e.online !== false).map((e) => el("div", { class: "small" },
       el("span", { class: `pill ${e.state === "ready" && !e.available ? "live" : e.state === "failed" ? "bad" : ""}` }, e.kind === "local" ? "this server" : e.name),
       " ", executorText(e),
-      e.verifiable === false ? el("span", { class: "muted", title: e.verify_reason || "" }, " · its self-check failed: it plays its own lab and verifies nobody") : null))),
+      e.verifiable === false ? el("span", { class: "muted", title: e.verify_reason || "" }, " · its self-check failed: it plays its own lab and verifies nobody") : null)),
+      // the helpers whose connection went stay executors until they come back: counted, not listed
+      (() => {
+        const gone = executors.filter((e) => e.kind !== "local" && e.online === false).length;
+        return gone ? el("div", { class: "muted small" }, `${gone} helper machine${gone === 1 ? "" : "s"} not connected`) : null;
+      })()),
     el("p", { class: "muted small" }, "Each game is a bot-vs-bot job the server plays on its own job host, under the host's CPU settings "
       + "(Servers page, Machine settings: threads, CPU share, memory), or offers to a machine whose owner lends its CPU "
       + "through the CITAR helper, under that machine's own. This page refreshes every 5 seconds; "
@@ -141,8 +147,17 @@ function drawExperiments(card, d, refresh) {
         e.failing.length ? el("div", { class: "bad small" }, `failed: #${e.failing.join(", #")} `, retry) : null,
         e.crashed && e.crashed.length ? el("div", { class: "muted small" }, `crashed (final): #${e.crashed.join(", #")}`) : null,
         e.refused ? el("div", { class: "bad small" }, e.refused) : null,
-        e.waiting && e.state === "queued" ? el("div", { class: "muted small" }, `waiting: ${e.waiting}`) : null),
-      el("td", {}, bar(e.done / e.games, progressText(e), e.state === "complete" ? "good" : "")),
+        e.waiting && e.state === "queued" ? el("div", { class: waitsForVerifier(e.waiting) ? "warn small" : "muted small" },
+          `waiting: ${e.waiting}`) : null,
+        // an administrator's: results that wait for a replica no verifier plays yet
+        admin && e.settling > (e.verifying || 0) ? el("div", { class: "warn small", title: "Results of new or sampled "
+          + "machines wait for their replicas: done to the experiment's owner, settled once replayed" },
+        `${e.settling - (e.verifying || 0)} waiting for a verifier`) : null),
+      el("td", {}, bar(e.done / e.games, progressText(e), e.state === "complete" ? "good" : ""),
+        verificationCounts(e) ? el("div", { class: "muted small", title: "Its games' results by how they were "
+          + "checked: verified (a replica reproduced it), unverified (accepted without one), reference (played by this "
+          + "server); withdrawn: taken back when their machine was caught, and played again" },
+        verificationCounts(e)) : null),
       el("td", {}, e.minutes_per_game != null ? `${e.minutes_per_game}` : "–"),
       el("td", {}, e.state === "complete" ? el("span", { class: "muted" }, e.finished ? new Date(e.finished).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "done")
         : e.state === "stalled" ? el("span", { class: "bad" }, "never (failing games)")
@@ -177,7 +192,8 @@ function gamesTable(jobs) {
     const badge = verificationBadge(j.verification);
     table.appendChild(el("tr", {},
       el("td", {}, `#${j.i}`),
-      el("td", {}, el("span", { class: `pill ${cls}` }, label), j.error ? el("div", { class: "bad small" }, j.error) : null),
+      el("td", {}, el("span", { class: `pill ${cls}` }, label), j.error ? el("div", { class: "bad small" }, j.error) : null,
+        j.waiting ? el("div", { class: "warn small" }, j.waiting) : null),
       el("td", {}, j.executor ? j.executor.name : el("span", { class: "muted" }, "–")),
       el("td", {}, badge ? el("span", { class: `pill ${badge[0]}`, title: badge[2] }, badge[1]) : el("span", { class: "muted" }, "–")),
       el("td", { class: "small" }, j.round != null ? `round ${j.round}${j.of ? ` / ${j.of}` : ""}${j.paused ? " (paused)" : ""}`

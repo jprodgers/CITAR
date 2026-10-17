@@ -632,13 +632,15 @@ _FIGURES: dict = {}
 
 def results_figures(name: str, kind: str = "lab") -> dict:
     """An experiment's results file in figures: the games it holds (``done``, each once, crash lines included), the
-    crashed ones, the median minutes and turns of the finished ones and when the last finished. Read again only when
-    the file changed."""
+    crashed ones, the median minutes and turns of the finished ones, when the last finished, and how many of its games
+    each verification accepted (``verification``: ``reference``, ``verified``, ``unverified``, from each line's
+    executor; a line from before jobs has none). Read again only when the file changed."""
     path = results_path(name, kind)
     try:
         st = path.stat()
     except OSError:
-        return {"done": 0, "games": set(), "crashed": [], "per_game": None, "median_turns": None, "finished": None}
+        return {"done": 0, "games": set(), "crashed": [], "per_game": None, "median_turns": None, "finished": None,
+                "verification": {}}
     key = str(path)
     stamp = (st.st_mtime_ns, st.st_size)
     hit = _FIGURES.get(key)
@@ -648,7 +650,12 @@ def results_figures(name: str, kind: str = "lab") -> dict:
     games = {r.get("i") for r in res if isinstance(r.get("i"), int)}
     mins = [r["seconds"] / 60 for r in res if not r.get("crash") and r.get("seconds")]
     turns = [r["turns"] for r in res if not r.get("crash") and r.get("turns")]
-    figures = {"done": len(games), "games": games,
+    verification: dict = {}
+    for r in res:
+        v = (r.get("executor") or {}).get("verification") if isinstance(r.get("executor"), dict) else None
+        if v in ("reference", "verified", "unverified"):
+            verification[v] = verification.get(v, 0) + 1
+    figures = {"done": len(games), "games": games, "verification": verification,
                "crashed": sorted({r["i"] for r in res if r.get("crash") and isinstance(r.get("i"), int)}),
                "per_game": statistics.median(mins) if mins else None,
                "median_turns": statistics.median(turns) if turns else None,
@@ -720,6 +727,9 @@ def overview() -> dict:
             # its games whose results wait for a replica (done to everyone but administrators), and the verification
             # runs playing for them
             "settling": int(info.get("settling") or 0), "verifying": int(info.get("verifying") or 0),
+            # its accepted games by verification (design/phase4-helper.md P4.5.11); the route adds its games whose
+            # result was withdrawn and played again (``store.withdrawn_games``, P4.5.8 rule 8)
+            "verification": dict(fig.get("verification") or {}),
             # each executor's reason, for the routes to name each one as the viewer may be told it
             "waiting_on": info.get("waiting_on") or [],
         })

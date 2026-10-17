@@ -29,14 +29,27 @@ job dispatcher (``citar.jobs.dispatcher``, the only writer of the machines' trus
    the match that made it was counted) returns to ``new`` when it falls below that tier's threshold. A tier an
    administrator set, or matches made after the promotion, never demote.
 
+**Credits and speed** (P4.5.7): a machine's measured speed (``trust.speed``, :func:`speed_sample`) is the median of
+the reference's CPU seconds over its own on its replicated jobs (the last ``SPEED_SAMPLES``); a machine under half the
+median speed of the other measured machines of its CPU class is ``class_suspect`` (:func:`class_suspect`), for an
+administrator to pin its class.
+
+**Model results by tier** (rule 11, :func:`vouched`): a machine's model results (benchmark games, probes, the
+diplomacy leaderboard's games) count toward the global boards when it was a site machine, an administrator's, or
+``trusted`` when they ran, or is ``trusted`` now.
+
 A key reset never changes any of this (P4.3.7): the trust is the machine's row's, not its key's.
 """
 from __future__ import annotations
 
+import logging
+import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 #: The machines' tiers (``models.TRUST_TIERS``).
 TIERS = ("new", "provisional", "trusted", "quarantined")
@@ -77,16 +90,20 @@ class SettingsError(ValueError):
 
 
 def _bounded(key: str, value) -> float:
+    """``value`` for setting ``key`` when it is in the setting's bounds (a count a whole number), else
+    ``SettingsError``. Compared before it is converted, and never through ``float`` of an int: JSON gives
+    ``1e999`` as infinity and a 400-digit count as an int no float holds, and both must be refused, not raise."""
     lo, hi = BOUNDS[key]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))):
         raise SettingsError(f"{key} is a number from {lo} to {hi}.")
-    if isinstance(lo, int) and isinstance(hi, int):
-        if float(value) != int(value):
-            raise SettingsError(f"{key} is a whole number from {lo} to {hi}.")
-        value = int(value)
+    whole = isinstance(lo, int) and isinstance(hi, int)
+    if whole and isinstance(value, float) and not value.is_integer():
+        raise SettingsError(f"{key} is a whole number from {lo} to {hi}.")
     if not lo <= value <= hi:
-        raise SettingsError(f"{key} is from {lo} to {hi}, not {value}.")
-    return value
+        shown = str(value) if abs(value) < 1e9 else "a number past them"
+        raise SettingsError(f"{key} is from {lo} to {hi}, not {shown}.")
+    return int(value) if whole else value
 
 
 def clean(changes: dict) -> dict:
@@ -336,3 +353,221 @@ def since(trust: Optional[dict]) -> Optional[datetime]:
 def is_verifier(tier: Optional[str], trust: Optional[dict]) -> bool:
     """Whether a helper machine verifies others' results: ``trusted`` and marked ``verifier`` by an administrator."""
     return tier == "trusted" and bool((trust or {}).get("verifier"))
+
+
+# ---------------------------------------------------------------------------- credits: the measured speed (P4.5.7)
+
+#: How many of a machine's replicated jobs its measured speed is the median of (the latest).
+SPEED_SAMPLES = 25
+#: A run whose CPU seconds (its own or its reference's) are under this says nothing of a machine's speed: Windows
+#: counts a thread's CPU time in steps of 15.6 ms, so a shorter game's figures are mostly the timer's grain.
+SPEED_FLOOR_S = 0.2
+#: A sample of a measured speed is held within these bounds: a machine twenty times faster or slower than the reference
+#: is more likely its helper's figure than its hardware, and one sample of ``cpu:1000`` must not reach far (4-12's
+#: review). A run's deadline holds the speed it is scaled by tighter still (``dispatcher.DEADLINE_SPEED_MIN``).
+SPEED_MIN, SPEED_MAX = 0.05, 20.0
+#: A machine whose measured speed is under this share of the median of the other measured machines of its CPU class
+#: is ``class_suspect`` (P4.5.7): its class prices its work as faster than it is, or its helper over-reports.
+CLASS_SUSPECT_SHARE = 0.5
+
+
+def _median(values: list) -> Optional[float]:
+    xs = sorted(float(v) for v in values)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2.0
+
+
+def speed_sample(trust: Optional[dict], reference_s, own_s) -> dict:
+    """A replicated job's figures added to a machine's measured speed (P4.5.7): ``reference_s`` (its replica's CPU
+    seconds: the reference machine's) over ``own_s`` (what its helper reported), kept among its last
+    ``SPEED_SAMPLES``; ``trust.speed`` the median of them. A job too short to time (either side under
+    ``SPEED_FLOOR_S``) adds nothing. Returns the trust, changed or not."""
+    trust = dict(trust or {})
+    try:
+        ref, own = float(reference_s or 0.0), float(own_s or 0.0)
+    except (TypeError, ValueError):
+        return trust
+    if not (ref >= SPEED_FLOOR_S and own >= SPEED_FLOOR_S) or ref != ref or own != own:
+        return trust
+    ratio = min(SPEED_MAX, max(SPEED_MIN, ref / own))
+    samples = [float(x) for x in (trust.get("speeds") or []) if isinstance(x, (int, float))]
+    samples = (samples + [round(ratio, 4)])[-SPEED_SAMPLES:]
+    trust["speeds"] = samples
+    trust["speed"] = round(_median(samples), 3)
+    return trust
+
+
+def speed_of(trust: Optional[dict]) -> Optional[float]:
+    """A machine's measured speed (``trust.speed``), or None while it has none."""
+    v = (trust or {}).get("speed")
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+
+
+def class_bar(others: list, now: Optional[datetime] = None, days: Optional[int] = None) -> list:
+    """The machines a machine's measured speed is compared with (``others``: the other measured machines of its CPU
+    class, rows with ``trust_tier``, ``trust`` and ``flags``): those that did not over-report their CPU within ``days``
+    (an over-reporter's measure is low by its own report, and would hide a slow peer), and of them the ``trusted`` ones
+    alone when there are any. A measured speed is the helper's own report over the reference's: a group of machines
+    under-reporting would raise the class's median and flag honest peers; a trusted machine has made
+    ``promote_verified`` verified matches first (4-12's review)."""
+    now = now or datetime.now(timezone.utc)
+    days = int(settings()["overreport_days"]) if days is None else days
+    honest = [o for o in others if not overreported(dict(getattr(o, "flags", None) or {}), now, days)]
+    trusted = [o for o in honest if (getattr(o, "trust_tier", None) or "new") == "trusted"]
+    return trusted or honest
+
+
+def class_suspect(speed: Optional[float], others: list) -> Optional[float]:
+    """Whether a machine's measured ``speed`` is out of line with its CPU class (P4.5.7): under
+    ``CLASS_SUSPECT_SHARE`` of the median speed of ``others`` (the measured speeds of :func:`class_bar`'s machines).
+    Returns that median when it is, else None (no speed, no other measured machine, or in line)."""
+    if speed is None:
+        return None
+    median = _median([o for o in others if isinstance(o, (int, float)) and o > 0])
+    if median is None or speed >= CLASS_SUSPECT_SHARE * median:
+        return None
+    return median
+
+
+def card(row, *, admin: bool, cpu_class: Optional[dict] = None) -> dict:
+    """A machine's trust as the Servers page shows it (design/phase4-helper.md P4.5.11): its tier with its verified
+    count, streak and mismatches to its owner; to an administrator (``admin``) also its last mismatch with its evidence,
+    its measured speed beside its CPU class (``cpu_class``: ``{id, name, pinned}``), its ``verifier`` mark, when its
+    standing began, the promotion it earned and the replication asked."""
+    trust = dict(getattr(row, "trust", None) or {})
+    out = {"tier": getattr(row, "trust_tier", None) or "new", "verified": int(trust.get("verified") or 0),
+           "streak": int(trust.get("streak") or 0), "mismatches": int(trust.get("mismatches") or 0)}
+    if admin:
+        out.update({k: trust.get(k) for k in ("last_mismatch", "speed", "since", "promoted", "quarantined_at",
+                                              "replicate")})
+        out["verifier"] = bool(trust.get("verifier"))
+        out["cpu_class"] = cpu_class
+    return out
+
+
+def cpu_class_of(session, row) -> Optional[dict]:
+    """The CPU class a machine is priced by (``{id, name, pinned}``), the one an administrator pinned or its
+    hardware's (``ledger.class_of``)."""
+    from sqlalchemy import select
+    from citar import ledger
+    from citar.db.models import HardwareClass
+    classes = [ledger.class_dict(c) for c in session.scalars(select(HardwareClass).where(HardwareClass.kind == "cpu"))]
+    facts = {"hardware": (row.config or {}).get("hardware") or {}, "class_override": bool(row.class_override),
+             "gpu_class_id": row.gpu_class_id, "cpu_class_id": row.cpu_class_id}
+    cls = ledger.class_of(facts, "cpu", classes)
+    return {"id": cls["id"], "name": cls["name"], "pinned": bool(row.class_override)} if cls else None
+
+
+# ---------------------------------------------------------------------------- rule 11: model results by tier
+
+def vouched(tier: Optional[str], *, site: bool = False, owner_admin: bool = False) -> bool:
+    """Whether a machine's model results count toward the global leaderboards (P4.5.8 rule 11): a site machine (the
+    host, the site's online APIs), one an administrator owns, or one ``trusted``. The others' results are listed with
+    an "unverified machine" badge and left out of the global boards until an administrator trusts the machine."""
+    return bool(site) or bool(owner_admin) or tier == "trusted"
+
+
+def standing_of(row, owner) -> dict:
+    """A machine row's standing as a model result records it when it runs (rule 11: "when they ran"): its tier and
+    whether it is :func:`vouched`. ``owner`` is its owner's row (or None). A machine with no owner is the site's as the
+    host is (administrators manage it: the configuration's machines, an account's deleted)."""
+    from citar.auth import access
+    tier = getattr(row, "trust_tier", None) or "new"
+    admin = owner is not None and getattr(owner, "role", None) == "admin" and getattr(owner, "status", None) == "active"
+    site = access.is_site_machine(row) or not getattr(row, "owner_id", None)
+    return {"tier": tier, "vouched": vouched(tier, site=site, owner_admin=admin)}
+
+
+#: A machine's standing when its row could not be read (``standing``): not vouched, so its results are left out until
+#: the boards, which read every such machine's standing again (``vouched_now``), find it vouched.
+UNKNOWN_STANDING = {"tier": "unknown", "vouched": False}
+
+
+def standing(server_id: Optional[str], session=None) -> Optional[dict]:
+    """:func:`standing_of` for a machine by its id, read from the database (None: no such machine, or no database: a
+    seat with no machine, a test's game). A read that fails (``database is locked`` under the dispatcher's writes) is
+    ``UNKNOWN_STANDING``, never None: rule 11 fails closed (4-12's review: a None recorded nothing, and every board
+    counted what was not marked), and a machine really vouched still counts once the database answers the boards."""
+    if not server_id:
+        return None
+    from citar.db.models import Server, User
+
+    def read(s):
+        row = s.get(Server, server_id)
+        if row is None:
+            return None
+        owner = s.get(User, row.owner_id) if row.owner_id else None
+        return standing_of(row, owner)
+    if session is not None:
+        return read(session)
+    from citar import db
+    if not db.configured():
+        return None
+    try:
+        with db.session() as s:
+            return read(s)
+    except Exception as exc:
+        log.warning("could not read machine %s's standing (%s); recorded as unknown (not vouched)", server_id, exc)
+        return dict(UNKNOWN_STANDING)
+
+
+#: How long :func:`vouched_now`'s answers are kept (the boards are read every few seconds by an open page).
+VOUCHED_SECONDS = 5.0
+_VOUCHED: dict = {}
+_VOUCHED_LOCK = threading.Lock()
+
+
+def vouched_now(ids) -> set:
+    """Of the machines ``ids``, those whose model results count now (:func:`vouched` as their rows are read now: an
+    administrator who trusts a machine brings its earlier results onto the boards). Read at most every
+    ``VOUCHED_SECONDS`` per machine; a machine the database does not hold counts nothing."""
+    ids = {str(i) for i in ids or () if i}
+    if not ids:
+        return set()
+    now = time.monotonic()
+    out, ask = set(), set()
+    with _VOUCHED_LOCK:
+        for i in ids:
+            hit = _VOUCHED.get(i)
+            if hit is not None and now - hit[0] < VOUCHED_SECONDS:
+                if hit[1]:
+                    out.add(i)
+            else:
+                ask.add(i)
+    if ask:
+        from citar import db
+        if not db.configured():
+            return out
+        from sqlalchemy import select
+        from citar.db.models import Server, User
+        with db.session() as s:
+            rows = {r.id: r for r in s.scalars(select(Server).where(Server.id.in_(sorted(ask))))}
+            owners = {u.id: u for u in s.scalars(select(User).where(
+                User.id.in_(sorted({r.owner_id for r in rows.values() if r.owner_id}) or [""])))}
+            got = {i: bool(rows.get(i) is not None
+                           and standing_of(rows[i], owners.get(rows[i].owner_id))["vouched"]) for i in ask}
+        with _VOUCHED_LOCK:
+            if len(_VOUCHED) > 5000:
+                _VOUCHED.clear()
+            for i, ok in got.items():
+                _VOUCHED[i] = (now, ok)
+                if ok:
+                    out.add(i)
+    return out
+
+
+def not_counted(entries) -> set:
+    """Of ``entries`` (``(machine, standing)``: a benchmark job's, a probe run's), the machines whose model results
+    do not count now (rule 11): not :func:`vouched` when they ran, and not since. Their results carry the "unverified
+    machine" badge."""
+    ids = {str(sid) for sid, st in entries or ()
+           if sid and isinstance(st, dict) and st.get("vouched") is False}
+    return ids - vouched_now(ids) if ids else set()
+
+
+def forget_vouched() -> None:
+    """Read the machines' standing again at the next look (a tier changed)."""
+    with _VOUCHED_LOCK:
+        _VOUCHED.clear()

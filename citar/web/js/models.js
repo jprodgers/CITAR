@@ -7,6 +7,21 @@ import { pageHeader, secs, bar } from "./nav.js";
 import { renderComparison } from "./metrics.js";
 import { helperCard } from "./helper.js";
 import { boardRows } from "./diplomacy.js";
+import { UNVERIFIED_MACHINE } from "./trustrules.js";
+
+/** The badge of a result played on a machine no administrator has trusted yet (P4.5.8 rule 11). */
+function unverifiedBadge() {
+  return el("span", { class: "pill warn small", title: UNVERIFIED_MACHINE }, "unverified machine");
+}
+
+/** The games or pairs a board left out for their machines (the server counts them, never names them). */
+function leftOut(list, what) {
+  if (!list || !list.length) return null;
+  return el("details", {}, el("summary", { class: "muted" }, `Left out: ${what} on machines not trusted yet`),
+    el("p", { class: "muted small" }, UNVERIFIED_MACHINE),
+    el("ul", { class: "muted small" }, ...list.map((u) => el("li", {}, el("b", {}, u.owners ? `${u.model} · ${u.owners}`
+      : u.model), ": ", u.reason))));
+}
 
 const open = new Set();
 const openLines = new Set();
@@ -55,6 +70,8 @@ function drawBoard(card, data, refresh) {
   if (!data.models.length) {
     card.appendChild(el("p", { class: "muted" }, "No AI games recorded yet. Run a benchmark suite to score models."));
     if (withheld.length) card.appendChild(el("ul", { class: "muted small" }, ...withheld));
+    const left = leftOut(data.unverified, "games");
+    if (left) card.appendChild(left);
     return;
   }
   const help = {
@@ -82,7 +99,7 @@ function drawBoard(card, data, refresh) {
     if (expanded && r.games.length) {
       const inner = el("table", { class: "list" }, el("tr", {}, ...["Game", "Scenario", "Turns", "Result", "Score vs best bot", "Performance"].map((h) => el("th", {}, h))),
         ...r.games.map((g) => el("tr", {},
-          el("td", {}, g.game), el("td", {}, g.scenario || "–"),
+          el("td", {}, g.game, g.unverified_machine ? [" ", unverifiedBadge()] : null), el("td", {}, g.scenario || "–"),
           el("td", {}, `${g.turns}${g.turn_limit ? " / " + g.turn_limit : ""}`),
           el("td", {}, g.phase === "playing" ? "in progress" : (g.performance === 100 ? el("span", { class: "good" }, "won") : "finished")),
           el("td", {}, g.score != null ? `${g.score} vs ${g.best_bot_score}` : "–"),
@@ -93,6 +110,8 @@ function drawBoard(card, data, refresh) {
   card.appendChild(el("div", { style: { overflowX: "auto" } }, table));
   if (withheld.length) card.appendChild(el("details", {}, el("summary", { class: "muted" }, "Not enough pooled data yet"),
     el("ul", { class: "muted small" }, ...withheld)));
+  const left = leftOut(data.unverified, "games");
+  if (left) card.appendChild(left);
 }
 
 // ---------------------------------------------------------------------------- the Diplomacy tab
@@ -121,6 +140,8 @@ function drawDiplomacy(card, data, refresh) {
     card.appendChild(el("p", { class: "muted" }, "No hybrid benchmark pairs yet. Give a benchmark scenario the hybrid mode " +
       "(Benchmarks → a suite → a scenario's Mode) and run it."));
     if (withheld.length) card.appendChild(el("ul", { class: "muted small" }, ...withheld));
+    const left = leftOut(data.unverified, "pairs");
+    if (left) card.appendChild(left);
     return;
   }
   const help = {
@@ -148,7 +169,8 @@ function drawDiplomacy(card, data, refresh) {
       el("td", { class: "small" }, r.fallbacks), el("td", {}, r.games.length ? (expanded ? "▾" : "▸") : "")));
     if (expanded && r.games.length) {
       const inner = el("table", { class: "list" }, el("tr", {}, ...["Run", "Scenario", "Seed", "Score vs control", "Deals"].map((h) => el("th", {}, h))),
-        ...r.games.map((g) => el("tr", {}, el("td", {}, g.run || g.run_id), el("td", {}, g.scenario || "–"),
+        ...r.games.map((g) => el("tr", {}, el("td", {}, g.run || g.run_id, g.unverified_machine ? [" ", unverifiedBadge()] : null),
+          el("td", {}, g.scenario || "–"),
           el("td", {}, g.seed != null ? `${g.seed}` : "–"),
           el("td", {}, Object.entries(g.score_diff || {}).map(([k, v]) => `${k === "end" ? "end" : `T${k}`} ${v > 0 ? "+" : ""}${v}`).join(" · ")),
           el("td", {}, `${g.deals ?? "–"}`))));
@@ -158,4 +180,6 @@ function drawDiplomacy(card, data, refresh) {
   card.appendChild(el("div", { style: { overflowX: "auto" } }, table));
   if (withheld.length) card.appendChild(el("details", {}, el("summary", { class: "muted" }, "Not enough pooled data yet"),
     el("ul", { class: "muted small" }, ...withheld)));
+  const left = leftOut(data.unverified, "pairs");
+  if (left) card.appendChild(left);
 }

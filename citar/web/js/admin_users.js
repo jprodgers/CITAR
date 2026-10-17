@@ -34,7 +34,9 @@ export async function renderAdminUsers(root) {
   const body = el("tbody");
   const more = el("button", { style: { display: "none" } }, "More");
   page.appendChild(el("section", { class: "card" },
-    el("h2", {}, "Users"),
+    el("div", { class: "row" }, el("h2", { class: "grow" }, "Users"),
+      el("a", { href: "#/admin/verification", title: "Helpers' CPU work: the verification settings, quarantined machines "
+        + "and owners with their evidence, mismatches, withdrawals and verifiers" }, "Verification →")),
     el("div", { class: "row gap wrap" }, q, role, status),
     el("div", { class: "table-wrap" }, el("table", { class: "list admin-users" },
       el("thead", {}, el("tr", {}, ...["Account", "Email", "Role", "Status", "Trust", "Compute (30 days)", "Joined", "Last seen"].map((h) => el("th", {}, h)))),

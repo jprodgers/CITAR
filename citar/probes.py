@@ -770,10 +770,14 @@ class ProbeRunner:
         if hybrid is not None:
             from .diplomacy_stats import owners_label
             model = f"{model} (hybrid: {owners_label(hybrid['owners']).replace('_', ' ')})"
+        from .jobs import trust
+        standing = trust.standing(llm.get("server_id"))
         run = {"id": rid, "name": name or f"{probe['name']} · {model}", "probe": probe, "llm": {k: v for k, v in llm.items() if k != "api_key"},
                "repeats": n_rep, "jobs": [{"case": c["id"], "rep": r} for c in chosen for r in range(n_rep)],
                "status": "queued", "done": 0, "created": time.time(), "started": None, "finished": None,
-               "summary": {}, "error": None, "owner_id": owner_id, "mode": mode, "hybrid": hybrid}
+               "summary": {}, "error": None, "owner_id": owner_id, "mode": mode, "hybrid": hybrid,
+               # its machine's standing when it was started (P4.5.8 rule 11): an "unverified machine" badge otherwise
+               "standing": standing}
         if session is not None:
             from . import items
             items.register(session, "probe_run", rid, owner_id, run["name"], path=self._run_dir(rid))

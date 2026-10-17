@@ -1325,6 +1325,7 @@ def bench_runs(request: Request, me=Depends(require_user), sdb: DbSession = Depe
     each."""
     key = _share_key(request)
     out = _scheduler().list_runs(items.listed(sdb, "benchmark_run", me, slug=key))
+    _badge_benchmark_runs(out)
     admin = _is_admin(me)
     # what a queued job waits for names only the work the caller may see (P3.9.1)
     name = work_access.namer(sdb, me, admin=admin)
@@ -1334,6 +1335,27 @@ def bench_runs(request: Request, me=Depends(require_user), sdb: DbSession = Depe
             # a machine's address is its owner's and the administrators' (the registry's routes are theirs)
             r["servers"] = [{k: v for k, v in sv.items() if k != "base_url"} for sv in r.get("servers", [])]
     return _with_perms(sdb, "benchmark_run", me, out, slug=key)
+
+
+def _badge_benchmark_runs(runs: list) -> None:
+    """Each benchmark job that ran on a machine whose model results do not count (design/phase4-helper.md P4.5.8 rule
+    11: not trusted, a site machine or an administrator's when it ran, nor trusted since) gets the "unverified
+    machine" badge (``unverified_machine``), and so does its run: the boards leave its games out. It marks copies
+    (``list_runs`` gives copies already; these are made here too, so no caller's dict, the scheduler's own above all,
+    keeps a badge once its machine is trusted), each badge decided again at each listing."""
+    from ..jobs import trust
+    bad = trust.not_counted((j.get("server_id"), j.get("standing")) for r in runs for j in r.get("jobs") or [])
+    for r in runs:
+        r.pop("unverified_machine", None)
+        jobs = []
+        for j in r.get("jobs") or []:
+            j = {k: v for k, v in j.items() if k != "unverified_machine"}
+            if j.get("server_id") in bad and (j.get("standing") or {}).get("vouched") is False:
+                j["unverified_machine"] = True
+                r["unverified_machine"] = True
+            jobs.append(j)
+        if "jobs" in r:
+            r["jobs"] = jobs
 
 
 class RunControl(BaseModel):
@@ -1995,13 +2017,16 @@ def probe_runs(request: Request, p: Principal = Depends(principal), sdb: DbSessi
     key = _share_key(request)
     seen = items.listed(sdb, "probe_run", p.user, slug=key)
     out = []
-    for r in runner.list_runs():
-        if seen is not None and r.get("id") not in seen:
-            continue
+    listed = [r for r in runner.list_runs() if seen is None or r.get("id") in seen]
+    # a run on a machine whose model results do not count (P4.5.8 rule 11) carries the "unverified machine" badge
+    from ..jobs import trust
+    bad = trust.not_counted(((r.get("llm") or {}).get("server_id"), r.get("standing")) for r in listed)
+    for r in listed:
         out.append({k: r.get(k) for k in ("id", "name", "status", "done", "created", "started", "finished",
                                           "summary", "error", "repeats", "mode", "hybrid")} |
                    {"total": len(r.get("jobs", [])), "probe_id": r["probe"].get("id"), "probe_name": r["probe"].get("name"),
-                    "model": r.get("llm", {}).get("model"), "provider": r.get("llm", {}).get("provider")})
+                    "model": r.get("llm", {}).get("model"), "provider": r.get("llm", {}).get("provider"),
+                    "unverified_machine": _probe_unverified(r, bad)})
     return {"runs": _with_perms(sdb, "probe_run", p.user, out, slug=key), "status": _probe_status(sdb, p.user, runner)}
 
 
@@ -2011,6 +2036,9 @@ def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb
     runner = _probes()
     _row, perms = items.require(sdb, "probe_run", rid, p.user, access.VIEW, slug=_share_key(request))
     run = _probe_call(runner.get_run, rid)
+    from ..jobs import trust
+    run["unverified_machine"] = _probe_unverified(run, trust.not_counted(
+        [((run.get("llm") or {}).get("server_id"), run.get("standing"))]))
     admin = _is_admin(p.user)
     # what a queued run waits for names only the work the caller may see (P3.9.1)
     run = work_access.with_waiting(run, work_access.namer(sdb, p.user, admin=admin))
@@ -2019,6 +2047,12 @@ def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb
         run["llm"] = {k: v for k, v in (run.get("llm") or {}).items() if k not in DESCRIBING_KEYS}
     return {"run": run, "results": runner.results(rid), "status": _probe_status(sdb, p.user, runner),
             **perms.client()}
+
+
+def _probe_unverified(run: dict, bad: set) -> bool:
+    """Whether a probe run's model ran on a machine whose results do not count (P4.5.8 rule 11)."""
+    st = run.get("standing")
+    return bool((run.get("llm") or {}).get("server_id") in bad and isinstance(st, dict) and st.get("vouched") is False)
 
 
 @app.post("/api/probe-runs/{rid}/stop")
@@ -2066,8 +2100,12 @@ def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = De
     job hosts' details (their machines' names and ids among them), which name every experiment and the server's own
     jobs, are an administrator's."""
     from .. import lab
+    from ..jobs import store
     from .jobs_api import _namer, told_executor, told_waiting
     out = lab.overview()
+    withdrawn = store.withdrawn_games(sdb)
+    for e in out.get("experiments") or []:
+        e["withdrawn"] = withdrawn.get(e.get("name"), 0)
     # a machine as the caller may be told it (the games table's words): "this server" for the server's own job host,
     # a helper machine's name only where the caller may see that machine
     name = _namer(sdb, me)

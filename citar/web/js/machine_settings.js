@@ -6,8 +6,11 @@
 // - Hardware, models and power: for each, auto or manual (what its helper's report may change), the last report with
 //   its time and how the configuration differs from it, Apply (copy it in, whatever the mode), and Rescan now (its
 //   connected helper scans the machine again and sends the scan, which the dialog shows when it comes);
-// - Class and trust: the hardware classes it is priced by and its trust tier, shown to its owner, set by
-//   administrators (with what the prompt scheduler noticed of its helper over-reporting its time).
+// - Class and trust: the hardware classes it is priced by and its trust (its tier, verified count and streak),
+//   shown to its owner; to administrators also its last mismatch with its evidence, its measured speed beside its CPU
+//   class, the flags the credits' bounds and the class check put on it, and the controls: the classes, the tier (a
+//   quarantine by hand withdrawing its unverified results or not), its verifier mark and replication by hand
+//   (design/phase4-helper.md P4.5.11).
 // Every request goes through servers.js's `call`, which asks machines.js's gates first, as the rest of the page does.
 import { el, clear, toast, modal } from "./util.js";
 import { call, may } from "./servers.js";
@@ -15,6 +18,7 @@ import {
   MODE_TEXT, RESCAN_LOOK_MS, RESCAN_WAIT_MS, SECTIONS, classText, cpuInEffectText, inEffectText, labGrantsText,
   rescanned, settingsBody, sharesCpu, wholeIn,
 } from "./machines.js";
+import { TIER_TEXT, evidenceText, flagText, speedText, trustLine } from "./trustrules.js";
 
 const NAMES = { hardware: "Hardware", models: "Models", power: "Power" };
 const WORK = {
@@ -22,12 +26,7 @@ const WORK = {
   ranking_game: "Ranking games (the bots' ladder)",
   reference_game: "Reference games (the comparisons the bots are held to)",
 };
-const TIERS = {
-  new: "new: nothing known of it yet",
-  provisional: "provisional: so far so good",
-  trusted: "trusted",
-  quarantined: "quarantined: its work is not to be relied on",
-};
+const TIERS = TIER_TEXT;
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const when = (iso) => (iso ? new Date(iso).toLocaleString() : "never");
 
@@ -241,6 +240,7 @@ export async function openMachineSettings(m, onSaved) {
     const cls = current.class || {};
     const kinds = cls.kinds || ["gpu", "cpu"];
     const flags = (current.flags || {}).overreports;
+    const trust = current.trust || { tier: current.trust_tier };
     const box = el("div", { class: "col" },
       el("div", { class: "card inner" },
         el("h3", {}, "Hardware class"),
@@ -251,10 +251,21 @@ export async function openMachineSettings(m, onSaved) {
         el("p", { class: "muted small" }, cls.pinned ? "Pinned by an administrator: its hardware does not change it."
           : "Follows its hardware: a change of hardware classifies it again.")),
       el("div", { class: "card inner" },
-        el("h3", {}, "Trust tier"),
+        el("h3", {}, "Trust"),
         el("p", {}, el("b", {}, TIERS[current.trust_tier] || current.trust_tier)),
-        el("p", { class: "muted small" }, "Set by administrators. Today it is a label for them; a later version sets it "
-          + "by itself and decides with it what work the machine is trusted with.")));
+        el("p", { class: "small" }, trustLine(trust), trust.verifier ? " · a verifier" : ""),
+        el("p", { class: "muted small" }, "Its CPU work earns it its tier: every result of a new machine is replayed on "
+          + "the server, a share of a provisional or trusted one's; matches move it from new to provisional to "
+          + "trusted, and a mismatch quarantines it and withdraws what it gave unverified. Its model results count on "
+          + "the global boards once it is trusted. An administrator can also set its tier."),
+        trust.last_mismatch ? el("p", { class: trust.tier === "quarantined" ? "bad small" : "muted small" },
+          `Last mismatch: ${evidenceText(trust.last_mismatch)}`) : null,
+        current.can_admin ? el("p", { class: "muted small" }, speedText(trust.speed, trust.cpu_class)) : null,
+        current.can_admin ? el("div", { class: "row wrap gap" }, ...Object.entries(current.flags || {})
+          .filter(([key]) => key !== "overreports").map(([key, f]) => {
+            const t = flagText(key, f);
+            return t ? el("span", { class: `pill ${t[0]}`, title: t[2] }, t[1]) : null;
+          })) : null));
     if (flags) {
       box.appendChild(el("p", { class: "warn-box" }, `Its helper reported more generation time than the server observed `
         + `(by over 10% and a second) ${flags.count} time${flags.count === 1 ? "" : "s"}; the last ${when(flags.last)}. `
@@ -279,6 +290,15 @@ export async function openMachineSettings(m, onSaved) {
       : { pinned: true, gpu_class_id: choice.gpu, cpu_class_id: choice.cpu });
     const tier = el("select", { "aria-label": "Trust tier" },
       ...Object.keys(TIERS).map((t) => el("option", { value: t, selected: t === current.trust_tier }, TIERS[t])));
+    const withdraw = el("input", { type: "checkbox", checked: true });
+    const withdrawRow = el("label", { class: "checkrow small" }, withdraw,
+      " Quarantining: also withdraw every result it gave unverified since its standing began");
+    const syncWithdraw = () => { withdrawRow.style.display = tier.value === "quarantined" ? "" : "none"; };
+    tier.onchange = syncWithdraw;
+    syncWithdraw();
+    const trust = current.trust || {};
+    const setTier = () => act("setMachineTrust", tier.value === "quarantined"
+      ? { trust_tier: "quarantined", withdraw: withdraw.checked } : { trust_tier: tier.value });
     return el("div", { class: "card inner" },
       el("h3", {}, "Administrators"),
       el("div", { class: "grid2" }, ...selects),
@@ -289,7 +309,12 @@ export async function openMachineSettings(m, onSaved) {
       el("p", { class: "muted small" }, "The ledger prices its work by the new class from now on; citar admin reprice "
         + "recomputes a past period."),
       el("div", { class: "row wrap gap" }, tier,
-        el("button", { class: "small", onclick: () => act("setMachineTrust", tier.value) }, "Set the trust tier")));
+        el("button", { class: "small", onclick: setTier }, "Set the trust tier")),
+      withdrawRow,
+      current.trust_tier === "trusted" ? el("div", { class: "row wrap gap" },
+        el("button", { class: "small", onclick: () => act("setMachineTrust", { verifier: !trust.verifier }),
+          title: "A verifier replays other owners' machines' sampled results" },
+        trust.verifier ? "Unmark verifier" : "Mark as verifier")) : null);
   }
 
   // ------------------------------------------------------------------ small form parts

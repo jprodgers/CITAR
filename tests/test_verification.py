@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -46,7 +47,7 @@ import tests.test_dispatcher as TD
 from citar import _engine, db, engine_api, lab, ledger, servers, settings
 from citar.bots import ratings
 from citar.db.models import AuditLog, BudgetEntry, ComputeEvent, CpuJob, CpuJobRun, Server, ServerGroup, User
-from citar.jobs import dispatcher as D, remote, trust as T
+from citar.jobs import dispatcher as D, host as H, remote, trust as T
 from tests import has_test_ops
 from tests.helperfake import claim_of, sign_claim, test_key, TEST_KEY_SEED
 
@@ -160,13 +161,21 @@ class Lender:
         """Its offers not answered yet."""
         return [f for f in self.conn.frames if f.get("t") == "job_offer" and f["run"] not in self.answered]
 
-    def play(self, offer: dict, fault: str = "") -> None:
+    def play(self, offer: dict, fault: str = "", *, cpu_s: float | None = None,
+             observed: float | None = None) -> None:
         """Accepts ``offer`` and sends its result, honest or as ``fault`` says (``lie``: one score raised, the result
-        hashed again into its signed claim, and the honest hash in the outcome beside it)."""
+        hashed again into its signed claim, and the honest hash in the outcome beside it). ``cpu_s`` is the CPU its
+        outcome reports (the game's own by default), and ``observed`` how long the server sees it play (its accept
+        stamped as arriving that long before its result)."""
         self.answered.add(offer["run"])
         self.n += 1
         self.runs.append((self.n, offer["run"], offer["job"]))
-        self.e.frame({"t": "job_accept", "run": offer["run"]})
+        accept = {"t": "job_accept", "run": offer["run"]}
+        if observed is not None:
+            accept[H.RX] = time.monotonic() - observed
+        self.e.frame(accept)
+        if observed is not None:
+            accept[remote.AT] -= observed       # on the dispatcher's clock too: it arrived that long ago
         if fault == "abandon":
             return
         out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
@@ -180,7 +189,8 @@ class Lender:
         self.e.frame({"t": "job_result", "run": offer["run"],
                       "outcome": {"result": out["result"],
                                   "result_hash": honest_hash if fault == "lie" else out["result_hash"],
-                                  "chain": out["chain"], "cpu_s": out["cpu_s"], "wall_s": out["wall_s"],
+                                  "chain": out["chain"], "cpu_s": out["cpu_s"] if cpu_s is None else cpu_s,
+                                  "wall_s": out["wall_s"] if observed is None else observed,
                                   "paused_s": 0.0, "peak_mb": 3.0},
                       "claim": claim, "signature": signature})
 
@@ -552,6 +562,8 @@ class Visibility(Verify):
         admin = client.get("/api/lab/jobs?exp=settling", headers=self.headers["zara"]).json()
         (ajob,) = admin["jobs"]
         self.assertEqual(ajob["state"], "settling")
+        self.assertIsNone(ajob["verification"], "no verification badge until it settles, to an administrator too")
+        self.assertEqual(ajob.get("waiting"), None, "its replica is offered: not waiting for a verifier")
         self.assertEqual(sorted(r["role"] for r in ajob["runs"]), ["primary", "replica"])
         lab_view = client.get("/api/lab", headers=self.headers["bob"]).json()
         self.assertEqual([r for r in lab_view["running"] if r.get("exp") == "settling"], [], "no replica in sight")
@@ -1122,6 +1134,89 @@ class QuarantineAndRelease(Verify):
         self.assertEqual(r.status_code, 200, r.text)
         row = bob.row()
         self.assertEqual((row.trust_tier, row.trust["verified"], row.public_key), ("provisional", 7, None))
+
+
+class DeletedWhileChecked(Verify):
+    """4-12's review: a cheater that deletes its machine while an altered result waits for its replica (the moment it
+    can tell a result was sampled) is quarantined all the same, from its runs: its owner on tampering, and everything
+    unverified it gave since its registration withdrawn."""
+
+    def cheat_waiting(self, name: str, *, tier: str = "new", earlier: int = 0) -> tuple:
+        """Bob's machine (``tier``) has given ``earlier`` altered results accepted unverified (provisional at rate 0),
+        then an altered one an administrator asked to replicate, which waits: this server's host is off."""
+        self.settings(provisional_rate=0.0)
+        bob = Lender(self, f"Bob's {name}", "bob", tier=tier)
+        self.submit("bob", duels(name, earlier + 2))
+        host = self.verifier()
+        d = self.make([host])
+        cheat = lambda lender, n: "result"       # noqa: E731
+        if earlier:
+            self.assertTrue(self.drive(d, [bob], cheat, until=lambda: bob.n >= earlier and all(
+                self.job_of(r).state == "accepted" for _n, r, _j in bob.runs[:earlier])))
+        host.state = "off"
+        if tier != "new":
+            D.replicate_next(bob.sid, 1, actor_id=self.ids["zara"])
+        self.assertTrue(self.drive(d, [bob], cheat, until=lambda: bob.n > earlier and self.job_of(
+            bob.runs[earlier][1]).state == "settling"))
+        return d, host, bob, [r for _n, r, _j in bob.runs[:earlier]], bob.runs[earlier][1]
+
+    def caught(self, d, host, run: str) -> None:
+        self.led.drain()
+        host.state = "ready"
+        self.assertTrue(self.drive(d, [], until=lambda: self.job_of(run).state == "withdrawn", ticks=200))
+
+    def test_a_new_machine_deleted_through_the_route_still_quarantines_its_owner(self):
+        from fastapi.testclient import TestClient
+        from citar.server import app as appmod
+        client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(client.close)
+        d, host, bob, _earlier, run = self.cheat_waiting("gone")
+        r = client.delete(f"/api/pool/servers/{bob.sid}", headers=self.headers["bob"])
+        self.assertEqual(r.status_code, 200, r.text)
+        servers.invalidate()
+        self.assertEqual(self.audits("server.deleted", bob.sid)[0]["owner_id"], self.ids["bob"])
+        self.caught(d, host, run)
+        primary = next(x for x in self.runs() if x.id == run)
+        self.assertEqual((primary.verdict, primary.error["verdict"]), ("mismatch", "result"))
+        self.assertEqual(self.event(run).verification, "rejected")
+        self.assertEqual(self.owner_tier("bob"), "quarantined", "deleting the machine does not save its owner")
+        (entry,) = self.audits("server.trust", bob.sid)
+        self.assertEqual((entry["changed"], entry["deleted"], entry["machine_run"]),
+                         ({"from": "deleted", "to": "quarantined"}, True, run))
+        # a machine its owner registers again is refused CPU work
+        second = Lender(self, "Bob's next", "bob", seed=TEST_KEY_SEED + 7)
+        d.tick()
+        self.assertEqual({second.e.refuses(j) for j in d.jobs.values() if j.state == "queued"},
+                         {"its owner is quarantined"})
+
+    def test_a_provisional_machine_deleted_loses_its_earlier_unverified_results(self):
+        from citar import pool
+        d, host, bob, earlier, run = self.cheat_waiting("gone2", tier="provisional", earlier=2)
+        lined = {(x.get("executor") or {}).get("run"): x for x in lab.load_results("gone2")}
+        self.assertEqual([lined[r]["executor"]["verification"] for r in earlier], ["unverified"] * 2)
+        with db.session() as s:
+            pool.delete_server(s, s.get(User, self.ids["bob"]), s.get(Server, bob.sid))
+        servers.invalidate()
+        self.caught(d, host, run)
+        lined = {(x.get("executor") or {}).get("run") for x in lab.load_results("gone2")}
+        self.assertFalse(set(earlier) & lined, "its earlier unverified results leave the results file")
+        for r in earlier:
+            self.assertEqual(self.job_of(r).state, "withdrawn")
+            self.assertEqual((self.event(r).verification, self.event(r).credits), ("rejected", 0.0))
+        self.assertEqual(self.owner_tier("bob"), "quarantined")
+        (entry,) = self.audits("server.trust", bob.sid)
+        self.assertEqual(entry["withdrawn"], 3, "the caught job and the two before it")
+
+    def test_a_deletion_with_no_owner_on_record_finds_the_owner_by_the_ledger(self):
+        """A machine deleted before its deletion's audit row named its owner (or by the registry alone): its owner is
+        the provider of its runs' events."""
+        d, host, bob, _earlier, run = self.cheat_waiting("gone3")
+        with db.session() as s:
+            servers.delete(bob.sid, session=s)
+        servers.invalidate()
+        self.assertEqual(self.audits("server.deleted", bob.sid), [])
+        self.caught(d, host, run)
+        self.assertEqual(self.owner_tier("bob"), "quarantined")
 
 
 class Routes(Verify):

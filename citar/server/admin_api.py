@@ -223,7 +223,9 @@ def servers_delete(sid: str, me: User = Depends(require_user), s: Session = Depe
     from .workers import hub
     row = _row(s, sid, me)
     config, name = dict(row.config or {}), row.name
-    audit.record(s, "server.deleted", actor=me, object_type="server", object_id=sid, name=name)
+    # its owner kept, so a mismatch found after the deletion still quarantines them (``Dispatcher._owner_of_gone``)
+    audit.record(s, "server.deleted", actor=me, object_type="server", object_id=sid, name=name,
+                 owner_id=row.owner_id)
     S.delete(sid, session=s)
     s.commit()
     hub().drop(sid, "its machine was deleted")

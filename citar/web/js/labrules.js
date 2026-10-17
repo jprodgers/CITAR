@@ -22,6 +22,7 @@ export function verificationBadge(v) {
 export function executorText(e) {
   if (!e) return "";
   const who = e.kind === "local" ? "this server" : (e.name || "a machine");
+  if (e.kind !== "local" && e.online === false) return `${who}: its helper is not connected`;
   if (e.on === false) return `${who}: CPU work is off`;
   const figures = [`${e.threads} thread${e.threads === 1 ? "" : "s"}`];
   if (e.cpu_percent != null) figures.push(`${e.cpu_percent}% of the CPU`);
