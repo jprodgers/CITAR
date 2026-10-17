@@ -1592,6 +1592,7 @@ impl<'a> Steady<'a> {
             version: Some(version.clone()),
             message: format!("restarting into CITAR helper {version}"),
         };
+        self.h.log.info(format!("update: restarting {version}: {}", st.message));
         if self.h.send(tx, HelperFrame::UpdateStatus(st)).await.is_ok() {
             let close =
                 CloseFrame { code: CloseCode::Away, reason: "restarting for an update".into() };
