@@ -96,6 +96,12 @@ ed25519-dalek = { version = "2.2", default-features = false, features = ["std", 
 getrandom = "0.3"
 # The machine's name, logical CPUs and memory (the local CPU ceiling's defaults; the scan, 4-06).
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# The update manifest's versions (citar-jobs) and the helper's: semver's order, pre-releases
+# included (design/phase4-helper.md P4.3.8). Already locked (rustc_version's).
+semver = "1.0"
+# The helper's update downloads are checked against the signed manifest's SHA-256 (P4.3.8), and
+# `cargo xtask helper-manifest` writes them. Already locked (ed25519-dalek's).
+sha2 = "0.10"
 # Local quiet hours: the machine's own time zone.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 # citar-jobs' sys module only (the owner-only DACL of the machine key, P4.3.7; the job limits,

@@ -32,6 +32,9 @@ base64.workspace = true
 thiserror.workspace = true
 # A run's CPU time, reported beside its result and never hashed: the thread's that played it.
 cpu-time.workspace = true
+# The update manifest's versions (P4.3.8): a helper never takes an older or the same one, and
+# the server pushes a manifest only to helpers older than it; semver orders pre-releases.
+semver.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The owner-only DACL of the helper's machine key (P4.3.7), written and read back: the security
