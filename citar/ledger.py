@@ -402,8 +402,11 @@ class Ledger:
         "request_id", "verification", "why"?}`` sets that event's ``verification`` (``verified``, ``unverified``,
         ``rejected``). A rejected event's credits and CPU seconds go to 0 (``flags.rejected`` says why, and
         ``flags.rejected_credits`` what it had), its hour's rollups are recomputed, and the budget settlement it made
-        (``flags.budget``) is reversed, in the database and in the keeper. Written by the writer thread after every
-        event put before it, in the same transaction as its batch, so an event and its verdict never cross."""
+        (``flags.budget``) is reversed, in the database and in the keeper. An update that also carries
+        ``cpu_core_s`` and ``credits`` (with ``flags`` to set and ``unflag`` to drop) bounds the event again: a helper's
+        run settled by a replica, whose reference cost is then the replica's own CPU seconds; its budget settlement
+        moves by the difference. Written by the writer thread after every event put before it, in the same transaction
+        as its batch, so an event and its verdict never cross."""
         if updates:
             self._put(("verdicts", [dict(u) for u in updates]))
 
@@ -869,8 +872,10 @@ def owner_of(session, activity: str) -> tuple:
 
 def _apply_verdicts(session, updates: list) -> list:
     """``Ledger.verdicts``' updates, in the writer's transaction: each event's ``verification`` set; a rejected one's
-    credits and CPU seconds taken to 0, its budget settlement reversed, its hour's rollups recomputed. Returns the
-    reversals for the keeper, ``[(budget, period, credits)]``, applied once the transaction commits."""
+    credits and CPU seconds taken to 0, its budget settlement reversed, its hour's rollups recomputed; one bounded
+    again given its new CPU seconds and credits, its budget settlement moved by the difference. Returns the changes
+    for the keeper, ``[(budget, period, credits taken back)]`` (negative: charged more), applied once the transaction
+    commits."""
     from sqlalchemy import select
     from .db.models import BudgetEntry, ComputeEvent
     hours: set = set()
@@ -885,6 +890,27 @@ def _apply_verdicts(session, updates: list) -> list:
                      u.get("verification"))
             continue
         verification = str(u.get("verification") or "unverified")
+        if verification != "rejected" and ev.verification != "rejected" and isinstance(u.get("credits"), (int, float)):
+            # bounded again by the job's own reference cost once a replica reproduced it (P4.5.7): its CPU seconds,
+            # credits and flags as that bound gives them, a budget settlement moved by the difference
+            flags = dict(ev.flags or {})
+            for k in u.get("unflag") or ():
+                flags.pop(k, None)
+            flags.update(u.get("flags") or {})
+            old, new = float(ev.credits or 0.0), max(0.0, float(u["credits"]))
+            ev.cpu_core_s = max(0.0, float(u.get("cpu_core_s") or 0.0))
+            ev.credits, ev.flags = new, flags
+            delta = new - old
+            hold = flags.get("budget")
+            if abs(delta) > 1e-9:
+                hours.add(hour_of(ev.at))
+                if isinstance(hold, dict) and hold.get("id") and hold.get("key"):
+                    entry = session.scalar(select(BudgetEntry).where(
+                        BudgetEntry.budget_id == hold["id"], BudgetEntry.activity_id == ev.activity[:64],
+                        BudgetEntry.period_key == hold["key"]))
+                    if entry is not None:
+                        entry.actual = max(0.0, float(entry.actual or 0.0) + delta)
+                    refunds.append((hold["id"], hold["key"], -delta))
         if verification == "rejected" and ev.verification != "rejected":
             flags = dict(ev.flags or {})
             credits = float(ev.credits or 0.0)

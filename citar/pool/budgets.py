@@ -503,15 +503,17 @@ class Keeper:
                 a.spent += credits
 
     def refund(self, budget_id: str, key: str, credits: float) -> None:
-        """Credits settled in period ``key`` of a budget taken back (a CPU run rejected by verification, P4.5.7): its
-        entry was lowered by the ledger's writer, and the account's spend now is too, when that period is current."""
+        """Credits settled in period ``key`` of a budget taken back (a CPU run rejected by verification, or bounded
+        again lower once its replica gave its reference cost, P4.5.7): its entry was lowered by the ledger's writer, and
+        the account's spend now is too, when that period is current. A negative ``credits`` is a charge (a run bounded
+        again higher: the work was done, whatever the budget has left)."""
         with self.lock:
             a = self.accounts.get(budget_id)
             if a is None:
                 return
             self._turn(a)
             if key == a.key:
-                a.spent = max(0.0, a.spent - max(0.0, float(credits or 0.0)))
+                a.spent = max(0.0, a.spent - float(credits or 0.0))
 
     def release(self, r: Optional[Reservation]) -> None:
         """The request never ran (or its event could not be written): the hold goes, nothing is spent."""

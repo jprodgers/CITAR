@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -46,7 +47,7 @@ import tests.test_dispatcher as TD
 from citar import _engine, db, engine_api, lab, ledger, servers, settings
 from citar.bots import ratings
 from citar.db.models import AuditLog, BudgetEntry, ComputeEvent, CpuJob, CpuJobRun, Server, ServerGroup, User
-from citar.jobs import dispatcher as D, remote, trust as T
+from citar.jobs import dispatcher as D, host as H, remote, trust as T
 from tests import has_test_ops
 from tests.helperfake import claim_of, sign_claim, test_key, TEST_KEY_SEED
 
@@ -160,13 +161,21 @@ class Lender:
         """Its offers not answered yet."""
         return [f for f in self.conn.frames if f.get("t") == "job_offer" and f["run"] not in self.answered]
 
-    def play(self, offer: dict, fault: str = "") -> None:
+    def play(self, offer: dict, fault: str = "", *, cpu_s: float | None = None,
+             observed: float | None = None) -> None:
         """Accepts ``offer`` and sends its result, honest or as ``fault`` says (``lie``: one score raised, the result
-        hashed again into its signed claim, and the honest hash in the outcome beside it)."""
+        hashed again into its signed claim, and the honest hash in the outcome beside it). ``cpu_s`` is the CPU its
+        outcome reports (the game's own by default), and ``observed`` how long the server sees it play (its accept
+        stamped as arriving that long before its result)."""
         self.answered.add(offer["run"])
         self.n += 1
         self.runs.append((self.n, offer["run"], offer["job"]))
-        self.e.frame({"t": "job_accept", "run": offer["run"]})
+        accept = {"t": "job_accept", "run": offer["run"]}
+        if observed is not None:
+            accept[H.RX] = time.monotonic() - observed
+        self.e.frame(accept)
+        if observed is not None:
+            accept[remote.AT] -= observed       # on the dispatcher's clock too: it arrived that long ago
         if fault == "abandon":
             return
         out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
@@ -180,7 +189,8 @@ class Lender:
         self.e.frame({"t": "job_result", "run": offer["run"],
                       "outcome": {"result": out["result"],
                                   "result_hash": honest_hash if fault == "lie" else out["result_hash"],
-                                  "chain": out["chain"], "cpu_s": out["cpu_s"], "wall_s": out["wall_s"],
+                                  "chain": out["chain"], "cpu_s": out["cpu_s"] if cpu_s is None else cpu_s,
+                                  "wall_s": out["wall_s"] if observed is None else observed,
                                   "paused_s": 0.0, "peak_mb": 3.0},
                       "claim": claim, "signature": signature})
 

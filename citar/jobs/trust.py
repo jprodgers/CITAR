@@ -29,6 +29,15 @@ job dispatcher (``citar.jobs.dispatcher``, the only writer of the machines' trus
    the match that made it was counted) returns to ``new`` when it falls below that tier's threshold. A tier an
    administrator set, or matches made after the promotion, never demote.
 
+**Credits and speed** (P4.5.7): a machine's measured speed (``trust.speed``, :func:`speed_sample`) is the median of
+the reference's CPU seconds over its own on its replicated jobs (the last ``SPEED_SAMPLES``); a machine under half the
+median speed of the other measured machines of its CPU class is ``class_suspect`` (:func:`class_suspect`), for an
+administrator to pin its class.
+
+**Model results by tier** (rule 11, :func:`vouched`): a machine's model results (benchmark games, probes, the
+diplomacy leaderboard's games) count toward the global boards when it was a site machine, an administrator's, or
+``trusted`` when they ran, or is ``trusted`` now.
+
 A key reset never changes any of this (P4.3.7): the trust is the machine's row's, not its key's.
 """
 from __future__ import annotations
@@ -336,3 +345,157 @@ def since(trust: Optional[dict]) -> Optional[datetime]:
 def is_verifier(tier: Optional[str], trust: Optional[dict]) -> bool:
     """Whether a helper machine verifies others' results: ``trusted`` and marked ``verifier`` by an administrator."""
     return tier == "trusted" and bool((trust or {}).get("verifier"))
+
+
+# ---------------------------------------------------------------------------- credits: the measured speed (P4.5.7)
+
+#: How many of a machine's replicated jobs its measured speed is the median of (the latest).
+SPEED_SAMPLES = 25
+#: A run whose CPU seconds (its own or its reference's) are under this says nothing of a machine's speed: Windows
+#: counts a thread's CPU time in steps of 15.6 ms, so a shorter game's figures are mostly the timer's grain.
+SPEED_FLOOR_S = 0.2
+#: A measured speed is held within these bounds (a reference ten thousand times faster than a machine is a figure).
+SPEED_MIN, SPEED_MAX = 0.001, 1000.0
+#: A machine whose measured speed is under this share of the median of the other measured machines of its CPU class
+#: is ``class_suspect`` (P4.5.7): its class prices its work as faster than it is, or its helper over-reports.
+CLASS_SUSPECT_SHARE = 0.5
+
+
+def _median(values: list) -> Optional[float]:
+    xs = sorted(float(v) for v in values)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2.0
+
+
+def speed_sample(trust: Optional[dict], reference_s, own_s) -> dict:
+    """A replicated job's figures added to a machine's measured speed (P4.5.7): ``reference_s`` (its replica's CPU
+    seconds: the reference machine's) over ``own_s`` (what its helper reported), kept among its last
+    ``SPEED_SAMPLES``; ``trust.speed`` the median of them. A job too short to time (either side under
+    ``SPEED_FLOOR_S``) adds nothing. Returns the trust, changed or not."""
+    trust = dict(trust or {})
+    try:
+        ref, own = float(reference_s or 0.0), float(own_s or 0.0)
+    except (TypeError, ValueError):
+        return trust
+    if not (ref >= SPEED_FLOOR_S and own >= SPEED_FLOOR_S) or ref != ref or own != own:
+        return trust
+    ratio = min(SPEED_MAX, max(SPEED_MIN, ref / own))
+    samples = [float(x) for x in (trust.get("speeds") or []) if isinstance(x, (int, float))]
+    samples = (samples + [round(ratio, 4)])[-SPEED_SAMPLES:]
+    trust["speeds"] = samples
+    trust["speed"] = round(_median(samples), 3)
+    return trust
+
+
+def speed_of(trust: Optional[dict]) -> Optional[float]:
+    """A machine's measured speed (``trust.speed``), or None while it has none."""
+    v = (trust or {}).get("speed")
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+
+
+def class_suspect(speed: Optional[float], others: list) -> Optional[float]:
+    """Whether a machine's measured ``speed`` is out of line with its CPU class (P4.5.7): under
+    ``CLASS_SUSPECT_SHARE`` of the median speed of ``others`` (the other measured machines of its class). Returns that
+    median when it is, else None (no speed, no other measured machine, or in line)."""
+    if speed is None:
+        return None
+    median = _median([o for o in others if isinstance(o, (int, float)) and o > 0])
+    if median is None or speed >= CLASS_SUSPECT_SHARE * median:
+        return None
+    return median
+
+
+# ---------------------------------------------------------------------------- rule 11: model results by tier
+
+def vouched(tier: Optional[str], *, site: bool = False, owner_admin: bool = False) -> bool:
+    """Whether a machine's model results count toward the global leaderboards (P4.5.8 rule 11): a site machine (the
+    host, the site's online APIs), one an administrator owns, or one ``trusted``. The others' results are listed with
+    an "unverified machine" badge and left out of the global boards until an administrator trusts the machine."""
+    return bool(site) or bool(owner_admin) or tier == "trusted"
+
+
+def standing_of(row, owner) -> dict:
+    """A machine row's standing as a model result records it when it runs (rule 11: "when they ran"): its tier and
+    whether it is :func:`vouched`. ``owner`` is its owner's row (or None)."""
+    from citar.auth import access
+    tier = getattr(row, "trust_tier", None) or "new"
+    admin = owner is not None and getattr(owner, "role", None) == "admin" and getattr(owner, "status", None) == "active"
+    return {"tier": tier, "vouched": vouched(tier, site=access.is_site_machine(row), owner_admin=admin)}
+
+
+def standing(server_id: Optional[str], session=None) -> Optional[dict]:
+    """:func:`standing_of` for a machine by its id, read from the database (None: no such machine, or no database: a
+    seat with no machine, a test's game)."""
+    if not server_id:
+        return None
+    from citar.db.models import Server, User
+
+    def read(s):
+        row = s.get(Server, server_id)
+        if row is None:
+            return None
+        owner = s.get(User, row.owner_id) if row.owner_id else None
+        return standing_of(row, owner)
+    if session is not None:
+        return read(session)
+    from citar import db
+    if not db.configured():
+        return None
+    try:
+        with db.session() as s:
+            return read(s)
+    except Exception:
+        return None
+
+
+#: How long :func:`vouched_now`'s answers are kept (the boards are read every few seconds by an open page).
+VOUCHED_SECONDS = 5.0
+_VOUCHED: dict = {}
+_VOUCHED_LOCK = threading.Lock()
+
+
+def vouched_now(ids) -> set:
+    """Of the machines ``ids``, those whose model results count now (:func:`vouched` as their rows are read now: an
+    administrator who trusts a machine brings its earlier results onto the boards). Read at most every
+    ``VOUCHED_SECONDS`` per machine; a machine the database does not hold counts nothing."""
+    ids = {str(i) for i in ids or () if i}
+    if not ids:
+        return set()
+    now = time.monotonic()
+    out, ask = set(), set()
+    with _VOUCHED_LOCK:
+        for i in ids:
+            hit = _VOUCHED.get(i)
+            if hit is not None and now - hit[0] < VOUCHED_SECONDS:
+                if hit[1]:
+                    out.add(i)
+            else:
+                ask.add(i)
+    if ask:
+        from citar import db
+        if not db.configured():
+            return out
+        from sqlalchemy import select
+        from citar.db.models import Server, User
+        with db.session() as s:
+            rows = {r.id: r for r in s.scalars(select(Server).where(Server.id.in_(sorted(ask))))}
+            owners = {u.id: u for u in s.scalars(select(User).where(
+                User.id.in_(sorted({r.owner_id for r in rows.values() if r.owner_id}) or [""])))}
+            got = {i: bool(rows.get(i) is not None
+                           and standing_of(rows[i], owners.get(rows[i].owner_id))["vouched"]) for i in ask}
+        with _VOUCHED_LOCK:
+            if len(_VOUCHED) > 5000:
+                _VOUCHED.clear()
+            for i, ok in got.items():
+                _VOUCHED[i] = (now, ok)
+                if ok:
+                    out.add(i)
+    return out
+
+
+def forget_vouched() -> None:
+    """Read the machines' standing again at the next look (a tier changed)."""
+    with _VOUCHED_LOCK:
+        _VOUCHED.clear()
