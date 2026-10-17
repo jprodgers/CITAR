@@ -377,6 +377,7 @@ fn play_sensed(
                 key: Some(Arc::clone(&key)),
                 results: Some(results.clone()),
                 state: jobs.clone(),
+                ..Default::default()
             },
         };
         let task = tokio::spawn(async move { helper.run().await });

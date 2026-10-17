@@ -60,6 +60,7 @@ from citar.jobs import dispatcher as D, host as H, local as L, store
 from citar.machine_settings import CPU_WORK
 from citar.pool import scheduler as S
 from tests import has_test_ops
+from tests.helperfake import result_frame, test_key
 
 settings.reset()
 ROOT = Path(__file__).resolve().parent.parent
@@ -127,10 +128,18 @@ class Fake:
     def play(self, run: str, *, peak: float = 1.0, **figures) -> None:
         job = self.jobs[run]
         out = engine_api.run_job(job.kind, job.spec, spec_hash=job.spec_hash)
-        self.frames.append({"t": "job_result", "run": run, "outcome": {
+        frame = {"t": "job_result", "run": run, "outcome": {
             "result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"],
             "cpu_s": figures.get("cpu_s", out["cpu_s"]), "wall_s": figures.get("wall_s", out["wall_s"]),
-            "paused_s": figures.get("paused_s", 0.0), "peak_mb": peak}})
+            "paused_s": figures.get("paused_s", 0.0), "peak_mb": peak}}
+        if self.kind != "local":
+            # a helper's result carries its claim, signed by the fake helpers' throwaway key (its machine's row
+            # registers it)
+            offer = {"job": job.id, "run": run, "kind": job.kind, "spec": job.spec, "spec_hash": job.spec_hash,
+                     "jobs_build": job.jobs_build}
+            signed = result_frame(offer, out, self.machine)
+            frame["claim"], frame["signature"] = signed["claim"], signed["signature"]
+        self.frames.append(frame)
 
     def fail(self, run: str, code: str, **extra) -> None:
         self.frames.append({"t": "job_failed", "run": run, "code": code, "message": f"{code} (a test)",
@@ -205,6 +214,10 @@ class Lab(unittest.TestCase):
                 self.headers[handle] = {"cookie": f"{sessions.COOKIE_NAME}={raw}",
                                         sessions.CSRF_HEADER: row.csrf_token, "origin": "https://citar.test"}
                 self.ids[handle] = user.id
+            # a trusted or provisional helper's results unsampled: verification is tests/test_verification.py's (a
+            # sampled result would wait for a verifier these tests do not give it)
+            from citar.jobs import trust
+            trust.save_settings(s, {"trusted_rate": 0.0, "provisional_rate": 0.0})
         self.host_cpu(threads=self.THREADS, memory_mb=400)
 
     def host_cpu(self, **cpu) -> None:
@@ -801,7 +814,8 @@ class Deadlines(Lab):
     def test_an_expiry_its_pause_caused_is_neither_an_attempt_nor_an_abandon(self):
         with db.session() as s:
             s.add(Server(id="sv_box", owner_id=self.ids["bob"], name="Bob box", kind="owned", provider="dryrun",
-                         reach="worker", max_concurrent=1, config={}))
+                         reach="worker", max_concurrent=1, config={}, trust_tier="trusted",
+                         public_key=test_key()))
         servers.invalidate()
         clock = Clock()
         self.submit("alice", duels("dl", 2))
@@ -832,6 +846,11 @@ class Deadlines(Lab):
                              {"past its deadline", "past its deadline (its pauses)"})
 
     def test_three_expiries_in_an_hour_keep_a_machine_from_offers_for_the_hour(self):
+        with db.session() as s:
+            s.add(Server(id="sv_box", owner_id=self.ids["bob"], name="box", kind="owned", provider="dryrun",
+                         reach="worker", max_concurrent=1, config={}, trust_tier="trusted",
+                         public_key=test_key()))
+        servers.invalidate()
         clock = Clock()
         self.submit("alice", duels("ab", 4))
         fake = Fake("sv_box", name="box", kind="remote", threads=1)
@@ -1165,7 +1184,8 @@ class PausedDeadlines(Lab):
         no abandon, its paused time counted from the report that said it was held. A deadline its play passed is."""
         with db.session() as s:
             s.add(Server(id="sv_box", owner_id=self.ids["bob"], name="Bob box", kind="owned", provider="dryrun",
-                         reach="worker", max_concurrent=1, config={}))
+                         reach="worker", max_concurrent=1, config={}, trust_tier="trusted",
+                         public_key=test_key()))
         servers.invalidate()
         clock = Clock()
         self.submit("alice", duels("held", 1))
@@ -1438,7 +1458,8 @@ class MemoryBounds(Lab):
         machine; its peak never enters the cost table; no figure passes ``MEM_MAX``."""
         with db.session() as s:
             s.add(Server(id="sv_box", owner_id=self.ids["bob"], name="Bob box", kind="owned", provider="dryrun",
-                         reach="worker", max_concurrent=1, config={}))
+                         reach="worker", max_concurrent=1, config={}, trust_tier="trusted",
+                         public_key=test_key()))
         servers.invalidate()
         self.submit("alice", duels("bounded", 2))
         fake = Fake("sv_box", name="Bob box", kind="remote", threads=1, per_run=100)
@@ -1524,7 +1545,7 @@ class Remote(Lab):
             s.add(group)
             s.flush()
             row = Server(owner_id=self.ids["bob"], name="Bob's PC", kind="owned", provider="lmstudio", reach="worker",
-                         max_concurrent=1, group_id=group.id, trust_tier="trusted",
+                         max_concurrent=1, group_id=group.id, trust_tier="trusted", public_key=test_key(),
                          capabilities={"cpu": {"enabled": True, "threads": 1, "cpu_percent": 50, "memory_mb": 1024,
                                                "work": ["lab_game", "ranking_game"], "yield_to_llm": True}})
             s.add(row)
@@ -1616,11 +1637,13 @@ class Remote(Lab):
             s.get(User, self.ids["bob"]).trust_tier = "quarantined"
         self.refused("bob", duels("quarantined", 1), "its owner is quarantined")
 
-    def test_a_machine_not_trusted_until_verification_arrives(self):
+    def test_a_new_machine_with_no_verifier_waits_for_one(self):
+        """4-10's "trusted machines only" is gone (4-11): a new machine takes work once a verifier can check its
+        results, and waits for one while none can (P4.5.8 rule 3)."""
         with db.session() as s:
             s.get(Server, self.sid).trust_tier = "new"
         servers.invalidate()
-        self.refused("bob", duels("untrusted", 1), "only a machine an administrator trusted")
+        self.refused("bob", duels("untrusted", 1), "waiting for a verifier")
 
     def test_its_helpers_quiet_hours(self):
         self.refused("bob", duels("quiet", 1), "its helper's own quiet hours", quiet_until=time.time() + 3600)
@@ -1676,9 +1699,7 @@ class Remote(Lab):
         (offer,) = self.offers(conn)
         out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
         e.frame({"t": "job_accept", "run": offer["run"]})
-        e.frame({"t": "job_result", "run": offer["run"], "outcome": {
-            "result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"], "cpu_s": 3600.0,
-            "wall_s": out["wall_s"], "paused_s": 0.0, "peak_mb": 3.5}, "claim": {}, "signature": ""})
+        e.frame(result_frame(offer, out, self.sid, cpu_s=3600.0))
         d.tick()
         self.led.flush()
         self.assertIn({"t": "job_result_ack", "run": offer["run"]},
@@ -1717,10 +1738,7 @@ class Remote(Lab):
         self.assertIn(offer["run"], e.holds, "the offer holds the budget")
         out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
         e.frame({"t": "job_accept", "run": offer["run"]})
-        e.frame({"t": "job_result", "run": offer["run"], "outcome": {
-            "result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"],
-            "cpu_s": out["cpu_s"], "wall_s": out["wall_s"], "paused_s": 0.0, "peak_mb": 3.5},
-            "claim": {}, "signature": ""})
+        e.frame(result_frame(offer, out, self.sid))
         d.tick()
         self.led.flush()
         self.assertNotIn(offer["run"], e.holds)
@@ -1833,14 +1851,32 @@ class Remote(Lab):
         self.assertEqual([f["spec"]["exp"] for f in self.offers(conn2)], ["after-the-restart"])
         self.assertEqual(d.backoff(self.sid), [])
 
+    def test_what_came_after_a_backing_off_frame_clears_it_on_a_clock_that_did_not_move(self):
+        """Windows' monotonic clock moves in 15.6 ms steps before Python 3.13: a hello, ``settings_ack`` or ``status``
+        that came after the frame that backed its machine off clears it though both read the same time, and one that
+        came before it does not."""
+        from citar.jobs import remote
+        frozen = 1000.0
+        d = self.dispatcher([], remotes=self.registry)
+        e, conn = self.connect()
+        e.clock = lambda: frozen
+        for reason, clear in (("stopped", lambda: e.connected(conn)), ("busy", lambda: e.status({"jobs_running": 0})),
+                              ("limits", e.acknowledged)):
+            clear()                     # before the frame: it does not clear what the frame causes
+            e.frame({"t": "job_failed", "run": "cr_none", "code": "aborted_locally"})
+            f = e._frames.pop()
+            self.assertEqual(f[remote.AT], frozen)
+            d._back_off(e, reason, f[remote.AT], f"backed off: {reason}", f[remote.SEQ])     # as its callers do
+            self.assertEqual(d._backed_off(e, frozen), f"backed off: {reason}")
+            clear()
+            self.assertIsNone(d._backed_off(e, frozen), reason)
+
 
     # ------------------------------------------------------------------ the review's findings (4-10's fix round)
     def result(self, offer: dict) -> dict:
         """A helper's ``job_result`` for ``offer``, played here."""
         out = engine_api.run_job(offer["kind"], offer["spec"], spec_hash=offer["spec_hash"])
-        return {"t": "job_result", "run": offer["run"], "outcome": {
-            "result": out["result"], "result_hash": out["result_hash"], "chain": out["chain"], "cpu_s": out["cpu_s"],
-            "wall_s": out["wall_s"], "paused_s": 0.0, "peak_mb": 3.5}, "claim": {}, "signature": ""}
+        return result_frame(offer, out, self.sid)
 
     def budget(self, amount: float) -> None:
         """Alice's grant on bob's group, listing ``lab``, with a hard monthly budget of ``amount`` credits."""

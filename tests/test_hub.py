@@ -1485,9 +1485,26 @@ class PooledWork(unittest.TestCase):
         for sid in list(self.manager.sessions):
             self.manager.delete(sid)
 
+    def benchmarks(self):
+        """A benchmark scheduler of this test's own. It registers with the shared work queue (``citar.pool.queue``) as
+        the process's would; that registration is put back as it was at the test's end, or the stopped scheduler's
+        job, still loading, would be listed as running on its machine in every later module's queue."""
+        from citar.pool import queue as work_queue
+        from citar.server.benchmarks import BenchmarkScheduler
+        before = [(table, table.get("benchmark")) for table in (work_queue._providers, work_queue._running)]
+
+        def restore():
+            for table, fn in before:
+                if fn is None:
+                    table.pop("benchmark", None)
+                else:
+                    table["benchmark"] = fn
+        self.addCleanup(restore)
+        return BenchmarkScheduler(self.manager, self.dir, autostart=False)
+
     def test_a_queued_benchmark_job_waits_for_a_game_on_its_machine(self):
         from citar.pool import seats
-        from citar.server.benchmarks import BenchmarkScheduler, resolve_group
+        from citar.server.benchmarks import resolve_group
         group = resolve_group({"server_id": self.server_id, "models": [{"model": "m1"}]})
         self.assertFalse(group["missing"])
         self.assertTrue(group["pooled"])
@@ -1498,7 +1515,7 @@ class PooledWork(unittest.TestCase):
         game.suspend()                      # a paused game still holds its machine: it will resume
         self.assertEqual(len(seats.occupied(self.server_id)), 1)
 
-        sch = BenchmarkScheduler(self.manager, self.dir, autostart=False)
+        sch = self.benchmarks()
         try:
             run = sch.create_run({"name": "t", "mode": "sequential", "repeats": 1,
                                   "servers": [{"server_id": self.server_id, "models": [{"model": "m1"}]}],
@@ -1583,14 +1600,13 @@ class PooledWork(unittest.TestCase):
 
     def test_one_queue_orders_benchmarks_and_probes_by_priority_then_age(self):
         from citar.pool import queue as work_queue, seats
-        from citar.server.benchmarks import BenchmarkScheduler
         runner = self._bare_runner()
         rid = f"test-old-probe-{int(time.time() * 1000) % 100000}"
         runner._write({"id": rid, "name": "old probe", "llm": {"server_id": self.server_id}, "status": "queued",
                        "jobs": [], "created": time.time() - 3600})
         runner.queue = [rid]
         work_queue.register("probe", runner.queue_items)
-        sch = BenchmarkScheduler(self.manager, self.dir, autostart=False)
+        sch = self.benchmarks()
         try:
             run = sch.create_run({"name": "t", "mode": "sequential", "repeats": 1,
                                   "servers": [{"server_id": self.server_id, "models": [{"model": "m1"}]}],

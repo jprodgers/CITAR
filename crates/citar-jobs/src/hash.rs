@@ -11,9 +11,9 @@
 //!   on turn `t` being the `t`-th: a job's game starts on turn 1 and chains each round from the
 //!   first. [`chain_check`] folds the digests from `chain_0` and checks that they reach the head
 //!   (replicas compare heads, and where two differ the first differing digest names the round
-//!   where two machines parted).
+//!   where two machines parted, [`parted_at`]).
 //!
-//! Claims and their signatures are 4-11's.
+//! Claims and their signatures are [`crate::claim`]'s.
 
 use citar_engine::base::digest::Digest;
 use citar_engine::base::ids::Turn;
@@ -169,16 +169,43 @@ pub fn chain_check(spec_hash: &SpecHash, chain: &Chain) -> Result<(), ChainError
         return Err(ChainError::Count { rounds: chain.rounds, digests: chain.digests.len() });
     }
     let head = unhex32(&chain.head).ok_or_else(|| ChainError::Hex("the head".to_owned()))?;
-    let mut fold = DigestChain::new(&spec_hash.0);
-    for (n, d) in chain.digests.iter().enumerate() {
-        let d = unhex32(d).ok_or_else(|| ChainError::Hex(format!("round {}'s digest", n + 1)))?;
-        let turn = Turn::try_from(n + 1).map_err(|_| ChainError::TooLong(chain.digests.len()))?;
-        fold.push(turn, &Digest(d));
-    }
-    if fold.head().0 != head {
-        return Err(ChainError::Head { folded: fold.head().to_hex(), head: chain.head.clone() });
+    let folded = fold(spec_hash, &chain.digests)?;
+    if unhex32(&folded) != Some(head) {
+        return Err(ChainError::Head { folded, head: chain.head.clone() });
     }
     Ok(())
+}
+
+/// The head `digests` fold to from `chain_0` of the spec hash `spec_hash`, 64 hex digits: what a
+/// chain of those rounds must name (and what a helper built to report broken hardware,
+/// `--test-fault digest:R`, folds its altered chain to).
+///
+/// # Errors
+/// More digests than a chain may carry, or one that is not 64 lower-case hex digits.
+pub fn fold(spec_hash: &SpecHash, digests: &[String]) -> Result<String, ChainError> {
+    if digests.len() > MAX_ROUNDS {
+        return Err(ChainError::TooLong(digests.len()));
+    }
+    let mut chain = DigestChain::new(&spec_hash.0);
+    for (n, d) in digests.iter().enumerate() {
+        let d = unhex32(d).ok_or_else(|| ChainError::Hex(format!("round {}'s digest", n + 1)))?;
+        let turn = Turn::try_from(n + 1).map_err(|_| ChainError::TooLong(digests.len()))?;
+        chain.push(turn, &Digest(d));
+    }
+    Ok(chain.head().to_hex())
+}
+
+/// The first round (1 for the first digest) where two chains' digests differ, or `None` when
+/// they hold the same digests: where two machines that played one job parted (P4.5.8's `chain`
+/// verdict). A chain that is a prefix of the other parts at the round after its last.
+#[must_use]
+pub fn parted_at(a: &[String], b: &[String]) -> Option<usize> {
+    let common = a.iter().zip(b).position(|(x, y)| x != y);
+    match common {
+        Some(i) => Some(i + 1),
+        None if a.len() == b.len() => None,
+        None => Some(a.len().min(b.len()) + 1),
+    }
 }
 
 /// Reads a received chain and checks it ([`chain_check`]).
@@ -222,6 +249,14 @@ mod tests {
             matches!(chain_check(&SpecHash([8; 32]), &good), Err(ChainError::Head { .. })),
             "another spec's chain_0"
         );
+        assert_eq!(fold(&spec, &good.digests), Ok(good.head.clone()));
+        let refolded = fold(&spec, &altered.digests).expect("a head");
+        assert_ne!(refolded, good.head);
+        altered.head = refolded;
+        assert_eq!(chain_check(&spec, &altered), Ok(()), "an altered chain folded again checks");
+        assert_eq!(parted_at(&good.digests, &altered.digests), Some(3), "it parted at round 3");
+        assert_eq!(parted_at(&good.digests, &good.digests), None);
+        assert_eq!(parted_at(&good.digests, &short.digests), Some(5), "a prefix parts after it");
         let v = serde_json::to_value(&good).expect("a value");
         assert_eq!(chain_check_value(&spec, &v), Ok(()));
         let mut extra = v;

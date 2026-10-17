@@ -96,7 +96,8 @@ jobs:
         # tests/test_helper_e2e.py runs the real binary against the real hub (design/phase4-helper.md, 4-05). Built
         # as cargo xtask develop builds it on a laptop: the ci profile, with the development guard (loopback
         # servers only, an explicit --home), which no shipped build ever has; with it, citar-fake-probe, the
-        # stand-in for the scan's probe programs that only such builds make (4-06), beside the helper.
+        # stand-in for the scan's probe programs that only such builds make (4-06), beside the helper, and the
+        # helper built to cheat on purpose (test-faults, 4-11), which the verification tests run.
         shell: bash
         run: |
           # both binaries named, as cargo xtask develop names them: with -p and citar-helper/dev-guard alone cargo
@@ -105,6 +106,9 @@ jobs:
           mkdir -p helper
           cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
           cp "target/ci/citar-fake-probe${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
+          # and the helper that cheats on purpose (--test-fault, the verification tests: 4-11), as develop builds it
+          cargo build --profile ci --locked -p citar-helper --bin citar-helper --features dev-guard,test-faults
+          cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" "helper/citar-helper-faults${{ runner.os == 'Windows' && '.exe' || '' }}"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -167,6 +171,7 @@ jobs:
         run: |
           chmod +x helper/citar-helper* helper/citar-fake-probe* || true
           export CITAR_HELPER_BIN="$PWD/helper/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}"
+          export CITAR_HELPER_FAULTS_BIN="$PWD/helper/citar-helper-faults${{ runner.os == 'Windows' && '.exe' || '' }}"
           python -m unittest discover -s tests -v
 
       - name: Route audit

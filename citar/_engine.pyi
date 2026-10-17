@@ -154,6 +154,11 @@ class jobs:
         """A spec, result or chain refused; .code is bad_spec, bad_result or bad_chain."""
         code: str
 
+    class ClaimRefused(ValueError):
+        """A run's claim refused (design/phase4-helper.md P4.4.4, P4.5.8); .verdict is signature, claim or
+        chain_inconsistent, each a tampering verdict."""
+        verdict: str
+
     @staticmethod
     def check_spec(kind: str, spec_json: bytes, spec_hash: Optional[str] = None) -> bytes:
         """{spec (canonical), spec_hash, bots}; JobRefused (bad_spec) for a spec refused, or one that does not
@@ -177,6 +182,30 @@ class jobs:
     @staticmethod
     def chain_check(spec_hash: str, chain_json: bytes) -> None:
         """Checks the chain folds to its head from the spec hash's chain_0; JobRefused (bad_chain)."""
+    @staticmethod
+    def verify_claim(kind: str, spec_json: bytes, spec_hash: str, job: str, run: str, machine: str, jobs_build: str,
+                     public_key: str, claim_json: bytes, signature: str, result_json: bytes, result_hash: str,
+                     chain_json: bytes) -> None:
+        """Checks a helper's signed claim for a run the server offered to machine (P4.4.4): the signature against
+        its registered public_key, the claim against these records and the spec's bots, the result's hash against
+        the claim's and result_hash (the outcome's), the chain's head and rounds and its own fold, the result against
+        its spec. ClaimRefused with its verdict; JobRefused (bad_spec) for a spec that does not check."""
+    @staticmethod
+    def sample_fraction(secret: bytes, job: str) -> float:
+        """Where the server's keyed sample of the job falls, in [0, 1) (P4.5.8 rule 1): replicated below its
+        machine's tier's rate."""
+    @staticmethod
+    def test_public_key(seed: int) -> str:
+        """A throwaway machine key's public half from a test's seed, in standard base64 (a build with test
+        operations only)."""
+    @staticmethod
+    def test_sign_claim(seed: int, claim_json: bytes) -> str:
+        """A claim signed by the throwaway key of seed, as a helper signs its own (a build with test operations
+        only); JobRefused (bad_result) for a claim that does not read."""
+    @staticmethod
+    def test_fold(spec_hash: str, digests_json: bytes) -> str:
+        """The head the digests fold to from the spec hash's chain_0 (a build with test operations only);
+        JobRefused (bad_chain)."""
     @staticmethod
     def jobs_build() -> str:
         """This build's jobs build: 12 hex digits."""

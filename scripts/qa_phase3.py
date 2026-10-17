@@ -1299,7 +1299,7 @@ class Helper:
     def __init__(self, h: "Harness", token: str, endpoint, name: str, *,
                  hardware: Optional[Path] = None, max_concurrent: int = 0, machine: Optional[str] = None,
                  provider: str = "openai_compatible", scan: bool = False, power: bool = False,
-                 env: Optional[dict] = None):
+                 env: Optional[dict] = None, binary: Optional[str] = None, extra: tuple = ()):
         """``endpoint``: a fake endpoint, or the address of a real one (the ``real`` part's LM Studio); ``hardware``:
         the hardware file it reports (``--hardware``), instead of none (``--no-hardware``) or, with ``scan``, the
         machine's own scan; ``power``: it takes power readings and sends them (else ``--no-power``); ``env``: more of
@@ -1308,7 +1308,9 @@ class Helper:
         machine it runs on, whose home (``<dir>/helper-home-<machine>``, its machine key with it) a helper started
         again for that machine keeps, as a real machine keeps its key across restarts (else a home of its own: a new
         key); ``provider``: what serves its models (``lmstudio`` reads which are loaded from LM Studio's own list; an
-        ``openai_compatible`` endpoint's every listed model counts as loaded)."""
+        ``openai_compatible`` endpoint's every listed model counts as loaded); ``binary``: another build of the helper
+        (phase 4's ``verify`` part runs ``citar-helper-faults``, which cheats on purpose); ``extra``: more of its
+        arguments (its ``--test-fault`` modes, ``--no-llm``)."""
         given = dict(env or {})
         state = h.server.state
         n = len(list(state.glob("helper-*.log"))) + 1
@@ -1319,15 +1321,16 @@ class Helper:
         env = {k: v for k, v in os.environ.items() if not k.startswith(("CITAR_WORKER_", "CITAR_HELPER_"))}
         env.update(given)
         env["CITAR_DATA_DIR"] = str(self.home)
+        more = list(extra)
         extra = ["--hardware", str(hardware)] if hardware is not None else [] if scan else ["--no-hardware"]
         if not power:
             extra.append("--no-power")
         if max_concurrent:
             extra += ["--max-concurrent", str(max_concurrent)]
         self.proc = subprocess.Popen(
-            [helper_binary(), "--home", str(self.home), "--server", h.server.base, f"--token={token}",
+            [binary or helper_binary(), "--home", str(self.home), "--server", h.server.base, f"--token={token}",
              "--base-url", endpoint if isinstance(endpoint, str) else endpoint.url, "--provider", provider,
-             "--name", name, *extra],
+             "--name", name, *extra, *more],
             cwd=str(state), stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
         out.close()
 

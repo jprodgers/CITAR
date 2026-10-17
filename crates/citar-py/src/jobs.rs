@@ -277,6 +277,114 @@ pub fn chain_check(spec_hash: &str, chain_json: &[u8]) -> PyResult<()> {
     out.map_err(|e| refused("bad_chain", e.to_string()))
 }
 
+create_exception!(
+    citar._engine,
+    ClaimRefused,
+    PyValueError,
+    "A run's claim refused (design/phase4-helper.md P4.4.4, P4.5.8): `.verdict` is signature, claim or \
+     chain_inconsistent, each a tampering verdict, the message the reason."
+);
+
+/// Checks a helper's signed claim, its result and its chain for the run `run` of the job `job`
+/// (`kind`, `spec_json`, held to `spec_hash`) that the server offered to `machine` of jobs build
+/// `jobs_build`, whose registered key is `public_key` (P4.4.4): the signature against that key,
+/// the claim against those records and the spec's bots, the result's hash against the claim's and
+/// against `result_hash` (the outcome's, which the server keeps), the chain's head and rounds
+/// against the claim's and its own fold, the result against its spec. `None`, or `ClaimRefused`
+/// with the verdict; a spec that does not check is `JobRefused` (`bad_spec`: the server's own
+/// record is wrong, not the helper).
+#[pyfunction]
+#[pyo3(signature = (kind, spec_json, spec_hash, job, run, machine, jobs_build, public_key, claim_json,
+                    signature, result_json, result_hash, chain_json))]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_claim(
+    py: Python<'_>,
+    kind: &str,
+    spec_json: &[u8],
+    spec_hash: &str,
+    job: &str,
+    run: &str,
+    machine: &str,
+    jobs_build: &str,
+    public_key: &str,
+    claim_json: &[u8],
+    signature: &str,
+    result_json: &[u8],
+    result_hash: &str,
+    chain_json: &[u8],
+) -> PyResult<()> {
+    let c = checked(py, kind_of(kind)?, spec_json, Some(spec_hash))?;
+    let not_json = |what: &str, e: serde_json::Error| {
+        claim_refused(citar_jobs::ClaimVerdict::Claim, format!("{what} is not JSON: {e}"))
+    };
+    let claim: Value = serde_json::from_slice(claim_json).map_err(|e| not_json("The claim", e))?;
+    let result: Value =
+        serde_json::from_slice(result_json).map_err(|e| not_json("The result", e))?;
+    let chain: Value = serde_json::from_slice(chain_json).map_err(|e| {
+        claim_refused(
+            citar_jobs::ClaimVerdict::ChainInconsistent,
+            format!("The chain is not JSON: {e}"),
+        )
+    })?;
+    let expected = citar_jobs::Expected { job, run, machine, jobs_build, key: public_key };
+    let sent =
+        citar_jobs::Sent { claim: &claim, signature, result: &result, result_hash, chain: &chain };
+    let rules = crate::rules::rules();
+    let out = guarded(py, || Ok(citar_jobs::verify_claim(rules, &c, &expected, &sent)))?;
+    out.map_err(|e| claim_refused(e.verdict, e.why))
+}
+
+/// A claim refused with its verdict.
+fn claim_refused(verdict: citar_jobs::ClaimVerdict, message: String) -> PyErr {
+    Python::attach(|py| {
+        let err = ClaimRefused::new_err(message);
+        match err.value(py).setattr("verdict", verdict.name()) {
+            Ok(()) => err,
+            Err(lost) => lost,
+        }
+    })
+}
+
+/// Where the server's keyed sample of the job `job` falls, in [0, 1) (P4.5.8 rule 1): the job's
+/// result is checked by a replica when this is below its machine's tier's rate. `secret` is the
+/// server's own, which never leaves it.
+#[pyfunction]
+pub fn sample_fraction(secret: &[u8], job: &str) -> f64 {
+    citar_jobs::sample_fraction(secret, job)
+}
+
+/// A throwaway machine key from a test's `seed` (a build with the test operations only): its
+/// public half in standard base64, as a hello registers it.
+#[cfg(feature = "test-ops")]
+#[pyfunction]
+pub fn test_public_key(seed: u8) -> String {
+    citar_jobs::claim::public_b64(&citar_jobs::claim::SigningKey::from_bytes(&[seed; 32]))
+}
+
+/// A claim (`claim_json`) signed by the throwaway key of `seed` (a build with the test operations
+/// only), as a helper signs its own: the tests' fake helpers.
+#[cfg(feature = "test-ops")]
+#[pyfunction]
+pub fn test_sign_claim(seed: u8, claim_json: &[u8]) -> PyResult<String> {
+    let claim: citar_jobs::Claim = serde_json::from_slice(claim_json)
+        .map_err(|e| refused("bad_result", format!("The claim does not read: {e}")))?;
+    Ok(claim.sign(&citar_jobs::claim::SigningKey::from_bytes(&[seed; 32])))
+}
+
+/// The head the digests (`digests_json`, a list of 64 hex digits each) fold to from `chain_0` of
+/// `spec_hash` (a build with the test operations only): what the tests' fake helpers that report
+/// broken hardware (a round's digest changed) name in their claims, as `--test-fault digest:R`
+/// does.
+#[cfg(feature = "test-ops")]
+#[pyfunction]
+pub fn test_fold(spec_hash: &str, digests_json: &[u8]) -> PyResult<String> {
+    let hash = SpecHash::from_hex(spec_hash)
+        .ok_or_else(|| refused("bad_chain", format!("{spec_hash:?} is no spec hash")))?;
+    let digests: Vec<String> = serde_json::from_slice(digests_json)
+        .map_err(|e| refused("bad_chain", format!("The digests do not read: {e}")))?;
+    citar_jobs::fold(&hash, &digests).map_err(|e| refused("bad_chain", e.to_string()))
+}
+
 /// This build's jobs build (P4.4.5), under the process's ruleset: 12 hex digits.
 #[pyfunction]
 pub fn jobs_build(py: Python<'_>) -> PyResult<String> {
@@ -312,6 +420,15 @@ pub fn test_job_spec(kind: &str, spec_json: &[u8]) -> PyResult<Bytes> {
 pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     let m = PyModule::new(py, "jobs")?;
     m.add("JobRefused", py.get_type::<JobRefused>())?;
+    m.add("ClaimRefused", py.get_type::<ClaimRefused>())?;
+    m.add_function(wrap_pyfunction!(verify_claim, &m)?)?;
+    m.add_function(wrap_pyfunction!(sample_fraction, &m)?)?;
+    #[cfg(feature = "test-ops")]
+    m.add_function(wrap_pyfunction!(test_public_key, &m)?)?;
+    #[cfg(feature = "test-ops")]
+    m.add_function(wrap_pyfunction!(test_sign_claim, &m)?)?;
+    #[cfg(feature = "test-ops")]
+    m.add_function(wrap_pyfunction!(test_fold, &m)?)?;
     m.add_function(wrap_pyfunction!(check_spec_py, &m)?)?;
     m.add_function(wrap_pyfunction!(run, &m)?)?;
     m.add_function(wrap_pyfunction!(result_hash, &m)?)?;

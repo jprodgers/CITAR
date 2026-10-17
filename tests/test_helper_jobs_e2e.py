@@ -6,11 +6,12 @@ without it the module skips, except on CI. The hub is the real app under uvicorn
 is started here with no local executor, so every job goes to a helper. Each helper runs in a home of its own whose
 ``helper.json`` lends the machine's CPU as its owner would: two threads, 20% of the machine and 512 MB, the lab's and
 the ranking's games (the site's settings ask more, and that ceiling wins). Bob owns the machines, in a group of his
-whose grant lists ``lab`` for alice, a member an administrator gave ``run_lab``; an administrator trusted them (until
-4-11 only trusted machines take remote work).
+whose grant lists ``lab`` for alice, a member an administrator gave ``run_lab``; an administrator trusted them, and
+their results are not sampled here (``trusted_rate`` 0: verification is ``tests/test_verification_e2e.py``'s, and this
+module's dispatcher has no verifier).
 
 - **Eight games** (gate 2): alice's experiment of eight 30-round duels plays on bob's machine: eight lines with
-  ``executor.machine`` that machine (``unverified``: verification arrives in 4-11), eight events given by bob and used
+  ``executor.machine`` that machine (``unverified``: accepted without a replica), eight events given by bob and used
   by alice; the machine settings dialog's read shows what is in effect, each limit hard on Windows (a Job Object);
   the job host's CPU stays under its cap plus slack, and every run's round advances at least every 30 s.
 - **Yield** (gate 3): while a request streams at the scripted endpoint, the game playing holds (its round reported
@@ -189,6 +190,8 @@ class Lending(unittest.TestCase):
             cls.group_id = group.id
             pool.create_grant(s, s.get(User, cls.ids["bob"]), group, subject_type="user", subject_handle="alice",
                               purposes=["lab"])
+            from citar.jobs import trust
+            trust.save_settings(s, {"trusted_rate": 0.0})
         cls.server = H.HubServer()
         cls.dispatcher = D.start(D.Dispatcher(local=False))
 

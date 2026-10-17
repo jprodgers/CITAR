@@ -149,7 +149,7 @@ fn offer(side: &JobSide, run: &str) -> JobOffer {
 async fn side(open: bool) -> (JobSide, GatedHosts, watch::Sender<bool>) {
     let (gate_tx, gate) = watch::channel(open);
     let hosts = GatedHosts { rec: Arc::default(), gate };
-    let setup = JobSetup { hosts: None, key: None, results: None, state: Default::default() };
+    let setup = JobSetup { hosts: None, key: None, results: None, ..Default::default() };
     let side = JobSide::start(&setup, Arc::new(hosts.clone()), true, Log::memory()).await;
     (side, hosts, gate_tx)
 }

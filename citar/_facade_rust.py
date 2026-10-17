@@ -56,7 +56,7 @@ __all__ = [
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
-    "jobs_build", "run_job_host",
+    "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
     "build_info", "key_fingerprint",
     "DEBUG_ACTIONS", "EngineGame",
     "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
@@ -529,6 +529,39 @@ def job_chain_check(spec_hash: str, chain: dict) -> None:
     """Checks that a job's chain ({"head", "rounds", "digests"}) folds to its head from the spec hash's ``chain_0``
     and counts as many rounds as it carries digests. Raises JobRefused (``bad_chain``) naming what does not hold."""
     _E.jobs.chain_check(spec_hash, _dumps(chain))
+
+
+#: A run's claim refused (a ValueError, P4.4.4): ``.verdict`` is ``signature`` (it does not verify against the
+#: machine's registered key), ``claim`` (it names another job, run, machine, kind, spec, jobs build, bots, key, result
+#: or chain than the server's records and what was sent, or its result does not answer its spec) or
+#: ``chain_inconsistent`` (its digests do not fold to the head it names): each a tampering verdict (P4.5.8).
+ClaimRefused = _E.jobs.ClaimRefused
+
+
+def verify_claim(kind: str, spec: dict, spec_hash: str, *, job: str, run: str, machine: str, jobs_build: str,
+                 public_key: str, claim: Any, signature: Any, result: Any, result_hash: Any, chain: Any) -> None:
+    """Checks a helper's signed claim for its run (P4.4.4), by the same Rust as the helper's: the signature against
+    the machine's registered ``public_key``, the claim against the server's records (``job``, ``run``, ``machine``,
+    ``kind``, the spec's hash and bots, ``jobs_build``, the key), the result's hash against the claim's and against
+    ``result_hash`` (the outcome's: once this returns, the claim's, the outcome's and the result's own are one, so the
+    hash the server keeps is one it checked), the chain's head and rounds against the claim's and its own fold, then
+    the result against its spec. Raises ClaimRefused with its verdict; JobRefused (``bad_spec``) when the server's own
+    spec does not check."""
+    for what, value, verdict in (("signature", signature, "signature"), ("outcome's result hash", result_hash,
+                                                                           "claim")):
+        if not isinstance(value, str):
+            err = ClaimRefused(f"the {what} is not text")
+            err.verdict = verdict
+            raise err
+    _E.jobs.verify_claim(kind, _dumps(spec), spec_hash, job, run, machine, jobs_build, public_key or "",
+                         _dumps(claim), signature, _dumps(result), result_hash, _dumps(chain))
+
+
+def sample_fraction(secret: str, job: str) -> float:
+    """Where the server's keyed sample of the job ``job`` falls, in [0, 1) (P4.5.8 rule 1): blake3 keyed by the
+    server's ``secret`` over the job's id. A provisional or trusted machine's result is checked by a replica when this
+    is below its tier's rate; without the secret nobody can tell which jobs will be."""
+    return _E.jobs.sample_fraction(secret.encode("utf-8"), job)
 
 
 def jobs_build() -> str:

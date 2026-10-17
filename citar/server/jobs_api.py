@@ -13,9 +13,10 @@ administrators.
 **Who sees what** (P4.5.8 rule 2, P3.9.1): an executor is named where the caller may view its machine (the server's
 own job host is "this server", its machine's name and id administrators'), "a member's machine" otherwise, in the
 dispatcher's executors and in why a game waits (:func:`told_executor`, :func:`told_waiting`); a job is ``done`` from
-the moment its primary's result is committed, whatever verification follows (replicas and the ``settling`` state are
-administrators' alone: 4-11), and ``crashed`` when its result is a crash. An experiment the caller may not see is "not
-found", as its report is.
+the moment its primary's result is committed, whatever verification follows (replicas, tiebreaks and the ``settling``
+state are administrators' alone), and ``crashed`` when its result is a crash; once it settles, its accepted run's
+verification (``reference``, ``verified``, ``unverified``) shows. A game whose result was withdrawn shows as the job
+that plays it again (P4.5.8 rule 8). An experiment the caller may not see is "not found", as its report is.
 """
 from __future__ import annotations
 
@@ -77,6 +78,8 @@ def told_executor(e: dict, name) -> dict:
     for the server's own job host), without its machine's id, its host's notes, or why its host stopped."""
     out = {k: e.get(k) for k in EXECUTOR_TOLD}
     out["name"] = name(e.get("machine"), e.get("kind"))["name"]
+    # its verification runs are administrators' alone (P4.5.8 rule 2): a member's count leaves them out
+    out["running"] = max(0, int(e.get("running") or 0) - int(e.get("verifying") or 0))
     if e.get("state") == "failed" and out.get("available"):
         out["available"] = HOST_STOPPED
     return out
@@ -104,16 +107,27 @@ def lab_jobs(request: Request, exp: str = Query(..., min_length=1, max_length=12
     name = _namer(s, p.user)
     out = []
     counts: dict = {}
-    for job, runs in store.experiment_jobs(s, exp):
+    listed = store.experiment_jobs(s, exp)
+    if not admin:
+        # a withdrawn result's game shows as the job that plays it again (one row a game)
+        later = {store.game_of(j.ref) for j, _runs in listed if j.state != "withdrawn"}
+        listed = [(j, r) for j, r in listed if j.state != "withdrawn" or store.game_of(j.ref) not in later]
+    for job, runs in listed:
         state = job.state if admin else SHOWN.get(job.state, job.state)
         counts[state] = counts.get(state, 0) + 1
         accepted = next((r for r in runs if r.id == job.accepted_run), None)
+        if accepted is None and job.state == "settling":
+            # its primary's result, committed: what a member is shown of it until it settles (rule 2)
+            accepted = next((r for r in reversed(runs) if r.role == "primary" and r.state == "done"), None)
+        if not admin:
+            runs = [r for r in runs if r.role == "primary"]
         last = runs[-1] if runs else None
         entry = {"i": store.game_of(job.ref), "job": job.id, "kind": job.kind, "state": state,
                  "attempts": job.attempts, "mem_mb": job.mem_mb, "priority": job.priority}
-        if accepted is not None:
+        if accepted is not None and job.state != "withdrawn":
+            settled = job.state in ("accepted", "crashed")
             entry.update({"executor": name(accepted.machine_id, accepted.executor),
-                          "verification": "reference" if accepted.executor == "local" else "unverified",
+                          "verification": verification_of(accepted) if settled or admin else None,
                           "started": _iso(accepted.started_at), "ended": _iso(accepted.ended_at),
                           "cpu_s": round(accepted.cpu_s or 0.0, 2), "wall_s": round(accepted.wall_s or 0.0, 2),
                           "peak_mb": round(accepted.peak_mb or 0.0, 1)})
@@ -134,6 +148,14 @@ def lab_jobs(request: Request, exp: str = Query(..., min_length=1, max_length=12
     return {"experiment": exp, "jobs": out, "counts": counts}
 
 
+def verification_of(run) -> str:
+    """A settled job's accepted run's verification, as its line says it (P4.5.7): ``reference`` (this server played
+    it), ``verified`` (a replica reproduced it), ``unverified`` (accepted without one), ``rejected`` (withdrawn)."""
+    if run.executor == "local":
+        return "reference"
+    return {"match": "verified", "rejected": "rejected"}.get(run.verdict or "", "unverified")
+
+
 def _iso(t) -> Optional[str]:
     return t.isoformat(timespec="seconds") if t is not None else None
 
@@ -150,7 +172,7 @@ def machine_jobs(sid: str, request: Request, limit: int = Query(50, ge=1, le=MAC
     run's verdict only once its job settled, P4.5.8 rule 2), each experiment named where the caller may view it ("a
     member's experiment" otherwise); what its helper lends now (the CPU in effect, each limit hard or soft, the memory
     a run may use, or why it lends nothing); and its trust counters (an administrator also sees the last claim
-    failure). Replicas, from 4-11, are administrators' alone."""
+    failure). Replicas and tiebreaks are administrators' alone (P4.5.8 rule 2)."""
     from sqlalchemy import select
     from ..auth.deps import require_user
     from ..db.models import CpuJob, CpuJobRun

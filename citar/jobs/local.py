@@ -9,7 +9,8 @@ change (once its runs have finished: no new run starts meanwhile), and closed wi
 outlives by two seconds at most.
 
 **Trusted by definition** (it is the server): its runs' verdict is ``reference``, its CPU seconds the reference cost
-of the jobs it plays, and it is the machine that will verify ``new`` helpers' results (4-11). Its host is told it
+of the jobs it plays, and it verifies helpers' results (design/phase4-helper.md P4.5.8: every ``new`` machine's, and
+the sampled ones of the others). Its host is told it
 plays its parent's own work (``play_unverifiable``), so a server whose canary or self-check fails (a server on a
 ruleset of its own, whose games the golden set does not hold) still plays its own lab, its ``verifiable`` false: it
 then verifies nobody, and its jobs build (which covers the ruleset) is shared by no stock helper anyway.

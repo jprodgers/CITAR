@@ -1,6 +1,6 @@
 {
   "name": "job-duplicate-result",
-  "about": "A second job_result for a settled run is acknowledged again when identical; one with other hashes gets no acknowledgement and is recorded as a claim failure.",
+  "about": "A second job_result for a settled run is acknowledged again when identical; one with other hashes gets no acknowledgement and is a claim verdict: recorded as a claim failure, the machine and its owner quarantined, and the run's result, accepted without a replica, withdrawn from the results.",
   "refs": ["P4.2.5", "P4.5.8"],
   "plays": {"helper": null, "hub": "4-10"},
   "one_side": "scripts a helper that sends a result twice",
@@ -239,6 +239,15 @@
       }
     },
     {"wait": {"s": 3, "quiet": true}},
-    {"state": {"side": "hub", "expect": {"result_lines": 1, "claim_failures": 1}}}
+    {
+      "state": {
+        "side": "hub",
+        "expect": {
+          "result_lines": 0,
+          "claim_failures": 1,
+          "audit": ["server.claim_failure", "server.trust", "user.trust"]
+        }
+      }
+    }
   ]
 }

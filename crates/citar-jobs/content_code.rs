@@ -599,7 +599,9 @@ mod tests {
 
     /// On the workspace's real lock: the code covers what the crate links and none of the
     /// engine's dev-dependencies, which the lock lists under the engine (proptest, and the rand
-    /// family it pulls in), so a `cargo update -p proptest` moves neither code.
+    /// family it pulls in), so a `cargo update -p proptest` moves neither code. The family is
+    /// matched by version: a crate's normal dependencies may reach another version of one of its
+    /// names (the jobs crate's ed25519 reaches `signature`'s own `rand_core`), which counts.
     #[test]
     fn the_real_lock_gives_what_the_crate_links_and_no_dev_dependency() {
         let real = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -611,8 +613,15 @@ mod tests {
         for linked in links {
             assert!(names.contains(linked), "{linked} in {locked:?}");
         }
+        let real_lock = std::fs::read_to_string(real.join("../../Cargo.lock")).expect("the lock");
+        let family = locked_versions(&["proptest".to_owned()], &real_lock);
         for dev in ["proptest", "rand", "rand_chacha", "rand_core", "regex-syntax", "unarray"] {
-            assert!(!names.contains(&dev), "{dev} in {locked:?}");
+            let theirs: Vec<&String> =
+                family.iter().filter(|e| e.split(' ').next() == Some(dev)).collect();
+            assert!(!theirs.is_empty(), "proptest reaches {dev}: {family:?}");
+            for entry in theirs {
+                assert!(!locked.contains(entry), "{entry} in {locked:?}");
+            }
         }
         assert_eq!(names.contains(&"citar-engine"), names_engine, "{tag} names the engine");
 

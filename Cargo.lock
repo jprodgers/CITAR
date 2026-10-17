@@ -335,11 +335,13 @@ dependencies = [
 name = "citar-jobs"
 version = "0.1.5"
 dependencies = [
+ "base64",
  "blake3",
  "citar-bot",
  "citar-engine",
  "citar-sim",
  "cpu-time",
+ "ed25519-dalek",
  "libc",
  "libtest-mimic",
  "proptest",

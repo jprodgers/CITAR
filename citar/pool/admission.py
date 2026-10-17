@@ -150,6 +150,11 @@ def check(session, user: Optional[User], server: Server, purpose: str = "game", 
     if not server.enabled:
         return _deny("disabled", f"“{server.name}” has been switched off by its owner.",
                      server=server)
+    if server.trust_tier == "quarantined" and not (server.owner_id == user.id and not access.is_site_machine(server)):
+        # a machine that returned a wrong game is relied on for nobody else, its model work included
+        # (design/phase4-helper.md P4.5.8 rule 7); its owner may still use it
+        return _deny("quarantined", f"“{server.name}” is quarantined: its results did not check out, so it serves "
+                                    "nobody but its owner until an administrator releases it.", server=server)
     if purpose != "lab" and not _takes_model_work(server):
         # its machine settings turned its LLM capability off (design/phase3-features.md P3.8): the prompt scheduler
         # would refuse every request, so the work is refused here, with the reason, before anything is made

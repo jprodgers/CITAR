@@ -13,14 +13,17 @@
                                                reconnect (close 1012) so that it does at once; the trust tier is
                                                unchanged
     POST /api/machines/{sid}/rescan            ask its connected helper to scan its hardware now; 409 when offline
-    PUT  /api/admin/machines/{sid}/trust       ``{"trust_tier": "new" | "provisional" | "trusted" | "quarantined"}``
+    PUT  /api/admin/machines/{sid}/trust       any of ``{"trust_tier": "new" | "provisional" | "trusted" |
+                                               "quarantined", "withdraw": bool, "verifier": bool}``
+                                               (design/phase4-helper.md P4.5.8 rule 10)
+    POST /api/admin/machines/{sid}/replicate   ``{"n": 1..100}``: its next N results checked by replicas
     PUT  /api/admin/machines/{sid}/class       ``{"pinned": true, "gpu_class_id"?, "cpu_class_id"?}`` pins the
                                                classes it is priced by; ``{"pinned": false}`` lets them follow its
                                                hardware again
 
 The first five are the machine's owner's and administrators' (MANAGE on its row: the site's machines, the host and its
 online APIs, are administrators' whoever is named their owner): anyone a group lends it to gets 403, anyone else 404,
-a visitor 401. The last two are administrators' alone (``require_role("admin", hide=True)``: anyone else signed in gets
+a visitor 401. The last three are administrators' alone (``require_role("admin", hide=True)``: anyone else signed in gets
 404). Each change writes one audit row and commits before it answers (the dialog reads it back at once); a change of
 slots or capabilities reaches the prompt scheduler at once (``Scheduler.refresh``) and the machine's connected helper
 too (``WorkerHub.push_settings``: protocol 2's ``settings`` frame, which it acknowledges; the route waits up to
@@ -197,20 +200,69 @@ def rescan(sid: str, request: Request, p: Principal = Depends(principal),
     return {"rescan": row.id}
 
 
+#: The most results ``replicate`` asks to be checked at once.
+REPLICATE_MAX = 100
+
+
 @router.put("/api/admin/machines/{sid}/trust")
 def machine_trust(sid: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
                   s: Session = Depends(get_db, scope="function")):
-    """Set a machine's trust tier (administrators; Phase 4 sets it automatically and acts on it)."""
+    """Change a machine's trust (administrators; P4.5.8 rule 10): ``trust_tier`` (any tier: ``quarantined`` by hand,
+    its unverified results withdrawn back to its ``since`` only with ``"withdraw": true``; ``new`` releases it, its
+    counters reset and ``since`` now; a quarantined verifier's matches are re-opened either way), and ``verifier`` (a
+    trusted machine's mark: it verifies others' results). The job dispatcher makes the change, as it makes every change
+    of a machine's trust; one audit row each."""
     row = _server(s, sid, me, access.MANAGE)
-    if not isinstance(body, dict) or set(body) != {"trust_tier"} or body["trust_tier"] not in TRUST_TIERS:
-        raise HTTPException(400, f"The body is {{\"trust_tier\": one of {', '.join(TRUST_TIERS)}}}.")
-    before = row.trust_tier or "new"
-    if body["trust_tier"] != before:
-        row.trust_tier = body["trust_tier"]
-        audit.record(s, "server.trust", actor=me, object_type="server", object_id=row.id,
-                     ip=ratelimit.client_ip(request), changed={"from": before, "to": row.trust_tier})
+    if not isinstance(body, dict) or not body or set(body) - {"trust_tier", "withdraw", "verifier"}:
+        raise HTTPException(400, "The body is any of {\"trust_tier\", \"withdraw\", \"verifier\"}.")
+    tier = body.get("trust_tier")
+    if tier is not None and tier not in TRUST_TIERS:
+        raise HTTPException(400, f"trust_tier is one of {', '.join(TRUST_TIERS)}.")
+    for flag in ("withdraw", "verifier"):
+        if flag in body and not isinstance(body[flag], bool):
+            raise HTTPException(400, f"{flag} is true or false.")
+    if body.get("withdraw") and tier != "quarantined":
+        raise HTTPException(400, "withdraw goes with \"trust_tier\": \"quarantined\".")
+    if body.get("verifier") and (tier or row.trust_tier or "new") != "trusted":
+        raise HTTPException(400, "Only a trusted machine verifies others' results.")
     s.commit()
-    return _answer(s, row, me)
+    from concurrent.futures import TimeoutError as Late
+
+    from ..jobs import dispatcher as jobs_dispatcher
+    try:
+        jobs_dispatcher.change_trust(sid, tier=tier, withdraw=bool(body.get("withdraw")),
+                                     verifier=body.get("verifier"), actor_id=me.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except LookupError:
+        raise HTTPException(404, "No such server.") from None
+    except Late:
+        raise HTTPException(503, "The job dispatcher did not make the change in time; it will at its next tick: "
+                                 "read the machine again shortly.") from None
+    s.expire_all()
+    return _answer(s, s.get(Server, sid), me)
+
+
+@router.post("/api/admin/machines/{sid}/replicate")
+def machine_replicate(sid: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
+                      s: Session = Depends(get_db, scope="function")):
+    """Have a machine's next N results checked by replicas whatever its tier's rate (administrators; P4.5.8 rule
+    10): ``{"n": 1..100}``. One audit row."""
+    _server(s, sid, me, access.MANAGE)
+    n = body.get("n") if isinstance(body, dict) and set(body) == {"n"} else None
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= REPLICATE_MAX:
+        raise HTTPException(400, f"The body is {{\"n\": 1 to {REPLICATE_MAX}}}.")
+    s.commit()
+    from concurrent.futures import TimeoutError as Late
+
+    from ..jobs import dispatcher as jobs_dispatcher
+    try:
+        out = jobs_dispatcher.replicate_next(sid, n, actor_id=me.id)
+    except LookupError:
+        raise HTTPException(404, "No such server.") from None
+    except Late:
+        raise HTTPException(503, "The job dispatcher did not ask for them in time; it will at its next tick.") from None
+    return {"machine": sid, **out}
 
 
 def _class(s: Session, class_id, kinds: tuple, what: str) -> str:

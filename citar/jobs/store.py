@@ -225,7 +225,7 @@ class Costs:
 
 #: The job states a game counts as settled in: its result accepted (a crash is a result, P4.4.2).
 SETTLED = ("accepted", "crashed")
-#: The job states that hold a game: waiting, playing, or settling (replicas, 4-11).
+#: The job states that hold a game: waiting, playing, or settling (its result in, a replica checking it: P4.5.8).
 LIVE = ("queued", "running", "settling")
 
 

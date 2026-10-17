@@ -115,6 +115,24 @@ fn run(cli: &Cli) -> Result<u8, Stop> {
     }
 }
 
+/// The faults `--test-fault` asks this test build to play (P4.4.6), said in the log; none in a
+/// build without the `test-faults` feature, which has no such flag.
+#[cfg(feature = "test-faults")]
+fn faults(cli: &Cli, log: &Log) -> Result<crate::faults::Faults, Stop> {
+    let f = crate::faults::Faults::parse(&cli.opts.test_faults).map_err(|e| Stop(2, e))?;
+    if f.active() {
+        log.warn(format!("TEST FAULTS: this helper cheats on purpose: {}", f.describe()));
+    }
+    Ok(f)
+}
+
+/// No fault in a shipped build.
+#[cfg(not(feature = "test-faults"))]
+#[allow(clippy::unnecessary_wraps)]
+fn faults(_cli: &Cli, _log: &Log) -> Result<crate::faults::Faults, Stop> {
+    Ok(crate::faults::Faults)
+}
+
 /// `citar-helper --self-test`: the build, then the canary and the self-check a job host runs
 /// before it takes work (P4.4.3), on a thread made as its run threads are. 0 when both pass, 1
 /// when either fails: this machine would refuse every job (`unverifiable`).
@@ -356,6 +374,7 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
         key: Some(Arc::clone(&machine_key)),
         results: Some(home.results_dir()),
         state: crate::jobs::JobState::default(),
+        faults: faults(cli, &log)?,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

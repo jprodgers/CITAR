@@ -20,7 +20,9 @@
 //!    with its development guard (`dev-guard`: loopback servers only, an explicit `--home`;
 //!    design/phase4-helper.md P4.3.1) into the same folder, where the end-to-end tests and the QA
 //!    script find it, with `citar-fake-probe` beside it (the stand-in for the scan's probe
-//!    programs that those builds alone make, P4.3.5);
+//!    programs that those builds alone make, P4.3.5), and `citar-helper-faults`, the same helper
+//!    with the `test-faults` feature as well (`--test-fault`, a helper that cheats on purpose for
+//!    the verification tests, P4.4.6);
 //! 5. writes `citar-dev.pth` into the venv: the checkout on `sys.path`, and `CITAR_EXT_DIR`,
 //!    which `citar/__init__.py` puts first on the package's path, so `import citar._engine`
 //!    finds the built library while every other module comes from the checkout.
@@ -177,6 +179,11 @@ const fn library_names() -> (&'static str, &'static str) {
 /// The helper's executable, as cargo writes it and as the tests look for it.
 const fn helper_name() -> &'static str {
     if cfg!(windows) { "citar-helper.exe" } else { "citar-helper" }
+}
+
+/// The cheating helper's executable (`test-faults`), beside the helper.
+const fn faults_name() -> &'static str {
+    if cfg!(windows) { "citar-helper-faults.exe" } else { "citar-helper-faults" }
 }
 
 /// The fake probe's executable, beside the helper.
@@ -414,6 +421,32 @@ fn develop(root: &Path, args: &[String]) -> Result<(), Step> {
         install_library(&build_dir.join(profile).join(exe), &ext.join(exe))
             .map_err(Step::Failed)?;
     }
+    // The same helper built to cheat on purpose, for the verification tests and the QA's
+    // `verify` part (P4.4.6): built after the honest one is copied, since cargo writes both to
+    // one name.
+    run(
+        Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .args([
+                "build",
+                "--locked",
+                "-p",
+                "citar-helper",
+                "--bin",
+                "citar-helper",
+                "--features",
+                "dev-guard,test-faults",
+                "--profile",
+                profile,
+            ])
+            .arg("--target-dir")
+            .arg(&build_dir)
+            .current_dir(root)
+            .env("CITAR_BUILD_ID", &label),
+        &format!("building citar-helper-faults ({profile} profile, dev-guard, test-faults)"),
+    )
+    .map_err(Step::Failed)?;
+    install_library(&build_dir.join(profile).join(helper_name()), &ext.join(faults_name()))
+        .map_err(Step::Failed)?;
 
     // 5. The venv's link to this worktree and the library.
     std::fs::write(&pth, pth_text(root, &ext))

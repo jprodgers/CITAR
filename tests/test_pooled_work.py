@@ -1389,6 +1389,7 @@ class QueuePage(World):
         from citar.server import app as appmod
         self.client = TestClient(appmod.app, base_url="https://citar.test")
         self.addCleanup(self.client.close)
+        self._quiet_work_queue()
         with db.session() as s:
             items.register(s, "report", "r-alice", self.ids["alice"], "alice's secret report")
             row = items.register(s, "report", "r-bob", self.ids["bob"], "bob's report")
@@ -1413,6 +1414,25 @@ class QueuePage(World):
             m.submit(t)
             self.tickets[key] = t
             self.addCleanup(t.close)
+
+    def _quiet_work_queue(self) -> None:
+        """The shared work queue (``citar.pool.queue``) lists nothing but this world's work while a test runs: its
+        producers are process-wide, and one an earlier module left registered (a benchmark scheduler of its own, a job
+        still holding its machine) would count as another busy machine (``others_busy``). Each is put back at the
+        test's end, unless something registered its kind again meanwhile."""
+        def nothing():
+            return []
+        replaced = []
+        for table in (work_queue._providers, work_queue._running):
+            for kind, fn in list(table.items()):
+                replaced.append((table, kind, fn))
+                table[kind] = nothing
+
+        def restore():
+            for table, kind, fn in replaced:
+                if table.get(kind) is nothing:
+                    table[kind] = fn
+        self.addCleanup(restore)
 
     def call(self, who, method, path, body=None):
         return self.client.request(method, path, json=body, headers=self.headers[who])

@@ -386,7 +386,23 @@ its standard input and output (`citar-jobs`).
   runs in `hello.results`; the welcome's `jobs.resend` names those the server still wants (sent again
   at once) and the helper deletes the others. A second `job_result` for a run already settled gets
   another `job_result_ack` when its hashes are identical; when they differ it gets no
-  acknowledgement and is a `claim` failure (P4.5.8).
+  acknowledgement and is a `claim` verdict (P4.5.8): the machine and its owner are quarantined, and
+  every result it gave that no replica checked is withdrawn.
+- **A result's claim is checked** (P4.4.4) before the result is committed: the signature against the
+  key the machine registered, the claim against the server's records (job, run, machine, kind, spec
+  hash, jobs build, the spec's bots, the key), the result's hash (the claim's `result_hash` and the
+  outcome's must both be the result's own: the server keeps the outcome's), the chain's head, rounds
+  and fold, and the result against its spec. One that does not hold is acknowledged (it is not
+  wanted again), its run rejected and its game played elsewhere, and its machine and owner are
+  quarantined. Then, as the machine's trust tier says, the result is accepted as it is or held while
+  a replica on a verifier plays the job again (P4.5.8); nothing about a job's offer or run tells the
+  helper which.
+- **A result the key no longer vouches for is not judged.** A result that arrives while its
+  machine has no registered key (its owner reset it, which also closes the connection), or whose
+  signature fails against a key registered after its run was offered, is neither accepted nor a
+  verdict: it gets no acknowledgement, its run ends `lost` (not an attempt) and its game is offered
+  again. The helper's next hello finds the run no longer wanted (not in `jobs.resend`) and deletes
+  it, as for any result the server does not want.
 - **Offers expire.** A run with neither `job_accept` nor `job_reject` within `offer_ttl_s` (30 s) is
   expired and its job offered elsewhere; a late `job_accept` gets `job_abort`.
 - **A silent run expires.** A running run with no `job_progress` for 5 minutes while its helper is
@@ -809,8 +825,8 @@ it is not valid JSON).
 `rounds` `int`; `key` `base64:32` (the machine's public key).
 
 Whether the claim agrees with the outcome, the run and the server's records is verification's
-business (P4.4.4), not a frame check: a frame whose claim names another run is a `claim` failure of
-that run, not a malformed frame.
+business (P4.4.4: the server's `verify_claim`, the same Rust as the helper's), not a frame check: a
+frame whose claim names another run is a `claim` verdict on that run, not a malformed frame.
 
 ### `job_failed` (helper)
 

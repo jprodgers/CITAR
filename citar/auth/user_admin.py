@@ -139,6 +139,14 @@ def apply(session, user: User, changes: dict, *, actor: Optional[User] = None, a
                  **({"reason": reason} if reason else {}))
     if user.role == "admin" and user.status == "active" and ("role" in changed or "status" in changed):
         accounts.on_first_admin(session, user)
+    if "trust_tier" in changed:
+        # an owner released from quarantine (or put in it) has their machines' CPU work follow at once
+        # (design/phase4-helper.md P4.5.8 rule 7): the job dispatcher's helpers read accounts' tiers through a cache,
+        # forgotten once this change is committed
+        from sqlalchemy import event
+
+        from ..jobs import remote
+        event.listen(session, "after_commit", lambda _s: remote.forget_owner_tiers(), once=True)
     return changed
 
 
