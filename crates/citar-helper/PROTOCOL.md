@@ -390,11 +390,19 @@ its standard input and output (`citar-jobs`).
   every result it gave that no replica checked is withdrawn.
 - **A result's claim is checked** (P4.4.4) before the result is committed: the signature against the
   key the machine registered, the claim against the server's records (job, run, machine, kind, spec
-  hash, jobs build, the spec's bots, the key), the result's hash, the chain's head, rounds and fold,
-  and the result against its spec. One that does not hold is acknowledged (it is not wanted again),
-  its run rejected and its game played elsewhere, and its machine and owner are quarantined. Then,
-  as the machine's trust tier says, the result is accepted as it is or held while a replica on a
-  verifier plays the job again (P4.5.8); nothing about a job's offer or run tells the helper which.
+  hash, jobs build, the spec's bots, the key), the result's hash (the claim's `result_hash` and the
+  outcome's must both be the result's own: the server keeps the outcome's), the chain's head, rounds
+  and fold, and the result against its spec. One that does not hold is acknowledged (it is not
+  wanted again), its run rejected and its game played elsewhere, and its machine and owner are
+  quarantined. Then, as the machine's trust tier says, the result is accepted as it is or held while
+  a replica on a verifier plays the job again (P4.5.8); nothing about a job's offer or run tells the
+  helper which.
+- **A result the key no longer vouches for is not judged.** A result that arrives while its
+  machine has no registered key (its owner reset it, which also closes the connection), or whose
+  signature fails against a key registered after its run was offered, is neither accepted nor a
+  verdict: it gets no acknowledgement, its run ends `lost` (not an attempt) and its game is offered
+  again. The helper's next hello finds the run no longer wanted (not in `jobs.resend`) and deletes
+  it, as for any result the server does not want.
 - **Offers expire.** A run with neither `job_accept` nor `job_reject` within `offer_ttl_s` (30 s) is
   expired and its job offered elsewhere; a late `job_accept` gets `job_abort`.
 - **A silent run expires.** A running run with no `job_progress` for 5 minutes while its helper is

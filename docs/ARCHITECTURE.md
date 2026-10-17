@@ -407,16 +407,21 @@ A helper's result is believed only as far as it checks out (`design/phase4-helpe
 - **The claim.** The helper signs each result's claim (job, run, machine, kind, spec hash, jobs build, bots, result
   hash, chain head and rounds, its key) with its machine key, in its own process, never the job host's. The server
   checks it with the same Rust (`citar_jobs::verify_claim`, through `engine_api.verify_claim`): the signature against
-  the key the machine registered, the claim against its own records, the result's hash, the chain's head, rounds and
-  fold, and the result against its spec. A claim that does not hold is a tampering verdict: the run is rejected, its
-  game played elsewhere, its machine and its owner quarantined.
+  the key the machine registered, the claim against its own records, the result's hash (the claim's and the
+  outcome's, which the server keeps and compares, are both the result's own), the chain's head, rounds and fold, and
+  the result against its spec. A claim that does not hold is a tampering verdict: the run is rejected, its game played
+  elsewhere, its machine and its owner quarantined. A result its machine's key no longer vouches for (no key since a
+  reset, or a signature failing against a key registered after the offer) is no verdict: the run is `lost`, not
+  acknowledged, and its game offered again.
 - **Replication, decided after the result.** Once a primary's result is committed the dispatcher decides whether a
   replica checks it: always for a `new` machine, at the machine's tier's rate otherwise (`blake3` keyed by the server's
   secret over the job's id: `engine_api.sample_fraction`), and for the next N results an administrator asked for. A
   checked job is `settling`: its result held, its ledger event `pending`, no results line; to everyone but
   administrators it is `done`. Nothing about a primary's offer or run differs between checked and unchecked jobs.
 - **Verifiers** are this server's job host (when its canary and self-check pass) and trusted machines an administrator
-  marked `verifier`; a `new` machine's replicas, tiebreaks and re-opened jobs run on this server alone. A replica equal
+  marked `verifier`; a `new` machine's replicas, tiebreaks and re-opened jobs run on this server alone. A remote
+  replica is judged by its machine's standing when its result comes: one from a machine no longer a verifier is void
+  (`unchecked`, its event `unverified`) and the job waits for another. A replica equal
   to its primary (result hash, chain head, rounds) settles the job `verified`; a remote verifier that disagrees asks
   this server for a tiebreak; this server's disagreement is a verdict: `result` (the same chain, another result:
   tampering or an incompatible build) or `chain` (the round where the chains parted: hardware or an incompatible
@@ -427,7 +432,11 @@ A helper's result is believed only as far as it checks out (`design/phase4-helpe
   result it gave unverified since `trust.since`: the job `withdrawn` and played again, its line taken from the results
   file (the experiment back from `done/` if need be), its event rejected through the ledger's writer
   (`Ledger.verdicts`: credits 0, the hour's rollups recomputed, its budget settlement reversed in the database and in
-  the keeper). A quarantined verifier's matches are re-opened and the promotions they made taken back.
+  the keeper). A quarantined machine's matches as a verifier are re-opened (marked a verifier now or not), and the
+  promotions they made taken back: a promotion is recorded with the time of the match that made it
+  (`trust.promoted`), so only a machine whose present tier counted the lost matches can fall (`trust.lose_matches`); a
+  tier an administrator set never does. No event is left `pending`: a settling job deleted with its experiment, or a
+  replica waiting for a tiebreak whose job is withdrawn, is given `unverified`.
 - **The dispatcher is the only writer** of the machines' trust: an administrator's change (`PUT
   /api/admin/machines/{id}/trust`, `POST .../replicate`) is made on its thread (`Dispatcher.call`), or, in a process
   with none, by a dispatcher of no executors whose withdrawals the server's finds at its next start.

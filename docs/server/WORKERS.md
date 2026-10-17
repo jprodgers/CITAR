@@ -384,8 +384,10 @@ and paused time, and its verification once settled), what it lends now and its t
 The server does not take a helper's word for a game. Every result comes with a **claim** signed by the machine key: the
 job, the run, the machine, the spec, the jobs build, the bots, the result's hash and the head of its chain of round
 digests. The server checks the signature against the key the machine registered, the claim against its own records,
-the result's hash and the chain (its digests must fold to its head), and the result against its spec. A claim that does
-not hold is never accepted: the game is played elsewhere, and the machine and its owner are quarantined (below).
+the result's hash (the claim's and the one sent beside the result must both be the result's own) and the chain (its
+digests must fold to its head), and the result against its spec. A claim that does not hold is never accepted: the
+game is played elsewhere, and the machine and its owner are quarantined (below). A result that arrives just as its
+machine's key is reset, signed by the key that is gone, is no verdict on anyone: its game is simply played again.
 
 Then, depending on the machine's **trust tier**, it may play the game again on a **verifier** to compare:
 
@@ -404,7 +406,9 @@ alone.
 **Who verifies.** This server's own job host (when its canary and self-check pass), and trusted machines an
 administrator marked as verifiers. Another member's trusted machine is never enough: one person with two accounts could
 otherwise vouch for their own. A new machine's games are replayed on this server only; when a remote verifier
-disagrees with a game, this server plays it a third time and every machine that disagrees with it is quarantined. To
+disagrees with a game, this server plays it a third time and every machine that disagrees with it is quarantined. A
+replay from a machine that stopped being a verifier while it played (an administrator unmarked it) checks nothing: the
+game is replayed again by a verifier. To
 keep this server from being swamped, a member's third new machine waits while two others have work in hand, new
 machines' replays take at most every other run of this server's while other work waits, and a new machine whose
 results wait for their replays is offered nothing more meanwhile (the Lab page says "waiting for a verifier").
@@ -416,9 +420,11 @@ quarantines the machine's **owner**: none of their machines is offered CPU work,
 administrator releases them. Then **every result the machine gave that was accepted unverified** since it was
 registered (or last released) is **withdrawn**, not only the ones after its last verified match: its lines leave the
 results files, its games are played again elsewhere, its ledger entries are rejected (no credits, and any budget they
-counted against gets them back), and the ratings no longer count them. A verifier that is quarantined has its own
-matches re-opened: the games it verified are checked again on this server, and a machine promoted on those matches
-goes back to **new** if it falls below its tier's threshold.
+counted against gets them back), and the ratings no longer count them. A machine that is quarantined has every match
+it made as a verifier re-opened (even if an administrator unmarked it first): the games it verified are checked again
+on this server, and a machine whose promotion those matches counted goes back to **new** if, without them, it falls
+below its tier's threshold. Matches made after a machine's promotion are taken off its counters but never take the
+tier back, and a tier an administrator set is never taken back by them.
 
 **What this means for a lender:** an honest machine climbs on its own; a broken one (bad memory, an overclock) is caught
 by its replays and quarantined without blame on its owner; a key reset never changes the tier. Model work is not

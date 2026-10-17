@@ -240,7 +240,9 @@ that means for an existing install:
   quarantines it (its owner too, but for a chain that parted: hardware), refuses its work to anyone
   but its owner, and withdraws every result it gave unverified since its registration or release:
   lines removed, games played again, ledger events rejected with their budget settlements reversed,
-  the ratings recomputed. A quarantined verifier's matches are re-opened. A member's third new machine
+  the ratings recomputed. A quarantined verifier's matches are re-opened, and the promotions they made
+  (not a tier an administrator set) taken back. A result sent just as its machine's key is reset is no
+  verdict: its game is played again. A member's third new machine
   waits while two have work in hand. `PUT /api/admin/machines/{id}/trust` gains `withdraw` and
   `verifier`; new route `POST /api/admin/machines/{id}/replicate`. `citar-helper-faults` (the
   `test-faults` feature, `--test-fault`) cheats on purpose for the tests; `scripts/qa_phase4.py verify`.
