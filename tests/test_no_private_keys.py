@@ -87,11 +87,18 @@ class NoPrivateKey(unittest.TestCase):
                 found.extend(findings(path, rel))
         self.assertEqual(found, [], "no private key belongs in the repository (design/phase4-helper.md P4.7.1)")
 
-    def test_the_committed_update_keys_are_none(self):
-        """Phase 4 ships no update key: crates/citar-jobs/update-keys.pub is empty (the owner's Phase 5 adds the
-        public half of the key whose private half lives in the helper-signing environment's secret)."""
+    def test_the_committed_update_keys_are_public_keys_only(self):
+        """crates/citar-jobs/update-keys.pub holds public keys only, at most two, one a line (comments and blank lines
+        aside). Phase 4 commits it empty; the owner's one-time setup adds the public half of the key whose private half
+        lives in the helper-signing environment's secret, and this holds either to the format, so that commit keeps the
+        suite green."""
         text = (ROOT / "crates" / "citar-jobs" / "update-keys.pub").read_text(encoding="utf-8")
-        self.assertEqual(text.strip(), "")
+        self.assertEqual(findings(ROOT / "crates" / "citar-jobs" / "update-keys.pub", "update-keys.pub"), [])
+        keys = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+        self.assertLessEqual(len(keys), 2, "two slots: the key and its successor")
+        for k in keys:
+            self.assertRegex(k, r"^[A-Za-z0-9+/]{43}=$", "one standard-base64 ed25519 public key a line")
+            self.assertEqual(len(base64.b64decode(k)), 32)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,12 @@ served on loopback behind a redirect. Nothing reaches beyond this machine.
   connection (the old socket closed before the new one dialled).
 - **By hand** (``notify``): a helper whose updates are set to notify reports the update available, downloads nothing
   and keeps the relayed manifest; ``citar-helper update check`` says it is newer, ``update apply`` installs it (the old
-  binary kept), and the helper started again is the new one and reports ``applied``.
+  binary kept), and the helper started again is the new one and reports ``applied``. ``update rollback`` then puts the
+  old binary back and holds the release back: started again with its updates automatic, the old binary refuses it at
+  its welcome, downloads nothing and stays (4-13's fix round: before, the next welcome installed it again).
+- **A download that fails is tried again** (4-13's fix round): the first request for the binary answered 503, the
+  helper says ``failed`` with when it tries again (cut to a second by ``CITAR_HELPER_TEST_RETRY_S``), tries again, and
+  the update goes through to ``applied``.
 - **The console rollback** (gate 3): a newer binary made to exit at its start (the hook
   ``CITAR_HELPER_TEST_EXIT_AT_START``) is swapped back by the supervisor; the old one serves again and reports
   ``failed``, and is not offered the same binary again.
@@ -308,8 +313,67 @@ class Update(_Update):
         self.assertTrue(ok, f"{self.states(sid)}\n{helper.text()[-3000:]}")
         W.hub().drop(sid, "its worker token was revoked", code="revoked")
         self.assertEqual(helper.exited(30), 78, helper.text()[-3000:])
+        # rolled back by hand: the old binary is back and the release held back, so an automatic helper does not
+        # install it again at its next welcome
+        back = subprocess.run([str(self.exe), "update", "rollback", "--home", str(self.home)], capture_output=True,
+                              text=True, timeout=60, env=env)
+        self.assertEqual(back.returncode, 0, back.stdout + back.stderr)
+        self.assertIn(f"does not install CITAR helper {NEW} again", back.stdout)
+        self.assertEqual(sha256(self.exe), sha256(self.old_bin), "the old binary is back")
+        asked = len(self.assets.asked)
+        helper = self.start(token)                      # updates automatic
+        held = H.until(lambda: W.hub().get(sid) is not None and W.hub().get(sid).helper_version == OLD
+                       and (W.hub().update_states.get(sid) or {}).get("state") == "refused", 60 * SLACK, 0.05)
+        self.assertTrue(held, f"{self.states(sid)}\n{helper.text()[-3000:]}")
+        refusal = W.hub().update_states[sid]
+        self.assertEqual(refusal["version"], NEW)
+        self.assertIn("was rolled back on this machine", refusal["message"])
+        self.assertEqual(len(self.assets.asked), asked, "nothing downloaded again")
+        self.assertEqual(sha256(self.exe), sha256(self.old_bin), "the old binary stays")
+        W.hub().drop(sid, "its worker token was revoked", code="revoked")
+        self.assertEqual(helper.exited(30), 78, helper.text()[-3000:])
         print(f"\n[update e2e] by hand: {check.stdout.strip().splitlines()[-1]}; states {self.states(sid)}",
               file=sys.stderr)
+
+    def test_a_download_that_fails_is_tried_again(self):
+        """The first request for the binary answered 503: failed, with when it is tried again; then tried again (a
+        second later, the test hook) and applied."""
+        failures = {"left": 1}
+        handler_class = self.assets.httpd.RequestHandlerClass
+        real = handler_class.do_GET
+        assets = self.assets
+
+        def flaky(handler):
+            if handler.path.startswith("/cdn/") and failures["left"] > 0:
+                failures["left"] -= 1
+                assets.asked.append(handler.path + " (503)")
+                handler.send_response(503)
+                handler.send_header("Content-Length", "0")
+                handler.end_headers()
+                return
+            real(handler)
+
+        patcher = mock.patch.object(handler_class, "do_GET", flaky)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        sid, token = self.machine("flaky download")
+        helper = self.start(token, env={"CITAR_HELPER_TEST_RETRY_S": "1"})
+        self.wait_state(sid, "applied", 120, helper)
+        log = list(W.hub().update_log.get(sid, []))
+        states = [s["state"] for s in log]
+        first_failed = states.index("failed")
+        self.assertLess(states.index("downloading"), first_failed, states)
+        self.assertIn("tried again", log[first_failed]["message"])
+        self.assertIn("503", log[first_failed]["message"])
+        self.assertIn("downloading", states[first_failed:], states)
+        for a, b in (("verified", "restarting"), ("restarting", "applied")):
+            self.assertLess(states.index(a), states.index(b), states)
+        self.assertEqual([p for p in self.assets.asked if p.startswith("/cdn/")],
+                         ["/cdn/citar-helper-next (503)", "/cdn/citar-helper-next"])
+        self.assertEqual(sha256(self.exe), sha256(self.new_bin), "the new binary is in place")
+        W.hub().drop(sid, "its worker token was revoked", code="revoked")
+        self.assertEqual(helper.exited(30), 78, helper.text()[-3000:])
+        print(f"\n[update e2e] retry: states {self.states(sid)}; asked {self.assets.asked}", file=sys.stderr)
 
     def test_a_new_binary_that_exits_before_it_is_healthy_is_swapped_back(self):
         """Gate 3, a console run: the supervisor puts the old binary back, which serves and says failed."""
