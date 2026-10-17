@@ -87,19 +87,20 @@ function quarantinedCard(data, reload) {
   const machineRows = machines.map((m) => el("tr", { "data-machine": m.machine },
     el("td", {}, el("a", { href: `#/pool/${encodeURIComponent(m.machine)}` }, m.name)),
     el("td", {}, who(m.owner), m.owner && m.owner.trust_tier === "quarantined"
-      ? el("span", { class: "pill bad small", title: "Its owner is quarantined too (a tampering verdict)" }, " owner quarantined") : null),
+      ? [" ", el("span", { class: "pill bad small", title: "Its owner is quarantined too (a tampering verdict)" },
+        "owner quarantined")] : null),
     el("td", { class: "evidence" }, evidenceText(m.evidence),
       (m.evidence && m.evidence.withdrawn_jobs || []).length
         ? el("div", { class: "muted small" }, "Withdrawn: ", m.evidence.withdrawn_jobs.map((w) => `${w.exp} #${w.i}`).join(", "))
         : null),
     el("td", { class: "nowrap" }, when(m.quarantined_at)),
-    el("td", {}, el("button", { class: "small", title: "Back to new: its counters reset, its standing from now",
+    el("td", { class: "nowrap" }, el("button", { class: "small", title: "Back to new: its counters reset, its standing from now",
       onclick: () => release(m.name, () => api.setMachineTrust(m.machine, { trust_tier: "new" })) }, "Release"))));
   const ownerRows = owners.map((u) => el("tr", {},
     el("td", {}, el("a", { href: `#/u/${encodeURIComponent(u.handle)}` }, `@${u.handle}`)),
     el("td", { class: "evidence" }, u.why || "quarantined by an administrator"),
     el("td", { class: "nowrap" }, when(u.at)),
-    el("td", {}, el("button", { class: "small", title: "Their machines may lend CPU again (each machine is released apart)",
+    el("td", { class: "nowrap" }, el("button", { class: "small", title: "Their machines may lend CPU again (each machine is released apart)",
       onclick: () => release(`@${u.handle}`, () => api.patchAdminUser(u.id, { trust_tier: "new" })) }, "Release"))));
   return el("section", { class: "card" },
     el("h2", {}, "Quarantined"),
@@ -145,7 +146,8 @@ function verifiersCard(data) {
   const rows = data.verifiers.map((v) => {
     const latest = (v.latest || []).map((r) => (r.void ? "void" : r.verdict)).join(", ");
     const state = v.kind === "local"
-      ? (v.verifiable === false ? `its self-check failed: ${v.why || "it verifies nobody"}` : "verifies")
+      ? (v.on === false ? "off: CPU work is off in the host's machine settings (new machines' results wait)"
+        : v.verifiable === false ? `its self-check failed: ${v.why || "it verifies nobody"}` : "verifies")
       : `${v.online ? "online" : "offline"}${v.verifiable === false ? ", its self-check failed" : ""}`;
     return el("tr", {},
       el("td", {}, v.kind === "local" ? el("b", {}, v.name || "this server")
@@ -172,7 +174,7 @@ function flaggedCard(data) {
     el("td", { class: "small" }, speedText(m.speed, null).replace("Measured speed: ", "")),
     el("td", {}, ...Object.entries(m.flags).map(([k, f]) => {
       const t = flagText(k, f);
-      return t ? el("span", { class: `pill ${t[0]} small`, title: t[2] }, t[1]) : null;
+      return t ? [el("span", { class: `pill ${t[0]} small`, title: t[2] }, t[1]), " "] : null;
     }))));
   return el("section", { class: "card" }, el("h2", {}, "Flagged machines"),
     el("p", { class: "muted small" }, "What the credits' bounds and the class check noticed: CPU over-reported (blocks "

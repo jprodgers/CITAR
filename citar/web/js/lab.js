@@ -101,10 +101,15 @@ function drawTop(card, d, rules, refresh) {
       stat("Queue finishes in", active.length ? eta(d.eta_minutes) : "queue empty",
         "Estimate: remaining games × median minutes per game for that experiment, spread over the threads."),
       stalled.length ? stat("Stalled", stalled.map((e) => e.name).join(", "), "Games that failed three times (an administrator's Retry, or the server's next start, plays them again), or an experiment that cannot be played; see the log.", "bad") : null),
-    el("div", { class: "lab-executors" }, ...executors.map((e) => el("div", { class: "small" },
+    el("div", { class: "lab-executors" }, ...executors.filter((e) => e.kind === "local" || e.online !== false).map((e) => el("div", { class: "small" },
       el("span", { class: `pill ${e.state === "ready" && !e.available ? "live" : e.state === "failed" ? "bad" : ""}` }, e.kind === "local" ? "this server" : e.name),
       " ", executorText(e),
-      e.verifiable === false ? el("span", { class: "muted", title: e.verify_reason || "" }, " · its self-check failed: it plays its own lab and verifies nobody") : null))),
+      e.verifiable === false ? el("span", { class: "muted", title: e.verify_reason || "" }, " · its self-check failed: it plays its own lab and verifies nobody") : null)),
+      // the helpers whose connection went stay executors until they come back: counted, not listed
+      (() => {
+        const gone = executors.filter((e) => e.kind !== "local" && e.online === false).length;
+        return gone ? el("div", { class: "muted small" }, `${gone} helper machine${gone === 1 ? "" : "s"} not connected`) : null;
+      })()),
     el("p", { class: "muted small" }, "Each game is a bot-vs-bot job the server plays on its own job host, under the host's CPU settings "
       + "(Servers page, Machine settings: threads, CPU share, memory), or offers to a machine whose owner lends its CPU "
       + "through the CITAR helper, under that machine's own. This page refreshes every 5 seconds; "

@@ -33,7 +33,7 @@ export function evidenceText(ev) {
   const against = ev.against ? ` (checked against ${ev.against})` : "";
   const n = ev.withdrawn != null ? ev.withdrawn : (ev.withdrawn_jobs || []).length;
   const withdrawn = n ? `; ${n} result${n === 1 ? "" : "s"} withdrawn and played again` : "";
-  const when = ev.at ? ` on ${String(ev.at).replace("T", " ").slice(0, 16)}` : "";
+  const when = ev.at ? ` on ${String(ev.at).replace("T", " ").slice(0, 16)} UTC` : "";
   return `${words}${against}${withdrawn}${when}.`;
 }
 

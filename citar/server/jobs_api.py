@@ -72,7 +72,7 @@ def _namer(s: Session, viewer: Optional[User]):
 
 #: What a member is told of an executor (P4.5.10: the dispatcher's health; the hosts' details, their machines' ids,
 #: their notes and their logs are administrators').
-EXECUTOR_TOLD = ("name", "kind", "on", "state", "threads", "running", "paused", "benchmark", "available")
+EXECUTOR_TOLD = ("name", "kind", "on", "state", "threads", "running", "paused", "benchmark", "available", "online")
 #: What a member is told of a job host that stopped (its death's words quote its log).
 HOST_STOPPED = "its job host stopped; it starts again shortly"
 
@@ -95,7 +95,9 @@ def told_waiting(exp: dict, name) -> Optional[str]:
     parts = exp.get("waiting_on") or []
     if not parts:
         return exp.get("waiting")
-    return "; ".join(f"{name(p.get('machine'), p.get('kind'))['name']}: {p.get('why')}" for p in parts)
+    # a part naming no machine (the helpers not connected, counted) is its words alone
+    return "; ".join(f"{name(p.get('machine'), p.get('kind'))['name']}: {p.get('why')}" if p.get("machine")
+                     else str(p.get("why")) for p in parts)
 
 
 @router.get("/api/lab/jobs")
@@ -301,7 +303,7 @@ def _verifiers(s: Session, disp: dict, running: list) -> list:
     out = []
     for e in disp.get("executors") or []:
         if e.get("kind") == "local":
-            out.append({"machine": e.get("machine"), "name": e.get("name"), "kind": "local",
+            out.append({"machine": e.get("machine"), "name": e.get("name"), "kind": "local", "on": e.get("on"),
                         "verifiable": e.get("verifiable"), "why": e.get("verify_reason"), "online": True})
     for row in s.scalars(select(Server).where(Server.trust_tier == "trusted")):
         if not T.is_verifier(row.trust_tier, row.trust):

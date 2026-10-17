@@ -23,7 +23,7 @@ test("a mismatch's evidence names its verdict, its verifier and what was withdra
   const ev = { verdict: "result", words: "same chain, different result: tampering or an incompatible build",
     against: "this server", withdrawn: 2, withdrawn_jobs: [{}, {}], at: "2026-10-17T10:20:30+00:00" };
   assert.equal(evidenceText(ev), "same chain, different result: tampering or an incompatible build (checked against "
-    + "this server); 2 results withdrawn and played again on 2026-10-17 10:20.");
+    + "this server); 2 results withdrawn and played again on 2026-10-17 10:20 UTC.");
   assert.equal(evidenceText({ verdict: "chain", words: "the chains parted at round 12: faulty hardware or an "
     + "incompatible build", withdrawn_jobs: [{}] }),
   "the chains parted at round 12: faulty hardware or an incompatible build; 1 result withdrawn and played again.");

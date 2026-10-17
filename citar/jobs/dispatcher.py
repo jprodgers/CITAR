@@ -2767,17 +2767,25 @@ class Dispatcher:
         now = self.clock() if now is None else now
         if lab.paused() is not None:
             return "the lab is paused", []
-        parts = []
+        parts, gone = [], []
         for e in self.executors:
             why = self._available(e, now) or e.refuses(job)
             if why is None and e.free <= 0:
                 why = "every thread is playing"
             if why is not None:
-                parts.append((e, why))
-        if len(parts) < len(self.executors):
+                # a helper whose connection went stays an executor until it comes back: such helpers are counted, not
+                # listed one by one (the reason that matters is the connected executors')
+                (gone if e.kind != "local" and not getattr(e, "online", True) else parts).append((e, why))
+        if len(parts) + len(gone) < len(self.executors):
             return "next in line", []
-        if not parts:
+        if not parts and not gone:
             return "no executor takes CPU work", []
+        if len(gone) > 1:
+            told = [{"machine": e.id, "kind": e.kind, "why": why} for e, why in parts]
+            gone_why = f"{len(gone)} helper machines whose helpers are not connected"
+            text = "; ".join([f"{self.label(e)}: {why}" for e, why in parts] + [gone_why])
+            return text, told + [{"machine": None, "kind": "remote", "why": gone_why}]
+        parts += gone
         return ("; ".join(f"{self.label(e)}: {why}" for e, why in parts),
                 [{"machine": e.id, "kind": e.kind, "why": why} for e, why in parts])
 

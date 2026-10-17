@@ -2252,11 +2252,52 @@ def part_verify(h) -> None:
         data.update(tiers_machine=lm_sid, tiers_run=bench_id)
         helpers.pop("models").stop()
         admin.patch(f"/api/admin/users/{ids['bob']}", json={"trust_tier": "new"})      # the instance left as it was
+        if h.keep:
+            data["browser"] = _verify_for_the_browser(h, helpers, machine, start, queue, tier, host, host_cpu, tag)
         r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
     finally:
-        for helper in helpers.values():
-            helper.stop()
-        scripted.close()
+        if not h.keep:
+            for helper in helpers.values():
+                helper.stop()
+            scripted.close()
+
+
+def _verify_for_the_browser(h, helpers: dict, machine, start, queue, tier, host: str, host_cpu: dict,
+                            tag: str) -> dict:
+    """With ``--keep``, the ``verify`` part leaves what the browser checklist's H1, H4 and H5 look at (P4.7.7): bob's
+    cheating machine caught again with bob quarantined (H5: the machine and its owner with the evidence and the
+    withdrawn job, Release); with this server's job host lending nothing (so no replica plays), alice's provisional
+    machine's results waiting for their replicas (H4: done to alice with no badge and no replica, settling and
+    "waiting for a verifier" to an administrator) and her new machine held, its experiment "waiting for a verifier"
+    (H4); their helpers left connected (H1: the card's helper, key and trust). Returns what it made."""
+    admin, alice, bob = (h.accounts[k] for k in ("admin", "alice", "bob"))
+    made: dict = {}
+    # H5: bob's machine whose helper alters every result, caught (and bob with it)
+    c_sid, c_token, _cg = machine(bob, "caught")
+    start("caught", c_sid, c_token, "result:1")
+    queue(bob, f"qa-browser-caught-{tag}", 2, 9100)
+    made["caught"] = c_sid if wait_until(lambda: tier(c_sid) == "quarantined", 120, 0.25) else None
+    # H4: this server's job host lends nothing: replicas wait
+    admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {**host_cpu, "enabled": False}}})
+    _verification(h, provisional_rate=1.0)
+    p_sid, p_token, _pg = machine(alice, "pending")
+    admin.put(f"/api/admin/machines/{p_sid}/trust", json={"trust_tier": "provisional"})
+    start("pending", p_sid, p_token)
+    pending = f"qa-browser-pending-{tag}"
+    queue(alice, pending, 4, 9200)
+    made["pending"] = {"machine": p_sid, "experiment": pending,
+                       "settling": wait_until(lambda: (_lab_view(admin, pending).get("settling") or 0) >= 4, 120, 0.25)}
+    helpers.pop("pending").stop()       # its results stay waiting; it takes none of the next experiment's games
+    n_sid, n_token, _ng = machine(alice, "held")
+    start("held", n_sid, n_token)
+    held = f"qa-browser-held-{tag}"
+    queue(alice, held, 2, 9300)
+    made["held"] = {"machine": n_sid, "experiment": held,
+                    "waiting": wait_until(lambda: "waiting for a verifier" in (_lab_view(alice, held).get("waiting")
+                                                                               or ""), 60, 0.25) and
+                    _lab_view(alice, held).get("waiting")}
+    made["password_in"] = "qa-verify.json"
+    return made
 
 
 # ---------------------------------------------------------------------------- the run

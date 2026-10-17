@@ -11,6 +11,8 @@ test("an executor is described with its state, figures and how its limits hold",
   assert.equal(executorText(e), "this server: ready, 2 threads, 16% of the CPU, 400 MB (CPU hard, memory hard)");
   assert.equal(executorText({ ...e, threads: 1, held: null }), "this server: ready, 1 thread, 16% of the CPU, 400 MB");
   assert.equal(executorText({ ...e, on: false }), "this server: CPU work is off");
+  assert.equal(executorText({ ...e, kind: "remote", name: "Bob's box", on: false, online: false }),
+    "Bob's box: its helper is not connected", "a helper whose connection went is not 'off'");
   assert.match(executorText({ ...e, available: "a benchmark holds its machine" }), /; a benchmark holds its machine$/);
   assert.match(executorText({ ...e, state: "failed", reason: "its job host could not start: boom" }),
     /^this server: not running, .*; its job host could not start: boom$/);

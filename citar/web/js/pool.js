@@ -471,7 +471,7 @@ function machineCard(m, data, reload) {
       // noticed of its helper
       ...Object.entries(m.flags || {}).map(([key, f]) => {
         const t = flagText(key, f);
-        return t ? el("span", { class: `pill ${t[0]}`, title: t[2] }, `⚠ ${t[1]}`) : null;
+        return t ? el("span", { class: `pill ${t[0]}`, title: t[2] }, `⚠ ${t[1]}`) : null;      // the row spaces them
       }),
       m.is_mine || !m.owner ? null : el("span", { class: "muted small" }, `owned by ${m.owner.display_name || m.owner.handle}`)),
     el("div", { class: "muted", style: { marginTop: "4px" } }, reg ? describeConn(reg) : `${PROVIDER[provider] || provider}${helper ? ", through its CITAR helper" : ""}`),
