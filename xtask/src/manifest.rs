@@ -3,7 +3,9 @@
 //!
 //! - `cargo xtask keygen --out DIR`: a new ed25519 update-signing key, written as
 //!   `DIR/citar-update-signing.key` (JSON: `{v, kind, public, secret}`, the secret's 32 bytes in
-//!   standard base64; mode 0600 on Unix) and `DIR/citar-update-signing.pub` (the public key, the
+//!   standard base64; its owner's alone before the secret is written: mode 0600 on Unix, and on
+//!   Windows a protected DACL for the user, SYSTEM and Administrators, as the helper's machine key
+//!   has) and `DIR/citar-update-signing.pub` (the public key, the
 //!   line `crates/citar-jobs/update-keys.pub` takes). It refuses a directory inside this repository
 //!   or any git working tree, and never overwrites a key.
 //! - `cargo xtask helper-manifest --assets DIR --version V [--base-url URL] [--build B]
@@ -200,7 +202,11 @@ pub fn read_key(text: &str) -> Result<SigningKey, String> {
     Ok(key)
 }
 
-/// Writes `text` to `path`, which must not exist yet; mode 0600 on Unix when `private`.
+/// Writes `text` to `path`, which must not exist yet. When `private`, the file is its owner's
+/// alone before anything is written in it: mode 0600 on Unix from its creation; on Windows
+/// [`owner_only`] on the empty file (else a `--out` such as `C:\keys`, which inherits
+/// Authenticated Users' modify right, would leave the release's signing key readable and
+/// replaceable by every local user).
 fn write_new(path: &Path, text: &str, private: bool) -> Result<(), String> {
     use std::io::Write as _;
     let mut opts = std::fs::OpenOptions::new();
@@ -210,10 +216,69 @@ fn write_new(path: &Path, text: &str, private: bool) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
-    #[cfg(not(unix))]
-    let _private = private;
     let mut f = opts.open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(windows)]
+    if private && let Err(e) = owner_only(path) {
+        drop(f);
+        let _gone = std::fs::remove_file(path);
+        return Err(format!(
+            "{}: could not make it owner-only ({e}): nothing written",
+            path.display()
+        ));
+    }
+    #[cfg(not(windows))]
+    let _private = private;
     f.write_all(text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The local system account and the Administrators group, beside the user.
+#[cfg(windows)]
+const SYSTEM_AND_ADMINISTRATORS: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
+
+/// Gives `path` a protected DACL granting full control to the current user, SYSTEM and
+/// Administrators and nothing to anyone else (citar-jobs' `sys::restrict_to_owner`, which xtask
+/// does not link: `icacls`, with the user's SID from `whoami`, so no name is localised).
+///
+/// # Errors
+/// Either tool failed.
+#[cfg(windows)]
+fn owner_only(path: &Path) -> Result<(), String> {
+    let me = current_user_sid()?;
+    let mut cmd = Command::new("icacls");
+    cmd.arg(path).args(["/inheritance:r", "/grant:r"]).arg(format!("*{me}:F"));
+    for sid in SYSTEM_AND_ADMINISTRATORS {
+        cmd.arg(format!("*{sid}:F"));
+    }
+    let out = cmd.output().map_err(|e| format!("icacls: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "icacls: {}",
+            String::from_utf8_lossy(&out.stdout).trim().lines().last().unwrap_or("failed")
+        ));
+    }
+    Ok(())
+}
+
+/// The SID of the user this runs as (`whoami /user`, as CSV: `"name","S-1-5-..."`).
+///
+/// # Errors
+/// `whoami` failed or printed no SID.
+#[cfg(windows)]
+fn current_user_sid() -> Result<String, String> {
+    let out = Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .map_err(|e| format!("whoami: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim()
+        .rsplit(',')
+        .next()
+        .map(|s| s.trim().trim_matches('"'))
+        .filter(|s| {
+            s.starts_with("S-1-") && s.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b'S')
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| format!("whoami printed no SID: {}", text.trim()))
 }
 
 fn keygen(root: &Path, args: &[String]) -> Result<(), Stop> {
@@ -541,6 +606,34 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = std::fs::metadata(dir.join(KEY_FILE)).expect("there").permissions().mode();
             assert_eq!(mode & 0o077, 0, "the key is its owner's alone");
+        }
+        #[cfg(windows)]
+        {
+            // The key file's DACL as SDDL (icacls /save, UTF-16): protected, and its entries the
+            // user's, SYSTEM's and Administrators' only.
+            let me = current_user_sid().expect("the user's SID");
+            let saved = dir.join("acl.txt");
+            let out = Command::new("icacls")
+                .arg(dir.join(KEY_FILE))
+                .arg("/save")
+                .arg(&saved)
+                .output()
+                .expect("icacls runs");
+            assert!(out.status.success(), "{out:?}");
+            let raw = std::fs::read(&saved).expect("saved");
+            let units: Vec<u16> =
+                raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+            let text = String::from_utf16_lossy(&units);
+            let sddl = text.lines().find(|l| l.contains("D:")).expect("an SDDL line");
+            let dacl = &sddl[sddl.find("D:").expect("a DACL")..];
+            assert!(dacl.starts_with("D:P"), "protected: {dacl}");
+            let allowed = [me.as_str(), "SY", "BA", "S-1-5-18", "S-1-5-32-544"];
+            let aces: Vec<&str> = dacl.split('(').skip(1).collect();
+            assert!(!aces.is_empty(), "{dacl}");
+            for ace in aces {
+                let sid = ace.trim_end_matches(')').rsplit(';').next().expect("a SID");
+                assert!(allowed.contains(&sid), "{sid} may not reach the key: {dacl}");
+            }
         }
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
