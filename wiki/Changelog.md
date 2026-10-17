@@ -268,6 +268,14 @@ that means for an existing install:
   ones, and says when games wait for a verifier; helpers whose connection went are counted rather than listed.
 - **Security:** SECURITY.md's "Helpers and shared machines": what a worker token allows, what a lender can rely on, how
   the server checks a helper, and the threat model.
+- **Verification, hardened (4-12's review):** deleting a machine while a result waits for its replay no longer escapes
+  quarantine (its owner and its unverified results follow the mismatch); after an upgrade only a sampled result that
+  waited is accepted unverified (a new machine's, an asked one and a disputed one are played again, no credits, no
+  verdict); a measured speed is held between 0.05 and 20 (a deadline's between 0.25 and 4) and the class check's bar
+  is set by machines that did not over-report, trusted ones first; a game knows each machine every model seat
+  played on, and a standing that cannot be read counts as unverified; the runs listing's badge is no longer saved into
+  the run; `PUT /api/admin/verification` answers 400, not 500, to infinity and huge counts; `GET /api/admin/jobs`
+  waits at most 2 s for a tick (503 past that).
 
 **Chat** ([docs/PLAYING.md](Playing-in-the-browser), [docs/AI_PLAYERS.md](AI-players)):
 

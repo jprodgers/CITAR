@@ -425,7 +425,9 @@ counted against gets them back), and the ratings no longer count them. A machine
 it made as a verifier re-opened (even if an administrator unmarked it first): the games it verified are checked again
 on this server, and a machine whose promotion those matches counted goes back to **new** if, without them, it falls
 below its tier's threshold. Matches made after a machine's promotion are taken off its counters but never take the
-tier back, and a tier an administrator set is never taken back by them.
+tier back, and a tier an administrator set is never taken back by them. Deleting a machine while its results wait
+for their replays changes none of this: a mismatch found after the deletion still quarantines its owner and withdraws
+everything the machine gave unverified.
 
 **What this means for a lender:** an honest machine climbs on its own; a broken one (bad memory, an overclock) is caught
 by its replays and quarantined without blame on its owner; a key reset never changes the tier. Model work is not
@@ -438,8 +440,10 @@ machines of one owner play at once, and this server's share for new machines' re
 machines with their evidence and the results withdrawn with them, the quarantined owners, each with **Release**, the
 recent mismatches and withdrawals, the verifiers and the machines the credits' bounds or the class check flagged. A
 machine's card and its machine settings dialog carry its trust and the controls; `GET /api/admin/jobs` shows the
-verifiers' replays and the caps on new machines. Results that waited for their replays when the server was upgraded to
-another jobs build (which no verifier plays) are accepted unverified at its next start.
+verifiers' replays and the caps on new machines. A result that waited for its replay when the server was upgraded to
+another jobs build (which no verifier plays) is accepted unverified at its next start when it was sampled; one of a
+new machine's, one an administrator asked to check and one a verifier disputed are never accepted unchecked: each is
+set aside with no verdict on anyone and no credits, and its game is played again.
 
 ### Credits for CPU work
 
@@ -456,10 +460,12 @@ so the server bounds them twice:
   is informational, since a slow honest machine is capped too, and never blocks a promotion.
 
 Its replays also measure the machine: its **measured speed** is the median of the reference's CPU seconds over its own
-on its replayed games long enough to time (a fifth of a second at least), shown to administrators beside its CPU class.
-A machine under half the median speed of the other measured machines of its class is flagged **class suspect**: its
-class prices it as faster than it is, or its helper over-reports; an administrator pins it to a fairer class (Machine
-settings…, Class and trust). A game rejected by verification earns nothing, and any budget it counted against gets its
+on its replayed games long enough to time (a fifth of a second at least), each held between a twentieth and twenty
+times the reference, shown to administrators beside its CPU class. Its games' deadlines scale by it, held between a
+quarter and four times. A machine under half the median speed of its class is flagged **class suspect**: its class
+prices it as faster than it is, or its helper over-reports; an administrator pins it to a fairer class (Machine
+settings…, Class and trust). The median is of the class's other measured machines that did not over-report their CPU,
+the trusted ones alone when there are any, so machines that under-report cannot set the bar for the rest. A game rejected by verification earns nothing, and any budget it counted against gets its
 credits back.
 
 ### Model results and the global boards
@@ -468,8 +474,10 @@ Model work is not replayed (a model's answers cannot be checked by running them 
 scores, the diplomacy leaderboard) count a model's results from a member's machine only once that machine is
 **trusted**: a game played on a machine that was not trusted when it ran (nor is since) is left out of every board but
 its owner's own figures, where it is marked **unverified machine**, as are its benchmark run and its probe run; each
-board says how many games it left out per model. When an administrator trusts the machine, its earlier results count
-too. The site's machines (the host, its online APIs) and an administrator's always count. A machine that serves models
+board says how many games it left out per model. A game knows each machine every model seat played on (read when the
+seat's lease is made and again every minute while it lasts), so a seat that moved off an untrusted machine mid-game is
+still left out, and a machine whose standing could not be read counts as unverified until the boards can read it.
+When an administrator trusts the machine, its earlier results count too. The site's machines (the host, its online APIs) and an administrator's always count. A machine that serves models
 but lends no CPU has no games to be promoted by: its owner asks an administrator, who can judge it by its results.
 
 ### CPU limits, per operating system
