@@ -1884,11 +1884,16 @@ impl<'a> Steady<'a> {
                         && let Some(h) = self.handoff.as_mut()
                     {
                         h.draining = true;
+                        let waited = self.updater.map_or(0, |u| u.idle_wait().as_secs());
                         self.h.log.info(format!(
-                            "CITAR helper {} has waited {} minutes for this helper to be idle: no \
-                             new work until what runs ends",
+                            "CITAR helper {} has waited {} for this helper to be idle: no new work \
+                             until what runs ends",
                             h.staged.version,
-                            self.updater.map_or(0, |u| u.idle_wait().as_secs() / 60)
+                            if waited >= 120 {
+                                format!("{} minutes", waited / 60)
+                            } else {
+                                format!("{waited} s")
+                            }
                         ));
                     }
                     if ping_at.is_some_and(|p| now >= p) {

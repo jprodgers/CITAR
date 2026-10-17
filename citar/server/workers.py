@@ -722,8 +722,10 @@ class WorkerHub:
         self._power_at: dict = {}
         #: Test hooks' counters (the conformance player reads them): token lookups made.
         self.lookups = 0
-        #: server_id -> the helper's last ``update_status`` ({state, version, message, at}), across its reconnects.
+        #: server_id -> the helper's last ``update_status`` ({state, version, message, at}), across its reconnects,
+        #: and its last few, oldest first (the tests read the order an update went through).
         self.update_states: dict = {}
+        self.update_log: dict = {}
         #: How many connections a newer one of their machine replaced (``shutdown`` ``replaced``): an update's
         #: hand-off never adds one.
         self.replaced = 0
@@ -1067,6 +1069,7 @@ class WorkerHub:
                  "at": self.clock.time()}
         with self._lock:
             self.update_states[server_id] = state
+            self.update_log.setdefault(server_id, collections.deque(maxlen=32)).append(state)
 
     def broadcast(self, frame_text: str):
         """Send a frame to every connected helper."""

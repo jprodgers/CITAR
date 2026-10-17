@@ -14,9 +14,10 @@
 //! one left from before a swap) refuses the `limits` this helper gives it (`fatal` `build`), or
 //! its `ready` is refused here: either way it is ended and reported as such
 //! ([`StartFailure::build`]), and the job side starts this helper's own at once. In a
-//! `test-update-key` build, `CITAR_HELPER_TEST_STALE_HOST` names a program the first host is
-//! started from instead (the old binary an update kept as `<name>.old`): the update tests' stand-in
-//! for a job host left from before the swap (design/phase4-helper.md 4-13, gate 4).
+//! `test-update-key` build, the binary an update just installed starts its first host from the one
+//! it replaced (`<name>.old`) when `CITAR_HELPER_TEST_STALE_HOST` is set ([`ChildHosts::stale`],
+//! `app`): the update tests' stand-in for a job host left from before the swap
+//! (design/phase4-helper.md 4-13, gate 4).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -55,7 +56,7 @@ impl ChildHosts {
     pub fn this_binary(log: Log) -> Result<ChildHosts, String> {
         let program =
             std::env::current_exe().map_err(|e| format!("this program's own path: {e}"))?;
-        Ok(ChildHosts { program, log, stale: std::sync::Mutex::new(stale_host()) })
+        Ok(ChildHosts { program, log, stale: std::sync::Mutex::new(None) })
     }
 
     /// The program the next host is started from: the stale one once, if a test build was given
@@ -74,17 +75,6 @@ impl ChildHosts {
             None => self.program.clone(),
         }
     }
-}
-
-/// `CITAR_HELPER_TEST_STALE_HOST` in a `test-update-key` build (the module's doc).
-#[cfg(feature = "test-update-key")]
-fn stale_host() -> Option<PathBuf> {
-    std::env::var_os("CITAR_HELPER_TEST_STALE_HOST").filter(|v| !v.is_empty()).map(PathBuf::from)
-}
-
-#[cfg(not(feature = "test-update-key"))]
-const fn stale_host() -> Option<PathBuf> {
-    None
 }
 
 /// Whether a start failed because the host is of another jobs build.

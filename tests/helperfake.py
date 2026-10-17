@@ -336,6 +336,108 @@ def require_faults_binary(what: str) -> str:
     raise unittest.SkipTest(f"{what}: no citar-helper-faults in CITAR_EXT_DIR (cargo xtask develop builds it)")
 
 
+def update_binaries() -> Optional[tuple]:
+    """The update tests' older and newer helper (the ``test-update-key`` feature, P4.3.8): ``CITAR_HELPER_UPDATE_BINS``
+    (two paths joined by ``os.pathsep``: CI's test jobs name the build-ext job's), else ``citar-helper-update-1`` and
+    ``-2`` beside the helper ``cargo xtask develop`` built, calling themselves ``0.1.6-test.1`` and ``0.1.6-test.2`` (the
+    second another jobs build). None when there are none; named ones that are no files raise ``NoHelperBinary``."""
+    import os
+    from pathlib import Path
+    given = os.environ.get("CITAR_HELPER_UPDATE_BINS")
+    if given:
+        paths = given.split(os.pathsep)
+        if len(paths) != 2 or not all(Path(p).is_file() for p in paths):
+            raise NoHelperBinary(f"CITAR_HELPER_UPDATE_BINS names {given!r}, which is not two files")
+        return tuple(paths)
+    binary = helper_binary()
+    if binary is None:
+        return None
+    found = []
+    for n in (1, 2):
+        for name in (f"citar-helper-update-{n}.exe", f"citar-helper-update-{n}"):
+            path = Path(binary).with_name(name)
+            if path.is_file():
+                found.append(str(path))
+                break
+    return tuple(found) if len(found) == 2 else None
+
+
+def require_update_binaries(what: str) -> tuple:
+    """``update_binaries``, or a skip (``unittest.SkipTest``) without them; on CI a failure."""
+    import os
+    import unittest
+    found = update_binaries()
+    if found is not None:
+        return found
+    if os.environ.get("CI"):
+        raise NoHelperBinary(f"{what}: no citar-helper-update-1 and -2 on CI (set CITAR_HELPER_UPDATE_BINS)")
+    raise unittest.SkipTest(f"{what}: no citar-helper-update-1 and -2 in CITAR_EXT_DIR (cargo xtask develop builds "
+                            "them)")
+
+
+def process_tree(pid: int) -> list:
+    """The processes ``pid`` started and theirs, by their parents' ids (Windows' process snapshot, Linux's ``/proc``;
+    [] elsewhere): what a test ends when a helper's supervisor leaves a child behind."""
+    import sys
+    from pathlib import Path
+    parents: dict = {}
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class Entry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return []
+        try:
+            e = Entry()
+            e.dwSize = ctypes.sizeof(Entry)
+            ok = k32.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                parents.setdefault(int(e.th32ParentProcessID), []).append(int(e.th32ProcessID))
+                ok = k32.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            k32.CloseHandle(snap)
+    elif sys.platform.startswith("linux"):
+        for d in Path("/proc").iterdir():
+            if not d.name.isdigit():
+                continue
+            try:
+                stat = (d / "stat").read_text()
+            except OSError:
+                continue
+            parents.setdefault(int(stat[stat.rindex(")") + 2:].split()[1]), []).append(int(d.name))
+    out, todo = [], [pid]
+    while todo:
+        for child in parents.get(todo.pop(), []):
+            if child not in out and child != pid:
+                out.append(child)
+                todo.append(child)
+    return out
+
+
+def kill_tree(pid: int) -> None:
+    """Ends ``pid``'s descendants, then ``pid``: a helper's supervisor and the helper it runs."""
+    import os
+    import signal
+    for child in reversed(process_tree(pid)):
+        try:
+            os.kill(child, signal.SIGTERM)
+        except OSError:
+            pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
 def fake_probe() -> Optional[str]:
     """``citar-fake-probe`` beside the helper binary (``helper_binary``): the stand-in for the scan's probe programs
     that development builds of the helper run when ``CITAR_HELPER_NVIDIA_SMI`` (or ``_POWERSHELL``,

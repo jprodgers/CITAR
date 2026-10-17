@@ -157,22 +157,33 @@ fn given_keys(
 }
 
 /// A test build's hooks for the update gates (`test-update-key` only): how long a verified update
-/// waits for the helper to be idle (`CITAR_HELPER_TEST_IDLE_WAIT_S`), and whether this binary
-/// exits at its start before it can become healthy (`CITAR_HELPER_TEST_EXIT_AT_START`, naming the
-/// version that does: "a test build made to exit at start", 4-13's gate 3).
+/// waits for the helper to be idle (`CITAR_HELPER_TEST_IDLE_WAIT_S`), whether this binary exits at
+/// its start before it can become healthy (`CITAR_HELPER_TEST_EXIT_AT_START`, naming the version
+/// that does: "a test build made to exit at start", 4-13's gate 3), and whether the binary an
+/// update just installed starts its first job host from the one it replaced
+/// (`CITAR_HELPER_TEST_STALE_HOST`: a job host left from before the swap, gate 4).
 #[cfg(feature = "test-update-key")]
-fn test_hooks() -> (Option<std::time::Duration>, bool) {
+fn test_hooks() -> TestHooks {
     let wait = env("CITAR_HELPER_TEST_IDLE_WAIT_S")
         .and_then(|v| v.to_string_lossy().parse::<f64>().ok())
         .filter(|s| s.is_finite() && *s >= 0.0)
         .map(std::time::Duration::from_secs_f64);
     let exit = env("CITAR_HELPER_TEST_EXIT_AT_START").is_some_and(|v| v == version::VERSION);
-    (wait, exit)
+    let stale = env("CITAR_HELPER_TEST_STALE_HOST").is_some_and(|v| !v.is_empty());
+    TestHooks { idle_wait: wait, exit_at_start: exit, stale_host: stale }
 }
 
 #[cfg(not(feature = "test-update-key"))]
-const fn test_hooks() -> (Option<std::time::Duration>, bool) {
-    (None, false)
+fn test_hooks() -> TestHooks {
+    TestHooks::default()
+}
+
+/// [`test_hooks`]: none outside a `test-update-key` build.
+#[derive(Clone, Copy, Debug, Default)]
+struct TestHooks {
+    idle_wait: Option<std::time::Duration>,
+    exit_at_start: bool,
+    stale_host: bool,
 }
 
 /// The binary an update would replace, as this build may: a development build refuses one in a
@@ -549,8 +560,8 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
             return Ok(Exit::Update.code());
         }
     };
-    let (idle_wait, exit_at_start) = test_hooks();
-    if exit_at_start {
+    let hooks = test_hooks();
+    if hooks.exit_at_start {
         log.warn("TEST: this build exits at its start (CITAR_HELPER_TEST_EXIT_AT_START)");
         return Ok(1);
     }
@@ -645,10 +656,15 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
     // CPU jobs: this binary's own job hosts as children (`job-host`), results signed by the
     // machine key and kept in the home until acknowledged.
     let machine_key = Arc::new(machine_key);
+    let hosts = crate::jobhost::ChildHosts::this_binary(log.clone()).map_err(|e| Stop(1, e))?;
+    if hooks.stale_host
+        && updating.is_some()
+        && let Some(i) = &install
+    {
+        *hosts.stale.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(i.old());
+    }
     let jobs = crate::jobs::JobSetup {
-        hosts: Some(Arc::new(
-            crate::jobhost::ChildHosts::this_binary(log.clone()).map_err(|e| Stop(1, e))?,
-        ) as Arc<dyn crate::jobs::Hosts>),
+        hosts: Some(Arc::new(hosts) as Arc<dyn crate::jobs::Hosts>),
         key: Some(Arc::clone(&machine_key)),
         results: Some(home.results_dir()),
         state: crate::jobs::JobState::default(),
@@ -661,7 +677,7 @@ fn serve(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
         dir: Some(update_dir.clone()),
         tls: Some(net::verified_tls(cfg.ca_file.as_deref()).map_err(|e| Stop(1, e))?),
         loopback_only: DEV_GUARD,
-        idle_wait: idle_wait.unwrap_or(crate::update::IDLE_WAIT),
+        idle_wait: hooks.idle_wait.unwrap_or(crate::update::IDLE_WAIT),
         updating,
         downloads: crate::update::Downloads::default(),
     };
