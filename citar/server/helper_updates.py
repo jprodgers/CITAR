@@ -90,7 +90,8 @@ def file_source(path: str) -> Callable[[], tuple[str, str]]:
 def _get(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "citar-server (helper update relay)"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as r:  # noqa: S310 (https, checked in settings)
+        # https only (or http to this machine): settings checks the address
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as r:
             raw = r.read(MAX_BYTES + 1)
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise FetchFailed(f"{url}: {e}") from None

@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 
@@ -29,13 +28,13 @@ _TMP = Path(tempfile.mkdtemp(prefix="citar_updates_"))
 os.environ["CITAR_DATA_DIR"] = str(_TMP)
 os.environ["CITAR_DB_URL"] = "sqlite:///" + (_TMP / "test.db").as_posix()
 
-from citar import db, engine_api, servers, settings  # noqa: E402
-from citar.auth import accounts, tokens  # noqa: E402
-from citar.db.models import Base, Server, WorkerToken  # noqa: E402
-from citar.pool import scheduler as S  # noqa: E402
-from citar.server import helper_updates as U  # noqa: E402
-from citar.server import workers as W  # noqa: E402
-from tests import helperfake as H  # noqa: E402
+from citar import db, engine_api, servers, settings
+from citar.auth import accounts, tokens
+from citar.db.models import Base, Server, WorkerToken
+from citar.pool import scheduler as S
+from citar.server import helper_updates as U
+from citar.server import workers as W
+from tests import helperfake as H
 
 SEED = 61
 
