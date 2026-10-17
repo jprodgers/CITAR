@@ -76,7 +76,7 @@ the action touches:
 | Change its configuration (name, models, hardware, power and costs, quiet hours), remove it | Its owner and administrators; another member gets 404 |
 | Its machine settings: LLM slots, model swaps, CPU sharing, what its helper's reports may change, applying the last one | Its owner and administrators; a member a group lends it to gets 403, any other member 404 |
 | Its CPU runs (`GET /api/machines/{id}/jobs`: the lab's games it played, what it lends now, its trust counters) | Its owner and administrators; a member a group lends it to gets 403, any other member 404. Another member's experiment is named "a member's experiment" unless the caller may see it |
-| Set its trust tier, pin the hardware classes it is priced by | Administrators; anyone else gets 404 |
+| Set its trust tier, mark it a verifier, withdraw its results, have its next results checked (`PUT /api/admin/machines/{id}/trust`, `POST /api/admin/machines/{id}/replicate`), pin the hardware classes it is priced by | Administrators; anyone else gets 404 |
 | Store or delete its API key | Its owner and administrators, on a machine the server dials; a helper machine has no key on the server (404) |
 | Add a machine the server dials itself, or switch one to that | Administrators, unless its provider is the dry run (it dials nothing): a member gets 403 with the reason |
 | Price a machine with an electricity plan | Administrators: the plans are the household's bill. A member gets 403, and on a machine an administrator gave a plan, sees no price per kWh |
@@ -174,10 +174,9 @@ and apply.
 
 **Class and trust.** The machine's **hardware class** prices its work in the compute ledger
 ([Configuration](../CONFIGURATION.md#credits-and-hardware-classes)): it follows the hardware details unless an
-administrator **pins** it, here. Its **trust tier** (new, provisional, trusted, quarantined) is set by administrators.
-Until the server checks helpers' results by itself (a later 0.1.6 package), only a machine an administrator set
-**trusted** is offered CPU work, and its results are accepted as **unverified**. Both are shown to the machine's
-owner. An
+administrator **pins** it, here. Its **trust tier** (new, provisional, trusted, quarantined) follows how its CPU
+results check out ([below](#verification-what-a-lenders-tier-means)), and administrators may set it. Both are shown to
+the machine's owner. An
 administrator also sees, here and on the card, when its helper has **over-reported** its generation time (more than the
 server observed, by over 10% and a second, three times within an hour): its work is credited the time the server
 observed whatever it reports.
@@ -380,6 +379,52 @@ the memory each game now has.
 **What the owner sees.** `GET /api/machines/{id}/jobs` lists the machine's recent runs (each game, its state, its CPU
 and paused time, and its verification once settled), what it lends now and its trust counters.
 
+### Verification: what a lender's tier means
+
+The server does not take a helper's word for a game. Every result comes with a **claim** signed by the machine key: the
+job, the run, the machine, the spec, the jobs build, the bots, the result's hash and the head of its chain of round
+digests. The server checks the signature against the key the machine registered, the claim against its own records,
+the result's hash and the chain (its digests must fold to its head), and the result against its spec. A claim that does
+not hold is never accepted: the game is played elsewhere, and the machine and its owner are quarantined (below).
+
+Then, depending on the machine's **trust tier**, it may play the game again on a **verifier** to compare:
+
+| Tier | Its results | How it moves |
+|---|---|---|
+| **new** (every machine starts here) | every one replayed on this server before it is accepted | 5 matching replays in a row make it **provisional** |
+| **provisional** | about 10% replayed, chosen by the server's secret once the result is in (nothing about a game's offer tells the helper whether it will be checked); the rest accepted **unverified** | 50 verified matches, no mismatch, and no over-reported time within 30 days make it **trusted** |
+| **trusted** | about 2% replayed, the rest accepted unverified | an administrator may mark it a **verifier** |
+| **quarantined** | no CPU work at all, and no work of anyone else's but its owner's (a pooled prompt from another member is refused) | an administrator releases it: back to **new**, its counters reset |
+
+A game is **verified** when its replay comes to the same result hash, chain head and round count. Its results line
+says `verified`, `unverified` (accepted without a replay) or `reference` (played by this server itself). Until a
+replayed game settles, its owner and the machine's owner see it **done** like any other; the replay is administrators'
+alone.
+
+**Who verifies.** This server's own job host (when its canary and self-check pass), and trusted machines an
+administrator marked as verifiers. Another member's trusted machine is never enough: one person with two accounts could
+otherwise vouch for their own. A new machine's games are replayed on this server only; when a remote verifier
+disagrees with a game, this server plays it a third time and every machine that disagrees with it is quarantined. To
+keep this server from being swamped, a member's third new machine waits while two others have work in hand, new
+machines' replays take at most every other run of this server's while other work waits, and a new machine whose
+results wait for their replays is offered nothing more meanwhile (the Lab page says "waiting for a verifier").
+
+**A mismatch** quarantines the machine, with the evidence for administrators: "same chain, different result:
+tampering or an incompatible build", or the round where the two runs' chains parted (faulty hardware or an
+incompatible build), or a bad signature, or a claim that does not hold. Every verdict but a parted chain also
+quarantines the machine's **owner**: none of their machines is offered CPU work, a new one included, until an
+administrator releases them. Then **every result the machine gave that was accepted unverified** since it was
+registered (or last released) is **withdrawn**, not only the ones after its last verified match: its lines leave the
+results files, its games are played again elsewhere, its ledger entries are rejected (no credits, and any budget they
+counted against gets them back), and the ratings no longer count them. A verifier that is quarantined has its own
+matches re-opened: the games it verified are checked again on this server, and a machine promoted on those matches
+goes back to **new** if it falls below its tier's threshold.
+
+**What this means for a lender:** an honest machine climbs on its own; a broken one (bad memory, an overclock) is caught
+by its replays and quarantined without blame on its owner; a key reset never changes the tier. Model work is not
+replayed: it is attributed to the machine, and over-reported generation time only keeps a machine from being
+promoted.
+
 ### CPU limits, per operating system
 
 CPU work runs in a **job host**: a child process of the helper (`citar-helper job-host`, which you
@@ -547,6 +592,9 @@ sampling parameters (`temperature`, `max_tokens`, `top_p`, `seed`, `reasoning_ef
 drops any other, and nothing in a request changes which endpoint it dials, the key it sends or whether
 it streams. It can ask it to scan its hardware again, and send it its settings, which your own
 ceiling caps.
+
+It can offer it lab games from the closed list the helper plays (lab, ranking and reference games of the bots compiled
+into it), each a typed spec with no path, script or code in it, and replay some of its results elsewhere to check them.
 
 It cannot read your files, run commands, see other things on your network, or use models you did
 not list. The helper only speaks to the base URL you configured, and only forwards completion

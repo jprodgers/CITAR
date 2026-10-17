@@ -224,12 +224,27 @@ that means for an existing install:
   helper is offered nothing until it reconnects, and a game its own pauses held past its deadline goes
   elsewhere for an hour. A grant's budget with no room holds its member's games back without charging
   the lender. When the machine's CPU settings change while games play, the helper restarts its job
-  host once they end and tells the server the memory a game now has. Until helpers' results are verified (a later 0.1.6 package) only machines an
-  administrator trusted take CPU work, their results entered as unverified. The machine settings
+  host once they end and tells the server the memory a game now has. Every machine takes CPU work, its
+  results verified as its trust tier says (below). The machine settings
   dialog and the helper card show the CPU in effect, each limit hard or soft, "not lent by this
   machine's owner", and the grants that lend it; the dialog gains "Pause its games while its own model
   works". New route: `GET /api/machines/{id}/jobs`. `scripts/qa_phase4.py remote` (and `--wsl`, the
   server in WSL). [docs/server/WORKERS.md](docs/server/WORKERS.md#lending-cpu-what-plays-on-it-and-for-whom).
+- **Helpers' results are verified** (design/phase4-helper.md P4.4.4, P4.5.8): the server checks each
+  result's signed claim (the machine's registered key, its own records, the result's hash, the chain's
+  fold) with the same Rust as the helper's, and replays results on a verifier (this server, or a
+  trusted machine an administrator marked one): every result of a `new` machine, about 10% of a
+  `provisional` one's and 2% of a `trusted` one's, chosen by the server's secret once each result is
+  in (a replayed job shows as done to its owners until it settles). Matches promote a machine
+  (5 make it provisional, 50 with no mismatch trusted); a mismatch or a claim that does not hold
+  quarantines it (its owner too, but for a chain that parted: hardware), refuses its work to anyone
+  but its owner, and withdraws every result it gave unverified since its registration or release:
+  lines removed, games played again, ledger events rejected with their budget settlements reversed,
+  the ratings recomputed. A quarantined verifier's matches are re-opened. A member's third new machine
+  waits while two have work in hand. `PUT /api/admin/machines/{id}/trust` gains `withdraw` and
+  `verifier`; new route `POST /api/admin/machines/{id}/replicate`. `citar-helper-faults` (the
+  `test-faults` feature, `--test-fault`) cheats on purpose for the tests; `scripts/qa_phase4.py verify`.
+  [docs/server/WORKERS.md](docs/server/WORKERS.md#verification-what-a-lenders-tier-means).
 
 **Chat** ([docs/PLAYING.md](docs/PLAYING.md), [docs/AI_PLAYERS.md](docs/AI_PLAYERS.md)):
 
