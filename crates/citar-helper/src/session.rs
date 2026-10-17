@@ -1587,6 +1587,15 @@ impl<'a> Steady<'a> {
                 }
             }
         }
+        // The updater's last words before this one (its `verified`, said just before the binary was
+        // staged) go first.
+        if let Some(r) = self.updates.as_mut() {
+            while let Ok(f) = r.try_recv() {
+                if self.h.send(tx, f).await.is_err() {
+                    return End::Update(h.staged);
+                }
+            }
+        }
         let st = UpdateStatus {
             state: UpdateState::Restarting,
             version: Some(version.clone()),

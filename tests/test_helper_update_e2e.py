@@ -12,6 +12,9 @@ served on loopback behind a redirect. Nothing reaches beyond this machine.
   hands off (``restarting``, its socket closed first) and the new binary reconnects reporting ``0.1.6-test.2`` and
   ``applied``; the install folder holds the new binary and the old one as ``<name>.old``; the hub never replaced a
   connection (the old socket closed before the new one dialled).
+- **By hand** (``notify``): a helper whose updates are set to notify reports the update available, downloads nothing
+  and keeps the relayed manifest; ``citar-helper update check`` says it is newer, ``update apply`` installs it (the old
+  binary kept), and the helper started again is the new one and reports ``applied``.
 - **The console rollback** (gate 3): a newer binary made to exit at its start (the hook
   ``CITAR_HELPER_TEST_EXIT_AT_START``) is swapped back by the supervisor; the old one serves again and reports
   ``failed``, and is not offered the same binary again.
@@ -273,6 +276,40 @@ class Update(_Update):
         W.hub().drop(sid, "its worker token was revoked", code="revoked")
         self.assertEqual(helper.exited(30), 78, helper.text()[-3000:])
         print(f"\n[update e2e] gate 1: states {self.states(sid)}; asked {self.assets.asked}", file=sys.stderr)
+
+    def test_notify_reports_it_and_update_apply_installs_it_by_hand(self):
+        sid, token = self.machine("by hand")
+        helper = self.start(token, extra=("--updates", "notify"))
+        self.wait_state(sid, "available", 60, helper)
+        self.assertEqual(self.assets.asked, [], "notify downloads nothing")
+        kept = self.home / "helper" / "update" / "manifest.json"
+        self.assertTrue(H.until(lambda: kept.is_file(), 10), "the relayed manifest is kept in the home")
+        W.hub().drop(sid, "its worker token was revoked", code="revoked")
+        self.assertEqual(helper.exited(30), 78, helper.text()[-3000:])
+        env = {**{k: v for k, v in os.environ.items() if not k.startswith("CITAR_HELPER_")},
+               "CITAR_DATA_DIR": str(self.home)}
+        common = ["--home", str(self.home), "--update-key", str(self.keyfile)]
+        check = subprocess.run([str(self.exe), "update", "check", *common], capture_output=True, text=True,
+                               timeout=60, env=env)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertIn(f"CITAR helper {NEW}", check.stdout)
+        self.assertIn("newer than this helper", check.stdout)
+        applied = subprocess.run([str(self.exe), "update", "apply", *common], capture_output=True, text=True,
+                                 timeout=300, env=env)
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertIn(f"installed CITAR helper {NEW}", applied.stdout)
+        self.assertEqual(sha256(self.exe), sha256(self.new_bin))
+        self.assertEqual(sha256(str(self.exe) + ".old"), sha256(self.old_bin))
+        self.assertIn("/cdn/citar-helper-next", self.assets.asked)
+        # started again by its owner: the new binary, which reports the update applied after its welcome
+        helper = self.start(token, extra=("--updates", "notify"))
+        ok = H.until(lambda: W.hub().get(sid) is not None and W.hub().get(sid).helper_version == NEW
+                     and (W.hub().update_states.get(sid) or {}).get("state") == "applied", 60 * SLACK, 0.05)
+        self.assertTrue(ok, f"{self.states(sid)}\n{helper.text()[-3000:]}")
+        W.hub().drop(sid, "its worker token was revoked", code="revoked")
+        self.assertEqual(helper.exited(30), 78, helper.text()[-3000:])
+        print(f"\n[update e2e] by hand: {check.stdout.strip().splitlines()[-1]}; states {self.states(sid)}",
+              file=sys.stderr)
 
     def test_a_new_binary_that_exits_before_it_is_healthy_is_swapped_back(self):
         """Gate 3, a console run: the supervisor puts the old binary back, which serves and says failed."""
