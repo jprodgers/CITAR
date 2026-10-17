@@ -143,7 +143,10 @@ class Tiers(unittest.TestCase):
         self.assertNotIn(models["bob"], rows)
         self.assertEqual(rows[models["zara"]]["benchmark_games"], 1)
         self.assertEqual(rows[models["alice"]]["benchmark_games"], 1)
-        self.assertEqual([(u["model"], u["games"]) for u in out["unverified"]], [(models["bob"], 1)])
+        # (other modules' saved games share the suite's saves folder: only this test's models are looked at)
+        left = {u["model"]: u["games"] for u in out["unverified"]}
+        self.assertEqual({m: left.get(m) for m in models.values()}, {models["bob"]: 1, models["zara"]: None,
+                                                                    models["alice"]: None})
         # another member's board leaves it out too (enough contributors to publish the rest)
         everyone = {(games[w], self.ids[w]) for w in games}
         with mock.patch.object(aggregate, "min_contributors", return_value=1):
@@ -151,7 +154,7 @@ class Tiers(unittest.TestCase):
             rows = {r["model"]: r for r in out["models"]}
             self.assertNotIn(models["bob"], rows)
             self.assertIn(models["zara"], rows)
-            self.assertEqual([u["model"] for u in out["unverified"]], [models["bob"]])
+            self.assertEqual([u["model"] for u in out["unverified"]], [models["bob"]], "its scope: these games")
             # its owner's own figures keep it, badged
             out = self.scores(self.scope("bob", {games["bob"]}, everyone))
             rows = {r["model"]: r for r in out["models"]}
@@ -165,7 +168,7 @@ class Tiers(unittest.TestCase):
         out = self.scores()
         rows = {r["model"]: r for r in out["models"]}
         self.assertEqual(rows[models["bob"]]["benchmark_games"], 1)
-        self.assertEqual(out["unverified"], [])
+        self.assertNotIn(models["bob"], {u["model"] for u in out["unverified"]})
 
     def test_the_runs_listing_and_probe_runs_carry_the_badge(self):
         from citar.server.app import _badge_benchmark_runs, _probe_unverified
