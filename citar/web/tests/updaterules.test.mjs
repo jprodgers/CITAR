@@ -22,6 +22,22 @@ test("an older helper is told an update is available, in its own words when it s
   // a refusal of another version is no word about this one
   assert.equal(updateLine({ latest, available: true, status: { state: "refused", version: "0.1.6", message: "x" } },
     "0.1.6").text, "Helper 0.1.6 · CITAR helper 0.1.7 is signed and relayed: update available");
+  // a refusal of this one says why it will not come by itself
+  assert.deepEqual(updateLine({ latest, available: true, status: { state: "refused", version: "0.1.7",
+    message: "updates are off on this machine" } }, "0.1.6"),
+  { cls: "warn", text: "Helper 0.1.6 · CITAR helper 0.1.7 is signed and relayed: update available; update refused "
+    + "(0.1.7): updates are off on this machine" });
+});
+
+test("a helper that cannot update itself is told to download the newer one", () => {
+  // every build of a tree whose update-keys.pub is empty says unavailable, with no version
+  assert.deepEqual(updateLine({ latest, available: true, status: { state: "unavailable", version: null,
+    message: "this build of the helper trusts no update key" } }, "0.1.6"),
+  { cls: "warn", text: "Helper 0.1.6 · CITAR helper 0.1.7 is signed and relayed: update available; this helper "
+    + "does not update itself: download it from the Servers page" });
+  // up to date, it is up to date whatever it can do
+  assert.deepEqual(updateLine({ latest, available: false, status: { state: "unavailable", version: null,
+    message: "x" } }, "0.1.7"), { cls: "good", text: "Helper 0.1.7 · up to date" });
 });
 
 test("an up-to-date helper says so, and that it was updated", () => {

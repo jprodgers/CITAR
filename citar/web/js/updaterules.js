@@ -25,8 +25,15 @@ export function updateLine(u, version) {
   const said = st ? `${STATE_TEXT[st.state][1]}${st.version ? ` (${st.version})` : ""}` : "";
   const why = st && st.message && ["failed", "refused", "available"].includes(st.state) ? `: ${st.message}` : "";
   if (u.available && latest) {
-    // newer than the helper: its own word when it has one about this version, else that it is there
-    const own = st && st.version === latest && st.state !== "refused" ? `${said}${why}` : "update available";
+    // newer than the helper: its own word when it has one about this version (a refusal of it says why it will not
+    // come by itself), that it cannot update itself (a build that trusts no update key: the owner downloads it), else
+    // that it is there
+    let own = "update available";
+    if (st && st.state === "unavailable") {
+      own = `update available; ${STATE_TEXT.unavailable[1]}: download it from the Servers page`;
+    } else if (st && st.version === latest) {
+      own = st.state === "refused" ? `update available; ${said}${why}` : `${said}${why}`;
+    }
     return { cls: st && st.state === "failed" ? "bad" : "warn",
              text: `Helper ${version || "?"} · CITAR helper ${latest} is signed and relayed: ${own}` };
   }

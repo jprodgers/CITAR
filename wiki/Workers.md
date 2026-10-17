@@ -71,8 +71,8 @@ built into the server ([Configuration](Configuration#workers)). A failed fetch k
 helper's welcome carries it, and a new one goes at once to the connected helpers older than it; each helper decides by
 its owner's `updates` setting ([Updates](#updates)). Each helper machine's card on the Servers page (and its Helper
 dialog) shows its version beside the latest signed helper, "update available" when it is older, and where its helper
-is with an update: downloading, applied, failed with why, refused with why, or unavailable for a build that trusts no
-key.
+is with an update: downloading, applied, failed with why, refused with why, or that it does not update itself (a build
+that trusts no update key: download the newer helper from the Servers page).
 
 ### Signing helper updates (the owner's one-time setup)
 
