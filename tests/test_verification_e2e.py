@@ -396,14 +396,26 @@ class Faulty(unittest.TestCase):
             self.assertAlmostEqual(e.cpu_core_s, 1.5 * replicas[e.request_id], places=5)
 
     def test_an_honest_helper_capped_to_a_quarter_core_is_promoted(self):
-        """An honest helper held to a quarter of a core by its job host's hard limit: its games take four times as
-        long, its CPU is its own (the limit adds waiting, not CPU time), nothing blocks it, and it is promoted."""
+        """An honest helper held to a quarter of a core by its job host's hard limit: its 300-round games (about a
+        second of CPU) take about four times as long as their CPU where the limit is hard (Windows' Job Object always;
+        Linux's systemd scope where it has one; a soft limit, macOS's, does not hold the share and is only reported),
+        its CPU is its own (the limit adds waiting, not CPU time), nothing blocks it, and it is promoted. 4-12's
+        review: the test once passed the same way had the job host ignored the share."""
+        import sys
+        from citar import machine_settings
         self.settings(new_streak=1, promote_verified=2, provisional_rate=1.0)
         sid, token = self.machine("quarter e2e")
-        quarter = max(1, round(25 / JH.machine_cpus()))
+        cpus = JH.machine_cpus()
+        quarter = max(1, round(25 / cpus))
+        share = min(1.0, quarter * cpus / 100.0)        # of a core, for its one thread
         self.lending(sid, quarter)
         self.helper(sid, token, ceiling={**CEILING, "cpu_percent": quarter})
-        self.submit("e2e-quarter", 3, turns=100)
+        with db.session() as s:
+            lent = machine_settings.client(s, s.get(Server, sid), s.get(User, self.ids[self.owner]))["cpu_helper"]
+        limits = lent.get("limits") or {}
+        if sys.platform == "win32":
+            self.assertEqual(limits.get("cpu"), "hard", f"a Job Object holds the share: {limits}")
+        self.submit("e2e-quarter", 3, turns=300)
         self.tick_until(lambda: self.row(sid).trust_tier == "trusted", limit=180)
         events = self.tick_until(lambda: self.settled(sid, 2))
         row = self.row(sid)
@@ -412,6 +424,15 @@ class Faulty(unittest.TestCase):
         for e in events:
             self.assertNotIn("overreported_cpu", e.flags)
             self.assertLessEqual(e.cpu_core_s, 1.5 * replicas[e.request_id] + 1e-6)
+            if limits.get("cpu") == "hard":
+                # held to ``share`` of a core: its wall time is about its CPU over that share (3.4 to 3.9 times its
+                # CPU at 0.24 of a core here, where 4.2 is the share's own: a Job Object lets a run's first moments go
+                # before its rate bites); unheld, about its CPU. Asserted at 0.6 of the share's figure
+                self.assertGreaterEqual(e.observed_s, 0.6 * e.reported_s / share,
+                                        (e.observed_s, e.reported_s, share, limits))
+        print(f"\n[verify e2e] a quarter of a core ({quarter}% of {cpus} CPUs: {share:.2f} of a core, held "
+              f"{limits}): " + ", ".join(f"{e.reported_s:.2f} s of CPU over {e.observed_s:.2f} s" for e in events),
+              file=sys.stderr)
 
     def _replica_cpu(self, sid: str) -> dict:
         """Each of the machine's primary runs' replica's CPU seconds (this server's job host: the reference)."""
