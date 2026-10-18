@@ -4296,8 +4296,6 @@ def main(argv=None) -> int:
                     help="service, exit: the helper in WSL (cargo xtask develop's citar-ext/citar-helper there; "
                          "citar-helper-faults beside it)")
     args = ap.parse_args(argv)
-    # the instance's server plays the lab (the lab part): the test suite's switch, if this runs under it, stays off
-    os.environ.pop("CITAR_TEST_NO_DISPATCHER", None)
     global LLM_URL, STAND_IN, WSL_HELPER
     LLM_URL, STAND_IN, WSL_HELPER = args.llm_url, args.stand_in, args.wsl_helper
     q3.HELPER_BIN = args.helper_bin
@@ -4321,6 +4319,9 @@ def main(argv=None) -> int:
         print("refused: --wsl-root and --wsl-python are absolute paths inside WSL (from Git Bash, set "
               "MSYS_NO_PATHCONV=1, or it rewrites them as Windows paths)", flush=True)
         return 2
+    # the instance's server plays the lab (the lab part): the test suite's switch, if this runs under it, stays off
+    # (cleared only here, past every refusal: a refused run changes nothing of the process it runs in either)
+    os.environ.pop("CITAR_TEST_NO_DISPATCHER", None)
     # the harness's own run, on this script's parts
     q3.PARTS, q3.LATER = PARTS, LATER
     try:

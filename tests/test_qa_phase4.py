@@ -12,6 +12,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -110,7 +111,9 @@ class All(unittest.TestCase):
 
     def main(self, *argv) -> tuple:
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        # the process's environment put back whatever main does with it: the suite's own switch
+        # (CITAR_TEST_NO_DISPATCHER) must survive for the modules after this one
+        with mock.patch.dict(os.environ), contextlib.redirect_stdout(out):
             code = qa4.main(list(argv))
         return code, out.getvalue()
 
@@ -125,6 +128,12 @@ class All(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--wsl belongs to", said)
         self.assertFalse(target.exists(), "a refusal touches nothing")
+        # nor the process's environment: the suite's switch that keeps its servers from playing the lab stays set (a
+        # refusal that cleared it made every later module's app start a job dispatcher of its own)
+        before = os.environ.get("CITAR_TEST_NO_DISPATCHER")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(qa4.main(["exit", "--dir", str(target)]), 2)
+        self.assertEqual(os.environ.get("CITAR_TEST_NO_DISPATCHER"), before)
 
     def test_all_runs_the_windows_parts_then_the_wsl_parts_each_in_a_folder_of_its_own(self):
         seen = []
