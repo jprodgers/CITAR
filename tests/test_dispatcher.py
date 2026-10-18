@@ -1677,6 +1677,28 @@ class Remote(Lab):
         servers.invalidate()
         self.refused("bob", duels("untrusted", 1), "waiting for a verifier")
 
+    def test_a_job_a_connected_helper_refuses_is_said_before_its_wait(self):
+        """Why a game waits names what keeps a connected helper from it for good before what holds the helper for now
+        (4-15; 4-12 saw a held machine say "waiting for a verifier" of a game it had no grant for): a new machine with
+        no verifier, asked for a member's game it has no grant for, says the grant."""
+        with db.session() as s:
+            s.get(Server, self.sid).trust_tier = "new"
+        servers.invalidate()
+        _e, conn = self.connect()
+        self.submit("alice", duels("held-no-grant", 1))
+        d = self.dispatcher([], remotes=self.registry)
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(self.offers(conn), [])
+        waiting = d.published["experiments"]["held-no-grant"].get("waiting") or ""
+        self.assertIn("You do not have permission", waiting)
+        self.assertNotIn("waiting for a verifier", waiting)
+        # bob's own game on the same held machine still says it waits for a verifier
+        self.submit("bob", duels("held-own", 1))
+        for _ in range(3):
+            d.tick()
+        self.assertIn("waiting for a verifier", d.published["experiments"]["held-own"].get("waiting") or "")
+
     def test_its_helpers_quiet_hours(self):
         self.refused("bob", duels("quiet", 1), "its helper's own quiet hours", quiet_until=time.time() + 3600)
 
