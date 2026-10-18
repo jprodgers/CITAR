@@ -250,6 +250,11 @@ class HubServer:
         self.url = f"ws://{ADDRESS}:{self.port}/ws/worker"
         self.base = f"http://{ADDRESS}:{self.port}"
 
+    def busy(self) -> int:
+        """The connections and requests the hub is still serving: uvicorn's task of each, from its handshake (before a
+        helper's connect returns) until the app's handler returns, every write the handler awaited done by then."""
+        return len(self.server.server_state.tasks)
+
     def stop(self):
         from citar.server import app as appmod, reports_api
         self.server.should_exit = True
@@ -845,6 +850,11 @@ class HubPlayer:
         from citar.auth import tokens
         from citar.db.models import Server, User, WorkerToken
         from citar.pool import scheduler as S
+        # the hub done with the transcripts before this one first: a hello sent by a transcript's last step (the second
+        # of handshake-refused-token-service) is answered after its connection closed, and its token lookup, its count
+        # and its audit row, written on threads, would otherwise land after this transcript's counts were taken
+        if not until(lambda: not self.server.busy(), 10.0):
+            raise AssertionError(f"the hub still serves {self.server.busy()} connections or requests of an earlier test")
         hub_setup = self.setup_hub
         for k in hub_setup:
             if k not in ("machine", "token", "rate", "clock", "ping_s", "answer_pings", "local_executor",
@@ -912,7 +922,7 @@ class HubPlayer:
         if self._plays_jobs():
             self._prepare_jobs(owner_id=owner.id)
         self.lookups0 = hub.lookups
-        self.audit0 = self._audit_count()
+        self.audit0 = self._audit_last()
 
     def _prepare_update(self, update: Optional[dict]) -> None:
         """The relay's manifest (``setup.hub.update``): one signed with the throwaway key the extension then trusts
@@ -1466,6 +1476,28 @@ class HubPlayer:
                 q = q.filter(AuditLog.action == action)
             return q.count()
 
+    @staticmethod
+    def _audit_last() -> int:
+        """The newest audit row's id (0 with none): the rows after it are the transcript's."""
+        from sqlalchemy import func
+        from citar import db
+        from citar.db.models import AuditLog
+        with db.session() as s:
+            return s.query(func.max(AuditLog.id)).scalar() or 0
+
+    def _audit_since(self) -> list:
+        """The audit rows written since the transcript began (after ``audit0``), oldest first: each one's action, and
+        the machine it names (``T <transcript>``), so a row another transcript left says whose it is."""
+        from citar import db
+        from citar.db.models import AuditLog, Server
+        with db.session() as s:
+            rows = s.query(AuditLog).filter(AuditLog.id > self.audit0).order_by(AuditLog.id).all()
+            named = []
+            for r in rows:
+                server = s.get(Server, r.object_id) if r.object_type == "server" and r.object_id else None
+                named.append(f"{r.action} ({server.name})" if server is not None else r.action)
+            return named
+
     def _machine(self):
         from citar.pool import scheduler as S
         return S.get().machine(self.sid)
@@ -1598,9 +1630,9 @@ class HubPlayer:
             if n != want:
                 raise AssertionError(f"{n} token lookups, not {want}")
         elif word == "audit_rows":
-            n = self._audit_count() - self.audit0
-            if n != want:
-                raise AssertionError(f"{n} audit rows, not {want}")
+            rows = self._audit_since()
+            if len(rows) != want:
+                raise AssertionError(f"{len(rows)} audit rows, not {want}: {', '.join(rows) or 'none'}")
         elif word == "rate_count":
             n = W.hub().limiter.count(ADDRESS)
             if n != want:
