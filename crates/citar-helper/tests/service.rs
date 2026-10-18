@@ -482,6 +482,75 @@ async fn a_new_supervisor_ends_the_helper_an_ended_one_left() {
     let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
 }
 
+/// 4-14's review: a record a supervisor ended from outside left behind may name a process id the
+/// system has since given to another CITAR helper. That one (here a job host: a `citar-helper`
+/// that is no supervisor) is not taken for the home's supervisor: `status` does not call it
+/// running, `uninstall`'s stop neither waits for it nor ends it, and a new supervisor of the home
+/// starts (and does not end it as a helper left behind).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_record_naming_another_helper_is_no_supervisor() {
+    let home = scratch("svc-stale").join("home");
+    std::fs::create_dir_all(home.join("helper")).expect("home");
+    let mut other = tokio_command()
+        .arg("job-host")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("a job host");
+    let pid = other.id().expect("its pid");
+    let stale = format!(r#"{{"pid": {pid}, "child": {pid}, "program": "citar-helper"}}"#);
+    std::fs::write(supervisor::pid_file(&home), &stale).expect("the stale record");
+    assert!(supervisor::alive(pid), "a live CITAR helper");
+    assert!(!supervisor::supervises_home(pid, &home), "but no supervisor of this home");
+    assert!(!supervisor::serves_home(pid, &home), "nor a helper serving it");
+    #[cfg(windows)]
+    {
+        let out = command()
+            .args(["service", "status", "--user", "--home"])
+            .arg(&home)
+            .output()
+            .expect("runs");
+        assert_eq!(out.status.code(), Some(3), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("not running"), "{out:?}");
+    }
+    let t0 = std::time::Instant::now();
+    supervisor::stop_running(&home, &Log::memory()).expect("stopped");
+    assert!(t0.elapsed() < Duration::from_secs(5), "no wait for a supervisor that is not there");
+    assert!(supervisor::read_record(&home).is_none(), "the stale record removed");
+    assert!(other.try_wait().expect("its state").is_none(), "the other helper left running");
+    #[cfg(feature = "dev-guard")]
+    {
+        let _cleanup = Cleanup(home.clone());
+        std::fs::write(supervisor::pid_file(&home), &stale).expect("the stale record again");
+        let (port, mut conns) = loopback_hub().await;
+        let mut sup = tokio_command()
+            .args(["run", "--supervisor", "--home"])
+            .arg(&home)
+            .args(helper_args(port))
+            .spawn()
+            .expect("the supervisor starts");
+        let hello = refuse_next(&mut conns, Duration::from_secs(30))
+            .await
+            .expect("a new supervisor starts its helper");
+        assert_eq!(hello["t"], "hello");
+        let log =
+            std::fs::read_to_string(home.join("helper").join("logs").join(supervisor::LOG_FILE))
+                .expect("its log");
+        assert!(!log.contains("already runs"), "{log}");
+        assert!(!log.contains("left running"), "{log}");
+        std::fs::write(supervisor::stop_file(&home), b"stop").expect("stop file");
+        let status = tokio::time::timeout(Duration::from_secs(30), sup.wait())
+            .await
+            .expect("it stops")
+            .expect("status");
+        assert_eq!(status.code(), Some(0));
+        assert!(other.try_wait().expect("its state").is_none(), "the other helper still runs");
+    }
+    other.kill().await.expect("the job host ended");
+    let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
+}
+
 /// Gate 3, `run --detach` (what the Run value starts): it returns at once, the supervisor runs in
 /// the background with the helper under it (which connects), and a stop request ends both.
 #[cfg(feature = "dev-guard")]

@@ -25,8 +25,16 @@ pub enum Step {
     Write { path: PathBuf, text: String, mode: u32 },
     /// Copy a file.
     Copy { from: PathBuf, to: PathBuf },
-    /// Give a folder and everything under it a protected DACL granting `principals` alone (SID
-    /// strings), owned by `owner` (Windows: the service's home).
+    /// Check the folders above `path`, up to its drive's root (Windows: the service's home): none a
+    /// link or junction, none another account could take over (it owns the folder, or may delete
+    /// or rename it or what it holds, or change its permissions or owner).
+    CheckAbove { path: PathBuf },
+    /// Make each missing folder above `path`, each with a protected DACL from its first moment:
+    /// owned by `owner`, full control for `full`, read for `read` (SID strings).
+    FoldersAbove { path: PathBuf, owner: String, full: Vec<String>, read: Vec<String> },
+    /// Make the folder `path` if it is missing (with its DACL from its first moment), then give it
+    /// and everything under it a protected DACL granting `principals` alone (SID strings), owned by
+    /// `owner` (Windows: the service's home).
     Secure { path: PathBuf, owner: String, principals: Vec<String> },
     /// Run a program; a step that `may_fail` notes its failure and goes on (a stop of something not
     /// running, the removal of something not there).
@@ -150,11 +158,36 @@ impl Step {
                 s
             }
             Step::Copy { from, to } => format!("copy {} to {}", shown(from), shown(to)),
+            Step::CheckAbove { path } => format!(
+                "check the folders above {}, up to its drive's root: none is a link or junction, \
+                 each is owned by {}, {}, {} or the administrator installing, and none lets another \
+                 account delete or rename it or what it holds, or change its permissions or owner",
+                shown(path),
+                principal_name(super::windows::SYSTEM),
+                principal_name(super::windows::ADMINISTRATORS),
+                principal_name(super::windows::TRUSTED_INSTALLER)
+            ),
+            Step::FoldersAbove { path, owner, full, read } => {
+                let names = |sids: &[String]| -> String {
+                    sids.iter().map(|p| principal_name(p)).collect::<Vec<_>>().join(", ")
+                };
+                format!(
+                    "make each missing folder above {}, secured as it is made: owner {}, full \
+                     control for {}, read for {}, nothing inherited (SDDL: {}); one that another \
+                     account makes meanwhile is checked as above",
+                    shown(path),
+                    principal_name(owner),
+                    names(full),
+                    names(read),
+                    above_sddl(owner, full, read)
+                )
+            }
             Step::Secure { path, owner, principals } => {
                 let names: Vec<String> = principals.iter().map(|p| principal_name(p)).collect();
                 format!(
-                    "secure {} and everything in it: owner {}, access for {} alone, nothing \
-                     inherited (SDDL of the folder: {})",
+                    "make {} if it is missing, secured as it is made, then secure it and \
+                     everything in it: owner {}, access for {} alone, nothing inherited (SDDL of \
+                     the folder: {})",
                     shown(path),
                     principal_name(owner),
                     names.join(", "),
@@ -191,6 +224,10 @@ pub fn principal_name(sid: &str) -> String {
     match sid {
         "S-1-5-18" => "SYSTEM (S-1-5-18)".to_owned(),
         "S-1-5-32-544" => "Administrators (S-1-5-32-544)".to_owned(),
+        "S-1-5-32-545" => "Users (S-1-5-32-545)".to_owned(),
+        super::windows::TRUSTED_INSTALLER => {
+            format!(r"NT SERVICE\TrustedInstaller ({})", super::windows::TRUSTED_INSTALLER)
+        }
         other => match super::windows::named_service_sid(other) {
             Some(account) => format!("{account} ({other})"),
             None => other.to_owned(),
@@ -205,6 +242,21 @@ pub fn folder_sddl(owner: &str, principals: &[String]) -> String {
     let mut s = format!("O:{owner}D:P");
     for p in principals {
         let _w = write!(s, "(A;OICI;FA;;;{p})");
+    }
+    s
+}
+
+/// What `0x1200a9` grants: read and list, read attributes, run (`FILE_GENERIC_READ` and
+/// `FILE_GENERIC_EXECUTE`, icacls' `RX`).
+pub const READ_AND_RUN: &str = "0x1200a9";
+
+/// The SDDL a folder of [`Step::FoldersAbove`] is made with: owner, protected DACL, full control
+/// for `full` and read for `read`, inherited by files and folders.
+#[must_use]
+pub fn above_sddl(owner: &str, full: &[String], read: &[String]) -> String {
+    let mut s = folder_sddl(owner, full);
+    for p in read {
+        let _w = write!(s, "(A;OICI;{READ_AND_RUN};;;{p})");
     }
     s
 }
@@ -278,6 +330,10 @@ impl Plan {
                     std::fs::copy(from, to)
                         .map_err(|e| fail(format!("{} to {}: {e}", shown(from), shown(to))))?;
                 }
+                Step::CheckAbove { path } => super::windows::check_above(path).map_err(fail)?,
+                Step::FoldersAbove { path, owner, full, read } => {
+                    folders_above(path, &above_sddl(owner, full, read)).map_err(fail)?
+                }
                 Step::Secure { path, owner, principals } => {
                     secure(path, owner, principals).map_err(fail)?
                 }
@@ -346,11 +402,48 @@ fn write_file(path: &Path, text: &str, mode: u32) -> Result<(), String> {
     })
 }
 
-/// [`Step::Secure`] on this OS.
+/// [`Step::FoldersAbove`] on this OS: the folders above `home` that are missing, from the highest
+/// down, each made with `sddl` from its first moment; one that is there by the time it is made
+/// (another account made it meanwhile) is checked as [`Step::CheckAbove`] checks them.
+fn folders_above(home: &Path, sddl: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let mut missing = Vec::new();
+        let mut up = home.parent();
+        while let Some(p) = up {
+            if p.as_os_str().is_empty() {
+                break;
+            }
+            match std::fs::symlink_metadata(p) {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(p),
+                Err(e) => return Err(format!("{}: {e}", shown(p))),
+            }
+            up = p.parent();
+        }
+        for p in missing.iter().rev() {
+            if !citar_jobs::sys::create_dir_with(p, sddl).map_err(|e| e.to_string())? {
+                super::windows::check_one_above(p)?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = sddl;
+        Err(format!("{}: an access list is Windows' own", shown(home)))
+    }
+}
+
+/// [`Step::Secure`] on this OS: the folder made with its access list when it is missing, then it
+/// and what it holds given that access list (citar-jobs' `restrict_tree_to`, which refuses a link,
+/// a junction, a hard link or another account's object in it).
 fn secure(path: &Path, owner: &str, principals: &[String]) -> Result<(), String> {
     #[cfg(windows)]
     {
         let p: Vec<&str> = principals.iter().map(String::as_str).collect();
+        let _made = citar_jobs::sys::create_dir_with(path, &folder_sddl(owner, principals))
+            .map_err(|e| e.to_string())?;
         // What may own what is there already: these principals, and the administrator installing.
         let me = citar_jobs::sys::current_user_sid().map_err(|e| e.to_string())?;
         let mut owners = p.clone();

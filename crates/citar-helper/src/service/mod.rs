@@ -350,6 +350,13 @@ pub fn command(cli: &Cli, action: &ServiceAction, log: &Log) -> Result<u8, Refus
         if installing && let Err(e) = check_settings(&i.home) {
             println!("note: {e}");
         }
+        if installing
+            && i.os == Os::Windows
+            && i.scope == Scope::System
+            && let Err(e) = windows::check_above(&i.home)
+        {
+            println!("note: the install would be refused: {e}");
+        }
         if scope == Scope::System && !citar_jobs::sys::is_elevated().unwrap_or(false) {
             println!("note: {}", elevation_needed(&i, installing));
         }
@@ -376,7 +383,8 @@ pub fn command(cli: &Cli, action: &ServiceAction, log: &Log) -> Result<u8, Refus
         ));
     }
     if installing && i.os == Os::Windows && i.scope == Scope::System {
-        windows::check_no_link_to(&i.home).map_err(|e| (2, e))?;
+        // Before anything is made: no folder above the home another account could take over.
+        windows::check_above(&i.home).map_err(|e| (2, e))?;
     }
     if installing {
         check_settings(&i.home).map_err(|e| (2, e))?;
@@ -464,9 +472,11 @@ pub fn read_status(i: &Inputs) -> Status {
             )
             .ok()
             .and_then(|t| windows::read_run_value(&t));
+            // Each process by its command line: a record a supervisor ended from outside left may
+            // name process ids the system has since given to other helpers.
             let record = supervisor::read_record(&i.home);
-            let sup = record.as_ref().filter(|r| supervisor::alive(r.pid));
-            let child = sup.and_then(|r| r.child).filter(|c| supervisor::alive(*c));
+            let sup = record.as_ref().filter(|r| supervisor::supervises_home(r.pid, &i.home));
+            let child = sup.and_then(|r| r.child).filter(|c| supervisor::serves_home(*c, &i.home));
             let mut line = match &value {
                 Some(v) => format!("the Run value \"{RUN_VALUE}\" starts {v} at each sign-in"),
                 None => format!("no Run value \"{RUN_VALUE}\""),
@@ -640,6 +650,29 @@ mod tests {
         let run = rendered(Os::Windows, Scope::User).expect("a plan");
         assert!(run.contains(r"\CurrentVersion\Run /v "), "{run}");
         assert!(run.contains("run --detach --home"), "{run}");
+    }
+
+    /// 4-14's review: the folders above the Windows service's home are checked before anything is
+    /// made, the missing ones made secured, the home secured before anything is made in it (its
+    /// `bin` then inherits the home's entries), and the binary copied in only after.
+    #[test]
+    fn the_windows_service_home_is_secured_before_anything_is_made_in_it() {
+        let plan = install_plan(&fixed(Os::Windows, Scope::System)).expect("a plan");
+        let at = |want: &dyn Fn(&Step) -> bool| {
+            plan.steps.iter().position(want).expect("the step is in the plan")
+        };
+        let check = at(&|s| matches!(s, Step::CheckAbove { .. }));
+        let above = at(&|s| matches!(s, Step::FoldersAbove { .. }));
+        let secure = at(&|s| matches!(s, Step::Secure { .. }));
+        let bin = at(&|s| matches!(s, Step::Folder(p) if p.ends_with("bin")));
+        let copy = at(&|s| matches!(s, Step::Copy { .. }));
+        assert_eq!((check, above, secure, bin, copy), (0, 1, 2, 3, 4), "{plan:?}");
+        let Step::FoldersAbove { owner, full, read, .. } = &plan.steps[above] else {
+            unreachable!("found above")
+        };
+        assert_eq!(owner, windows::ADMINISTRATORS);
+        assert_eq!(full, &[windows::SYSTEM.to_owned(), windows::ADMINISTRATORS.to_owned()]);
+        assert_eq!(read, &[windows::USERS.to_owned()], "Users may read, and nothing more");
     }
 
     #[test]

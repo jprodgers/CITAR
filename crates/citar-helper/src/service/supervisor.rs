@@ -19,7 +19,10 @@
 //! the helper is ended at once, as closing its window would (a game it played is played again
 //! elsewhere; results it holds are sent at its next start). `helper/supervisor.json` names the
 //! supervisor's process and the helper's, which `service status` reads; one supervisor per home:
-//! a second one started while the first runs leaves at once. Its log is `helper/logs/supervisor.log`.
+//! a second one started while the first runs leaves at once. A process the record names counts
+//! only when its command line says what it is (`--supervisor` or `--service`, and this home):
+//! a record a supervisor ended from outside left behind may name process ids the system has since
+//! given to other CITAR helpers. Its log is `helper/logs/supervisor.log`.
 //!
 //! The supervising itself ([`supervise`]) is written over a [`Child`], so the tests run it on
 //! tokio's paused clock against children of their own, among them the helper's own session
@@ -201,7 +204,8 @@ fn write_record(home: &Path, r: &Record) {
 }
 
 /// Whether the process `pid` runs, and is a CITAR helper (its program's name starts so: a process
-/// id the system gave to something else since is not one).
+/// id the system gave to something else since is not one). Any CITAR helper: what the supervisor
+/// of a home is, or a helper serving it, is told by [`supervises_home`] and [`serves_home`].
 #[must_use]
 pub fn alive(pid: u32) -> bool {
     let sys_pid = sysinfo::Pid::from_u32(pid);
@@ -211,11 +215,33 @@ pub fn alive(pid: u32) -> bool {
         .is_some_and(|p| p.name().to_string_lossy().to_lowercase().starts_with("citar-helper"))
 }
 
-/// Whether `pid` is a helper in service mode for the home `home`: its command line names both, as
-/// the supervisor of that home starts it (a process id the system has given to another program, or
-/// to a helper of another home, since its supervisor ended is not one).
-#[must_use]
-pub fn serves_home(pid: u32, home: &Path) -> bool {
+/// Two homes as the same folder: equal paths, and on Windows, whose paths ignore case, equal
+/// once lowered.
+fn same_home(a: &Path, b: &Path) -> bool {
+    a == b
+        || (cfg!(windows)
+            && Path::new(&a.to_string_lossy().to_lowercase())
+                == Path::new(&b.to_string_lossy().to_lowercase()))
+}
+
+/// Whether a command line names the home `home`: `--home HOME` or `--home=HOME`.
+fn names_home(cmd: &[OsString], home: &Path) -> bool {
+    let mut args = cmd.iter();
+    while let Some(a) = args.next() {
+        let named = if a == "--home" {
+            args.next().map(PathBuf::from)
+        } else {
+            a.to_str().and_then(|t| t.strip_prefix("--home=")).map(PathBuf::from)
+        };
+        if named.is_some_and(|n| same_home(&n, home)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The command line of the CITAR helper `pid`, when it runs and is one.
+fn helper_cmd(pid: u32) -> Option<Vec<OsString>> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut sys = sysinfo::System::new();
     sys.refresh_processes_specifics(
@@ -223,10 +249,32 @@ pub fn serves_home(pid: u32, home: &Path) -> bool {
         true,
         sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always),
     );
-    let Some(p) = sys.process(sys_pid) else { return false };
-    p.name().to_string_lossy().to_lowercase().starts_with("citar-helper")
-        && p.cmd().iter().any(|a| a == "--service")
-        && p.cmd().iter().any(|a| Path::new(a) == home)
+    let p = sys.process(sys_pid)?;
+    p.name().to_string_lossy().to_lowercase().starts_with("citar-helper").then(|| p.cmd().to_vec())
+}
+
+/// Whether `pid` is a helper in service mode for the home `home`: its command line names both, as
+/// the supervisor of that home starts it (a process id the system has given to another program, or
+/// to a helper of another home, since its supervisor ended is not one).
+#[must_use]
+pub fn serves_home(pid: u32, home: &Path) -> bool {
+    helper_cmd(pid).is_some_and(|cmd| {
+        cmd.iter().any(|a| a == "--service")
+            && !cmd.iter().any(|a| a == SUPERVISOR_FLAG)
+            && names_home(&cmd, home)
+    })
+}
+
+/// Whether `pid` is the Run supervisor of the home `home`: a CITAR helper whose command line has
+/// [`SUPERVISOR_FLAG`] and names the home. A record left by a supervisor that was ended (at
+/// sign-out, or from Task Manager) may name a process id the system has since given to another
+/// CITAR helper (a console helper of another home, the Windows service, another supervisor's
+/// helper): that one is no supervisor of this home, so it neither keeps a new one from starting
+/// nor is ended by `uninstall`.
+#[must_use]
+pub fn supervises_home(pid: u32, home: &Path) -> bool {
+    helper_cmd(pid)
+        .is_some_and(|cmd| cmd.iter().any(|a| a == SUPERVISOR_FLAG) && names_home(&cmd, home))
 }
 
 /// Ends the process `pid` at once, if it is a CITAR helper.
@@ -244,36 +292,40 @@ fn kill(pid: u32) {
 /// How long `uninstall` waits for a supervisor to stop by itself.
 pub const STOP_WAIT: Duration = Duration::from_secs(20);
 
-/// Stops the supervisor this home's record names, if it runs: the stop file written, then, past
-/// [`STOP_WAIT`], the supervisor and its helper ended. A record whose process is gone is removed.
+/// Stops the supervisor this home's record names, if it runs (it is this home's supervisor by its
+/// command line, [`supervises_home`]): the stop file written, then, past [`STOP_WAIT`], the
+/// supervisor and its helper ended. A record whose supervisor is gone is removed, and a helper it
+/// left serving this home ended ([`serves_home`]); a process id the record names that the system
+/// has given to anything else is left alone.
 ///
 /// # Errors
 /// The stop file could not be written.
 pub fn stop_running(home: &Path, log: &Log) -> Result<(), String> {
     let Some(r) = read_record(home) else { return Ok(()) };
-    if !alive(r.pid) {
-        if let Some(c) = r.child.filter(|c| serves_home(*c, home)) {
+    let left_child = || {
+        if let Some(c) = read_record(home).and_then(|r| r.child).filter(|c| serves_home(*c, home)) {
             kill(c);
         }
+    };
+    if !supervises_home(r.pid, home) {
+        left_child();
         let _gone = std::fs::remove_file(pid_file(home));
         return Ok(());
     }
     let stop = stop_file(home);
     std::fs::write(&stop, b"stop\n").map_err(|e| format!("{}: {e}", stop.display()))?;
     let until = std::time::Instant::now() + STOP_WAIT;
-    while alive(r.pid) && std::time::Instant::now() < until {
+    while supervises_home(r.pid, home) && std::time::Instant::now() < until {
         std::thread::sleep(Duration::from_millis(200));
     }
-    if alive(r.pid) {
+    if supervises_home(r.pid, home) {
         log.warn(format!(
             "the supervisor (pid {}) did not stop within {} s: ending it",
             r.pid,
             STOP_WAIT.as_secs()
         ));
         kill(r.pid);
-        if let Some(c) = r.child {
-            kill(c);
-        }
+        left_child();
     }
     let _gone = std::fs::remove_file(pid_file(home));
     let _gone = std::fs::remove_file(&stop);
@@ -382,7 +434,7 @@ pub fn main(home: &Home, log: &Log) -> u8 {
     let me = std::process::id();
     if let Some(r) = read_record(&root)
         && r.pid != me
-        && alive(r.pid)
+        && supervises_home(r.pid, &root)
     {
         log.info(format!("a supervisor already runs for this home (pid {}): leaving it be", r.pid));
         return 0;
@@ -589,6 +641,25 @@ mod tests {
         let (code, ()) = tokio::join!(task, stopper);
         assert_eq!(code, 0);
         assert_eq!(child.starts.lock().expect("lock").len(), 1);
+    }
+
+    #[test]
+    fn a_command_line_names_its_home_only_as_the_home() {
+        let cmd = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        let home = Path::new("/srv/h");
+        assert!(names_home(&cmd(&["run", "--home", "/srv/h", SUPERVISOR_FLAG]), home));
+        assert!(names_home(&cmd(&["run", "--home=/srv/h/"]), home), "--home= and a trailing slash");
+        assert!(!names_home(&cmd(&["run", "--home", "/srv/other"]), home), "another home");
+        assert!(!names_home(&cmd(&["scan", "/srv/h"]), home), "the path, but not as the home");
+        assert!(!names_home(&cmd(&["run", "--home"]), home), "no value");
+        #[cfg(windows)]
+        assert!(
+            names_home(
+                &cmd(&["run", "--home", r"C:\Users\A\CITAR"]),
+                Path::new(r"c:\users\a\citar")
+            ),
+            "Windows' paths ignore case"
+        );
     }
 
     #[test]

@@ -20,11 +20,25 @@
 //! update's rollback counts (the last action repeats, so no count of quick failures stops it).
 //! Installing needs an elevated prompt; an unelevated `install --system` prints the elevated
 //! command and exits 2. Under `%ProgramData%` every user may make folders and files, and owns
-//! what they make: the home is set only when no link or junction leads to it or lies in it and
-//! everything in it is SYSTEM's, Administrators', the installing administrator's or the service's
-//! (citar-jobs' `restrict_tree_to`), so a home another user made first, or a junction or hard link
-//! planted in one, is refused rather than taken over; and the binary's copy replaces no file that
-//! is there (a hard link would carry the write to its target).
+//! what they make, so before anything is made:
+//! - **the folders above the home** (its parent to the drive's root) must be no other account's to
+//!   take over: each owned by SYSTEM, Administrators, TrustedInstaller or the administrator
+//!   installing, none letting another account delete or rename it or what it holds, or change its
+//!   permissions or owner, and none a link or junction ([`check_above`], citar-jobs'
+//!   `check_ancestors`; 4-14's review). The home's own access list cannot keep the owner of
+//!   `%ProgramData%\CITAR` from moving the home aside and putting its own, binary and all, in its
+//!   place, where the service's fixed binary path would run it as the service. A missing folder
+//!   above the home is made with its access list from its first moment (Administrators' and
+//!   SYSTEM's, Users may read), and one another account makes in the meantime is checked as the
+//!   others were;
+//! - **the home** is made with its access list from its first moment when it is missing, and set
+//!   (with what it holds) only when no link, junction or file with a second name (a hard link)
+//!   lies in it and everything in it is SYSTEM's, Administrators', the installing administrator's
+//!   or the service's (citar-jobs' `restrict_tree_to`, which checks each object again on its own
+//!   handle right before it sets it): a home another user made first, or a junction or hard link
+//!   planted in one, is refused rather than taken over. Its `bin` is made after, inheriting the
+//!   home's entries; and the binary's copy replaces no file that is there (a hard link would carry
+//!   the write to its target).
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +51,11 @@ pub const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 pub const SYSTEM: &str = "S-1-5-18";
 /// The Administrators group.
 pub const ADMINISTRATORS: &str = "S-1-5-32-544";
+/// The Users group.
+pub const USERS: &str = "S-1-5-32-545";
+/// `NT SERVICE\TrustedInstaller`, which owns a drive's root and Windows' own folders.
+pub const TRUSTED_INSTALLER: &str =
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 /// The service's description.
 pub const DESCRIPTION: &str = "Lends this machine's model endpoint and, if its owner says so, its spare CPU to a CITAR server.";
 /// How long a failed service waits before the service manager starts it again, in ms.
@@ -168,26 +187,64 @@ fn sc(args: &[&str], may_fail: bool) -> Step {
     }
 }
 
-/// Refuses a home that a link or junction leads to (the home itself, or a folder above it, which
-/// under `%ProgramData%` any user may make): checked before anything is made, so no folder is made
-/// through one.
+/// What may own a folder above the service's home, and hold rights over it: SYSTEM, Administrators,
+/// TrustedInstaller (a drive's root) and the administrator installing.
+#[cfg(windows)]
+fn trusted_above() -> Result<Vec<String>, String> {
+    let me = citar_jobs::sys::current_user_sid().map_err(|e| format!("this account: {e}"))?;
+    Ok(vec![SYSTEM.to_owned(), ADMINISTRATORS.to_owned(), TRUSTED_INSTALLER.to_owned(), me])
+}
+
+/// What a refusal of a folder above the home says to do.
+fn above_refused(e: &std::io::Error, home: &Path) -> String {
+    format!(
+        "{e}; another account could then move the service's home {} aside and put its own in its \
+         place, and its program would run as the service: remove that folder, or give it to \
+         Administrators with nobody else allowed to delete, rename or re-permission it, and install \
+         again",
+        home.display()
+    )
+}
+
+/// Refuses a home whose folders above it (from its parent to its drive's root) hold a link or
+/// junction, or one another account could take over: owned by it, or letting it delete or rename
+/// the folder or what it holds, or change the folder's permissions or owner (citar-jobs'
+/// `check_ancestors`). Under `%ProgramData%` any user may make a folder, and owns it: a
+/// `%ProgramData%\CITAR` another user made before the administrator installs would let that user
+/// replace the home under it, binary and all, whatever the home's own access list says. Checked
+/// before anything is made; a folder that is missing is made by the plan, secured as it is made.
 ///
 /// # Errors
-/// The link, named.
-pub fn check_no_link_to(home: &Path) -> Result<(), String> {
-    let mut up = Some(home);
-    while let Some(p) = up {
-        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(format!(
-                "{} is a link or junction, so the service's home {} would be wherever it leads: \
-                 remove it",
-                p.display(),
-                home.display()
-            ));
-        }
-        up = p.parent();
+/// The folder refused and why, with what to do.
+pub fn check_above(home: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let trusted = trusted_above()?;
+        let t: Vec<&str> = trusted.iter().map(String::as_str).collect();
+        citar_jobs::sys::check_ancestors(home, &t).map_err(|e| above_refused(&e, home))
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        Err(format!("{}: the folders' access lists are Windows' own", home.display()))
+    }
+}
+
+/// One folder above the home, checked as [`check_above`] checks them (one another account made
+/// while the plan made the folders above the home).
+///
+/// # Errors
+/// As [`check_above`].
+pub fn check_one_above(folder: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let trusted = trusted_above()?;
+        let t: Vec<&str> = trusted.iter().map(String::as_str).collect();
+        citar_jobs::sys::check_ancestor(folder, &t).map_err(|e| above_refused(&e, folder))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(format!("{}: the folders' access lists are Windows' own", folder.display()))
+    }
 }
 
 /// The service's binary in its home: `<home>\bin\citar-helper.exe`.
@@ -196,9 +253,11 @@ pub fn service_binary(home: &Path) -> PathBuf {
     Quoting::Windows.join(home, &["bin", &format!("{NAME}.exe")])
 }
 
-/// `install --system`: the home and its `bin` made, the home's DACL set, this binary copied in, the
-/// service created with its account, description, SID type, failure actions and their non-crash
-/// flag, and started.
+/// `install --system`: the folders above the home checked (none another account could take over)
+/// and the missing ones made secured; the home made secured when missing and its DACL set on it
+/// and on what it holds; then its `bin` made (inheriting the home's entries), this binary copied
+/// in, the service created with its account, description, SID type, failure actions and their
+/// non-crash flag, and started.
 #[must_use]
 pub fn system_install_plan(source: &Path, home: &Path) -> Plan {
     let binary = service_binary(home);
@@ -211,12 +270,19 @@ pub fn system_install_plan(source: &Path, home: &Path) -> Plan {
         title: "citar-helper service install --system".to_owned(),
         quoting: Quoting::Windows,
         steps: vec![
-            Step::Folder(Quoting::Windows.join(home, &["bin"])),
+            Step::CheckAbove { path: home.to_path_buf() },
+            Step::FoldersAbove {
+                path: home.to_path_buf(),
+                owner: ADMINISTRATORS.to_owned(),
+                full: vec![SYSTEM.to_owned(), ADMINISTRATORS.to_owned()],
+                read: vec![USERS.to_owned()],
+            },
             Step::Secure {
                 path: home.to_path_buf(),
                 owner: ADMINISTRATORS.to_owned(),
                 principals: vec![SYSTEM.to_owned(), ADMINISTRATORS.to_owned(), sid],
             },
+            Step::Folder(Quoting::Windows.join(home, &["bin"])),
             Step::Copy { from: source.to_path_buf(), to: binary },
             sc(
                 &[
@@ -402,9 +468,12 @@ mod tests {
             .output()
             .expect("mklink");
         assert!(made.status.success(), "{made:?}");
-        let e = check_no_link_to(&link.join("helper")).expect_err("refused");
-        assert!(e.contains("is a link or junction"), "{e}");
-        assert!(check_no_link_to(&elsewhere.join("helper")).is_ok(), "no link on the way");
+        // The folder right above the home is a junction: refused there, first, with what to do.
+        // (Folders further up that another account could take over are refused too: citar-jobs'
+        // sys tests, which can bound the walk to their own folders.)
+        let e = check_above(&link.join("helper")).expect_err("refused");
+        assert!(e.contains("CITAR: a link or junction"), "{e}");
+        assert!(e.contains("could then move the service's home"), "{e}");
         std::fs::remove_dir(&link).expect("the junction removed");
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
