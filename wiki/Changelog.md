@@ -305,9 +305,11 @@ that means for an existing install:
   `SuccessfulExit` false); Windows: a Run value at sign-in that starts `citar-helper run --detach`, a supervisor with no
   window that restarts the helper at once after an update and with backoff after a crash, or, from an elevated prompt,
   a Windows service running as `NT SERVICE\citar-helper` (not LocalSystem) from `%ProgramData%\CITAR\helper`, whose
-  access list leaves out the machine's other users, restarted after every failure. `--dry-run` prints exactly what
-  would be written and run. In service mode nothing permanent ends the helper: a refused token or a setting it cannot
-  take idles and tries again hourly. [docs/server/WORKERS.md](Workers#running-the-helper-as-a-service).
+  access list leaves out the machine's other users, restarted after every failure; it is installed only when no
+  folder above that home is another account's to take over. `--dry-run` prints exactly what would be written and run.
+  In service mode nothing permanent ends the helper: a refused token idles and tries again hourly, and a setting it
+  cannot take idles and is read again after 15 s (doubling to an hour) or as soon as `helper.json` changes.
+  [docs/server/WORKERS.md](Workers#running-the-helper-as-a-service).
 - **Five helper downloads:** an Intel Mac build (`citar-helper-macos-x64`) joins Windows x64, macOS on Apple silicon
   and Linux x64 and ARM64, all built in Rust by the release workflow under the same unversioned names, each with its
   `.sha256`, run once with `--version` and `--self-test`. The Servers page offers a Mac whose browser does not say its
@@ -375,7 +377,8 @@ own, and all of them at once in one game, with a real model in LM Studio last
   alike) was offered the Apple silicon helper only; it is now offered both macOS builds.
 - A helper run as a service with a setting it cannot take exited with code 2, which a service
   manager restarted every 15 s for ever; it now idles, says why once in its log and reads its
-  settings again hourly (except while an update's new binary must have its starts counted).
+  settings again after 15 s, doubling to an hour, and at once when `helper.json` changes (except
+  while an update's new binary must have its starts counted).
 
 **Rules the Rust engine fixes.** The new engine in `crates/citar-engine`, which replaces the Python
 engine in this release, plays by the same rules except where the Python engine was wrong or

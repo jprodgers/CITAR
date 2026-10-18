@@ -516,9 +516,17 @@ the helper with `--service`, its home's absolute path and the binary's: the bina
 ran can go), and gives the home `%ProgramData%\CITAR\helper` an access list of SYSTEM, Administrators
 and the service's account alone, owned by Administrators, with nothing inherited from `%ProgramData%`
 (which would let every user of the machine read `helper.json`, which holds the token, and the machine
-key). Under `%ProgramData%` any user may make folders and files, so the home is taken over only when
-nothing in it belongs to another account and no link or junction leads to it or lies in it; otherwise
-`install` names what to remove and changes nothing. Its recovery actions start it again 15 s after every failure, a non-zero exit code included (so
+key). Under `%ProgramData%` any user may make folders and files, and owns what they make, so before
+anything is made `install` checks every folder above the home, up to the drive's root: each must be
+owned by SYSTEM, Administrators, TrustedInstaller or you, and none may let another account delete or
+rename it or what it holds, or change its permissions or owner (a `%ProgramData%\CITAR` that another
+user made before you install would let that user move the home aside and put their own, binary and
+all, in its place, to run as the service). A missing folder above the home (`%ProgramData%\CITAR`
+the first time) is made with its access list from its first moment: Administrators and SYSTEM, and
+Users may read. The home is made the same way when missing, and taken over only when nothing in it
+belongs to another account and no link, junction or hard link leads to it or lies in it; its `bin` is
+made after it is secured. Otherwise `install` names the folder or file to remove and changes nothing.
+Its recovery actions start it again 15 s after every failure, a non-zero exit code included (so
 an update's hand-off, exit 75, restarts it), with no limit on how often. The service writes its
 machine key for its own account: an administrator's `citar-helper --version --home ...` cannot read it
 and prints no fingerprint, and the Servers page's Helper dialog shows it instead. `service run` is the
@@ -535,9 +543,12 @@ service's own entry, which the service manager starts; run from a console it say
 
 A service run **never exits on something permanent**: a token refused, a machine taken away, another
 helper's key (the paragraph "When the server says no", below), and also settings it
-cannot take or a machine key others can read. It says why once in its log, idles, and tries again
-every hour (reading its settings again), and stops at once when asked. So no service manager restarts
-it into a loop every 15 s, as the 0.1.5 unit did. The one exception is an update in progress: a new
+cannot take or a machine key others can read. It says why once in its log, idles, and stops at once
+when asked. A refusal from the server is tried again every hour. Settings it cannot take are read
+again after 15 s, then after twice as long each time up to an hour, and at once when `helper.json`
+changes, so a fixed file takes effect within seconds without a restart, and a file not readable yet
+at boot costs seconds, not an hour. So no service manager restarts it into a loop every 15 s, as the
+0.1.5 unit did. The one exception is an update in progress: a new
 binary that cannot take its settings exits, so that its starts are counted and the old binary is put
 back ([Updates](#updates)).
 
@@ -884,9 +895,10 @@ is not the same as a model in memory.
 
 **The service does not start, or does nothing.** `citar-helper service status` (with the same
 `--user`/`--system` and `--home`) says whether it runs; the helper's log in its home
-(`helper/logs/helper.log`) says why it does not connect. A service whose settings are wrong (or whose
-token was revoked) runs and idles, saying why once in that log and trying again every hour: fix
-`helper.json`, then restart it (`systemctl --user restart citar-helper`, `launchctl kickstart -k
+(`helper/logs/helper.log`) says why it does not connect. A service whose settings are wrong runs and
+idles, saying why once in that log: fix `helper.json`, and it reads it again within seconds. One whose
+token was revoked idles and tries again every hour: give it a new token (`citar-helper setup --home
+...`), then restart it (`systemctl --user restart citar-helper`, `launchctl kickstart -k
 gui/$(id -u)/org.citar.helper`, `sc.exe stop`/`start citar-helper` from an elevated prompt, or
 `service uninstall` and `install` again). On Linux a user service stops when you log out unless
 lingering is on (`loginctl enable-linger $USER`). On Windows `install --system` needs an elevated
