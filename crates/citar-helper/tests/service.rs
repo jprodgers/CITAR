@@ -413,6 +413,60 @@ async fn the_run_supervisor_keeps_the_helper_and_stops_on_request() {
     let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
 }
 
+/// A supervisor ended from outside (Task Manager) leaves its helper running alone: the next one
+/// started for the home ends that helper before it starts its own, so two helpers never fight over
+/// the machine's connection; and a second supervisor for a home whose supervisor runs leaves at once.
+#[cfg(feature = "dev-guard")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_supervisor_ends_the_helper_an_ended_one_left() {
+    let home = scratch("svc-orphan").join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let _cleanup = Cleanup(home.clone());
+    let (port, mut conns) = loopback_hub().await;
+    let start = || {
+        tokio_command()
+            .args(["run", "--supervisor", "--home"])
+            .arg(&home)
+            .args(helper_args(port))
+            .spawn()
+            .expect("the supervisor starts")
+    };
+    let mut first = start();
+    refuse_next(&mut conns, Duration::from_secs(30)).await.expect("the first helper's hello");
+    let orphan = record_with_child(&home).await.and_then(|r| r.child).expect("its helper");
+    assert!(supervisor::serves_home(orphan, &home), "the helper serves this home");
+    // A second supervisor while the first runs: it leaves at once, and starts nothing.
+    let second = tokio_command()
+        .args(["run", "--supervisor", "--home"])
+        .arg(&home)
+        .args(helper_args(port))
+        .output()
+        .await
+        .expect("it runs");
+    assert_eq!(second.status.code(), Some(0), "{second:?}");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), conns.recv()).await.is_err(),
+        "no second helper"
+    );
+    // The first ended from outside: its helper runs on, alone.
+    first.kill().await.expect("killed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(supervisor::alive(orphan), "the helper outlived its supervisor");
+    let mut third = start();
+    refuse_next(&mut conns, Duration::from_secs(30)).await.expect("the new supervisor's helper");
+    assert!(gone(orphan, Duration::from_secs(10)).await, "the helper left alone was ended");
+    let log = std::fs::read_to_string(home.join("helper").join("logs").join(supervisor::LOG_FILE))
+        .expect("log");
+    assert!(log.contains("an earlier supervisor of this home left running"), "{log}");
+    std::fs::write(supervisor::stop_file(&home), b"stop").expect("stop file");
+    let status = tokio::time::timeout(Duration::from_secs(30), third.wait())
+        .await
+        .expect("stops")
+        .expect("status");
+    assert_eq!(status.code(), Some(0));
+    let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
+}
+
 /// Gate 3, `run --detach` (what the Run value starts): it returns at once, the supervisor runs in
 /// the background with the helper under it (which connects), and a stop request ends both.
 #[cfg(feature = "dev-guard")]

@@ -211,6 +211,24 @@ pub fn alive(pid: u32) -> bool {
         .is_some_and(|p| p.name().to_string_lossy().to_lowercase().starts_with("citar-helper"))
 }
 
+/// Whether `pid` is a helper in service mode for the home `home`: its command line names both, as
+/// the supervisor of that home starts it (a process id the system has given to another program, or
+/// to a helper of another home, since its supervisor ended is not one).
+#[must_use]
+pub fn serves_home(pid: u32, home: &Path) -> bool {
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always),
+    );
+    let Some(p) = sys.process(sys_pid) else { return false };
+    p.name().to_string_lossy().to_lowercase().starts_with("citar-helper")
+        && p.cmd().iter().any(|a| a == "--service")
+        && p.cmd().iter().any(|a| Path::new(a) == home)
+}
+
 /// Ends the process `pid` at once, if it is a CITAR helper.
 fn kill(pid: u32) {
     let sys_pid = sysinfo::Pid::from_u32(pid);
@@ -234,7 +252,7 @@ pub const STOP_WAIT: Duration = Duration::from_secs(20);
 pub fn stop_running(home: &Path, log: &Log) -> Result<(), String> {
     let Some(r) = read_record(home) else { return Ok(()) };
     if !alive(r.pid) {
-        if let Some(c) = r.child.filter(|c| alive(*c)) {
+        if let Some(c) = r.child.filter(|c| serves_home(*c, home)) {
             kill(c);
         }
         let _gone = std::fs::remove_file(pid_file(home));
@@ -368,6 +386,17 @@ pub fn main(home: &Home, log: &Log) -> u8 {
     {
         log.info(format!("a supervisor already runs for this home (pid {}): leaving it be", r.pid));
         return 0;
+    }
+    // A helper whose supervisor was ended (by Task Manager, say) runs on alone: a second one with
+    // the same token would take the machine's connection from it, and each would be told it was
+    // replaced in turn. It goes first.
+    if let Some(orphan) =
+        read_record(&root).and_then(|r| r.child).filter(|c| serves_home(*c, &root))
+    {
+        log.warn(format!(
+            "ending the helper (pid {orphan}) an earlier supervisor of this home left running"
+        ));
+        kill(orphan);
     }
     let program = match std::env::current_exe() {
         Ok(p) => p,
