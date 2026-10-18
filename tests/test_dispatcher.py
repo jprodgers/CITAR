@@ -474,9 +474,11 @@ _CHILD = textwrap.dedent("""
     from citar import db, lab
     from citar.jobs import dispatcher as D, host as H, local as L
     db.configure(os.environ["CITAR_DB_URL"])
+    # 150 ms a step: at 30 CI's macOS runner played the first two games whole between two ticks, so the server
+    # was killed with two games already done (test.yml run 39165561726)
     def factory(threads, cpu_percent, memory_mb):
         return H.JobHost(threads, cpu_percent, memory_mb, play_unverifiable=True,
-                         env={{"CITAR_JOBS_TEST_STEP_MS": "30"}})
+                         env={{"CITAR_JOBS_TEST_STEP_MS": "150"}})
     d = D.Dispatcher([L.LocalExecutor(host_factory=factory)])
     told = False
     while True:
