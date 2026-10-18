@@ -3767,10 +3767,17 @@ def _exit_cheat(h, data: dict, lenders: dict, machine, executor, ids: dict, host
     lenders["other"] = _lender(h, o_token, "qa-exit-other", wsl=False,
                                ceiling={**EXIT_WINDOWS, "threads": 1, "work": ["lab_game"]})
     ready_o = wait_until(lambda: executor(o_sid).get("state") == "ready", 120, 0.5)
-    # this server's job host lends nothing a moment: her games wait, and why each executor leaves them is shown
-    host_cpu = {"enabled": True, "threads": 1, "cpu_percent": max(1, min(100, 200 // (os.cpu_count() or 1))),
-                "memory_mb": 400, "work": ALL_WORK}
-    admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {**host_cpu, "enabled": False}}})
+    # this server's one thread busy a moment with a long game of bob's (no other connected machine may play it): her
+    # games wait meanwhile, and the dispatcher says why each executor leaves them
+    bob = h.accounts["bob"]
+    busy = f"qa-exit-busy-{tag}"
+    bob.post("/api/bots/experiments", json={**LONG_GAME, "name": busy, "games": 1, "seed": 15450})
+
+    def host_playing() -> bool:
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("running") or {}).get(host, []) if got.status_code == 200 else []
+        return any(x.get("exp") == busy and x.get("state") == "running" for x in rows)
+    wait_until(host_playing, 60, 0.25)
     other = f"qa-exit-refused-{tag}"
     carol.post("/api/bots/experiments", json={
         "profiles": ["standard", "classic-production"], "name": other, "players": 2, "games": 3, "seed": 15500,
@@ -3781,15 +3788,15 @@ def _exit_cheat(h, data: dict, lenders: dict, machine, executor, ids: dict, host
         rows = (got.json().get("queued") or {}).get(other, []) if got.status_code == 200 else []
         said = [x.get("waiting") or "" for x in rows]
         return said[0] if len(said) == 3 and all("its owner is quarantined" in x for x in said) else None
-    why = wait_until(waiting, 60, 0.5)
+    why = wait_until(waiting, 30, 0.25)
     runs_held = admin.get(f"/api/machines/{o_sid}/jobs").json().get("runs") or []
-    admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_cpu}})
-    done_o = wait_until(lambda: _lab_view(carol, other).get("state") == "complete", 180, 1.0)
+    done_o = wait_until(lambda: _lab_view(carol, other).get("state") == "complete"
+                        and _lab_view(bob, busy).get("state") == "complete", 180, 1.0)
     runs_o = admin.get(f"/api/machines/{o_sid}/jobs").json().get("runs") or []
     lines_o = _lab_lines(h, other)
     r.check("carol's second machine, an honest helper connected and lending, is refused CPU work while its owner is "
-            "quarantined: with this server lending nothing her games wait, the dispatcher saying so of that machine "
-            "(\"its owner is quarantined\"), and once this server lends again they play there alone",
+            "quarantined: while this server's one thread plays another game her games wait, the dispatcher saying so "
+            "of that machine (\"its owner is quarantined\"), then they play on this server alone",
             bool(ready_o) and bool(why) and runs_held == [] and bool(done_o) and runs_o == []
             and {x["executor"]["machine"] for x in lines_o} == {host},
             json.dumps({"waiting": why, "runs": len(runs_o)})[:600])
