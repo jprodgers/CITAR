@@ -51,7 +51,7 @@ pub use self::unix::{limit_data, nice};
 pub use self::unix::{terminate, user_id};
 #[cfg(windows)]
 pub use self::windows::{
-    Ace, AceKind, Dacl, JobObject, TRUSTED_INSTALLER, check_ancestor, check_ancestors,
+    Ace, AceKind, Dacl, JobObject, TAKES_OVER, TRUSTED_INSTALLER, check_ancestor, check_ancestors,
     committed_bytes, create_dir_with, current_user_sid, dacl, keep_std_handles_to_self,
     restrict_tree_to, run_service, takeover,
 };

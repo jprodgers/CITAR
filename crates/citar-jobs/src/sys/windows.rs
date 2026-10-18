@@ -569,7 +569,7 @@ pub const TRUSTED_INSTALLER: &str =
 /// (`DELETE`), deleting or renaming what it holds whatever their own access lists say
 /// (`FILE_DELETE_CHILD`), and changing its access list or owner (`WRITE_DAC`, `WRITE_OWNER`;
 /// `GENERIC_ALL` is all of them).
-const TAKES_OVER: u32 = DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
+pub const TAKES_OVER: u32 = DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
 
 /// What `mask`'s rights of [`TAKES_OVER`] let their holder do, in words.
 fn takeover_words(mask: u32) -> String {
