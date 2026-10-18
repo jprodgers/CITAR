@@ -2,9 +2,11 @@
 part's check of a helper's signed claim, made by another implementation than the server's (``cryptography``'s
 ed25519 over the claim's compact JSON, its fields in the signed order), against claims the extension signs as a
 helper signs its own; the lab log's lines that say why a result was replicated; a results line's result taken apart
-from its measurements; the gate the real parts put between the helper and LM Studio (``qa_phase3.ModelGate``); and
-``all``: its refusals, and its two runs (the parts written for a server on Windows, then ``service``, ``exit`` and
-``real`` with the server in WSL), each in a folder of its own, summed up in ``qa-all.json``."""
+from its measurements; the exit's checks that each helper's results were replicated while its machine was new and
+sampled after (tied to its promotion), and that the ledger has one event a run; the gate the real parts put between
+the helper and LM Studio (``qa_phase3.ModelGate``); and ``all``: its refusals, and its two runs (the parts written for
+a server on Windows, then ``service``, ``exit`` and ``real`` with the server in WSL), each in a folder of its own,
+summed up in ``qa-all.json``."""
 from __future__ import annotations
 
 import argparse
@@ -103,6 +105,74 @@ class Lines(unittest.TestCase):
     def test_database_times_are_utc_unless_they_name_a_zone(self):
         self.assertEqual(qa4._when("2026-10-18T09:00:00"), qa4._when("2026-10-18T05:00:00-04:00"))
         self.assertEqual(qa4._when(None), 0.0)
+
+
+class ReplicationOrder(unittest.TestCase):
+    """The exit's check that a helper machine's results were replicated while it was new and sampled after
+    (``_replication_order``, P4.5.8 rules 1 and 5), tied to the time of its promotion (4-15's review: a result of a new
+    machine accepted without a replica passed whenever its sample fell over the rate)."""
+
+    HOST = "sv_host"
+    PROMOTED = 1000.0
+    RATE = 0.5
+
+    def primary(self, arrived: float, why=None, *, sample: float = 0.9, verdict=None, local: bool = True) -> dict:
+        replicas = [] if why is None else [{"executor": "local" if local else "remote",
+                                            "machine": self.HOST if local else "sv_other", "verdict": "reference"}]
+        return {"ref": f"lab:x:{arrived:g}", "arrived": arrived, "why": why, "replicas": replicas,
+                "verdict": verdict or ("match" if why else "unchecked"), "sample": sample}
+
+    def order(self, primaries: list, promoted=PROMOTED) -> tuple:
+        return qa4._replication_order(primaries, promoted, self.RATE, self.HOST)
+
+    def test_a_machine_replicated_while_new_and_sampled_after_keeps_the_rules(self):
+        slack = qa4.PROMOTION_SLACK_S
+        counts, wrong = self.order([
+            self.primary(900.0, "new"), self.primary(950.0, "new"),
+            # in the promotion's own tick: either side
+            self.primary(1000.0 - slack / 2, "new"), self.primary(1000.0 - slack / 3, sample=0.7),
+            self.primary(1001.0, "sampled", sample=0.2), self.primary(1010.0, sample=0.8)])
+        self.assertEqual(wrong, [])
+        self.assertEqual(counts, {"new": 3, "sampled": 1, "unsampled": 2, "boundary": 2})
+
+    def test_a_new_machines_result_accepted_without_a_replica_is_caught(self):
+        # the review's planted bug: one result of a new machine accepted unreplicated (no verifier free, say), its
+        # sample over the rate, five others matching
+        primaries = [self.primary(800.0 + 10 * i, "new") for i in range(5)] + [self.primary(900.0, sample=0.9)]
+        _counts, wrong = self.order(primaries)
+        self.assertEqual([w["job"] for w in wrong], ["lab:x:900"])
+        self.assertEqual(wrong[0]["after_promotion_s"], -100.0)
+
+    def test_a_result_decided_on_the_wrong_side_of_the_promotion_is_caught(self):
+        _counts, wrong = self.order([self.primary(900.0, "sampled", sample=0.2), self.primary(1005.0, "new")])
+        self.assertEqual([w["job"] for w in wrong], ["lab:x:900", "lab:x:1005"])
+
+    def test_a_sample_on_the_wrong_side_of_the_rate_or_a_bad_replica_is_caught(self):
+        _counts, wrong = self.order([
+            self.primary(1005.0, "sampled", sample=0.7), self.primary(1006.0, sample=0.2),
+            self.primary(900.0, "new", local=False), self.primary(901.0, "new", verdict="mismatch"),
+            self.primary(1007.0, "asked", sample=0.9)])
+        self.assertEqual(len(wrong), 5, wrong)
+
+    def test_a_machine_never_promoted_has_every_result_replicated_as_new(self):
+        counts, wrong = self.order([self.primary(1.0e9, "new"), self.primary(2.0e9, sample=0.9)], promoted=None)
+        self.assertEqual([w["job"] for w in wrong], ["lab:x:2e+09"])
+        self.assertEqual(counts["boundary"], 0)
+
+
+class EventsPerRun(unittest.TestCase):
+    """One ledger event a run that ended done (``_events_per_run``; 4-15's review: counted by request in a dict, an
+    event written twice passed)."""
+
+    RUNS = [{"id": "a", "state": "done"}, {"id": "b", "state": "done"}, {"id": "c", "state": "aborted"}]
+
+    def test_one_event_a_done_run(self):
+        self.assertEqual(qa4._events_per_run([{"request": "b"}, {"request": "a"}], self.RUNS),
+                         {"events": 2, "runs": 2, "duplicated": [], "stray": [], "missing": []})
+
+    def test_an_event_written_twice_one_of_no_done_run_and_a_run_without_one_show(self):
+        got = qa4._events_per_run([{"request": "a"}, {"request": "a"}, {"request": "c"}], self.RUNS)
+        self.assertEqual(got, {"events": 3, "runs": 2, "duplicated": ["a"], "stray": ["c"], "missing": ["b"]})
 
 
 class Gate(unittest.TestCase):

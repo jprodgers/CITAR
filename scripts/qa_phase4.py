@@ -3262,6 +3262,74 @@ def _replicated_why(log: str) -> dict:
     return out
 
 
+#: How far before a machine's promotion a result's arrival may fall and still have been decided after it. The
+#: dispatcher handles a result in the first tick after it arrives (each tick reads every executor's frames; ticks
+#: come at once on a frame, and ``TICK_SECONDS``, 2 s, apart at the longest), in its executors' order, so a result
+#: that arrived in the promotion's own tick may be decided on either side of it; its audit row is written in that
+#: tick, after its frames were read.
+PROMOTION_SLACK_S = 6.0
+
+
+def _replication_order(primaries: list, promoted: Optional[float], rate: float, host: str) -> tuple:
+    """One helper machine's primary results against its promotion to provisional (P4.5.8 rules 1, 3, 5): ``promoted``
+    is its ``server.trust`` audit row's time (seconds; None when it was never promoted), and each primary a dict with
+    ``arrived`` (when the server got its result, seconds), ``why`` (the lab log's reason it was replicated: ``new``,
+    ``sampled``, ``asked``; None when it was not), ``replicas`` (``{"executor", "machine", "verdict"}`` each),
+    ``verdict``, ``sample`` (the keyed sample of its job) and ``ref``. Returns ``(counts, wrong)``:
+
+    - a result that arrived more than ``PROMOTION_SLACK_S`` before the promotion (or with none) was decided while the
+      machine was new: replicated (rule 1) on this server's job host (``host``, a new machine's only verifier), for the
+      reason ``new``;
+    - one that arrived after the promotion's audit row was decided while it was provisional: replicated as ``sampled``
+      when its sample falls under ``rate``, else left ``unchecked`` (rule 5), never ``new``;
+    - one in between may be either, consistently (``counts["boundary"]`` says how many were there);
+    - every replicated one matched: its primary ``match``, its replicas the reference or matches.
+
+    ``counts`` holds how many were replicated new, sampled, and left unsampled; ``wrong`` the results the rules break,
+    with what was seen."""
+    counts = {"new": 0, "sampled": 0, "unsampled": 0, "boundary": 0}
+    wrong = []
+    for x in primaries:
+        reps = x.get("replicas") or []
+        why = x.get("why") if reps else None
+        local = bool(reps) and all(y.get("executor") == "local" and y.get("machine") == host for y in reps)
+        matched = x.get("verdict") == "match" and all(y.get("verdict") in ("reference", "match") for y in reps)
+        as_new = why == "new" and local and matched
+        as_provisional = (why == "sampled" and x["sample"] < rate and matched) or (
+            not reps and x["sample"] >= rate and x.get("verdict") == "unchecked")
+        arrived = x["arrived"]
+        if promoted is None or arrived < promoted - PROMOTION_SLACK_S:
+            fine = as_new
+        elif arrived > promoted:
+            fine = as_provisional
+        else:
+            counts["boundary"] += 1
+            fine = as_new or as_provisional
+        if why == "new":
+            counts["new"] += 1
+        elif why == "sampled":
+            counts["sampled"] += 1
+        elif not reps:
+            counts["unsampled"] += 1
+        if not fine:
+            wrong.append({"job": x.get("ref"), "why": why, "sample": round(x["sample"], 3), "replicas": len(reps),
+                          "verdict": x.get("verdict"),
+                          "after_promotion_s": None if promoted is None else round(arrived - promoted, 3)})
+    return counts, wrong
+
+
+def _events_per_run(events: list, runs: list) -> dict:
+    """The ledger's CPU events against the runs that ended ``done`` (each such run has exactly one, P4.5.7): the
+    events counted by their request (a list: an event written twice shows), the requests with more than one, the
+    events of no done run, and the done runs with none."""
+    from collections import Counter
+    counts = Counter(e["request"] for e in events)
+    done = {x["id"] for x in runs if x["state"] == "done"}
+    return {"events": sum(counts.values()), "runs": len(done),
+            "duplicated": sorted(k for k, c in counts.items() if c > 1),
+            "stray": sorted(set(counts) - done), "missing": sorted(done - set(counts))}
+
+
 def _lender(h, token: str, name: str, *, wsl: bool, ceiling: dict, faults: tuple = ()):
     """One of the exit's lending helpers: in WSL (``WslHelper``) or on Windows (``Helper``), its own ceiling lent at
     setup (``citar-helper setup``, answered yes to lending CPU, after the ceiling was written); ``faults`` its
@@ -3496,6 +3564,7 @@ def _exit_gate2(h, data: dict, state: dict, lines: dict, main: str, ladder: str,
     runs = [x for n in exps for x in exps[n]["runs"]]
     by_id = {x["id"]: x for x in runs}
     events = {e["request"]: e for n in exps for e in exps[n]["events"]}
+    per_run = _events_per_run([e for n in exps for e in exps[n]["events"]], runs)
 
     # ---- every accepted line signed by its machine (or this server's own), its claim the run's
     unsigned, bad = [], []
@@ -3561,36 +3630,24 @@ def _exit_gate2(h, data: dict, state: dict, lines: dict, main: str, ladder: str,
         audits = (state.get("audits") or {}).get(sid) or []
         promo = next((a["at"] for a in audits if (a.get("changed") or {}).get("to") == "provisional"), None)
         tiers[helpers[sid]] = {"tier": (machines.get(sid) or {}).get("tier"), "provisional_at": promo}
-        mine = [x for x in runs if x["machine"] == sid and x["role"] == "primary" and x["state"] == "done"]
-        c = counts.setdefault(helpers[sid], {"new": 0, "sampled": 0, "unsampled": 0})
-        for x in mine:
+        primaries = []
+        for x in runs:
+            if x["machine"] != sid or x["role"] != "primary" or x["state"] != "done":
+                continue
             job = jobs[x["job"]]
             replicas = [y for y in runs if y["job"] == x["job"] and y["role"] == "replica"]
-            said = (why.get((job["exp"], int(job["ref"].rsplit(":", 1)[-1]))) or [None])[-1]
-            if replicas:
-                local = all(y["executor"] == "local" and y["machine"] == host for y in replicas)
-                if said == "new":
-                    c["new"] += 1
-                    fine = local and (promo is None or _when(x["ended"]) < _when(promo))
-                elif said == "sampled":
-                    c["sampled"] += 1
-                    fine = local and promo is not None and job["sample"] < rate
-                else:
-                    fine = False
-                # a replica on this server is its reference: the primary matched it
-                fine = fine and x["verdict"] == "match" and all(y["verdict"] in ("reference", "match")
-                                                                for y in replicas)
-            else:
-                c["unsampled"] += 1
-                fine = promo is not None and job["sample"] >= rate and x["verdict"] == "unchecked"
-            if not fine:
-                wrong.append({"machine": helpers[sid], "job": job["ref"], "why": said, "sample": round(job["sample"], 3),
-                              "replicas": len(replicas), "verdict": x["verdict"]})
-    r.check(f"each helper's results were replicated on this server's job host while its machine was new (all of them, "
-            f"{streak} matches promoting it to provisional) and sampled after at the provisional rate by the server's "
-            "keyed choice: every replicated result after the promotion one whose sample falls under the rate, every "
-            "unreplicated one over it, each replica a match; after the promotions, both a sampled result and an "
-            "unsampled one among the two",
+            primaries.append({"ref": job["ref"], "arrived": _when(x["ended"]), "sample": job["sample"],
+                              "verdict": x["verdict"],
+                              "why": (why.get((job["exp"], int(job["ref"].rsplit(":", 1)[-1]))) or [None])[-1],
+                              "replicas": [{k: y[k] for k in ("executor", "machine", "verdict")} for y in replicas]})
+        counts[helpers[sid]], bad = _replication_order(primaries, _when(promo) if promo else None, rate, host)
+        wrong += [{"machine": helpers[sid], **b} for b in bad]
+    r.check(f"each helper's results were replicated on this server's job host while its machine was new (every one "
+            f"it gave before its promotion, {streak} matches promoting it to provisional) and sampled after at the "
+            "provisional rate by the server's keyed choice: every result given after the promotion replicated when "
+            "its sample falls under the rate and left unchecked when over it, none replicated as new (a result in "
+            f"the promotion's own dispatcher tick, {PROMOTION_SLACK_S:g} s before it at most, either), each replica a "
+            "match; after the promotions, both a sampled result and an unsampled one among the two",
             not wrong and all(t["tier"] == "provisional" and t["provisional_at"] for t in tiers.values())
             and all(c["new"] >= streak for c in counts.values())
             and sum(c["sampled"] for c in counts.values()) >= 1 and sum(c["unsampled"] for c in counts.values()) >= 1,
@@ -3670,9 +3727,11 @@ def _exit_gate2(h, data: dict, state: dict, lines: dict, main: str, ladder: str,
             "server's and for a matched replica's primary, unverified for an unsampled result); a primary used by "
             "its experiment's owner (bob; nobody for the server's collection), a replica by nobody; given by "
             "alice for her machines' runs, by nobody for this server's; every one of hers bounded by 1.5 times the "
-            "reference cost",
-            not off and not bounded and len(events) >= sum(1 for x in runs if x["state"] == "done"),
-            json.dumps({"events": len(events), "runs": sum(1 for x in runs if x["state"] == "done"), "off": off[:4],
+            "reference cost; no event written twice, none for a run that did not end",
+            not off and not bounded and not per_run["duplicated"] and not per_run["stray"]
+            and not per_run["missing"],
+            json.dumps({**per_run, "duplicated": per_run["duplicated"][:4], "stray": per_run["stray"][:4],
+                        "missing": per_run["missing"][:4], "off": off[:4],
                         "unbounded": [(e["cpu"], e["flags"].get("reference_s")) for e in bounded][:3]}))
     agreed, seen = _ledger_me(h, {"alice": ("given",), "bob": ("used",)}, (main, ladder, base), state)
     r.check("alice's given and bob's used, as /api/ledger/me tells them, equal the sums of their events (credits and "
@@ -3963,6 +4022,7 @@ def _exit_selective(h, data: dict, lenders: dict, machine, executor, ids: dict, 
     six_run, eight_run, seven_run = (mine[5]["id"], mine[7]["id"], mine[6]["id"]) if len(mine) > 8 else ("", "", "")
     events = {e["request"]: e for e in exp.get("events") or []}
     old = {k: v for k, v in events.items() if k in (six_run, eight_run)}
+    per_run = _events_per_run(exp.get("events") or [], runs)
     rated = state.get("rated") or {}
     was = {(x.get("executor") or {}).get("run") for x in before_lines}
     replayed = [x for x in lines if f"lab:{sel}:{x['i']}" in {jobs[j]["ref"] for j in (mine[5]["job"], mine[7]["job"])}]\
@@ -3994,10 +4054,12 @@ def _exit_selective(h, data: dict, lenders: dict, machine, executor, ids: dict, 
                and e["verification"] != "rejected")
     r.check("the budget follows: the runs on dave's machine were settled against his grant's budget, the two "
             "withdrawn runs' settlements reversed (the budget's spending is what its runs still hold), and the "
-            "ledger shows them rejected",
+            "ledger shows them rejected, with one event for each run of the experiment (none written twice)",
             bid is not None and all((f or {}).get("id") == bid for f in b_flags) and settled > 0
-            and spent_now is not None and abs(spent_now - kept) < 1e-3,
+            and spent_now is not None and abs(spent_now - kept) < 1e-3
+            and not per_run["duplicated"] and not per_run["stray"] and not per_run["missing"],
             json.dumps({"budget": bid, "spent": spent_now, "runs_hold": round(kept, 6), "reversed": round(settled, 6),
+                        "events": {k: v if isinstance(v, int) else v[:3] for k, v in per_run.items()},
                         "before": [(x.get("i"), (x.get("executor") or {}).get("machine")) for x in before_lines
                                    if (x.get("executor") or {}).get("run") in (six_run, eight_run)]}))
     data.update(selective_machine=d_sid, selective_withdrawn=sorted(withdrawn), selective_marks=marks)
