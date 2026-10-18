@@ -179,7 +179,13 @@ jobs:
           chmod +x helper/citar-helper* helper/citar-fake-probe* || true
           export CITAR_HELPER_BIN="$PWD/helper/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}"
           export CITAR_HELPER_FAULTS_BIN="$PWD/helper/citar-helper-faults${{ runner.os == 'Windows' && '.exe' || '' }}"
-          export CITAR_HELPER_UPDATE_BINS="$PWD/helper/citar-helper-update-1${{ runner.os == 'Windows' && '.exe' || '' }}${{ runner.os == 'Windows' && ';' || ':' }}$PWD/helper/citar-helper-update-2${{ runner.os == 'Windows' && '.exe' || '' }}"
+          # two paths joined by os.pathsep: Git Bash turns one path in a variable into Windows' form for
+          # Python, but not a list joined by ';', so on Windows each is converted here (cygpath -w)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export CITAR_HELPER_UPDATE_BINS="$(cygpath -w "$PWD/helper/citar-helper-update-1.exe");$(cygpath -w "$PWD/helper/citar-helper-update-2.exe")"
+          else
+            export CITAR_HELPER_UPDATE_BINS="$PWD/helper/citar-helper-update-1:$PWD/helper/citar-helper-update-2"
+          fi
           python -m unittest discover -s tests -v
 
       - name: Route audit

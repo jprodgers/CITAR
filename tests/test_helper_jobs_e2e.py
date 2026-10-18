@@ -359,8 +359,14 @@ class Lending(unittest.TestCase):
                   file=sys.stderr)
             return
         D.poke()
-        for run in runs.running():
-            self.assertEqual(self.finished(run, 30).state, "aborted")
+        # each run seen playing ends aborted; where the share is held softly one may have ended (done) before the
+        # deletion reached it (CI, test.yml run 39078917427, macos), but not both, as the file was still queued
+        ends = [self.finished(run, 30).state for run in runs.running()]
+        if limits.get("cpu") == "hard":
+            self.assertEqual(set(ends), {"aborted"}, ends)
+        else:
+            self.assertIn("aborted", ends, ends)
+            self.assertLessEqual(set(ends), {"aborted", "done"}, ends)
         print(f"\n[jobs e2e] a share of 5% held {limits}: CPU {json.dumps(cpu)}", file=sys.stderr)
 
     @unittest.skipIf(sys.platform == "win32", "a test can end a Windows child only by TerminateProcess, which is no stop "

@@ -373,7 +373,9 @@ class Faulty(unittest.TestCase):
         for e in events:
             ref = replicas[e.request_id]
             self.assertLessEqual(e.cpu_core_s, 1.5 * ref + 1e-6, (e.cpu_core_s, ref))
-            self.assertLessEqual(e.cpu_core_s, e.observed_s * 1.05 + 1 + 1e-6)
+            # observed_s is kept to the millisecond and the cap made from the unrounded time: half a millisecond's
+            # rounding, times 1.05 (CI, test.yml run 39078917427: 2.451547 against 2.451101)
+            self.assertLessEqual(e.cpu_core_s, e.observed_s * 1.05 + 1 + 1e-3)
             self.assertAlmostEqual(e.flags.get("reference_s"), ref, places=5)
 
     def test_holding_results_is_capped_at_the_reference_and_still_promoted(self):
