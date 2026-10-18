@@ -2267,6 +2267,27 @@ def part_verify(h) -> None:
         wait_until(lambda: _lab_view(alice, over).get("state") == "complete", 180, 0.5)
         helpers.pop("over").stop()
 
+        # The honest machine is measured before the hold:2 machine joins the class. That one reports its hold as CPU,
+        # so its measured speed (about 0.3) is as low as the over-reporter's, and the class's bar keeps it (the server
+        # observed the hold: capped_cpu only). Measured after it, the honest machine made a trusted pair with it (0.3
+        # and 0.9), the class median about 0.6, and the over-reporter's 0.3 against half of that a coin's toss.
+        ms_sid, ms_token, _mg = machine(alice, "measured")
+        ready_m = start("measured", ms_sid, ms_token)
+        measured = f"qa-verify-measured-{tag}"
+        queue(alice, measured, 6, 8900, turns=300)
+        timed = wait_until(lambda: admin_trust(ms_sid).get("speed") is not None and len(
+            primaries(measured, ms_sid)) >= 2, 180, 1.0)
+        suspect = ((admin_trust(o_sid).get("flags") or {}).get("class_suspect") or {})
+        r.check("the class check: an honest machine measured beside the over-reporter (both of the default CPU class) "
+                "leaves the over-reporter, under half the class's median speed, flagged class_suspect, and itself not",
+                bool(ready_m) and bool(timed) and suspect.get("speed") is not None
+                and suspect["speed"] < 0.5 * suspect.get("class_median", 0)
+                and "class_suspect" not in (admin_trust(ms_sid).get("flags") or {}),
+                json.dumps({"over": admin_trust(o_sid).get("speed"), "honest": admin_trust(ms_sid).get("speed"),
+                            "suspect": suspect}))
+        wait_until(lambda: _lab_view(alice, measured).get("state") == "complete", 180, 0.5)
+        helpers.pop("measured").stop()
+
         hd_sid, hd_token, _hg = machine(alice, "hold")
         ready_h = start("hold", hd_sid, hd_token, "hold:2")
         held = f"qa-verify-hold-{tag}"
@@ -2288,23 +2309,6 @@ def part_verify(h) -> None:
                                        | {"reference": e["flags"].get("reference_s")} for e in events_h]})[:900])
         wait_until(lambda: _lab_view(alice, held).get("state") == "complete", 180, 0.5)
         helpers.pop("hold").stop()
-
-        ms_sid, ms_token, _mg = machine(alice, "measured")
-        ready_m = start("measured", ms_sid, ms_token)
-        measured = f"qa-verify-measured-{tag}"
-        queue(alice, measured, 6, 8900, turns=300)
-        timed = wait_until(lambda: admin_trust(ms_sid).get("speed") is not None and len(
-            primaries(measured, ms_sid)) >= 2, 180, 1.0)
-        suspect = ((admin_trust(o_sid).get("flags") or {}).get("class_suspect") or {})
-        r.check("the class check: an honest machine measured beside the over-reporter (both of the default CPU class) "
-                "leaves the over-reporter, under half the class's median speed, flagged class_suspect, and itself not",
-                bool(ready_m) and bool(timed) and suspect.get("speed") is not None
-                and suspect["speed"] < 0.5 * suspect.get("class_median", 0)
-                and "class_suspect" not in (admin_trust(ms_sid).get("flags") or {}),
-                json.dumps({"over": admin_trust(o_sid).get("speed"), "honest": admin_trust(ms_sid).get("speed"),
-                            "suspect": suspect}))
-        wait_until(lambda: _lab_view(alice, measured).get("state") == "complete", 180, 0.5)
-        helpers.pop("measured").stop()
         _verification(h, **{k: defaults[k] for k in ("new_streak", "promote_verified", "provisional_rate")})
 
         # ---- 4-12: model results by their machine's tier (P4.5.8 rule 11): a benchmark on bob's provisional machine
