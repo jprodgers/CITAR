@@ -3658,8 +3658,8 @@ def _exit_gate2(h, data: dict, state: dict, lines: dict, main: str, ladder: str,
             not wrong and all(t["tier"] == "provisional" and t["provisional_at"] for t in tiers.values())
             and all(c["new"] >= streak for c in counts.values())
             and sum(c["sampled"] for c in counts.values()) >= 1 and sum(c["unsampled"] for c in counts.values()) >= 1,
-            json.dumps({"tiers": tiers, "counts": counts, "wrong": wrong[:5]}))
-    data.update(tiers=tiers, replication=counts)
+            json.dumps({"wrong": wrong[:3], "counts": counts, "tiers": tiers}))   # the detail keeps 500 characters
+    data.update(tiers=tiers, replication=counts, replication_wrong=wrong)
 
     # ---- the replicated games' Windows and Linux results, byte for byte
     pairs = []
