@@ -526,7 +526,10 @@ fn results_do_not_depend_on_the_limits() -> Outcome {
 fn a_pause_holds_a_run_and_extends_its_deadline() -> Outcome {
     const BURN_DEADLINE_S: f64 = 2.5;
     let req = Requested { threads: 2, cpu_percent: two_cores_percent(), memory_mb: 512 };
-    let mut host = start(req, &[("CITAR_JOBS_TEST_STEP_MS", "20")])?;
+    // 60 ms a step: at 20 a fast runner (helper.yml's aarch64-apple-darwin at 943a4d9) had played the
+    // whole self-check game before the pause at 400 ms, and the wait for its paused progress below
+    // then waited until nextest's 600 s.
+    let mut host = start(req, &[("CITAR_JOBS_TEST_STEP_MS", "60")])?;
     let set = GoldenSet::committed()?;
     let job = &set.jobs[SELF_CHECK];
     send(&mut host, &offer("cr_game", "lab_game", &job.spec, &job.spec_hash, 600.0))?;
@@ -541,12 +544,24 @@ fn a_pause_holds_a_run_and_extends_its_deadline() -> Outcome {
         FromHost::JobProgress(p) if p.run == "cr_game" => Some(p.clone()),
         _ => None,
     };
+    let deadline = Instant::now() + Duration::from_secs(60);
     let (paused, since) = loop {
         let (f, at) = frame(&mut host)?;
         if let Some(p) = held_at(&f)
             && p.paused
         {
             break (p, at);
+        }
+        if f.run() == Some("cr_game")
+            && matches!(
+                f,
+                FromHost::JobResult(_) | FromHost::JobFailed(_) | FromHost::JobAborted(_)
+            )
+        {
+            return fail(format!("the game ended before its pause was seen: {f:?}"));
+        }
+        if Instant::now() > deadline {
+            return fail("no paused progress from the game in 60 s".to_owned());
         }
     };
     std::thread::sleep(Duration::from_secs(2));

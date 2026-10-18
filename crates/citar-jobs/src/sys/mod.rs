@@ -300,7 +300,7 @@ mod tests {
             restrict_tree_to(&home, None, &principals, &["S-1-5-18"]).expect_err("not ours");
         assert!(refused.to_string().contains("owned by"), "{refused}");
         assert!(!dacl(&home).expect("the DACL").protected, "nothing changed");
-        let set = restrict_tree_to(&home, None, &principals, &[me.as_str()]).expect("set");
+        let set = restrict_tree_to(&home, None, &principals, &ours(&me)).expect("set");
         assert_eq!(set, 5, "the home, helper/, logs/, helper.json and helper.log");
         for p in [
             home.clone(),
@@ -321,8 +321,7 @@ mod tests {
         std::fs::write(home.join("later.json"), "{}").expect("written");
         assert_eq!(exposure(&home.join("later.json")).expect("read"), None);
         assert!(
-            restrict_tree_to(&home.join("helper.json"), None, &["S-1-5-18"], &[me.as_str()])
-                .is_err()
+            restrict_tree_to(&home.join("helper.json"), None, &["S-1-5-18"], &ours(&me)).is_err()
         );
         restrict_dir_to_owner(&home).expect("given back");
         // A junction in the tree, or as the folder itself, refuses the call (junctions need no
@@ -339,17 +338,17 @@ mod tests {
             assert!(made.status.success(), "{made:?}");
         };
         junction(&home.join("helper").join("planted"));
-        let e = restrict_tree_to(&home, None, &principals, &[me.as_str()])
-            .expect_err("a junction in it");
+        let e =
+            restrict_tree_to(&home, None, &principals, &ours(&me)).expect_err("a junction in it");
         assert!(e.to_string().contains("a link or junction"), "{e}");
         std::fs::remove_dir(home.join("helper").join("planted")).expect("the junction removed");
         std::fs::create_dir_all(elsewhere.join("sub")).expect("made");
         let root = dir.join("junction-home");
         junction(&root);
-        let e = restrict_tree_to(&root, None, &principals, &[me.as_str()])
-            .expect_err("a junction itself");
+        let e =
+            restrict_tree_to(&root, None, &principals, &ours(&me)).expect_err("a junction itself");
         assert!(e.to_string().contains("a link or junction"), "{e}");
-        let e = restrict_tree_to(&root.join("sub"), None, &principals, &[me.as_str()])
+        let e = restrict_tree_to(&root.join("sub"), None, &principals, &ours(&me))
             .expect_err("under one");
         assert!(
             e.to_string().contains("a link or junction"),
@@ -386,7 +385,7 @@ mod tests {
         std::fs::hard_link(&outside, home.join("helper").join("linked.json")).expect("a hard link");
         let me = current_user_sid().expect("the user");
         let before = dacl(&outside).expect("the DACL");
-        let e = restrict_tree_to(&home, None, &["S-1-5-18", me.as_str()], &[me.as_str()])
+        let e = restrict_tree_to(&home, None, &["S-1-5-18", me.as_str()], &ours(&me))
             .expect_err("a hard link in it");
         assert!(e.to_string().contains("2 names (hard links)"), "{e}");
         assert!(!dacl(&home).expect("the DACL").protected, "nothing changed");
@@ -416,7 +415,7 @@ mod tests {
         );
         let planted = home.join("helper").join("planted.json");
         let mut plant = || std::fs::hard_link(&outside, &planted).expect("planted");
-        let e = windows::restrict_tree_with(&home, None, &principals, &[me.as_str()], &mut plant)
+        let e = windows::restrict_tree_with(&home, None, &principals, &ours(&me), &mut plant)
             .expect_err("the planted link");
         let said = e.to_string();
         assert!(said.contains("planted.json") && said.contains("hard links"), "{said}");
@@ -438,7 +437,7 @@ mod tests {
                 .expect("mklink");
             assert!(made.status.success(), "{made:?}");
         };
-        let e = windows::restrict_tree_with(&home, None, &principals, &[me.as_str()], &mut plant)
+        let e = windows::restrict_tree_with(&home, None, &principals, &ours(&me), &mut plant)
             .expect_err("the planted junction");
         let said = e.to_string();
         assert!(said.contains("a link or junction") && said.contains("found after"), "{said}");
@@ -446,6 +445,14 @@ mod tests {
         std::fs::remove_dir(&junction).expect("the junction removed");
         restrict_dir_to_owner(&home).expect("given back");
         std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    /// The owners of what a test makes: the user, and the Administrators group when the process is
+    /// elevated, which Windows makes the owner of what an elevated process creates (CI's Windows
+    /// runners are elevated: helper.yml at 943a4d9 refused "owned by S-1-5-32-544" four times).
+    #[cfg(windows)]
+    fn ours(me: &str) -> Vec<&str> {
+        if super::is_elevated().unwrap_or(false) { vec![me, "S-1-5-32-544"] } else { vec![me] }
     }
 
     /// 4-14's review: the folders above the Windows service's home must be no other account's to
@@ -462,8 +469,14 @@ mod tests {
         let trusted = ["S-1-5-18", "S-1-5-32-544", me.as_str()];
         // Owned by this user, trusted: passes (the home itself need not exist yet).
         windows::check_ancestors_until(&home, &trusted, Some(&dir)).expect("ours");
-        // The same folder owned by an account that is not trusted (this user, left out).
-        let e = windows::check_ancestors_until(&home, &["S-1-5-18", "S-1-5-32-544"], Some(&dir))
+        // The same folder owned by an account that is not trusted (its owner left out: this user, or
+        // the Administrators group when the process is elevated, as on CI's Windows runners).
+        let untrusted: Vec<&str> = if super::is_elevated().unwrap_or(false) {
+            vec!["S-1-5-18", me.as_str()]
+        } else {
+            vec!["S-1-5-18", "S-1-5-32-544"]
+        };
+        let e = windows::check_ancestors_until(&home, &untrusted, Some(&dir))
             .expect_err("another account's");
         assert!(e.to_string().contains("CITAR: owned by"), "{e}");
         // Granting Users the right to delete it, or what it holds: refused, named.
