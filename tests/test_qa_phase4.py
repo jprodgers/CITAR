@@ -109,55 +109,53 @@ class Lines(unittest.TestCase):
 
 class ReplicationOrder(unittest.TestCase):
     """The exit's check that a helper machine's results were replicated while it was new and sampled after
-    (``_replication_order``, P4.5.8 rules 1 and 5), tied to the time of its promotion (4-15's review: a result of a new
-    machine accepted without a replica passed whenever its sample fell over the rate)."""
+    (``_replication_order``, P4.5.8 rules 1 and 5), each result put before or after the promotion by the order of the
+    ledger's events, the promoting replica's among them (4-15's review: a result of a new machine accepted without a
+    replica passed whenever its sample fell over the rate)."""
 
     HOST = "sv_host"
-    PROMOTED = 1000.0
+    PROMOTED = 100
     RATE = 0.5
 
-    def primary(self, arrived: float, why=None, *, sample: float = 0.9, verdict=None, local: bool = True) -> dict:
+    def primary(self, event, why=None, *, sample: float = 0.9, verdict=None, local: bool = True) -> dict:
         replicas = [] if why is None else [{"executor": "local" if local else "remote",
                                             "machine": self.HOST if local else "sv_other", "verdict": "reference"}]
-        return {"ref": f"lab:x:{arrived:g}", "arrived": arrived, "why": why, "replicas": replicas,
+        return {"ref": f"lab:x:{event}", "event": event, "why": why, "replicas": replicas,
                 "verdict": verdict or ("match" if why else "unchecked"), "sample": sample}
 
     def order(self, primaries: list, promoted=PROMOTED) -> tuple:
         return qa4._replication_order(primaries, promoted, self.RATE, self.HOST)
 
     def test_a_machine_replicated_while_new_and_sampled_after_keeps_the_rules(self):
-        slack = qa4.PROMOTION_SLACK_S
         counts, wrong = self.order([
-            self.primary(900.0, "new"), self.primary(950.0, "new"),
-            # in the promotion's own tick: either side
-            self.primary(1000.0 - slack / 2, "new"), self.primary(1000.0 - slack / 3, sample=0.7),
-            self.primary(1001.0, "sampled", sample=0.2), self.primary(1010.0, sample=0.8)])
+            self.primary(90, "new"), self.primary(95, "new"), self.primary(99, "new"),
+            self.primary(101, sample=0.7), self.primary(102, "sampled", sample=0.2), self.primary(110, sample=0.8)])
         self.assertEqual(wrong, [])
-        self.assertEqual(counts, {"new": 3, "sampled": 1, "unsampled": 2, "boundary": 2})
+        self.assertEqual(counts, {"new": 3, "sampled": 1, "unsampled": 2})
 
     def test_a_new_machines_result_accepted_without_a_replica_is_caught(self):
         # the review's planted bug: one result of a new machine accepted unreplicated (no verifier free, say), its
-        # sample over the rate, five others matching
-        primaries = [self.primary(800.0 + 10 * i, "new") for i in range(5)] + [self.primary(900.0, sample=0.9)]
+        # sample over the rate, five others matching; however close to the promotion it was decided
+        primaries = [self.primary(80 + i, "new") for i in range(5)] + [self.primary(99, sample=0.9)]
         _counts, wrong = self.order(primaries)
-        self.assertEqual([w["job"] for w in wrong], ["lab:x:900"])
-        self.assertEqual(wrong[0]["after_promotion_s"], -100.0)
+        self.assertEqual([(w["job"], w["decided"]) for w in wrong], [("lab:x:99", "while new")])
 
     def test_a_result_decided_on_the_wrong_side_of_the_promotion_is_caught(self):
-        _counts, wrong = self.order([self.primary(900.0, "sampled", sample=0.2), self.primary(1005.0, "new")])
-        self.assertEqual([w["job"] for w in wrong], ["lab:x:900", "lab:x:1005"])
+        _counts, wrong = self.order([self.primary(99, "sampled", sample=0.2), self.primary(101, "new")])
+        self.assertEqual([(w["job"], w["decided"]) for w in wrong],
+                         [("lab:x:99", "while new"), ("lab:x:101", "once provisional")])
 
-    def test_a_sample_on_the_wrong_side_of_the_rate_or_a_bad_replica_is_caught(self):
+    def test_a_sample_on_the_wrong_side_of_the_rate_a_bad_replica_or_no_event_is_caught(self):
         _counts, wrong = self.order([
-            self.primary(1005.0, "sampled", sample=0.7), self.primary(1006.0, sample=0.2),
-            self.primary(900.0, "new", local=False), self.primary(901.0, "new", verdict="mismatch"),
-            self.primary(1007.0, "asked", sample=0.9)])
-        self.assertEqual(len(wrong), 5, wrong)
+            self.primary(105, "sampled", sample=0.7), self.primary(106, sample=0.2),
+            self.primary(90, "new", local=False), self.primary(91, "new", verdict="mismatch"),
+            self.primary(107, "asked", sample=0.9), self.primary(None, "new")])
+        self.assertEqual(len(wrong), 6, wrong)
+        self.assertEqual(wrong[-1]["decided"], "no event")
 
     def test_a_machine_never_promoted_has_every_result_replicated_as_new(self):
-        counts, wrong = self.order([self.primary(1.0e9, "new"), self.primary(2.0e9, sample=0.9)], promoted=None)
-        self.assertEqual([w["job"] for w in wrong], ["lab:x:2e+09"])
-        self.assertEqual(counts["boundary"], 0)
+        _counts, wrong = self.order([self.primary(10, "new"), self.primary(2000, sample=0.9)], promoted=None)
+        self.assertEqual([w["job"] for w in wrong], ["lab:x:2000"])
 
 
 class EventsPerRun(unittest.TestCase):
