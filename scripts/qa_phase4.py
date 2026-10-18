@@ -1297,6 +1297,11 @@ def part_lab(h) -> None:
                                                      "verifiable")}))
     data.update(executor={k: executor.get(k) for k in ("threads", "cpu_percent", "memory_mb", "held")})
     r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
+    # the server was started with each seat step slowed (the restart checks above): started again without it, so the
+    # parts after this one in a run of several (all) play at full speed (the verify part's credits time its games)
+    h.server.restart()
+    for who in h.accounts.values():
+        who.reconnect()
 
 
 # ---------------------------------------------------------------------------- remote (4-10)
@@ -1426,11 +1431,14 @@ def part_remote(h) -> None:
     scripted.slow = {TEST_PROMPT: YIELD_S}
     helpers: list = []
     poller: Optional[JobsPoller] = None
+    host_was: dict = {}
     try:
         # ---- the host lends nothing in this part: every game goes to a helper, whose results are not sampled
         # (its trusted machine's rate 0: with no verifier a sampled result would wait; verification is the verify
         # part's)
         _verification(h, trusted_rate=0.0)
+        got = admin.get(f"/api/machines/{host}/settings")
+        host_was = ((got.json().get("capabilities") or {}).get("cpu") if got.status_code == 200 else None) or {}
         off = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {"enabled": False}}})
         # ---- bob's machine in a group of his, trusted by an administrator; alice given run_lab, and bob's grant
         # listing lab for her
@@ -1674,6 +1682,8 @@ def part_remote(h) -> None:
             scripted.close()
         try:
             _verification(h, trusted_rate=0.02)        # the default again, for the parts after this one
+            if host_was:
+                admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_was}})
         except Exception:
             pass
 
@@ -1940,6 +1950,9 @@ def part_verify(h) -> None:
     host = "sv_qa_host"
     share = max(1, min(100, 200 // (os.cpu_count() or 1)))
     scripted = FakeEndpoint(delay=0.05)
+    # a model name of its own: the boards it checks (rule 11) hold only this part's games, whatever ran before it
+    scripted.MODEL = f"qa-verify-model-{tag}"
+    scripted.models = [(scripted.MODEL, True)]
     helpers: dict = {}
     duel = {"profiles": ["standard", "classic-production"], "players": 2, "size": "duel", "maps": ["pangaea"],
             "speed": "Quick", "turns": 30}
