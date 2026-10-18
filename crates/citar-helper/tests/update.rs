@@ -219,6 +219,21 @@ impl Case {
         }
     }
 
+    /// The binary the updater staged. Its `verified` status goes out from the download's task
+    /// before that task's end sets what is staged, so a test reading it the moment `verified`
+    /// arrives could find nothing yet under load (S7 of 4-14's fix round saw it once): it is
+    /// waited for, at most 10 s.
+    async fn staged(&self) -> citar_helper::update::Staged {
+        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(s) = self.updater.staged() {
+                return s;
+            }
+            assert!(tokio::time::Instant::now() < until, "nothing staged 10 s after verified");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     fn unchanged(&self) {
         let now = sha256(&std::fs::read(self.install.path()).expect("read"));
         assert_eq!(now, self.installed_sha, "the installed binary is untouched");
@@ -388,7 +403,7 @@ async fn a_good_update_is_staged_and_one_failing_its_self_test_is_not() {
     let states: Vec<UpdateState> = sts.iter().map(|s| s.state).collect();
     assert_eq!(states, [UpdateState::Downloading, UpdateState::Verified], "{sts:?}");
     assert_eq!(c.downloads.get(), 1);
-    let staged = c.updater.staged().expect("staged");
+    let staged = c.staged().await;
     assert_eq!(staged.version, me);
     assert_eq!(sha256(&std::fs::read(&staged.path).expect("staged")), sha256(&bin));
     c.unchanged();
@@ -581,7 +596,7 @@ async fn a_failure_that_may_pass_is_tried_again_and_a_changed_binary_never_insta
     let third = c.statuses().await;
     assert_eq!(states(&third), [UpdateState::Downloading, UpdateState::Verified], "{third:?}");
     assert_eq!((c.downloads.get(), asked.load(Ordering::SeqCst)), (3, 3));
-    let staged = c.updater.staged().expect("staged");
+    let staged = c.staged().await;
     // The swap fails (the binary's folder full, say): tried again the same way.
     c.updater.swap_failed("no space left on the device".to_owned());
     let after_swap = c.statuses().await;
