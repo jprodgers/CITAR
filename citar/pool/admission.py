@@ -210,6 +210,11 @@ def _takes_model_work(server: Server) -> bool:
 _RANK = {"no_grant": 0, "purpose": 1, "concurrency": 2, "offline": 3, "window": 4, "budget": 5}
 
 
+def _and(items: list) -> str:
+    """``a``, ``a and b``, ``a, b and c``."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
 def _rank(code: str) -> int:
     """How preferable one candidate machine is over another."""
     return _RANK.get(code, 0)
@@ -227,10 +232,16 @@ def _check_grant(session, user: User, server: Server, grant: AccessGrant, purpos
                          f"Your access to “{group_name}” is for every kind of model work, which does not include "
                          f"{PURPOSE_LABELS.get(purpose, purpose)}: its owner lends the CPU only with a grant that "
                          "lists it.", grant=grant, server=server)
-        allowed = ", ".join(PURPOSE_LABELS.get(p, p) for p in (grant.purposes or []))
+        listed = list(grant.purposes or [])
+        allowed = _and([PURPOSE_LABELS.get(p, p) for p in listed])
+        if purpose not in CPU_PURPOSES and all(p in CPU_PURPOSES for p in listed):
+            # a grant lending the CPU alone, the usual way to lend it (4-12): what it is for, not a list to compare
+            return _deny("purpose",
+                         f"Your access to “{group_name}” is for {allowed} only: its owner lends no model work "
+                         "under it.", grant=grant, server=server)
         return _deny("purpose",
-                     f"Your access to “{group_name}” is limited to {allowed}, "
-                     f"and this is {PURPOSE_LABELS.get(purpose, purpose)}.",
+                     f"Your access to “{group_name}” covers {allowed} only, not "
+                     f"{PURPOSE_LABELS.get(purpose, purpose)}.",
                      grant=grant, server=server)
 
     window_rows = list(session.scalars(select(AvailabilityWindow)

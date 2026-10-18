@@ -277,8 +277,11 @@ class FakeEndpoint:
     **One model** (``one_model``), as LM Studio with its one model loaded: one completion generated at a time, the
     others waiting their turn; with ``runs_on``, a generation whose client went keeps the model busy to its end, as a
     server that does not stop a generation when its client goes. ``lengthy`` prompts are answered at length (an essay
-    to cancel), and ``unload_at`` plays the model unloaded during a run. ``qa_phase4.py``'s ``llm-real`` stand-in is
-    built of these."""
+    to cancel), ``unload_at`` plays the model unloaded during a run, and ``fail_at`` a completion that fails as LM
+    Studio's did when its GPU stack crashed under it, the model unloaded from then on; with ``refuse_unloaded`` a
+    completion that comes once the model is unloaded is refused as LM Studio refuses it with its just-in-time loading
+    off (else it is answered, as by one that loads the model again). ``qa_phase4.py``'s ``llm-real`` stand-in is built
+    of these."""
 
     #: How often a streaming answer looks whether its client went.
     POLL = 0.02
@@ -312,6 +315,15 @@ class FakeEndpoint:
         #: Once this many chat completions have arrived, ``/models`` lists every model not loaded: the model unloaded
         #: during a run (None: never).
         self.unload_at: Optional[int] = None
+        #: The chat completion with this number (1: the first to arrive) fails as LM Studio's did when its engine
+        #: crashed (4-15): its stream carries an error event and ends; the model is unloaded from its arrival on, as
+        #: with ``unload_at`` (None: none fails).
+        self.fail_at: Optional[int] = None
+        #: Whether a chat completion that arrives once the model is unloaded is refused (HTTP 400, "No models loaded",
+        #: as LM Studio answers with its just-in-time loading off; ``refused`` keeps when each came) rather than
+        #: answered (as an LM Studio that loads the model again just in time would).
+        self.refuse_unloaded = False
+        self.refused: list[float] = []
         #: Prompts answered at length: {text in the last user message: words}. Such a prompt gets that many words of
         #: text and no tool call, its ``delay_for`` seconds spread over them: a model writing an essay.
         self.lengthy: dict = {}
@@ -342,7 +354,7 @@ class FakeEndpoint:
             def do_GET(self):
                 outer.requests.append({"t": time.time(), "method": "GET", "path": self.path})
                 if self.path.rstrip("/").endswith("/models"):
-                    unloaded = outer.unload_at is not None and len(outer.arrivals) >= outer.unload_at
+                    unloaded = outer.unloaded(len(outer.arrivals))
                     return self._send(200, {"object": "list", "data": [
                         {"id": key, "object": "model", "state": "loaded" if loaded and not unloaded else "not-loaded",
                          "max_context_length": 32768} for key, loaded in list(outer.models)]})
@@ -358,7 +370,16 @@ class FakeEndpoint:
                 except ValueError:
                     body = {}
                 with outer._lock:
+                    before = len(outer.arrivals)
                     outer.arrivals.append(t0)
+                if outer.refuse_unloaded and outer.unloaded(before):
+                    with outer._lock:
+                        outer.refused.append(t0)
+                    return self._send(400, {"error": {
+                        "message": "No models loaded. Please load a model in the developer page or use the 'lms load' "
+                                   "command.", "type": "invalid_request_error", "param": "model", "code": None}})
+                if outer.fail_at is not None and before + 1 == outer.fail_at:
+                    return outer._crash(self, body, entry)
                 if outer.hold is not None and outer.hold(body):
                     with outer._lock:
                         outer.held += 1
@@ -519,6 +540,28 @@ class FakeEndpoint:
         left = max(0.0, finish_at - time.time())
         entry["ran_on_s"] = round(left, 3)
         time.sleep(left)
+
+    def unloaded(self, arrived: int) -> bool:
+        """Whether the model is unloaded once ``arrived`` chat completions have arrived (``unload_at``, ``fail_at``)."""
+        return any(at is not None and arrived >= at for at in (self.unload_at, self.fail_at))
+
+    def _crash(self, handler, body: dict, entry: dict) -> None:
+        """The completion ``fail_at`` names, answered as LM Studio answered when its engine crashed under it (4-15's
+        real part, 2026-10-18): a stream whose one event is an error, then its end. It is served (``requests``)."""
+        entry.update(stream=True, crashed=True, seconds=0.0, tools=len(body.get("tools") or []), calls=[],
+                     **self.describe(body))
+        self.requests.append(entry)
+        event = b'data: {"error":{"message":"terminated"},"message":"terminated"}\n\n'
+        try:
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.send_header("Cache-Control", "no-cache")
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.end_headers()
+            handler.wfile.write(f"{len(event):x}\r\n".encode() + event + b"\r\n0\r\n\r\n")
+            handler.wfile.flush()
+        except OSError:
+            handler.close_connection = True
 
     def one_model(self, runs_on: bool = False) -> None:
         """Play a server with one model loaded, as LM Studio is: one completion generated at a time, the others
@@ -2982,15 +3025,25 @@ def _hybrid_benchmarks(h: Harness) -> None:
                                                   "mean_deal_value", "fallbacks_per_game")}
                         for k, v in ((str(k), v) for k, v in lines_a.items())})[:600])
     code_b, lines_b, body_b = board(bob)
-    code_z, lines_z, _ = board(admin)
+    # design/phase4-helper.md P4.5.8 rule 11 (package 4-12): a member's machine's model results count on the global
+    # boards, the administrators' whole-site board among them, only once an administrator trusts the machine; until
+    # then they are counted as unverified there
+    _code, lines_held, body_held = board(admin)
+    held = {(u.get("model"), u.get("owners")): u.get("pairs") for u in body_held.get("unverified") or []}
+    trusted = admin.put(f"/api/admin/machines/{mid}/trust", json={"trust_tier": "trusted"})
+    code_z, lines_z, _ = wait_until(lambda: (lambda b: b if (b[1].get(("dry-run", "all_but_war")) or {}).get("pairs")
+                                             else None)(board(admin)), 15, 0.5) or board(admin)
     code_v, _lines_v, _ = board(None)
     zline = lines_z.get(("dry-run", "all_but_war")) or {}
-    r.check("bob, who may not see her private runs, sees none of their pairs; the administrator sees every pair named; "
-            "a visitor is refused",
+    r.check("bob, who may not see her private runs, sees none of their pairs; the administrator's board leaves them "
+            "out while bob's machine is not trusted (counted as unverified, P4.5.8 rule 11) and names every pair once "
+            "an administrator trusts it; a visitor is refused",
             code_b == 200 and not any(k[0] in ("dry-run", "dry-run-b") for k in lines_b)
-            and run_a not in json.dumps(body_b) and code_z == 200 and zline.get("pairs") == 2
-            and len(zline.get("games") or []) == 2 and code_v == 401,
-            f"bob {code_b} {sorted(lines_b)}; admin {code_z} {zline.get('pairs')}; visitor {code_v}")
+            and run_a not in json.dumps(body_b) and ("dry-run", "all_but_war") not in lines_held
+            and held.get(("dry-run", "all_but_war")) == 2 and trusted.status_code == 200
+            and code_z == 200 and zline.get("pairs") == 2 and len(zline.get("games") or []) == 2 and code_v == 401,
+            f"bob {code_b} {sorted(lines_b)}; admin before trusting: unverified {held}; trust "
+            f"{trusted.status_code}; admin {code_z} {zline.get('pairs')}; visitor {code_v}")
     data.update({"runs": [run_a, run_b], "controls": controls,
                  "pairs": [{"seed": j.get("seed"), **{k: (j.get("result") or {}).get("pair", {}).get(k)
                                                       for k in ("score_diff", "deals", "deal_value_mean",
@@ -4610,9 +4663,423 @@ def lmstudio_model(base: str = REAL_URL, model: str = REAL_MODEL, timeout: float
     return True, f"{model} is loaded in LM Studio at {root} (context {context})"
 
 
+#: What the CITAR helper logs when a model endpoint failed a request (``session.rs``: ``request <id> failed
+#: (endpoint): ...``).
+ENDPOINT_FAILED = "failed (endpoint)"
+
+
+class _Answer:
+    """An HTTP response as it passes through ``ModelGate``, looked at and never changed: its status, whether its body
+    ended as its framing says (chunked, a length, or the connection's close), and an error in it (an error event in a
+    stream of server-sent events, ``error`` in a JSON answer)."""
+
+    #: The most of a body (or of a stream's unended line) kept to be read.
+    KEEP = 1 << 20
+
+    def __init__(self):
+        self.status: Optional[int] = None
+        self.chunked = False
+        self.length: Optional[int] = None
+        self.stream = False
+        self.complete = False
+        self.error: Optional[str] = None
+        self.body = bytearray()
+        self._buf = b""
+        self._lines = b""
+        self._got = 0
+        self._left: Optional[int] = None      # bytes of the current chunk's data still to come
+        self._crlf = 0                         # bytes of the CRLF after them
+        self._trailer = False
+
+    def feed(self, data: bytes) -> None:
+        self._buf += data
+        if self.status is None:
+            end = self._buf.find(b"\r\n\r\n")
+            if end < 0:
+                return
+            head, self._buf = self._buf[:end].decode("latin-1"), self._buf[end + 4:]
+            first, *rest = head.split("\r\n")
+            parts = first.split(" ", 2)
+            self.status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            headers = {}
+            for line in rest:
+                k, _, v = line.partition(":")
+                headers[k.strip().lower()] = v.strip()
+            self.chunked = "chunked" in headers.get("transfer-encoding", "").lower()
+            if not self.chunked and headers.get("content-length", "").isdigit():
+                self.length = int(headers["content-length"])
+            self.stream = "text/event-stream" in headers.get("content-type", "").lower()
+            if self.length == 0:
+                self.complete = True
+        self._body()
+
+    def _body(self) -> None:
+        if not self.chunked:
+            piece, self._buf = self._buf, b""
+            if self.length is not None:
+                piece = piece[:max(0, self.length - self._got)]
+                self._got += len(piece)
+                self.complete = self._got >= self.length
+            self._take(piece)
+            return
+        while not self.complete:
+            if self._trailer:
+                end = self._buf.find(b"\r\n")
+                if end < 0:
+                    return
+                line, self._buf = self._buf[:end], self._buf[end + 2:]
+                self.complete = not line
+                continue
+            if self._left is None:
+                end = self._buf.find(b"\r\n")
+                if end < 0:
+                    return
+                size, self._buf = self._buf[:end], self._buf[end + 2:]
+                try:
+                    n = int(size.split(b";")[0].strip(), 16)
+                except ValueError:
+                    self.error = self.error or f"a malformed chunk ({size[:40]!r})"
+                    self.complete = True
+                    return
+                if n == 0:
+                    self._trailer = True
+                    continue
+                self._left, self._crlf = n, 2
+            if self._left:
+                piece, self._buf = self._buf[:self._left], self._buf[self._left:]
+                self._left -= len(piece)
+                self._take(piece)
+                if self._left:
+                    return
+            skip = min(self._crlf, len(self._buf))
+            self._buf, self._crlf = self._buf[skip:], self._crlf - skip
+            if self._crlf:
+                return
+            self._left = None
+
+    def _take(self, piece: bytes) -> None:
+        if not self.stream:
+            if len(self.body) < self.KEEP:
+                self.body += piece[:self.KEEP - len(self.body)]
+            return
+        self._lines += piece
+        while b"\n" in self._lines:
+            line, self._lines = self._lines.split(b"\n", 1)
+            line = line.rstrip(b"\r")
+            if line.startswith(b"event:") and line[6:].strip() == b"error":
+                self.error = self.error or "an error event"
+            elif line.startswith(b"data:"):
+                payload = line[5:].strip()
+                if payload and payload != b"[DONE]":
+                    try:
+                        doc = json.loads(payload)
+                    except ValueError:
+                        continue
+                    if isinstance(doc, dict) and doc.get("error"):
+                        self.error = f"an error event: {payload[:300].decode('utf-8', 'replace')}"
+        if len(self._lines) > self.KEEP:
+            self._lines = b""
+
+    def failure(self) -> Optional[str]:
+        """A failure the answer has shown so far (an error status, an error event), else None."""
+        if self.error:
+            return self.error
+        if self.status is not None and not 200 <= self.status < 300:
+            return f"HTTP {self.status}: {bytes(self.body[:300]).decode('utf-8', 'replace')}"
+        return None
+
+    def verdict(self, closed: bool) -> tuple:
+        """``("ok", "")`` or ``("failed", why)`` for the answer as it stands, ``closed`` when its connection closed
+        (which ends a body framed by neither chunks nor a length)."""
+        if self.status is None:
+            return "failed", "LM Studio closed the connection before it answered"
+        if not 200 <= self.status < 300:
+            return "failed", f"HTTP {self.status}: {bytes(self.body[:300]).decode('utf-8', 'replace')}"
+        if self.error:
+            return "failed", self.error
+        if not self.complete and (self.chunked or self.length is not None or not closed):
+            return "failed", "its answer was cut short"
+        if not self.stream and self.body:
+            try:
+                doc = json.loads(bytes(self.body))
+            except ValueError:
+                doc = None
+            if isinstance(doc, dict) and doc.get("error"):
+                return "failed", f"an error answer: {bytes(self.body[:300]).decode('utf-8', 'replace')}"
+        return "ok", ""
+
+
+class ModelGate:
+    """A gate in front of LM Studio for the ``real`` parts (this script's and ``qa_phase4.py``'s ``real`` and
+    ``llm-real``, P4.7.1 rule 7): the helper's base URL is the gate's, so the gate is the helper's only way to the
+    model, and it forwards a completion to LM Studio only while the model is loaded and nothing has failed.
+
+    LM Studio loads a model just in time for a completion that names it (when that setting is on), and a model whose
+    engine crashed is unloaded: a game whose helper went on forwarding its seats' requests after that would load the
+    model again, or hammer a GPU stack that had just failed. (4-15's first real run: LM Studio's CUDA backend crashed
+    at the first completion, and the helper forwarded eleven more within a second; the model stayed unloaded only
+    because just-in-time loading was off.) So:
+
+    - **before each completion** it reads LM Studio's model list (``lmstudio_model``: read only); a model that is not
+      loaded closes the gate, and the completion is refused here (HTTP 503) without reaching LM Studio;
+    - **a completion that fails** (an HTTP error, an error event in its stream, an answer cut short, LM Studio not
+      taking the connection) closes the gate, and the completions after it are refused here. A completion whose client
+      went (the helper's cancel) is no failure: its connection to LM Studio is closed at once, so LM Studio stops it;
+    - ``watch`` adds the guard a game needs: a thread that reads the model list every ``POLL`` seconds and the
+      helper's log every ``LOG_POLL`` for an endpoint failure (``ENDPOINT_FAILED``), and closes the gate on either;
+    - **closed** it stays closed (``tripped``: when and why; ``closed`` is set) and calls each ``on_trip`` function
+      once, in a thread of its own: the parts stop the helper there, and pause the game.
+
+    A listing (``GET``) passes through: it loads nothing. The bytes are relayed as LM Studio sends them (a stream's
+    chunked framing included), one answer a connection, so the helper reads what it would read from LM Studio. The
+    model's state is read a few milliseconds before a completion is forwarded: what LM Studio does between that read
+    and the completion's arrival is the one window left."""
+
+    #: How often the guard (``watch``) reads the model list, and the helper's log.
+    POLL = 0.5
+    LOG_POLL = 0.1
+    #: How long LM Studio may send nothing in an answer before the gate takes it for a failure (the helper's own
+    #: timeout, which closes the connection, is shorter).
+    IDLE_S = 900.0
+    #: The only hosts it stands in front of: this machine's (P4.7.1 rule 4).
+    LOCAL = ("localhost", "127.0.0.1", "::1")
+
+    def __init__(self, upstream: str, model: str):
+        parsed = urlparse(upstream.rstrip("/"))
+        if parsed.scheme != "http" or parsed.hostname not in self.LOCAL:
+            raise ValueError(f"the gate stands in front of this machine's own model server only, not {upstream}")
+        self.upstream = upstream.rstrip("/")
+        self.model = model
+        self._addr = (parsed.hostname, parsed.port or 80)
+        self._host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        self.tripped: Optional[dict] = None
+        self.closed = threading.Event()
+        self.forwarded = self.refused = self.cancelled = 0
+        self.failures: list = []
+        self._lock = threading.Lock()
+        self._on_trip: list = []
+        self._stop = threading.Event()
+        gate = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                gate._relay(self, b"", completion=False)
+
+            def do_POST(self):
+                size = int(self.headers.get("Content-Length") or 0)
+                gate._relay(self, self.rfile.read(size) if size else b"", completion=True)
+
+            def log_message(self, *args):
+                pass
+
+        class Server(ThreadingHTTPServer):
+            daemon_threads = True
+            block_on_close = False
+
+            def handle_error(self, request, client_address):
+                if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+                    return
+                super().handle_error(request, client_address)
+
+        self.httpd = Server(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}{parsed.path}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True, name="qa-model-gate").start()
+
+    # ------------------------------------------------------------------ closing it
+    def check(self) -> Optional[str]:
+        """Why the gate is closed (None: open): closed already, or LM Studio's model list (read now) no longer shows
+        the model loaded, which closes it."""
+        if self.tripped is None:
+            ready, said = lmstudio_model(self.upstream, self.model, timeout=5.0)
+            if not ready:
+                self.trip(f"the model list: {said}")
+        return self.tripped["why"] if self.tripped is not None else None
+
+    def trip(self, why: str) -> None:
+        """Close the gate for good (the first reason kept), and call the ``on_trip`` functions."""
+        with self._lock:
+            if self.tripped is not None:
+                return
+            self.tripped = {"at": time.time(), "why": why[:500]}
+            fns = list(self._on_trip)
+        self.closed.set()
+        self._call(fns)
+
+    def on_trip(self, fn: Callable[[], None]) -> None:
+        """Call ``fn`` once the gate closes (at once, in a thread, when it is closed already)."""
+        with self._lock:
+            if self.tripped is None:
+                self._on_trip.append(fn)
+                return
+        self._call([fn])
+
+    @staticmethod
+    def _call(fns: list) -> None:
+        def run():
+            for fn in fns:
+                try:
+                    fn()
+                except Exception:
+                    traceback.print_exc()
+        if fns:
+            threading.Thread(target=run, daemon=True, name="qa-model-gate-closed").start()
+
+    def watch(self, log: Optional[Path] = None) -> None:
+        """The guard for a game (the class's doc): until the gate closes (or ``close``), the model list read every
+        ``POLL`` seconds and the helper's ``log`` every ``LOG_POLL`` for ``ENDPOINT_FAILED``."""
+        threading.Thread(target=self._watch, args=(log,), daemon=True, name="qa-model-guard").start()
+
+    def _watch(self, log: Optional[Path]) -> None:
+        offset, rest, due = 0, b"", 0.0
+        while not self._stop.is_set() and self.tripped is None:
+            if time.monotonic() >= due:
+                self.check()
+                due = time.monotonic() + self.POLL
+            if log is not None:
+                try:
+                    with open(log, "rb") as fh:
+                        fh.seek(offset)
+                        data = fh.read()
+                except OSError:
+                    data = b""
+                offset += len(data)
+                lines = (rest + data).split(b"\n")
+                rest = lines.pop()
+                for line in lines:
+                    text = line.decode("utf-8", "replace").strip()
+                    if ENDPOINT_FAILED in text:
+                        self.trip(f"the helper's log: {text[:400]}")
+                        break
+            self._stop.wait(self.LOG_POLL)
+
+    def summary(self) -> dict:
+        """What it did: completions forwarded, refused here and cancelled by their client; the last failures; when
+        and why it closed (None: it never did)."""
+        with self._lock:
+            return {"forwarded": self.forwarded, "refused": self.refused, "cancelled": self.cancelled,
+                    "failures": list(self.failures[-5:]), "tripped": self.tripped}
+
+    def close(self) -> None:
+        """Stop serving (an answer still under way is cut)."""
+        self._stop.set()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    # ------------------------------------------------------------------ the relay
+    def _relay(self, handler, body: bytes, *, completion: bool) -> None:
+        handler.close_connection = True         # one answer a connection: LM Studio closes its own after it
+        if completion:
+            why = self.check()
+            if why is not None:
+                with self._lock:
+                    self.refused += 1
+                self._refuse(handler, 503, why)
+                return
+            with self._lock:
+                self.forwarded += 1
+        try:
+            up = socket.create_connection(self._addr, timeout=10)
+        except OSError as e:
+            why = f"LM Studio took no connection at {self._host}:{self._addr[1]} ({type(e).__name__})"
+            if completion:
+                self._failed(why)
+            self._refuse(handler, 502, why)
+            return
+        try:
+            up.settimeout(None)
+            up.sendall(self._request(handler, body))
+            outcome, why = self._pump(handler.connection, up, completion)
+        except OSError as e:
+            outcome, why = "failed", f"LM Studio's connection failed ({type(e).__name__}: {e})"
+        finally:
+            up.close()
+        if completion and outcome == "gone":
+            with self._lock:
+                self.cancelled += 1
+        elif completion and outcome == "failed":
+            self._failed(why)
+
+    def _failed(self, why: str) -> None:
+        with self._lock:
+            self.failures.append({"at": time.time(), "why": why[:400]})
+        self.trip(f"a completion failed: {why}")
+
+    def _request(self, handler, body: bytes) -> bytes:
+        skip = ("host", "connection", "keep-alive", "content-length", "transfer-encoding", "proxy-connection", "te",
+                "upgrade")
+        lines = [f"{handler.command} {handler.path} HTTP/1.1", f"Host: {self._host}:{self._addr[1]}"]
+        lines += [f"{k}: {v}" for k, v in handler.headers.items() if k.lower() not in skip]
+        if handler.command != "GET" or body:
+            lines.append(f"Content-Length: {len(body)}")
+        lines.append("Connection: close")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
+
+    def _pump(self, down, up, completion: bool) -> tuple:
+        """LM Studio's answer relayed to the helper as it comes: ``("ok", "")``, ``("failed", why)``, or ``("gone",
+        "")`` when the helper closed its connection (a cancel), which closes LM Studio's at once. A completion's
+        failure that its bytes show (an error status, an error event, an error answer) closes the gate before those
+        bytes go on (``("reported", why)``): the helper cannot hear of it, and the server send the next completion,
+        before the gate is closed."""
+        seen = _Answer()
+        watch_down = True
+        last = time.monotonic()
+        reported = ""
+
+        def out(outcome: str, why: str = "") -> tuple:
+            return ("reported", reported) if reported else (outcome, why)
+        while not self._stop.is_set():
+            readable, _, _ = select.select([up, down] if watch_down else [up], [], [], 0.5)
+            if down in readable:
+                try:
+                    peek = down.recv(1, socket.MSG_PEEK)
+                except OSError:
+                    peek = b""
+                if not peek:
+                    return out("gone")
+                watch_down = False          # bytes from the helper mid-answer: not looked at again
+            if up in readable:
+                try:
+                    data = up.recv(65536)
+                except OSError as e:
+                    return out("failed", f"LM Studio's connection broke mid-answer ({type(e).__name__})")
+                if not data:
+                    return out(*seen.verdict(closed=True))
+                last = time.monotonic()
+                seen.feed(data)
+                verdict = seen.verdict(closed=False) if seen.complete else ("failed", seen.failure() or "")
+                if completion and not reported and verdict[0] == "failed" and verdict[1]:
+                    reported = verdict[1]
+                    self._failed(reported)
+                try:
+                    down.sendall(data)
+                except OSError:
+                    return out("gone")
+                if seen.complete:
+                    return out(*verdict)
+            elif time.monotonic() - last > self.IDLE_S:
+                return out("failed", f"LM Studio sent nothing for {self.IDLE_S:g} s")
+        return out("gone")
+
+    @staticmethod
+    def _refuse(handler, code: int, why: str) -> None:
+        body = json.dumps({"error": {"message": f"the QA gate in front of LM Studio refused this: {why}",
+                                     "type": "qa_gate"}}).encode()
+        try:
+            handler.send_response(code)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            handler.wfile.write(body)
+        except OSError:
+            pass
+
+
 def part_real(h: Harness) -> None:
     """3-19's ``real`` part (design/phase3-features.md Appendix D, 3-19; the owner's decision of 2026-10-11): the
-    plumbing against a real model. Bob's helper machine (a real Python helper, one slot) has the laptop's LM Studio as
+    plumbing against a real model. Bob's helper machine (a real CITAR helper, one slot) has the laptop's LM Studio as
     its upstream, serving ``REAL_MODEL``, which the owner keeps loaded; the part first checks that LM Studio lists it
     loaded and fails with what to do otherwise, and it never loads, unloads or swaps a model, changes LM Studio's
     settings or uses another model. Bob shares the machine with alice for games and pooled prompts. Alice's game seats
@@ -4622,7 +5089,12 @@ def part_real(h: Harness) -> None:
     machine as a pooled prompt. The model is small, so this tests the plumbing, not the play. The evidence: the turns
     each model seat played and how they ended, the tool calls made and refused, the chats with their replies, causes
     and times, every fallback to the bot with its cause, and the generation seconds the scheduler metered against the
-    compute ledger's events for the machine."""
+    compute ledger's events for the machine.
+
+    The helper reaches LM Studio only through a ``ModelGate``: a completion goes on only while LM Studio lists the
+    model loaded and none has failed, and the gate's guard stops the helper the moment the model goes or a completion
+    fails. The game is then paused and the part fails, its game checks left out: nothing more reaches LM Studio, so
+    nothing loads the model again (4-15's review)."""
     r = h.report
     alice, bob = h.accounts["alice"], h.accounts["bob"]
     data = r.data.setdefault("real", {})
@@ -4632,6 +5104,7 @@ def part_real(h: Harness) -> None:
         return
     state = h.server.state
     helper: Optional[Helper] = None
+    gate = ModelGate(REAL_URL, REAL_MODEL)
     drivers: list = []
     gid = ""
     t0 = time.time()
@@ -4644,7 +5117,9 @@ def part_real(h: Harness) -> None:
         issued = bob.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa real"}) if hid else None
         token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
         if token:
-            helper = Helper(h, token, REAL_URL, "qa-real-helper")
+            helper = Helper(h, token, gate.url, "qa-real-helper")
+            gate.on_trip(helper.stop)       # the server's only way to LM Studio, closed the moment the gate closes
+            gate.watch(helper.log)
         group = bob.post("/api/pool/groups", json={"name": f"QA real group {h.tag}", "visibility": "private"})
         group_id = group.json().get("id", "") if group.status_code == 200 else ""
         put = bob.put(f"/api/pool/servers/{hid}", json={"group_id": group_id})
@@ -4704,7 +5179,7 @@ def part_real(h: Harness) -> None:
         # ---- the game, to its end: a turn that does not move for REAL_STALL_S is a hang
         last, moved, progress = None, time.perf_counter(), []
         deadline = time.perf_counter() + REAL_LIMIT_S
-        while time.perf_counter() < deadline:
+        while time.perf_counter() < deadline and gate.tripped is None:
             gi = _game_info(alice, gid)
             mark = (gi.get("turn"), gi.get("current_player"))
             if gi.get("phase") not in ("playing", None):
@@ -4716,7 +5191,9 @@ def part_real(h: Harness) -> None:
                 progress.append({"at_s": round(time.time() - t0, 1), "turn": mark[0], "player": mark[1]})
             elif time.perf_counter() - moved > REAL_STALL_S:
                 break
-            time.sleep(2.0)
+            gate.closed.wait(2.0)
+        if not gate_held(r, gate, alice, gid, data):
+            return
         gi = _game_info(alice, gid)
         stalled = gi.get("phase") == "playing"
         r.check("the game was played to its end (20 rounds), no turn hanging", not stalled,
@@ -4795,8 +5272,6 @@ def part_real(h: Harness) -> None:
                 f"(observed {events[2]:.1f} s, {events[3]:.2f} credits); report {meta.get('status')}, written "
                 f"{meta.get('narrative_written')}, {report_events[0]} events, {report_events[1]:.2f} s",
                 metered_s=round(metered, 3), ledger_s=round(events[1], 3))
-        after, said_after = lmstudio_model(REAL_URL, REAL_MODEL)
-        r.check("LM Studio still lists the model loaded, as before the part", after, said_after)
         fallbacks = [{"where": "chat", "nid": x.get("nid"), "player": x.get("player"), "outcome": x.get("outcome"),
                       "cause": x.get("cause")} for x in negotiations if x.get("outcome") != "answered"]
         fallbacks += [{"where": "diplomat phase", "turn": x.get("turn"), "outcome": x.get("outcome"),
@@ -4806,8 +5281,7 @@ def part_real(h: Harness) -> None:
         calls_made = {k: sum(int(x.get(k) or 0) for x in llm_turns)
                       for k in ("tool_calls", "actions_ok", "queries", "errors", "repeats", "malformed")}
         data.update({
-            "lmstudio": {**data["lmstudio"], "after": said_after}, "seconds": round(time.time() - t0, 1),
-            "progress": progress[-60:],
+            "seconds": round(time.time() - t0, 1), "progress": progress[-60:],
             "llm_seat": {"turns": len(llm_turns), "end_reasons": _counts(x.get("end_reason") for x in llm_turns),
                          "model_s": round(sum(float(x.get("model_s") or 0) for x in llm_turns), 2),
                          "queue_s": round(sum(float(x.get("queue_s") or 0) for x in llm_turns), 2),
@@ -4849,6 +5323,34 @@ def part_real(h: Harness) -> None:
                 pass
         if helper is not None:
             helper.stop()
+        gate.close()
+        data["gate"] = gate.summary()
+        # whatever ended the part, once something could have reached LM Studio
+        after, said_after = lmstudio_model(REAL_URL, REAL_MODEL)
+        data["lmstudio"]["after"] = said_after
+        r.check("LM Studio still lists the model loaded, as before the part", after, said_after)
+
+
+def gate_held(r: "Report", gate: ModelGate, who: "Account", gid: str, data: dict) -> bool:
+    """The ``real`` parts' check after their game: the model stayed loaded and answered every completion the game
+    sent (``gate`` never closed). When it closed, its guard had stopped the helper already: the game ``gid`` is paused
+    (``who`` plays in it) so it asks for nothing more, what the gate saw goes to ``data``, and False says to leave the
+    game's checks out."""
+    tripped = gate.tripped
+    if tripped is not None and gid:
+        try:
+            who.post(f"/api/games/{gid}/control", json={"paused": True})
+        except httpx.HTTPError:
+            pass
+    summary = gate.summary()
+    data["gate"] = summary
+    r.check("LM Studio kept the model loaded and answered every completion of the game: the gate in front of it (the "
+            "helper's only way there) forwarded each only once LM Studio listed the model loaded, and no completion "
+            "failed (else the helper is stopped at once, the game paused and its checks left out, so nothing more "
+            "reaches LM Studio)",
+            tripped is None and summary["forwarded"] > 0 and summary["refused"] == 0,
+            json.dumps(summary)[:700])
+    return tripped is None
 
 
 #: How a model seat's chat answer may end other than by its model's answer (the game's metrics, ``outcome`` and

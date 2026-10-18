@@ -23,6 +23,7 @@ import tests  # noqa: F401  (temporary saves folder and server registry; must be
 
 import importlib.util
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -39,6 +40,7 @@ from tests import helperfake as H
 ROOT = Path(__file__).resolve().parent.parent
 _TMP = Path(tempfile.mkdtemp(prefix="citar_helper_e2e_"))
 _URL = "sqlite:///" + (_TMP / "test.db").as_posix()
+_SAVED: dict = {}
 CI = bool(os.environ.get("CI"))
 
 
@@ -55,6 +57,7 @@ MODEL = qa.FakeEndpoint.MODEL
 
 def setUpModule():
     H.require_helper_binary("the end-to-end helper tests")       # skips locally without one; fails on CI
+    _SAVED.update({k: os.environ.get(k) for k in ("CITAR_DATA_DIR", "CITAR_DB_URL")})
     os.environ["CITAR_DATA_DIR"] = str(_TMP)
     os.environ["CITAR_DB_URL"] = _URL
     settings.reset()
@@ -64,6 +67,21 @@ def setUpModule():
     db.create_all()
     servers.invalidate()
     S.reset()
+
+
+def tearDownModule():
+    # the pool's connections closed here, not left to the interpreter's exit ("unclosed database" warnings under
+    # -X dev when the module ran alone), and the environment as it was for the modules after this one
+    S.reset()
+    db.dispose()
+    for k, v in _SAVED.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    settings.reset()
+    servers.invalidate()
+    shutil.rmtree(_TMP, ignore_errors=True)
 
 
 def _until(check, limit: float = 10.0, step: float = 0.01):

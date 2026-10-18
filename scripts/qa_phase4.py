@@ -28,15 +28,17 @@ Parts:
 - ``llm-real`` (4-05): 4-04's real-model checks through the hub and the scheduler, in a hub of its own in this process
   (its database in ``<dir>/llm-real``): LM Studio (``--llm-url``, ``http://localhost:1234/v1``) lists
   ``google/gemma-4-e2b`` loaded before and after (only its model list is read: the part never loads, unloads or swaps a
-  model or changes LM Studio's settings); the real helper in front of it answers a request with tools with a raw
-  message whose tool call (or text) the server parses; a 1,500-token generation cancelled at 2 s is acknowledged
-  within a second, freeing its slot with nothing draining; three short requests after it take no longer than 1.5
-  times the median of three before it plus a second. ``--stand-in`` plays LM Studio with the scripted endpoint (the
-  same model name, loaded; streaming; one model generating one answer at a time; a cancelled generation stopped), to
-  check the part itself without the model. The checks are one function (``exercise``), and
-  ``tests/test_helper_llm_real.py`` runs it in every test run against stand-ins: it passes against one that stops a
-  cancelled generation, and fails against one that runs on after the cancel, against a model that is not loaded (with
-  nothing sent to it) and against one unloaded during the run.
+  model or changes LM Studio's settings); the real helper in front of it (reaching it only through the QA gate,
+  ``qa_phase3.ModelGate``: a completion forwarded only while LM Studio lists the model loaded and none has failed)
+  answers a request with tools with a raw message whose tool call (or text) the server parses; a 1,500-token
+  generation cancelled at 2 s is acknowledged within a second, freeing its slot with nothing draining; three short
+  requests after it take no longer than 1.5 times the median of three before it plus a second. ``--stand-in`` plays
+  LM Studio with the scripted endpoint (the same model name, loaded; streaming; one model generating one answer at a
+  time; a cancelled generation stopped), to check the part itself without the model. The checks are one function
+  (``exercise``), and ``tests/test_helper_llm_real.py`` runs it in every test run against stand-ins: it passes against
+  one that stops a cancelled generation, and fails against one that runs on after the cancel, against a model that is
+  not loaded (with nothing sent to it), against one unloaded during the run, and against one unloaded after its first
+  completion or whose engine fails mid-run (nothing more reaching it either way).
 
 - ``scan`` (4-06): bob's helper machine with the real helper scanning and measuring, ``citar-fake-probe`` (built beside
   the helper by ``cargo xtask develop``) named as its ``nvidia-smi`` by ``CITAR_HELPER_NVIDIA_SMI``, so the machine's
@@ -133,8 +135,44 @@ Parts:
   idles again, ``NRestarts`` still 0; ``service uninstall`` stops and removes it, ``service status`` says not installed,
   and ``systemctl --user list-unit-files`` lists no citar unit. A last invocation checks that none is left.
 
-``all`` runs every part written so far; ``service`` needs ``--wsl`` (the server in WSL), and 4-15 adds ``exit`` and
-``real``.
+- ``exit`` (4-15): Phase 4's exit (design/phase4-helper.md P4.1.4; Appendix E, 4-15 gates 2 and 3), with the server in
+  WSL (``--wsl``, P4.7.6's topology; its job host, Linux, the verifier) and helpers on both sides of it. Alice's
+  Windows helper machine (the Windows helper dialling the WSL server through WSL's localhost forwarding; two threads,
+  25%, 512 MB) and her WSL helper machine (the helper ``cargo xtask develop`` built in WSL, ``--wsl-helper``, dialling
+  it on WSL's own loopback; two threads, 50%, 512 MB), each lending CPU from its own settings (``citar-helper setup``
+  answered yes after its ceiling was written), her grant to bob listing lab explicitly; bob (given ``run_lab``)
+  queues 24 duels of 40 rounds and an administrator a ranking experiment of 6 and a reference run of 4 (``citar lab
+  submit``), all dispatched across the two helpers and this server's job host. Checked from what the run left: every
+  accepted line signed by its machine (its claim the run's, its ed25519 signature verified here with ``cryptography``,
+  another implementation than the server's) or the server's own; every game played again here (Windows) folding to
+  the chain head its run gave, its result hash the line's; each helper's results replicated on the job host while
+  its machine was new and sampled after at the provisional rate by the server's keyed choice (set to
+  ``EXIT_SAMPLE`` for the run); the games the Windows helper played and Linux replicated equal byte for byte (the
+  engine's bytes played again on both, the hashes and heads of both runs, the line); each game once in its results
+  file, the ratings exactly the accepted lab and ranking games; one ledger event a run with its verification, given
+  by alice and used by bob (each bounded by 1.5 times the reference cost), replicas used by nobody, their sums as
+  ``/api/ledger/me`` tells them; the limits hard on both and held (each job host's CPU under its cap). Then the faulty
+  helpers: carol's WSL helper altering its third result (``--test-fault result:3``) is quarantined at it with the
+  evidence on ``#/admin/verification``'s data, and her second machine is refused CPU work; dave's Windows helper,
+  lending to bob under a budgeted grant and altering its sixth and ninth results (``result-at:6,9``), reaches
+  provisional, an administrator's replica checks its seventh, sampling (the rate at 1) catches its ninth, and its
+  sixth and eighth (both unverified, one before the verified match) are withdrawn, played again elsewhere and
+  accepted, their events rejected and their budget settlements reversed, the ratings counting each game once. With
+  ``--keep`` alice's two helpers stay connected, lending, for the browser checklist.
+- ``real`` (4-15): LM Studio's ``google/gemma-4-e2b`` (loaded before and after; the part never loads, unloads or
+  swaps a model, and the helper offers that model only and reaches it only through the QA gate, whose guard stops
+  the helper the moment the model goes or a completion fails, the game then paused and the part failed with nothing
+  more sent) through alice's Windows helper: a 6-round game with her
+  person seat, a hybrid seat (prompted every 2 turns), an LLM seat and two bots; the LLM seat's every turn ended by
+  its own ``end_turn``, at least two chats answered by the models' own calls (parsed on the server), the ledger's
+  generation seconds the scheduler's, no slot drained; then 4-04's checks through the same helper binary
+  (``exercise``: a 1,500-token generation cancelled at 2 s acknowledged within a second, the next short requests
+  within the run's own baseline).
+
+``all`` runs every part in that order in two runs, each on a server of its own in a folder of ``--dir``: the parts
+before ``service`` with the server on Windows, then ``service``, ``exit`` and ``real`` with the server in WSL (so it
+needs ``--wsl`` and ``--wsl-helper``; ``--skip`` leaves parts out for a development run, never at the exit); its
+``qa-all.json`` holds both runs' summaries.
 """
 from __future__ import annotations
 
@@ -162,8 +200,8 @@ def _phase3():
 q3 = _phase3()
 Harness, Helper, FakeEndpoint, wait_until = q3.Harness, q3.Helper, q3.FakeEndpoint, q3.wait_until
 
-#: Parts a later package writes (P4.7.6): asked for now, the harness says so and refuses.
-LATER = {"exit": "4-15", "real": "4-15"}
+#: Parts a later package writes (P4.7.6): asked for now, the harness says so and refuses. None is left.
+LATER: dict = {}
 #: The v1 refusal's words (``citar.server.helper_protocol.V1_REFUSAL_MESSAGE``), as a 0.1.5 worker prints them.
 V1_START = "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2)."
 #: A protocol 1 hello, as a 0.1.5 worker sent it.
@@ -529,8 +567,11 @@ def exercise(check: Callable, url: str, state: Path, data: dict, *, label: str =
     home ``<state>/helper-llm-real``) in front of the endpoint. Each check goes to ``check(name, ok, detail,
     **numbers)`` (the harness's ``Report.check``), and what the run measured to ``data``.
 
-    Nothing is sent to a model that is not loaded: the first check ends the run there, before a helper starts. A
-    failure that leaves the later checks meaningless (the helper not connecting, a request failing) ends it at that
+    Nothing is sent to a model that is not loaded: the first check ends the run there, before a helper starts; the
+    helper reaches the model only through a ``q3.ModelGate``, which forwards a completion only while the model is
+    listed loaded and none has failed (a failure closes it for the rest of the run); and the model's state is read
+    again before the requests before the cancel, the long generation and the requests after it. A failure that leaves
+    the later checks meaningless (the helper not connecting, a request failing, the model gone) ends the run at that
     check, and the model's state is read again after the run whatever happened in it. ``ack_bound`` is the seconds
     the cancel's acknowledgement may take: the gate's 1 (the tests give CI three times it, ``p3-notes.md``)."""
     ready, said = q3.lmstudio_model(url, REAL_MODEL)
@@ -557,13 +598,26 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
     from citar.server import workers as W
     from tests import helperfake as HF
 
+    gate = q3.ModelGate(url, REAL_MODEL)
+
     def must(name: str, what: str, fn: Callable):
-        """``fn()``; if it raises, the check ``name`` fails saying ``what`` failed, and the run ends."""
+        """``fn()``; if it raises, the check ``name`` fails saying ``what`` failed (and why the gate closed, when it
+        did), and the run ends."""
         try:
             return fn()
         except Exception as exc:
-            check(name, False, f"{what} failed: {type(exc).__name__}: {exc}"[:400])
+            closed = gate.tripped
+            check(name, False, f"{what} failed: {type(exc).__name__}: {exc}"[:400]
+                  + (f"; the gate closed: {closed['why']}"[:300] if closed else ""))
             raise _Ended from exc
+
+    def loaded_still(name: str, what: str) -> None:
+        """Before ``what``: the model still listed loaded (and the gate open), else the check ``name`` fails and the
+        run ends with nothing more sent."""
+        why = gate.check()
+        if why is not None:
+            check(name, False, f"nothing more was sent before {what}: {why}"[:500])
+            raise _Ended
 
     hub_server = HF.HubServer()
     helper = None
@@ -578,7 +632,7 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
             sid = row.id
         servers.invalidate()
         S.reset()
-        helper = HF.RealHelper(hub_server.base, raw, url, name="qa-llm-real", slots=1,
+        helper = HF.RealHelper(hub_server.base, raw, gate.url, name="qa-llm-real", slots=1,
                                extra=("--provider", "lmstudio", "--model", REAL_MODEL),
                                home=state / "helper-llm-real")
         online = wait_until(lambda: W.hub().get(sid) is not None and W.hub().get(sid).ack is not None, 60, 0.25)
@@ -617,7 +671,11 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
                 return time.perf_counter() - t0
             bound_name = ("three short requests after the cancel take no longer than 1.5 times the median of three "
                           "before it plus a second: the model stopped the cancelled generation")
+            cancel_name = (f"a 1,500-token generation cancelled at {CANCEL_AT:g} s is acknowledged within "
+                           f"{ack_bound:g} s: the helper's cancelled frees its slot, nothing drains")
+            loaded_still(bound_name, "the requests before the cancel")
             before = must(bound_name, "a short request before the cancel", lambda: [short() for _ in range(3)])
+            loaded_still(cancel_name, "the long generation")
             ticket = sched.ticket(sid, REAL_MODEL, cls="test", label="qa long generation")
             conv = conversation(ticket, LONG_PROMPT, max_tokens=1500)
             late0 = m.counters["late_frames"]
@@ -642,12 +700,12 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
             ack_s = round(acked - t_cancel, 3) if acked else None
             ended = ("cancelled" if "error" in out else "answered before the cancel" if "result" in out
                      else "still running")
-            check(f"a 1,500-token generation cancelled at {CANCEL_AT:g} s is acknowledged within {ack_bound:g} s: the "
-                  "helper's cancelled frees its slot, nothing drains",
+            check(cancel_name,
                   ended == "cancelled" and acked is not None and acked - t_cancel < ack_bound
                   and m.counters["draining"] == 0 and m.counters.get("cancel_unacked", 0) == 0,
                   json.dumps({"ack_s": ack_s, "the generation": ended, "counters": dict(m.counters)})[:400],
                   ack_s=ack_s)
+            loaded_still(bound_name, "the requests after the cancel")
             after = must(bound_name, "a short request after the cancel", lambda: [short() for _ in range(3)])
             bound = 1.5 * statistics.median(before) + 1.0
             check(bound_name, all(x <= bound for x in after),
@@ -662,6 +720,8 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
             helper.stop()
         hub_server.stop()
         S.reset()
+        gate.close()
+        data["gate"] = gate.summary()
 
 
 # ---------------------------------------------------------------------------- the scan part (4-06)
@@ -1263,6 +1323,11 @@ def part_lab(h) -> None:
                                                      "verifiable")}))
     data.update(executor={k: executor.get(k) for k in ("threads", "cpu_percent", "memory_mb", "held")})
     r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
+    # the server was started with each seat step slowed (the restart checks above): started again without it, so the
+    # parts after this one in a run of several (all) play at full speed (the verify part's credits time its games)
+    h.server.restart()
+    for who in h.accounts.values():
+        who.reconnect()
 
 
 # ---------------------------------------------------------------------------- remote (4-10)
@@ -1392,11 +1457,14 @@ def part_remote(h) -> None:
     scripted.slow = {TEST_PROMPT: YIELD_S}
     helpers: list = []
     poller: Optional[JobsPoller] = None
+    host_was: dict = {}
     try:
         # ---- the host lends nothing in this part: every game goes to a helper, whose results are not sampled
         # (its trusted machine's rate 0: with no verifier a sampled result would wait; verification is the verify
         # part's)
         _verification(h, trusted_rate=0.0)
+        got = admin.get(f"/api/machines/{host}/settings")
+        host_was = ((got.json().get("capabilities") or {}).get("cpu") if got.status_code == 200 else None) or {}
         off = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {"enabled": False}}})
         # ---- bob's machine in a group of his, trusted by an administrator; alice given run_lab, and bob's grant
         # listing lab for her
@@ -1640,6 +1708,8 @@ def part_remote(h) -> None:
             scripted.close()
         try:
             _verification(h, trusted_rate=0.02)        # the default again, for the parts after this one
+            if host_was:
+                admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_was}})
         except Exception:
             pass
 
@@ -1906,6 +1976,9 @@ def part_verify(h) -> None:
     host = "sv_qa_host"
     share = max(1, min(100, 200 // (os.cpu_count() or 1)))
     scripted = FakeEndpoint(delay=0.05)
+    # a model name of its own: the boards it checks (rule 11) hold only this part's games, whatever ran before it
+    scripted.MODEL = f"qa-verify-model-{tag}"
+    scripted.models = [(scripted.MODEL, True)]
     helpers: dict = {}
     duel = {"profiles": ["standard", "classic-production"], "players": 2, "size": "duel", "maps": ["pangaea"],
             "speed": "Quick", "turns": 30}
@@ -2817,62 +2890,1417 @@ def part_service(h) -> None:
                 proc.kill()
 
 
-# ---------------------------------------------------------------------------- the run
+# ---------------------------------------------------------------------------- helpers in WSL (4-15)
+
+#: The script a helper in WSL runs through: its process id kept (so it is stopped by it, as WSL's own ``wsl.exe``
+#: going does not end it), its data directory its home, the user manager's runtime directory known (so its job host
+#: runs in a ``systemd-run --user`` scope: limits held hard). Arguments: the pid file, the home, the command.
+WSL_HELPER_SH = r"""#!/bin/bash
+PIDFILE="$1"; HOME_DIR="$2"; shift 2
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export CITAR_DATA_DIR="$HOME_DIR"
+echo $$ > "$PIDFILE"
+exec "$@"
+"""
+
+#: A process's job host's CPU sampled inside WSL (``CpuWatch``'s reading, by ``/proc``): ``python3 -c WSL_CPU_WATCH
+#: <pid> <stop file> <limit s>``, sampling every 0.25 s until the stop file appears; prints ``CpuWatch.summary()``'s
+#: figures, as a percentage of WSL's logical CPUs.
+WSL_CPU_WATCH = r"""
+import json, os, sys, time
+pid, stop, limit = int(sys.argv[1]), sys.argv[2], float(sys.argv[3])
+def kids():
+    parents = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            stat = open(f"/proc/{d}/stat").read()
+        except OSError:
+            continue
+        parents.setdefault(int(stat[stat.rindex(")") + 2:].split()[1]), []).append(int(d))
+    out, todo = [], [pid]
+    while todo:
+        for c in parents.get(todo.pop(), []):
+            if c not in out and c != pid:
+                out.append(c)
+                todo.append(c)
+    return out
+def cpu(p):
+    try:
+        f = open(f"/proc/{p}/stat").read()
+    except OSError:
+        return None
+    f = f[f.rindex(")") + 2:].split()
+    return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+seen, samples, t0 = {}, [], time.monotonic()
+while not os.path.exists(stop) and time.monotonic() - t0 < limit:
+    for c in kids():
+        got = cpu(c)
+        if got is not None:
+            seen[c] = max(got, seen.get(c, 0.0))
+    if seen:
+        samples.append((time.monotonic(), sum(seen.values())))
+    time.sleep(0.25)
+cpus = os.cpu_count() or 1
+peak, j = 0.0, 0
+for i in range(len(samples)):
+    while j < len(samples) and samples[j][0] - samples[i][0] < 2.0:
+        j += 1
+    if j >= len(samples):
+        break
+    peak = max(peak, (samples[j][1] - samples[i][1]) / (samples[j][0] - samples[i][0]) / cpus * 100.0)
+span = samples[-1][0] - samples[0][0] if len(samples) > 1 else 0.0
+used = samples[-1][1] - samples[0][1] if len(samples) > 1 else 0.0
+print(json.dumps({"peak_pct": round(peak, 2) if span else None,
+                  "mean_pct": round(used / span / cpus * 100.0, 2) if span else None,
+                  "seconds": round(span, 2), "cpu_s": round(used, 3), "cpus": cpus}))
+"""
+
+
+def wsl_faults() -> str:
+    """``citar-helper-faults`` beside the helper ``cargo xtask develop`` built in WSL (``--wsl-helper``)."""
+    import posixpath
+    if not WSL_HELPER:
+        raise q3.HarnessError("no helper in WSL: give --wsl-helper")
+    return posixpath.join(posixpath.dirname(WSL_HELPER), "citar-helper-faults")
+
+
+class WslHelper:
+    """A CITAR helper in WSL dialling the WSL server on WSL's own loopback, ``Helper``'s counterpart: the helper
+    ``cargo xtask develop`` built there (``--wsl-helper``), or ``citar-helper-faults`` beside it, its home
+    ``helper-home-<name>`` in the WSL state (``--home``, and ``CITAR_DATA_DIR``), its log in the harness's directory,
+    lending CPU only (``--no-llm``, no scan, no power readings). Its own settings are what ``citar-helper setup``
+    writes once its owner answers yes to lending CPU (the ceiling ``ceiling`` written first, then the setup's three
+    answers on its standard input): ``setup`` keeps its answer (``setup.stdout``)."""
+
+    def __init__(self, h, token: str, name: str, *, ceiling: dict, faults: tuple = (), scope: bool = True):
+        """``scope``: its job host runs in a ``systemd --user`` scope (limits hard, CPU and memory); without it (the
+        user manager left unknown to the helper) the job host runs directly, its CPU held softly (``nice``) and its
+        memory hard (``RLIMIT_DATA``), as on a Linux machine with no user manager."""
+        import subprocess
+        server = h.server
+        self.server, self.name = server, name
+        self.binary = wsl_faults() if faults else WSL_HELPER
+        self.home = f"{server.remote}/helper-home-{name}"
+        self.pidfile = f"{self.home}/helper.pid"
+        self.log = server.state / f"helper-wsl-{name}.log"
+        server._wsl("mkdir", "-p", self.home)
+        server._put(f"helper-home-{name}/helper.json", json.dumps({"cpu": ceiling}))
+        server._put("wsl-helper.sh", WSL_HELPER_SH)
+        server._put("wsl-helper-direct.sh", WSL_HELPER_SH.replace(
+            'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+            "unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS"))
+        self.setup = server._wsl(self.binary, "setup", "--home", self.home,
+                                 stdin=f"http://127.0.0.1:{server.port}\n{token}\ny\n", timeout=60)
+        out = open(self.log, "w", encoding="utf-8")
+        args = [self.binary, "--home", self.home, "--server", f"http://127.0.0.1:{server.port}", f"--token={token}",
+                "--no-llm", "--no-hardware", "--no-power", "--name", name,
+                *(x for m in faults for x in ("--test-fault", m))]
+        script = "wsl-helper.sh" if scope else "wsl-helper-direct.sh"
+        self.proc = subprocess.Popen(["wsl", "-d", server.distro, "-u", server.user, "-e", "bash",
+                                      f"{server.remote}/{script}", self.pidfile, self.home, *args],
+                                     stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        out.close()
+
+    def settings(self) -> dict:
+        """Its ``helper.json`` as ``setup`` left it (the token left out)."""
+        got = self.server._wsl("cat", f"{self.home}/helper.json", timeout=60)
+        try:
+            data = json.loads(got.stdout) if got.returncode == 0 else {}
+        except ValueError:
+            data = {}
+        return {k: v for k, v in data.items() if k != "token"}
+
+    def pid(self) -> Optional[int]:
+        got = self.server._wsl("cat", self.pidfile, timeout=60)
+        text = got.stdout.strip()
+        return int(text) if got.returncode == 0 and text.isdigit() else None
+
+    def text(self) -> str:
+        return self.log.read_text(encoding="utf-8", errors="replace") if self.log.exists() else ""
+
+    def stop(self) -> None:
+        """Ended by its process id (SIGTERM, then SIGKILL after 10 s), and its ``wsl`` with it."""
+        if self.proc.poll() is None:
+            self.server._wsl("bash", "-c", 'p=$(cat "$1" 2>/dev/null) || exit 0; kill -TERM "$p" 2>/dev/null; '
+                             'for i in $(seq 1 100); do kill -0 "$p" 2>/dev/null || exit 0; sleep 0.1; done; '
+                             'kill -KILL "$p" 2>/dev/null; exit 0', "stop", self.pidfile, timeout=60)
+            try:
+                self.proc.wait(timeout=15)
+            except Exception:
+                self.proc.kill()
+
+
+class WslCpuWatch:
+    """``CpuWatch`` for a helper in WSL: ``WSL_CPU_WATCH`` sampling its job host inside WSL from ``start()`` until
+    ``stop()`` (a stop file), which returns the same figures."""
+
+    def __init__(self, helper: WslHelper, limit: float = 1800.0):
+        self.helper, self.limit = helper, limit
+        self.stopfile = f"{helper.home}/cpu-watch.stop"
+        self.proc = None
+
+    def start(self) -> "WslCpuWatch":
+        import subprocess
+        server = self.helper.server
+        server._wsl("rm", "-f", self.stopfile)
+        server._put("cpu-watch.py", WSL_CPU_WATCH)
+        pid = self.helper.pid()
+        self.proc = subprocess.Popen(["wsl", "-d", server.distro, "-u", server.user, "-e", "python3",
+                                      f"{server.remote}/cpu-watch.py", str(pid or 0), self.stopfile, str(self.limit)],
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        return self
+
+    def stop(self) -> dict:
+        self.helper.server._wsl("touch", self.stopfile)
+        try:
+            out, _err = self.proc.communicate(timeout=30)
+            return json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
+        except Exception:
+            return {"peak_pct": None, "mean_pct": None, "seconds": 0.0, "error": "the sampler said nothing"}
+
+
+# ---------------------------------------------------------------------------- the exit part (4-15)
+
+#: Every kind of CPU work a machine can lend (``machine_settings.CPU_WORK``).
+ALL_WORK = ["lab_game", "ranking_game", "reference_game"]
+#: Alice's machines' own ceilings, lent at setup (4-15 gate 2): her Windows helper two threads, 25% of the machine and
+#: 512 MB; her WSL helper two threads, 50% and 512 MB; every kind of work (the server's ranking and reference games
+#: are lent by opting into their kinds).
+EXIT_WINDOWS = {"threads": 2, "cpu_percent": 25, "memory_mb": 512, "work": ALL_WORK}
+EXIT_WSL = {"threads": 2, "cpu_percent": 50, "memory_mb": 512, "work": ALL_WORK}
+#: What her machines' settings ask on the site: as much or more, so each helper's own ceiling is what plays.
+EXIT_SITE = {"enabled": True, "threads": 2, "cpu_percent": 50, "memory_mb": 512, "work": ALL_WORK,
+             "yield_to_llm": True}
+#: Gate 2's experiments: bob's 24 duels of 40 rounds; an administrator's ranking experiment of 6 and reference run of 4.
+EXIT_GAMES, EXIT_TURNS, EXIT_RANKING, EXIT_REFERENCE = 24, 40, 6, 4
+#: A provisional machine's results are checked by a replica at this rate in the exit (P4.5.8's ``provisional_rate``;
+#: the default 0.10 over the dozen results the two helpers give once promoted would leave about one run in three
+#: showing no sampled replica at all): which of them is sampled stays the server's keyed choice (``sample_fraction``),
+#: and the part checks every one against it.
+EXIT_SAMPLE = 0.5
+#: The second pass's games (4-15 gate 3): duels long enough (300 rounds, about 2 s of a core here) that an
+#: administrator's word lands between two of the selective cheater's results.
+EXIT_LONG = {"profiles": ["standard", "classic-production"], "players": 2, "size": "duel", "maps": ["pangaea"],
+             "speed": "Quick", "turns": 300}
+#: How many games the second pass's experiment has. Dave's machine must give nine results before they run out, and
+#: this server's job host, which plays the experiment's other games beside its replicas, plays one in about a second
+#: where dave's helper takes about four (its offers and results go through WSL's forwarding): of 24 games dave's
+#: machine got nine in five runs, and seven in the fix round's `all`, its experiment over before its eighth.
+SELECTIVE_GAMES = 48
+#: A result line's measurements and where it came from: the rest is the job's result (P4.4.2).
+LINE_EXTRAS = ("seconds", "started_ts", "cpu_s", "finished", "executor")
+#: The claim's fields in their signed order (``citar_jobs::Claim``; P4.4.4).
+CLAIM_FIELDS = ("v", "job", "run", "machine", "kind", "spec_hash", "jobs_build", "bots", "result_hash", "chain_head",
+                "rounds", "key")
+
+#: The instance's jobs, runs, events, machines and ratings for the exit's checks, read in the server's environment:
+#: ``python -c EXIT_STATE <experiment names,> <machine ids,> <user ids,>``.
+EXIT_STATE = """
+import json, sys
+from sqlalchemy import func, select
+from citar import db, engine_api, settings as site
+from citar.bots import ratings
+from citar.db.models import AuditLog, BudgetEntry, ComputeEvent, CpuJob, CpuJobRun, Server, User
+from citar.jobs import trust as T
+db.configure()
+names = [x for x in sys.argv[1].split(",") if x]
+machines = [x for x in sys.argv[2].split(",") if x]
+users = [x for x in sys.argv[3].split(",") if x]
+secret = site.get().secret_key
+def iso(t):
+    return t.isoformat() if t is not None else None
+out = {"exps": {}, "machines": {}, "users": {}, "audits": {}, "budgets": {}, "settings": T.settings(fresh=True)}
+with db.session() as s:
+    for name in names:
+        jobs = list(s.scalars(select(CpuJob).where(CpuJob.item_ref == name)))
+        runs = list(s.scalars(select(CpuJobRun).where(CpuJobRun.job_id.in_([j.id for j in jobs] or ["-"]))))
+        out["exps"][name] = {
+            "jobs": [{"id": j.id, "ref": j.ref, "kind": j.kind, "state": j.state, "owner": j.owner_id,
+                      "accepted_run": j.accepted_run, "result_hash": j.result_hash, "spec_hash": j.spec_hash,
+                      "spec": j.spec, "jobs_build": j.jobs_build,
+                      "sample": engine_api.sample_fraction(secret, j.id)} for j in jobs],
+            "runs": [{"id": r.id, "job": r.job_id, "machine": r.machine_id, "executor": r.executor, "role": r.role,
+                      "state": r.state, "verdict": r.verdict, "error": r.error, "result_hash": r.result_hash,
+                      "chain_head": r.chain_head, "rounds": r.rounds, "claim": r.claim, "signature": r.signature,
+                      "offered": iso(r.offered_at), "ended": iso(r.ended_at), "cpu_s": r.cpu_s}
+                     for r in sorted(runs, key=lambda r: r.offered_at)],
+            "events": [{"id": e.id, "request": e.request_id, "machine": e.machine_id, "consumer": e.consumer_id,
+                        "provider": e.provider_id, "verification": e.verification, "cpu": e.cpu_core_s,
+                        "reported": e.reported_s, "observed": e.observed_s, "credits": e.credits,
+                        "self_use": e.self_use, "flags": e.flags or {}}
+                       for e in s.scalars(select(ComputeEvent).where(ComputeEvent.activity.like(f"lab:{name}:%")))]}
+    for sid in machines:
+        row = s.get(Server, sid)
+        if row is not None:
+            out["machines"][sid] = {"owner": row.owner_id, "key": row.public_key, "tier": row.trust_tier or "new",
+                                    "trust": row.trust or {}, "name": row.name}
+            out["audits"][sid] = [{"at": iso(a.at), "changed": (a.detail or {}).get("changed")}
+                                  for a in s.scalars(select(AuditLog).where(
+                                      AuditLog.action == "server.trust", AuditLog.object_id == sid)
+                                      .order_by(AuditLog.id))]
+    for uid in users:
+        u = s.get(User, uid)
+        if u is not None:
+            out["users"][uid] = u.trust_tier
+    for bid, spent in s.execute(select(BudgetEntry.budget_id, func.sum(BudgetEntry.actual))
+                                .group_by(BudgetEntry.budget_id)):
+        out["budgets"][bid] = spent
+games, _entries = ratings.collect()
+rated = {}
+for g in games:
+    rated[g["id"]] = rated.get(g["id"], 0) + 1
+out["rated"] = rated
+print(json.dumps(out, default=str))
+"""
+
+#: Jobs played again in the server's environment (the engine there: Linux for the WSL server), for the byte-for-byte
+#: comparison: ``python -c EXIT_REPLAY <file of [{kind, spec, spec_hash}]>``; prints each result as compact JSON (the
+#: order the engine wrote it in), its hash and its chain's head and rounds.
+EXIT_REPLAY = """
+import json, sys
+from citar import engine_api
+jobs = json.loads(open(sys.argv[1], encoding="utf-8").read())
+out = []
+for j in jobs:
+    got = engine_api.run_job(j["kind"], j["spec"], spec_hash=j["spec_hash"])
+    out.append({"result": json.dumps(got["result"], separators=(",", ":")), "result_hash": got["result_hash"],
+                "head": got["chain"]["head"], "rounds": got["chain"]["rounds"]})
+print(json.dumps({"jobs_build": engine_api.jobs_build(), "out": out}))
+"""
+
+
+def _server_put(h, rel: str, text: str) -> str:
+    """``text`` written to ``rel`` in the instance's directory; the path the server's own processes read it by."""
+    putter = getattr(h.server, "_put", None)
+    if putter is not None:
+        putter(rel, text)
+        return f"{h.server.remote}/{rel}"
+    path = h.server.state / rel
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def _server_json(h, code: str, *args: str) -> dict:
+    """``python -c code args`` in the server's environment (``_server_python``), its last line read as JSON."""
+    lines = (_server_python(h, code, *args) or "").strip().splitlines()
+    try:
+        return json.loads(lines[-1]) if lines else {}
+    except ValueError:
+        return {"_error": lines[-1][:500]}
+
+
+def _lab_submit(h, specs: list, owner: str):
+    """``citar lab submit`` of ``specs`` as ``owner`` (an administrator's ranking and reference runs), in the server's
+    environment."""
+    import subprocess
+    path = _server_put(h, f"qa-lab-{owner}-{h.tag}.json", json.dumps(specs))
+    runner = getattr(h.server, "python", None)
+    if runner is not None:
+        return runner("-m", "citar.lab", "submit", path, "--owner", owner)
+    return subprocess.run([sys.executable, "-m", "citar.lab", "submit", path, "--owner", owner], cwd=str(ROOT),
+                          env=h.server.env, capture_output=True, text=True, timeout=120)
+
+
+def _member(h, key: str, handle: str):
+    """Another member made with ``admin_cli create-user`` and signed in (the exit's fourth member), with the run's
+    throwaway password."""
+    if key in h.accounts:
+        return h.accounts[key]
+    password = h.report.data.get("password") or ""
+    made = h.server.cli("create-user", "--handle", handle, "--email", f"{handle}@example.com", "--role", "user",
+                        "--password-stdin", stdin=password + "\n")
+    if made.returncode != 0:
+        raise q3.HarnessError(f"admin_cli create-user {handle} failed: {made.stdout.strip()} {made.stderr[-300:]}")
+    who = q3.Account(h.server, handle, "user", password)
+    if who.login().status_code != 200:
+        raise q3.HarnessError(f"{handle} could not sign in")
+    h.accounts[key] = who
+    h.report.data.setdefault("accounts", []).append({"handle": handle, "role": "user"})
+    return who
+
+
+def _claim_signed(claim: dict, signature: str, key: str) -> bool:
+    """Whether ``signature`` is ``key``'s ed25519 signature over the claim (P4.4.4: ``CITAR-CLAIM-V1\\0`` and the
+    claim's compact JSON, its fields in order), checked here by another implementation than the server's."""
+    import base64
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        raise q3.HarnessError("the claims' signatures are checked with the cryptography package, which this Python "
+                              "lacks") from None
+    try:
+        body = json.dumps({k: claim[k] for k in CLAIM_FIELDS}, separators=(",", ":")).encode("utf-8")
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(key)).verify(base64.b64decode(signature),
+                                                                        b"CITAR-CLAIM-V1\0" + body)
+        return True
+    except (InvalidSignature, KeyError, TypeError, ValueError):
+        return False
+
+
+def _result_of(line: dict) -> dict:
+    """A results line's job result: the line without its measurements and its executor (P4.4.2)."""
+    return {k: v for k, v in line.items() if k not in LINE_EXTRAS}
+
+
+def _when(text) -> float:
+    """A database time (ISO, UTC when it names no zone) as seconds since the epoch; 0 when there is none."""
+    from datetime import datetime, timezone
+    if not text:
+        return 0.0
+    t = datetime.fromisoformat(str(text))
+    return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def _replicated_why(log: str) -> dict:
+    """``(experiment, game) -> why`` its primary's result was checked by a replica (``new``, ``sampled``, ``asked``),
+    from the lab's log (the dispatcher's line for each such result)."""
+    import re
+    out: dict = {}
+    pattern = re.compile(r"^\S+ \S+ (\S+) #(\d+): .*; checked by a replica before it is accepted \((\w+)\)$")
+    for line in (log or "").splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            out.setdefault((m.group(1), int(m.group(2))), []).append(m.group(3))
+    return out
+
+
+def _replication_order(primaries: list, promoted: Optional[int], rate: float, host: str) -> tuple:
+    """One helper machine's primary results against its promotion to provisional (P4.5.8 rules 1, 3, 5), in the order
+    the dispatcher decided them: the order of their CPU events in the ledger. Each result's event is put when the
+    dispatcher handles it (``Dispatcher._accept``, after the tick's commit, in the order the tick handled its frames),
+    and the ledger's one writer inserts events in the order they were put, so their ids are that order; the replica
+    whose match promoted the machine has its event put in the same way, as its result is handled, which is when the
+    machine's tier moves. So ``promoted`` is that replica's event id (None when the machine was never promoted), and
+    each primary a dict with ``event`` (its event's id), ``why`` (the lab log's reason it was replicated: ``new``,
+    ``sampled``, ``asked``; None when it was not), ``replicas`` (``{"executor", "machine", "verdict"}`` each),
+    ``verdict``, ``sample`` (the keyed sample of its job) and ``ref``. Returns ``(counts, wrong)``:
+
+    - a result decided before the promotion (or with none) was decided while the machine was new: replicated (rule 1)
+      on this server's job host (``host``, a new machine's only verifier), for the reason ``new``;
+    - one decided after it, while the machine was provisional: replicated as ``sampled`` when its sample falls under
+      ``rate``, else left ``unchecked`` (rule 5), never ``new``;
+    - every replicated one matched: its primary ``match``, its replicas the reference or matches.
+
+    ``counts`` holds how many were replicated new, sampled, and left unsampled; ``wrong`` the results the rules break,
+    with what was seen (a result with no event among them)."""
+    counts = {"new": 0, "sampled": 0, "unsampled": 0}
+    wrong = []
+    for x in primaries:
+        reps = x.get("replicas") or []
+        why = x.get("why") if reps else None
+        local = bool(reps) and all(y.get("executor") == "local" and y.get("machine") == host for y in reps)
+        matched = x.get("verdict") == "match" and all(y.get("verdict") in ("reference", "match") for y in reps)
+        event = x.get("event")
+        if event is None:
+            fine = False
+        elif promoted is None or event < promoted:
+            fine = why == "new" and local and matched
+        else:
+            fine = (why == "sampled" and x["sample"] < rate and matched) or (
+                not reps and x["sample"] >= rate and x.get("verdict") == "unchecked")
+        if why == "new":
+            counts["new"] += 1
+        elif why == "sampled":
+            counts["sampled"] += 1
+        elif not reps:
+            counts["unsampled"] += 1
+        if not fine:
+            wrong.append({"job": x.get("ref"), "why": why, "sample": round(x["sample"], 3), "replicas": len(reps),
+                          "verdict": x.get("verdict"), "event": event,
+                          "decided": "no event" if event is None else "while new" if promoted is None
+                          or event < promoted else "once provisional"})
+    return counts, wrong
+
+
+def _events_per_run(events: list, runs: list) -> dict:
+    """The ledger's CPU events against the runs that ended ``done`` (each such run has exactly one, P4.5.7): the
+    events counted by their request (a list: an event written twice shows), the requests with more than one, the
+    events of no done run, and the done runs with none."""
+    from collections import Counter
+    counts = Counter(e["request"] for e in events)
+    done = {x["id"] for x in runs if x["state"] == "done"}
+    return {"events": sum(counts.values()), "runs": len(done),
+            "duplicated": sorted(k for k, c in counts.items() if c > 1),
+            "stray": sorted(set(counts) - done), "missing": sorted(done - set(counts))}
+
+
+def _lender(h, token: str, name: str, *, wsl: bool, ceiling: dict, faults: tuple = ()):
+    """One of the exit's lending helpers: in WSL (``WslHelper``) or on Windows (``Helper``), its own ceiling lent at
+    setup (``citar-helper setup``, answered yes to lending CPU, after the ceiling was written); ``faults`` its
+    ``--test-fault`` modes (``citar-helper-faults``). On the fallback topology a WSL helper is a second Windows one."""
+    import subprocess
+    if wsl and getattr(h.server, "topology", "") == "wsl":
+        return WslHelper(h, token, name, ceiling=ceiling, faults=faults)
+    home = h.server.state / f"helper-home-{name}"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "helper.json").write_text(json.dumps({"cpu": ceiling}), encoding="utf-8")
+    binary = faults_binary() if faults else q3.helper_binary()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CITAR_WORKER_", "CITAR_HELPER_"))}
+    env["CITAR_DATA_DIR"] = str(home)
+    setup = subprocess.run([binary, "setup", "--home", str(home)], input=f"{h.server.base}\n{token}\ny\n",
+                           capture_output=True, text=True, timeout=60, env=env)
+    helper = Helper(h, token, h.endpoint, name, machine=name, binary=binary if faults else None,
+                    extra=("--no-llm", *(x for m in faults for x in ("--test-fault", m))))
+    helper.setup = setup
+    helper.settings = lambda: {k: v for k, v in json.loads((home / "helper.json").read_text(encoding="utf-8")).items()
+                               if k != "token"}
+    return helper
+
+
+def part_exit(h) -> None:
+    """The ``exit`` part (the module's doc)."""
+    r = h.report
+    admin, alice, bob, carol = (h.accounts[k] for k in ("admin", "alice", "bob", "carol"))
+    data = r.data.setdefault("exit", {"topology": getattr(h.server, "topology", "windows")})
+    tag = h.tag
+    host = "sv_qa_host"
+    lenders: dict = {}
+    watches: dict = {}
+    try:
+        dave = _member(h, "dave", "qa-dave")
+        ids = {k: h.accounts[k].get("/api/auth/me").json()["user"]["id"] for k in ("alice", "bob", "carol", "dave")}
+        # ---- the server: its job host lends one thread (the verifier, and a player); provisional results sampled
+        cpus = os.cpu_count() or 1
+        host_cpu = {"enabled": True, "threads": 1, "cpu_percent": max(1, min(100, 200 // cpus)), "memory_mb": 400,
+                    "work": ALL_WORK}
+        put = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_cpu}})
+        settings = _verification(h, provisional_rate=EXIT_SAMPLE)
+        caps = [admin.patch(f"/api/admin/users/{ids[k]}", json={"caps": {"run_lab": True}}) for k in ("bob", "carol")]
+        # ---- alice's two machines in a group of hers, the grant to bob listing lab
+        group = alice.post("/api/pool/groups", json={"name": f"QA exit lenders {tag}"})
+        a_gid = group.json().get("id", "") if group.status_code == 200 else ""
+
+        def machine(who, label: str, gid: str, site: dict) -> tuple:
+            made = who.post("/api/pool/servers", json={"config": {"name": f"QA {label} {tag}", "kind": "owned",
+                                                                  "connection": {"provider": "openai_compatible",
+                                                                                 "max_parallel": 1}},
+                                                       "reach": "worker", "group_id": gid})
+            sid = made.json().get("id", "") if made.status_code == 200 else ""
+            issued = who.post(f"/api/pool/servers/{sid}/workers/tokens", json={"label": label}) if sid else None
+            token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
+            who.put(f"/api/machines/{sid}/settings", json={"capabilities": {"cpu": site}})
+            return sid, token
+
+        w_sid, w_token = machine(alice, "exit Windows", a_gid, EXIT_SITE)
+        l_sid, l_token = machine(alice, "exit WSL", a_gid, EXIT_SITE)
+        grant = alice.post(f"/api/pool/groups/{a_gid}/grants", json={"subject_type": "user", "handle": bob.handle,
+                                                                     "purposes": ["lab"]}) if a_gid else None
+        listed = (grant.json().get("purposes") if grant is not None and grant.status_code == 200 else None)
+        r.check("the exit's server (P4.7.6's topology: in WSL, its job host the verifier) lends one thread; bob and "
+                "carol given run_lab by an administrator; alice's Windows and WSL helper machines in a group of hers, "
+                "her grant to bob listing lab explicitly; a provisional machine's results sampled at "
+                f"{EXIT_SAMPLE:g} (the part's setting), the rest of the verification settings the defaults",
+                put.status_code == 200 and all(c.status_code == 200 for c in caps) and bool(w_token)
+                and bool(l_token) and listed == ["lab"] and settings.get("new_streak") == 5
+                and settings.get("provisional_rate") == EXIT_SAMPLE,
+                json.dumps({"topology": data["topology"], "grant": listed, "settings": settings}))
+        data.update(windows_machine=w_sid, wsl_machine=l_sid, settings=settings, host_cpu=host_cpu)
+
+        # ---- her helpers, CPU lent at setup
+        lenders["win"] = _lender(h, w_token, "qa-exit-win", wsl=False, ceiling=EXIT_WINDOWS)
+        lenders["wsl"] = _lender(h, l_token, "qa-exit-wsl", wsl=True, ceiling=EXIT_WSL)
+
+        def executor(sid: str) -> dict:
+            got = admin.get("/api/admin/jobs")
+            return next((e for e in ((got.json().get("dispatcher") or {}).get("executors") or [])
+                         if e.get("machine") == sid), {}) if got.status_code == 200 else {}
+        ready = wait_until(lambda: all(executor(s).get("state") == "ready" for s in (w_sid, l_sid)), 180, 0.5)
+        view = admin.get("/api/admin/jobs").json()
+        server_build = (view.get("dispatcher") or {}).get("jobs_build")
+        shown = {}
+        for key, sid in (("win", w_sid), ("wsl", l_sid)):
+            got = alice.get(f"/api/machines/{sid}/settings")
+            shown[key] = (got.json().get("cpu_helper") or {}) if got.status_code == 200 else {}
+        grants = alice.get(f"/api/machines/{w_sid}/settings").json().get("lab_grants") or []
+        lent = {k: (lenders[k].settings().get("cpu") or {}) for k in lenders}
+        effective = {k: {f: (shown[k].get("effective") or {}).get(f) for f in ("threads", "cpu_percent", "memory_mb")}
+                     for k in shown}
+        r.check("both helpers lend CPU from their own settings (helper.json says enabled after citar-helper setup "
+                "answered yes) and connect, their job hosts ready on the server's jobs build (one profile: "
+                "cargo xtask develop's); the dialog shows each in effect, Windows 2 threads, 25%, 512 MB and WSL 2 "
+                "threads, 50%, 512 MB, each limit hard, and the grant lending them to bob",
+                bool(ready) and all(x.get("enabled") is True for x in lent.values())
+                and all(lenders[k].setup.returncode == 0 for k in lenders)
+                and bool(server_build) and all(executor(s).get("jobs_build") == server_build for s in (w_sid, l_sid))
+                and effective == {"win": {"threads": 2, "cpu_percent": 25, "memory_mb": 512},
+                                  "wsl": {"threads": 2, "cpu_percent": 50, "memory_mb": 512}}
+                and all(shown[k].get("limits") == {"cpu": "hard", "memory": "hard"} for k in shown)
+                and [g.get("subject") for g in grants] == [bob.handle],
+                json.dumps({"lent": lent, "shown": {k: {f: v.get(f) for f in ("effective", "limits", "lent",
+                                                                               "verifiable")}
+                                                    for k, v in shown.items()},
+                            "jobs_build": server_build, "grants": grants})[:900])
+        data.update(jobs_build=server_build, shown={k: {f: v.get(f) for f in ("effective", "limits")}
+                                                    for k, v in shown.items()})
+
+        # ---- gate 2: bob's experiment, an administrator's ranking and reference runs, across the three executors
+        main, ladder, base = f"qa-exit-{tag}", f"qa-exit-ladder-{tag}", f"qa-exit-reference-{tag}"
+        watches["win"] = CpuWatch(lenders["win"].proc.pid).start()
+        watches["wsl"] = (WslCpuWatch(lenders["wsl"]) if isinstance(lenders["wsl"], WslHelper)
+                          else CpuWatch(lenders["wsl"].proc.pid)).start()
+        t0 = time.perf_counter()
+        queued = bob.post("/api/bots/experiments", json={
+            "profiles": ["standard", "classic-production"], "name": main, "players": 2, "games": EXIT_GAMES,
+            "seed": 15100, "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": EXIT_TURNS})
+        submitted = _lab_submit(h, [
+            {"name": ladder, "kind": "ranking", "games": EXIT_RANKING, "seed": 15200, "size": "duel",
+             "maps": ["pangaea"], "turns": EXIT_TURNS,
+             "seats": [{"profile": "standard"}, {"profile": "classic-production"}]},
+            {"name": base, "kind": "reference", "games": EXIT_REFERENCE, "seed": 15300, "size": "duel",
+             "maps": ["pangaea"], "turns": EXIT_TURNS}], admin.handle)
+        done = wait_until(lambda: _lab_view(bob, main).get("state") == "complete"
+                          and all(_lab_view(admin, n).get("state") == "complete" for n in (ladder, base))
+                          and time.perf_counter(), 900, 1.0)
+        cpu = {k: w.stop() for k, w in watches.items()}
+        watches.clear()
+        took = round(done - t0, 1) if done else None
+        lines = {main: _lab_lines(h, main), ladder: _lab_lines(h, ladder), base: _lab_lines(h, base, "reference")}
+        state: dict = {}
+        machines_all = [w_sid, l_sid, host]
+
+        def settled() -> bool:
+            state.clear()
+            state.update(_server_json(h, EXIT_STATE, ",".join((main, ladder, base)), ",".join(machines_all),
+                                      ",".join(ids.values())))
+            exps = state.get("exps") or {}
+            runs = [x for n in exps for x in exps[n]["runs"] if x["state"] == "done"]
+            events = {e["request"] for n in exps for e in exps[n]["events"]}
+            return bool(runs) and all(x["id"] in events for x in runs) and not any(
+                e["verification"] == "pending" for n in exps for e in exps[n]["events"])
+        wait_until(settled, 60, 2.0)
+        by_machine: dict = {}
+        for n in (main, ladder, base):
+            for x in lines[n]:
+                m = (x.get("executor") or {}).get("machine")
+                by_machine[m] = by_machine.get(m, 0) + 1
+        sizes = {main: EXIT_GAMES, ladder: EXIT_RANKING, base: EXIT_REFERENCE}
+        once = all(sorted(x.get("i") for x in lines[n]) == list(range(sizes[n])) for n in sizes)
+        r.check("bob's 24 duels of 40 rounds (from the A/B route), an administrator's ranking experiment of 6 and "
+                "reference run of 4 (citar lab submit, the server's own collection) all run to their end, dispatched "
+                "across alice's two helpers and this server's job host (each playing some), each game in its results "
+                "file once",
+                queued.status_code == 200 and submitted.returncode == 0 and bool(done) and once
+                and all(by_machine.get(m, 0) > 0 for m in machines_all) and set(by_machine) <= set(machines_all),
+                json.dumps({"seconds": took, "lines": {n: len(v) for n, v in lines.items()},
+                            "by_machine": {("windows" if m == w_sid else "wsl" if m == l_sid else "host"): c
+                                           for m, c in by_machine.items()}}), seconds=took)
+        data.update(experiments=[main, ladder, base], seconds=took, by_machine=by_machine)
+        _exit_gate2(h, data, state, lines, main, ladder, base, w_sid, l_sid, host, ids, cpu, shown)
+        _exit_binding(h, data, lenders, executor, w_sid, l_sid, host, host_cpu)
+
+        # ---- gate 3, first pass: carol's helper in WSL alters its third result (--test-fault result:3)
+        for key in ("win", "wsl"):
+            lenders.pop(key).stop()
+        _exit_cheat(h, data, lenders, machine, executor, ids, host)
+        # ---- gate 3, second pass: dave's helper alters chosen results either side of an administrator's replica
+        _exit_selective(h, data, lenders, machine, executor, ids, host, dave)
+        if h.keep:
+            data["browser"] = _exit_for_the_browser(h, lenders, machine, executor, w_token, l_token, a_gid)
+        r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
+    finally:
+        for w in watches.values():
+            try:
+                w.stop()
+            except Exception:
+                pass
+        if not h.keep:
+            for helper in lenders.values():
+                helper.stop()
+            try:
+                _verification(h, provisional_rate=0.10)
+            except Exception:
+                pass
+
+
+def _exit_for_the_browser(h, lenders: dict, machine, executor, w_token: str, l_token: str, a_gid: str) -> dict:
+    """With ``--keep``, what the browser checklist looks at (P4.7.7) beside the run's own state (the quarantined
+    machines and owners with their evidence and dave's withdrawn games for H5 and H4, bob's experiments' games with
+    their executors and badges for H4): alice's two machines connected and lending again (their homes and keys kept;
+    H1's hard limits, H2's capped CPU and the grant lending them, H3's games), her third machine's helper scanning
+    and lending nothing (H2: "not lent by this machine's owner", Rescan now), and bob's machine whose helper in WSL
+    runs its job host without a user manager (H1: its CPU held softly), lending reference games only (H4: a run only
+    it could play waits for a verifier while this server lends nothing). Returns what it made, for the checklist's
+    steps."""
+    alice, bob = h.accounts["alice"], h.accounts["bob"]
+    tag = h.tag
+    made: dict = {}
+    lenders["win"] = _lender(h, w_token, "qa-exit-win", wsl=False, ceiling=EXIT_WINDOWS)
+    lenders["wsl"] = _lender(h, l_token, "qa-exit-wsl", wsl=True, ceiling=EXIT_WSL)
+    n_sid, n_token = machine(alice, "exit not lent", a_gid, EXIT_SITE)
+    lenders["not-lent"] = Helper(h, n_token, h.endpoint, "qa-exit-not-lent", machine="qa-exit-not-lent", scan=True,
+                                 extra=("--no-llm",))
+    group = bob.post("/api/pool/groups", json={"name": f"QA exit soft {tag}"})
+    b_gid = group.json().get("id", "") if group.status_code == 200 else ""
+    soft_work = {**EXIT_SITE, "work": ["reference_game"]}
+    s_sid, s_token = machine(bob, "exit soft", b_gid, soft_work)
+    if getattr(h.server, "topology", "") == "wsl":
+        lenders["soft"] = WslHelper(h, s_token, "qa-exit-soft", ceiling={**EXIT_WSL, "work": ["reference_game"]},
+                                    scope=False)
+    made.update(not_lent=n_sid, soft=s_sid, soft_group=b_gid)
+    wait_until(lambda: q3._online(alice, n_sid) and (s_sid not in lenders or executor(s_sid).get("state") == "ready"),
+               120, 0.5)
+    got = bob.get(f"/api/machines/{s_sid}/settings")
+    made["soft_limits"] = ((got.json().get("cpu_helper") or {}).get("limits") if got.status_code == 200 else None)
+    return made
+
+
+def _exit_gate2(h, data: dict, state: dict, lines: dict, main: str, ladder: str, base: str, w_sid: str, l_sid: str,
+                host: str, ids: dict, cpu: dict, shown: dict) -> None:
+    """4-15 gate 2's checks on what the run left (the module's doc)."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from citar import engine_api
+    r = h.report
+    exps = state.get("exps") or {}
+    machines = state.get("machines") or {}
+    helpers = {w_sid: "windows", l_sid: "wsl"}
+    jobs = {j["id"]: {**j, "exp": n} for n in exps for j in exps[n]["jobs"]}
+    runs = [x for n in exps for x in exps[n]["runs"]]
+    by_id = {x["id"]: x for x in runs}
+    events = {e["request"]: e for n in exps for e in exps[n]["events"]}
+    per_run = _events_per_run([e for n in exps for e in exps[n]["events"]], runs)
+
+    # ---- every accepted line signed by its machine (or this server's own), its claim the run's
+    unsigned, bad = [], []
+    accepted = []
+    for n in (main, ladder, base):
+        for line in lines[n]:
+            ex = line.get("executor") or {}
+            run = by_id.get(ex.get("run")) or {}
+            job = jobs.get(run.get("job")) or {}
+            accepted.append((n, line, run, job))
+            if ex.get("machine") == host:
+                if run.get("executor") != "local" or ex.get("verification") != "reference":
+                    bad.append((n, line.get("i"), "host line not the server's own"))
+                continue
+            claim, sig = run.get("claim") or {}, run.get("signature") or ""
+            key = (machines.get(ex.get("machine")) or {}).get("key") or ""
+            ok = (bool(claim) and claim.get("run") == run.get("id") and claim.get("machine") == ex.get("machine")
+                  and claim.get("job") == job.get("id") and claim.get("key") == key
+                  and claim.get("result_hash") == run.get("result_hash") == job.get("result_hash")
+                  and claim.get("chain_head") == run.get("chain_head") and claim.get("rounds") == run.get("rounds")
+                  and claim.get("spec_hash") == job.get("spec_hash") and claim.get("jobs_build") == job.get("jobs_build")
+                  and _claim_signed(claim, sig, key))
+            if not ok:
+                unsigned.append((n, line.get("i"), ex.get("machine")))
+    r.check("every accepted line is signed by its machine (or is this server's own): its run's claim names the run, "
+            "the machine, the job, its spec, the jobs build and the machine's registered key, and its result hash and "
+            "chain head the run's, and its ed25519 signature verifies here (another implementation than the server's)",
+            bool(accepted) and not unsigned and not bad,
+            json.dumps({"lines": len(accepted), "signed": sum(1 for a in accepted if a[2].get("executor") == "remote"),
+                        "unsigned": unsigned[:5], "bad": bad[:5]}))
+
+    # ---- each game played again here (this process's engine, Windows): the same result hash and chain head, and the
+    # chain folds; the line's own bytes hash to it
+    replayed, differ = 0, []
+    t0 = time.perf_counter()
+    for n, line, run, job in accepted:
+        if not job:
+            differ.append((n, line.get("i"), "no job"))
+            continue
+        got = engine_api.run_job(job["kind"], job["spec"], spec_hash=job["spec_hash"])
+        try:
+            engine_api.job_chain_check(job["spec_hash"], got["chain"])
+            folds = True
+        except Exception:
+            folds = False
+        mine = engine_api.job_result_hash(job["kind"], _result_of(line))
+        if not (folds and got["result_hash"] == run.get("result_hash") == mine
+                and got["chain"]["head"] == run.get("chain_head") and got["chain"]["rounds"] == run.get("rounds")):
+            differ.append((n, line.get("i"), (run.get("machine") or "")[:12]))
+        replayed += 1
+    r.check("every accepted game's chain is consistent: played again here (Windows) it folds from its spec's chain_0 "
+            "to the head its run gave (and its helper signed), with the same rounds and result hash, and the line in "
+            "the results file hashes to that result",
+            replayed == len(accepted) and not differ,
+            json.dumps({"replayed": replayed, "seconds": round(time.perf_counter() - t0, 1), "differ": differ[:5]}))
+
+    # ---- replicated while new, sampled after, as each machine's tier said
+    why = _replicated_why(_saves_text(h, "lab/lab.log") or "")
+    rate = float((state.get("settings") or {}).get("provisional_rate") or EXIT_SAMPLE)
+    streak = int((state.get("settings") or {}).get("new_streak") or 5)
+    event_of = {e["request"]: e.get("id") for n in exps for e in exps[n]["events"]}
+    tiers, wrong, counts = {}, [], {}
+    for sid in helpers:
+        audits = (state.get("audits") or {}).get(sid) or []
+        promo = next((a["at"] for a in audits if (a.get("changed") or {}).get("to") == "provisional"), None)
+        mine = [x for x in runs if x["machine"] == sid and x["role"] == "primary" and x["state"] == "done"]
+        # the replica whose match promoted it: dated by its result's arrival (``trust.promoted``, rule 9's reading)
+        promoted = ((machines.get(sid) or {}).get("trust") or {}).get("promoted") or {}
+        at = _when(promoted.get("at")) if promoted.get("tier") == "provisional" else None
+        theirs = {x["job"] for x in mine}
+        promoting = next((y for y in runs if at is not None and y["job"] in theirs and y["role"] == "replica"
+                          and y["state"] == "done" and abs(_when(y["ended"]) - at) < 1e-5), None)
+        promo_event = event_of.get(promoting["id"]) if promoting else None
+        tiers[helpers[sid]] = {"tier": (machines.get(sid) or {}).get("tier"), "provisional_at": promo,
+                               "promoting_replica": (promoting or {}).get("id"), "its_event": promo_event}
+        if at is not None and promo_event is None:
+            wrong.append({"machine": helpers[sid], "why": "the replica that promoted it, or its event, not found"})
+        primaries = []
+        for x in mine:
+            job = jobs[x["job"]]
+            replicas = [y for y in runs if y["job"] == x["job"] and y["role"] == "replica"]
+            primaries.append({"ref": job["ref"], "event": event_of.get(x["id"]), "sample": job["sample"],
+                              "verdict": x["verdict"],
+                              "why": (why.get((job["exp"], int(job["ref"].rsplit(":", 1)[-1]))) or [None])[-1],
+                              "replicas": [{k: y[k] for k in ("executor", "machine", "verdict")} for y in replicas]})
+        counts[helpers[sid]], bad = _replication_order(primaries, promo_event, rate, host)
+        wrong += [{"machine": helpers[sid], **b} for b in bad]
+    r.check(f"each helper's results were replicated on this server's job host while its machine was new (every one "
+            f"the dispatcher decided before its promotion, {streak} matches promoting it to provisional) and sampled "
+            "after at the provisional rate by the server's keyed choice: every result decided after the promotion "
+            "replicated when its sample falls under the rate and left unchecked when over it, none replicated as new "
+            "(the order of their decisions is their CPU events' in the ledger, the promoting replica's among them), "
+            "each replica a match; after the promotions, both a sampled result and an unsampled one among the two",
+            not wrong and all(t["tier"] == "provisional" and t["provisional_at"] for t in tiers.values())
+            and all(c["new"] >= streak for c in counts.values())
+            and sum(c["sampled"] for c in counts.values()) >= 1 and sum(c["unsampled"] for c in counts.values()) >= 1,
+            json.dumps({"wrong": wrong[:3], "counts": counts, "tiers": tiers}))   # the detail keeps 500 characters
+    data.update(tiers=tiers, replication=counts, replication_wrong=wrong)
+
+    # ---- the replicated games' Windows and Linux results, byte for byte
+    pairs = []
+    for x in runs:
+        if x["machine"] != w_sid or x["role"] != "primary" or x["state"] != "done":
+            continue
+        reps = [y for y in runs if y["job"] == x["job"] and y["role"] == "replica" and y["state"] == "done"]
+        if reps:
+            pairs.append((x, reps[-1]))
+    replays = []
+    for x, _rep in pairs:
+        job = jobs[x["job"]]
+        replays.append({"kind": job["kind"], "spec": job["spec"], "spec_hash": job["spec_hash"]})
+    path = _server_put(h, f"qa-exit-replay-{h.tag}.json", json.dumps(replays))
+    linux = _server_json(h, EXIT_REPLAY, path)
+    here = [engine_api.run_job(j["kind"], j["spec"], spec_hash=j["spec_hash"]) for j in replays]
+    line_of = {(line.get("executor") or {}).get("run"): line for n in lines for line in lines[n]}
+    same, differ = 0, []
+    for k, (x, rep) in enumerate(pairs):
+        theirs = (linux.get("out") or [{}] * len(pairs))[k] if k < len(linux.get("out") or []) else {}
+        mine = json.dumps(here[k]["result"], separators=(",", ":"))
+        line = line_of.get(x["id"])
+        filed = json.dumps(_result_of(line), separators=(",", ":")) if line else None
+        if (x["result_hash"] == rep["result_hash"] and x["chain_head"] == rep["chain_head"]
+                and theirs.get("result") == mine and (filed is None or filed == mine)
+                and theirs.get("result_hash") == x["result_hash"] and theirs.get("head") == x["chain_head"]):
+            same += 1
+        else:
+            differ.append(jobs[x["job"]]["ref"])
+    linux_os = "linux" if getattr(h.server, "topology", "") == "wsl" else "windows (the fallback)"
+    r.check("the replicated games' Windows and Linux results are equal byte for byte: each game the Windows helper "
+            "played and this server's job host replicated has one result hash and chain head on both, and the "
+            "result's bytes as the engine writes them are the same played again on Windows (here) and on Linux (in "
+            "the server's environment), and the same as its line in the results file",
+            bool(pairs) and same == len(pairs) and linux_os == "linux"
+            and linux.get("jobs_build") == data.get("jobs_build"),
+            json.dumps({"replicated_windows_games": len(pairs), "equal": same, "differ": differ[:5],
+                        "server_os": linux_os, "linux_jobs_build": linux.get("jobs_build")}))
+    data.update(byte_for_byte={"games": len(pairs), "equal": same})
+
+    # ---- the ratings: exactly the accepted lab and ranking games, each once
+    rated = state.get("rated") or {}
+    want = {f"lab:{n}:{x.get('i')}" for n in (main, ladder) for x in lines[n] if not x.get("crash")}
+    have = {g: c for g, c in rated.items() if g.split(":")[1] in (main, ladder, base)}
+    r.check("the ratings include exactly the accepted lab and ranking games, each once (the reference run's are "
+            "baselines, never rated)",
+            set(have) == want and all(c == 1 for c in have.values()),
+            json.dumps({"rated": len(have), "accepted": len(want), "extra": sorted(set(have) - want)[:3],
+                        "missing": sorted(want - set(have))[:3]}))
+
+    # ---- the ledger: one event a run, given and used as the run says, verified or not as its line says
+    off = []
+    for x in runs:
+        if x["state"] != "done":
+            continue
+        job = jobs[x["job"]]
+        e = events.get(x["id"])
+        owner = (machines.get(x["machine"]) or {}).get("owner")
+        line = line_of.get(x["id"])
+        want_v = ("verified" if x["executor"] == "local" or x["verdict"] == "match" else "unverified")
+        want_consumer = job["owner"] if x["role"] == "primary" else None
+        want_provider = None if x["executor"] == "local" else owner
+        if (e is None or e["machine"] != x["machine"] or e["verification"] != want_v
+                or e["consumer"] != want_consumer or e["provider"] != want_provider
+                or (line is not None and (line.get("executor") or {}).get("verification")
+                    not in ("reference" if x["executor"] == "local" else want_v,))):
+            off.append({"run": x["id"], "role": x["role"], "machine": helpers.get(x["machine"], "host"),
+                        "event": {k: (e or {}).get(k) for k in ("verification", "consumer", "provider")}})
+    bounded = [e for e in events.values() if e["provider"] == ids["alice"]
+               and not e["cpu"] <= 1.5 * (e["flags"].get("reference_s") or 0) + 1e-6]
+    r.check("the ledger: one cpu event a run, on its machine, with the verification its line has (verified for this "
+            "server's and for a matched replica's primary, unverified for an unsampled result); a primary used by "
+            "its experiment's owner (bob; nobody for the server's collection), a replica by nobody; given by "
+            "alice for her machines' runs, by nobody for this server's; every one of hers bounded by 1.5 times the "
+            "reference cost; no event written twice, none for a run that did not end",
+            not off and not bounded and not per_run["duplicated"] and not per_run["stray"]
+            and not per_run["missing"],
+            json.dumps({**per_run, "duplicated": per_run["duplicated"][:4], "stray": per_run["stray"][:4],
+                        "missing": per_run["missing"][:4], "off": off[:4],
+                        "unbounded": [(e["cpu"], e["flags"].get("reference_s")) for e in bounded][:3]}))
+    agreed, seen = _ledger_me(h, {"alice": ("given",), "bob": ("used",)}, (main, ladder, base), state)
+    r.check("alice's given and bob's used, as /api/ledger/me tells them, equal the sums of their events (credits and "
+            "counts)", agreed, json.dumps(seen)[:700])
+
+    # ---- the limits held, hard on both, and were shown so
+    held = {}
+    for key, sid in (("win", w_sid), ("wsl", l_sid)):
+        cap = (shown.get(key) or {}).get("effective", {}).get("cpu_percent") or 0
+        c = cpu.get(key) or {}
+        held[key] = {"cap": cap, **{k: c.get(k) for k in ("peak_pct", "mean_pct", "seconds", "cpus")},
+                     "shown": (shown.get(key) or {}).get("limits")}
+    r.check("the limits held, hard on both, and were shown so: the dialog said hard CPU and memory for each helper, "
+            "and each job host's CPU over the run stayed under its cap plus slack (peak over 2 s windows)",
+            all(v["shown"] == {"cpu": "hard", "memory": "hard"} and v["peak_pct"] is not None
+                and v["peak_pct"] <= v["cap"] + 5 and (v["mean_pct"] or 0) > 0 for v in held.values()),
+            json.dumps(held))
+    data.update(limits=held)
+
+
+def _exit_binding(h, data: dict, lenders: dict, executor, w_sid: str, l_sid: str, host: str, host_cpu: dict) -> None:
+    """The limits where they bind (the remote part's check, on both helpers): alice's machines' share pushed down to
+    5% of the machine on the site (the helpers restart their job hosts with it), this server's job host lending
+    nothing, and long games of bob's playing on both helpers; each job host's CPU over 8 s stays under 5% plus slack
+    and uses at least half of it, Windows' Job Object and the WSL helper's ``systemd --user`` scope alike. Deleting the
+    experiment from the queue ends its games on the helpers; the share goes back to the run's."""
+    r = h.report
+    admin, alice, bob = (h.accounts[k] for k in ("admin", "alice", "bob"))
+    low = {**EXIT_SITE, "cpu_percent": 5}
+    put = [alice.put(f"/api/machines/{sid}/settings", json={"capabilities": {"cpu": low}}) for sid in (w_sid, l_sid)]
+    off = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {**host_cpu, "enabled": False}}})
+    pushed = wait_until(lambda: all(executor(s).get("cpu_percent") == 5 and executor(s).get("state") == "ready"
+                                    for s in (w_sid, l_sid)), 60, 0.25)
+    held = f"qa-exit-binding-{h.tag}"
+    bob.post("/api/bots/experiments", json={**LONG_GAME, "name": held, "games": 4, "seed": 15700})
+
+    def playing() -> bool:
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("running") or {}) if got.status_code == 200 else {}
+        return all(len([x for x in rows.get(s) or [] if x.get("exp") == held and x.get("state") == "running"
+                        and x.get("turn")]) == 2 for s in (w_sid, l_sid))
+    both = wait_until(playing, 90, 0.25)
+    watches = {"win": CpuWatch(lenders["win"].proc.pid),
+               "wsl": (WslCpuWatch(lenders["wsl"]) if isinstance(lenders["wsl"], WslHelper)
+                       else CpuWatch(lenders["wsl"].proc.pid))}
+    for w in watches.values():
+        w.start()
+    time.sleep(8.0)         # the measurement's own span: two games held at the share for 8 s on each helper
+    share = {k: w.stop() for k, w in watches.items()}
+    _saves_remove(h, f"lab/queue/{held}.json")
+
+    def ended() -> bool:
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("running") or {}) if got.status_code == 200 else {}
+        return not any(x.get("exp") == held for s in (w_sid, l_sid) for x in rows.get(s) or [])
+    gone = wait_until(ended, 60, 0.25)
+    held_both = all(v.get("peak_pct") is not None and v["peak_pct"] <= 5 + 2 and (v.get("mean_pct") or 0) >= 2.5
+                    for v in share.values())
+    r.check("the limits where they bind: with alice's machines' share pushed down to 5% of the machine, two long games "
+            "on each helper keep its job host's CPU under 5% plus slack (and use at least half of it) over 8 s, held "
+            "by Windows' Job Object and by the WSL helper's systemd --user scope; deleting the experiment ends them",
+            all(x.status_code == 200 for x in put) and off.status_code == 200 and bool(pushed) and bool(both)
+            and held_both and bool(gone),
+            json.dumps({"share": share, "pushed": bool(pushed), "playing": bool(both), "ended": bool(gone)}))
+    data.update(binding=share)
+    for sid in (w_sid, l_sid):
+        alice.put(f"/api/machines/{sid}/settings", json={"capabilities": {"cpu": EXIT_SITE}})
+    admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_cpu}})
+    wait_until(lambda: all(executor(s).get("cpu_percent") in (25, 50) for s in (w_sid, l_sid)), 30, 0.25)
+
+
+def _ledger_me(h, sides: dict, names: tuple, state: dict) -> tuple:
+    """``q3._ledger_agrees`` for any topology: each account's sides as ``/api/ledger/me?range=all`` tells them against
+    the sums of the compute ledger's events in the server's database (``SELF_USE`` left out), read until two reads
+    around the route's answer agree."""
+    ids = {k: h.accounts[k].get("/api/auth/me").json()["user"]["id"] for k in sides}
+    code = """
+import json, sys
+from sqlalchemy import func, select
+from citar import db
+from citar.db.models import ComputeEvent
+db.configure()
+out = {}
+with db.session() as s:
+    for key, uid in json.loads(sys.argv[1]).items():
+        row = {}
+        for side, col in (("given", ComputeEvent.provider_id), ("used", ComputeEvent.consumer_id)):
+            credits, n = s.execute(select(func.coalesce(func.sum(ComputeEvent.credits), 0), func.count())
+                                   .where(col == uid, ComputeEvent.self_use.is_(False))).one()
+            row[side] = [float(credits), int(n)]
+        out[key] = row
+print(json.dumps(out))
+"""
+    seen: dict = {}
+
+    def agrees() -> bool:
+        before = _server_json(h, code, json.dumps(ids))
+        told = {k: h.accounts[k].get("/api/ledger/me?range=all").json() for k in sides}
+        after = _server_json(h, code, json.dumps(ids))
+        seen.update(events=before, told={k: {s: (v.get(s) or {}) for s in ("given", "used")} for k, v in told.items()})
+        if before != after or not before:
+            return False
+        for key, wanted in sides.items():
+            for side in wanted:
+                credits, n = before[key][side]
+                got = told[key].get(side) or {}
+                if abs(float(got.get("credits", -1)) - credits) > 1e-3 or int(got.get("events", -1)) != n:
+                    return False
+        return True
+    return bool(wait_until(agrees, 90, 2.0)), seen
+
+
+def _exit_cheat(h, data: dict, lenders: dict, machine, executor, ids: dict, host: str) -> None:
+    """4-15 gate 3's first pass: carol's new machine, its helper in WSL altering its third result (``--test-fault
+    result:3``), quarantined at that job with the evidence on ``#/admin/verification``'s data; her second machine
+    refused CPU work."""
+    r = h.report
+    admin, carol = h.accounts["admin"], h.accounts["carol"]
+    tag = h.tag
+    group = carol.post("/api/pool/groups", json={"name": f"QA exit cheat {tag}"})
+    gid = group.json().get("id", "") if group.status_code == 200 else ""
+    site = {**EXIT_SITE, "threads": 1, "work": ["lab_game"]}
+    c_sid, c_token = machine(carol, "exit cheat", gid, site)
+    lenders["cheat"] = _lender(h, c_token, "qa-exit-cheat", wsl=True, faults=("result:3",),
+                               ceiling={**EXIT_WSL, "threads": 1, "work": ["lab_game"]})
+    ready = wait_until(lambda: executor(c_sid).get("state") == "ready", 180, 0.5)
+    cheat = f"qa-exit-cheat-{tag}"
+    queued = carol.post("/api/bots/experiments", json={
+        "profiles": ["standard", "classic-production"], "name": cheat, "players": 2, "games": 10, "seed": 15400,
+        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": EXIT_TURNS})
+
+    def tier(sid: str) -> str:
+        got = admin.get(f"/api/machines/{sid}/jobs")
+        return (got.json().get("machine") or {}).get("trust_tier", "") if got.status_code == 200 else ""
+    caught = wait_until(lambda: tier(c_sid) == "quarantined", 300, 0.5)
+    done = wait_until(lambda: _lab_view(carol, cheat).get("state") == "complete", 300, 1.0)
+    state = _server_json(h, EXIT_STATE, cheat, c_sid, ids["carol"])
+    exp = (state.get("exps") or {}).get(cheat) or {}
+    mine = [x for x in exp.get("runs") or [] if x["machine"] == c_sid and x["role"] == "primary"]
+    ev = ((state.get("machines") or {}).get(c_sid) or {}).get("trust", {}).get("last_mismatch") or {}
+    lines = _lab_lines(h, cheat)
+    page = admin.get("/api/admin/verification").json()
+    on_page = next((q for q in (page.get("quarantined") or {}).get("machines") or [] if q["machine"] == c_sid), {})
+    owners = {u["handle"] for u in (page.get("quarantined") or {}).get("owners") or []}
+    words = "same chain, different result: tampering or an incompatible build"
+    r.check("carol's new machine, its helper in WSL altering its third result (--test-fault result:3), is quarantined "
+            "at its third job: its first two matched this server's replicas, the third gave the evidence \"same "
+            "chain, different result: tampering or an incompatible build\" (shown with the machine on "
+            "#/admin/verification's data, carol among the quarantined owners); its result never in the results file "
+            "and its event rejected; the experiment ends on this server",
+            bool(ready) and queued.status_code == 200 and bool(caught) and bool(done)
+            and [x["verdict"] for x in mine[:3]] == ["match", "match", "mismatch"] and len(mine) == 3
+            and ev.get("verdict") == "result" and ev.get("words") == words and ev.get("run") == mine[2]["id"]
+            and (on_page.get("evidence") or {}).get("words") == words and carol.handle in owners
+            and (state.get("users") or {}).get(ids["carol"]) == "quarantined"
+            and mine[2]["id"] not in {(x.get("executor") or {}).get("run") for x in lines}
+            and sorted(x["i"] for x in lines) == list(range(10))
+            and any(e["request"] == mine[2]["id"] and e["verification"] == "rejected" and e["credits"] == 0
+                    for e in exp.get("events") or []),
+            json.dumps({"runs": [(x["verdict"], (x.get("error") or {}).get("code")) for x in mine],
+                        "evidence": {k: ev.get(k) for k in ("verdict", "words", "round")},
+                        "on_page": bool(on_page), "owners": sorted(owners)})[:700])
+    data.update(cheat_machine=c_sid, cheat_evidence={k: ev.get(k) for k in ("verdict", "words", "run")})
+    lenders.pop("cheat").stop()
+
+    # ---- carol's second machine, honest, refused CPU work while she is quarantined
+    o_sid, o_token = machine(carol, "exit other", gid, site)
+    lenders["other"] = _lender(h, o_token, "qa-exit-other", wsl=False,
+                               ceiling={**EXIT_WINDOWS, "threads": 1, "work": ["lab_game"]})
+    ready_o = wait_until(lambda: executor(o_sid).get("state") == "ready", 120, 0.5)
+    # this server's one thread busy a moment with a long game of bob's (no other connected machine may play it): her
+    # games wait meanwhile, and the dispatcher says why each executor leaves them
+    bob = h.accounts["bob"]
+    busy = f"qa-exit-busy-{tag}"
+    bob.post("/api/bots/experiments", json={**LONG_GAME, "name": busy, "games": 1, "seed": 15450})
+
+    def host_playing() -> bool:
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("running") or {}).get(host, []) if got.status_code == 200 else []
+        return any(x.get("exp") == busy and x.get("state") == "running" for x in rows)
+    wait_until(host_playing, 60, 0.25)
+    other = f"qa-exit-refused-{tag}"
+    carol.post("/api/bots/experiments", json={
+        "profiles": ["standard", "classic-production"], "name": other, "players": 2, "games": 3, "seed": 15500,
+        "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": EXIT_TURNS})
+
+    def waiting() -> Optional[str]:
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("queued") or {}).get(other, []) if got.status_code == 200 else []
+        said = [x.get("waiting") or "" for x in rows]
+        return said[0] if len(said) == 3 and all("its owner is quarantined" in x for x in said) else None
+    why = wait_until(waiting, 30, 0.25)
+    runs_held = admin.get(f"/api/machines/{o_sid}/jobs").json().get("runs") or []
+    done_o = wait_until(lambda: _lab_view(carol, other).get("state") == "complete"
+                        and _lab_view(bob, busy).get("state") == "complete", 180, 1.0)
+    runs_o = admin.get(f"/api/machines/{o_sid}/jobs").json().get("runs") or []
+    lines_o = _lab_lines(h, other)
+    r.check("carol's second machine, an honest helper connected and lending, is refused CPU work while its owner is "
+            "quarantined: while this server's one thread plays another game her games wait, the dispatcher saying so "
+            "of that machine (\"its owner is quarantined\"), then they play on this server alone",
+            bool(ready_o) and bool(why) and runs_held == [] and bool(done_o) and runs_o == []
+            and {x["executor"]["machine"] for x in lines_o} == {host},
+            json.dumps({"waiting": why, "runs": len(runs_o)})[:600])
+    lenders.pop("other").stop()
+    data.update(other_machine=o_sid)
+
+
+def _exit_selective(h, data: dict, lenders: dict, machine, executor, ids: dict, host: str, dave) -> None:
+    """4-15 gate 3's second pass: dave's machine, lending to bob under a budgeted grant, its helper altering its sixth
+    and ninth results (``--test-fault result-at:6,9``): promoted by five matches, its sixth result accepted
+    unverified, its seventh checked by an administrator's replica (a match), its eighth unverified, its ninth sampled
+    once the rate is 1 and caught; the sixth and eighth withdrawn, played again elsewhere, the ledger, the budget and
+    the ratings following."""
+    r = h.report
+    admin, bob = h.accounts["admin"], h.accounts["bob"]
+    tag = h.tag
+    group = dave.post("/api/pool/groups", json={"name": f"QA exit selective {tag}"})
+    gid = group.json().get("id", "") if group.status_code == 200 else ""
+    site = {**EXIT_SITE, "threads": 1, "work": ["lab_game"]}
+    d_sid, d_token = machine(dave, "exit selective", gid, site)
+    grant = dave.post(f"/api/pool/groups/{gid}/grants", json={
+        "subject_type": "user", "handle": bob.handle, "purposes": ["lab"],
+        "budget": {"period": "month", "amount": 1_000_000, "unit": "credits", "behavior": "hard"}})
+    _verification(h, provisional_rate=0.0)
+    lenders["selective"] = _lender(h, d_token, "qa-exit-selective", wsl=False, faults=("result-at:6,9",),
+                                   ceiling={"threads": 1, "cpu_percent": 20, "memory_mb": 512, "work": ["lab_game"]})
+    ready = wait_until(lambda: executor(d_sid).get("state") == "ready", 180, 0.5)
+    sel = f"qa-exit-selective-{tag}"
+    queued = bob.post("/api/bots/experiments", json={**EXIT_LONG, "name": sel, "games": SELECTIVE_GAMES,
+                                                     "seed": 15600})
+
+    def look() -> tuple:
+        got = admin.get(f"/api/machines/{d_sid}/jobs", params={"limit": 200})
+        body = got.json() if got.status_code == 200 else {}
+        prim = sorted((x for x in body.get("runs") or [] if x.get("role") == "primary"), key=lambda x: x["offered"])
+        return (body.get("machine") or {}).get("trust_tier", ""), prim
+    marks: dict = {}
+    provisional = wait_until(lambda: look()[0] == "provisional", 600, 0.2)
+    six = wait_until(lambda: (lambda p: p if len([x for x in p if x["state"] == "done"]) >= 6 else None)(look()[1]),
+                     300, 0.05)
+    asked = admin.post(f"/api/admin/machines/{d_sid}/replicate", json={"n": 1})
+    marks["asked_after"] = len([x for x in (six or []) if x["state"] == "done"])
+    marks["asked_seen"] = len([x for x in look()[1] if x["state"] == "done"])
+    wait_until(lambda: (lambda p: p if len([x for x in p if x["state"] == "done"]) >= 8 else None)(look()[1]), 300, 0.05)
+    before_lines = _lab_lines(h, sel)
+    _verification(h, provisional_rate=1.0)
+    marks["rate_after"] = len([x for x in look()[1] if x["state"] == "done"])
+    caught = wait_until(lambda: look()[0] == "quarantined", 300, 0.2)
+    _verification(h, provisional_rate=0.10)
+    done = wait_until(lambda: _lab_view(bob, sel).get("state") == "complete", 900, 1.0)
+    lenders.pop("selective").stop()
+    state: dict = {}
+
+    def written() -> bool:
+        state.clear()
+        state.update(_server_json(h, EXIT_STATE, sel, d_sid, ",".join([ids["dave"], ids["bob"]])))
+        exp = (state.get("exps") or {}).get(sel) or {}
+        events = {e["request"] for e in exp.get("events") or []}
+        return all(x["id"] in events for x in exp.get("runs") or [] if x["state"] == "done") and not any(
+            e["verification"] == "pending" for e in exp.get("events") or [])
+    wait_until(written, 60, 2.0)          # the ledger's writer writes the events (and the budget's entries) in batches
+    exp = (state.get("exps") or {}).get(sel) or {}
+    runs = exp.get("runs") or []
+    mine = [x for x in runs if x["machine"] == d_sid and x["role"] == "primary"]
+    jobs = {j["id"]: j for j in exp.get("jobs") or []}
+    trust = ((state.get("machines") or {}).get(d_sid) or {}).get("trust") or {}
+    ev = trust.get("last_mismatch") or {}
+    withdrawn = {w["run"] for w in ev.get("withdrawn_jobs") or []}
+    audits = [a.get("changed") for a in (state.get("audits") or {}).get(d_sid) or []]
+    lines = _lab_lines(h, sel)
+    lined = {(x.get("executor") or {}).get("run") for x in lines}
+    reps = {x["job"] for x in runs if x["role"] == "replica"}
+    nine = mine[8] if len(mine) > 8 else {}
+    r.check("dave's new machine (its helper altering its sixth and ninth results, --test-fault result-at:6,9) reaches "
+            "provisional by five matches against this server's replicas; at the provisional rate 0 its sixth result "
+            "(altered) is accepted unverified; an administrator then asks for its next replica (POST .../replicate), "
+            "and its seventh (honest) is a verified match; its eighth is accepted unverified; with the rate at 1 its "
+            "ninth (altered) is sampled, mismatches, and the machine and dave are quarantined",
+            grant.status_code == 200 and bool(ready) and queued.status_code == 200 and bool(provisional)
+            and asked.status_code == 200 and bool(caught) and len(mine) >= 9
+            and audits[:1] == [{"from": "new", "to": "provisional"}]
+            and [x["job"] in reps for x in mine[:9]] == [True] * 5 + [False, True, False, True]
+            and marks.get("asked_seen") == 6 and marks.get("rate_after") == 8
+            and ev.get("verdict") == "result" and ev.get("run") == nine.get("id")
+            and (state.get("users") or {}).get(ids["dave"]) == "quarantined",
+            json.dumps({"marks": marks, "audits": audits,
+                        "primaries": [(x["state"], x["verdict"], x["job"] in reps) for x in mine[:10]],
+                        "evidence": {k: ev.get(k) for k in ("verdict", "words", "run")}})[:800])
+    six_run, eight_run, seven_run = (mine[5]["id"], mine[7]["id"], mine[6]["id"]) if len(mine) > 8 else ("", "", "")
+    events = {e["request"]: e for e in exp.get("events") or []}
+    old = {k: v for k, v in events.items() if k in (six_run, eight_run)}
+    per_run = _events_per_run(exp.get("events") or [], runs)
+    rated = state.get("rated") or {}
+    was = {(x.get("executor") or {}).get("run") for x in before_lines}
+    replayed = [x for x in lines if f"lab:{sel}:{x['i']}" in {jobs[j]["ref"] for j in (mine[5]["job"], mine[7]["job"])}]\
+        if len(mine) > 8 else []
+    r.check("every unverified result it gave is withdrawn, the sixth (before its verified match) and the eighth: "
+            "their lines, in the results file (and rated) before the catch, leave it, their games are played again elsewhere and accepted (each game once), "
+            "their events are rejected with no credits (the credits they had kept in flags), the seventh (verified) "
+            "stays, and the ratings count each game of the experiment once, from its accepted line",
+            {six_run, eight_run} <= withdrawn and seven_run not in withdrawn and bool(done)
+            and {six_run, eight_run} <= was
+            and not ({six_run, eight_run} & lined) and seven_run in lined
+            and sorted(x["i"] for x in lines) == list(range(SELECTIVE_GAMES))
+            and len(replayed) == 2 and all((x.get("executor") or {}).get("machine") != d_sid for x in replayed)
+            and all(e["verification"] == "rejected" and e["credits"] == 0 and (e["flags"].get("rejected_credits") or 0) > 0
+                    for e in old.values()) and len(old) == 2
+            and {g: c for g, c in rated.items() if g.split(":")[1] == sel} == {f"lab:{sel}:{i}": 1 for i in range(SELECTIVE_GAMES)},
+            json.dumps({"withdrawn": sorted(withdrawn), "six": six_run, "eight": eight_run,
+                        "events": {k: {f: v.get(f) for f in ("verification", "credits")}
+                                   | {"rejected_credits": v["flags"].get("rejected_credits")} for k, v in old.items()},
+                        "replayed_on": [(x["i"], (x.get("executor") or {}).get("machine")) for x in replayed]})[:800])
+    # the budget: the grant's settlements for the two withdrawn runs reversed
+    settled = sum(float(e["flags"].get("rejected_credits") or 0) for e in old.values())
+    budgets = (state.get("budgets") or {})
+    b_flags = [e["flags"].get("budget") for e in old.values()]
+    bid = (b_flags[0] or {}).get("id") if b_flags and b_flags[0] else None
+    spent_now = float(budgets.get(bid) or 0) if bid else None
+    kept = sum(float(e["credits"] or 0) for e in events.values()
+               if e["machine"] == d_sid and (e["flags"].get("budget") or {}).get("id") == bid
+               and e["verification"] != "rejected")
+    r.check("the budget follows: the runs on dave's machine were settled against his grant's budget, the two "
+            "withdrawn runs' settlements reversed (the budget's spending is what its runs still hold), and the "
+            "ledger shows them rejected, with one event for each run of the experiment (none written twice)",
+            bid is not None and all((f or {}).get("id") == bid for f in b_flags) and settled > 0
+            and spent_now is not None and abs(spent_now - kept) < 1e-3
+            and not per_run["duplicated"] and not per_run["stray"] and not per_run["missing"],
+            json.dumps({"budget": bid, "spent": spent_now, "runs_hold": round(kept, 6), "reversed": round(settled, 6),
+                        "events": {k: v if isinstance(v, int) else v[:3] for k, v in per_run.items()},
+                        "before": [(x.get("i"), (x.get("executor") or {}).get("machine")) for x in before_lines
+                                   if (x.get("executor") or {}).get("run") in (six_run, eight_run)]}))
+    data.update(selective_machine=d_sid, selective_withdrawn=sorted(withdrawn), selective_marks=marks)
+
+
+# ---------------------------------------------------------------------------- the real part (4-15)
+
+#: The ``real`` part's game: a small map, 6 rounds; chat timeouts long enough for a small model on a laptop.
+REAL_CONFIG = {**q3.REAL_CONFIG, "seed": 4151, "turn_limit": 6}
+#: A hybrid seat's model is prompted every this many turns.
+REAL_PROMPT_EVERY = 2
+
+
+def part_real(h) -> None:
+    """The ``real`` part (the module's doc): LM Studio's model through alice's Windows helper, a 6-round game with her
+    person seat, an LLM seat, a hybrid seat and two bots, the models answering her chats by their own calls; then
+    4-04's cancel and baseline checks through the same helper binary (``exercise``). ``--stand-in`` plays LM Studio
+    with the scripted endpoint (``stand_in``: the model's name, loaded; a game's turns and chats answered by its
+    scripted policy's tool calls), to check the part itself without the model."""
+    r = h.report
+    admin, alice = h.accounts["admin"], h.accounts["alice"]
+    data = r.data.setdefault("real", {})
+    ep = stand_in() if STAND_IN else None
+    url = ep.url if ep is not None else LLM_URL
+    label = "the stand-in" if ep is not None else "LM Studio"
+    try:
+        _real(h, r, admin, alice, data, url, label)
+    finally:
+        if ep is not None:
+            data["stand_in_side"] = endpoint_side(ep, (data.get("cancel") or {}).get("cancel_at"))
+            ep.close()
+
+
+def _real(h, r, admin, alice, data: dict, url: str, label: str) -> None:
+    ready, said = q3.lmstudio_model(url, REAL_MODEL)
+    data["lmstudio"] = {"url": url, "model": REAL_MODEL, "before": said, "stand_in": label != "LM Studio"}
+    if not r.check(f"{label} at {url} lists {REAL_MODEL}, loaded (read only: GET /api/v0/models; the part never "
+                   "loads, unloads or swaps a model)", ready, said):
+        return
+    # the helper reaches the model only through the gate (``q3.ModelGate``): a completion goes on only while the model
+    # is listed loaded and none has failed, and the gate's guard stops the helper the moment either changes
+    gate = q3.ModelGate(url, REAL_MODEL)
+    try:
+        played = _real_game(h, r, admin, alice, data, gate, label)
+    finally:
+        gate.close()
+        data["gate"] = gate.summary()
+    if played:
+        # ---- the cancel: 4-04's checks, the same Windows helper binary in front of the model (behind a gate of its
+        # own), through a hub and the prompt scheduler of this process's own (its database in <dir>/real-cancel): a
+        # 1,500-token generation cancelled at 2 s acknowledged within a second, the next short requests within the
+        # run's own baseline, nothing drained
+        cancel = data.setdefault("cancel", {})
+        _own_instance(h.server.state / "real-cancel")
+        exercise(r.check, url, h.server.state, cancel, label=label)
+    after, said_after = q3.lmstudio_model(url, REAL_MODEL)
+    data["lmstudio"]["after"] = said_after
+    r.check(f"{REAL_MODEL} is still loaded at the part's end, as at its start", after, said_after)
+
+
+def _real_game(h, r, admin, alice, data: dict, gate, label: str) -> bool:
+    """``real``'s game (``part_real``) with the helper behind ``gate``: whether it was played through with the model
+    loaded and answering all along (else the cancel's checks are left out)."""
+    helper = None
+    driver = None
+    gid = ""
+    t0 = time.time()
+    try:
+        made = alice.post("/api/pool/servers", json={"config": {"name": f"QA real {h.tag}", "kind": "owned",
+                                                                "connection": {"provider": "lmstudio",
+                                                                               "max_parallel": 1}},
+                                                     "reach": "worker"})
+        hid = made.json().get("id", "") if made.status_code == 200 else ""
+        issued = alice.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa real"}) if hid else None
+        token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
+        if token:
+            # the model's own allowlist: the helper offers nothing else, so nothing could ask LM Studio for another
+            helper = Helper(h, token, gate.url, "qa-real", provider="lmstudio", max_concurrent=1,
+                            extra=("--model", REAL_MODEL))
+            gate.on_trip(helper.stop)       # the server's only way to the model, closed the moment the gate closes
+            gate.watch(helper.log)
+        online = bool(helper) and bool(wait_until(lambda: q3._online(alice, hid), 60, 0.25))
+        info = _workers(alice, hid)
+        card = next((s for s in alice.get("/api/pool/servers").json().get("servers", []) if s.get("id") == hid), {})
+        live = {m.get("key"): m.get("loaded") for m in card.get("live_models") or []}
+        r.check(f"alice's helper machine, the real Windows helper in front of {label} (one slot, the model its only "
+                "one), protocol 2, reports the model loaded",
+                online and live == {REAL_MODEL: True} and (info.get("worker") or {}).get("protocol") == 2,
+                json.dumps({"online": online, "live": live, "target": (info.get("worker") or {}).get("target")}))
+        data["machine"] = hid
+        if not online:
+            return False
+        model = {"server_id": hid, "model": REAL_MODEL}
+        seats = [{"type": "human"},
+                 {"type": "hybrid", "llm": dict(model), "bot": {"profile": "standard"},
+                  "hybrid": {"owners": "all_but_war", "prompt_every": REAL_PROMPT_EVERY}},
+                 {"type": "llm", "llm": {**model, "max_turn_seconds": q3.REAL_TURN_S}}, {"type": "bot"}, {"type": "bot"}]
+        g = alice.post("/api/games", json={"name": f"QA real game {h.tag}", "config": dict(REAL_CONFIG),
+                                           "seats": seats})
+        info = g.json() if g.status_code == 200 else {}
+        gid = info.get("id", "")
+        tokens = [s.get("token", "") for s in info.get("seats") or []]
+        r.check(f"alice's game: her person seat, a hybrid seat (prompted every {REAL_PROMPT_EVERY} turns), an LLM seat "
+                f"on {REAL_MODEL} and two bots, {REAL_CONFIG['turn_limit']} rounds",
+                bool(gid) and [s.get("type") for s in info.get("seats") or []] == ["human", "hybrid", "llm", "bot",
+                                                                                    "bot"],
+                f"HTTP {g.status_code} {g.text[:200] if g.status_code != 200 else ''}")
+        if not gid:
+            return False
+        data["game"] = gid
+        alice.post(f"/api/games/{gid}/debug/meet_all")
+        alice.post(f"/api/games/{gid}/debug/gold")
+        driver = q3.SeatDriver(h, gid, tokens[0], 0, "alice")
+        driver.hold.set()
+        wait_until(lambda: driver.first is not None, 120, 0.5)
+
+        def opened(res: dict) -> Optional[int]:
+            return (res.get("result") or {}).get("negotiation_id") if res.get("ok") else None
+        chats = {"hybrid": opened(driver.tool("open_negotiation", {
+                     "to": 1, "message": "Hello neighbour. Would you trade your map for some of my gold?",
+                     "give": [{"type": "gold", "amount": 30}], "receive": [{"type": "share_map"}]})),
+                 "llm": opened(driver.tool("open_negotiation", {
+                     "to": 2, "message": "Hello neighbour. Shall we share our maps?",
+                     "give": [{"type": "share_map"}], "receive": [{"type": "share_map"}]}))}
+        r.check("on her first turn alice opened a chat with each model seat", all(chats.values()), json.dumps(chats))
+        driver.hold.clear()
+        last, moved = None, time.perf_counter()
+        deadline = time.perf_counter() + q3.REAL_LIMIT_S
+        while time.perf_counter() < deadline and gate.tripped is None:
+            gi = q3._game_info(alice, gid)
+            mark = (gi.get("turn"), gi.get("current_player"))
+            if gi.get("phase") not in ("playing", None):
+                break
+            if mark != last:
+                if last is None or mark[0] != last[0]:
+                    r.note(f"real: turn {mark[0]} ({round(time.time() - t0)} s)")
+                last, moved = mark, time.perf_counter()
+            elif time.perf_counter() - moved > q3.REAL_STALL_S:
+                break
+            gate.closed.wait(2.0)
+        if not q3.gate_held(r, gate, alice, gid, data):
+            return False
+        gi = q3._game_info(alice, gid)
+        r.check(f"the game was played to its end ({REAL_CONFIG['turn_limit']} rounds), no turn hanging",
+                gi.get("phase") not in ("playing", None),
+                f"phase {gi.get('phase')}, turn {gi.get('turn')}; {round(time.time() - t0)} s",
+                seconds=round(time.time() - t0, 1))
+        time.sleep(4.0)                 # the ledger's writer inserts what it has every 2 s
+        metrics = alice.get(f"/api/games/{gid}/metrics").json()
+        rows = metrics.get("turns") or []
+        llm_turns = [x for x in rows if x.get("player") == 2]
+        phases = [x for x in metrics.get("diplomat") or [] if x.get("player") == 1]
+        negotiations = metrics.get("negotiations") or []
+        ends = [x.get("end_reason") for x in llm_turns]
+        r.check("the LLM seat played every turn of the game, each ended by its own end_turn call (parsed on the "
+                "server from the helper's raw completion), with actions of its own",
+                len(llm_turns) >= REAL_CONFIG["turn_limit"] - 1 and all(e == "end_turn" for e in ends)
+                and any((x.get("actions_ok") or 0) >= 1 for x in llm_turns),
+                json.dumps({"turns": len(llm_turns), "ends": q3._counts(ends),
+                            "tool_calls": sum(int(x.get("tool_calls") or 0) for x in llm_turns)}))
+        by_model = [x for x in negotiations if x.get("outcome") == "answered" and x.get("cause") is None
+                    and x.get("player") in (1, 2)]
+        wrong = [x for x in negotiations if not q3._chat_ended_by_rule(x)]
+        r.check("at least two chats answered by the models' own calls (the hybrid seat's model and the LLM seat's, "
+                "each a tool call parsed on the server), and none failed by a model",
+                len(by_model) >= 2 and {x.get("player") for x in by_model} == {1, 2} and not wrong,
+                json.dumps({"answered": [{k: x.get(k) for k in ("player", "nid", "seconds", "gen_s", "steps")}
+                                         for x in by_model],
+                            "outcomes": q3._counts(f"{x.get('player')} {x.get('outcome')}/{x.get('cause')}"
+                                                   for x in negotiations)})[:600])
+        metered = (sum(float(x.get("model_s") or 0.0) for x in llm_turns)
+                   + sum(float(x.get("gen_s") or 0.0) for x in negotiations)
+                   + sum(float(x.get("gen_s") or 0.0) for x in phases))
+        steps = (sum(int(x.get("model_steps") or 0) for x in llm_turns)
+                 + sum(int(x.get("steps") or 0) for x in negotiations) + sum(int(x.get("steps") or 0) for x in phases))
+        slack = 0.001 * (steps + len(llm_turns) + len(negotiations) + len(phases)) + 0.01
+        ledger = _server_json(h, """
+import json, sys
+from sqlalchemy import func, select
+from citar import db
+from citar.db.models import ComputeEvent
+db.configure()
+with db.session() as s:
+    n, gen = s.execute(select(func.count(), func.coalesce(func.sum(ComputeEvent.gen_s), 0)).where(
+        ComputeEvent.machine_id == sys.argv[1], ComputeEvent.kind == "gpu",
+        ComputeEvent.activity == f"game:{sys.argv[2]}")).one()
+print(json.dumps({"events": int(n), "gen_s": float(gen)}))
+""", hid, gid)
+        r.check("the ledger's generation seconds for the game on the machine equal the scheduler's (the game's metrics: "
+                "the LLM seat's turns, the chat answers, the diplomat phases)",
+                (ledger.get("events") or 0) > 0 and abs(float(ledger.get("gen_s") or 0) - metered) <= slack,
+                f"metered {metered:.3f} s ({steps} steps, within {slack:.3f} s); ledger {ledger}",
+                metered_s=round(metered, 3), ledger_s=round(float(ledger.get("gen_s") or 0), 3))
+        status = q3._machine_status(admin, hid)
+        counters = status.get("counters") or {}
+        listed = status.get("id") == hid
+        r.check("no slot of the machine drained over the game (nothing cancelled went unacknowledged): the machine, in "
+                "/api/status with the game's completions granted on it, has nothing draining",
+                listed and counters.get("granted", 0) > 0 and status.get("draining", 0) == 0
+                and counters.get("draining", 0) == 0 and counters.get("cancel_unacked", 0) == 0,
+                json.dumps({"counters": counters}) if listed else "the machine is not in /api/status")
+        data.update(seconds=round(time.time() - t0, 1), llm_turns=len(llm_turns), ends=q3._counts(ends),
+                    chats=[{k: x.get(k) for k in ("player", "nid", "outcome", "cause", "seconds", "gen_s")}
+                           for x in negotiations],
+                    phases=[{k: x.get(k) for k in ("turn", "outcome", "cause", "steps", "gen_s")} for x in phases],
+                    metered_gen_s=round(metered, 3), ledger=ledger, counters=counters,
+                    alice={"turns": len(driver.ended), "answered": {str(k): v for k, v in driver.answered.items()}})
+        return gate.tripped is None
+    finally:
+        if driver is not None:
+            driver.stop()
+        if gid and not h.keep:
+            try:
+                alice.post(f"/api/games/{gid}/control", json={"paused": True})
+                alice.delete(f"/api/games/{gid}")
+            except Exception:
+                pass
+        if helper is not None:
+            helper.stop()
 
 PARTS: dict[str, Callable] = {"helper": part_helper, "llm-real": part_llm_real, "scan": part_scan,
                               "lab": part_lab, "remote": part_remote, "verify": part_verify, "update": part_update,
-                              "service": part_service}
+                              "service": part_service, "exit": part_exit, "real": part_real}
+#: The parts ``all`` runs with the server in WSL (P4.7.6's topology: the service is installed there, and the exit's
+#: experiment is the cross-OS one), after the others, which run with a server on Windows; ``real`` ends the run there.
+WSL_PARTS = ("service", "exit", "real")
+#: The parts that need the server in WSL and the helper built there (``--wsl``, ``--wsl-helper``).
+NEEDS_WSL = ("service", "exit")
 
 
-def main(argv=None) -> int:
-    """Run the harness on Phase 4's parts."""
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("part", choices=sorted([*PARTS, *LATER, "all"]), help="the part to run, or all")
-    ap.add_argument("--port", type=int, default=0, help="a free port by default; never 8799 or one in use")
-    ap.add_argument("--dir", default=str(Path(os.environ.get("TEMP") or "/tmp") / "citar-qa-phase4"),
-                    help="the state directory: new, empty, or an earlier run's (it is emptied first)")
-    ap.add_argument("--keep", action="store_true", help="leave the server running afterwards (the browser checklist)")
-    ap.add_argument("--skip", action="append", choices=sorted(PARTS), default=[], metavar="PART",
-                    help="all: leave this part out (llm-real needs LM Studio; say so when quoting the run)")
-    ap.add_argument("--helper-bin", default=None, metavar="PATH",
-                    help="the CITAR helper to run (default: citar-helper in CITAR_EXT_DIR)")
-    ap.add_argument("--llm-url", default=REAL_URL, help="llm-real: LM Studio's address (read only)")
-    ap.add_argument("--stand-in", action="store_true",
-                    help="llm-real: play LM Studio with the scripted endpoint (to check the part without the model)")
-    ap.add_argument("--wsl", action="store_true",
-                    help="the server in WSL (the remote, service and exit parts: 4-10, 4-14, 4-15)")
-    ap.add_argument("--wsl-root", default=None, metavar="PATH", help="--wsl: the checkout in WSL the server runs from")
-    ap.add_argument("--wsl-python", default=None, metavar="PATH",
-                    help="--wsl: the Python in WSL that runs it (a venv's, with the extension cargo xtask develop built)")
-    ap.add_argument("--wsl-distro", default="Ubuntu-24.04", help="--wsl: the WSL distribution (P4.7.1's)")
-    ap.add_argument("--wsl-user", default="claude", help="--wsl: the WSL user (P4.7.1's)")
-    ap.add_argument("--wsl-helper", default=None, metavar="PATH",
-                    help="service: the helper in WSL to install (cargo xtask develop's citar-ext/citar-helper there)")
-    args = ap.parse_args(argv)
-    # the instance's server plays the lab (the lab part): the test suite's switch, if this runs under it, stays off
-    os.environ.pop("CITAR_TEST_NO_DISPATCHER", None)
-    global LLM_URL, STAND_IN, WSL_HELPER
-    LLM_URL, STAND_IN, WSL_HELPER = args.llm_url, args.stand_in, args.wsl_helper
-    q3.HELPER_BIN = args.helper_bin
-    if args.wsl and args.part not in ("remote", "service", "all"):
-        print("refused: --wsl belongs to the remote, service and exit parts (packages 4-10, 4-14, 4-15)", flush=True)
-        return 2
-    if args.part == "service" and not (args.wsl and args.wsl_helper):
-        print("refused: the service part installs the helper as a systemd user service in WSL only (design P4.7.1 "
-              "rule 8): give --wsl --wsl-root --wsl-python and --wsl-helper (absolute paths inside WSL)", flush=True)
-        return 2
-    if args.wsl_helper and not (args.wsl_helper.startswith("/") and ":" not in args.wsl_helper):
-        print("refused: --wsl-helper is an absolute path inside WSL (from Git Bash, set MSYS_NO_PATHCONV=1)", flush=True)
-        return 2
-    if args.wsl and not (args.wsl_root and args.wsl_python):
-        print("refused: --wsl needs --wsl-root (a checkout in WSL) and --wsl-python (its venv's Python)", flush=True)
-        return 2
-    if args.wsl and not all(p.startswith("/") and ":" not in p for p in (args.wsl_root, args.wsl_python)):
-        print("refused: --wsl-root and --wsl-python are absolute paths inside WSL (from Git Bash, set "
-              "MSYS_NO_PATHCONV=1, or it rewrites them as Windows paths)", flush=True)
-        return 2
-    # the harness's own run, on this script's parts
-    q3.PARTS, q3.LATER = PARTS, LATER
+def _run(args) -> tuple:
+    """One harness run of ``args.part`` (or of every part in ``q3.PARTS`` for ``all``) with the server on Windows or,
+    with ``args.wsl``, in WSL: (exit code, the summary written to ``qa-<part>.json``). Raises ``q3.Refused``."""
     plain = q3.Server
     fallback: dict = {}
     if args.wsl:
@@ -2888,9 +4316,6 @@ def main(argv=None) -> int:
         q3.Server = server
     try:
         code, report = q3.run(args)
-    except q3.Refused as e:
-        print(f"refused: {e}", flush=True)
-        return 2
     finally:
         q3.Server = plain
     if args.wsl:
@@ -2912,6 +4337,119 @@ def main(argv=None) -> int:
         code = 1
     passed = sum(1 for c in report.checks if c["ok"])
     print(f"{'OK' if code == 0 else 'FAILED'}: {passed} of {len(report.checks)} checks passed; {where}", flush=True)
+    summary["where"] = where
+    return code, summary
+
+
+def _run_all(args) -> int:
+    """``all``: every part, in ``PARTS``' order, in two harness runs, each on a server of its own in a folder of the
+    run's directory: the parts written for a server on Windows first (``<dir>/<name>-windows``), then ``WSL_PARTS``
+    with the server in WSL (``<dir>/<name>-wsl``). ``qa-all.json`` holds both runs' summaries; exit 0 only when every
+    check of both passed."""
+    skip = set(args.skip or ())
+    top = Path(args.dir).expanduser()
+    q3.check_dir(top)
+    q3.claim(top.resolve() if top.exists() else top)
+    top = top.resolve()
+    groups = [("windows", [p for p in PARTS if p not in skip and p not in WSL_PARTS], False),
+              ("wsl", [p for p in PARTS if p not in skip and p in WSL_PARTS], True)]
+    runs: dict = {}
+    code = 0
+    t0 = time.perf_counter()
+    for label, parts, on_wsl in groups:
+        if not parts:
+            continue
+        sub = argparse.Namespace(**vars(args))
+        sub.part, sub.skip, sub.wsl = "all", [], on_wsl
+        sub.dir = str(top / f"{top.name}-{label}")
+        q3.PARTS = {p: PARTS[p] for p in parts}
+        print(f"all: the {label} run ({', '.join(parts)})", flush=True)
+        try:
+            got, summary = _run(sub)
+        except q3.Refused as e:
+            got, summary = 1, {"ok": False, "refused": str(e)}
+        finally:
+            q3.PARTS = PARTS
+        runs[label] = {"dir": sub.dir, "parts": parts, "ok": got == 0, "summary": summary.get("parts"),
+                       "checks": len(summary.get("checks") or []),
+                       "passed": sum(1 for c in summary.get("checks") or [] if c["ok"]),
+                       "failed": [c["check"] for c in summary.get("checks") or [] if not c["ok"]],
+                       "remote": summary.get("remote"), "seconds": summary.get("seconds")}
+        code = code or got
+    out = {"part": "all", "ok": code == 0, "runs": runs, "skipped": sorted(skip),
+           "seconds": round(time.perf_counter() - t0, 1)}
+    (top / "qa-all.json").write_text(json.dumps(out, indent=2, default=str) + "\n", encoding="utf-8")
+    passed = sum(r["passed"] for r in runs.values())
+    total = sum(r["checks"] for r in runs.values())
+    print(f"{'OK' if code == 0 else 'FAILED'}: all: {passed} of {total} checks passed in {len(runs)} runs"
+          f"{' (skipped: ' + ', '.join(sorted(skip)) + ')' if skip else ''}; evidence in {top / 'qa-all.json'}",
+          flush=True)
+    return code
+
+
+def main(argv=None) -> int:
+    """Run the harness on Phase 4's parts."""
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("part", choices=sorted([*PARTS, *LATER, "all"]), help="the part to run, or all")
+    ap.add_argument("--port", type=int, default=0, help="a free port by default; never 8799 or one in use")
+    ap.add_argument("--dir", default=str(Path(os.environ.get("TEMP") or "/tmp") / "citar-qa-phase4"),
+                    help="the state directory: new, empty, or an earlier run's (it is emptied first)")
+    ap.add_argument("--keep", action="store_true", help="leave the server running afterwards (the browser checklist)")
+    ap.add_argument("--skip", action="append", choices=sorted(PARTS), default=[], metavar="PART",
+                    help="all: leave this part out (llm-real needs LM Studio; say so when quoting the run)")
+    ap.add_argument("--helper-bin", default=None, metavar="PATH",
+                    help="the CITAR helper to run (default: citar-helper in CITAR_EXT_DIR)")
+    ap.add_argument("--llm-url", default=REAL_URL, help="llm-real, real: LM Studio's address (read only)")
+    ap.add_argument("--stand-in", action="store_true",
+                    help="llm-real, real: play LM Studio with the scripted endpoint (to check the part without the "
+                         "model)")
+    ap.add_argument("--wsl", action="store_true",
+                    help="the server in WSL (the remote, service, exit and real parts, and all's last run: 4-10, "
+                         "4-14, 4-15)")
+    ap.add_argument("--wsl-root", default=None, metavar="PATH", help="--wsl: the checkout in WSL the server runs from")
+    ap.add_argument("--wsl-python", default=None, metavar="PATH",
+                    help="--wsl: the Python in WSL that runs it (a venv's, with the extension cargo xtask develop built)")
+    ap.add_argument("--wsl-distro", default="Ubuntu-24.04", help="--wsl: the WSL distribution (P4.7.1's)")
+    ap.add_argument("--wsl-user", default="claude", help="--wsl: the WSL user (P4.7.1's)")
+    ap.add_argument("--wsl-helper", default=None, metavar="PATH",
+                    help="service, exit: the helper in WSL (cargo xtask develop's citar-ext/citar-helper there; "
+                         "citar-helper-faults beside it)")
+    args = ap.parse_args(argv)
+    global LLM_URL, STAND_IN, WSL_HELPER
+    LLM_URL, STAND_IN, WSL_HELPER = args.llm_url, args.stand_in, args.wsl_helper
+    q3.HELPER_BIN = args.helper_bin
+    if args.wsl and args.part not in ("remote", *WSL_PARTS, "all"):
+        print("refused: --wsl belongs to the remote, service, exit, real and all runs (packages 4-10, 4-14, 4-15)",
+              flush=True)
+        return 2
+    wanted = [p for p in PARTS if p not in set(args.skip)] if args.part == "all" else [args.part]
+    if any(p in NEEDS_WSL for p in wanted) and not (args.wsl and args.wsl_helper):
+        print("refused: the service and exit parts run with the server in WSL and a helper built there (design "
+              "P4.7.1 rule 8, P4.7.6): give --wsl --wsl-root --wsl-python and --wsl-helper (absolute paths inside "
+              "WSL), or, for a development run of all, --skip service --skip exit", flush=True)
+        return 2
+    if args.wsl_helper and not (args.wsl_helper.startswith("/") and ":" not in args.wsl_helper):
+        print("refused: --wsl-helper is an absolute path inside WSL (from Git Bash, set MSYS_NO_PATHCONV=1)", flush=True)
+        return 2
+    if args.wsl and not (args.wsl_root and args.wsl_python):
+        print("refused: --wsl needs --wsl-root (a checkout in WSL) and --wsl-python (its venv's Python)", flush=True)
+        return 2
+    if args.wsl and not all(p.startswith("/") and ":" not in p for p in (args.wsl_root, args.wsl_python)):
+        print("refused: --wsl-root and --wsl-python are absolute paths inside WSL (from Git Bash, set "
+              "MSYS_NO_PATHCONV=1, or it rewrites them as Windows paths)", flush=True)
+        return 2
+    # the instance's server plays the lab (the lab part): the test suite's switch, if this runs under it, stays off
+    # (cleared only here, past every refusal: a refused run changes nothing of the process it runs in either)
+    os.environ.pop("CITAR_TEST_NO_DISPATCHER", None)
+    # the harness's own run, on this script's parts
+    q3.PARTS, q3.LATER = PARTS, LATER
+    try:
+        if args.part == "all":
+            return _run_all(args)
+        code, _summary = _run(args)
+    except q3.Refused as e:
+        print(f"refused: {e}", flush=True)
+        return 2
     return code
 
 

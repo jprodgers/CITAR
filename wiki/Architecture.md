@@ -12,6 +12,7 @@ citar/
   server/     FastAPI app, sessions, turn driver, benchmark scheduler
   auth/       accounts, sessions, permissions
   pool/       shared hardware: groups, grants, budgets, availability, the prompt scheduler
+  jobs/       the job dispatcher, the server's job host, helpers as executors, trust tiers
   ledger.py   the compute ledger: who gave and who used compute, in credits; rollups, the ratio
   usage.py, costing.py   what each activity held, and its price
   db/         SQLAlchemy models
@@ -543,6 +544,41 @@ returns the whole registry with schemas (`engine_api.tool_list`).
   front of a scripted endpoint, and its `exit` part plays all of it at once (one game of a person, a hybrid seat, an
   LLM seat, an MCP seat and bots on a shared helper machine, with pooled work, a benchmark beside it and a server
   killed mid-chat); its `real` part does the same against a real model in LM Studio
+  ([CONTRIBUTING.md](https://github.com/jprodgers/CITAR/blob/main/CONTRIBUTING.md)).
+
+## Phase 4: the helper, CPU sharing and proof of work
+
+0.1.6's helper and the lab's CPU work (`design/phase4-helper.md`) in one place; each part has its own section or
+page.
+
+- **One protocol, typed on both sides.** Helper protocol 2 (`crates/citar-helper/PROTOCOL.md`, normative) is a set
+  of JSON frames with serde types in the helper (`protocol.rs`) and checked builders and parsers in the server
+  (`citar/server/helper_protocol.py`); shared fixtures and transcripts (`crates/citar-helper/protocol/v2/`) are
+  played by both sides, so neither can drift alone. The hub speaks protocol 2 only ([The hub](#the-hub-protocol-2));
+  a 0.1.5 worker gets one line telling it to download the new helper, and the Python worker is gone.
+- **The CITAR helper** (`crates/citar-helper`, one Rust program for five targets) is what a member runs on a machine
+  to lend it: a streaming proxy in front of its model server whose cancel really stops the generation and which
+  returns completions raw for the server's one parser ([One parser](#one-parser-for-every-completion)); the hardware
+  scan and power samples; a machine key (owner-only on disk) that signs its results; signed self-update with a
+  supervisor that rolls back; service installation per OS. Its own `helper.json` is its owner's ceiling, and it
+  lends no CPU until its owner says so ([WORKERS.md](Workers)).
+- **CPU work is jobs** ([CPU jobs and the jobs build](#cpu-jobs-and-the-jobs-build)): lab, ranking and reference
+  games as closed, typed specs played by the same Rust everywhere (`crates/citar-jobs`), each with a chain of round
+  digests and a result hash, compared only within one jobs build. One job host program plays them under limits, hard
+  where the OS allows (a Job Object, a `systemd --user` scope), as the helper's child and as the server's.
+- **The lab runs inside the server** ([The job dispatcher](#the-job-dispatcher-the-lab-inside-the-server)): one
+  dispatcher thread offers queued games to executors (the server's own job host, and each connected helper whose
+  owner lends its CPU and whose grants list Lab), writes each accepted result once, feeds the ratings, and writes one
+  compute-ledger event a run with the machine's owner as the provider.
+- **Results are checked, not believed** ([Proof of work](#proof-of-work-claims-replays-and-trust-tiers)): a signed
+  claim per result; replays on a verifier (every result of a new machine, a keyed sample after); trust tiers that
+  promote on matches and quarantine on a mismatch, withdrawing everything a caught machine gave unverified, with its
+  credits and budget settlements, and the ratings recomputed. Model results from members' machines count on the
+  global boards only once the machine is trusted.
+- **Checked end to end.** `scripts/qa_phase4.py` runs each part on a dev server of its own with the real helper; its
+  `exit` part puts the server in WSL with helpers on Windows and in WSL lending to another member's experiment, checks
+  every accepted line's signature and chain, compares the Windows helper's replicated games with Linux byte for byte,
+  and catches two cheating helpers; its `real` part plays a game on a real model through a Windows helper
   ([CONTRIBUTING.md](https://github.com/jprodgers/CITAR/blob/main/CONTRIBUTING.md)).
 
 ## The server

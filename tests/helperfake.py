@@ -912,7 +912,12 @@ class HubPlayer:
         if self._plays_jobs():
             self._prepare_jobs(owner_id=owner.id)
         self.lookups0 = hub.lookups
-        self.audit0 = self._audit_count()
+        # a transcript that counts audit rows counts from a quiet start: the transcript before may still be writing one
+        # (a refused token's row goes through a thread), which would land after the count was taken (4-14 saw it once
+        # in WSL, 4-15 again)
+        counts = any(st.action == "state" and st.body.get("side") == "hub" and "audit_rows" in st.body.get("expect", {})
+                     for st in self.t.steps)
+        self.audit0 = self._settled_audit_count() if counts else self._audit_count()
 
     def _prepare_update(self, update: Optional[dict]) -> None:
         """The relay's manifest (``setup.hub.update``): one signed with the throwaway key the extension then trusts
@@ -1457,6 +1462,19 @@ class HubPlayer:
                 yield F.realize(st.body, dict(self.bindings), self.t.values, example=example)
 
     # -------------------------------------------------------------- state
+    def _settled_audit_count(self, quiet: float = 0.3, limit: float = 5.0) -> int:
+        """The audit rows' count once nothing has been written for ``quiet`` seconds (at most ``limit``)."""
+        last, since = self._audit_count(), time.monotonic()
+        deadline = since + limit
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            now = self._audit_count()
+            if now != last:
+                last, since = now, time.monotonic()
+            elif time.monotonic() - since >= quiet:
+                break
+        return last
+
     def _audit_count(self, action: Optional[str] = None) -> int:
         from citar import db
         from citar.db.models import AuditLog

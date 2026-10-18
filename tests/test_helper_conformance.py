@@ -25,6 +25,7 @@ from __future__ import annotations
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,12 +38,14 @@ from tests import helperfake as H
 
 _TMP = Path(tempfile.mkdtemp(prefix="citar_conformance_"))
 _URL = "sqlite:///" + (_TMP / "test.db").as_posix()
+_SAVED: dict = {}
 
 TRANSCRIPTS = (H.hub_transcripts("4-05") + H.hub_transcripts("4-06") + H.hub_transcripts("4-10")
                + H.hub_transcripts("4-13"))
 
 
 def setUpModule():
+    _SAVED.update({k: os.environ.get(k) for k in ("CITAR_DATA_DIR", "CITAR_DB_URL")})
     os.environ["CITAR_DATA_DIR"] = str(_TMP)
     os.environ["CITAR_DB_URL"] = _URL
     settings.reset()
@@ -52,6 +55,21 @@ def setUpModule():
     db.create_all()
     servers.invalidate()
     S.reset()
+
+
+def tearDownModule():
+    # the pool's connections closed here, not left to the interpreter's exit ("unclosed database" warnings under
+    # -X dev when the module ran alone), and the environment as it was for the modules after this one
+    S.reset()
+    db.dispose()
+    for k, v in _SAVED.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    settings.reset()
+    servers.invalidate()
+    shutil.rmtree(_TMP, ignore_errors=True)
 
 
 class Transcripts(unittest.TestCase):

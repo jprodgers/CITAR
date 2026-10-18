@@ -2861,7 +2861,12 @@ class Dispatcher:
             return "the lab is paused", []
         parts, gone = [], []
         for e in self.executors:
-            why = self._available(e, now) or e.refuses(job)
+            # an executor ready to play is asked about the job first: a refusal (no grant, a quarantined owner, a
+            # kind it leaves out) keeps it from the game for good, where its wait for a verifier or a backoff ends
+            # and would still not play it (4-15); one that is not ready says why it is not
+            ready = e.state == "ready" and getattr(e, "online", True)
+            why = (e.refuses(job) or self._available(e, now)) if ready else (self._available(e, now)
+                                                                             or e.refuses(job))
             if why is None and e.free <= 0:
                 why = "every thread is playing"
             if why is not None:

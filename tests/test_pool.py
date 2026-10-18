@@ -219,6 +219,33 @@ class Admission(PoolFixtures):
             self.assertEqual(refused.code, "purpose")
             self.assertIn("scenarios", refused.reason)
 
+    def test_a_purpose_refusal_says_what_the_grant_covers_and_what_it_does_not(self):
+        """The refusal names what the grant covers and what was asked (4-15's review: "and this is ordinary games"
+        was no English)."""
+        with db.session() as s:
+            self._grant(s, purposes=["game", "pooled"])
+        with db.session() as s:
+            guest, server = s.get(User, self.guest_id), s.get(Server, self.server_id)
+            for purpose, label in (("scenario", "scenarios"), ("lab", "lab runs (CPU work)")):
+                refused = admission.check(s, guest, server, purpose)
+                self.assertEqual((refused.allowed, refused.code), (False, "purpose"))
+                self.assertEqual(refused.reason, "Your access to “Overnight box” covers ordinary games and pooled "
+                                                 f"prompts only, not {label}.")
+
+    def test_a_grant_lending_the_cpu_alone_says_it_lends_no_model_work(self):
+        """A grant listing lab alone, the usual way to lend a machine's CPU (4-12), refuses model work saying what it
+        is for, rather than comparing lists: what a grantee's Servers page shows under such a machine."""
+        with db.session() as s:
+            self._grant(s, purposes=["lab"])
+        with db.session() as s:
+            guest, server = s.get(User, self.guest_id), s.get(Server, self.server_id)
+            self.assertTrue(admission.check(s, guest, server, "lab").allowed)
+            for purpose in ("game", "pooled", "scenario"):
+                refused = admission.check(s, guest, server, purpose)
+                self.assertEqual((refused.allowed, refused.code), (False, "purpose"))
+                self.assertEqual(refused.reason, "Your access to “Overnight box” is for lab runs (CPU work) only: its "
+                                                 "owner lends no model work under it.")
+
     def test_the_briefs_overnight_scenario_box(self):
         """'available only for scenarios from midnight to 6am with a budget of $100 per month'."""
         with db.session() as s:

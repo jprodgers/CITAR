@@ -97,12 +97,22 @@ that means for an existing install:
   files and `status.json` are no longer read. The lab's CPU is in the compute ledger as one event a
   game, used by the experiment's owner (it was charged to the host as `verified`, whoever played it, by
   reading the results files). [docs/BOTS.md](docs/BOTS.md#the-lab).
+- **Lending a machine's CPU is its owner's choice, made on the machine, and grants lend it only for Lab.** A
+  helper lends no CPU until its owner turns that on in its own settings (`citar-helper setup` asks, default no;
+  `--cpu` for one run), and what its `helper.json` lends is a ceiling the site's settings never pass. A grant lends a
+  machine's CPU only when it lists **Lab (CPU work)**: a grant with no purposes ("every purpose") covers model work
+  only, and an administrator's own experiments need such a grant like anyone's.
+  [docs/server/WORKERS.md](docs/server/WORKERS.md#lending-cpu-what-plays-on-it-and-for-whom).
 - **API changes.** The report sharing routes under `/api/shared/reports` moved to the owned items'
   routes (`/api/items/report/{id}/sharing`) and `/r/{slug}`; `replay_data("full")` and a replay asked
   for in it are refused (the recap reads the `delta` frames); a seat's view no longer carries
   `trade_options` (`GET /api/games/{id}/trade-options/{other}` does); `respond_negotiation` requires a
   `message`; an LLM seat's wait for a chat's answer inside its turn is 60 s (it was 240 s), the chat's
-  own time being the lobby's.
+  own time being the lobby's. New for helpers and CPU work ([docs/API.md](docs/API.md)): `POST
+  /api/machines/{id}/key/reset` and `/rescan`; `GET /api/machines/{id}/jobs`; `GET /api/lab/jobs`; `GET
+  /api/admin/jobs` and `POST /api/admin/jobs/pause`, `/resume` and `/retry`; `PUT /api/admin/machines/{id}/trust`
+  (with `withdraw` and `verifier`) and `POST /api/admin/machines/{id}/replicate`; `GET` and `PUT
+  /api/admin/verification`; and `/ws/worker` speaks helper protocol 2 only.
 
 ### Added
 
@@ -354,7 +364,12 @@ that means for an existing install:
 
 **Development:** `POST /api/games/{id}/debug/ops` (scenario operations on a live game, on debug
 servers only); `scripts/qa_phase3.py`, which checks each feature end to end on a dev server of its
-own, and all of them at once in one game, with a real model in LM Studio last
+own, and all of them at once in one game, with a real model in LM Studio last; `scripts/qa_phase4.py`,
+the same for the helper and CPU work with the real `citar-helper`, its `exit` part with the server in WSL and
+helpers on Windows and in WSL (every accepted result's signature and chain checked, the Windows helper's replayed
+games compared with Linux byte for byte, two cheating helpers caught) and its `real` part a game on a real model
+through a Windows helper, which reaches LM Studio only through a gate that forwards a completion while the model is
+loaded and none has failed, so a crash stops the part before anything could load the model again
 ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ### Fixed
@@ -373,12 +388,23 @@ own, and all of them at once in one game, with a real model in LM Studio last
   counts as a refused token (the helper is asked to try again).
 - A cancelled request kept running on its helper until it finished, holding its slot (draining); the
   helper now stops it.
+- A `json`-mode seat on a helper machine never had the JSON protocol in its prompt (the 0.1.5 worker parsed
+  completions itself with a conversation that left it out); the server now builds every prompt and parses every
+  completion.
+- A helper read its model server's models once per connection, so a model loaded or unloaded later was unknown to
+  the server until the helper reconnected; it now sends its catalog whenever it changes.
+- A helper scanned the machine's hardware inside its connection before connecting, holding the connection up; the
+  scan now runs beside it, and a changed scan is sent when it is done.
 - A Mac whose browser does not say its processor (Safari and Firefox, on Apple silicon and Intel
   alike) was offered the Apple silicon helper only; it is now offered both macOS builds.
 - A helper run as a service with a setting it cannot take exited with code 2, which a service
   manager restarted every 15 s for ever; it now idles, says why once in its log and reads its
   settings again after 15 s, doubling to an hour, and at once when `helper.json` changes (except
   while an update's new binary must have its starts counted).
+- A machine lent for lab runs alone showed each grantee "Your access to ... is limited to lab runs (CPU work), and
+  this is ordinary games"; it now says the access is for lab runs only, its owner lending no model work under it, and
+  a grant that lists other purposes says what it covers and what it does not ("covers ordinary games and pooled
+  prompts only, not scenarios").
 
 **Rules the Rust engine fixes.** The new engine in `crates/citar-engine`, which replaces the Python
 engine in this release, plays by the same rules except where the Python engine was wrong or
