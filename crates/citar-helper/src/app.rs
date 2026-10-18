@@ -235,10 +235,11 @@ enum Served {
 }
 
 /// Ctrl-C's and SIGTERM's listener ([`stop_on_signal`]), or none when the service manager stops the
-/// helper: installed at most once in a process, and only once the settings are read. One
-/// installed before them would take a Ctrl-C at the first-run questions for a stop request and
-/// leave the question waiting for an answer, where a terminal's Ctrl-C there must quit the helper
-/// (as the default handler does until the listener is installed).
+/// helper: installed at most once in a process, and only when the session starts (or a service
+/// idles). One installed before the settings are read would take a Ctrl-C at the first-run
+/// questions for a stop request and leave the question waiting for an answer, where a terminal's
+/// Ctrl-C there must quit the helper (as the default handler does until the listener is
+/// installed); so must one at a refusal's "Press Enter to close".
 struct Signals(Option<Box<dyn FnOnce() + Send>>);
 
 impl Signals {
@@ -283,8 +284,8 @@ const SETTINGS_POLL: Duration = Duration::from_secs(2);
 
 /// The helper itself (`run`, `run --service`, `service run`): the update's start path first (the
 /// module's doc, step 2), then [`serve`] on a runtime of its own, stopped by `given_stop` (the
-/// Windows service manager's) or else by Ctrl-C and SIGTERM (listened for once the settings are
-/// read, [`Signals`]). In service mode, settings this binary cannot take idle rather than exit (the
+/// Windows service manager's) or else by Ctrl-C and SIGTERM (listened for once the session starts,
+/// [`Signals`]). In service mode, settings this binary cannot take idle rather than exit (the
 /// module's doc), read again after 15 s doubling to an hour, and at once when the settings file
 /// changes.
 fn run_helper(
@@ -351,6 +352,8 @@ fn run_helper(
                             settings.display()
                         ));
                         wait = SETTINGS_RETRY_FIRST;
+                        // What the changed file still lacks is worth a line of its own.
+                        idle_logged = false;
                     }
                     Woke::Elapsed => wait = (wait * 2).min(PERMANENT_RETRY),
                 }
