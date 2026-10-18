@@ -227,7 +227,7 @@ The build id is unchanged (`0b412a18fe95`), and so are the jobs builds (`c24ed48
      - **S10:** before (10:22) and after (13:00), identical (`C:/dev/target/p-4-15-fix-s10-before.log`, `-after.log`).
      - **CI-only, not run:** test.yml on its three OSes, rust.yml, determinism.yml (no new jobs build), and helper.yml (its five targets and the service jobs), at the merge push.
 
-**4-15's final attempt** (one agent, 2026-10-18, from 13:02 to 14:12 (-04:00), on `p-4-15` from `c253aea`). The real model is still **DEFERRED: model not loaded**. LM Studio was running, but `/api/v0/models` and `/v1/models` listed no model, and no `llama-server.exe` ran (read only, at 13:02 and 14:07). Each of the three real-model commands was run against it and stopped at its first read, with nothing sent:
+**4-15's final attempt** (one agent, 2026-10-18, from 13:02 to 14:08 (-04:00), on `p-4-15` from `c253aea`). The real model is still **DEFERRED: model not loaded**. LM Studio was running, but `/api/v0/models` and `/v1/models` listed no model, and no `llama-server.exe` ran (read only, at 13:02 and 14:07). Each of the three real-model commands was run against it and stopped at its first read, with nothing sent:
 - `qa_phase4.py real` and `llm-real` failed their first check, "google/gemma-4-e2b is not among LM Studio's models (none)" (`C:/dev/target/p-4-15-final-qa-real`, `-final-qa-llm-real`);
 - the Rust test panicked with "google/gemma-4-e2b is not loaded in LM Studio: nothing was sent to it" (`C:/dev/target/p-4-15-final-real-model-rs.log`).
 
