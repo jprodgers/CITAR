@@ -664,7 +664,9 @@ mod tests {
         let check = at(&|s| matches!(s, Step::CheckAbove { .. }));
         let above = at(&|s| matches!(s, Step::FoldersAbove { .. }));
         let secure = at(&|s| matches!(s, Step::Secure { .. }));
-        let bin = at(&|s| matches!(s, Step::Folder(p) if p.ends_with("bin")));
+        // The plan's Windows paths are text on every OS (on Linux a backslash separates nothing).
+        let bin =
+            at(&|s| matches!(s, Step::Folder(p) if p.to_string_lossy().ends_with(r"\helper\bin")));
         let copy = at(&|s| matches!(s, Step::Copy { .. }));
         assert_eq!((check, above, secure, bin, copy), (0, 1, 2, 3, 4), "{plan:?}");
         let Step::FoldersAbove { owner, full, read, .. } = &plan.steps[above] else {

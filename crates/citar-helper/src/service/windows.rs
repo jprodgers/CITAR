@@ -196,6 +196,7 @@ fn trusted_above() -> Result<Vec<String>, String> {
 }
 
 /// What a refusal of a folder above the home says to do.
+#[cfg(windows)]
 fn above_refused(e: &std::io::Error, home: &Path) -> String {
     format!(
         "{e}; another account could then move the service's home {} aside and put its own in its \
