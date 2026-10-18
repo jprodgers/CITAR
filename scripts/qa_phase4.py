@@ -3378,6 +3378,7 @@ def part_exit(h) -> None:
                                            for m, c in by_machine.items()}}), seconds=took)
         data.update(experiments=[main, ladder, base], seconds=took, by_machine=by_machine)
         _exit_gate2(h, data, state, lines, main, ladder, base, w_sid, l_sid, host, ids, cpu, shown)
+        _exit_binding(h, data, lenders, executor, w_sid, l_sid, host, host_cpu)
 
         # ---- gate 3, first pass: carol's helper in WSL alters its third result (--test-fault result:3)
         for key in ("win", "wsl"):
@@ -3616,6 +3617,57 @@ def _exit_gate2(h, data: dict, state: dict, lines: dict, main: str, ladder: str,
     data.update(limits=held)
 
 
+def _exit_binding(h, data: dict, lenders: dict, executor, w_sid: str, l_sid: str, host: str, host_cpu: dict) -> None:
+    """The limits where they bind (the remote part's check, on both helpers): alice's machines' share pushed down to
+    5% of the machine on the site (the helpers restart their job hosts with it), this server's job host lending
+    nothing, and long games of bob's playing on both helpers; each job host's CPU over 8 s stays under 5% plus slack
+    and uses at least half of it, Windows' Job Object and the WSL helper's ``systemd --user`` scope alike. Deleting the
+    experiment from the queue ends its games on the helpers; the share goes back to the run's."""
+    r = h.report
+    admin, alice, bob = (h.accounts[k] for k in ("admin", "alice", "bob"))
+    low = {**EXIT_SITE, "cpu_percent": 5}
+    put = [alice.put(f"/api/machines/{sid}/settings", json={"capabilities": {"cpu": low}}) for sid in (w_sid, l_sid)]
+    off = admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {**host_cpu, "enabled": False}}})
+    pushed = wait_until(lambda: all(executor(s).get("cpu_percent") == 5 and executor(s).get("state") == "ready"
+                                    for s in (w_sid, l_sid)), 60, 0.25)
+    held = f"qa-exit-binding-{h.tag}"
+    bob.post("/api/bots/experiments", json={**LONG_GAME, "name": held, "games": 4, "seed": 15700})
+
+    def playing() -> bool:
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("running") or {}) if got.status_code == 200 else {}
+        return all(len([x for x in rows.get(s) or [] if x.get("exp") == held and x.get("state") == "running"
+                        and x.get("turn")]) == 2 for s in (w_sid, l_sid))
+    both = wait_until(playing, 90, 0.25)
+    watches = {"win": CpuWatch(lenders["win"].proc.pid),
+               "wsl": (WslCpuWatch(lenders["wsl"]) if isinstance(lenders["wsl"], WslHelper)
+                       else CpuWatch(lenders["wsl"].proc.pid))}
+    for w in watches.values():
+        w.start()
+    time.sleep(8.0)         # the measurement's own span: two games held at the share for 8 s on each helper
+    share = {k: w.stop() for k, w in watches.items()}
+    _saves_remove(h, f"lab/queue/{held}.json")
+
+    def ended() -> bool:
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("running") or {}) if got.status_code == 200 else {}
+        return not any(x.get("exp") == held for s in (w_sid, l_sid) for x in rows.get(s) or [])
+    gone = wait_until(ended, 60, 0.25)
+    held_both = all(v.get("peak_pct") is not None and v["peak_pct"] <= 5 + 2 and (v.get("mean_pct") or 0) >= 2.5
+                    for v in share.values())
+    r.check("the limits where they bind: with alice's machines' share pushed down to 5% of the machine, two long games "
+            "on each helper keep its job host's CPU under 5% plus slack (and use at least half of it) over 8 s, held "
+            "by Windows' Job Object and by the WSL helper's systemd --user scope; deleting the experiment ends them",
+            all(x.status_code == 200 for x in put) and off.status_code == 200 and bool(pushed) and bool(both)
+            and held_both and bool(gone),
+            json.dumps({"share": share, "pushed": bool(pushed), "playing": bool(both), "ended": bool(gone)}))
+    data.update(binding=share)
+    for sid in (w_sid, l_sid):
+        alice.put(f"/api/machines/{sid}/settings", json={"capabilities": {"cpu": EXIT_SITE}})
+    admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_cpu}})
+    wait_until(lambda: all(executor(s).get("cpu_percent") in (25, 50) for s in (w_sid, l_sid)), 30, 0.25)
+
+
 def _ledger_me(h, sides: dict, names: tuple, state: dict) -> tuple:
     """``q3._ledger_agrees`` for any topology: each account's sides as ``/api/ledger/me?range=all`` tells them against
     the sums of the compute ledger's events in the server's database (``SELF_USE`` left out), read until two reads
@@ -3714,18 +3766,33 @@ def _exit_cheat(h, data: dict, lenders: dict, machine, executor, ids: dict, host
     o_sid, o_token = machine(carol, "exit other", gid, site)
     lenders["other"] = _lender(h, o_token, "qa-exit-other", wsl=False,
                                ceiling={**EXIT_WINDOWS, "threads": 1, "work": ["lab_game"]})
-    ready_o = wait_until(lambda: q3._online(carol, o_sid), 120, 0.5)
+    ready_o = wait_until(lambda: executor(o_sid).get("state") == "ready", 120, 0.5)
+    # this server's job host lends nothing a moment: her games wait, and why each executor leaves them is shown
+    host_cpu = {"enabled": True, "threads": 1, "cpu_percent": max(1, min(100, 200 // (os.cpu_count() or 1))),
+                "memory_mb": 400, "work": ALL_WORK}
+    admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": {**host_cpu, "enabled": False}}})
     other = f"qa-exit-refused-{tag}"
     carol.post("/api/bots/experiments", json={
         "profiles": ["standard", "classic-production"], "name": other, "players": 2, "games": 3, "seed": 15500,
         "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": EXIT_TURNS})
+
+    def waiting() -> Optional[str]:
+        got = admin.get("/api/admin/jobs")
+        rows = (got.json().get("queued") or {}).get(other, []) if got.status_code == 200 else []
+        said = [x.get("waiting") or "" for x in rows]
+        return said[0] if len(said) == 3 and all("its owner is quarantined" in x for x in said) else None
+    why = wait_until(waiting, 60, 0.5)
+    runs_held = admin.get(f"/api/machines/{o_sid}/jobs").json().get("runs") or []
+    admin.put(f"/api/machines/{host}/settings", json={"capabilities": {"cpu": host_cpu}})
     done_o = wait_until(lambda: _lab_view(carol, other).get("state") == "complete", 180, 1.0)
     runs_o = admin.get(f"/api/machines/{o_sid}/jobs").json().get("runs") or []
     lines_o = _lab_lines(h, other)
-    r.check("carol's second machine, an honest helper, is refused CPU work while its owner is quarantined: her next "
-            "experiment plays on this server alone",
-            bool(ready_o) and bool(done_o) and runs_o == [] and {x["executor"]["machine"] for x in lines_o} == {host},
-            json.dumps({"runs": len(runs_o), "executor": executor(o_sid).get("reason")}))
+    r.check("carol's second machine, an honest helper connected and lending, is refused CPU work while its owner is "
+            "quarantined: with this server lending nothing her games wait, the dispatcher saying so of that machine "
+            "(\"its owner is quarantined\"), and once this server lends again they play there alone",
+            bool(ready_o) and bool(why) and runs_held == [] and bool(done_o) and runs_o == []
+            and {x["executor"]["machine"] for x in lines_o} == {host},
+            json.dumps({"waiting": why, "runs": len(runs_o)})[:600])
     lenders.pop("other").stop()
     data.update(other_machine=o_sid)
 
@@ -3864,13 +3931,27 @@ REAL_PROMPT_EVERY = 2
 def part_real(h) -> None:
     """The ``real`` part (the module's doc): LM Studio's model through alice's Windows helper, a 6-round game with her
     person seat, an LLM seat, a hybrid seat and two bots, the models answering her chats by their own calls; then
-    4-04's cancel and baseline checks through the same helper binary (``exercise``)."""
+    4-04's cancel and baseline checks through the same helper binary (``exercise``). ``--stand-in`` plays LM Studio
+    with the scripted endpoint (``stand_in``: the model's name, loaded; a game's turns and chats answered by its
+    scripted policy's tool calls), to check the part itself without the model."""
     r = h.report
     admin, alice = h.accounts["admin"], h.accounts["alice"]
     data = r.data.setdefault("real", {})
-    ready, said = q3.lmstudio_model(REAL_URL, REAL_MODEL)
-    data["lmstudio"] = {"url": REAL_URL, "model": REAL_MODEL, "before": said}
-    if not r.check(f"LM Studio at {REAL_URL} lists {REAL_MODEL}, loaded (read only: GET /api/v0/models; the part never "
+    ep = stand_in() if STAND_IN else None
+    url = ep.url if ep is not None else LLM_URL
+    label = "the stand-in" if ep is not None else "LM Studio"
+    try:
+        _real(h, r, admin, alice, data, url, label)
+    finally:
+        if ep is not None:
+            data["stand_in_side"] = endpoint_side(ep, (data.get("cancel") or {}).get("cancel_at"))
+            ep.close()
+
+
+def _real(h, r, admin, alice, data: dict, url: str, label: str) -> None:
+    ready, said = q3.lmstudio_model(url, REAL_MODEL)
+    data["lmstudio"] = {"url": url, "model": REAL_MODEL, "before": said, "stand_in": label != "LM Studio"}
+    if not r.check(f"{label} at {url} lists {REAL_MODEL}, loaded (read only: GET /api/v0/models; the part never "
                    "loads, unloads or swaps a model)", ready, said):
         return
     helper = None
@@ -3887,13 +3968,13 @@ def part_real(h) -> None:
         token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
         if token:
             # the model's own allowlist: the helper offers nothing else, so nothing could ask LM Studio for another
-            helper = Helper(h, token, REAL_URL, "qa-real", provider="lmstudio", max_concurrent=1,
+            helper = Helper(h, token, url, "qa-real", provider="lmstudio", max_concurrent=1,
                             extra=("--model", REAL_MODEL))
         online = bool(helper) and bool(wait_until(lambda: q3._online(alice, hid), 60, 0.25))
         info = _workers(alice, hid)
         card = next((s for s in alice.get("/api/pool/servers").json().get("servers", []) if s.get("id") == hid), {})
         live = {m.get("key"): m.get("loaded") for m in card.get("live_models") or []}
-        r.check("alice's helper machine, the real Windows helper in front of LM Studio (one slot, the model its only "
+        r.check(f"alice's helper machine, the real Windows helper in front of {label} (one slot, the model its only "
                 "one), protocol 2, reports the model loaded",
                 online and live == {REAL_MODEL: True} and (info.get("worker") or {}).get("protocol") == 2,
                 json.dumps({"online": online, "live": live, "target": (info.get("worker") or {}).get("target")}))
@@ -4026,8 +4107,8 @@ print(json.dumps({"events": int(n), "gen_s": float(gen)}))
     # at 2 s acknowledged within a second, the next short requests within the run's own baseline, nothing drained
     cancel = data.setdefault("cancel", {})
     _own_instance(h.server.state / "real-cancel")
-    exercise(r.check, REAL_URL, h.server.state, cancel)
-    after, said_after = q3.lmstudio_model(REAL_URL, REAL_MODEL)
+    exercise(r.check, url, h.server.state, cancel, label=label)
+    after, said_after = q3.lmstudio_model(url, REAL_MODEL)
     data["lmstudio"]["after"] = said_after
     r.check(f"{REAL_MODEL} is still loaded at the part's end, as at its start", after, said_after)
 
@@ -4142,9 +4223,10 @@ def main(argv=None) -> int:
                     help="all: leave this part out (llm-real needs LM Studio; say so when quoting the run)")
     ap.add_argument("--helper-bin", default=None, metavar="PATH",
                     help="the CITAR helper to run (default: citar-helper in CITAR_EXT_DIR)")
-    ap.add_argument("--llm-url", default=REAL_URL, help="llm-real: LM Studio's address (read only)")
+    ap.add_argument("--llm-url", default=REAL_URL, help="llm-real, real: LM Studio's address (read only)")
     ap.add_argument("--stand-in", action="store_true",
-                    help="llm-real: play LM Studio with the scripted endpoint (to check the part without the model)")
+                    help="llm-real, real: play LM Studio with the scripted endpoint (to check the part without the "
+                         "model)")
     ap.add_argument("--wsl", action="store_true",
                     help="the server in WSL (the remote, service, exit and real parts, and all's last run: 4-10, "
                          "4-14, 4-15)")
