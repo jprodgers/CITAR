@@ -257,7 +257,19 @@ fn on_windows_nothing_is_installed_unelevated() {
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     let out = command().args(["service", "run", "--home"]).arg(&home).output().expect("it runs");
     assert_eq!(out.status.code(), Some(2), "{out:?}");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("the service manager starts"), "{out:?}");
+    // The whole sentence, as one line with single spaces (a literal's lost line continuations once
+    // put runs of spaces in it).
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        format!("citar-helper: {}", citar_helper::app::SERVICE_RUN_FROM_A_CONSOLE),
+        "{out:?}"
+    );
+    assert!(!citar_helper::app::SERVICE_RUN_FROM_A_CONSOLE.contains("  "), "no run of spaces");
+    assert!(
+        citar_helper::app::SERVICE_RUN_FROM_A_CONSOLE
+            .starts_with("`service run` is the Windows service's own entry, which the service manager starts (citar-helper service install --system installs it);"),
+        "the sentence"
+    );
     for scope in ["--user", "--system"] {
         let out = command()
             .args(["service", "status", scope, "--home"])
@@ -583,8 +595,10 @@ async fn run_detach_leaves_the_supervisor_in_the_background() {
     let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
 }
 
-/// In service mode a setting this binary cannot take idles (logged once, read again hourly), where
-/// a console run exits 2; so no service manager restarts it every 15 s (P4.3.9).
+/// In service mode a setting this binary cannot take idles (logged once, read again after 15 s
+/// doubling to an hour), where a console run exits 2; so no service manager restarts it every
+/// 15 s (P4.3.9). A fixed `helper.json` is read at once (4-14's review: the service's settings are
+/// looked at every 2 s), and the same process connects, with no restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn service_mode_idles_on_settings_it_cannot_take() {
     let home = scratch("svc-idle").join("home");
@@ -596,8 +610,11 @@ async fn service_mode_idles_on_settings_it_cannot_take() {
     .expect("helper.json");
     let console = command().args(["run", "--home"]).arg(&home).output().expect("runs");
     assert_eq!(console.status.code(), Some(2), "a console run exits 2: {console:?}");
-    let mut svc =
-        tokio_command().args(["run", "--service", "--home"]).arg(&home).spawn().expect("starts");
+    let mut svc = tokio_command()
+        .args(["run", "--service", "--no-hardware", "--no-power", "--home"])
+        .arg(&home)
+        .spawn()
+        .expect("starts");
     let log = home.join("helper").join("logs").join("helper.log");
     let mut idled = false;
     for _ in 0..100 {
@@ -608,10 +625,36 @@ async fn service_mode_idles_on_settings_it_cannot_take() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(idled, "the idle line in {}", log.display());
+    let said = std::fs::read_to_string(&log).expect("the log");
+    assert!(
+        said.contains("the settings are read again in 15 s, then less often (at most hourly)"),
+        "{said}"
+    );
     assert!(
         tokio::time::timeout(Duration::from_secs(2), svc.wait()).await.is_err(),
         "it does not exit"
     );
+    #[cfg(feature = "dev-guard")]
+    {
+        // The owner fixes helper.json: the idling service reads it within seconds, well before its
+        // 15 s wait ends, and connects; the same process.
+        let (port, mut conns) = loopback_hub().await;
+        std::fs::write(
+            home.join("helper.json"),
+            format!(
+                r#"{{"server_url": "http://127.0.0.1:{port}", "token": "{TOKEN}", "no_llm": true}}"#
+            ),
+        )
+        .expect("the fixed helper.json");
+        let t0 = std::time::Instant::now();
+        let hello =
+            refuse_next(&mut conns, Duration::from_secs(20)).await.expect("connected once fixed");
+        assert_eq!(hello["t"], "hello", "{hello}");
+        assert!(t0.elapsed() < Duration::from_secs(10), "at once, not at the wait's end");
+        assert!(svc.try_wait().expect("its state").is_none(), "the same process, never restarted");
+        let said = std::fs::read_to_string(&log).expect("the log");
+        assert!(said.contains("changed: reading the settings again"), "{said}");
+    }
     #[cfg(unix)]
     {
         let pid = svc.id().expect("its pid");
@@ -632,6 +675,49 @@ async fn service_mode_idles_on_settings_it_cannot_take() {
     {
         svc.kill().await.expect("killed");
     }
+    let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
+}
+
+/// Ctrl-C (SIGINT) while the session runs is a stop request: the helper says "stopping" and exits
+/// 0 (4-14's review: the listener is installed when the session starts, and only then; at the
+/// first-run questions a Ctrl-C quits, `tests/binary.rs`).
+#[cfg(all(unix, feature = "dev-guard"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_c_while_serving_stops_the_helper() {
+    let home = scratch("svc-sigint").join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let (port, mut conns) = loopback_hub().await;
+    let mut helper = tokio_command()
+        .args(["run", "--home"])
+        .arg(&home)
+        .args(helper_args(port))
+        .spawn()
+        .expect("it starts");
+    let mut ws = tokio::time::timeout(Duration::from_secs(30), conns.recv())
+        .await
+        .expect("it dials")
+        .expect("a connection");
+    let hello = tokio::time::timeout(Duration::from_secs(30), next_text(&mut ws))
+        .await
+        .expect("its hello")
+        .expect("a frame");
+    assert_eq!(hello["t"], "hello", "{hello}");
+    let pid = helper.id().expect("its pid");
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("kill")
+            .success()
+    );
+    let status = tokio::time::timeout(Duration::from_secs(10), helper.wait())
+        .await
+        .expect("it stops")
+        .expect("status");
+    assert_eq!(status.code(), Some(0), "stopped as asked");
+    let log = std::fs::read_to_string(home.join("helper").join("logs").join("helper.log"))
+        .expect("its log");
+    assert!(log.contains("stopping"), "{log}");
     let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
 }
 
