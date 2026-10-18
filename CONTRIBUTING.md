@@ -293,7 +293,7 @@ turn and how it ended, the tool calls made and refused, each chat's answer and i
 fallback to the bot with its cause, and the generation seconds metered against the compute ledger.
 
 **The Phase 4 QA script** (`scripts/qa_phase4.py`, design/phase4-helper.md P4.7.6) runs on the same
-harness, imported rather than copied, with the same refusals and evidence. Its parts so far:
+harness, imported rather than copied, with the same refusals and evidence. Its parts:
 `helper` (a helper machine end to end with the real `citar-helper`: its key and card, settings, a
 seat playing through it, a cancel stopped at the endpoint, a 0.1.5 worker refused, a key reset, the
 rate limit and a revoke) and `llm-real` (the helper's real-model checks through the hub and the
@@ -313,6 +313,27 @@ row, costing measuring the machine's energy from it, every reading a call in the
 their lines, events, ratings and `GET /api/lab/jobs`; an administrator's ranking and reference runs through
 `citar lab submit`; Stop and Resume; the server killed twice with two games playing (each seat step slowed by the
 test build's `CITAR_JOBS_TEST_STEP_MS`), playing exactly those two again; the Queue page's CPU card.
+`remote` lends a helper's CPU to another member's experiment (its limits, yield and benchmarks), `verify` runs
+helpers built to cheat (`citar-helper-faults`) against the server's verification and credits, `update` updates a
+helper with a throwaway key (below), `service` installs one as a systemd user unit in WSL (below). `exit` is Phase
+4's exit: the server in WSL (its job host, Linux, the verifier), a member's Windows and WSL helpers lending to
+another member's 24 games and an administrator's ranking and reference runs, every accepted line's signature
+checked by the script itself and every game played again on Windows, the Windows helper's replicated games compared
+with Linux byte for byte, then a helper altering its third result quarantined and a selective one caught by
+sampling with its unverified results withdrawn. `real` plays a 6-round game with an LLM seat and a hybrid seat on
+the model in LM Studio through a Windows helper, then checks a cancel there. `all` runs every part in two runs, each
+on a server of its own: the parts before `service` with the server on Windows, then `service`, `exit` and `real` with
+it in WSL, so it needs the WSL options; `qa-all.json` sums both runs.
+
+**The server in WSL** (`--wsl`, for `remote`, `service`, `exit`, `real` and `all`): a clone of your branch in WSL
+(made from a `git bundle`, below), `cargo xtask develop` run there with a venv of its own, and the paths inside WSL
+given from Git Bash with `MSYS_NO_PATHCONV=1` (else Git Bash rewrites `/home/...` as a Windows path). The server
+binds `0.0.0.0` inside WSL only when `wslinfo --networking-mode` says `nat` (WSL's own interface, reached from
+Windows only through `localhost`), else `127.0.0.1`; the Windows helpers dial it through WSL's localhost forwarding
+and the WSL helpers (`--wsl-helper`, and `citar-helper-faults` beside it) on WSL's own loopback. Its state is in
+`~/citar-qa/<the directory's name>` in WSL. When Windows cannot reach it, a part says so and runs with the server
+on Windows. Build both sides from one commit in one profile (`cargo xtask develop`'s), so the extension and every
+helper share a jobs build.
 
 ```bash
 python scripts/qa_phase4.py helper --dir C:/dev/qa-phase4             # about 20 s; a free port
@@ -320,6 +341,12 @@ python scripts/qa_phase4.py llm-real --dir C:/dev/qa-phase4           # the mode
 python scripts/qa_phase4.py llm-real --stand-in --dir C:/dev/qa-phase4
 python scripts/qa_phase4.py scan --dir C:/dev/qa-phase4               # about 80 s: a minute of samples
 python scripts/qa_phase4.py lab --dir C:/dev/qa-phase4                # about 60 s
+python scripts/qa_phase4.py verify --dir C:/dev/qa-phase4             # about 80 s
+export MSYS_NO_PATHCONV=1 W="--wsl --wsl-root /home/you/citar --wsl-python /home/you/venv/bin/python \
+  --wsl-helper /home/you/target/citar-ext/citar-helper"
+python scripts/qa_phase4.py exit $W --dir C:/dev/qa-phase4            # a few minutes
+python scripts/qa_phase4.py real --dir C:/dev/qa-phase4               # the model loaded; about 10 minutes
+python scripts/qa_phase4.py all $W --dir C:/dev/qa-phase4             # everything; --skip for a development run
 ```
 
 **The suite's servers play no lab.** `tests/__init__.py` sets `CITAR_TEST_NO_DISPATCHER`, so an app a test
