@@ -227,6 +227,21 @@ The build id is unchanged (`0b412a18fe95`), and so are the jobs builds (`c24ed48
      - **S10:** before (10:22) and after (13:00), identical (`C:/dev/target/p-4-15-fix-s10-before.log`, `-after.log`).
      - **CI-only, not run:** test.yml on its three OSes, rust.yml, determinism.yml (no new jobs build), and helper.yml (its five targets and the service jobs), at the merge push.
 
+**4-15's final attempt** (one agent, 2026-10-18, from 13:02 to 14:12 (-04:00), on `p-4-15` from `c253aea`). The real model is still **DEFERRED: model not loaded**. LM Studio was running, but `/api/v0/models` and `/v1/models` listed no model, and no `llama-server.exe` ran (read only, at 13:02 and 14:07). Each of the three real-model commands was run against it and stopped at its first read, with nothing sent:
+- `qa_phase4.py real` and `llm-real` failed their first check, "google/gemma-4-e2b is not among LM Studio's models (none)" (`C:/dev/target/p-4-15-final-qa-real`, `-final-qa-llm-real`);
+- the Rust test panicked with "google/gemma-4-e2b is not loaded in LM Studio: nothing was sent to it" (`C:/dev/target/p-4-15-final-real-model-rs.log`).
+
+`real --stand-in` gave 19 of 19 again (`C:/dev/target/p-4-15-final-qa-real-standin`).
+
+Found on the way: run alone under `-X dev`, `tests/test_helper_llm_real.py`, `test_helper_conformance.py` and `test_helper_e2e.py` each left two or three "unclosed database" ResourceWarnings at the interpreter's exit. Their `setUpModule` configured a database, and nothing disposed of it. The 18-module set hid this, because a later module disposed of the pool. Each now has a `tearDownModule`, as `test_helper_update_e2e.py` has: the pool disposed, `CITAR_DATA_DIR` and `CITAR_DB_URL` put back for the modules after it, and its temporary folder removed. Run alone, each now gives 0 warnings, on Windows and in WSL (`C:/dev/target/p-4-15-final-wsl.log`).
+
+Gates at `d111599` (`p415/gates.sh` with `P=p-4-15-final` and `SKIP_RUST=1`, `C:/dev/target/p-4-15-final-gates.log`, 13:24 to 14:04; no Rust changed):
+- the `-X dev` set: **337 OK** (2 skipped), 0 ResourceWarnings; the dispatcher's tick median 16.4 ms, and 13.4 ms with ten refusing helpers;
+- **S1: 1813 OK** (2 skipped) in 961 s, 10 traceback lines, all from the known set;
+- **S1b** (Python 3.12, `TZ=UTC0`): **1813 OK** in 952 s, 6 lines, the known set;
+- **S2** ruff and `sync_requirements`; **S3** 227 routes, 0 unguarded; **S4** 38 files, 338 links; **S5** `mkdocs build --strict`, the wiki unchanged; **S6** Node 138 of 138, 47 ESM modules;
+- **S10** after (14:07): the same as the fix round's after (13:00).
+
 ### P4.1.5 What changed since the plan was written
 
 Each checked against `1d5ca71`:
