@@ -16,20 +16,28 @@ use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_CALL_NOT_IMPLEMENTED, ERROR_SERVICE_SPECIFIC_ERROR, ERROR_SUCCESS, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, NO_ERROR, SetHandleInformation,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CALL_NOT_IMPLEMENTED, ERROR_SERVICE_SPECIFIC_ERROR,
+    ERROR_SUCCESS, GENERIC_ALL, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
+    NO_ERROR, SetHandleInformation,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    GetNamedSecurityInfoW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
     DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorControl,
     GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, INHERIT_ONLY_ACE,
     INHERITED_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenUser,
+    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SetKernelObjectSecurity,
+    TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    WRITE_OWNER,
 };
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -127,8 +135,8 @@ struct Handle(HANDLE);
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        // SAFETY: the handle came from OpenProcessToken or CreateJobObjectW and is closed exactly
-        // once, here.
+        // SAFETY: the handle came from OpenProcessToken, CreateJobObjectW or CreateFileW and is
+        // closed exactly once, here.
         unsafe { CloseHandle(self.0) };
     }
 }
@@ -261,9 +269,18 @@ fn restrict(path: &Path, flags: &str) -> io::Result<()> {
 ///
 /// **Nothing is set unless all of it may be:** first every object is checked, and the call refuses,
 /// changing nothing, when `path` or a folder above it is a link or a junction, when anything under
-/// it is one, or when anything there is owned by an account outside `owners` (SID strings). A link
-/// would carry the access list to wherever it leads, and an object another account owns (a hard
-/// link to someone else's file shares that file's owner) is not this folder's to take over.
+/// it is one (any reparse point), when a file there has more than one name (a hard link: its other
+/// name is elsewhere, and its access list would change there too), or when anything there is owned
+/// by an account outside `owners` (SID strings). A link would carry the access list to wherever it
+/// leads, and an object another account owns is not this folder's to take over.
+///
+/// **And nothing appears unchecked between the check and the change** (4-14's review): each object
+/// is opened as itself (a link or junction is opened, never followed), checked again on that very
+/// handle, and only then given its access list through it, folders first, each folder listed only
+/// once it is set, when no account outside `principals` can add anything to it any more. The
+/// access list is written on the object alone (`SetKernelObjectSecurity`): no automatic
+/// propagation to what a folder holds, which would reach an object before its own check. Anything
+/// found then is refused, with the objects already set named.
 ///
 /// The Windows service's home (design/phase4-helper.md P4.3.9): SYSTEM, Administrators and the
 /// service's virtual account, with nothing inherited from `%ProgramData%` (which gives Users read
@@ -273,16 +290,30 @@ fn restrict(path: &Path, flags: &str) -> io::Result<()> {
 /// elevated process.
 ///
 /// # Errors
-/// The first object the OS refused, with its path; the objects before it are set.
+/// The first object refused, or that the OS refused, with its path; the objects set before it
+/// (none when the first check refused) are named.
 pub fn restrict_tree_to(
     path: &Path,
     owner: Option<&str>,
     principals: &[&str],
     owners: &[&str],
 ) -> io::Result<usize> {
+    restrict_tree_with(path, owner, principals, owners, &mut || {})
+}
+
+/// [`restrict_tree_to`], with `between` called after the first check and before the first change
+/// (the tests plant there what appears in that moment).
+pub(super) fn restrict_tree_with(
+    path: &Path,
+    owner: Option<&str>,
+    principals: &[&str],
+    owners: &[&str],
+    between: &mut dyn FnMut(),
+) -> io::Result<usize> {
     if !std::fs::metadata(path)?.is_dir() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a folder"));
     }
+    let at = |p: &Path, e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", p.display()));
     let refuse = |p: &Path, why: String| {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{}: {why}", p.display())))
     };
@@ -293,34 +324,26 @@ pub fn restrict_tree_to(
         }
         up = p.parent();
     }
+    // First, everything checked and nothing changed.
+    let look = READ_CONTROL | FILE_READ_ATTRIBUTES;
     let mut all = vec![path.to_path_buf()];
     let mut i = 0;
     while i < all.len() {
         let here = all[i].clone();
         i += 1;
-        if !std::fs::symlink_metadata(&here)?.is_dir() {
-            continue;
+        let o = open_as_itself(&here, look).map_err(|e| at(&here, e))?;
+        if let Some(why) = tree_refusal(&o, owners).map_err(|e| at(&here, e))? {
+            return refuse(&here, why);
         }
-        for entry in std::fs::read_dir(&here)? {
-            let entry = entry?;
-            if entry.file_type()?.is_symlink() {
-                return refuse(&entry.path(), "a link or junction: refused".to_owned());
+        if o.is_dir() {
+            for entry in std::fs::read_dir(&here).map_err(|e| at(&here, e))? {
+                all.push(entry.map_err(|e| at(&here, e))?.path());
             }
-            all.push(entry.path());
         }
     }
-    for p in &all {
-        let o = dacl(p)?.owner.unwrap_or_default();
-        if !owners.contains(&o.as_str()) {
-            return refuse(
-                p,
-                format!(
-                    "owned by {}, not by an account this folder belongs to: remove it",
-                    named(&o)
-                ),
-            );
-        }
-    }
+    between();
+    // Then each object set through its own handle, checked again on it first; a folder is listed
+    // only once it is set, when no account outside `principals` can add to it any more.
     let entries = |flags: &str| -> String {
         let mut s = String::new();
         if let Some(o) = owner {
@@ -332,35 +355,166 @@ pub fn restrict_tree_to(
         }
         s
     };
-    let (folder, file) = (entries("OICI"), entries(""));
-    let mut set = 0usize;
+    let (folder, file) = (descriptor(&entries("OICI"))?, descriptor(&entries(""))?);
+    let change = look | WRITE_DAC | if owner.is_some() { WRITE_OWNER } else { 0 };
+    let mut set: Vec<std::path::PathBuf> = Vec::new();
+    let late = |p: &Path, why: &str, set: &[std::path::PathBuf]| {
+        let shown: Vec<String> = set.iter().take(5).map(|s| s.display().to_string()).collect();
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{}: {why} (found after the first check; {} object(s) already set: {}{})",
+                p.display(),
+                set.len(),
+                if shown.is_empty() { "none".to_owned() } else { shown.join(", ") },
+                if set.len() > shown.len() { ", ..." } else { "" }
+            ),
+        )
+    };
+    let set_one = |p: &Path, want_dir: bool, set: &mut Vec<std::path::PathBuf>| {
+        let o = open_as_itself(p, change).map_err(|e| late(p, &e.to_string(), set))?;
+        if let Some(why) = tree_refusal(&o, owners).map_err(|e| late(p, &e.to_string(), set))? {
+            return Err(late(p, &why, set));
+        }
+        if o.is_dir() != want_dir {
+            return Err(late(p, "changed kind (a folder for a file, or one for the other)", set));
+        }
+        let sd = if want_dir { &folder } else { &file };
+        set_on_handle(&o, sd, owner.is_some()).map_err(|e| late(p, &e.to_string(), set))?;
+        set.push(p.to_path_buf());
+        Ok::<(), io::Error>(())
+    };
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        apply(&dir, &folder, owner.is_some())
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
-        set += 1;
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
+        set_one(&dir, true, &mut set)?;
+        for entry in std::fs::read_dir(&dir).map_err(|e| late(&dir, &e.to_string(), &set))? {
+            let entry = entry.map_err(|e| late(&dir, &e.to_string(), &set))?;
+            let kind = entry.file_type().map_err(|e| late(&entry.path(), &e.to_string(), &set))?;
+            if kind.is_dir() && !kind.is_symlink() {
+                // Checked and set when its turn comes, before it is listed.
                 stack.push(entry.path());
             } else {
-                let p = entry.path();
-                apply(&p, &file, owner.is_some())
-                    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
-                set += 1;
+                // A link or junction among them is opened as itself and refused there.
+                set_one(&entry.path(), false, &mut set)?;
             }
         }
     }
-    Ok(set)
+    Ok(set.len())
 }
 
-/// Writes the descriptor `sddl` describes onto `path`: its DACL, protected from inheritance, and
-/// with `with_owner` its owner.
-fn apply(path: &Path, sddl: &str, with_owner: bool) -> io::Result<()> {
+/// An object opened as itself (a link or junction is opened, never followed), with its
+/// attributes and its number of names.
+struct Opened {
+    handle: Handle,
+    attributes: u32,
+    links: u32,
+}
+
+impl Opened {
+    fn is_dir(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+}
+
+/// Opens `path` as itself with `access`: `FILE_FLAG_OPEN_REPARSE_POINT` opens a link or junction
+/// rather than what it leads to, and `FILE_FLAG_BACKUP_SEMANTICS` lets a folder be opened at all.
+fn open_as_itself(path: &Path, access: u32) -> io::Result<Opened> {
+    let name = wide(path.as_os_str());
+    // SAFETY: `name` is NUL-terminated and alive across the call; no security attributes and no
+    // template; on success the handle is `Handle`'s to close.
+    let raw = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let handle = Handle(raw);
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is open; `info` is the structure the call fills, alive across it.
+    if unsafe { GetFileInformationByHandle(handle.0, &raw mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Opened { handle, attributes: info.dwFileAttributes, links: info.nNumberOfLinks })
+}
+
+/// The owner of the object `o`, read through its handle.
+fn handle_owner(o: &Opened) -> io::Result<Option<String>> {
+    let mut owner: PSID = ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: the handle is open with READ_CONTROL; on success the API allocates the descriptor
+    // (freed by `Local`) and points `owner` into it.
+    let rc = unsafe {
+        GetSecurityInfo(
+            o.handle.0,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(rc.cast_signed()));
+    }
+    let _sd = Local(sd);
+    if owner.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: `owner` points into the descriptor, alive until `_sd` drops.
+    Ok(Some(unsafe { sid_string(owner) }?))
+}
+
+/// Why the object `o` may not be given a tree's access list, or `None`: a link or junction (any
+/// reparse point), a file with more than one name, or an owner outside `owners`.
+fn tree_refusal(o: &Opened, owners: &[&str]) -> io::Result<Option<String>> {
+    if o.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Ok(Some("a link or junction: refused".to_owned()));
+    }
+    if !o.is_dir() && o.links > 1 {
+        return Ok(Some(format!(
+            "a file with {} names (hard links): another of them is elsewhere, where its access list \
+             would change too: refused",
+            o.links
+        )));
+    }
+    let owner = handle_owner(o)?.unwrap_or_default();
+    if !owners.contains(&owner.as_str()) {
+        return Ok(Some(format!(
+            "owned by {}, not by an account this folder belongs to: remove it",
+            named(&owner)
+        )));
+    }
+    Ok(None)
+}
+
+/// Writes the descriptor `sd` onto the object `o` alone, through its handle: its DACL (protected,
+/// as the descriptor's `D:P` says) and with `with_owner` its owner. The low-level call changes
+/// nothing else: a folder's new entries reach only what is made in it from now on.
+fn set_on_handle(o: &Opened, sd: &Local, with_owner: bool) -> io::Result<()> {
+    let mut info = DACL_SECURITY_INFORMATION;
+    if with_owner {
+        info |= OWNER_SECURITY_INFORMATION;
+    }
+    // SAFETY: the handle is open with WRITE_DAC (and WRITE_OWNER when the owner is set); `sd` is a
+    // valid self-relative descriptor alive across the call, which copies it.
+    if unsafe { SetKernelObjectSecurity(o.handle.0, info, sd.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The security descriptor `sddl` describes, allocated by the OS (freed by `Local`).
+fn descriptor(sddl: &str) -> io::Result<Local> {
     let sddl = wide(OsStr::new(sddl));
     let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and alive across the call; on success the API allocates
@@ -376,7 +530,161 @@ fn apply(path: &Path, sddl: &str, with_owner: bool) -> io::Result<()> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    let sd = Local(sd);
+    Ok(Local(sd))
+}
+
+/// Makes the folder `path` with the security descriptor `sddl` from its first moment
+/// (`CreateDirectoryW` given it): nothing it would otherwise inherit applies to it, even for an
+/// instant. `Ok(false)` when something was there already, left as it was (the caller checks it);
+/// the folder above must exist.
+///
+/// # Errors
+/// The descriptor does not parse, or the OS refused (with the path).
+pub fn create_dir_with(path: &Path, sddl: &str) -> io::Result<bool> {
+    let sd = descriptor(sddl)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_u32::<SECURITY_ATTRIBUTES>(),
+        lpSecurityDescriptor: sd.0,
+        bInheritHandle: 0,
+    };
+    let name = wide(path.as_os_str());
+    // SAFETY: `name` is NUL-terminated; `attributes` and the descriptor it points to are alive
+    // across the call, which copies the descriptor onto the new folder.
+    if unsafe { CreateDirectoryW(name.as_ptr(), &raw const attributes) } != 0 {
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(ERROR_ALREADY_EXISTS.cast_signed()) {
+        return Ok(false);
+    }
+    Err(io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+}
+
+/// TrustedInstaller (`NT SERVICE\TrustedInstaller`), which owns a volume's root and Windows' own
+/// folders.
+pub const TRUSTED_INSTALLER: &str =
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+
+/// The rights over a folder that hand it to whoever holds them: deleting or renaming it
+/// (`DELETE`), deleting or renaming what it holds whatever their own access lists say
+/// (`FILE_DELETE_CHILD`), and changing its access list or owner (`WRITE_DAC`, `WRITE_OWNER`;
+/// `GENERIC_ALL` is all of them).
+const TAKES_OVER: u32 = DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
+
+/// What `mask`'s rights of [`TAKES_OVER`] let their holder do, in words.
+fn takeover_words(mask: u32) -> String {
+    if mask & GENERIC_ALL != 0 {
+        return "do anything with it".to_owned();
+    }
+    let mut w = Vec::new();
+    if mask & DELETE != 0 {
+        w.push("delete or rename it");
+    }
+    if mask & FILE_DELETE_CHILD != 0 {
+        w.push("delete or rename what it holds");
+    }
+    if mask & WRITE_DAC != 0 {
+        w.push("change its permissions");
+    }
+    if mask & WRITE_OWNER != 0 {
+        w.push("take its ownership");
+    }
+    w.join(", ")
+}
+
+/// What lets an account outside `trusted` (SID strings) take the folder whose owner and DACL are
+/// `d` over, or `None`: an owner outside them (an owner may always change the access list), no
+/// DACL at all (everyone may do anything), or an entry that grants another account a right of
+/// [`TAKES_OVER`]. On a volume's root (`root`), which cannot be deleted or renamed, `DELETE` is
+/// harmless. An entry that applies only to what is made in the folder (inherit-only) grants nothing
+/// on it; one for "OWNER RIGHTS" is the owner's, already trusted.
+#[must_use]
+pub fn takeover(d: &Dacl, trusted: &[&str], root: bool) -> Option<String> {
+    match d.owner.as_deref() {
+        Some(o) if trusted.contains(&o) => {}
+        Some(o) => return Some(format!("owned by {}", named(o))),
+        None => return Some("owned by no account".to_owned()),
+    }
+    let Some(aces) = &d.aces else {
+        return Some("it has no access list, which lets everyone do anything".to_owned());
+    };
+    let rights = if root { TAKES_OVER & !DELETE } else { TAKES_OVER };
+    for a in aces.iter().filter(|a| a.kind == AceKind::Allow && !a.inherit_only) {
+        match a.sid.as_deref() {
+            Some(s) if trusted.contains(&s) || s == OWNER_RIGHTS => {}
+            Some(_) if a.mask & rights == 0 => {}
+            Some(s) => {
+                return Some(format!("lets {} {}", named(s), takeover_words(a.mask & rights)));
+            }
+            None => return Some("an object entry this cannot read".to_owned()),
+        }
+    }
+    None
+}
+
+/// One folder above the service's home, as [`check_ancestors`] checks it: refused (with its path)
+/// when it is a link or junction, not a folder, or [`takeover`] names what lets another account
+/// take it over. A folder that is not there passes: whoever makes it decides its access list.
+///
+/// # Errors
+/// The refusal, or what the OS could not say.
+pub fn check_ancestor(p: &Path, trusted: &[&str]) -> io::Result<()> {
+    let refuse = |why: String| {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{}: {why}", p.display())))
+    };
+    let meta = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", p.display()))),
+    };
+    if meta.file_type().is_symlink() {
+        return refuse("a link or junction".to_owned());
+    }
+    if !meta.is_dir() {
+        return refuse("not a folder".to_owned());
+    }
+    let d = dacl(p).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
+    match takeover(&d, trusted, p.parent().is_none()) {
+        Some(why) => refuse(why),
+        None => Ok(()),
+    }
+}
+
+/// Refuses, naming the folder, when a folder above `path` (its parent, up to the volume's root) is
+/// a link or junction, or lets an account outside `trusted` (SID strings) take it over
+/// ([`check_ancestor`]). The Windows service's binary path names its home, so an account that
+/// could delete, rename or re-permission a folder above the home (under `%ProgramData%` any user
+/// may make a folder, and owns it) could move the home aside, put its own in its place, and have
+/// its program run as the service (4-14's review).
+///
+/// # Errors
+/// The first folder refused, or what the OS could not say.
+pub fn check_ancestors(path: &Path, trusted: &[&str]) -> io::Result<()> {
+    check_ancestors_until(path, trusted, None)
+}
+
+/// [`check_ancestors`], stopping below `until` when it is one of them (the tests check their own
+/// folders, whose ancestors are the machine's).
+pub(super) fn check_ancestors_until(
+    path: &Path,
+    trusted: &[&str],
+    until: Option<&Path>,
+) -> io::Result<()> {
+    let mut up = path.parent();
+    while let Some(p) = up {
+        if p.as_os_str().is_empty() || until.is_some_and(|u| p == u) {
+            break;
+        }
+        check_ancestor(p, trusted)?;
+        up = p.parent();
+    }
+    Ok(())
+}
+
+/// Writes the descriptor `sddl` describes onto `path`: its DACL, protected from inheritance, and
+/// with `with_owner` its owner.
+pub(super) fn apply(path: &Path, sddl: &str, with_owner: bool) -> io::Result<()> {
+    let sd = descriptor(sddl)?;
     let (mut present, mut defaulted) = (0, 0);
     let mut acl: *mut ACL = ptr::null_mut();
     // SAFETY: `sd.0` is the valid descriptor made above; the ACL pointer it writes points into

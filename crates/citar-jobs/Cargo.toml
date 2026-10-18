@@ -52,6 +52,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Services",
     "Win32_System_Threading",
+    # The service home's objects opened as themselves (a link or junction never followed) and
+    # their names counted (hard links); a folder made with its access list (4-14's review).
+    "Win32_Storage_FileSystem",
 ] }
 
 [target.'cfg(unix)'.dependencies]
