@@ -516,7 +516,9 @@ the helper with `--service`, its home's absolute path and the binary's: the bina
 ran can go), and gives the home `%ProgramData%\CITAR\helper` an access list of SYSTEM, Administrators
 and the service's account alone, owned by Administrators, with nothing inherited from `%ProgramData%`
 (which would let every user of the machine read `helper.json`, which holds the token, and the machine
-key). Its recovery actions start it again 15 s after every failure, a non-zero exit code included (so
+key). Under `%ProgramData%` any user may make folders and files, so the home is taken over only when
+nothing in it belongs to another account and no link or junction leads to it or lies in it; otherwise
+`install` names what to remove and changes nothing. Its recovery actions start it again 15 s after every failure, a non-zero exit code included (so
 an update's hand-off, exit 75, restarts it), with no limit on how often. The service writes its
 machine key for its own account: an administrator's `citar-helper --version --home ...` cannot read it
 and prints no fingerprint, and the Servers page's Helper dialog shows it instead. `service run` is the
