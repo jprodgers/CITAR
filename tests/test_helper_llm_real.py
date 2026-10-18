@@ -47,6 +47,7 @@ CI = bool(os.environ.get("CI"))
 #: The stand-in's long generation here: 100 words over 6 s, so a run that does not stop it holds the model about 4 s
 #: past the cancel at 2 s (the QA script's own stand-in takes 40 s for 1,500).
 LONG_S, LONG_WORDS = 6.0, 100
+_SAVED: dict = {}
 
 
 def _qa4():
@@ -62,6 +63,7 @@ MODEL = qa4.REAL_MODEL
 
 def setUpModule():
     H.require_helper_binary("the llm-real checks against a stand-in")   # skips locally without one; fails on CI
+    _SAVED.update({k: os.environ.get(k) for k in ("CITAR_DATA_DIR", "CITAR_DB_URL")})
     os.environ["CITAR_DATA_DIR"] = str(_TMP)
     os.environ["CITAR_DB_URL"] = _URL
     settings.reset()
@@ -74,7 +76,17 @@ def setUpModule():
 
 
 def tearDownModule():
+    # the pool's connections closed here, not left to the interpreter's exit (two "unclosed database" warnings under
+    # -X dev when the module ran alone), and the environment as it was for the modules after this one
     S.reset()
+    db.dispose()
+    for k, v in _SAVED.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    settings.reset()
+    servers.invalidate()
     shutil.rmtree(_TMP, ignore_errors=True)
 
 
