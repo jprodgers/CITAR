@@ -2948,7 +2948,10 @@ class WslHelper:
     writes once its owner answers yes to lending CPU (the ceiling ``ceiling`` written first, then the setup's three
     answers on its standard input): ``setup`` keeps its answer (``setup.stdout``)."""
 
-    def __init__(self, h, token: str, name: str, *, ceiling: dict, faults: tuple = ()):
+    def __init__(self, h, token: str, name: str, *, ceiling: dict, faults: tuple = (), scope: bool = True):
+        """``scope``: its job host runs in a ``systemd --user`` scope (limits hard, CPU and memory); without it (the
+        user manager left unknown to the helper) the job host runs directly, its CPU held softly (``nice``) and its
+        memory hard (``RLIMIT_DATA``), as on a Linux machine with no user manager."""
         import subprocess
         server = h.server
         self.server, self.name = server, name
@@ -2959,14 +2962,18 @@ class WslHelper:
         server._wsl("mkdir", "-p", self.home)
         server._put(f"helper-home-{name}/helper.json", json.dumps({"cpu": ceiling}))
         server._put("wsl-helper.sh", WSL_HELPER_SH)
+        server._put("wsl-helper-direct.sh", WSL_HELPER_SH.replace(
+            'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+            "unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS"))
         self.setup = server._wsl(self.binary, "setup", "--home", self.home,
                                  stdin=f"http://127.0.0.1:{server.port}\n{token}\ny\n", timeout=60)
         out = open(self.log, "w", encoding="utf-8")
         args = [self.binary, "--home", self.home, "--server", f"http://127.0.0.1:{server.port}", f"--token={token}",
                 "--no-llm", "--no-hardware", "--no-power", "--name", name,
                 *(x for m in faults for x in ("--test-fault", m))]
+        script = "wsl-helper.sh" if scope else "wsl-helper-direct.sh"
         self.proc = subprocess.Popen(["wsl", "-d", server.distro, "-u", server.user, "-e", "bash",
-                                      f"{server.remote}/wsl-helper.sh", self.pidfile, self.home, *args],
+                                      f"{server.remote}/{script}", self.pidfile, self.home, *args],
                                      stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         out.close()
 
@@ -3400,11 +3407,7 @@ def part_exit(h) -> None:
         # ---- gate 3, second pass: dave's helper alters chosen results either side of an administrator's replica
         _exit_selective(h, data, lenders, machine, executor, ids, host, dave)
         if h.keep:
-            # the browser checklist: alice's two machines connected and lending again (H1, H2; their homes and keys
-            # kept), the quarantined machines and owners with their evidence (H5), the experiments' games (H4)
-            lenders["win"] = _lender(h, w_token, "qa-exit-win", wsl=False, ceiling=EXIT_WINDOWS)
-            lenders["wsl"] = _lender(h, l_token, "qa-exit-wsl", wsl=True, ceiling=EXIT_WSL)
-            data["browser"] = {"windows": w_sid, "wsl": l_sid, "lenders_kept": True}
+            data["browser"] = _exit_for_the_browser(h, lenders, machine, executor, w_token, l_token, a_gid)
         r.check("no traceback in the server's log", h.server.tracebacks() == 0, f"{h.server.tracebacks()} traceback(s)")
     finally:
         for w in watches.values():
@@ -3419,6 +3422,38 @@ def part_exit(h) -> None:
                 _verification(h, provisional_rate=0.10)
             except Exception:
                 pass
+
+
+def _exit_for_the_browser(h, lenders: dict, machine, executor, w_token: str, l_token: str, a_gid: str) -> dict:
+    """With ``--keep``, what the browser checklist looks at (P4.7.7) beside the run's own state (the quarantined
+    machines and owners with their evidence and dave's withdrawn games for H5 and H4, bob's experiments' games with
+    their executors and badges for H4): alice's two machines connected and lending again (their homes and keys kept;
+    H1's hard limits, H2's capped CPU and the grant lending them, H3's games), her third machine's helper scanning
+    and lending nothing (H2: "not lent by this machine's owner", Rescan now), and bob's machine whose helper in WSL
+    runs its job host without a user manager (H1: its CPU held softly), lending reference games only (H4: a run only
+    it could play waits for a verifier while this server lends nothing). Returns what it made, for the checklist's
+    steps."""
+    alice, bob = h.accounts["alice"], h.accounts["bob"]
+    tag = h.tag
+    made: dict = {}
+    lenders["win"] = _lender(h, w_token, "qa-exit-win", wsl=False, ceiling=EXIT_WINDOWS)
+    lenders["wsl"] = _lender(h, l_token, "qa-exit-wsl", wsl=True, ceiling=EXIT_WSL)
+    n_sid, n_token = machine(alice, "exit not lent", a_gid, EXIT_SITE)
+    lenders["not-lent"] = Helper(h, n_token, h.endpoint, "qa-exit-not-lent", machine="qa-exit-not-lent", scan=True,
+                                 extra=("--no-llm",))
+    group = bob.post("/api/pool/groups", json={"name": f"QA exit soft {tag}"})
+    b_gid = group.json().get("id", "") if group.status_code == 200 else ""
+    soft_work = {**EXIT_SITE, "work": ["reference_game"]}
+    s_sid, s_token = machine(bob, "exit soft", b_gid, soft_work)
+    if getattr(h.server, "topology", "") == "wsl":
+        lenders["soft"] = WslHelper(h, s_token, "qa-exit-soft", ceiling={**EXIT_WSL, "work": ["reference_game"]},
+                                    scope=False)
+    made.update(not_lent=n_sid, soft=s_sid, soft_group=b_gid)
+    wait_until(lambda: q3._online(alice, n_sid) and (s_sid not in lenders or executor(s_sid).get("state") == "ready"),
+               120, 0.5)
+    got = bob.get(f"/api/machines/{s_sid}/settings")
+    made["soft_limits"] = ((got.json().get("cpu_helper") or {}).get("limits") if got.status_code == 200 else None)
+    return made
 
 
 def _exit_gate2(h, data: dict, state: dict, lines: dict, main: str, ladder: str, base: str, w_sid: str, l_sid: str,
