@@ -3563,9 +3563,11 @@ def _exit_gate2(h, data: dict, state: dict, lines: dict, main: str, ladder: str,
     r.check(f"each helper's results were replicated on this server's job host while its machine was new (all of them, "
             f"{streak} matches promoting it to provisional) and sampled after at the provisional rate by the server's "
             "keyed choice: every replicated result after the promotion one whose sample falls under the rate, every "
-            "unreplicated one over it, each replica a match",
+            "unreplicated one over it, each replica a match; after the promotions, both a sampled result and an "
+            "unsampled one among the two",
             not wrong and all(t["tier"] == "provisional" and t["provisional_at"] for t in tiers.values())
-            and all(c["new"] >= streak for c in counts.values()),
+            and all(c["new"] >= streak for c in counts.values())
+            and sum(c["sampled"] for c in counts.values()) >= 1 and sum(c["unsampled"] for c in counts.values()) >= 1,
             json.dumps({"tiers": tiers, "counts": counts, "wrong": wrong[:5]}))
     data.update(tiers=tiers, replication=counts)
 
