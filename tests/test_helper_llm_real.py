@@ -15,7 +15,10 @@ with one model generating one answer at a time), so the checks themselves are te
   is right), but the first answer after it waits for the abandoned generation, over the bound;
 - they **fail when the long generation ends before the cancel**: it tests no cancel, and its check says so at once;
 - they **fail with nothing sent against a model that is not loaded**: no completion reaches it and no helper starts;
-- they **fail against a model unloaded during the run**, at the look after it.
+- they **fail against a model unloaded during the run**, at the look after it;
+- they **send nothing more to a model unloaded after its first completion, or whose engine fails mid-run** (4-15's
+  review): the helper reaches the stand-in only through the QA gate (``qa_phase3.ModelGate``), which forwards a
+  completion only while the model is listed loaded and closes at the first failure, and the run ends there.
 
 The binary is the one ``cargo xtask develop`` builds into ``CITAR_EXT_DIR``, as in ``tests/test_helper_e2e.py``:
 without it the module skips, except on CI, where it fails.
@@ -113,6 +116,10 @@ class StandIn(unittest.TestCase):
         # a long answer under way (its words 60 ms apart: about 33 out by the cancel), cut short
         self.assertTrue(10 <= side["long_events"] < LONG_WORDS, f"not cut short mid-answer: {side}")
         self.assertIsNone(side["ran_on_s"], "a stand-in that stops does not run on")
+        # the gate in front of it forwarded every completion, the cancelled one counted as its client's, no failure
+        gate = data["gate"]
+        self.assertEqual((gate["forwarded"], gate["refused"], gate["cancelled"], gate["tripped"]), (8, 0, 1, None),
+                         gate)
 
     def test_the_checks_fail_against_a_stand_in_that_runs_on_after_a_cancel(self):
         ep = self.stand_in(runs_on=True)
@@ -160,6 +167,39 @@ class StandIn(unittest.TestCase):
         self.assertEqual(checks[-1]["check"], f"{MODEL} is still loaded after the part")
         self.assertIn("not-loaded", data["after"])
         self.assertEqual(len(ep.completions()), 8)
+
+    def test_a_model_unloaded_after_its_first_completion_is_sent_nothing_more(self):
+        # 4-15's review: a model that goes under the run (its engine crashed, an idle timeout) would be loaded again
+        # just in time by the next completion that names it. This stand-in answers completions after the unload, as
+        # such an LM Studio would (loading the model): none reaches it, the model's state read before the requests
+        # before the cancel ending the run there, and the gate reading it before every completion.
+        ep = self.stand_in()
+        ep.unload_at = 1
+        checks, data, _state = self.exercise(ep)
+        self.assertEqual([c["ok"] for c in checks], [True, True, True, False, False], self.said(checks))
+        self.assertTrue(checks[3]["check"].startswith("three short requests after the cancel"), self.said(checks))
+        self.assertIn("nothing more was sent before the requests before the cancel", checks[3]["detail"])
+        self.assertEqual(len(ep.arrivals), 1, "a completion reached the model after it was unloaded")
+        self.assertEqual(data["gate"]["forwarded"], 1, data["gate"])
+        self.assertIn("not-loaded", data["gate"]["tripped"]["why"])
+
+    def test_a_model_whose_engine_fails_mid_run_is_sent_nothing_after_it(self):
+        # LM Studio's crash in 4-15's first real run: a completion's stream carried an error event, the model was
+        # unloaded, and the helper forwarded eleven more completions within a second. Here the second completion (the
+        # first short request) fails so, and the stand-in refuses later ones as LM Studio did with its just-in-time
+        # loading off: the gate closes at the error event, the run ends at that request, and nothing more reaches the
+        # stand-in, which would have loaded the model again had its just-in-time loading been on.
+        ep = self.stand_in()
+        ep.fail_at, ep.refuse_unloaded = 2, True
+        checks, data, _state = self.exercise(ep)
+        self.assertEqual([c["ok"] for c in checks], [True, True, True, False, False], self.said(checks))
+        self.assertTrue(checks[3]["check"].startswith("three short requests after the cancel"), self.said(checks))
+        self.assertIn("a short request before the cancel failed", checks[3]["detail"])
+        self.assertIn("the gate closed: a completion failed: an error event", checks[3]["detail"])
+        self.assertEqual((len(ep.arrivals), ep.refused), (2, []), "a completion reached the model after it failed")
+        gate = data["gate"]
+        self.assertEqual((gate["forwarded"], gate["cancelled"]), (2, 0), gate)
+        self.assertIn("terminated", gate["tripped"]["why"])
 
 
 if __name__ == "__main__":

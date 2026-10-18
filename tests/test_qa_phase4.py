@@ -2,9 +2,9 @@
 part's check of a helper's signed claim, made by another implementation than the server's (``cryptography``'s
 ed25519 over the claim's compact JSON, its fields in the signed order), against claims the extension signs as a
 helper signs its own; the lab log's lines that say why a result was replicated; a results line's result taken apart
-from its measurements; and ``all``: its refusals, and its two runs (the parts written for a server on Windows, then
-``service``, ``exit`` and ``real`` with the server in WSL), each in a folder of its own, summed up in
-``qa-all.json``."""
+from its measurements; the gate the real parts put between the helper and LM Studio (``qa_phase3.ModelGate``); and
+``all``: its refusals, and its two runs (the parts written for a server on Windows, then ``service``, ``exit`` and
+``real`` with the server in WSL), each in a folder of its own, summed up in ``qa-all.json``."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -102,6 +103,150 @@ class Lines(unittest.TestCase):
     def test_database_times_are_utc_unless_they_name_a_zone(self):
         self.assertEqual(qa4._when("2026-10-18T09:00:00"), qa4._when("2026-10-18T05:00:00-04:00"))
         self.assertEqual(qa4._when(None), 0.0)
+
+
+class Gate(unittest.TestCase):
+    """``qa_phase3.ModelGate``, between the real parts' helper and LM Studio (4-15's review: after LM Studio's engine
+    crashed, the helper forwarded eleven more completions within a second, and with just-in-time loading on they would
+    have loaded the model again), here in front of the stand-in for LM Studio (``qa_phase4.stand_in``)."""
+
+    def setUp(self):
+        self.ep = qa4.stand_in(long_s=6.0, long_words=100)
+        self.addCleanup(self.ep.close)
+        self.gate = qa4.q3.ModelGate(self.ep.url, qa4.REAL_MODEL)
+        self.addCleanup(self.gate.close)
+
+    def complete(self, prompt: str = "Reply with exactly: OK", *, stream: bool = True):
+        import httpx
+        return httpx.post(f"{self.gate.url}/chat/completions", timeout=30,
+                          json={"model": qa4.REAL_MODEL, "stream": stream,
+                                "messages": [{"role": "user", "content": prompt}]})
+
+    def test_listings_and_answers_pass_through_as_the_model_sends_them(self):
+        import httpx
+        listing = httpx.get(self.gate.url.rsplit("/v1", 1)[0] + "/api/v0/models", timeout=10)
+        self.assertEqual([(m["id"], m["state"]) for m in listing.json()["data"]], [(qa4.REAL_MODEL, "loaded")])
+        streamed = self.complete()
+        self.assertEqual(streamed.status_code, 200)
+        self.assertIn("text/event-stream", streamed.headers["content-type"])
+        self.assertTrue(streamed.text.rstrip().endswith("data: [DONE]"), streamed.text[-200:])
+        plain = self.complete(stream=False)
+        self.assertEqual(plain.json()["object"], "chat.completion")
+        self.assertEqual(len(self.ep.completions()), 2)
+        summary = self.gate.summary()
+        self.assertEqual((summary["forwarded"], summary["refused"], summary["tripped"]), (2, 0, None), summary)
+
+    def test_a_model_not_listed_loaded_is_sent_no_completion_and_the_gate_stays_closed(self):
+        self.ep.models = [(qa4.REAL_MODEL, False)]
+        refused = self.complete()
+        self.assertEqual(refused.status_code, 503)
+        self.assertIn("not-loaded", refused.json()["error"]["message"])
+        self.assertTrue(self.gate.closed.is_set())
+        # loaded again, the gate stays closed: a part that saw its model go stops there
+        self.ep.models = [(qa4.REAL_MODEL, True)]
+        self.assertEqual(self.complete().status_code, 503)
+        self.assertEqual(self.ep.arrivals, [], "a completion reached a model that was not loaded")
+        self.assertEqual(self.gate.summary()["refused"], 2)
+
+    def test_a_completion_that_fails_closes_the_gate_before_the_next(self):
+        # LM Studio's crash in 4-15's first real run: the stream's error event. This stand-in answers what comes after
+        # (as LM Studio with just-in-time loading on would, loading the model again): nothing more reaches it
+        self.ep.fail_at = 1
+        first = self.complete()
+        self.assertEqual(first.status_code, 200, "relayed as the model sent it")
+        self.assertIn('"terminated"', first.text)
+        # closed before the failure's bytes went on: the helper cannot hear of it first
+        self.assertIsNotNone(self.gate.tripped, "the client had the failure before the gate closed")
+        self.assertIn("an error event", self.gate.tripped["why"])
+        self.assertEqual(self.complete().status_code, 503)
+        self.assertEqual(len(self.ep.arrivals), 1)
+        self.assertEqual(len(self.gate.summary()["failures"]), 1)
+
+    def test_a_cancel_closes_the_models_connection_at_once_and_is_no_failure(self):
+        import socket
+        from urllib.parse import urlparse
+        body = json.dumps({"model": qa4.REAL_MODEL, "stream": True,
+                           "messages": [{"role": "user", "content": qa4.LONG_PROMPT}]}).encode()
+        sock = socket.create_connection(("127.0.0.1", urlparse(self.gate.url).port), timeout=10)
+        sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: qa\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        got = b""
+        while got.count(b"data: ") < 5:
+            more = sock.recv(65536)
+            self.assertTrue(more, "the answer ended before its fifth event")
+            got += more
+        closed = time.time()
+        sock.close()
+        entry = qa4.wait_until(lambda: next((e for e in self.ep.live if e.get("gone")), None), 5, 0.01)
+        self.assertIsNotNone(entry, "the model's connection stayed open after its client went")
+        self.assertLess(entry["gone"] - closed, 1.0)
+        self.assertLess(entry["tokens"], 100, "the answer was not cut short")
+        self.assertTrue(qa4.wait_until(lambda: self.gate.summary()["cancelled"] == 1, 5, 0.01))
+        self.assertIsNone(self.gate.tripped, "a cancel is no failure")
+        self.assertEqual(self.complete().status_code, 200, "the gate stays open after a cancel")
+
+    def test_the_guard_closes_the_gate_and_stops_the_helper_when_the_model_goes(self):
+        stopped = []
+        self.gate.on_trip(lambda: stopped.append(time.monotonic()))
+        self.gate.watch()
+        self.assertEqual(self.complete().status_code, 200)
+        went = time.monotonic()
+        self.ep.unload_at = len(self.ep.arrivals)        # unloaded now, between completions
+        self.assertTrue(qa4.wait_until(lambda: stopped, 5, 0.01), "the guard did not see the model go")
+        self.assertLess(stopped[0] - went, self.gate.POLL + 1.0)
+        self.assertEqual(self.complete().status_code, 503)
+        self.assertEqual((len(stopped), len(self.ep.arrivals)), (1, 1))
+
+    def test_the_guard_reads_the_helpers_log_for_an_endpoint_failure(self):
+        tmp = Path(tempfile.mkdtemp(prefix="citar_qa4_gate_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        log = tmp / "helper-1.log"
+        log.write_text("2026-10-18 04:51:12 INFO    request 0a done in 1.0 s (1 tool call)\n", encoding="utf-8")
+        stopped = []
+        self.gate.on_trip(lambda: stopped.append(1))
+        self.gate.watch(log)
+        self.assertIsNone(qa4.wait_until(lambda: self.gate.tripped, 0.5, 0.05), "a done request closed the gate")
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write("2026-10-18 04:51:13 INFO    request 4acb failed (endpoint): the endpoint reported an error: "
+                     "terminated\n")
+        self.assertTrue(qa4.wait_until(lambda: stopped, 5, 0.01), "the guard did not read the failure")
+        self.assertIn("request 4acb failed (endpoint)", self.gate.tripped["why"])
+        self.assertEqual(stopped, [1])
+
+    def test_it_stands_in_front_of_this_machines_own_server_only(self):
+        for url in ("http://example.com:1234/v1", "https://localhost:1234/v1", "http://192.168.1.2:1234/v1"):
+            with self.assertRaises(ValueError, msg=url):
+                qa4.q3.ModelGate(url, qa4.REAL_MODEL)
+
+    def test_its_reading_of_an_answer(self):
+        def read(*pieces: bytes, closed: bool = True) -> tuple:
+            answer = qa4.q3._Answer()
+            for p in pieces:
+                for i in range(len(p)):             # a byte at a time: every boundary falls somewhere
+                    answer.feed(p[i:i + 1])
+            return answer.complete, answer.verdict(closed=closed)
+        error = b'{"error": {"message": "No models loaded."}}'
+        self.assertEqual(read(b"HTTP/1.1 400 Bad Request\r\nContent-Length: %d\r\n\r\n" % len(error) + error)[1],
+                         ("failed", 'HTTP 400: {"error": {"message": "No models loaded."}}'))
+        self.assertEqual(read(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(error) + error)[1][0], "failed")
+        events = [b'data: {"choices": [{"delta": {"content": "OK"}}]}\n\n', b"data: [DONE]\n\n"]
+        head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+        chunks = b"".join(b"%x\r\n%s\r\n" % (len(e), e) for e in events)
+        self.assertEqual(read(head, chunks, b"0\r\n\r\n", closed=False), (True, ("ok", "")))
+        self.assertEqual(read(head, chunks, closed=True), (False, ("failed", "its answer was cut short")))
+        crashed = b'data: {"error":{"message":"terminated"},"message":"terminated"}\n\n'
+        done, (verdict, why) = read(head, b"%x\r\n%s\r\n0\r\n\r\n" % (len(crashed), crashed), closed=False)
+        self.assertEqual((done, verdict), (True, "failed"))
+        self.assertIn("an error event", why)
+        self.assertEqual(read(b"")[1], ("failed", "LM Studio closed the connection before it answered"))
+        # a failure shows as soon as its bytes do, before the answer ends
+        early = qa4.q3._Answer()
+        early.feed(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 99\r\n\r\n{")
+        self.assertEqual((early.complete, early.failure()), (False, "HTTP 400: {"))
+        early = qa4.q3._Answer()
+        early.feed(head + b"%x\r\n%s\r\n" % (len(crashed), crashed))
+        self.assertFalse(early.complete)
+        self.assertIn("an error event", early.failure())
 
 
 class All(unittest.TestCase):

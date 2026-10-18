@@ -28,15 +28,17 @@ Parts:
 - ``llm-real`` (4-05): 4-04's real-model checks through the hub and the scheduler, in a hub of its own in this process
   (its database in ``<dir>/llm-real``): LM Studio (``--llm-url``, ``http://localhost:1234/v1``) lists
   ``google/gemma-4-e2b`` loaded before and after (only its model list is read: the part never loads, unloads or swaps a
-  model or changes LM Studio's settings); the real helper in front of it answers a request with tools with a raw
-  message whose tool call (or text) the server parses; a 1,500-token generation cancelled at 2 s is acknowledged
-  within a second, freeing its slot with nothing draining; three short requests after it take no longer than 1.5
-  times the median of three before it plus a second. ``--stand-in`` plays LM Studio with the scripted endpoint (the
-  same model name, loaded; streaming; one model generating one answer at a time; a cancelled generation stopped), to
-  check the part itself without the model. The checks are one function (``exercise``), and
-  ``tests/test_helper_llm_real.py`` runs it in every test run against stand-ins: it passes against one that stops a
-  cancelled generation, and fails against one that runs on after the cancel, against a model that is not loaded (with
-  nothing sent to it) and against one unloaded during the run.
+  model or changes LM Studio's settings); the real helper in front of it (reaching it only through the QA gate,
+  ``qa_phase3.ModelGate``: a completion forwarded only while LM Studio lists the model loaded and none has failed)
+  answers a request with tools with a raw message whose tool call (or text) the server parses; a 1,500-token
+  generation cancelled at 2 s is acknowledged within a second, freeing its slot with nothing draining; three short
+  requests after it take no longer than 1.5 times the median of three before it plus a second. ``--stand-in`` plays
+  LM Studio with the scripted endpoint (the same model name, loaded; streaming; one model generating one answer at a
+  time; a cancelled generation stopped), to check the part itself without the model. The checks are one function
+  (``exercise``), and ``tests/test_helper_llm_real.py`` runs it in every test run against stand-ins: it passes against
+  one that stops a cancelled generation, and fails against one that runs on after the cancel, against a model that is
+  not loaded (with nothing sent to it), against one unloaded during the run, and against one unloaded after its first
+  completion or whose engine fails mid-run (nothing more reaching it either way).
 
 - ``scan`` (4-06): bob's helper machine with the real helper scanning and measuring, ``citar-fake-probe`` (built beside
   the helper by ``cargo xtask develop``) named as its ``nvidia-smi`` by ``CITAR_HELPER_NVIDIA_SMI``, so the machine's
@@ -158,7 +160,9 @@ Parts:
   accepted, their events rejected and their budget settlements reversed, the ratings counting each game once. With
   ``--keep`` alice's two helpers stay connected, lending, for the browser checklist.
 - ``real`` (4-15): LM Studio's ``google/gemma-4-e2b`` (loaded before and after; the part never loads, unloads or
-  swaps a model, and the helper offers that model only) through alice's Windows helper: a 6-round game with her
+  swaps a model, and the helper offers that model only and reaches it only through the QA gate, whose guard stops
+  the helper the moment the model goes or a completion fails, the game then paused and the part failed with nothing
+  more sent) through alice's Windows helper: a 6-round game with her
   person seat, a hybrid seat (prompted every 2 turns), an LLM seat and two bots; the LLM seat's every turn ended by
   its own ``end_turn``, at least two chats answered by the models' own calls (parsed on the server), the ledger's
   generation seconds the scheduler's, no slot drained; then 4-04's checks through the same helper binary
@@ -563,8 +567,11 @@ def exercise(check: Callable, url: str, state: Path, data: dict, *, label: str =
     home ``<state>/helper-llm-real``) in front of the endpoint. Each check goes to ``check(name, ok, detail,
     **numbers)`` (the harness's ``Report.check``), and what the run measured to ``data``.
 
-    Nothing is sent to a model that is not loaded: the first check ends the run there, before a helper starts. A
-    failure that leaves the later checks meaningless (the helper not connecting, a request failing) ends it at that
+    Nothing is sent to a model that is not loaded: the first check ends the run there, before a helper starts; the
+    helper reaches the model only through a ``q3.ModelGate``, which forwards a completion only while the model is
+    listed loaded and none has failed (a failure closes it for the rest of the run); and the model's state is read
+    again before the requests before the cancel, the long generation and the requests after it. A failure that leaves
+    the later checks meaningless (the helper not connecting, a request failing, the model gone) ends the run at that
     check, and the model's state is read again after the run whatever happened in it. ``ack_bound`` is the seconds
     the cancel's acknowledgement may take: the gate's 1 (the tests give CI three times it, ``p3-notes.md``)."""
     ready, said = q3.lmstudio_model(url, REAL_MODEL)
@@ -591,13 +598,26 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
     from citar.server import workers as W
     from tests import helperfake as HF
 
+    gate = q3.ModelGate(url, REAL_MODEL)
+
     def must(name: str, what: str, fn: Callable):
-        """``fn()``; if it raises, the check ``name`` fails saying ``what`` failed, and the run ends."""
+        """``fn()``; if it raises, the check ``name`` fails saying ``what`` failed (and why the gate closed, when it
+        did), and the run ends."""
         try:
             return fn()
         except Exception as exc:
-            check(name, False, f"{what} failed: {type(exc).__name__}: {exc}"[:400])
+            closed = gate.tripped
+            check(name, False, f"{what} failed: {type(exc).__name__}: {exc}"[:400]
+                  + (f"; the gate closed: {closed['why']}"[:300] if closed else ""))
             raise _Ended from exc
+
+    def loaded_still(name: str, what: str) -> None:
+        """Before ``what``: the model still listed loaded (and the gate open), else the check ``name`` fails and the
+        run ends with nothing more sent."""
+        why = gate.check()
+        if why is not None:
+            check(name, False, f"nothing more was sent before {what}: {why}"[:500])
+            raise _Ended
 
     hub_server = HF.HubServer()
     helper = None
@@ -612,7 +632,7 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
             sid = row.id
         servers.invalidate()
         S.reset()
-        helper = HF.RealHelper(hub_server.base, raw, url, name="qa-llm-real", slots=1,
+        helper = HF.RealHelper(hub_server.base, raw, gate.url, name="qa-llm-real", slots=1,
                                extra=("--provider", "lmstudio", "--model", REAL_MODEL),
                                home=state / "helper-llm-real")
         online = wait_until(lambda: W.hub().get(sid) is not None and W.hub().get(sid).ack is not None, 60, 0.25)
@@ -651,7 +671,11 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
                 return time.perf_counter() - t0
             bound_name = ("three short requests after the cancel take no longer than 1.5 times the median of three "
                           "before it plus a second: the model stopped the cancelled generation")
+            cancel_name = (f"a 1,500-token generation cancelled at {CANCEL_AT:g} s is acknowledged within "
+                           f"{ack_bound:g} s: the helper's cancelled frees its slot, nothing drains")
+            loaded_still(bound_name, "the requests before the cancel")
             before = must(bound_name, "a short request before the cancel", lambda: [short() for _ in range(3)])
+            loaded_still(cancel_name, "the long generation")
             ticket = sched.ticket(sid, REAL_MODEL, cls="test", label="qa long generation")
             conv = conversation(ticket, LONG_PROMPT, max_tokens=1500)
             late0 = m.counters["late_frames"]
@@ -676,12 +700,12 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
             ack_s = round(acked - t_cancel, 3) if acked else None
             ended = ("cancelled" if "error" in out else "answered before the cancel" if "result" in out
                      else "still running")
-            check(f"a 1,500-token generation cancelled at {CANCEL_AT:g} s is acknowledged within {ack_bound:g} s: the "
-                  "helper's cancelled frees its slot, nothing drains",
+            check(cancel_name,
                   ended == "cancelled" and acked is not None and acked - t_cancel < ack_bound
                   and m.counters["draining"] == 0 and m.counters.get("cancel_unacked", 0) == 0,
                   json.dumps({"ack_s": ack_s, "the generation": ended, "counters": dict(m.counters)})[:400],
                   ack_s=ack_s)
+            loaded_still(bound_name, "the requests after the cancel")
             after = must(bound_name, "a short request after the cancel", lambda: [short() for _ in range(3)])
             bound = 1.5 * statistics.median(before) + 1.0
             check(bound_name, all(x <= bound for x in after),
@@ -696,6 +720,8 @@ def _through_the_hub(check: Callable, url: str, state: Path, data: dict, ack_bou
             helper.stop()
         hub_server.stop()
         S.reset()
+        gate.close()
+        data["gate"] = gate.summary()
 
 
 # ---------------------------------------------------------------------------- the scan part (4-06)
@@ -4011,6 +4037,30 @@ def _real(h, r, admin, alice, data: dict, url: str, label: str) -> None:
     if not r.check(f"{label} at {url} lists {REAL_MODEL}, loaded (read only: GET /api/v0/models; the part never "
                    "loads, unloads or swaps a model)", ready, said):
         return
+    # the helper reaches the model only through the gate (``q3.ModelGate``): a completion goes on only while the model
+    # is listed loaded and none has failed, and the gate's guard stops the helper the moment either changes
+    gate = q3.ModelGate(url, REAL_MODEL)
+    try:
+        played = _real_game(h, r, admin, alice, data, gate, label)
+    finally:
+        gate.close()
+        data["gate"] = gate.summary()
+    if played:
+        # ---- the cancel: 4-04's checks, the same Windows helper binary in front of the model (behind a gate of its
+        # own), through a hub and the prompt scheduler of this process's own (its database in <dir>/real-cancel): a
+        # 1,500-token generation cancelled at 2 s acknowledged within a second, the next short requests within the
+        # run's own baseline, nothing drained
+        cancel = data.setdefault("cancel", {})
+        _own_instance(h.server.state / "real-cancel")
+        exercise(r.check, url, h.server.state, cancel, label=label)
+    after, said_after = q3.lmstudio_model(url, REAL_MODEL)
+    data["lmstudio"]["after"] = said_after
+    r.check(f"{REAL_MODEL} is still loaded at the part's end, as at its start", after, said_after)
+
+
+def _real_game(h, r, admin, alice, data: dict, gate, label: str) -> bool:
+    """``real``'s game (``part_real``) with the helper behind ``gate``: whether it was played through with the model
+    loaded and answering all along (else the cancel's checks are left out)."""
     helper = None
     driver = None
     gid = ""
@@ -4025,8 +4075,10 @@ def _real(h, r, admin, alice, data: dict, url: str, label: str) -> None:
         token = issued.json().get("token", "") if issued is not None and issued.status_code == 200 else ""
         if token:
             # the model's own allowlist: the helper offers nothing else, so nothing could ask LM Studio for another
-            helper = Helper(h, token, url, "qa-real", provider="lmstudio", max_concurrent=1,
+            helper = Helper(h, token, gate.url, "qa-real", provider="lmstudio", max_concurrent=1,
                             extra=("--model", REAL_MODEL))
+            gate.on_trip(helper.stop)       # the server's only way to the model, closed the moment the gate closes
+            gate.watch(helper.log)
         online = bool(helper) and bool(wait_until(lambda: q3._online(alice, hid), 60, 0.25))
         info = _workers(alice, hid)
         card = next((s for s in alice.get("/api/pool/servers").json().get("servers", []) if s.get("id") == hid), {})
@@ -4037,7 +4089,7 @@ def _real(h, r, admin, alice, data: dict, url: str, label: str) -> None:
                 json.dumps({"online": online, "live": live, "target": (info.get("worker") or {}).get("target")}))
         data["machine"] = hid
         if not online:
-            return
+            return False
         model = {"server_id": hid, "model": REAL_MODEL}
         seats = [{"type": "human"},
                  {"type": "hybrid", "llm": dict(model), "bot": {"profile": "standard"},
@@ -4054,7 +4106,7 @@ def _real(h, r, admin, alice, data: dict, url: str, label: str) -> None:
                                                                                     "bot"],
                 f"HTTP {g.status_code} {g.text[:200] if g.status_code != 200 else ''}")
         if not gid:
-            return
+            return False
         data["game"] = gid
         alice.post(f"/api/games/{gid}/debug/meet_all")
         alice.post(f"/api/games/{gid}/debug/gold")
@@ -4074,7 +4126,7 @@ def _real(h, r, admin, alice, data: dict, url: str, label: str) -> None:
         driver.hold.clear()
         last, moved = None, time.perf_counter()
         deadline = time.perf_counter() + q3.REAL_LIMIT_S
-        while time.perf_counter() < deadline:
+        while time.perf_counter() < deadline and gate.tripped is None:
             gi = q3._game_info(alice, gid)
             mark = (gi.get("turn"), gi.get("current_player"))
             if gi.get("phase") not in ("playing", None):
@@ -4085,7 +4137,9 @@ def _real(h, r, admin, alice, data: dict, url: str, label: str) -> None:
                 last, moved = mark, time.perf_counter()
             elif time.perf_counter() - moved > q3.REAL_STALL_S:
                 break
-            time.sleep(2.0)
+            gate.closed.wait(2.0)
+        if not q3.gate_held(r, gate, alice, gid, data):
+            return False
         gi = q3._game_info(alice, gid)
         r.check(f"the game was played to its end ({REAL_CONFIG['turn_limit']} rounds), no turn hanging",
                 gi.get("phase") not in ("playing", None),
@@ -4139,15 +4193,19 @@ print(json.dumps({"events": int(n), "gen_s": float(gen)}))
                 metered_s=round(metered, 3), ledger_s=round(float(ledger.get("gen_s") or 0), 3))
         status = q3._machine_status(admin, hid)
         counters = status.get("counters") or {}
-        r.check("no slot of the machine drained over the game (nothing cancelled went unacknowledged)",
-                status.get("draining", 0) == 0 and counters.get("draining", 0) == 0
-                and counters.get("cancel_unacked", 0) == 0, json.dumps({"counters": counters}))
+        listed = status.get("id") == hid
+        r.check("no slot of the machine drained over the game (nothing cancelled went unacknowledged): the machine, in "
+                "/api/status with the game's completions granted on it, has nothing draining",
+                listed and counters.get("granted", 0) > 0 and status.get("draining", 0) == 0
+                and counters.get("draining", 0) == 0 and counters.get("cancel_unacked", 0) == 0,
+                json.dumps({"counters": counters}) if listed else "the machine is not in /api/status")
         data.update(seconds=round(time.time() - t0, 1), llm_turns=len(llm_turns), ends=q3._counts(ends),
                     chats=[{k: x.get(k) for k in ("player", "nid", "outcome", "cause", "seconds", "gen_s")}
                            for x in negotiations],
                     phases=[{k: x.get(k) for k in ("turn", "outcome", "cause", "steps", "gen_s")} for x in phases],
                     metered_gen_s=round(metered, 3), ledger=ledger, counters=counters,
                     alice={"turns": len(driver.ended), "answered": {str(k): v for k, v in driver.answered.items()}})
+        return gate.tripped is None
     finally:
         if driver is not None:
             driver.stop()
@@ -4159,15 +4217,6 @@ print(json.dumps({"events": int(n), "gen_s": float(gen)}))
                 pass
         if helper is not None:
             helper.stop()
-    # ---- the cancel: 4-04's checks, the same Windows helper binary in front of LM Studio, through a hub and the
-    # prompt scheduler of this process's own (its database in <dir>/real-cancel): a 1,500-token generation cancelled
-    # at 2 s acknowledged within a second, the next short requests within the run's own baseline, nothing drained
-    cancel = data.setdefault("cancel", {})
-    _own_instance(h.server.state / "real-cancel")
-    exercise(r.check, url, h.server.state, cancel, label=label)
-    after, said_after = q3.lmstudio_model(url, REAL_MODEL)
-    data["lmstudio"]["after"] = said_after
-    r.check(f"{REAL_MODEL} is still loaded at the part's end, as at its start", after, said_after)
 
 PARTS: dict[str, Callable] = {"helper": part_helper, "llm-real": part_llm_real, "scan": part_scan,
                               "lab": part_lab, "remote": part_remote, "verify": part_verify, "update": part_update,
