@@ -287,7 +287,11 @@ person seat and two bots, with a member's report analysis on the same machine: a
 whose real helper's upstream is LM Studio at `http://localhost:1234/v1` serving
 `google/gemma-4-e2b`. Load that model in LM Studio first: the part checks that LM Studio lists it
 loaded (`GET /api/v0/models`) and fails with what to do otherwise, and it never loads, unloads or
-swaps a model, changes LM Studio's settings or names another model. A small model on a laptop takes
+swaps a model, changes LM Studio's settings or names another model. The helper reaches LM Studio only
+through a gate in the script (`ModelGate`): it forwards a completion only while LM Studio lists the
+model loaded and no completion has failed, and when either changes it stops the helper at once, the
+game is paused and the part fails, so nothing more reaches LM Studio (which, with its just-in-time
+loading on, would load the model again). A small model on a laptop takes
 tens of minutes for the 20 rounds; the part tests the plumbing, not the play, and records each model
 turn and how it ended, the tool calls made and refused, each chat's answer and its time, every
 fallback to the bot with its cause, and the generation seconds metered against the compute ledger.
@@ -300,11 +304,14 @@ rate limit and a revoke) and `llm-real` (the helper's real-model checks through 
 scheduler: with `google/gemma-4-e2b` loaded in LM Studio, a request with tools parsed on the server,
 a long generation cancelled at 2 s acknowledged within a second, and the requests after it no
 slower than those before). `llm-real` reads LM Studio's model list before and after, never loads,
-unloads or swaps a model, and sends nothing when the model is not loaded. `--stand-in` plays LM
-Studio with the scripted endpoint to check the part itself, and `tests/test_helper_llm_real.py` runs
-the same checks in every test run against stand-ins: they pass against one that stops a cancelled
-generation, and fail against one that goes on generating after the cancel, one whose generation is
-over before it, a model that is not loaded (with nothing sent to it) and one unloaded during the run.
+unloads or swaps a model, and sends nothing when the model is not loaded; like every real part, its
+helper reaches LM Studio through the gate. `--stand-in` plays LM Studio with the scripted endpoint to
+check the part itself, and `tests/test_helper_llm_real.py` runs the same checks in every test run
+against stand-ins: they pass against one that stops a cancelled generation, and fail against one that
+goes on generating after the cancel, one whose generation is over before it, a model that is not
+loaded (with nothing sent to it), one unloaded during the run, and one unloaded after its first
+completion or whose engine fails mid-run (with nothing sent to it after). `tests/test_qa_phase4.py`
+holds the gate itself to the same stand-in.
 `scan` runs a helper that scans and measures, with `citar-fake-probe` as its `nvidia-smi` (below): its
 hello's scan as the machine's last report, Rescan now within 5 s, a minute of samples as one power
 row, costing measuring the machine's energy from it, every reading a call in the fake's log, and a

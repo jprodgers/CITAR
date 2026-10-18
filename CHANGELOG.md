@@ -368,7 +368,9 @@ own, and all of them at once in one game, with a real model in LM Studio last; `
 the same for the helper and CPU work with the real `citar-helper`, its `exit` part with the server in WSL and
 helpers on Windows and in WSL (every accepted result's signature and chain checked, the Windows helper's replayed
 games compared with Linux byte for byte, two cheating helpers caught) and its `real` part a game on a real model
-through a Windows helper ([CONTRIBUTING.md](CONTRIBUTING.md)).
+through a Windows helper, which reaches LM Studio only through a gate that forwards a completion while the model is
+loaded and none has failed, so a crash stops the part before anything could load the model again
+([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ### Fixed
 
@@ -399,6 +401,10 @@ through a Windows helper ([CONTRIBUTING.md](CONTRIBUTING.md)).
   manager restarted every 15 s for ever; it now idles, says why once in its log and reads its
   settings again after 15 s, doubling to an hour, and at once when `helper.json` changes (except
   while an update's new binary must have its starts counted).
+- A machine lent for lab runs alone showed each grantee "Your access to ... is limited to lab runs (CPU work), and
+  this is ordinary games"; it now says the access is for lab runs only, its owner lending no model work under it, and
+  a grant that lists other purposes says what it covers and what it does not ("covers ordinary games and pooled
+  prompts only, not scenarios").
 
 **Rules the Rust engine fixes.** The new engine in `crates/citar-engine`, which replaces the Python
 engine in this release, plays by the same rules except where the Python engine was wrong or
