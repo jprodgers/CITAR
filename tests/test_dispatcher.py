@@ -1714,7 +1714,7 @@ class Remote(Lab):
 
     def test_a_grant_without_lab(self):
         self.grant("alice", ["game", "pooled"])
-        self.refused("alice", duels("no-lab", 1), "limited to")
+        self.refused("alice", duels("no-lab", 1), "covers ordinary games and pooled prompts only, not lab runs")
 
     def test_a_grant_with_no_purposes_never_lends_the_cpu(self):
         self.grant("alice", [])
