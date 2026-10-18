@@ -269,6 +269,12 @@ impl Plan {
                 }
                 Step::Write { path, text, mode } => write_file(path, text, *mode).map_err(fail)?,
                 Step::Copy { from, to } => {
+                    // A new file, never a write through whatever is there (a hard link's target).
+                    match std::fs::remove_file(to) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(fail(format!("{}: {e}", shown(to)))),
+                    }
                     std::fs::copy(from, to)
                         .map_err(|e| fail(format!("{} to {}: {e}", shown(from), shown(to))))?;
                 }
@@ -345,7 +351,11 @@ fn secure(path: &Path, owner: &str, principals: &[String]) -> Result<(), String>
     #[cfg(windows)]
     {
         let p: Vec<&str> = principals.iter().map(String::as_str).collect();
-        citar_jobs::sys::restrict_tree_to(path, Some(owner), &p)
+        // What may own what is there already: these principals, and the administrator installing.
+        let me = citar_jobs::sys::current_user_sid().map_err(|e| e.to_string())?;
+        let mut owners = p.clone();
+        owners.push(&me);
+        citar_jobs::sys::restrict_tree_to(path, Some(owner), &p, &owners)
             .map(|_| ())
             .map_err(|e| format!("{}: {e}", shown(path)))
     }

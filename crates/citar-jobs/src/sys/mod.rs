@@ -290,7 +290,13 @@ mod tests {
         let me = current_user_sid().expect("the user");
         // This user stands in for the service's account (an unelevated test cannot give the
         // objects to Administrators, nor lock itself out of its own scratch folder).
-        let set = restrict_tree_to(&home, None, &["S-1-5-18", "S-1-5-32-544", &me]).expect("set");
+        let principals = ["S-1-5-18", "S-1-5-32-544", me.as_str()];
+        // Another owner anywhere refuses the whole call, and nothing is changed.
+        let refused =
+            restrict_tree_to(&home, None, &principals, &["S-1-5-18"]).expect_err("not ours");
+        assert!(refused.to_string().contains("owned by"), "{refused}");
+        assert!(!dacl(&home).expect("the DACL").protected, "nothing changed");
+        let set = restrict_tree_to(&home, None, &principals, &[me.as_str()]).expect("set");
         assert_eq!(set, 5, "the home, helper/, logs/, helper.json and helper.log");
         for p in [
             home.clone(),
@@ -310,8 +316,46 @@ mod tests {
         // What is made there later inherits the folder's entries.
         std::fs::write(home.join("later.json"), "{}").expect("written");
         assert_eq!(exposure(&home.join("later.json")).expect("read"), None);
-        assert!(restrict_tree_to(&home.join("helper.json"), None, &["S-1-5-18"]).is_err());
+        assert!(
+            restrict_tree_to(&home.join("helper.json"), None, &["S-1-5-18"], &[me.as_str()])
+                .is_err()
+        );
         restrict_dir_to_owner(&home).expect("given back");
+        // A junction in the tree, or as the folder itself, refuses the call (junctions need no
+        // privilege to make, unlike symbolic links).
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("made");
+        let junction = |link: &Path| {
+            let made = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(link)
+                .arg(&elsewhere)
+                .output()
+                .expect("mklink");
+            assert!(made.status.success(), "{made:?}");
+        };
+        junction(&home.join("helper").join("planted"));
+        let e = restrict_tree_to(&home, None, &principals, &[me.as_str()])
+            .expect_err("a junction in it");
+        assert!(e.to_string().contains("a link or junction"), "{e}");
+        std::fs::remove_dir(home.join("helper").join("planted")).expect("the junction removed");
+        std::fs::create_dir_all(elsewhere.join("sub")).expect("made");
+        let root = dir.join("junction-home");
+        junction(&root);
+        let e = restrict_tree_to(&root, None, &principals, &[me.as_str()])
+            .expect_err("a junction itself");
+        assert!(e.to_string().contains("a link or junction"), "{e}");
+        let e = restrict_tree_to(&root.join("sub"), None, &principals, &[me.as_str()])
+            .expect_err("under one");
+        assert!(
+            e.to_string().contains("a link or junction"),
+            "a folder reached through a junction: {e}"
+        );
+        std::fs::remove_dir(&root).expect("the junction removed");
+        assert!(
+            dacl(&elsewhere).expect("the DACL").aces.is_some_and(|a| a.iter().any(|x| x.inherited)),
+            "untouched"
+        );
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 

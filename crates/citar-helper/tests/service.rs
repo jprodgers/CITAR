@@ -435,15 +435,30 @@ async fn a_new_supervisor_ends_the_helper_an_ended_one_left() {
     refuse_next(&mut conns, Duration::from_secs(30)).await.expect("the first helper's hello");
     let orphan = record_with_child(&home).await.and_then(|r| r.child).expect("its helper");
     assert!(supervisor::serves_home(orphan, &home), "the helper serves this home");
-    // A second supervisor while the first runs: it leaves at once, and starts nothing.
-    let second = tokio_command()
+    // A second supervisor while the first runs: it leaves at once, and starts nothing. (Were it to
+    // stay, the test says so in seconds and ends what it started, rather than hang.)
+    let mut second = tokio_command()
         .args(["run", "--supervisor", "--home"])
         .arg(&home)
         .args(helper_args(port))
-        .output()
-        .await
-        .expect("it runs");
-    assert_eq!(second.status.code(), Some(0), "{second:?}");
+        .spawn()
+        .expect("it starts");
+    let left = tokio::time::timeout(Duration::from_secs(15), second.wait()).await;
+    if left.is_err() {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let ours: Vec<&sysinfo::Process> = sys
+            .processes()
+            .values()
+            .filter(|p| p.cmd().iter().any(|a| std::path::Path::new(a) == home))
+            .collect();
+        ours.iter().for_each(|p| {
+            let _killed = p.kill();
+        });
+        panic!("a second supervisor for a home whose supervisor runs did not leave");
+    }
+    let left = left.expect("in time").expect("its status");
+    assert_eq!(left.code(), Some(0), "{left:?}");
     assert!(
         tokio::time::timeout(Duration::from_secs(3), conns.recv()).await.is_err(),
         "no second helper"

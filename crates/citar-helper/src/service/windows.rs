@@ -19,7 +19,12 @@
 //! so an exit code that is not 0 counts: 75 (an update), and a new binary's failed start, which an
 //! update's rollback counts (the last action repeats, so no count of quick failures stops it).
 //! Installing needs an elevated prompt; an unelevated `install --system` prints the elevated
-//! command and exits 2.
+//! command and exits 2. Under `%ProgramData%` every user may make folders and files, and owns
+//! what they make: the home is set only when no link or junction leads to it or lies in it and
+//! everything in it is SYSTEM's, Administrators', the installing administrator's or the service's
+//! (citar-jobs' `restrict_tree_to`), so a home another user made first, or a junction or hard link
+//! planted in one, is refused rather than taken over; and the binary's copy replaces no file that
+//! is there (a hard link would carry the write to its target).
 
 use std::path::{Path, PathBuf};
 
@@ -161,6 +166,28 @@ fn sc(args: &[&str], may_fail: bool) -> Step {
         args: args.iter().map(|s| (*s).to_owned()).collect(),
         may_fail,
     }
+}
+
+/// Refuses a home that a link or junction leads to (the home itself, or a folder above it, which
+/// under `%ProgramData%` any user may make): checked before anything is made, so no folder is made
+/// through one.
+///
+/// # Errors
+/// The link, named.
+pub fn check_no_link_to(home: &Path) -> Result<(), String> {
+    let mut up = Some(home);
+    while let Some(p) = up {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!(
+                "{} is a link or junction, so the service's home {} would be wherever it leads: \
+                 remove it",
+                p.display(),
+                home.display()
+            ));
+        }
+        up = p.parent();
+    }
+    Ok(())
 }
 
 /// The service's binary in its home: `<home>\bin\citar-helper.exe`.
@@ -358,6 +385,28 @@ mod tests {
             read_run_value("\r\nHKEY_CURRENT_USER\\...\\Run\r\n    Other    REG_SZ    x\r\n"),
             None
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_home_a_junction_leads_to_is_refused() {
+        let dir = std::env::temp_dir().join(format!("citar-svc-junction-{}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&dir);
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("made");
+        let link = dir.join("CITAR");
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&elsewhere)
+            .output()
+            .expect("mklink");
+        assert!(made.status.success(), "{made:?}");
+        let e = check_no_link_to(&link.join("helper")).expect_err("refused");
+        assert!(e.contains("is a link or junction"), "{e}");
+        assert!(check_no_link_to(&elsewhere.join("helper")).is_ok(), "no link on the way");
+        std::fs::remove_dir(&link).expect("the junction removed");
+        std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 
     #[test]

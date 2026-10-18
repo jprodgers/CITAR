@@ -375,6 +375,9 @@ pub fn command(cli: &Cli, action: &ServiceAction, log: &Log) -> Result<u8, Refus
                 .to_owned(),
         ));
     }
+    if installing && i.os == Os::Windows && i.scope == Scope::System {
+        windows::check_no_link_to(&i.home).map_err(|e| (2, e))?;
+    }
     if installing {
         check_settings(&i.home).map_err(|e| (2, e))?;
         if i.os == Os::Windows && i.scope == Scope::System && windows_service_exists() {

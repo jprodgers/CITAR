@@ -256,8 +256,14 @@ fn restrict(path: &Path, flags: &str) -> io::Result<()> {
 
 /// Gives the folder `path`, and every file and folder under it, a protected DACL granting full
 /// control to `principals` (SID strings) and nobody else anything, the folders' entries inherited
-/// by what is made in them (`OICI`); with `owner`, also that owner (a SID string). Links and
-/// junctions are left alone, never followed. Returns how many objects were set.
+/// by what is made in them (`OICI`); with `owner`, also that owner (a SID string). Returns how many
+/// objects were set.
+///
+/// **Nothing is set unless all of it may be:** first every object is checked, and the call refuses,
+/// changing nothing, when `path` or a folder above it is a link or a junction, when anything under
+/// it is one, or when anything there is owned by an account outside `owners` (SID strings). A link
+/// would carry the access list to wherever it leads, and an object another account owns (a hard
+/// link to someone else's file shares that file's owner) is not this folder's to take over.
 ///
 /// The Windows service's home (design/phase4-helper.md P4.3.9): SYSTEM, Administrators and the
 /// service's virtual account, with nothing inherited from `%ProgramData%` (which gives Users read
@@ -272,9 +278,48 @@ pub fn restrict_tree_to(
     path: &Path,
     owner: Option<&str>,
     principals: &[&str],
+    owners: &[&str],
 ) -> io::Result<usize> {
     if !std::fs::metadata(path)?.is_dir() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a folder"));
+    }
+    let refuse = |p: &Path, why: String| {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{}: {why}", p.display())))
+    };
+    let mut up = Some(path);
+    while let Some(p) = up {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return refuse(p, "a link or junction: refused".to_owned());
+        }
+        up = p.parent();
+    }
+    let mut all = vec![path.to_path_buf()];
+    let mut i = 0;
+    while i < all.len() {
+        let here = all[i].clone();
+        i += 1;
+        if !std::fs::symlink_metadata(&here)?.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&here)? {
+            let entry = entry?;
+            if entry.file_type()?.is_symlink() {
+                return refuse(&entry.path(), "a link or junction: refused".to_owned());
+            }
+            all.push(entry.path());
+        }
+    }
+    for p in &all {
+        let o = dacl(p)?.owner.unwrap_or_default();
+        if !owners.contains(&o.as_str()) {
+            return refuse(
+                p,
+                format!(
+                    "owned by {}, not by an account this folder belongs to: remove it",
+                    named(&o)
+                ),
+            );
+        }
     }
     let entries = |flags: &str| -> String {
         let mut s = String::new();
