@@ -778,7 +778,7 @@ async fn pipeline(
         }
     }
     if let Err(why) = self_test(&staged, manifest, target).await {
-        let _gone = tokio::fs::remove_file(&staged).await;
+        remove_soon(&staged).await;
         say(
             UpdateState::Failed,
             format!("the new binary failed its self-test, so it is not installed: {why}"),
@@ -857,4 +857,19 @@ pub async fn self_test(binary: &Path, manifest: &Manifest, target: &str) -> Resu
         return Err(format!("{} ({})", clip(last.trim(), 300), out.status));
     }
     Ok(())
+}
+
+/// Removes `path`, trying again for up to two seconds while the OS refuses: on Windows a program
+/// that has just exited (the self-test's) stays locked a moment, and one attempt left the binary
+/// that failed its self-test in place (helper.yml at fbfe28b, windows). Gone or never there is
+/// done; anything else is left to the next download, which replaces it.
+async fn remove_soon(path: &std::path::Path) {
+    for _ in 0..20 {
+        match tokio::fs::remove_file(path).await {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            _ => return,
+        }
+    }
 }

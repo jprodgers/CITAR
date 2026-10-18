@@ -139,23 +139,31 @@ pub fn background() -> io::Result<()> {
     Ok(())
 }
 
-/// This process's resident size in bytes, as the kernel's task info reports it.
+/// This process's memory in bytes as macOS counts it against a process: its physical footprint
+/// (`proc_pid_rusage`'s `ri_phys_footprint`, what Activity Monitor shows and the kernel's own
+/// memory limits count). Not the resident size, which also counts the shared libraries' pages the
+/// process has touched and memory it freed that the system has not yet taken back: a run that
+/// allocated its share passed the limit by that alone (helper.yml at fbfe28b, aarch64-apple-darwin:
+/// 231 MB resident for a host of 15 MB and a run of 157 MB, against 200 MB).
 ///
 /// # Errors
 /// The OS could not say.
 #[cfg(target_os = "macos")]
 pub fn resident_bytes() -> io::Result<u64> {
-    let size = std::mem::size_of::<libc::proc_taskinfo>();
-    let len = libc::c_int::try_from(size).map_err(io::Error::other)?;
-    // SAFETY: an all-zero proc_taskinfo is a valid value of that plain C structure.
-    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
-    // SAFETY: `info` is a buffer of exactly `len` bytes for the call to fill; getpid has no
+    // SAFETY: an all-zero rusage_info_v2 is a valid value of that plain C structure.
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a rusage_info_v2, the structure RUSAGE_INFO_V2 asks the call to fill
+    // (passed, as the C API takes it, as a pointer to `rusage_info_t`); getpid has no
     // preconditions.
     let got = unsafe {
-        libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), len)
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V2,
+            (&raw mut info).cast::<libc::rusage_info_t>(),
+        )
     };
-    if got != len {
+    if got != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(info.pti_resident_size)
+    Ok(info.ri_phys_footprint)
 }

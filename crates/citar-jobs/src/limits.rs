@@ -6,7 +6,7 @@
 //! | Windows | a Job Object the host puts itself in, `CpuRate = percent x 100` with `HARD_CAP`, at `BELOW_NORMAL_PRIORITY_CLASS` | the same Job Object's `JobMemoryLimit`, `KILL_ON_JOB_CLOSE` | hard, hard |
 //! | Linux in a scope | the parent's `systemd-run --user --scope` set `CPUQuota`; the host reads its cgroup's `cpu.max` to confirm | `MemoryMax` (and `MemorySwapMax=0`), read back from `memory.max` | hard, hard |
 //! | Linux otherwise | `nice 10`, and the thread cap | `RLIMIT_DATA` | soft, hard |
-//! | macOS | the background band (`PRIO_DARWIN_BG`), and the thread cap | a watchdog reading the resident size every 500 ms, which ends the host past the limit | soft, soft |
+//! | macOS | the background band (`PRIO_DARWIN_BG`), and the thread cap | a watchdog reading the physical footprint every 500 ms, which ends the host past the limit | soft, soft |
 //!
 //! "Hard" means the operating system holds the figure whatever the games do; "soft" that the host
 //! only lowers its priority or watches. `threads` is the most runs at once on every OS: the host
@@ -59,7 +59,7 @@ pub const NICE: i32 = 10;
 pub const WATCHDOG_LINE: &str = "citar job host: resident memory passed the limit";
 /// The exit code of a host the macOS watchdog ended.
 pub const EXIT_MEMORY: i32 = 3;
-/// How often the macOS watchdog reads the resident size.
+/// How often the macOS watchdog reads the physical footprint (`sys::resident_bytes`).
 pub const WATCHDOG_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The limits a parent asks a host to hold: the effective figures (P4.2.3), each concrete.
@@ -117,7 +117,7 @@ pub enum MemoryBy {
     /// `RLIMIT_DATA` (Linux's fallback): the process's private writable mappings (`VmData`), each
     /// thread's whole stack among them.
     DataLimit,
-    /// The macOS watchdog: the resident size.
+    /// The macOS watchdog: the physical footprint (`sys::resident_bytes`).
     Resident,
     /// Nothing: a host inside its parent's process, or an OS without a memory limit.
     Nothing,
