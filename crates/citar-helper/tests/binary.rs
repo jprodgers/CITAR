@@ -174,3 +174,87 @@ fn setup_asks_saves_owner_only_and_keeps_the_other_settings() {
     assert_eq!(read()["token"], "cwt_newer");
     std::fs::remove_dir_all(&dir).expect("cleaned");
 }
+
+/// Ctrl-C at the first-run questions quits the helper at once, as a terminal's Ctrl-C does (4-14's
+/// review: a stop listener installed before the settings were read took it for a stop request,
+/// said "stopping" and left the question waiting). On Linux, on a pseudo-terminal that util-linux's
+/// `script` makes: the question seen, ^C written to the terminal (the line discipline sends SIGINT
+/// to the helper), the helper gone within 2 s.
+#[cfg(target_os = "linux")]
+#[test]
+fn ctrl_c_at_the_first_run_questions_quits_at_once() {
+    use std::io::{Read as _, Write as _};
+    use std::time::{Duration, Instant};
+    let home = std::env::temp_dir().join(format!("citar-helper-ctrl-c-{}", std::process::id()));
+    let _fresh = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("home");
+    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+    let line = format!(
+        "{} run --home {} --no-llm --no-hardware --no-power",
+        quote(BIN),
+        quote(&home.display().to_string())
+    );
+    let mut cmd = Command::new("script");
+    cmd.args(["-qefc", &line, "/dev/null"]).env("CITAR_DATA_DIR", &home);
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("CITAR_WORKER_") {
+            cmd.env_remove(k);
+        }
+    }
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("script (util-linux) runs");
+    let mut out = child.stdout.take().expect("its output");
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = out.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    let take = |seen: &mut Vec<u8>, until: Instant| {
+        while let Ok(b) = rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            seen.extend(b);
+            if Instant::now() >= until {
+                break;
+            }
+        }
+    };
+    let asked = Instant::now() + Duration::from_secs(30);
+    while !String::from_utf8_lossy(&seen).contains("CITAR server address") && Instant::now() < asked
+    {
+        if let Ok(b) = rx.recv_timeout(asked.saturating_duration_since(Instant::now())) {
+            seen.extend(b);
+        }
+    }
+    if !String::from_utf8_lossy(&seen).contains("CITAR server address") {
+        let _killed = child.kill();
+        panic!("no first-run question: {}", String::from_utf8_lossy(&seen));
+    }
+    child.stdin.as_mut().expect("its input").write_all(b"\x03").expect("^C written");
+    let sent = Instant::now();
+    let ended = loop {
+        if let Some(status) = child.try_wait().expect("its state") {
+            break Some(status);
+        }
+        if sent.elapsed() > Duration::from_secs(2) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    take(&mut seen, Instant::now() + Duration::from_millis(200));
+    let said = String::from_utf8_lossy(&seen).into_owned();
+    if ended.is_none() {
+        let _killed = child.kill();
+        let _waited = child.wait();
+    }
+    let _cleaned = std::fs::remove_dir_all(&home);
+    assert!(ended.is_some(), "still running 2 s after ^C at the question: {said}");
+    assert!(!said.contains("stopping"), "a Ctrl-C there is no stop request: {said}");
+}

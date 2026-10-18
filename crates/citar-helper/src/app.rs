@@ -3,9 +3,10 @@
 //! on its standard input and output: the helper's child, which reads no settings, writes no file
 //! and dials nothing), `scan [FILE]` (the standalone collector: it reads the helper's settings for
 //! its model endpoint, writes only FILE and dials nothing but that endpoint, for its runtimes),
-//! `setup`, `update check|apply|rollback` (P4.3.8), and `run` (the default) with
-//! every check in front of it, in this order, so that nothing is written or dialled before it is
-//! allowed:
+//! `setup`, `update check|apply|rollback` (P4.3.8), `service install|uninstall|status|run`
+//! (P4.3.9, [`crate::service`]), and `run` (the default; with `--detach` the Run supervisor started
+//! in the background, [`crate::service::supervisor`]) with every check in front of it, in this
+//! order, so that nothing is written or dialled before it is allowed:
 //! 1. the development guard (`dev-guard` builds, and every build with a test feature): an
 //!    explicit `--home` outside the per-user base, refused before anything else happens;
 //! 2. an update's start path ([`crate::update::files::on_start`]), first thing once the home is
@@ -18,9 +19,21 @@
 //!    development build a loopback server, refused before anything is dialled;
 //! 4. the machine key, refused when others can read it, and a warning for a `helper.json` they
 //!    can;
-//! 5. the session, until it is stopped (Ctrl-C, SIGTERM), permanently refused, or swapped for an
-//!    update's binary: a service run (`--service`, or a supervised one) then exits 75, a console
-//!    run becomes the new binary's supervisor ([`crate::update::supervise`]).
+//! 5. the session, until it is stopped (Ctrl-C, SIGTERM, the Windows service manager's stop),
+//!    permanently refused, or swapped for an update's binary: a service run (`--service`, or a
+//!    supervised one) then exits 75, a console run becomes the new binary's supervisor
+//!    ([`crate::update::supervise`]).
+//!
+//! **In service mode nothing permanent exits** (P4.3.9): a server's permanent refusal idles in the
+//! session, and so do settings this binary cannot take (step 3, a key others can read: what exits 2
+//! from a console) unless an update is in progress, whose new binary must exit to have its starts
+//! counted and be rolled back (P4.3.8). The helper logs why once, reads its settings again after
+//! 15 s, then after twice as long each time up to an hour, and at once when its settings file
+//! changes, and stops at once when asked, so no service manager restarts it into a loop every 15 s
+//! and a passing cause (a file not readable yet at boot) costs seconds, not an hour.
+//!
+//! Ctrl-C and SIGTERM are listened for only once the session starts (and while a service idles):
+//! before that, a Ctrl-C at the first-run questions or at "Press Enter to close" quits the helper.
 //!
 //! Exit codes (P4.3.9): 0 stopped, 78 a permanent refusal from a console, 75 restart for an
 //! update, 2 a command line or settings it cannot take (or a key it refuses), 1 anything else that
@@ -30,10 +43,11 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use citar_engine::rules::Ruleset;
 
-use crate::cli::{Cli, Command, UpdateAction};
+use crate::cli::{Cli, Command, ServiceAction, UpdateAction};
 use crate::clock::Clock;
 use crate::config::{self, Machine, Sources};
 use crate::home::{self, Home};
@@ -44,7 +58,7 @@ use crate::net::{self, TcpDialer};
 use crate::power::SystemPower;
 use crate::protocol::Provider;
 use crate::scan::{self, Probes, Runtime, SystemScanner};
-use crate::session::{Exit, Facts, Helper, Sensors};
+use crate::session::{Exit, Facts, Helper, PERMANENT_RETRY, Sensors};
 use crate::update::files::{self as update_files, Install, Start, UpdateDir};
 use crate::update::{UpdateSetup, supervise};
 use crate::version;
@@ -117,25 +131,297 @@ fn run(cli: &Cli) -> Result<u8, Stop> {
     if DEV_GUARD {
         home::guard(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?;
     }
+    if let Some(Command::Service { action }) = &cli.command {
+        return service_command(cli, action);
+    }
     let (home, _source) = home::resolve(opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?;
     let log = Log::stderr(opts.verbose);
     match cli.command.clone().unwrap_or(Command::Run) {
         Command::Setup => setup(cli, &home),
         Command::Run | Command::Scan { .. } => {
-            // An update's start path before anything a new binary could refuse (the module's
-            // doc, step 2).
-            let started = start_path(&home);
-            if let Start::RolledBack(why) = &started {
-                // The log file too, when it can be opened: the service's log says why.
-                let _file = log.to_file(&home.log_dir());
-                log.error(format!("the update is rolled back: {why}"));
-                return Ok(Exit::Update.code());
+            if opts.detach && !opts.supervisor {
+                return detach(cli, &home);
             }
-            serve(cli, &home, log, &started)
+            if opts.supervisor {
+                return Ok(crate::service::supervisor::main(&home, &log));
+            }
+            run_helper(cli, &home, log, opts.service, None)
         }
         Command::JobHost => Ok(job_host()),
         Command::Update { action } => update_command(cli, &home, &action, &log),
+        Command::Service { .. } => Err(Stop(2, "service: handled above".to_owned())),
     }
+}
+
+/// `citar-helper service ...` ([`crate::service`]); `service run` is the helper itself, in service
+/// mode (on Windows under the service manager).
+fn service_command(cli: &Cli, action: &ServiceAction) -> Result<u8, Stop> {
+    let log = Log::stderr(cli.opts.verbose);
+    if *action == ServiceAction::Run {
+        let (home, _source) =
+            home::resolve(cli.opts.home.as_deref(), &env).map_err(|e| Stop(2, e))?;
+        return service_run(cli, &home, log);
+    }
+    crate::service::command(cli, action, &log).map_err(|(code, why)| Stop(code, why))
+}
+
+/// What `service run` says when a console, not the service manager, started it.
+pub const SERVICE_RUN_FROM_A_CONSOLE: &str = "`service run` is the Windows service's own entry, \
+     which the service manager starts (citar-helper service install --system installs it); to run \
+     the helper here, leave out `service run`";
+
+/// `service run` on Windows: the helper under the service manager, which starts it (the service
+/// `citar-helper`'s command line) and stops it; its exit code is the service's.
+#[cfg(windows)]
+fn service_run(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let code = Arc::new(AtomicU8::new(0));
+    let (cli2, home2, code2) = (cli.clone(), home.clone(), Arc::clone(&code));
+    let main: Box<dyn FnOnce() -> u32 + Send> = Box::new(move || {
+        let c = match run_helper(&cli2, &home2, log.clone(), true, Some(rx)) {
+            Ok(c) => c,
+            Err(Stop(c, why)) => {
+                let _file = log.to_file(&home2.log_dir());
+                log.error(why);
+                c
+            }
+        };
+        code2.store(c, Ordering::SeqCst);
+        u32::from(c)
+    });
+    let stop: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let _sent = tx.send(true);
+    });
+    citar_jobs::sys::run_service(crate::service::NAME, stop, main).map_err(|e| {
+        if e.raw_os_error() == Some(1063) {
+            Stop(2, SERVICE_RUN_FROM_A_CONSOLE.to_owned())
+        } else {
+            Stop(1, format!("the service could not start: {e}"))
+        }
+    })?;
+    Ok(code.load(Ordering::SeqCst))
+}
+
+/// `service run` elsewhere: the helper in service mode, as the systemd unit and the LaunchAgent run
+/// it (`run --service`).
+#[cfg(not(windows))]
+fn service_run(cli: &Cli, home: &Home, log: Log) -> Result<u8, Stop> {
+    run_helper(cli, home, log, true, None)
+}
+
+/// `run --detach`: the settings checked as `run` would read them (so a mistake is said here, not in
+/// a log), then the Run supervisor started in the background, and this process gone.
+fn detach(cli: &Cli, home: &Home) -> Result<u8, Stop> {
+    let cfg = config::resolve(&Sources { opts: &cli.opts, env: &env, home }, None)
+        .map_err(|e| Stop(2, e))?;
+    let target = net::target(&cfg.server_url).map_err(|e| Stop(2, e))?;
+    if DEV_GUARD {
+        net::guard_loopback(&target).map_err(|e| Stop(2, e))?;
+    }
+    let pid = crate::service::supervisor::detach().map_err(|e| Stop(1, e))?;
+    println!(
+        "the helper runs in the background (its supervisor's pid {pid}); its logs are in {}",
+        home.log_dir().display()
+    );
+    Ok(0)
+}
+
+/// What [`serve`] ended with: an exit code, or, after a console run swapped its binary for an
+/// update's, the binary it now supervises.
+enum Served {
+    Code(u8),
+    Supervise(Install),
+}
+
+/// Ctrl-C's and SIGTERM's listener ([`stop_on_signal`]), or none when the service manager stops the
+/// helper: installed at most once in a process, and only when the session starts (or a service
+/// idles). One installed before the settings are read would take a Ctrl-C at the first-run
+/// questions for a stop request and leave the question waiting for an answer, where a terminal's
+/// Ctrl-C there must quit the helper (as the default handler does until the listener is
+/// installed); so must one at a refusal's "Press Enter to close".
+struct Signals(Option<Box<dyn FnOnce() + Send>>);
+
+impl Signals {
+    /// The listener turning `tx` true, registered on `runtime` when [`Signals::listen`] is first
+    /// called ([`listen_for_stop`]).
+    fn on(
+        runtime: &tokio::runtime::Runtime,
+        tx: tokio::sync::watch::Sender<bool>,
+        log: Log,
+    ) -> Self {
+        let handle = runtime.handle().clone();
+        Signals(Some(Box::new(move || listen_for_stop(&handle, tx, log))))
+    }
+
+    /// Installs the listener, the first time only.
+    fn listen(&mut self) {
+        if let Some(install) = self.0.take() {
+            install();
+        }
+    }
+}
+
+/// What every [`serve`] of one run of the helper shares.
+struct Serving<'a> {
+    cli: &'a Cli,
+    home: &'a Home,
+    started: &'a Start,
+    runtime: &'a tokio::runtime::Runtime,
+    stop: tokio::sync::watch::Receiver<bool>,
+    service: bool,
+    signals: Signals,
+}
+
+/// The first wait before a service reads settings it could not take again; each wait after it is
+/// twice the one before, up to [`PERMANENT_RETRY`] (an hour). A cause that passes (a `helper.json`
+/// not readable yet at boot, a key file's I/O error) is retried soon, and one that stays costs a
+/// file read an hour: nothing is dialled while the settings are wrong.
+const SETTINGS_RETRY_FIRST: Duration = Duration::from_secs(15);
+/// How often an idling service looks at its settings file: a change is read at once, so a fixed
+/// `helper.json` takes effect without a restart of the service.
+const SETTINGS_POLL: Duration = Duration::from_secs(2);
+
+/// The helper itself (`run`, `run --service`, `service run`): the update's start path first (the
+/// module's doc, step 2), then [`serve`] on a runtime of its own, stopped by `given_stop` (the
+/// Windows service manager's) or else by Ctrl-C and SIGTERM (listened for once the session starts,
+/// [`Signals`]). In service mode, settings this binary cannot take idle rather than exit (the
+/// module's doc), read again after 15 s doubling to an hour, and at once when the settings file
+/// changes.
+fn run_helper(
+    cli: &Cli,
+    home: &Home,
+    log: Log,
+    service: bool,
+    given_stop: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<u8, Stop> {
+    let started = start_path(home);
+    if let Start::RolledBack(why) = &started {
+        // The log file too, when it can be opened: the service's log says why.
+        let _file = log.to_file(&home.log_dir());
+        log.error(format!("the update is rolled back: {why}"));
+        return Ok(Exit::Update.code());
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| Stop(1, format!("could not start: {e}")))?;
+    let (stop, signals) = if let Some(rx) = given_stop {
+        (rx, Signals(None))
+    } else {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        (rx, Signals::on(&runtime, tx, log.clone()))
+    };
+    let updating = matches!(started, Start::Updating { .. });
+    let settings = cli.opts.config.clone().unwrap_or_else(|| home.config_file());
+    let mut serving =
+        Serving { cli, home, started: &started, runtime: &runtime, stop, service, signals };
+    let mut idle_logged = false;
+    let mut wait = SETTINGS_RETRY_FIRST;
+    // Only the first reading of the settings may ask the first-run questions: a service reading
+    // them again has its stop listener by then.
+    let mut ask = config::interactive();
+    let outcome = loop {
+        match serve(&mut serving, log.clone(), ask) {
+            Err(Stop(2, why)) if service && !updating => {
+                ask = false;
+                // Idling, it must still stop when asked.
+                serving.signals.listen();
+                let _file = log.to_file(&home.log_dir());
+                if idle_logged {
+                    log.debug(&why);
+                } else {
+                    log.error(format!(
+                        "{why}. Running as a service: idling; the settings are read again in {} s, \
+                         then less often (at most hourly), and at once when {} changes (or restart \
+                         the service once they are fixed).",
+                        wait.as_secs(),
+                        settings.display()
+                    ));
+                    idle_logged = true;
+                }
+                match idle_on_settings(&runtime, serving.stop.clone(), wait, &settings) {
+                    Woke::Stopped => {
+                        log.info("stopped");
+                        break Ok(Served::Code(Exit::Stopped.code()));
+                    }
+                    Woke::Changed => {
+                        log.info(format!(
+                            "{} changed: reading the settings again",
+                            settings.display()
+                        ));
+                        wait = SETTINGS_RETRY_FIRST;
+                        // What the changed file still lacks is worth a line of its own.
+                        idle_logged = false;
+                    }
+                    Woke::Elapsed => wait = (wait * 2).min(PERMANENT_RETRY),
+                }
+            }
+            other => break other,
+        }
+    };
+    drop(serving);
+    runtime.shutdown_timeout(Duration::from_secs(2));
+    match outcome? {
+        Served::Code(code) => Ok(code),
+        Served::Supervise(install) => {
+            let update_dir = UpdateDir::new(home.update_dir());
+            let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+            Ok(supervise::supervise(&install, &update_dir, &args, &log))
+        }
+    }
+}
+
+/// Why an idling service woke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Woke {
+    /// It was asked to stop.
+    Stopped,
+    /// Its wait ended.
+    Elapsed,
+    /// Its settings file changed (made, written, removed).
+    Changed,
+}
+
+/// The settings file's modified time and length, `None` while it is missing: what a change of it
+/// is seen by.
+async fn stamp(file: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
+    tokio::fs::metadata(file).await.ok().map(|m| (m.modified().ok(), m.len()))
+}
+
+/// Waits `wait`, until `stop` turns true, or until `settings` changes (looked at every
+/// [`SETTINGS_POLL`]).
+fn idle_on_settings(
+    runtime: &tokio::runtime::Runtime,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    wait: Duration,
+    settings: &Path,
+) -> Woke {
+    runtime.block_on(async move {
+        let seen = stamp(settings).await;
+        let changed = async {
+            let mut tick = tokio::time::interval(SETTINGS_POLL);
+            tick.tick().await; // the first tick is at once
+            loop {
+                tick.tick().await;
+                if stamp(settings).await != seen {
+                    return;
+                }
+            }
+        };
+        let stopped = async {
+            if stop.wait_for(|s| *s).await.is_err() {
+                // Nobody can stop it any more: the wait or a change ends the idle.
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            () = tokio::time::sleep(wait) => Woke::Elapsed,
+            () = changed => Woke::Changed,
+            () = stopped => Woke::Stopped,
+        }
+    })
 }
 
 /// An update's start path for the home `home` (P4.3.8): this binary's start counted when it is the
@@ -627,11 +913,15 @@ fn facts() -> (Facts, Machine) {
     )
 }
 
-fn serve(cli: &Cli, home: &Home, log: Log, started: &Start) -> Result<u8, Stop> {
-    let prompt_ok = config::interactive();
+/// The helper, once: its settings read (with the first-run questions when `ask`), checked, and
+/// served until it stops. Ctrl-C and SIGTERM are listened for from the moment the session starts
+/// ([`Signals`]): before it, at the first-run questions and at a refusal's "Press Enter to close",
+/// a Ctrl-C quits the helper, as a terminal's Ctrl-C does.
+fn serve(s: &mut Serving<'_>, log: Log, ask: bool) -> Result<Served, Stop> {
+    let (cli, home, started, runtime, service) = (s.cli, s.home, s.started, s.runtime, s.service);
+    let stop = s.stop.clone();
     let mut terminal = config::Terminal;
-    let prompt: Option<&mut dyn config::Prompt> =
-        if prompt_ok { Some(&mut terminal) } else { None };
+    let prompt: Option<&mut dyn config::Prompt> = if ask { Some(&mut terminal) } else { None };
     let cfg = config::resolve(&Sources { opts: &cli.opts, env: &env, home }, prompt)
         .map_err(|e| Stop(2, e))?;
     log.add_secret(&cfg.token);
@@ -667,7 +957,7 @@ fn serve(cli: &Cli, home: &Home, log: Log, started: &Start) -> Result<u8, Stop> 
     let hooks = test_hooks();
     if hooks.exit_at_start {
         log.warn("TEST: this build exits at its start (CITAR_HELPER_TEST_EXIT_AT_START)");
-        return Ok(1);
+        return Ok(Served::Code(1));
     }
     let keys = update_keys(cli)?;
     let (machine_key, made) = key::load_or_create(home).map_err(|e| Stop(2, e.to_string()))?;
@@ -786,14 +1076,10 @@ fn serve(cli: &Cli, home: &Home, log: Log, started: &Start) -> Result<u8, Stop> 
         updating,
         downloads: crate::update::Downloads::default(),
     };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|e| Stop(1, format!("could not start: {e}")))?;
+    // Every check has passed and nothing asks a question any more: a Ctrl-C (or SIGTERM) from
+    // here on is a stop request, which the session ends on.
+    s.signals.listen();
     let code = runtime.block_on(async {
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        tokio::spawn(stop_on_signal(stop_tx, log.clone()));
         let helper = Helper {
             config: cfg,
             public_key: machine_key.public_b64(),
@@ -803,8 +1089,8 @@ fn serve(cli: &Cli, home: &Home, log: Log, started: &Start) -> Result<u8, Stop> 
             clock: Clock::system(),
             dialer: Arc::new(dialer),
             endpoint,
-            service: cli.opts.service,
-            stop: stop_rx,
+            service,
+            stop,
             in_flight: crate::proxy::InFlight::default(),
             sensors,
             jobs,
@@ -812,19 +1098,17 @@ fn serve(cli: &Cli, home: &Home, log: Log, started: &Start) -> Result<u8, Stop> 
         };
         helper.run().await
     });
-    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
     if code != Exit::Update {
         log.info(if code == Exit::Stopped { "stopped" } else { "stopped: permanently refused" });
-        return Ok(code.code());
+        return Ok(Served::Code(code.code()));
     }
-    if cli.opts.service || cli.opts.supervised {
+    if service || cli.opts.supervised {
         log.info("exiting 75: the service manager (or the supervisor) starts the update's binary");
-        return Ok(Exit::Update.code());
+        return Ok(Served::Code(Exit::Update.code()));
     }
-    let Some(install) = install else { return Ok(Exit::Update.code()) };
+    let Some(install) = install else { return Ok(Served::Code(Exit::Update.code())) };
     log.info("the update's binary is in place: this console run supervises it from now on");
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    Ok(supervise::supervise(&install, &update_dir, &args, &log))
+    Ok(Served::Supervise(install))
 }
 
 /// The API key the endpoint is given: the variable `api_key_env` names, else for `openai` the
@@ -841,29 +1125,142 @@ fn api_key(api_key_env: &str, provider: Provider) -> Option<String> {
     std::env::var(var).ok().filter(|k| !k.is_empty())
 }
 
-/// Ctrl-C, and SIGTERM on Unix (what a service manager sends), stop the helper.
-async fn stop_on_signal(stop: tokio::sync::watch::Sender<bool>, log: Log) {
+/// Ctrl-C, and SIGTERM on Unix (what a service manager sends), registered with the OS when this is
+/// called (in a runtime's context): the future it returns ends at the first of them. From the
+/// call on, those signals no longer end the process by themselves; one the OS cannot register is
+/// left as it was (without a console there is still SIGTERM, or the service manager's stop).
+fn stop_signals() -> impl std::future::Future<Output = ()> + Send + 'static {
     #[cfg(unix)]
-    let term = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut s) => {
-                s.recv().await;
+    let (mut first, mut second) = {
+        use tokio::signal::unix::{SignalKind, signal};
+        (signal(SignalKind::interrupt()).ok(), signal(SignalKind::terminate()).ok())
+    };
+    #[cfg(windows)]
+    let (mut first, mut second) =
+        (tokio::signal::windows::ctrl_c().ok(), None::<tokio::signal::windows::CtrlC>);
+    async move {
+        #[cfg(any(unix, windows))]
+        {
+            let one = async {
+                match first.as_mut() {
+                    Some(s) => {
+                        let _got = s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            let other = async {
+                match second.as_mut() {
+                    Some(s) => {
+                        let _got = s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                () = one => {}
+                () = other => {}
             }
-            Err(_) => std::future::pending::<()>().await,
         }
-    };
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
-    let ctrl_c = async {
-        // Without a console handler there is still SIGTERM, or the service manager's stop.
-        if tokio::signal::ctrl_c().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    };
-    tokio::select! {
-        () = ctrl_c => {}
-        () = term => {}
+        #[cfg(not(any(unix, windows)))]
+        std::future::pending::<()>().await;
     }
+}
+
+/// Ctrl-C, and SIGTERM on Unix (what a service manager sends), stop the helper (and the Run
+/// supervisor): `stop` turns true at the first of them.
+pub(crate) async fn stop_on_signal(stop: tokio::sync::watch::Sender<bool>, log: Log) {
+    stop_signals().await;
     log.info("stopping");
     let _sent = stop.send(true);
+}
+
+/// [`stop_on_signal`] with the signals registered before this returns, on `handle`'s runtime: from
+/// then on they are stop requests (what [`Signals::listen`] promises).
+fn listen_for_stop(
+    handle: &tokio::runtime::Handle,
+    stop: tokio::sync::watch::Sender<bool>,
+    log: Log,
+) {
+    let _context = handle.enter();
+    let signals = stop_signals();
+    let _listening = handle.spawn(async move {
+        signals.await;
+        log.info("stopping");
+        let _sent = stop.send(true);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("citar-helper-app-{}-{name}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("a scratch directory");
+        d
+    }
+
+    /// Ctrl-C's listener is installed only when the session starts: not before the settings are
+    /// read (a Ctrl-C at the first-run questions must quit, 4-14's review), nor when a check after
+    /// them refuses (a double-clicked helper then waits at "Press Enter to close", where a Ctrl-C
+    /// must quit too); and only once.
+    #[test]
+    fn no_stop_listener_before_the_session() {
+        let dir = scratch("signals");
+        let home = Home::at(&dir);
+        let args = [
+            std::ffi::OsString::from("citar-helper"),
+            "run".into(),
+            "--home".into(),
+            dir.clone().into(),
+        ];
+        let cli = Cli::try_parse_from(args).expect("parsed");
+        let runtime =
+            tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
+        let installed = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&installed);
+        let (_tx, stop) = tokio::sync::watch::channel(false);
+        let started = Start::Normal;
+        let mut serving = Serving {
+            cli: &cli,
+            home: &home,
+            started: &started,
+            runtime: &runtime,
+            stop,
+            service: false,
+            signals: Signals(Some(Box::new(move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }))),
+        };
+        // No settings: refused at the settings, nothing else done.
+        let Err(Stop(code, why)) = serve(&mut serving, Log::memory(), false) else {
+            panic!("refused without settings")
+        };
+        assert_eq!(code, 2, "{why}");
+        assert_eq!(installed.load(Ordering::SeqCst), 0, "no listener before the settings are read");
+        // Settings it takes, and a check after them that refuses: the log's folder cannot be made
+        // (a file stands where `helper/` goes).
+        std::fs::write(
+            home.config_file(),
+            r#"{"server_url": "http://127.0.0.1:9", "token": "cwt_app_test_0123456789abcdef", "no_llm": true}"#,
+        )
+        .expect("helper.json");
+        std::fs::write(home.state_dir(), b"a file where the folder goes").expect("written");
+        let Err(Stop(code, why)) = serve(&mut serving, Log::memory(), false) else {
+            panic!("refused at the log's folder")
+        };
+        assert_eq!(code, 1, "{why}");
+        assert!(why.contains("logs"), "{why}");
+        assert_eq!(installed.load(Ordering::SeqCst), 0, "no listener when a check refuses");
+        serving.signals.listen();
+        serving.signals.listen();
+        assert_eq!(installed.load(Ordering::SeqCst), 1, "installed once");
+        drop(serving);
+        let _cleaned = std::fs::remove_dir_all(&dir);
+    }
 }

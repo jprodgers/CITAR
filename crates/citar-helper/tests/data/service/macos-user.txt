@@ -1,0 +1,44 @@
+citar-helper service install --user (a dry run: nothing is written, started or changed)
+1. make the folder /Users/alice/Library/LaunchAgents
+2. make the folder /Users/alice/Library/Application Support/CITAR/helper/logs
+3. write /Users/alice/Library/LaunchAgents/org.citar.helper.plist (mode 0644):
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <!-- The CITAR helper as a LaunchAgent, written by `citar-helper service install --user`
+         (design/phase4-helper.md P4.3.9); `citar-helper service uninstall` unloads and removes it. -->
+    <plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>org.citar.helper</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>/Users/alice/bin/citar-helper-macos-arm64</string>
+            <string>run</string>
+            <string>--service</string>
+            <string>--home</string>
+            <string>/Users/alice/Library/Application Support/CITAR</string>
+        </array>
+        <key>RunAtLoad</key>
+        <true/>
+        <!-- started again after any exit but 0: 75 (an update), a failed start (an update rolled back) -->
+        <key>KeepAlive</key>
+        <dict>
+            <key>SuccessfulExit</key>
+            <false/>
+        </dict>
+        <key>ThrottleInterval</key>
+        <integer>15</integer>
+        <key>ProcessType</key>
+        <string>Background</string>
+        <key>StandardOutPath</key>
+        <string>/Users/alice/Library/Application Support/CITAR/helper/logs/launchd.log</string>
+        <key>StandardErrorPath</key>
+        <string>/Users/alice/Library/Application Support/CITAR/helper/logs/launchd.log</string>
+    </dict>
+    </plist>
+4. run: launchctl bootout gui/501/org.citar.helper (a failure is noted)
+5. run: launchctl bootstrap gui/501 /Users/alice/Library/LaunchAgents/org.citar.helper.plist
+
+citar-helper service uninstall --user (a dry run: nothing is written, started or changed)
+1. run: launchctl bootout gui/501/org.citar.helper (a failure is noted)
+2. remove /Users/alice/Library/LaunchAgents/org.citar.helper.plist (if it is there)

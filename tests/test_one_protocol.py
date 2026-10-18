@@ -38,9 +38,11 @@ ALLOWED = {
         ("Update citar-worker.",)),
     "crates/citar-helper/protocol/v2/transcripts/handshake-v015-server.json": (
         "a 0.1.5 server's own words, recorded", ("Update citar-worker.",)),
-    "docs/server/WORKERS.md": ("the runbook for a machine still running the 0.1.5 system unit",
-                               ("systemctl disable --now citar-worker",)),
-    "wiki/Workers.md": ("generated from docs/server/WORKERS.md", ("systemctl disable --now citar-worker",)),
+    "docs/server/WORKERS.md": ("the runbook for a machine still running the 0.1.5 system unit: it disables the unit and "
+                               "removes its file (4-14)",
+                               ("systemctl disable --now citar-worker", "citar-worker.service")),
+    "wiki/Workers.md": ("generated from docs/server/WORKERS.md",
+                        ("systemctl disable --now citar-worker", "citar-worker.service")),
     "wiki/Changelog.md": ("generated from CHANGELOG.md", None),
     "install.sh": ("--uninstall removes the link a 0.1.5 install made", ("for link in citar citar-admin citar-worker",)),
     "tests/test_one_protocol.py": ("this test", None),

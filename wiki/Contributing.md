@@ -461,6 +461,26 @@ fourth hook, `CITAR_HELPER_TEST_RETRY_S`, cuts the wait before a failed download
 (5 minutes, doubling to 6 hours). Never put a key file in the checkout:
 `tests/test_no_private_keys.py` fails on one.
 
+**The helper's services** (`src/service`, design/phase4-helper.md P4.3.9) are never installed on a
+development machine. `citar-helper service install|uninstall --dry-run` prints the plan a command
+would carry out (the systemd unit, the LaunchAgent's plist, the `sc.exe` and `reg.exe` command lines,
+the Windows service home's access list): the unit tests hold every OS's plans, made from fixed inputs,
+to the files in `crates/citar-helper/tests/data/service/` on every OS (`CITAR_BLESS_SERVICE=1` rewrites
+them after a deliberate change), and `tests/service.rs` holds the binary's own `--dry-run` to this OS's
+files. A development or test build (`dev-guard`) installs nothing on Windows, only `--dry-run`; an
+unelevated `install --system` prints the elevated command and exits 2 (its test first checks the
+process is not elevated, and stops if it is). The Run supervisor (`run --detach`, and `run
+--supervisor`, which `--detach` starts) is tested on tokio's paused clock against children of the
+tests' own (among them a helper refused for good, which must idle one attempt an hour) and with the
+real binary against a loopback fake server, its first wait after a crash cut by
+`CITAR_HELPER_TEST_SUPERVISOR_FIRST_S` (development builds only). Real installations run in WSL, with
+the dev server there: `scripts/qa_phase4.py service --wsl --wsl-root ~/CLONE --wsl-python
+~/VENV/bin/python --wsl-helper ~/TARGET/citar-ext/citar-helper` installs a systemd user unit, checks it
+connects and idles when its token is revoked, and removes it, all in one `wsl` invocation under a
+`trap` (set `MSYS_NO_PATHCONV=1` in Git Bash). And in CI: `helper.yml` installs each target's release
+build for real on the runners through `scripts/ci/service_check.py`, which refuses to run anywhere
+else.
+
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
 benchmarks need valgrind, so they run there too, and so do the helper's Linux checks (`cargo

@@ -29,6 +29,17 @@ the bots and the state of every played game stay on the server. A helper is a mo
 tunnel around it: it returns each completion exactly as its model server gave it, and the server reads
 the tool calls in it, with the same parser it uses for every model.
 
+**This guide, in order:** for the person running the server ([registering a machine](#for-the-person-running-the-server),
+[helper updates and their signing](#helper-updates), [who may do what](#who-may-do-what-to-a-machine), [the Servers
+page](#the-servers-page), [machine settings](#machine-settings-and-what-a-helpers-report-changes),
+[revocation](#revocation), [the machine key](#the-machine-key)); for the person lending the machine ([getting and
+running the helper](#for-the-person-lending-the-machine), [moving a 0.1.5 machine](#moving-from-015), [its
+settings](#the-helpers-settings-citar-016), [updates](#updates), [running it as a
+service](#running-the-helper-as-a-service), [lending CPU](#lending-cpu-what-plays-on-it-and-for-whom),
+[verification](#verification-what-a-lenders-tier-means), [credits](#credits-for-cpu-work), [CPU limits per
+OS](#cpu-limits-per-operating-system), [quiet hours](#quiet-hours), [when a machine is busy](#when-a-machine-is-busy),
+[what the server can and cannot do](#what-the-server-can-and-cannot-do)); then [troubleshooting](#troubleshooting).
+
 ---
 
 ## For the person running the server
@@ -257,15 +268,29 @@ once. A reset is audited and never changes the machine's trust tier.
 
 ## For the person lending the machine
 
-Run the **CITAR helper**: one file, with nothing else to install. The **Servers** and **Models** pages
-offer the right download for your computer (Windows, macOS on Apple silicon, Linux x64 and ARM64); the
-files are also on every [GitHub release](https://github.com/jprodgers/CITAR/releases/latest). Start it
-with no arguments (double-click it on Windows) and it asks for the server's address and the token
-once, remembers them in `helper.json` in your CITAR folder, and connects straight away every time
-after that. `citar-helper setup` asks again, to give it a new token for instance.
+Run the **CITAR helper**: one file, with nothing else to install. There are five builds, under names
+that never change:
+
+| Your computer | The file |
+|---|---|
+| Windows (64-bit) | `citar-helper-windows-x64.exe` |
+| macOS on Apple silicon (an M chip) | `citar-helper-macos-arm64` |
+| macOS on an Intel processor | `citar-helper-macos-x64` |
+| Linux x64 | `citar-helper-linux-x64` |
+| Linux ARM64 (a Raspberry Pi 4 or 5 with a 64-bit system, an ARM server) | `citar-helper-linux-arm64` |
+
+The **Servers** and **Models** pages offer the right download for your computer. A Mac's browser that
+does not say which processor it has (Safari and Firefox never do) is offered both macOS downloads:
+Apple menu → About This Mac says which (an Apple M chip, or an Intel processor). Every file is also on
+every [GitHub release](https://github.com/jprodgers/CITAR/releases/latest), each with its SHA-256 in a
+`.sha256` file beside it. Start the helper with no arguments (double-click it on Windows) and it asks
+for the server's address and the token once, remembers them in `helper.json` in your CITAR folder,
+and connects straight away every time after that. `citar-helper setup` asks again, to give it a new
+token for instance. To keep it running with the machine (or from your sign-in), and after its
+updates, install it as a service ([below](#running-the-helper-as-a-service)).
 
 On macOS and Linux, make the download executable first (`chmod +x citar-helper-*`; on macOS also
-`xattr -d com.apple.quarantine citar-helper-macos-arm64`, since the build is not notarised).
+`xattr -d com.apple.quarantine citar-helper-macos-*`, since the builds are not notarised).
 
 If the server restarts, the helper reconnects by itself (after 2 s, then backing off to a minute).
 Only a refused token or key, or a machine taken away, stops it for good.
@@ -278,19 +303,36 @@ the Python worker before 0.1.6, now say where to download the helper and exit wi
 A 0.1.6 server refuses the 0.1.5 worker with one message ("This server runs CITAR 0.1.6, which needs
 the new CITAR helper (protocol 2)…") and close code 4426, and the other way round a 0.1.6 helper waits
 for a 0.1.5 server to be upgraded, trying every 10 minutes: either side can move first, and in
-between the machine is simply offline. The 0.1.5 worker run by hand logs the message and stops. **Run
-as the system unit `citar setup --worker` installed** (`Restart=always`, `RestartSec=15`), it is
+between the machine is simply offline. The 0.1.5 worker run by hand logs the message and stops.
+
+**The 0.1.5 unit's retries.** Run as the system unit `citar setup --worker` installed
+(`/etc/systemd/system/citar-worker.service`, `Restart=always`, `RestartSec=15`), the 0.1.5 worker is
 restarted into the same refusal every 15 s until the unit is disabled: cheap for the server (no token
-lookup, a log line an hour) but noisy, so on such a machine:
+lookup, a log line an hour) but noisy, and it would hold the machine's GPU slot for nothing. So that
+unit is the first thing to go. The helper's own units are named `citar-helper.service` and restart
+only on failure, never into a refusal ([below](#running-the-helper-as-a-service)).
 
-1. `sudo systemctl disable --now citar-worker` (the 0.1.5 unit), or close the 0.1.5 worker;
-2. download `citar-helper` for the machine from the Servers page of the server;
-3. run `citar-helper setup`: it reads the old `helper.json` (its endpoint, models and quiet hours),
-   asks for the new token, and asks whether to lend CPU (default no). A `worker.json` written by
-   `citar setup --worker` works too, with `--config`.
+**The runbook, for a machine moving to a 0.1.6 server** (the owner's own machines when the VPS moves,
+design/phase4-helper.md P4.2.8):
 
-A server started on a fresh database (as the VPS's 0.1.6 will be) has no 0.1.5 token: register the
-machine again and issue a token there first.
+1. **On the server:** deploy 0.1.6 ([DEPLOY.md](Deploying-a-server)). Register the machine on the Servers page
+   (or keep its imported row) and issue it a token (Servers → the machine → Helper). A server started
+   on a fresh database, as the VPS's 0.1.6 will be, has no 0.1.5 token: the machine needs a new one
+   whatever the protocol.
+2. **On the machine, stop the 0.1.5 worker:** `sudo systemctl disable --now citar-worker` where
+   `citar setup --worker` installed it as a service (then `sudo rm
+   /etc/systemd/system/citar-worker.service && sudo systemctl daemon-reload`); otherwise close it.
+3. **Download the helper** for the machine (`citar-helper-<target>`, the table above) from the Servers
+   page, and make it executable on macOS and Linux.
+4. **Run `citar-helper setup`:** it reads the old `helper.json` (the endpoint, the models and the quiet
+   hours carry over with their meanings), asks for the new token, and asks whether to lend this
+   machine's spare CPU (default no). A `worker.json` that `citar setup --worker` wrote works too:
+   `citar-helper setup --config /etc/citar/worker.json`, or copy its settings into `helper.json`.
+5. **Run it** (`citar-helper`) and check the Servers page shows it online, with its version, protocol
+   2 and the fingerprint `citar-helper --version` prints.
+6. **Optionally install it as a service** (`citar-helper service install`, [below](#running-the-helper-as-a-service)),
+   after stopping the copy started by hand: the newest connection wins, and the older helper is told
+   it was replaced and exits.
 
 ### The helper's settings (CITAR 0.1.6)
 
@@ -324,7 +366,8 @@ as not given, and so does an empty value in the file.
 | Updates ([Updates](#updates)) | `--updates` | `updates` | | `auto` (or `notify`, `off`; `notify` in a package manager's build) |
 | Stream from the endpoint | | `stream` | | `true` |
 | Send no power samples | `--no-power` | `no_power` | | |
-| Run as a service | `--service` | | | |
+| Run as a service (what every service definition runs) | `--service` | | | |
+| Start in the background, under the Run supervisor (what Windows' Run value runs) | `run --detach` | | | |
 
 **The first run.** Started with nothing configured, at a terminal, the helper asks for the server's
 address, a token, and whether to lend this machine's spare CPU (the default is no), and offers to
@@ -445,6 +488,69 @@ By hand, in the helper's home (`--home` as the helper runs):
   `helper/update/failed.json`): with `updates: auto` the helper does not install it again at its next connection, and
   the Servers page shows it refused as rolled back on this machine. Delete that file (or run `update apply`) to take it
   again.
+
+### Running the helper as a service
+
+`citar-helper service install` keeps the helper running: started with the machine (or at your sign-in),
+started again after an update's hand-off and after a crash, and never into a refusal. `service
+uninstall` stops and removes it; `service status` says whether it is installed and running (exit 0 when
+it runs, 3 when it does not). `--dry-run` prints exactly what `install` or `uninstall` would write and
+run (the unit file, the plist, the `sc.exe` and `reg.exe` command lines, the home's access list) and
+changes nothing.
+
+A service reads its settings from its home's `helper.json` alone (a service has no command line of
+yours and no variables of yours), so set the helper up first: run it once by hand, or `citar-helper
+setup` (with `--home DIR` for another home). `install` refuses settings flags (`--server`, `--token`,
+...) rather than drop them, and refuses a home whose settings would not start. Every definition runs
+the helper with `--service`, its home's absolute path and the binary's: the binary stays where it is
+(except for the Windows service, below), so keep it there; an update replaces it in place.
+
+| Your system | `--user` (the default) | `--system` |
+|---|---|---|
+| Linux | a systemd user unit, `~/.config/systemd/user/citar-helper.service` (`Restart=on-failure`, `RestartSec=15`, `RestartPreventExitStatus=78`, `NoNewPrivileges=yes`), enabled and started with `systemctl --user`. It runs while you are logged in; to keep it running after you log out, run once `loginctl enable-linger $USER` (the helper prints the line and never runs it). Its output is in `journalctl --user -u citar-helper` | `/etc/systemd/system/citar-helper.service`, the same rules, with `User=` the account that ran `sudo`; run it as `sudo citar-helper service install --system --home DIR`, a home of that account's. Unelevated, it prints that command and exits 2 |
+| macOS | a LaunchAgent, `~/Library/LaunchAgents/org.citar.helper.plist` (`RunAtLoad`, `KeepAlive` with `SuccessfulExit` false, `ThrottleInterval` 15), loaded with `launchctl bootstrap gui/<uid>`: it runs while you are logged in. Its output is in `helper/logs/launchd.log` in the home | not offered |
+| Windows | the value `CITAR helper` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, which starts `citar-helper run --detach --home …` at your sign-in (and `install` starts it now): a small supervisor runs the helper in the background with no window, starts it again at once after an update and after a crash with backoff (15 s doubling to 10 minutes), and stops when it stops (exit 0). Its log is `helper/logs/supervisor.log` beside the helper's | the Windows service `citar-helper`, started with the machine, running as the virtual account `NT SERVICE\citar-helper` (not LocalSystem). From an elevated prompt (Run as administrator): `citar-helper setup --home "C:\ProgramData\CITAR\helper"`, then `citar-helper service install --system`. Unelevated, it prints the elevated command and exits 2 |
+
+**The Windows service in detail.** `install --system` copies the binary into
+`%ProgramData%\CITAR\helper\bin` (updates, run by the service's account, replace it there; the file you
+ran can go), and gives the home `%ProgramData%\CITAR\helper` an access list of SYSTEM, Administrators
+and the service's account alone, owned by Administrators, with nothing inherited from `%ProgramData%`
+(which would let every user of the machine read `helper.json`, which holds the token, and the machine
+key). Under `%ProgramData%` any user may make folders and files, and owns what they make, so before
+anything is made `install` checks every folder above the home, up to the drive's root: each must be
+owned by SYSTEM, Administrators, TrustedInstaller or you, and none may let another account delete or
+rename it or what it holds, or change its permissions or owner (a `%ProgramData%\CITAR` that another
+user made before you install would let that user move the home aside and put their own, binary and
+all, in its place, to run as the service). A missing folder above the home (`%ProgramData%\CITAR`
+the first time) is made with its access list from its first moment: Administrators and SYSTEM, and
+Users may read. The home is made the same way when missing, and taken over only when nothing in it
+belongs to another account and no link, junction or hard link leads to it or lies in it; its `bin` is
+made after it is secured. Otherwise `install` names the folder or file to remove and changes nothing.
+Its recovery actions start it again 15 s after every failure, a non-zero exit code included (so
+an update's hand-off, exit 75, restarts it), with no limit on how often. The service writes its
+machine key for its own account: an administrator's `citar-helper --version --home ...` cannot read it
+and prints no fingerprint, and the Servers page's Helper dialog shows it instead. `service run` is the
+service's own entry, which the service manager starts; run from a console it says so and exits 2.
+
+**What a service run does that a console run does not.** Exit codes are part of the contract:
+
+| Exit code | Meaning | What the service manager does |
+|---|---|---|
+| 0 | stopped by you or the service manager | nothing (the Run supervisor stops too) |
+| 75 | restart for an update ([Updates](#updates)): the new binary is in place | starts it (systemd and launchd after 15 s, the Windows service after 15 s, the Run supervisor at once) |
+| 78 | refused for good (a console run only) | systemd does not restart it; a service run never exits with it |
+| anything else | a crash, or a start that failed (a new binary's are counted, and the fourth puts the old one back) | starts it again (15 s; the Run supervisor backs off to 10 minutes) |
+
+A service run **never exits on something permanent**: a token refused, a machine taken away, another
+helper's key (the paragraph "When the server says no", below), and also settings it
+cannot take or a machine key others can read. It says why once in its log, idles, and stops at once
+when asked. A refusal from the server is tried again every hour. Settings it cannot take are read
+again after 15 s, then after twice as long each time up to an hour, and at once when `helper.json`
+changes, so a fixed file takes effect within seconds without a restart, and a file not readable yet
+at boot costs seconds, not an hour. So no service manager restarts it into a loop every 15 s, as the
+0.1.5 unit did. The one exception is an update in progress: a new
+binary that cannot take its settings exits, so that its starts are counted and the old binary is put
+back ([Updates](#updates)).
 
 ### Lending CPU: what plays on it, and for whom
 
@@ -636,7 +742,8 @@ the same kind of command, about a `helper.json` others can read, since that hold
 **When the server says no.** A refused token or key, or a machine taken away (revoked, disabled,
 deleted, suspended, or replaced by another helper with the same token), is permanent: run from a
 console the helper says why and exits with code 78; as a service (`--service`) it waits an hour
-before trying again, so no service manager restarts it in a loop. A server that does not speak the
+before trying again, so no service manager restarts it in a loop
+([Running the helper as a service](#running-the-helper-as-a-service)). A server that does not speak the
 helper's protocol (a 0.1.5 server, say) is tried again every 10 minutes, and the helper connects by
 itself once the server is upgraded. Anything else (a restart, a dropped connection) is retried after
 2 s, then backing off to a minute.
@@ -785,6 +892,17 @@ says when a listing of the models failed.
 
 **Everything looks fine and completions fail.** The model is probably not loaded. A catalogue entry
 is not the same as a model in memory.
+
+**The service does not start, or does nothing.** `citar-helper service status` (with the same
+`--user`/`--system` and `--home`) says whether it runs; the helper's log in its home
+(`helper/logs/helper.log`) says why it does not connect. A service whose settings are wrong runs and
+idles, saying why once in that log: fix `helper.json`, and it reads it again within seconds. One whose
+token was revoked idles and tries again every hour: give it a new token (`citar-helper setup --home
+...`), then restart it (`systemctl --user restart citar-helper`, `launchctl kickstart -k
+gui/$(id -u)/org.citar.helper`, `sc.exe stop`/`start citar-helper` from an elevated prompt, or
+`service uninstall` and `install` again). On Linux a user service stops when you log out unless
+lingering is on (`loginctl enable-linger $USER`). On Windows `install --system` needs an elevated
+prompt, and says so.
 
 **The update says unavailable, refused or failed.** *Unavailable*: this build trusts no update key (every build until
 the first signed release): download the new helper from the Servers page. *Refused*: the reason follows (the same or

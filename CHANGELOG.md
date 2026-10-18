@@ -299,6 +299,22 @@ that means for an existing install:
   that trusts no update key fetches nothing (no hourly GitHub request and warning), relays only a manifest of its own
   engine build, and logs a helper's update status once per change; committing the owner's public key keeps the test
   suite green.
+- **The helper runs as a service** (design/phase4-helper.md P4.3.9): `citar-helper service install|uninstall|status
+  [--user|--system] [--dry-run]`. Linux: a systemd user unit (or, as root, a system unit with `User=`) that restarts
+  on failure and never on a permanent refusal (`RestartPreventExitStatus=78`); macOS: a LaunchAgent (`KeepAlive` with
+  `SuccessfulExit` false); Windows: a Run value at sign-in that starts `citar-helper run --detach`, a supervisor with no
+  window that restarts the helper at once after an update and with backoff after a crash, or, from an elevated prompt,
+  a Windows service running as `NT SERVICE\citar-helper` (not LocalSystem) from `%ProgramData%\CITAR\helper`, whose
+  access list leaves out the machine's other users, restarted after every failure; it is installed only when no
+  folder above that home is another account's to take over. `--dry-run` prints exactly what would be written and run.
+  In service mode nothing permanent ends the helper: a refused token idles and tries again hourly, and a setting it
+  cannot take idles and is read again after 15 s (doubling to an hour) or as soon as `helper.json` changes.
+  [docs/server/WORKERS.md](docs/server/WORKERS.md#running-the-helper-as-a-service).
+- **Five helper downloads:** an Intel Mac build (`citar-helper-macos-x64`) joins Windows x64, macOS on Apple silicon
+  and Linux x64 and ARM64, all built in Rust by the release workflow under the same unversioned names, each with its
+  `.sha256`, run once with `--version` and `--self-test`. The Servers page offers a Mac whose browser does not say its
+  processor (Safari, Firefox) both macOS downloads. `helper.yml` tests the helper on the five targets and installs it
+  as a service on each OS's runner. [packaging/README.md](packaging/README.md#the-citar-helper).
 
 **Chat** ([docs/PLAYING.md](docs/PLAYING.md), [docs/AI_PLAYERS.md](docs/AI_PLAYERS.md)):
 
@@ -357,6 +373,12 @@ own, and all of them at once in one game, with a real model in LM Studio last
   counts as a refused token (the helper is asked to try again).
 - A cancelled request kept running on its helper until it finished, holding its slot (draining); the
   helper now stops it.
+- A Mac whose browser does not say its processor (Safari and Firefox, on Apple silicon and Intel
+  alike) was offered the Apple silicon helper only; it is now offered both macOS builds.
+- A helper run as a service with a setting it cannot take exited with code 2, which a service
+  manager restarted every 15 s for ever; it now idles, says why once in its log and reads its
+  settings again after 15 s, doubling to an hour, and at once when `helper.json` changes (except
+  while an update's new binary must have its starts counted).
 
 **Rules the Rust engine fixes.** The new engine in `crates/citar-engine`, which replaces the Python
 engine in this release, plays by the same rules except where the Python engine was wrong or

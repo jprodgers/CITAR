@@ -163,13 +163,16 @@ Full walkthrough, including what to do when you have an nginx already: [server/D
 
 ## The CITAR helper
 
-The CITAR helper lends this machine's models to a CITAR server somewhere else. It is one file with
-nothing else to install, and its connection is outbound, so nothing needs to be opened on your
-router. Download it from the server's **Servers** page (it offers the file for your computer) or
-from the [latest release](https://github.com/jprodgers/CITAR/releases/latest), and run it with a
-token from whoever runs the server; they issue one on the Servers page, or with
-`citar admin add-server --name "your machine"`. Since 0.1.6 the helper replaces the Python worker:
-`citar worker`, `install.sh --worker` and `install.ps1 -Worker` only say where to download it. See
+The CITAR helper lends this machine's models (and, if you say so, its spare CPU) to a CITAR server
+somewhere else. It is one file with nothing else to install, and its connection is outbound, so
+nothing needs to be opened on your router. There are five builds: Windows x64, macOS on Apple silicon
+and on Intel, Linux x64 and ARM64. Download yours from the server's **Servers** page (it offers the
+file for your computer; a Mac's Safari or Firefox gets both macOS files, since neither says which
+processor the Mac has) or from the [latest release](https://github.com/jprodgers/CITAR/releases/latest),
+and run it with a token from whoever runs the server; they issue one on the Servers page, or with
+`citar admin add-server --name "your machine"`. `citar-helper service install` then keeps it running
+with the machine or from your sign-in. Since 0.1.6 the helper replaces the Python worker: `citar
+worker`, `install.sh --worker` and `install.ps1 -Worker` only say where to download it. See
 [server/WORKERS.md](Workers).
 
 ---
