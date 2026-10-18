@@ -2982,15 +2982,25 @@ def _hybrid_benchmarks(h: Harness) -> None:
                                                   "mean_deal_value", "fallbacks_per_game")}
                         for k, v in ((str(k), v) for k, v in lines_a.items())})[:600])
     code_b, lines_b, body_b = board(bob)
-    code_z, lines_z, _ = board(admin)
+    # design/phase4-helper.md P4.5.8 rule 11 (package 4-12): a member's machine's model results count on the global
+    # boards, the administrators' whole-site board among them, only once an administrator trusts the machine; until
+    # then they are counted as unverified there
+    _code, lines_held, body_held = board(admin)
+    held = {(u.get("model"), u.get("owners")): u.get("pairs") for u in body_held.get("unverified") or []}
+    trusted = admin.put(f"/api/admin/machines/{mid}/trust", json={"trust_tier": "trusted"})
+    code_z, lines_z, _ = wait_until(lambda: (lambda b: b if (b[1].get(("dry-run", "all_but_war")) or {}).get("pairs")
+                                             else None)(board(admin)), 15, 0.5) or board(admin)
     code_v, _lines_v, _ = board(None)
     zline = lines_z.get(("dry-run", "all_but_war")) or {}
-    r.check("bob, who may not see her private runs, sees none of their pairs; the administrator sees every pair named; "
-            "a visitor is refused",
+    r.check("bob, who may not see her private runs, sees none of their pairs; the administrator's board leaves them "
+            "out while bob's machine is not trusted (counted as unverified, P4.5.8 rule 11) and names every pair once "
+            "an administrator trusts it; a visitor is refused",
             code_b == 200 and not any(k[0] in ("dry-run", "dry-run-b") for k in lines_b)
-            and run_a not in json.dumps(body_b) and code_z == 200 and zline.get("pairs") == 2
-            and len(zline.get("games") or []) == 2 and code_v == 401,
-            f"bob {code_b} {sorted(lines_b)}; admin {code_z} {zline.get('pairs')}; visitor {code_v}")
+            and run_a not in json.dumps(body_b) and ("dry-run", "all_but_war") not in lines_held
+            and held.get(("dry-run", "all_but_war")) == 2 and trusted.status_code == 200
+            and code_z == 200 and zline.get("pairs") == 2 and len(zline.get("games") or []) == 2 and code_v == 401,
+            f"bob {code_b} {sorted(lines_b)}; admin before trusting: unverified {held}; trust "
+            f"{trusted.status_code}; admin {code_z} {zline.get('pairs')}; visitor {code_v}")
     data.update({"runs": [run_a, run_b], "controls": controls,
                  "pairs": [{"seed": j.get("seed"), **{k: (j.get("result") or {}).get("pair", {}).get(k)
                                                       for k in ("score_diff", "deals", "deal_value_mean",
