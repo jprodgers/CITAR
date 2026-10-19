@@ -39,15 +39,18 @@ With ``--version V`` every place is held to V instead of the source. The command
   (and with ``--github-output`` appends to that file) ``version``, ``pep440`` (maturin's mapping: ``-rc.1`` is
   ``rc1``), ``numeric``, ``label``, ``date`` (one per run, so jobs either side of midnight agree), ``mode`` and
   ``prerelease``. In ``ci`` mode the version is the source's.
-- ``notes`` prints V's CHANGELOG section byte for byte (the text after its heading, up to the next ``## `` heading or the
-  link definitions at the end), which is what release.yml's awk printed.
+- ``notes`` prints V's CHANGELOG section byte for byte (the text after its heading, up to the next ``## `` heading or
+  the link definitions at the end), which is what release.yml's awk printed.
 - ``assets`` prints the release's file names (P5.10), the one list every job and check compares with: each file then
   its ``.sha256``, ``SHA256SUMS`` last; ``--signed`` adds the manifest's signature (a signed tag's); ``--json`` gives
   them with their groups.
 
 Every command takes ``--root DIR``, the checkout (by default the one this script is in). Standard library only, so a
-job runs it before installing anything. Exit status: 0 done; 1 a place out of step, or a version, bump or section
-refused (each named); 2 a usage error.
+job runs it before installing anything, on Python 3.11 or newer (the package's own floor; ``tomllib`` reads the
+manifests): a job runs it after ``actions/setup-python``, as ``python`` on Windows, and inside a manylinux container
+as ``/opt/python/cp311-cp311/bin/python``, never the image's system ``python3``. An older interpreter (Ubuntu 22.04's
+``python3`` is 3.10) is refused with that reason, before anything else is read. Exit status: 0 done; 1 a place out of
+step, or a version, bump or section refused (each named); 2 a usage error, an older Python among them.
 """
 from __future__ import annotations
 
@@ -57,9 +60,19 @@ import json
 import os
 import re
 import sys
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+#: The oldest Python this script runs on: ``tomllib`` came in 3.11. The whole file keeps to Python 3.8's grammar, so an
+#: older interpreter compiles it and reaches this refusal instead of dying on an ImportError's traceback (tests hold
+#: both).
+OLDEST_PYTHON = (3, 11)
+if sys.version_info < OLDEST_PYTHON:
+    print(f"release.py needs Python {'.'.join(map(str, OLDEST_PYTHON))} or newer (it reads TOML with tomllib); this "
+          f"is Python {'.'.join(map(str, sys.version_info[:3]))}", file=sys.stderr)
+    sys.exit(2)
+
+import tomllib  # after the version check, which names what an older Python lacks
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO_URL = "https://github.com/jprodgers/CITAR"
@@ -338,7 +351,8 @@ class Tree:
         if every_member:
             for name in members:
                 if name not in seen:
-                    self.problems.append(f"{text.rel}: no entry for the workspace member {name} (run cargo to update it)")
+                    self.problems.append(f"{text.rel}: no entry for the workspace member {name} "
+                                         "(run cargo to update it)")
 
     def _one(self, text: Text, pattern: str, what: str, rule: str) -> None:
         found = [(i, m) for i, body in enumerate(text.bodies()) if (m := re.fullmatch(pattern, body))]

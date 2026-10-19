@@ -10,6 +10,7 @@ tag may name a prerelease (``-f version=0.1.6-rc.1``), so the copy tests also ru
 ``...FromAPrerelease`` classes): a prerelease's next release shares its ``X.Y.Z``, and so the installer's numeric
 version.
 """
+import ast
 import contextlib
 import importlib.util
 import io
@@ -798,6 +799,36 @@ class Standalone(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("Cargo.toml:", done.stderr)
         self.assertEqual(subprocess.run([sys.executable, "-I", str(SCRIPT)], capture_output=True).returncode, 2)
+
+    def run_as(self, version_info: tuple, *argv: str, tomllib_missing: bool):
+        """The script as ``python -I -S`` runs it, under an interpreter that reports ``version_info`` (and, as before
+        3.11, has no ``tomllib`` when ``tomllib_missing``)."""
+        program = ("import runpy, sys\n"
+                   + ("sys.modules['tomllib'] = None\n" if tomllib_missing else "")
+                   + f"sys.version_info = {version_info!r}\n"
+                   f"runpy.run_path({str(SCRIPT)!r}, run_name='__main__')\n")
+        return subprocess.run([sys.executable, "-I", "-S", "-c", program, *argv], capture_output=True, text=True,
+                              cwd=tempfile.gettempdir())
+
+    def test_an_older_python_is_refused_with_its_reason(self):
+        """Ubuntu 22.04's python3 is 3.10, which has no tomllib: a job that runs the script there is told why, with a
+        usage error's status, instead of an ImportError's traceback."""
+        done = self.run_as((3, 10, 12, "final", 0), "check", tomllib_missing=True)
+        self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertEqual(done.stderr, "release.py needs Python 3.11 or newer (it reads TOML with tomllib); this is "
+                                      "Python 3.10.12\n")
+        # 3.11 itself is enough.
+        done = self.run_as((3, 11, 0, "final", 0), "check", tomllib_missing=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(f"agree on {SOURCE}", done.stdout)
+
+    def test_older_pythons_compile_it_up_to_the_refusal(self):
+        """An older interpreter compiles the whole file before the version check runs, so the file keeps to Python
+        3.8's grammar (ast checks the forms that came after it; the f-strings 3.12 allows are held by the suite's
+        Python 3.11 job, which compiles the script when this module loads it)."""
+        ast.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT), feature_version=(3, 8))
+        with self.assertRaises(SyntaxError):  # the check can fail: a form 3.8 lacks
+            ast.parse("match x:\n    case 1:\n        pass\n", feature_version=(3, 8))
 
 
 if __name__ == "__main__":
