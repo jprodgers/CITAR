@@ -80,7 +80,12 @@ its version in a comment. CI checks only that form. The second asks GitHub that 
 action's repository and that the version in the comment names it; CI does not run it, because it needs the network
 and a token that the tests workflow must not hold. To add an action, write it with its tag (`actions/checkout@v7`)
 and let `python scripts/ci/action_pins.py pin --write` replace the tag with the commit (`@3d3c42e... # v7.0.1`).
-Dependabot's weekly pull request moves the pins.
+Dependabot's weekly pull request moves the pins. The images a workflow builds or runs in (maturin-action's
+`container:`, a job's `container:` or `services:`, a `docker://` step) are pinned too, by digest
+(`quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b...`), with the tag and the date in a comment beside them; the first
+check refuses a moving tag there, and a maturin-action step that would pick its own image. Dependabot does not move
+these: to update one, look up the digest its tag names today (for quay.io,
+`https://quay.io/api/v1/repository/pypa/<name>/tag/?specificTag=latest`) and replace it, comment and all.
 
 ## Conventions
 
@@ -419,14 +424,19 @@ its feature list never names `test-ops`: `cargo xtask check` refuses one that wo
 test operations or `legacy`, so no wheel carries them. `test.yml`'s build-ext job builds a test
 wheel per OS (the ci profile with `--features test-ops`); each test job installs only the
 dependencies (`scripts/ci/requirements.py all`) and unpacks the wheel's library into the checkout
-(`scripts/ci/unpack_ext.py`, which fails unless it imports with the test operations), and the
-package job builds the release wheel as it would ship. Every wheel and the source distribution are
-built with one maturin, `MATURIN_VERSION` at the top of `test.yml`, and `scripts/ci/check_dist.py`
-holds each to the checkout: the files git tracks under `citar/`, the library, and nothing stray,
-and in the source distribution the ruleset the engine compiles in (`crates/citar-engine/data/`).
-After changing `[tool.maturin]`'s `include` or `exclude`, or moving that pin, run it on a local
-build (`python scripts/ci/check_dist.py wheel DIR`, or `sdist DIR`). To run the suite as a test job
-does:
+(`scripts/ci/unpack_ext.py`, which fails unless it imports with the test operations).
+`package.yml` builds what a release ships, on every pull request: the five release wheels (Windows
+x64, macOS arm64 and x64, Linux x64 and arm64 in the manylinux_2_28 containers), each on its own
+runner with the build label set, and the source distribution and a wheel built from it as a user
+would; `scripts/ci/smoke_wheel.py` installs each wheel in a fresh venv on Python 3.11 and 3.14 and
+proves it there (its label, a verifiable job host, one seeded lab game whose result hash every
+platform shares). Every wheel and the source distribution are built with one maturin,
+`MATURIN_VERSION` at the top of both workflows (a test holds them equal), and
+`scripts/ci/check_dist.py` holds each to the checkout: the files git tracks under `citar/`, the
+library, the licence files, and nothing stray, and in the source distribution the ruleset the
+engine compiles in (`crates/citar-engine/data/`). After changing `[tool.maturin]`'s `include` or
+`exclude`, or moving that pin, run it on a local build (`python scripts/ci/check_dist.py wheel
+DIR`, or `sdist DIR`). To run the suite as a test job does:
 
 ```bash
 maturin build --profile ci --features test-ops --out "$CARGO_TARGET_DIR/wheels"

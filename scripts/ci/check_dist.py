@@ -1,26 +1,32 @@
-"""Hold a built wheel or source distribution to the checkout it was built from, for CI's build-ext and package jobs.
+"""Hold a built wheel or source distribution to the checkout it was built from, for CI's build-ext job and
+package.yml's wheel and sdist jobs.
 
 maturin decides what each file carries from pyproject.toml's ``include`` and ``exclude``, the package folder and
 ``.gitignore``, and how it reads them has changed between its releases (crates/citar-engine/DESIGN.md, "As built in
-2-06b"). test.yml pins the maturin it builds with (``MATURIN_VERSION``); this check makes a change of either one, the
-pin or the lists, fail the job when it drops a file or picks up a stray one, rather than ship it.
+2-06b"). test.yml and package.yml pin the maturin they build with (``MATURIN_VERSION``); this check makes a change of
+either one, the pin or the lists, fail the job when it drops a file or picks up a stray one, rather than ship it.
 
-    python scripts/ci/check_dist.py wheel WHEEL_OR_DIR [--tag TAG] [--library NAME]
-    python scripts/ci/check_dist.py sdist SDIST_OR_DIR
+    python scripts/ci/check_dist.py wheel WHEEL_OR_DIR [--tag TAG] [--library NAME] [--version P]
+    python scripts/ci/check_dist.py sdist SDIST_OR_DIR [--version P]
 
 A wheel must have:
 
 - one ``Tag``, ``TAG`` when given (and the file name ending in it), otherwise a ``cp311-abi3`` one;
 - exactly one extension library ``citar/_engine.*``, named ``NAME`` when given;
 - under ``citar/``, exactly the files git tracks there, and the library;
-- everything else inside its one ``citar-<version>.dist-info/``, the version being the file name's;
+- everything else inside its one ``citar-<version>.dist-info/``, the version being the file name's, which its
+  ``METADATA`` repeats, and which is ``P`` when given (the release's PEP 440 version, ``release.py meta``'s
+  ``pep440``);
+- PEP 639's licence files: each of ``[project]``'s ``license-files`` under the dist-info's ``licenses/``, its
+  ``METADATA`` naming exactly those as ``License-File`` and ``[project]``'s ``license`` as ``License-Expression``;
 - every tracked file that a wheel ``include`` names, at its own path;
 - no member twice.
 
 A source distribution must have:
 
-- one top folder, ``citar-<version>/``, the file name's;
+- one top folder, ``citar-<version>/``, the file name's, which its ``PKG-INFO`` repeats, and which is ``P`` when given;
 - in it, nothing but files git tracks, and ``PKG-INFO``;
+- each licence file at the top, ``PKG-INFO`` naming exactly those as ``License-File`` and the licence's expression;
 - every file git tracks under ``citar/``, every tracked file that an sdist ``include`` names and no ``exclude`` takes
   away, and the files a build from it starts from (``pyproject.toml``, the workspace's ``Cargo.toml`` and
   ``Cargo.lock``, ``crates/citar-py/Cargo.toml``);
@@ -59,6 +65,8 @@ SDIST_NEEDS = ("pyproject.toml", "Cargo.toml", "Cargo.lock", "crates/citar-py/Ca
 SDIST_NEEDS_TREES = ("crates/citar-engine/data/",)
 #: The one file in a source distribution that no checkout has: its metadata, which the build writes.
 SDIST_OWN = "PKG-INFO"
+#: Where a wheel keeps its licence files (PEP 639): under its dist-info.
+LICENSES = "licenses/"
 
 
 class Refused(Exception):
@@ -142,9 +150,43 @@ def listed(what: str, paths) -> list[str]:
     return [f"{what}: {p}" for p in sorted(paths)]
 
 
+def metadata_fields(text: str) -> dict[str, list[str]]:
+    """A METADATA or PKG-INFO file's header fields (up to the first blank line, where the description starts), each
+    name's values in order. A continuation line (one starting with whitespace) belongs to the field above it."""
+    fields: dict[str, list[str]] = {}
+    last = None
+    for line in text.splitlines():
+        if not line.strip():
+            break
+        if line[0] in " \t" and last is not None:
+            fields[last][-1] += "\n" + line.strip()
+            continue
+        name, sep, value = line.partition(":")
+        if not sep:
+            continue
+        last = name.strip()
+        fields.setdefault(last, []).append(value.strip())
+    return fields
+
+
+def check_metadata(fields: dict[str, list[str]], where: str, version: str, licenses: tuple[str, ...],
+                   expression: str | None) -> list[str]:
+    """The version and the licence fields of a wheel's METADATA or a source distribution's PKG-INFO."""
+    problems = []
+    if fields.get("Version") != [version]:
+        problems.append(f"{where} says Version {fields.get('Version')}, not {version}")
+    if licenses and sorted(fields.get("License-File", [])) != sorted(licenses):
+        problems.append(f"{where} names the licence files {fields.get('License-File', [])}, not {list(licenses)}")
+    if expression is not None and fields.get("License-Expression") != [expression]:
+        problems.append(f"{where} says License-Expression {fields.get('License-Expression')}, not {expression}")
+    return problems
+
+
 def check_wheel(path: Path, tracked: set[str], maturin: dict, tag: str | None = None,
-                library: str | None = None) -> list[str]:
-    """What is wrong with the wheel at ``path``: one line per difference, none when it is as it should be."""
+                library: str | None = None, version: str | None = None, licenses: tuple[str, ...] = (),
+                expression: str | None = None) -> list[str]:
+    """What is wrong with the wheel at ``path``: one line per difference, none when it is as it should be.
+    ``licenses`` and ``expression`` are ``[project]``'s ``license-files`` and ``license`` (not checked when not given)."""
     parts = path.name.removesuffix(".whl").split("-")
     if not path.name.endswith(".whl") or len(parts) not in (5, 6):
         return [f"{path.name}: not a wheel's file name (name-version[-build]-python-abi-platform.whl)"]
@@ -157,8 +199,12 @@ def check_wheel(path: Path, tracked: set[str], maturin: dict, tag: str | None = 
     with archive:
         names = archive.namelist()
         meta = archive.read(dist_info + "WHEEL").decode("utf-8") if dist_info + "WHEEL" in names else None
+        metadata = (archive.read(dist_info + "METADATA").decode("utf-8")
+                    if dist_info + "METADATA" in names else None)
     problems = twice(names)
     members = set(names)
+    if version is not None and parts[1] != version:
+        problems.append(f"its file name says version {parts[1]}, not {version}")
 
     if meta is None:
         problems.append(f"no {dist_info}WHEEL")
@@ -175,6 +221,10 @@ def check_wheel(path: Path, tracked: set[str], maturin: dict, tag: str | None = 
     for needed in ("METADATA", "RECORD"):
         if dist_info + needed not in members:
             problems.append(f"no {dist_info}{needed}")
+    if metadata is not None:
+        problems += check_metadata(metadata_fields(metadata), f"{dist_info}METADATA", parts[1], licenses, expression)
+    problems += listed("missing (a licence file, PEP 639)",
+                       {f"{dist_info}{LICENSES}{name}" for name in licenses} - members)
 
     in_package = {m for m in members if m.startswith(PACKAGE) and not m.endswith("/")}
     libraries = sorted(m for m in in_package - tracked if LIBRARY.fullmatch(m))
@@ -192,17 +242,26 @@ def check_wheel(path: Path, tracked: set[str], maturin: dict, tag: str | None = 
     return problems
 
 
-def check_sdist(path: Path, tracked: set[str], maturin: dict) -> list[str]:
-    """What is wrong with the source distribution at ``path``: one line per difference, none when it is right."""
+def check_sdist(path: Path, tracked: set[str], maturin: dict, version: str | None = None,
+                licenses: tuple[str, ...] = (), expression: str | None = None) -> list[str]:
+    """What is wrong with the source distribution at ``path``: one line per difference, none when it is right.
+    ``licenses`` and ``expression`` are ``[project]``'s ``license-files`` and ``license`` (not checked when not given)."""
     if not path.name.endswith(".tar.gz"):
         return [f"{path.name}: not a source distribution's file name (name-version.tar.gz)"]
     top = path.name.removesuffix(".tar.gz")
+    pkg_info = None
     try:
         with tarfile.open(path, "r:gz") as archive:
             entries = archive.getmembers()
+            info = next((e for e in entries if e.isfile() and e.name == f"{top}/{SDIST_OWN}"), None)
+            if info is not None:
+                pkg_info = archive.extractfile(info).read().decode("utf-8")
     except (OSError, tarfile.TarError) as e:
         return [f"{path.name}: not a source distribution ({e})"]
     problems, files = [], []
+    own_version = top.partition("-")[2]
+    if version is not None and own_version != version:
+        problems.append(f"its file name says version {own_version}, not {version}")
     for entry in entries:
         head, _, rest = entry.name.partition("/")
         if head != top:
@@ -215,6 +274,9 @@ def check_sdist(path: Path, tracked: set[str], maturin: dict) -> list[str]:
     members = set(files)
     if SDIST_OWN not in members:
         problems.append(f"no {SDIST_OWN}")
+    if pkg_info is not None:
+        problems += check_metadata(metadata_fields(pkg_info), SDIST_OWN, own_version, licenses, expression)
+    problems += listed("missing (a licence file, PEP 639)", set(licenses) - members)
     problems += listed("stray (git does not track it)", members - tracked - {SDIST_OWN})
     want = {p for p in tracked if p.startswith(PACKAGE)}
     problems += listed("missing (git tracks it under citar/)", want - members)
@@ -234,16 +296,24 @@ def main(argv=None) -> int:
     wheel.add_argument("--library", help="the extension library's member name, e.g. citar/_engine.abi3.so")
     sdist = kinds.add_parser("sdist", help="check a source distribution")
     sdist.add_argument("path", type=Path, help="a .tar.gz, or a directory holding exactly one")
+    for kind in (wheel, sdist):
+        kind.add_argument("--version", help="the PEP 440 version it must carry, e.g. 0.1.6rc1 (default: its own)")
     args = parser.parse_args(argv)
     try:
-        maturin = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["maturin"]
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        maturin = pyproject["tool"]["maturin"]
+        licenses = tuple(pyproject["project"].get("license-files", ()))
+        expression = pyproject["project"].get("license")
+        if not isinstance(expression, str) or not licenses:
+            raise Refused("pyproject.toml's [project] has no SPDX license expression and license-files (PEP 639), "
+                          "which this check holds every file to")
         tracked = tracked_files()
         if args.kind == "wheel":
             path = find(args.path, ".whl")
-            problems = check_wheel(path, tracked, maturin, args.tag, args.library)
+            problems = check_wheel(path, tracked, maturin, args.tag, args.library, args.version, licenses, expression)
         else:
             path = find(args.path, ".tar.gz")
-            problems = check_sdist(path, tracked, maturin)
+            problems = check_sdist(path, tracked, maturin, args.version, licenses, expression)
     except Refused as e:
         print(f"check_dist: {e}", file=sys.stderr)
         return 2

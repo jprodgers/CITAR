@@ -18,10 +18,13 @@
 //!     crate, or citar-py's own `test-ops` (the Python suite's builds; `features` holds the rest
 //!     of that feature);
 //!   - in `pyproject.toml`'s maturin features (`pyproject`);
-//!   - on any line of `release.yml`, and of `helper.yml`'s artifact jobs (those whose id starts
-//!     with `artifact`) and its workflow-wide `env:` and `defaults:`, which apply to every job;
-//!     none of these may pass `--all-features`, or a feature list held in a variable
-//!     (`--features $FEATURES`, `-F ${{ matrix.features }}`), which no check can read. The
+//!   - on any line of `release.yml` and `package.yml` (design/phase5-release.md P5.3, from
+//!     5-02b: every build a release ships, the wheels among them), and of `helper.yml`'s artifact
+//!     jobs (those whose id starts with `artifact`) and its workflow-wide `env:` and `defaults:`,
+//!     which apply to every job; none of these may name citar-py's `test-ops` either (the engine's
+//!     test operations, which no wheel carries), nor pass `--all-features`, or a feature list
+//!     held in a variable (`--features $FEATURES`, `-F ${{ matrix.features }}`), which no check can
+//!     read. A literal list of features that ship (`--features packaged`, P5.4.1) passes. The
 //!     workflows are read as text, as `triggers` reads rust.yml: a comment is not a build line,
 //!     and a job id is a key at the indentation of the first key under `jobs:`, whatever it is.
 //!
@@ -48,14 +51,19 @@ pub const HELPER_CRATES: &[&str] = &["citar-helper", "citar-jobs"];
 pub const TEST_FEATURES: &[&str] =
     &["test-faults", "test-update-key", "test-jobs", "dev-guard", "conformance"];
 
-/// The workflow that builds releases, read whole.
+/// The workflow that releases, read whole.
 pub const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
+/// The workflow that builds every artifact a release ships (from 5-02b), read whole.
+pub const PACKAGE_WORKFLOW: &str = ".github/workflows/package.yml";
 /// The helper's workflow (from 4-14), whose artifact jobs are read.
 pub const HELPER_WORKFLOW: &str = ".github/workflows/helper.yml";
 /// helper.yml's jobs that build what ships: their ids start with this.
 pub const ARTIFACT_JOB: &str = "artifact";
 /// A workflow's top-level keys that apply to every job, so to the artifact jobs too.
 pub const WORKFLOW_WIDE: &[&str] = &["env", "defaults"];
+/// The workflows read, each whole (`None`) or only its jobs whose id starts with the prefix.
+pub const WORKFLOWS: &[(&str, Option<&str>)] =
+    &[(RELEASE_WORKFLOW, None), (PACKAGE_WORKFLOW, None), (HELPER_WORKFLOW, Some(ARTIFACT_JOB))];
 
 /// Every rule above, against the workspace at `root`.
 pub fn check(root: &Path, meta: &Metadata) -> Result<Vec<Finding>, String> {
@@ -67,7 +75,7 @@ pub fn check(root: &Path, meta: &Metadata) -> Result<Vec<Finding>, String> {
         }
     }
     out.extend(check_features(meta));
-    for (file, jobs) in [(RELEASE_WORKFLOW, None), (HELPER_WORKFLOW, Some(ARTIFACT_JOB))] {
+    for &(file, jobs) in WORKFLOWS {
         let path = root.join(file);
         if path.is_file() {
             let text = std::fs::read_to_string(&path)
@@ -203,9 +211,15 @@ fn features_from_a_variable(code: &str) -> bool {
     })
 }
 
+/// The words a watched line may not hold: the helper crates' test features and citar-py's
+/// `test-ops`, which no shipped build carries.
+fn never_built() -> impl Iterator<Item = &'static str> {
+    TEST_FEATURES.iter().copied().chain([TEST_OPS])
+}
+
 /// A workflow's lines that would build a test feature into what ships: every line of
-/// `release.yml`, or the lines of `helper.yml`'s jobs whose id starts with `jobs_prefix` and of
-/// its workflow-wide `env:` and `defaults:`.
+/// `release.yml` and `package.yml`, or the lines of `helper.yml`'s jobs whose id starts with
+/// `jobs_prefix` and of its workflow-wide `env:` and `defaults:`.
 pub fn check_workflow(file: &str, text: &str, jobs_prefix: Option<&str>) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut top: Option<String> = None;
@@ -241,8 +255,7 @@ pub fn check_workflow(file: &str, text: &str, jobs_prefix: Option<&str>) -> Vec<
         if !watched {
             continue;
         }
-        let mut named: Vec<&str> =
-            TEST_FEATURES.iter().copied().filter(|f| body.contains(f)).collect();
+        let mut named: Vec<&str> = never_built().filter(|f| body.contains(f)).collect();
         if body.contains("--all-features") {
             named.push("--all-features");
         }
@@ -462,13 +475,34 @@ mod tests {
         assert_eq!(check_workflow(RELEASE_WORKFLOW, release, None).len(), 1);
     }
 
-    /// The workflows as they are pass.
+    /// package.yml is read whole, as release.yml is (5-02b): the wheels' builds may not name the
+    /// extension's test operations, and the packaged helper's literal feature list passes.
+    #[test]
+    fn package_yml_is_read_whole() {
+        let package = "jobs:\n  wheels:\n    steps:\n      # never test-ops here\n      - uses: PyO3/maturin-action@x # v1\n        with:\n          args: --release --locked --out dist\n      - run: maturin build --release --features test-ops\n  helpers:\n    steps:\n      - run: cargo build --release --locked -p citar-helper --features packaged\n      - run: cargo build -p citar-helper --features dev-guard\n      - run: cargo build --features \"$EXTRA\"\n";
+        let found: Vec<String> = check_workflow(PACKAGE_WORKFLOW, package, None)
+            .into_iter()
+            .map(|f| f.message)
+            .collect();
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(
+            found[0].starts_with(".github/workflows/package.yml:8: names `test-ops`"),
+            "{found:?}"
+        );
+        assert!(found[1].contains(":12: names `dev-guard`"), "{found:?}");
+        assert!(found[2].contains(":13: takes its feature list from a variable"), "{found:?}");
+        assert!(WORKFLOWS.contains(&(PACKAGE_WORKFLOW, None)));
+    }
+
+    /// The workflows as they are pass: each that exists, as it is read.
     #[test]
     fn the_workflows_as_they_are_pass() -> Result<(), String> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let text =
-            std::fs::read_to_string(root.join(RELEASE_WORKFLOW)).map_err(|e| e.to_string())?;
-        assert_eq!(check_workflow(RELEASE_WORKFLOW, &text, None), []);
+        for &(file, jobs) in WORKFLOWS {
+            let text =
+                std::fs::read_to_string(root.join(file)).map_err(|e| format!("{file}: {e}"))?;
+            assert_eq!(check_workflow(file, &text, jobs), [], "{file}");
+        }
         Ok(())
     }
 }

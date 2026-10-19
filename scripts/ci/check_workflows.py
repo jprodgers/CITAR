@@ -40,7 +40,11 @@ pinned job, and a secret that a build or an installer could read. Each rule is c
     workflow runs ``build_wiki.py --push``;
 11. every remote ``uses:`` (a step's or a job's) is pinned to a 40-character commit SHA, with its version in a comment
     on the same line (``@<sha> # v7.0.1``); ``./`` references are exempt, and a ``docker://`` image needs a
-    ``@sha256:`` digest. ``scripts/ci/action_pins.py verify`` proves the pins against GitHub;
+    ``@sha256:`` digest. So does every other image a workflow runs, each matrix leg's: a job's ``container:`` and
+    ``services:``, and the one a maturin-action step builds in on Linux, its ``container:`` (``off`` builds on the
+    runner); a step that names none while its ``manylinux`` asks for a container (``publish`` and a cross target
+    ask for ``auto``) would build in maturin-action's own image, by a moving tag, and is refused.
+    ``scripts/ci/action_pins.py verify`` proves the action pins against GitHub;
 12. a job that calls a workflow passes no ``secrets:`` (never ``inherit``) and sets ``permissions: contents: read``;
 13. artifact names: package.yml uploads only ``pkg-...``, release.yml only ``rel-...``, and no other workflow either
     prefix; the upload names, each matrix leg's, are unique across test.yml, package.yml and release.yml; every
@@ -115,6 +119,10 @@ TAINTED = re.compile(
     re.IGNORECASE)
 EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 SHA40 = re.compile(r"[0-9a-f]{40}")
+#: An image named by its content: ``registry/name@sha256:<64 hex>``.
+DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
+#: maturin-action's ``container:`` values that name no image: each takes one from the action's own table.
+MATURIN_TABLE_IMAGE = ("on", "auto", "true")
 VERSION_COMMENT = re.compile(r"v?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?")
 USES_LINE = re.compile(r"""^\s*(?:-\s+)?uses:\s*(["']?)(?P<ref>[^\s"'#]+)\1\s*(?:#\s*(?P<comment>.*))?$""")
 
@@ -1280,6 +1288,92 @@ def rule_11(wf: Workflow) -> list[Finding]:
         if not ref.startswith("./") and len(jobs) > seen.get(ref, 0):
             out.append(Finding(wf.name, jobs[0], 11, f"{ref} is written where its pin and comment cannot be read "
                                                      f"(put `uses:` on a line of its own)"))
+    return out + image_findings(wf)
+
+
+def cli_value(args: str, flag: str) -> str:
+    """The value of ``flag`` in an action's ``args`` string (``--target X`` or ``--target=X``), else ``""``."""
+    words = args.split()
+    for i, word in enumerate(words):
+        if word == flag and i + 1 < len(words):
+            return words[i + 1]
+        if word.startswith(flag + "="):
+            return word[len(flag) + 1:]
+    return ""
+
+
+def maturin_image_problem(given: dict, value, os_name: str | None) -> str | None:
+    """Why a maturin-action step would build in an image not pinned by digest, or None. As the action decides
+    (PyO3/maturin-action's ``innerMain``): only on Linux and only for ``build`` and ``publish`` does it build in a
+    container; the one ``container:`` names (``off``: none), or else, when ``manylinux`` asks for one, one from its
+    table by a moving tag. ``manylinux`` defaults to ``auto`` for ``publish`` and for a Linux target it cross-compiles
+    to (read here whatever the runner's architecture, which is the stricter reading)."""
+    if os_name not in (None, "Linux"):
+        return None
+    command = value(given.get("command")) or "build"
+    if command not in ("build", "publish"):
+        return None
+    container = value(given.get("container"))
+    if container == "off":
+        return None
+    if container and container.lower() not in MATURIN_TABLE_IMAGE:
+        return None if DIGEST.search(container) else f"its container {container} is not pinned by a sha256 digest"
+    manylinux = re.sub(r"^manylinux_?", "", value(given.get("manylinux")))
+    target = value(given.get("target")) or cli_value(value(given.get("args")), "--target")
+    cross = "linux" in target and "android" not in target and not ("x86_64" in target or "i686" in target)
+    if not manylinux and (command == "publish" or cross):
+        manylinux = "auto"
+    if container or (manylinux and manylinux != "off"):
+        return (f"builds in maturin-action's own image for manylinux {manylinux or 'auto'}, a moving tag: name its "
+                f"container by a sha256 digest, or set manylinux: off")
+    return None
+
+
+def image_findings(wf: Workflow) -> list[Finding]:
+    """Rule 11's images, each matrix leg's: a job's ``container:`` and ``services:``, and the image each
+    maturin-action step builds in, each pinned by a sha256 digest."""
+    out = []
+    for job_id, job in wf.jobs.items():
+        if not isinstance(job, dict):
+            continue
+        legs = matrix_legs(job)
+        runs_on = job.get("runs-on", "")
+        labels = runs_on if isinstance(runs_on, list) else [runs_on]
+        for index, leg in enumerate(legs):
+            os_name = runner_os([expand(label, leg, None, index) for label in labels])
+
+            def value(raw, leg=leg, os_name=os_name, index=index) -> str:
+                if raw is None:
+                    return ""
+                # A key a leg does not have reads as empty, as GitHub reads it.
+                text = expand(raw, leg, os_name, index)
+                return re.sub(r"\$\{\{\s*matrix\.[A-Za-z0-9_-]+\s*\}\}", "", text).strip()
+
+            where = ""
+            if len(legs) > 1:
+                where = f" (leg {leg.get('platform') or leg.get('os') or leg.get('runner') or index})"
+            images = []
+            container = job.get("container")
+            if isinstance(container, dict):
+                container = container.get("image")
+            if container is not None:
+                images.append(("its container", value(container)))
+            services = job.get("services")
+            for name, service in (services.items() if isinstance(services, dict) else ()):
+                image = service.get("image") if isinstance(service, dict) else service
+                if image is not None:
+                    images.append((f"its service {name}", value(image)))
+            for what, image in images:
+                if image and not DIGEST.search(image):
+                    out.append(Finding(wf.name, job_id, 11, f"{what} {image}{where} is not pinned by a sha256 "
+                                                            f"digest"))
+            for i, step in enumerate(wf.steps(job)):
+                if action_of(step.get("uses")) != "pyo3/maturin-action":
+                    continue
+                given = step.get("with")
+                problem = maturin_image_problem(given if isinstance(given, dict) else {}, value, os_name)
+                if problem:
+                    out.append(Finding(wf.name, job_id, 11, f"{step_label(i, step)}{where}: {problem}"))
     return out
 
 

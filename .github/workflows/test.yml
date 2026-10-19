@@ -9,9 +9,10 @@
 # The Rust extension, citar._engine, is built once per OS (build-ext) and every job that needs it
 # takes that build rather than compiling its own: the test jobs unpack it into the checkout, so the
 # checkout's own sources run with it and the four Linux Pythons (3.11 to 3.14) share one abi3
-# library, and the installer jobs install its wheel. The package and docker jobs use a release
-# wheel without the test operations instead, as a release would ship it
-# (crates/citar-engine/DESIGN.md P2.6.8).
+# library (crates/citar-engine/DESIGN.md P2.6.8). What a release ships is package.yml's: the five
+# release wheels and the source distribution, installed and smoke-tested on their own runners, and
+# the install script and the image on those wheels (design/phase5-release.md P5.3; the package,
+# installer and docker jobs moved there in 5-02b).
 #
 # release.yml calls this workflow on a tag and on a release's dry run (design/phase5-release.md
 # P5.11, P5.17), with the mode, the version and the date, no secrets and contents: read. Every job
@@ -57,10 +58,11 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental artefacts are never reused on a fresh runner; they only slow the cache down.
   CARGO_INCREMENTAL: 0
-  # The maturin every wheel and source distribution here is built with: the version tested, moved on
-  # deliberately. Left to itself maturin-action takes the newest release that pyproject.toml's
-  # `maturin>=1.15,<2` allows, and how maturin reads the include and exclude lists has changed
-  # between minor releases; scripts/ci/check_dist.py then holds what it built to the checkout.
+  # The maturin the test wheels are built with, package.yml's for the release ones (a test holds the
+  # two pins equal): the version tested, moved on deliberately. Left to itself maturin-action takes
+  # the newest release that pyproject.toml's `maturin>=1.15,<2` allows, and how maturin reads the
+  # include and exclude lists has changed between minor releases; scripts/ci/check_dist.py then
+  # holds what it built to the checkout.
   MATURIN_VERSION: v1.15.0
   # The release run's mode, version and date (workflow_call's inputs; a run of its own is mode ci).
   # They reach release.py prepare's shell through the environment, never written into a script.
@@ -104,8 +106,8 @@ jobs:
         # engine tests need them, and the ci profile keeps the debug assertions. This is also where
         # the extension links on each OS (Windows through raw-dylib, macOS with `-undefined
         # dynamic_lookup` from crates/citar-py/build.rs). On Linux it builds on the runner itself
-        # (`manylinux: off`, a plain `linux` tag), so the cache above serves it; the package job
-        # builds the manylinux wheel.
+        # (`manylinux: off`, a plain `linux` tag), so the cache above serves it; package.yml builds
+        # the release wheels, the manylinux ones among them.
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           maturin-version: ${{ env.MATURIN_VERSION }}
@@ -114,9 +116,9 @@ jobs:
           manylinux: "off"
 
       - name: One abi3 wheel, holding the package and the extension
-        # The installer jobs install this wheel, so what it holds matters as much as the package
-        # job's: one cp311-abi3 tag, this OS's library, the files git tracks under citar/ and
-        # nothing else but the dist-info.
+        # The test jobs run this wheel's library, so it is held to what package.yml holds the
+        # release wheels to: one cp311-abi3 tag, this OS's library, the files git tracks under
+        # citar/ and nothing else but the dist-info.
         shell: bash
         run: |
           ls -l wheels
@@ -359,213 +361,3 @@ jobs:
         # one file and fails, on Node 24 too.
         run: node --test "citar/web/tests/*.test.mjs"
 
-  package:
-    name: wheel installs and runs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: The version this run tests
-        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
-        # a run of its own (mode ci) only checks.
-        shell: bash
-        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
-
-      - name: Toolchain
-        # For the source distribution, which asks cargo for the crates' files on the runner.
-        run: rustup toolchain install
-
-      - name: The source distribution
-        # Before the wheel: the container below leaves target/ owned by root.
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
-        with:
-          maturin-version: ${{ env.MATURIN_VERSION }}
-          command: sdist
-          args: --out dist
-
-      - name: Build the release wheel
-        # As a release ships it: the release profile, and pyproject.toml's features, which never
-        # include the test operations. In the manylinux_2_28 container, so the wheel installs on
-        # any glibc from 2.28: the Docker image's Debian 12 (2.36) and the VPS. The container
-        # installs rust-toolchain.toml's toolchain itself.
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
-        with:
-          maturin-version: ${{ env.MATURIN_VERSION }}
-          command: build
-          args: --release --locked --out dist
-          manylinux: "2_28"
-
-      - name: One abi3 manylinux_2_28 wheel, and both files hold what the checkout says
-        # The wheel: its one tag, its library, exactly the files git tracks under citar/ and the
-        # dist-info. The source distribution: only tracked files, all of citar/ and everything its
-        # includes name. scripts/ci/check_dist.py lists any difference.
-        run: |
-          ls -l dist
-          python scripts/ci/check_dist.py wheel dist --tag cp311-abi3-manylinux_2_28_x86_64 --library citar/_engine.abi3.so
-          python scripts/ci/check_dist.py sdist dist
-
-      - name: Install the wheel into a clean environment
-        run: |
-          python -m venv /tmp/fresh
-          /tmp/fresh/bin/pip install --quiet dist/*.whl
-
-      - name: It runs, and its data and its engine came with it
-        # The failure this catches is a packaging change that drops the ruleset, the web client or
-        # the extension: the wheel installs, the command runs, and the first game fails.
-        #
-        # Run from /tmp, and with -P. `python -c` puts the current directory at the front of
-        # sys.path, so running this from the checkout imported the *source tree* and asserted
-        # nothing at all about the wheel - it passed while the wheel was broken.
-        working-directory: /tmp
-        run: |
-          /tmp/fresh/bin/citar --version
-          /tmp/fresh/bin/citar where
-          /tmp/fresh/bin/citar doctor --quiet
-          /tmp/fresh/bin/python -P -c "
-          import json
-          from citar import paths
-          from citar import _engine
-          assert 'site-packages' in paths.PACKAGE.as_posix(), f'not testing the wheel: {paths.PACKAGE}'
-          assert 'site-packages' in _engine.__file__, f'the extension is not from the wheel: {_engine.__file__}'
-          assert not _engine.HAS_TEST_OPS, 'the release wheel carries the test operations'
-          info = json.loads(_engine.build_info())
-          assert info['version'] == __import__('citar').__version__, info
-          assert info['ruleset_dir'] is None, info
-          print('extension', _engine.__file__, info)
-          # The ruleset is compiled into the extension (crates/citar-engine/data): no file to find.
-          counts = json.loads(_engine.ruleset_counts())
-          assert counts['techs'] > 50 and counts['nations'] > 40, f'the ruleset did not load: {counts}'
-          assert (paths.collectors_dir() / 'collect_hardware.sh').is_file(), 'collectors missing from the wheel'
-          assert (paths.web_dir() / 'index.html').is_file(), 'web client missing from the wheel'
-          assert (paths.migrations_dir() / 'env.py').is_file(), 'migrations missing from the wheel'
-          assert list((paths.migrations_dir() / 'versions').glob('*.py')), 'no migrations in the wheel'
-          print('package contents OK', counts)
-          "
-
-      - name: An installed copy writes to the user directory, not site-packages
-        # The bug this pins: every module used to resolve its own directory from __file__, which
-        # put saved games inside site-packages once CITAR was installed from a wheel.
-        working-directory: /tmp
-        run: |
-          /tmp/fresh/bin/python -P -c "
-          from citar import paths
-          assert 'site-packages' in paths.PACKAGE.as_posix(), f'not testing the wheel: {paths.PACKAGE}'
-          assert not paths.in_source_checkout(), 'an installed copy thinks it is a checkout'
-          assert 'site-packages' not in str(paths.save_dir()), paths.save_dir()
-          print('state directory OK:', paths.save_dir())
-          "
-
-      - name: Metadata is valid for PyPI
-        run: |
-          pip install twine
-          twine check dist/*
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        # For the docker job, which builds the image from this wheel.
-        with:
-          name: wheel-manylinux
-          path: dist/*.whl
-          if-no-files-found: error
-          retention-days: 7
-
-  installer:
-    name: install.sh works
-    needs: build-ext
-    # A failed build on one OS fails this job on that OS alone, at the download of its missing
-    # wheel: without this condition a matrix need skips the job on every OS when any leg fails.
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with: { python-version: "3.12" }
-
-      - name: The version this run tests
-        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
-        # a run of its own (mode ci) only checks.
-        shell: bash
-        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        # --from lets the script install a local wheel instead of PyPI, so the installer is tested
-        # on the code in the pull request rather than on the last release: here the build-ext
-        # job's wheel for this OS.
-        with:
-          name: ext-${{ runner.os }}
-          path: wheels
-
-      - name: Install
-        run: bash install.sh --from "$(ls wheels/*.whl)" --no-setup
-
-      - name: It installed, and it runs
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          citar --version
-          citar where
-          citar doctor --quiet
-          # The unattended path the installers use. With no model server running on a CI runner it
-          # configures for scripted bots, which is the correct outcome and the one least tested by
-          # hand.
-          citar setup --local --non-interactive
-
-      - name: Uninstall leaves no program behind, and no data missing
-        run: |
-          bash install.sh --uninstall
-          test ! -e "$HOME/.local/share/citar-app" || { echo "prefix survived the uninstall"; exit 1; }
-          test ! -e "$HOME/.local/bin/citar" || { echo "command survived the uninstall"; exit 1; }
-          echo "uninstall is clean"
-
-  docker:
-    needs: package
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: The version this run tests
-        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
-        # a run of its own (mode ci) only checks.
-        shell: bash
-        run: python3 scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        # The Dockerfile installs the package from wheelhouse/, never building Rust in the image.
-        with:
-          name: wheel-manylinux
-          path: wheelhouse
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build the image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          push: false
-          load: true
-          tags: citar:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: It starts and answers
-        run: |
-          docker run -d --name citar-ci -p 8765:8765 citar:ci
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8765/api/auth/config >/dev/null 2>&1; then
-              echo "answered after ${attempt}s"
-              docker rm -f citar-ci
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "the container never answered:"
-          docker logs citar-ci
-          exit 1
-      - name: The image's engine has no test operations
-        run: |
-          docker run --rm --entrypoint python citar:ci -c "
-          import citar._engine as E
-          assert not E.HAS_TEST_OPS, 'the image carries the test operations'
-          print('engine', E.build_info())
-          "
