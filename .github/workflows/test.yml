@@ -11,6 +11,15 @@
 # checkout's own sources run with it and the three Linux Pythons share one abi3 library, and the
 # installer jobs install its wheel. The package and docker jobs use a release wheel without the
 # test operations instead, as a release would ship it (crates/citar-engine/DESIGN.md P2.6.8).
+#
+# release.yml calls this workflow on a tag and on a release's dry run (design/phase5-release.md
+# P5.11, P5.17), with the mode, the version and the date, no secrets and contents: read. Every job
+# starts, after the checkout and its interpreter, with scripts/release.py prepare: a dry run bumps
+# the runner's checkout to its version there, so the suite runs on what a tag of the bumped branch
+# would build; a tag checks that every place agrees with it; a run of its own (mode ci) checks.
+# scripts/ci/check_workflows.py (the lint job) holds this file to P5.17's rules: it publishes
+# nothing, names no environment and no secret, every action is pinned to a commit, and every job
+# prepares before it builds or tests.
 name: tests
 
 on:
@@ -18,10 +27,26 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      mode:
+        description: "ci, dry-run or tag: what scripts/release.py prepare does first in every job"
+        type: string
+        default: ci
+      version:
+        description: "the release's version, without the leading v (dry-run and tag)"
+        type: string
+        default: ""
+      date:
+        description: "a dry run's bump date, YYYY-MM-DD (one per run, so every job bumps alike)"
+        type: string
+        default: ""
 
 concurrency:
-  # A new push supersedes the run in flight for the same branch.
-  group: tests-${{ github.ref }}
+  # A new push supersedes the run in flight for the same branch. When release.yml calls this
+  # workflow, github.workflow is the caller's name, so its run never shares a group with a push's
+  # (it can neither wait on its caller nor be cancelled by a later push: check_workflows.py's rule 4).
+  group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -36,6 +61,11 @@ env:
   # `maturin>=1.15,<2` allows, and how maturin reads the include and exclude lists has changed
   # between minor releases; scripts/ci/check_dist.py then holds what it built to the checkout.
   MATURIN_VERSION: v1.15.0
+  # The release run's mode, version and date (workflow_call's inputs; a run of its own is mode ci).
+  # They reach release.py prepare's shell through the environment, never written into a script.
+  RELEASE_MODE: ${{ inputs.mode || 'ci' }}
+  RELEASE_VERSION: ${{ inputs.version || '' }}
+  RELEASE_DATE: ${{ inputs.date || '' }}
 
 jobs:
   build-ext:
@@ -48,6 +78,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # PyO3 reads an interpreter's configuration when it builds; any Python of 3.11 or later
+        # does for an abi3 build. It runs release.py first.
+        with:
+          python-version: "3.12"
+
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
       - name: Toolchain
         # rust-toolchain.toml pins the exact release; maturin-action reads the same file.
         run: rustup toolchain install
@@ -55,12 +97,6 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: build-ext
-
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        # PyO3 reads an interpreter's configuration when it builds; any Python of 3.11 or later
-        # does for an abi3 build.
-        with:
-          python-version: "3.12"
 
       - name: Build the test wheel
         # The ci profile with the test operations, as `cargo xtask develop` builds it: the suite's
@@ -138,6 +174,8 @@ jobs:
           - { os: ubuntu-latest, python: "3.11" }
           - { os: ubuntu-latest, python: "3.12" }
           - { os: ubuntu-latest, python: "3.13" }
+          # The newest the classifiers claim (design/phase5-release.md P5.17).
+          - { os: ubuntu-latest, python: "3.14" }
           - { os: windows-latest, python: "3.12" }
           - { os: macos-latest, python: "3.12" }
     steps:
@@ -147,6 +185,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -227,6 +271,12 @@ jobs:
             3.13
             3.14
 
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ext-Linux
@@ -255,13 +305,24 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install ruff
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+      - run: pip install ruff pyyaml
       - run: ruff check --output-format=github .
       - name: Every place the version lives agrees
         # scripts/release.py (design/phase5-release.md P5.2): Cargo.toml's version, both locks' workspace entries,
         # __version__, the installer script's defaults, KNOWN_ISSUES' header and the changelog. A half-done bump
         # fails here, naming each place with its file and line.
         run: python scripts/release.py check
+      - name: The workflows keep the release's rules
+        # scripts/ci/check_workflows.py (design/phase5-release.md P5.17): every workflow reads only, and
+        # nothing publishes outside a tag push (release.yml) or main (docs.yml); no environment but
+        # those allowed; every action pinned to a commit; called workflows get no secrets; artifact
+        # names apart; nothing installed or built where a secret or a write permission is held.
+        run: python scripts/ci/check_workflows.py
 
   frontend:
     name: front-end syntax
@@ -271,6 +332,11 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python3 scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
       - name: Parse every module as an ES module
         # `node --check` on a .js file parses it as CommonJS, where `import` is a syntax error only
         # in some positions — a broken template literal inside a ternary once passed this check and
@@ -301,6 +367,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
 
       - name: Toolchain
         # For the source distribution, which asks cargo for the crates' files on the runner.
@@ -415,6 +487,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: "3.12" }
 
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         # --from lets the script install a local wheel instead of PyPI, so the installer is tested
         # on the code in the pull request rather than on the last release: here the build-ext
@@ -449,6 +527,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python3 scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         # The Dockerfile installs the package from wheelhouse/, never building Rust in the image.
         with:
