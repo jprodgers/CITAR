@@ -395,8 +395,9 @@ class Requirements(unittest.TestCase):
 
 
 class SmokeWheel(unittest.TestCase):
-    """smoke_wheel.py's parts that run without a built wheel: the venv folder's rule, the environment the checks run
-    in, the constraints file's rule, the smoke line, and the version's PEP 440 form (release.py's)."""
+    """smoke_wheel.py's parts that run without a built wheel: the rule for the folders it clears (checked before any
+    is touched), the environment the checks run in, the constraints file's rule, the smoke line, and the version's
+    PEP 440 form (release.py's)."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="citar-smoke-"))
@@ -414,17 +415,122 @@ class SmokeWheel(unittest.TestCase):
         with self.assertRaisesRegex(smoke_wheel.Refused, "no such wheel"):
             smoke_wheel.find_wheel(self.tmp / "missing")
 
-    def test_a_folder_that_is_no_venv_is_never_cleared(self):
+    def test_a_folder_this_script_did_not_make_is_never_cleared(self):
         folder = self.tmp / "work"
         folder.mkdir()
         (folder / "notes.txt").write_text("keep me")
-        with self.assertRaisesRegex(smoke_wheel.Refused, "is no venv"):
-            smoke_wheel.fresh_venv(sys.executable, folder)
+        (folder / "pyvenv.cfg").write_text("home = elsewhere\n")      # a venv, but not one a run made
+        for clear in (lambda: smoke_wheel.fresh_venv(sys.executable, folder), lambda: smoke_wheel.renew(folder)):
+            with self.assertRaisesRegex(smoke_wheel.Refused, "did not make"):
+                clear()
         self.assertEqual((folder / "notes.txt").read_text(), "keep me")
         a_file = self.tmp / "file"
         a_file.write_text("x")
         with self.assertRaisesRegex(smoke_wheel.Refused, "is a file"):
             smoke_wheel.fresh_venv(sys.executable, a_file)
+        self.assertEqual(a_file.read_text(), "x")
+
+    def test_an_empty_or_marked_folder_is_made_afresh_and_marked(self):
+        empty, marked = self.tmp / "empty", self.tmp / "marked"
+        empty.mkdir()
+        (marked / "sub").mkdir(parents=True)
+        (marked / smoke_wheel.MARKER).write_text("")
+        (marked / "sub" / "old.txt").write_text("from an earlier run")
+        for folder in (empty, marked, self.tmp / "new" / "deeper"):
+            with self.subTest(folder=folder.name):
+                smoke_wheel.renew(folder)
+                self.assertEqual(sorted(p.name for p in folder.iterdir()), [smoke_wheel.MARKER])
+                smoke_wheel.own_folder(folder, "the folder")        # a later run may clear it again
+
+    def test_a_link_is_never_cleared(self):
+        target = self.tmp / "precious"
+        target.mkdir()
+        (target / smoke_wheel.MARKER).write_text("")
+        (target / "data.txt").write_text("keep me")
+        links = []
+        try:
+            (self.tmp / "symlink").symlink_to(target, target_is_directory=True)
+            links.append(self.tmp / "symlink")
+        except OSError:  # Windows without the symbolic-link privilege
+            pass
+        if sys.platform == "win32":
+            import _winapi
+            _winapi.CreateJunction(str(target), str(self.tmp / "junction"))
+            links.append(self.tmp / "junction")
+        if not links:
+            self.skipTest("no link of either kind can be made here")
+        for link in links:
+            with self.subTest(link=link.name):
+                with self.assertRaisesRegex(smoke_wheel.Refused, "is a link"):
+                    smoke_wheel.renew(link)
+                with self.assertRaisesRegex(smoke_wheel.Refused, "is a link"):
+                    smoke_wheel.claim(sys.executable, link, [])
+                self.assertEqual((target / "data.txt").read_text(), "keep me")
+                # a link above the folder is no link of the folder's (macOS's /tmp is one)
+                (target / "child").mkdir(exist_ok=True)
+                (target / "child" / smoke_wheel.MARKER).write_text("")
+                (target / "child" / "old.txt").write_text("from an earlier run")
+                smoke_wheel.renew(link / "child")
+                self.assertEqual(sorted(p.name for p in (target / "child").iterdir()), [smoke_wheel.MARKER])
+                self.assertEqual((target / "data.txt").read_text(), "keep me")
+
+    def smoke_args(self, work: Path, python: str, *more: str) -> list:
+        return ["smoke", "--wheel", str(wheel(self.tmp, {})), "--python", python, "--work", str(work),
+                "--out", str(self.tmp / "o.json"), "--version", "0.1.5", "--label", "unknown", "--platform", "x",
+                *more]
+
+    def test_a_refused_run_clears_nothing(self):
+        import contextlib
+        import io
+        work = self.tmp / "footgun"
+        (work / "state").mkdir(parents=True)
+        (work / "run").mkdir()
+        (work / "state" / "precious.txt").write_text("keep me")
+        (work / "run" / "notes.txt").write_text("keep me too")
+        cases = (
+            # a --python that does not run: refused before anything is touched
+            (str(self.tmp / "no-such-python"), "does not run"),
+            # a working --python, but state/ and run/ hold files no run made
+            (sys.executable, "did not make"),
+        )
+        for python, why in cases:
+            with self.subTest(why=why), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(smoke_wheel.main(self.smoke_args(work, python)), 2)
+                self.assertIn(why, err.getvalue())
+                self.assertEqual((work / "state" / "precious.txt").read_text(), "keep me")
+                self.assertEqual((work / "run" / "notes.txt").read_text(), "keep me too")
+                self.assertFalse((work / "venv").exists())
+        # an earlier run's folders (marked), but a --python that does not run: still nothing cleared
+        for sub in ("state", "run"):
+            (work / sub / smoke_wheel.MARKER).write_text("")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(smoke_wheel.main(self.smoke_args(work, str(self.tmp / "no-such-python"))), 2)
+        self.assertEqual((work / "state" / "precious.txt").read_text(), "keep me")
+        self.assertEqual((work / "run" / "notes.txt").read_text(), "keep me too")
+
+    def test_the_venv_is_never_an_interpreter_this_run_uses(self):
+        import contextlib
+        import io
+        prefixes = smoke_wheel.interpreter_prefixes(sys.executable)
+        self.assertEqual(prefixes, [Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()])
+        constraints = ["constraints", "--wheel", str(wheel(self.tmp, {})), "--python", sys.executable,
+                       "--work", str(self.tmp / "w"), "--out", str(self.tmp / "c.txt")]
+        for venv in sorted({sys.prefix, sys.base_prefix}):
+            for argv in (self.smoke_args(self.tmp / "w", sys.executable), constraints):
+                with self.subTest(venv=venv, command=argv[0]), contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(smoke_wheel.main([*argv, "--venv", venv]), 2)
+                    self.assertIn("holds the interpreter", err.getvalue())
+        self.assertTrue(Path(sys.executable).is_file())
+        self.assertFalse((self.tmp / "w").exists())
+        # nor a folder holding one, nor the state or run folder
+        with self.assertRaisesRegex(smoke_wheel.Refused, "holds the interpreter"):
+            smoke_wheel.claim(sys.executable, Path(sys.prefix).resolve().parent, [])
+        work = self.tmp / "w2"
+        with self.assertRaisesRegex(smoke_wheel.Refused, "overlap"):
+            smoke_wheel.claim(sys.executable, work / "state", [work / "state", work / "run"])
+        with self.assertRaisesRegex(smoke_wheel.Refused, "overlap"):
+            smoke_wheel.claim(sys.executable, work, [work / "state", work / "run"])
+        self.assertFalse(work.exists())
 
     def test_the_checks_run_with_no_citar_variable_but_the_state_ones(self):
         import os

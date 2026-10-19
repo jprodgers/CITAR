@@ -37,9 +37,13 @@ citar`` to ``--out``: the release's tested dependency set (``citar-<pep440>-serv
 and the server's deploy install with ``--constraint`` (P5.7, P5.13). Each of its lines must pin one distribution
 (``name==version``).
 
-A venv folder that exists must be a venv (it is made again from nothing) or empty: anything else is refused, so a
-mistyped path cannot be cleared. Exit status 0 when every check passed, 1 when one failed (the message says which), 2
-for a usage error or a run that could not start.
+Every folder a run clears (the venv, ``WORK/state`` and ``WORK/run``) is checked before any of them is touched: it
+must be missing, empty, or one an earlier run made, which holds the file ``.smoke_wheel`` this script writes into
+each folder it makes. A file, a link, or a folder holding anything else is refused, and so is a venv that holds
+the interpreter running this script or ``--python``'s (its ``sys.prefix`` or ``sys.base_prefix``) or overlaps
+``WORK/state`` or ``WORK/run``: so a mistyped path, the package's own venv or a real installation's data is never
+cleared. Exit status 0 when every check passed, 1 when one failed (the message says which), 2 for a usage error or
+a run that could not start (a refused folder, a ``--python`` that does not run), in which case nothing was cleared.
 """
 from __future__ import annotations
 
@@ -75,6 +79,12 @@ RECORD_KEYS = ("smoke", "platform", "python", "wheel", "version", "pep440", "lab
                "spec_hash", "result_hash", "turns", "verifiable", "host_limits", "seconds")
 #: A constraints line: one distribution pinned to one version.
 PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?==[^\s;]+")
+#: The file this script writes into every folder it makes; a later run clears a folder only if it holds this, or
+#: nothing at all.
+MARKER = ".smoke_wheel"
+MARKER_TEXT = "Made by scripts/ci/smoke_wheel.py, which may clear this folder on its next run.\n"
+#: Asks an interpreter where it lives, isolated (-I) from the working directory and the environment.
+PREFIXES = "import json, sys; print(json.dumps([sys.prefix, sys.base_prefix]))"
 
 
 class Failed(Exception):
@@ -123,15 +133,90 @@ def venv_script(venv: Path, name: str) -> Path:
     return venv / ("Scripts" if os.name == "nt" else "bin") / (f"{name}.exe" if os.name == "nt" else name)
 
 
+def under(path, folder) -> bool:
+    """Whether ``path`` is ``folder`` or inside it, both resolved."""
+    try:
+        Path(path).resolve().relative_to(Path(folder).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def is_link(path: Path) -> bool:
+    """Whether ``path`` itself (not a folder above it) is a symbolic link or a junction."""
+    if path.is_symlink():
+        return True
+    if not path.exists():
+        return False
+    itself = os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(path))), path.name)
+    return os.path.normcase(os.path.realpath(path)) != os.path.normcase(itself)
+
+
+def own_folder(path: Path, what: str) -> None:
+    """Refuses a folder this script may not clear: it must be missing, empty, or one an earlier run made (it holds
+    ``MARKER``). A file, a link (a symbolic link or a junction) and a folder holding anything else are refused."""
+    if is_link(path):
+        raise Refused(f"{what} {path} is a link: name a folder of its own")
+    if not path.exists():
+        return
+    if not path.is_dir():
+        raise Refused(f"{what} {path} is a file")
+    if any(path.iterdir()) and not (path / MARKER).is_file():
+        raise Refused(f"{what} {path} holds files this script did not make (no {MARKER} in it): name an empty "
+                      f"folder, or one an earlier run made")
+
+
+def interpreter_prefixes(python: str) -> list:
+    """``sys.prefix`` and ``sys.base_prefix`` of ``python``, asked in a process of its own; a ``python`` that does
+    not run is a usage error."""
+    try:
+        done = subprocess.run([python, "-I", "-c", PREFIXES], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=COMMAND_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Refused(f"--python {python} does not run: {e}") from None
+    out = done.stdout.decode("utf-8", "replace").strip()
+    try:
+        if done.returncode != 0:
+            raise ValueError(f"exit {done.returncode}")
+        found = json.loads(out.splitlines()[-1])
+        return [Path(p).resolve() for p in found]
+    except (ValueError, IndexError, TypeError) as e:
+        raise Refused(f"--python {python} did not say where it lives ({e}): {out[-2000:]!r}") from None
+
+
+def claim(python: str, venv: Path, scratch: list) -> None:
+    """Checks every folder a run clears, before any of it is touched: the venv holds neither the interpreter running
+    this script nor ``python`` and overlaps no scratch folder, and each of them is missing, empty or an earlier
+    run's (``own_folder``). Raises ``Refused``, having changed nothing."""
+    for prefix in sorted({Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(), *interpreter_prefixes(python)}):
+        if under(prefix, venv):
+            raise Refused(f"the venv {venv} holds the interpreter at {prefix}: clearing it would delete a Python "
+                          f"this run uses")
+    for folder in scratch:
+        if under(folder, venv) or under(venv, folder):
+            raise Refused(f"the venv {venv} and the folder {folder} overlap")
+    own_folder(venv, "the venv")
+    for folder in scratch:
+        own_folder(folder, "the folder")
+
+
+def renew(path: Path) -> None:
+    """Empties (or makes) a folder ``own_folder`` accepts, and marks it as this script's."""
+    own_folder(path, "the folder")
+    try:
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True)
+        (path / MARKER).write_text(MARKER_TEXT, encoding="utf-8")
+    except OSError as e:
+        raise Failed(f"could not make {path} afresh: {e}") from None
+
+
 def fresh_venv(python: str, venv: Path) -> Path:
-    """A new venv at ``venv`` made by ``python``: an existing venv there is made again from nothing (``--clear``), an
-    empty folder is used, and anything else is refused."""
-    if venv.exists():
-        if not venv.is_dir():
-            raise Refused(f"{venv} is a file, not a venv")
-        if any(venv.iterdir()) and not (venv / "pyvenv.cfg").is_file():
-            raise Refused(f"{venv} holds files and is no venv: name an empty folder or a venv")
-    run([python, "-m", "venv", "--clear", str(venv)], "make the venv", timeout=COMMAND_TIMEOUT)
+    """A new venv at ``venv`` made by ``python``, in a folder ``own_folder`` accepts, emptied first; the caller has
+    ``claim``-ed it."""
+    renew(venv)
+    run([python, "-m", "venv", str(venv)], "make the venv", timeout=COMMAND_TIMEOUT)
     exe = venv_python(venv)
     if not exe.is_file():
         raise Failed(f"the venv at {venv} has no {exe.name}")
@@ -178,12 +263,11 @@ def smoke(args) -> int:
     wheel = find_wheel(args.wheel)
     version = release_version(args.version)
     work = args.work.resolve()
-    venv = (args.venv or work / "venv").resolve()
+    venv = Path(os.path.abspath(args.venv or work / "venv"))      # not resolved: own_folder refuses a link
     state, folder = work / "state", work / "run"
+    claim(args.python, venv, [state, folder])      # every folder checked before any is cleared
     for path in (state, folder):
-        if path.exists():
-            shutil.rmtree(path)
-        path.mkdir(parents=True)
+        renew(path)
     python = fresh_venv(args.python, venv)
     install(python, wheel, args.extras)
     out = args.out.resolve()
@@ -223,7 +307,8 @@ def read_record(path: Path) -> dict:
 def constraints(args) -> int:
     wheel = find_wheel(args.wheel)
     work = args.work.resolve()
-    venv = (args.venv or work / "venv").resolve()
+    venv = Path(os.path.abspath(args.venv or work / "venv"))      # not resolved: own_folder refuses a link
+    claim(args.python, venv, [])
     work.mkdir(parents=True, exist_ok=True)
     python = fresh_venv(args.python, venv)
     install(python, wheel, "server")
@@ -267,14 +352,6 @@ def check(condition, message: str, ok: str) -> None:
     if not condition:
         raise Failed(message)
     say(f"ok: {ok}")
-
-
-def under(path, folder) -> bool:
-    try:
-        Path(path).resolve().relative_to(Path(folder).resolve())
-        return True
-    except ValueError:
-        return False
 
 
 #: What the extension itself says of its file and its test operations, asked in an interpreter of its own, as
