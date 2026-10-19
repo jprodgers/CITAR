@@ -633,7 +633,7 @@ Each file is read whole against the code at 5-12's base; every statement about i
 
 `tests/test_workflows.py` runs it on the real files and on a planted fixture for each rule, each of which must fail naming its job and rule.
 
-**As built in 5-02a: the workflow guard, the pins and test.yml's call** (Appendix F, 5-02a). One agent, from 2026-10-19 06:46 to 08:12 (-04:00), on branch `p-5-02a` from `8d97d30`.
+**As built in 5-02a: the workflow guard, the pins and test.yml's call** (Appendix F, 5-02a). One agent, from 2026-10-19 06:46 to 08:11 (-04:00), on branch `p-5-02a` from `8d97d30`.
 
 - **What was built.**
   - `scripts/ci/check_workflows.py`: rules 1 to 15 above. It reads the files with PyYAML, which the lint job installs and `uvicorn[standard]` brings to every suite environment. Each finding names its file, its job where it has one, and its rule. Exit 0 when every rule holds, 1 on a finding, 2 when it cannot run.
