@@ -772,7 +772,7 @@ def job_reasons(wf: Workflow, job: dict) -> tuple[list[str], list[tuple[int, dic
 
 
 def step_label(i: int, step: dict) -> str:
-    name = step.get("name") or step.get("uses") or (step.get("run") or "").strip().split("\n")[0][:60]
+    name = step.get("name") or action_of(step.get("uses")) or (step.get("run") or "").strip().split("\n")[0][:60]
     return f"step {i + 1} ({name})"
 
 
