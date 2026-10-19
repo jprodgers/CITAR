@@ -899,10 +899,11 @@ def rule_5(wf: Workflow) -> list[Finding]:
 
 def rule_6(wf: Workflow) -> list[Finding]:
     out = []
-    defined = "MATURIN_VERSION" in (wf.data.get("env") or {})
     for job_id, job in wf.jobs.items():
         if not isinstance(job, dict):
             continue
+        defined = any("MATURIN_VERSION" in (env if isinstance(env, dict) else {})
+                      for env in (wf.data.get("env"), job.get("env")))
         for i, step in enumerate(wf.steps(job)):
             if action_of(step.get("uses")) != "pyo3/maturin-action":
                 continue

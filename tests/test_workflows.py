@@ -346,6 +346,9 @@ permissions:
         tree = Tree(self)
         tree.replace("test.yml", "          maturin-version: ${{ env.MATURIN_VERSION }}\n", "")
         self.assertFinds(tree, 6, "test.yml", "build-ext")
+        tree = Tree(self)
+        tree.replace("test.yml", "  MATURIN_VERSION: v1.15.0\n", "")
+        self.assertFinds(tree, 6, "test.yml", "package", "does not define")
 
     # ---- rule 7
     def test_rule_7_a_build_before_prepare(self):
