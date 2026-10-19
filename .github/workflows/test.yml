@@ -257,6 +257,11 @@ jobs:
           cache: pip
       - run: pip install ruff
       - run: ruff check --output-format=github .
+      - name: Every place the version lives agrees
+        # scripts/release.py (design/phase5-release.md P5.2): Cargo.toml's version, both locks' workspace entries,
+        # __version__, the installer script's defaults, KNOWN_ISSUES' header and the changelog. A half-done bump
+        # fails here, naming each place with its file and line.
+        run: python scripts/release.py check
 
   frontend:
     name: front-end syntax
