@@ -602,7 +602,8 @@ def label(mode: str, version: str | None, sha: str | None) -> str:
         Version.parse(version)
     if mode in ("dry-run", "ci"):
         if sha is None or not SHA.fullmatch(sha.lower()):
-            raise Refused(f"a {mode} label needs --sha, the commit's hex SHA (7 to 40 digits), not {sha!r}")
+            given = f", not {sha!r}" if sha is not None else ""
+            raise Refused(f"a {mode} label needs --sha, the commit's hex SHA (7 to 40 digits){given}")
     if mode == "tag":
         return f"v{version}"
     if mode == "dry-run":
