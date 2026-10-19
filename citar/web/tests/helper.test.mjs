@@ -1,7 +1,8 @@
 // The helper card's downloads (citar/web/js/helperrules.js, design/phase4-helper.md P4.10, 4-14): its five names are the
-// release's, as release.yml's build-helper matrix builds them (one line a target, read by pattern: the project has no
-// YAML dependency), as helper.yml's artifact matrix builds them for its service checks, and as cargo xtask
-// helper-manifest lists them; and what a browser is offered. Run with `node --test "citar/web/tests/*.test.mjs"`.
+// release's, as helper.yml's artifact matrix builds them (one line a target, read by pattern: the project has no YAML
+// dependency) and as cargo xtask helper-manifest lists them; and what a browser is offered. release.yml is only its
+// gate until Phase 5 rebuilds it (design/phase5-release.md P5.11), so helper.yml's matrix is the one read here (5-02a);
+// package.yml's helpers matrix joins it in 5-03. Run with `node --test "citar/web/tests/*.test.mjs"`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -34,16 +35,14 @@ function manifestTargets() {
 
 const byTarget = (rows) => rows.map((r) => `${r.target} ${r.asset}`).sort();
 
-test("the card's five names are the release's: release.yml's matrix, helper.yml's artifacts, the manifest's", () => {
+test("the card's five names are the release's: helper.yml's artifacts, the manifest's", () => {
   const names = HELPERS.map((h) => h.file).sort();
   assert.equal(names.length, 5);
-  const release = matrix(".github/workflows/release.yml", "build-helper");
-  assert.equal(release.length, 5, JSON.stringify(release));
-  assert.deepEqual(release.map((r) => r.asset).sort(), names);
   const artifacts = matrix(".github/workflows/helper.yml", "artifact");
-  assert.deepEqual(byTarget(artifacts), byTarget(release), "helper.yml builds what release.yml builds");
-  assert.deepEqual(artifacts.map((r) => r.os), release.map((r) => r.os), "on the same runners");
-  assert.deepEqual(byTarget(manifestTargets()), byTarget(release), "the manifest lists each name for its target");
+  assert.equal(artifacts.length, 5, JSON.stringify(artifacts));
+  assert.deepEqual(artifacts.map((r) => r.asset).sort(), names, "helper.yml builds the card's names");
+  assert.equal(new Set(artifacts.map((r) => r.target)).size, 5, "one build a target");
+  assert.deepEqual(byTarget(manifestTargets()), byTarget(artifacts), "the manifest lists each name for its target");
   for (const h of HELPERS) {
     assert.ok(download(h.file).endsWith(`/releases/latest/download/${h.file}`), h.file);
   }

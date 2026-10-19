@@ -11,8 +11,8 @@ const unix = {
   run: (f) => `./${f}`,
 };
 
-// One entry a release asset: release.yml's build-helper matrix and helper.yml's artifact matrix build these five names
-// (the Node test holds them equal).
+// One entry a release asset: helper.yml's artifact matrix builds these five names, and cargo xtask helper-manifest lists
+// them (the Node test holds them equal; design/phase5-release.md P5.4.1).
 export const HELPERS = [
   { os: "windows", arch: "x64", file: "citar-helper-windows-x64.exe", label: "Windows (64-bit)",
     run: (f) => `.\\${f}`,
