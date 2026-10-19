@@ -8,9 +8,10 @@
 #
 # The Rust extension, citar._engine, is built once per OS (build-ext) and every job that needs it
 # takes that build rather than compiling its own: the test jobs unpack it into the checkout, so the
-# checkout's own sources run with it and the three Linux Pythons share one abi3 library, and the
-# installer jobs install its wheel. The package and docker jobs use a release wheel without the
-# test operations instead, as a release would ship it (crates/citar-engine/DESIGN.md P2.6.8).
+# checkout's own sources run with it and the four Linux Pythons (3.11 to 3.14) share one abi3
+# library, and the installer jobs install its wheel. The package and docker jobs use a release
+# wheel without the test operations instead, as a release would ship it
+# (crates/citar-engine/DESIGN.md P2.6.8).
 #
 # release.yml calls this workflow on a tag and on a release's dry run (design/phase5-release.md
 # P5.11, P5.17), with the mode, the version and the date, no secrets and contents: read. Every job
