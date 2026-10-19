@@ -141,14 +141,6 @@ class Version:
         return self.pre is not None
 
 
-def numeric_of(text: str) -> str | None:
-    """The four numbers of a version the tree holds, or None when it is not one."""
-    try:
-        return Version.parse(text).numeric
-    except Refused:
-        return None
-
-
 # ------------------------------------------------------------------------------------------------ files and places
 
 
@@ -506,30 +498,34 @@ def check(root: Path, version: str | None = None) -> tuple[Tree, str]:
     problems = list(tree.problems)
     if tree.source is None:
         raise Disagrees(problems)
-    target = version if version is not None else tree.source.value
     if version is not None:
-        Version.parse(version)
-    target_numeric = numeric_of(target)
+        target = Version.parse(version)
+    else:
+        try:
+            target = Version.parse(tree.source.value)
+        except Refused as e:
+            raise Disagrees([*problems, f"{tree.source.where}: the source's version {e}"]) from e
     origin = "the release" if version is not None else f"the source ({tree.source.where})"
     for place in tree.places:
         value = place.value
-        if place.rule == "equal" and value != target:
-            problems.append(f"{place.where}: {place.what} is {value}, but {origin} is {target}")
-        elif place.rule == "numeric" and value != target_numeric:
-            problems.append(f"{place.where}: {place.what} is {value}, but {origin} {target} needs {target_numeric}")
+        if place.rule == "equal" and value != target.text:
+            problems.append(f"{place.where}: {place.what} is {value}, but {origin} is {target.text}")
+        elif place.rule == "numeric" and value != target.numeric:
+            problems.append(f"{place.where}: {place.what} is {value}, but {origin} {target.text} needs "
+                            f"{target.numeric}")
         elif place.rule == "at-least":
             try:
-                older = Version.parse(target).newer_than(Version.parse(value))
+                older = target.newer_than(Version.parse(value))
             except Refused:
                 problems.append(f"{place.where}: {place.what} is {value}, which is not a release version")
                 continue
             if older:
-                problems.append(f"{place.where}: {place.what} is {value}, older than {origin}, {target}")
+                problems.append(f"{place.where}: {place.what} is {value}, older than {origin}, {target.text}")
     if tree.changelog is not None:
-        problems += check_changelog(tree.changelog, target)
+        problems += check_changelog(tree.changelog, target.text)
     if problems:
         raise Disagrees(problems)
-    return tree, target
+    return tree, target.text
 
 
 def bump(root: Path, version: str, date: str, out=print) -> tuple[Tree, str]:

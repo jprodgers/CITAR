@@ -256,6 +256,13 @@ class Check(CopyTest):
         self.assertNotIn(self.source_where, named)
         self.assertTrue(any(p.startswith("CHANGELOG.md:") for p in problems))
 
+    def test_a_source_that_is_no_version_is_named(self):
+        self.plant(0, f"{SOURCE}x")
+        self.assertEqual(self.problems(), [f"{self.source_where}: the source's version '{SOURCE}x' is not a release "
+                                           "version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N or -rc.N"])
+        with self.assertRaisesRegex(release.Refused, "out of step before the bump"):
+            self.bump(NEXT)
+
     def test_known_issues_may_name_a_newer_release(self):
         text = self.copy.read("KNOWN_ISSUES.md")
         header = f"in {self.known.value}."
