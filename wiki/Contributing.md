@@ -66,6 +66,19 @@ node --test "citar/web/tests/*.test.mjs"     # or `npm test` in citar/web
 
 CI runs all of this on Linux, Windows and macOS (the front-end checks on Linux).
 
+If you change a workflow in `.github/workflows/`, run the checks the tests workflow's lint job runs on it:
+
+```bash
+python scripts/ci/check_workflows.py          # needs PyYAML, which the dependencies bring
+python scripts/ci/action_pins.py verify       # reads GitHub through gh, and changes nothing
+```
+
+The first holds every workflow to the release's rules: nothing publishes outside a tag push (`release.yml`) or
+`main` (`docs.yml`), no secret or environment where it does not belong, and every action is pinned to a commit with
+its version in a comment. To add an action, write it with its tag (`actions/checkout@v7`) and let
+`python scripts/ci/action_pins.py pin --write` replace the tag with the commit (`@3d3c42e... # v7.0.1`).
+Dependabot's weekly pull request moves the pins.
+
 ## Conventions
 
 These are not style preferences; each one exists because breaking it caused a real problem.
