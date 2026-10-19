@@ -419,14 +419,19 @@ its feature list never names `test-ops`: `cargo xtask check` refuses one that wo
 test operations or `legacy`, so no wheel carries them. `test.yml`'s build-ext job builds a test
 wheel per OS (the ci profile with `--features test-ops`); each test job installs only the
 dependencies (`scripts/ci/requirements.py all`) and unpacks the wheel's library into the checkout
-(`scripts/ci/unpack_ext.py`, which fails unless it imports with the test operations), and the
-package job builds the release wheel as it would ship. Every wheel and the source distribution are
-built with one maturin, `MATURIN_VERSION` at the top of `test.yml`, and `scripts/ci/check_dist.py`
-holds each to the checkout: the files git tracks under `citar/`, the library, and nothing stray,
-and in the source distribution the ruleset the engine compiles in (`crates/citar-engine/data/`).
-After changing `[tool.maturin]`'s `include` or `exclude`, or moving that pin, run it on a local
-build (`python scripts/ci/check_dist.py wheel DIR`, or `sdist DIR`). To run the suite as a test job
-does:
+(`scripts/ci/unpack_ext.py`, which fails unless it imports with the test operations).
+`package.yml` builds what a release ships, on every pull request: the five release wheels (Windows
+x64, macOS arm64 and x64, Linux x64 and arm64 in the manylinux_2_28 containers), each on its own
+runner with the build label set, and the source distribution and a wheel built from it as a user
+would; `scripts/ci/smoke_wheel.py` installs each wheel in a fresh venv on Python 3.11 and 3.14 and
+proves it there (its label, a verifiable job host, one seeded lab game whose result hash every
+platform shares). Every wheel and the source distribution are built with one maturin,
+`MATURIN_VERSION` at the top of both workflows (a test holds them equal), and
+`scripts/ci/check_dist.py` holds each to the checkout: the files git tracks under `citar/`, the
+library, the licence files, and nothing stray, and in the source distribution the ruleset the
+engine compiles in (`crates/citar-engine/data/`). After changing `[tool.maturin]`'s `include` or
+`exclude`, or moving that pin, run it on a local build (`python scripts/ci/check_dist.py wheel
+DIR`, or `sdist DIR`). To run the suite as a test job does:
 
 ```bash
 maturin build --profile ci --features test-ops --out "$CARGO_TARGET_DIR/wheels"

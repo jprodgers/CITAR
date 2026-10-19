@@ -7,9 +7,9 @@
 #
 # The package comes from a wheel in wheelhouse/, never from the source: it carries the Rust engine
 # (citar._engine), and building that here would put a Rust toolchain and a long compile into every
-# image build. CI's package job builds the wheel (manylinux_2_28, the release profile, no test
-# operations) and its docker job copies it there; a tests run keeps it as the artifact
-# `wheel-manylinux`. To build one yourself, use maturin's manylinux container, since a wheel built
+# image build. package.yml's wheels job builds the wheel (manylinux_2_28, the release profile, no
+# test operations) and its docker job copies it there; a package run keeps it as the artifact
+# `pkg-wheel-linux-x64`. To build one yourself, use maturin's manylinux container, since a wheel built
 # on a newer Linux than this image's Debian 12 needs a newer glibc than the image has:
 #
 #   docker run --rm -v "$PWD":/io ghcr.io/pyo3/maturin build --release --out wheelhouse
