@@ -198,9 +198,12 @@ jobs:
         # for testkit's integration tests: `cargo run` would resolve the features again without
         # the dev-dependencies and rebuild the engine and testkit. The seed is the run's number,
         # so that every push plays other games; each failure leaves a replay file, which
-        # `cargo chaos --replay FILE` plays again whatever the seed.
+        # `cargo chaos --replay FILE` plays again whatever the seed. The dispatch's input reaches the shell through the
+        # environment, never written into the script (scripts/ci/check_workflows.py, rule 5).
         shell: bash
-        run: ./target/ci/chaos --seconds "${{ inputs.chaos_seconds || '60' }}" --seed "${{ github.run_number }}" --out chaos-replays
+        env:
+          CHAOS_SECONDS: ${{ inputs.chaos_seconds || '60' }}
+        run: ./target/ci/chaos --seconds "$CHAOS_SECONDS" --seed "${{ github.run_number }}" --out chaos-replays
 
       - name: Keep the chaos replays
         if: failure()

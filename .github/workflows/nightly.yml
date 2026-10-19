@@ -140,10 +140,13 @@ jobs:
         run: cargo build --locked -p citar-testkit --bins --profile ci
 
       - name: Chaos
-        # Seeds a million apart from rust.yml's, whose run numbers count separately.
+        # Seeds a million apart from rust.yml's, whose run numbers count separately. A dispatch's inputs reach the
+        # shells here through the environment, never written into the script (scripts/ci/check_workflows.py, rule 5).
         shell: bash
+        env:
+          CHAOS_SECONDS: ${{ inputs.chaos_seconds || '1200' }}
         run: >
-          ./target/ci/chaos --seconds "${{ inputs.chaos_seconds || '1200' }}"
+          ./target/ci/chaos --seconds "$CHAOS_SECONDS"
           --seed "$((1000000 + ${{ github.run_number }}))" --out chaos-replays
 
       - name: Soak
@@ -151,8 +154,10 @@ jobs:
         # fails (exit 3), so a slow runner shows as a failure rather than as fewer games played.
         if: ${{ !cancelled() }}
         shell: bash
+        env:
+          SOAK_GAMES: ${{ inputs.soak_games || '36' }}
         run: >
-          ./target/ci/soak --games "${{ inputs.soak_games || '36' }}" --seconds 2700
+          ./target/ci/soak --games "$SOAK_GAMES" --seconds 2700
           --seed "${{ github.run_number }}" --json soak-${{ matrix.os }}.json
 
       - name: Keep the chaos replays
@@ -197,16 +202,20 @@ jobs:
         # Seeds two million apart from rust.yml's: the stability job's chaos takes the first
         # million above them.
         shell: bash
+        env:
+          CHAOS_SECONDS: ${{ inputs.chaos_seconds || '1200' }}
         run: >
-          ./target/ci/chaos --seconds "${{ inputs.chaos_seconds || '1200' }}" --drivers mixed
+          ./target/ci/chaos --seconds "$CHAOS_SECONDS" --drivers mixed
           --seed "$((2000000 + ${{ github.run_number }}))" --out chaos-replays
 
       - name: Bot soak
         # The stability job's games, with basic-1 in every seat; the 2,700 s as there.
         if: ${{ !cancelled() }}
         shell: bash
+        env:
+          BOT_SOAK_GAMES: ${{ inputs.bot_soak_games || '36' }}
         run: >
-          ./target/ci/soak --games "${{ inputs.bot_soak_games || '36' }}" --seconds 2700
+          ./target/ci/soak --games "$BOT_SOAK_GAMES" --seconds 2700
           --drivers bot --seed "${{ github.run_number }}" --json bot-soak-${{ matrix.os }}.json
 
       - name: Keep the chaos replays
