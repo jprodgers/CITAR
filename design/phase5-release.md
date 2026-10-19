@@ -633,6 +633,111 @@ Each file is read whole against the code at 5-12's base; every statement about i
 
 `tests/test_workflows.py` runs it on the real files and on a planted fixture for each rule, each of which must fail naming its job and rule.
 
+**As built in 5-02a: the workflow guard, the pins and test.yml's call** (Appendix F, 5-02a). One agent, from 2026-10-19 06:46 to 08:11 (-04:00), on branch `p-5-02a` from `8d97d30`.
+
+- **What was built.**
+  - `scripts/ci/check_workflows.py`: rules 1 to 15 above. It reads the files with PyYAML, which the lint job installs and `uvicorn[standard]` brings to every suite environment. Each finding names its file, its job where it has one, and its rule. Exit 0 when every rule holds, 1 on a finding, 2 when it cannot run.
+  - `tests/test_workflows.py` (53 tests, 58 after the fix round): the tree passes, and so does a small package.yml fixture in 5-02b's shape (`workflow_call` inputs, the `github.workflow` group, prepare, maturin pinned, `pkg-` names, downloads by name and `pkg-*`). Each rule fails on a copy of the tree with one thing planted. The expression reader, the shell reader, the matrix and the upload paths have tests of their own, and so has the pin tool, offline.
+  - `scripts/ci/action_pins.py` (standard library; `gh api` GETs only), with three commands:
+    - `list` prints every remote `uses:`;
+    - `pin [--write]` resolves a tag (an annotated one dereferenced) or else a branch to its commit, and writes the most precise version tag on that commit as the comment;
+    - `verify [--out]` asks GitHub that each SHA is a commit of its repository and that the commented tag, dereferenced, is that commit.
+  - **Every remote `uses:` in the seven workflows is pinned:** 99 references to 13 commits in 13 repositories, each the commit its major tag named on 2026-10-19. They are `actions/checkout` v7.0.1, `setup-python` v7.0.0, `setup-node` v7.1.0, `upload-artifact` v7.0.2, `download-artifact` v8.0.2, `upload-pages-artifact` v5.0.0, `configure-pages` v6.0.0, `deploy-pages` v5.0.1, `Swatinem/rust-cache` v2.9.2, `taiki-e/install-action` v2.87.29, `PyO3/maturin-action` v1.51.0, `docker/setup-buildx-action` v4.4.1 and `docker/build-push-action` v7.4.0. Dependabot's `github-actions` group moves them.
+  - **release.yml** is one job, `phase-5`, whose one step prints `::error title=release packaging is Phase 5::...` and exits 1, on a `v*` tag and on a dispatch alike. It has no checkout, no build, no publishing job and no environment. The old jobs went with it: the literal `environment: helper-signing`, the publishing under `startsWith(github.ref, 'refs/tags/')` alone, and `cargo xtask` beside the key. Run over the workflows as they were at `8d97d30`, the checker names 171 problems, these among them.
+  - **test.yml:**
+    - `workflow_call` with `mode`, `version` and `date`. The workflow's `env` carries them as `RELEASE_MODE` (`ci` by default), `RELEASE_VERSION` and `RELEASE_DATE`.
+    - Every job's first step after its checkout and interpreter is `python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}` in bash. The two jobs without setup-python (frontend, docker) use `python3`, Ubuntu 24.04's 3.12. build-ext now sets up Python before its toolchain, so prepare comes before every build step.
+    - The group is `tests-${{ github.workflow }}-${{ github.ref }}`.
+    - The Linux suite gains Python 3.14.
+    - lint installs PyYAML and runs `check_workflows.py` after `release.py check`.
+    - The artifact names are unchanged.
+  - `citar/web/tests/helper.test.mjs` reads helper.yml's `artifact` matrix in place of release.yml's `build-helper`: five lines, five targets, the card's names and the manifest's table. helper.yml's and `helperrules.js`'s comments follow. CONTRIBUTING names both scripts and `pin --write`; the wiki is regenerated (never pushed).
+- **Decided beyond the text.**
+  - **What publishes** (rule 2) is wider than the design's list:
+    - any `write` permission, or `write-all`;
+    - `actions/attest`, and `docker/build-push-action` with `push`;
+    - gh's other writes: `workflow run`, and changes to `pr`, `issue`, `secret`, `variable`, `label`, `repo`, `run` and `cache` (`gh release view`, `list` and `download` are reads);
+    - `docker build --push`, `podman push`, `npm`/`cargo`/`uv`/`poetry publish` and `maturin publish|upload`.
+    A command is found past its global options (`git -C dir push`, `gh -R o/r release create`).
+  - **A guard** is a conjunct of the condition's top-level `&&` chain, with parentheses flattened:
+    - `(guard) || x` fails, and so does a guard inside a `!`;
+    - `always()`, `cancelled()` and `failure()` fail anywhere in the condition; `success()` and further conjuncts are allowed;
+    - the `startsWith` literal must begin `refs/tags/v`;
+    - an `if:` with text around its `${{ }}`, or one the reader cannot parse, fails.
+    The tag expression of rule 14 is read the same way: `(guards && '<name>') || ''`, with the name last.
+  - **The other rules, beyond their wording:**
+    - Rule 3 counts `GITHUB_TOKEN` too ("no secret"), whether written `secrets.GITHUB_TOKEN` or `github.token`, and refuses a `workflow_call` that declares secrets.
+    - Rule 4 also checks a called workflow's job-level groups. "Differs from its caller's" is judged as the caller runs it: `github.workflow` is read as the caller's `name`. A workflow-level group has no job, so that finding names the file and the rule.
+    - Rule 5 also refuses the pull request's title, body, head ref and label, and the head commit's message and author.
+    - Rule 6 also requires the workflow or the job to define `MATURIN_VERSION`.
+    - Rule 7: only the checkout, `actions/setup-*`, `docker/setup-*`, the caches, `taiki-e/install-action` and `download-artifact` may come between the checkout and prepare. Prepare carries no `if:` and no `continue-on-error`.
+    - Rule 8 adds `python -m build`, `pip wheel`, `buildx build`, maturin-action and build-push-action.
+    - Rule 9 reads "can include" as any of: a last path part that matches a key's name (`*`, `*.key`, `update-signing.key`); a `throwaway` folder; the runner's temporary folder whole; a path with `..`; the runner's own folders. So rule 9 already covers 5-03's key folder, and 5-03 only keeps its uploads outside it.
+    - Rule 10 adds `gh workflow run nightly|docs` in release.yml.
+    - Rule 11 reads the `uses:` lines as text, since YAML drops comments. It refuses a `uses:` written where its line cannot be read (a flow mapping), and a `docker://` image without a `sha256` digest.
+    - Rule 13 expands each matrix as GitHub does (the product, `exclude`, then `include`) and fills in `matrix.*`, `runner.os` (from `runs-on`) and `strategy.job-index`. It counts `upload-pages-artifact` (default name `github-pages`) for the prefixes, and an unnamed upload is `artifact`.
+    - Rule 14 accepts the tag expression only for `helper-signing` (`TAG_ENVIRONMENTS`), the one name P5.11 writes that way and P5.18.2 allows besides `github-pages` and `pypi`. A misspelt name would otherwise pass and create a new environment, with no reviewer and no secret, at Phase 6's tag push.
+    - Rules 8 and 15 refuse a run step in a shell the check cannot read: anything but bash, sh, pwsh, powershell and cmd (`shell: python`, a `perl {0}` template, an expression), taken from the step's `shell:` or else the job's or workflow's `defaults.run.shell`. That is a rule 8 finding anywhere in release.yml, and a rule 15 finding in a step reading a secret or in a powered release.yml job.
+  - **Shell is read word by word.** Quotes are removed, comments dropped, and commands split at `;`, `&`, `&&`, `|`, `||`, `(`, `)`, backticks and newlines, each remembering the operator that ended it; a `${{ }}` is a placeholder word. Redirections (`2>&1`, `&>log`) stay with their command, and launchers are seen through (`sudo` with its options, `env`, `timeout`, `nice`); `pip3`, `pip3.12` and `pip-3.12` are pip. A heredoc's body is data (`cat > f <<EOF`, `python3 - <<PY`), except when a shell reads it as its script: `bash <<EOF`, `bash -s <<'EOF'`, or `cat <<EOF | bash` through a pipeline (not `bash x.sh <<EOF`, whose stdin is data). Also read as scripts: `bash -c`/`-lc`, `eval`, a here-string given to a shell (`bash <<< '...'`), and the words after `pwsh -Command` (or `-c`) and `cmd /c`. A `<<` inside quotes or a comment starts no heredoc. So docs.yml's notice, `echo "... 'python scripts/build_wiki.py --push' ..."`, is text and not a push. A script written to a file and run later is not read; the permission and secret rules are the barrier there.
+  - **Rule 5 covers every workflow** (its text says "no `run:` block"). So rust.yml's chaos step and nightly.yml's four chaos and soak steps, which wrote `${{ inputs.* || default }}` into their scripts, now pass each input through the step's `env:`. The defaults and commands are unchanged. P5.17's table says nightly.yml takes "the pins only"; this is the one exception.
+  - **S1c:** the package's venv is Windows' Python 3.14.6, as every Phase 3 to 5 venv has been. So S1 is the 3.14 run, and no second venv was made.
+- **Gates** (logs under `C:/dev/target/citar-p-5-02a`; the scripts are in the session's scratchpad `p502a/`):
+  1. `check_workflows.py` passes on the tree: 7 workflows, 29 jobs. Each of the gate's 18 plants fails naming its job and rule (`gate1.log`, which prints each finding). The plants and their rules:
+     - rule 2: an unguarded `softprops/action-gh-release`; `startsWith` without the event; the guard under `always()`, `!cancelled()`, `failure()` and an `||`; docs.yml's wiki step without its main guard;
+     - rules 3 and 14: `environment: staging` in test.yml's lint;
+     - rule 14: a literal `helper-signing` on a guarded job;
+     - rule 4: test.yml's group without `github.workflow`;
+     - rule 5: `${{ inputs.version }}` in a run;
+     - rule 6: three maturin pins;
+     - rule 7: a `cargo build` before prepare;
+     - rule 9: five key-bearing paths;
+     - rule 10: `build_wiki.py --push`;
+     - rule 11: `actions/checkout@v7`;
+     - rule 12: `secrets: inherit`;
+     - rule 13: package.yml's unnamed and `helper-*` downloads, and test.yml's `pkg-x`;
+     - rule 15: `cargo build` in docs.yml's secret-reading step, and `pip install` in a release.yml job holding `id-token: write`.
+     The module's other plants cover every rule again.
+  2. `action_pins.py verify`: 99 references to 13 pins in 13 repositories, 0 problems (`gate2.log`, and the rows in `gate2-pins.json`). Each SHA is a commit of its repository, and its commented tag is that commit.
+  3. The seven workflows parse, `cargo xtask check` is all clear, and `helper.test.mjs` passes 4 of 4 reading helper.yml. In copies of the four files it reads (`gate3/`), it fails with a sixth matrix line, with a sixth name on the card, and with a matrix line out of step with the manifest.
+  4. S1c: the suite on Windows' Python 3.14.6, run before the CI leg could: 1,929 OK, 2 skipped (`head-s1.log`). No 3.14 failure; the tripwire was not needed.
+  5. CI-only, at the merge push (PR #5's runs, watched by the merge agent): test.yml's Linux 3.14 leg and every workflow on the pinned actions. Locally, test.yml's two prepare commands were run as the runners run them, from the YAML, in bash, in a scratch clone: Git Bash with the venv's Python, and WSL with Python 3.12 (`prepare-windows.log`, `wsl.log`).
+     - Mode `ci` checks; a tag at 0.1.5 passes and one at 0.1.6 fails.
+     - A dry run to 0.1.6 or 0.1.6-rc.1 bumps six files and passes.
+     - In WSL the checker passes and the module passes 53 of 53.
+     docs.yml and nightly.yml do not run on a branch push, so their pins are first exercised on `main`.
+  6. Standard gates:
+     - S1: 1,929 OK, 2 skipped, the base's 1,876 plus the module's 53. S1b (Python 3.12.10, `TZ=UTC0`): 1,929 OK, 2 skipped. Both are at `f92e885`, the code's head, and their tracebacks are only the known set.
+     - S2: ruff, and `sync_requirements --check`. S3: 227 routes, 0 unguarded. S4: 38 files, 338 links. S5: `mkdocs build --strict`, and the wiki unchanged by a second `build_wiki.py`. S6: Node 138 of 138, and 47 modules as ESM. S8 as gate 3. S11: `check` passes (`quick.log`).
+     - S10 before and after: identical.
+- **Fix round** (2026-10-19 08:36 to 09:25, -04:00). The review found five minor gaps. Each was confirmed by a plant that gave 0 findings, and each is fixed:
+  - **Heredocs a shell reads.** The shell reader dropped every heredoc body, so `bash <<'EOF'` or `bash -s <<EOF` hid its commands from rules 2, 3, 8 and 15. A heredoc's body is now read when a shell runs it.
+  - **Shells the check cannot read.** A `shell: python` step's commands are unreadable. Such a step is now refused: in release.yml under rule 8, and under rule 15 in a step reading a secret or in a powered job.
+  - **Versioned pip.** `pip3.12 install` passed rule 15; `pip3.12` and its kind are now pip.
+  - **`github.token`.** `${{ github.token }}` passed rule 3; it now counts as `GITHUB_TOKEN`.
+  - **Rule 14's name.** The tag expression was accepted with any environment name; it is now accepted for `helper-signing` only.
+  - **CONTRIBUTING** said lint runs `action_pins.py verify`, but CI checks only a pin's form. It and the wiki now say `verify` is local.
+
+  Found while fixing, in the same family, and fixed:
+  - a `<<` inside quotes (`echo "use <<STOP"`) began a "heredoc" that hid every later line of the script;
+  - here-strings given to a shell, `pwsh -Command` and `cmd /c` were not read;
+  - `sudo`'s options (`sudo -E pip`) hid the command;
+  - `2>&1` split a command in two.
+
+  The module has 58 tests, 5 of them new, and new subtests in others. Every new one fails on the checker as it was (33 failures, 1 error).
+
+  Gates rerun at `bc9f9ac`, the code's head (logs `fix-*` under the target folder):
+  - Gate 1: the tree has 0 findings, and the 18 plants each fail naming job and rule.
+  - Gate 2: 99 references, 13 pins, 0 problems.
+  - Gate 3: helper.test.mjs passes 4 of 4, and its three plants fail.
+  - S1 and S1c (3.14.6): 1,934 OK, 2 skipped. S1b (3.12.10, `TZ=UTC0`): 1,934 OK, 2 skipped. Both show only the known tracebacks.
+  - S2 to S6, S8 and S11 are green; the wiki is unchanged after its regeneration.
+  - WSL (Python 3.12.3): the checker passes, the module passes 58 of 58, and test.yml's prepare runs pass.
+  - S10 before and after: identical.
+- **Left for later.**
+  - `packaging/README.md` still describes the old release.yml's jobs (`build-helper`, `sign-helper-manifest`, "Tag and push"); 5-08 rewrites it.
+  - `check_workflows.py` grows in 5-03 (package.yml's helper jobs) and 5-09 (rule 16).
+  - When 5-02b adds package.yml, `TheTree.test_the_workflows_as_they_are_pass` holds the real file. The fixture tests then write `PACKAGE_YML` over it in their copies.
+
 ---
 
 ## P5.18 Cross-cutting rules

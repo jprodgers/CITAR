@@ -5,7 +5,7 @@
 #   golden set in the ci and the release profile, on Windows x64, Linux x64 and arm64, macOS arm64 and x64. rust.yml
 #   runs the helper's tests on three of these on every Rust change; this adds macOS x64 and Linux arm64, where the
 #   helper ships too, and the scan and the limits there.
-# - artifact: the release build of each target, as release.yml builds it (no features: cargo xtask check reads every
+# - artifact: the release build of each target, as a release ships it (no features: cargo xtask check reads every
 #   line of the jobs whose ids start with "artifact", and this file's workflow-wide env and defaults), run once with
 #   --version (it names its target) and --self-test (the job host's canary and self-check), its .sha256 beside it.
 #   The artifacts are what the service jobs install; they are kept for a week and are not a release.
@@ -79,16 +79,16 @@ jobs:
           # If this label is retired, run x86_64-apple-darwin under Rosetta on macos-15 instead.
           - { os: macos-15-intel, target: x86_64-apple-darwin }
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Toolchain
         run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: helper-${{ matrix.target }}
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest
 
@@ -114,8 +114,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # release.yml's build-helper matrix, line for line (citar/web/tests/helper.test.mjs holds both to the
-        # download card's names and to cargo xtask helper-manifest's)
+        # The release's five helpers, one line a target (citar/web/tests/helper.test.mjs holds them to the download
+        # card's names and to cargo xtask helper-manifest's; package.yml's helpers matrix joins them in Phase 5, P5.4.1)
         include:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe }
           - { os: macos-15, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64 }
@@ -123,7 +123,7 @@ jobs:
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64 }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64 }
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Toolchain
         shell: bash
@@ -131,7 +131,7 @@ jobs:
           rustup toolchain install
           rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: helper-release-${{ matrix.target }}
 
@@ -164,7 +164,7 @@ jobs:
             | cut -d' ' -f1 > "${{ matrix.asset }}.sha256"
           cat "${{ matrix.asset }}.sha256"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
           path: |
@@ -178,16 +178,16 @@ jobs:
     needs: artifact
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
       - name: The fake server's WebSocket
         run: pip install "websockets>=13"
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: citar-helper-linux-x64
           path: dist
@@ -205,16 +205,16 @@ jobs:
     needs: artifact
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
       - name: The fake server's WebSocket
         run: pip install "websockets>=13"
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: citar-helper-windows-x64.exe
           path: dist
@@ -234,16 +234,16 @@ jobs:
     needs: artifact
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
       - name: The fake server's WebSocket
         run: pip install "websockets>=13"
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: citar-helper-macos-arm64
           path: dist
