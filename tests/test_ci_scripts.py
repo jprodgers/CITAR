@@ -1,9 +1,12 @@
 """The CI glue in scripts/ci/: unpack_ext.py, which puts the build-ext job's extension into the checkout for the test
-jobs, requirements.py, which lists what to install without building the package, and check_dist.py, which holds a
-built wheel or source distribution to the checkout (crates/citar-engine/DESIGN.md P2.6.8)."""
+jobs, requirements.py, which lists what to install without building the package, check_dist.py, which holds a built
+wheel or source distribution to the checkout (crates/citar-engine/DESIGN.md P2.6.8), and smoke_wheel.py's parts that
+need no built wheel (design/phase5-release.md P5.3.4; the smoke itself is package.yml's, and 5-02b's gates)."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import importlib.machinery
 import importlib.util
+import json
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -23,6 +26,7 @@ def load(name: str):
 unpack_ext = load("unpack_ext")
 requirements = load("requirements")
 check_dist = load("check_dist")
+smoke_wheel = load("smoke_wheel")
 
 #: A suffix this Python loads, and one it never does (the other family's).
 HERE = importlib.machinery.EXTENSION_SUFFIXES[-1]
@@ -135,8 +139,21 @@ TRACKED = {
     "citar/data/collectors/collect.sh", "tests/test_a.py", "tests/output/keep.txt", "scripts/ci/x.py",
     "pyproject.toml", "Cargo.toml", "Cargo.lock", "crates/citar-py/Cargo.toml", "crates/citar-py/src/lib.rs",
     "crates/citar-engine/data/game.json", "crates/citar-engine/data/ruleset/units.json",
-    "refcheck/intended.toml", "refcheck/README.md", "README.md",
+    "refcheck/intended.toml", "refcheck/README.md", "README.md", "LICENSE", "NOTICE.md",
 }
+#: pyproject.toml's PEP 639 fields, as check_dist's main reads them.
+LICENSES = ("LICENSE", "NOTICE.md")
+EXPRESSION = "MPL-2.0"
+
+
+def metadata(version="0.1.5", licenses=LICENSES, expression=EXPRESSION, extra=()):
+    """A METADATA or PKG-INFO as maturin writes one: its fields, a blank line, then the description (whose text never
+    counts as a field)."""
+    lines = ["Metadata-Version: 2.4", "Name: citar", f"Version: {version}", *extra]
+    if expression:
+        lines.append(f"License-Expression: {expression}")
+    lines += [f"License-File: {name}" for name in licenses]
+    return "\n".join(lines) + "\n\nA description that says\nVersion: 9.9.9\n"
 MATURIN = {
     "include": [{"path": "citar/web/**/*", "format": ["sdist", "wheel"]},
                 {"path": "citar/data/collectors/*", "format": ["sdist", "wheel"]},
@@ -152,25 +169,27 @@ class CheckDist(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="citar-dist-"))
         self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
 
-    def a_wheel(self, drop=(), add=None, tag=TAG, name_tag=TAG, wheel_meta=None):
+    def a_wheel(self, drop=(), add=None, tag=TAG, name_tag=TAG, wheel_meta=None, meta=None):
         members = {p: "x" for p in TRACKED if p.startswith("citar/") and p not in drop}
         members["citar/_engine.abi3.so"] = b"lib"
         info = "citar-0.1.5.dist-info/"
         members.update({info + "WHEEL": wheel_meta or f"Wheel-Version: 1.0\nTag: {tag}\n",
-                        info + "METADATA": "Name: citar", info + "RECORD": ""})
+                        info + "METADATA": meta if meta is not None else metadata(), info + "RECORD": "",
+                        info + "licenses/LICENSE": "MPL", info + "licenses/NOTICE.md": "notice"})
         for member in drop:
             members.pop(member, None)
         members.update(add or {})
         return wheel(self.tmp, members, name=f"citar-0.1.5-{name_tag}.whl")
 
-    def a_sdist(self, drop=(), add=(), top="citar-0.1.5", name="citar-0.1.5.tar.gz"):
+    def a_sdist(self, drop=(), add=(), top="citar-0.1.5", name="citar-0.1.5.tar.gz", pkg_info=None):
         import io
         import tarfile
         path = self.tmp / name
         files = [p for p in sorted(TRACKED) if p not in drop and p != "tests/output/keep.txt"] + ["PKG-INFO"]
+        own = pkg_info if pkg_info is not None else metadata(top.partition("-")[2])
         with tarfile.open(path, "w:gz") as archive:
             for member in [f"{top}/{p}" for p in files if p not in drop] + list(add):
-                data = member.encode()
+                data = own.encode() if member == f"{top}/PKG-INFO" else member.encode()
                 entry = tarfile.TarInfo(member)
                 entry.size = len(data)
                 archive.addfile(entry, io.BytesIO(data))
@@ -230,6 +249,49 @@ class CheckDist(unittest.TestCase):
 
     def test_a_sdist_as_built_passes(self):
         self.assertEqual(check_dist.check_sdist(self.a_sdist(), TRACKED, MATURIN), [])
+        self.assertEqual(check_dist.check_sdist(self.a_sdist(), TRACKED, MATURIN, "0.1.5", LICENSES, EXPRESSION), [])
+
+    def test_a_wheels_version_and_licence_files(self):
+        """5-02b: the release's PEP 440 version in the file name and METADATA, and PEP 639's licence files under the
+        dist-info, named in METADATA with the licence's expression."""
+        full = {"licenses": LICENSES, "expression": EXPRESSION}
+        self.assertEqual(self.wheel_problems(self.a_wheel(), version="0.1.5", **full), [])
+        self.assertEqual(self.wheel_problems(self.a_wheel(), version="0.1.6rc1", **full),
+                         ["its file name says version 0.1.5, not 0.1.6rc1"])
+        dropped = self.wheel_problems(self.a_wheel(drop=["citar-0.1.5.dist-info/licenses/NOTICE.md"]), **full)
+        self.assertEqual(dropped, ["missing (a licence file, PEP 639): citar-0.1.5.dist-info/licenses/NOTICE.md"])
+        info = "citar-0.1.5.dist-info/METADATA"
+        for meta, problem in (
+                (metadata("0.1.4"), f"{info} says Version ['0.1.4'], not 0.1.5"),
+                (metadata(licenses=("LICENSE",)), f"{info} names the licence files ['LICENSE'], not "
+                                                  "['LICENSE', 'NOTICE.md']"),
+                (metadata(expression="MIT"), f"{info} says License-Expression ['MIT'], not MPL-2.0"),
+                (metadata(expression=None, extra=("License: MPL-2.0",)),
+                 f"{info} says License-Expression None, not MPL-2.0")):
+            with self.subTest(problem=problem):
+                self.assertEqual(self.wheel_problems(self.a_wheel(meta=meta), **full), [problem])
+        # Without the licence list (a call that does not ask), only the version is held: METADATA's must be the
+        # file name's.
+        self.assertEqual(self.wheel_problems(self.a_wheel(meta=metadata(licenses=(), expression=None))), [])
+        self.assertEqual(self.wheel_problems(self.a_wheel(meta=metadata("0.2.0"))),
+                         [f"{info} says Version ['0.2.0'], not 0.1.5"])
+
+    def test_a_sdists_version_and_licence_files(self):
+        full = {"licenses": LICENSES, "expression": EXPRESSION}
+        self.assertEqual(check_dist.check_sdist(self.a_sdist(), TRACKED, MATURIN, "0.1.6", **full),
+                         ["its file name says version 0.1.5, not 0.1.6"])
+        problems = check_dist.check_sdist(self.a_sdist(drop=["NOTICE.md"]), TRACKED, MATURIN, **full)
+        self.assertEqual(problems, ["missing (a licence file, PEP 639): NOTICE.md"])
+        problems = check_dist.check_sdist(self.a_sdist(pkg_info=metadata("0.1.4", licenses=("NOTICE.md",))), TRACKED,
+                                          MATURIN, **full)
+        self.assertEqual(problems, ["PKG-INFO says Version ['0.1.4'], not 0.1.5",
+                                    "PKG-INFO names the licence files ['NOTICE.md'], not ['LICENSE', 'NOTICE.md']"])
+
+    def test_metadata_fields_stop_at_the_description(self):
+        fields = check_dist.metadata_fields("Name: citar\nVersion: 1.0\nSummary: one\n  and two\nLicense-File: A\n"
+                                            "License-File: B\n\nVersion: 9.9.9\n")
+        self.assertEqual(fields, {"Name": ["citar"], "Version": ["1.0"], "Summary": ["one\nand two"],
+                                  "License-File": ["A", "B"]})
 
     def test_a_sdist_with_a_stray_or_a_missing_file_fails(self):
         problems = check_dist.check_sdist(
@@ -330,6 +392,102 @@ class Requirements(unittest.TestCase):
         data["project"]["optional-dependencies"]["bad"] = ["citar[z]"]
         with self.assertRaises(KeyError):
             requirements.requirements(data, ["bad"])
+
+
+class SmokeWheel(unittest.TestCase):
+    """smoke_wheel.py's parts that run without a built wheel: the venv folder's rule, the environment the checks run
+    in, the constraints file's rule, the smoke line, and the version's PEP 440 form (release.py's)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="citar-smoke-"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
+
+    def test_the_wheel_is_one_file_or_the_one_in_a_folder(self):
+        with self.assertRaisesRegex(smoke_wheel.Refused, "found none"):
+            smoke_wheel.find_wheel(self.tmp)
+        one = wheel(self.tmp, {})
+        self.assertEqual(smoke_wheel.find_wheel(self.tmp), one.resolve())
+        self.assertEqual(smoke_wheel.find_wheel(one), one.resolve())
+        wheel(self.tmp, {}, name="citar-0.1.5-cp311-abi3-other.whl")
+        with self.assertRaisesRegex(smoke_wheel.Refused, "expected exactly one wheel"):
+            smoke_wheel.find_wheel(self.tmp)
+        with self.assertRaisesRegex(smoke_wheel.Refused, "no such wheel"):
+            smoke_wheel.find_wheel(self.tmp / "missing")
+
+    def test_a_folder_that_is_no_venv_is_never_cleared(self):
+        folder = self.tmp / "work"
+        folder.mkdir()
+        (folder / "notes.txt").write_text("keep me")
+        with self.assertRaisesRegex(smoke_wheel.Refused, "is no venv"):
+            smoke_wheel.fresh_venv(sys.executable, folder)
+        self.assertEqual((folder / "notes.txt").read_text(), "keep me")
+        a_file = self.tmp / "file"
+        a_file.write_text("x")
+        with self.assertRaisesRegex(smoke_wheel.Refused, "is a file"):
+            smoke_wheel.fresh_venv(sys.executable, a_file)
+
+    def test_the_checks_run_with_no_citar_variable_but_the_state_ones(self):
+        import os
+        from unittest import mock
+        state = self.tmp / "state"
+        with mock.patch.dict(os.environ, {"CITAR_EXT_DIR": "x", "CITAR_RULESET_DIR": "y", "CITAR_BUILD_ID": "z",
+                                          "citar_lower": "w", "PYTHONPATH": "p", "PATH": os.environ.get("PATH", "")}):
+            env = smoke_wheel.scrubbed_env(state)
+        self.assertEqual(sorted(k for k in env if k.upper().startswith("CITAR_")), sorted(smoke_wheel.STATE_VARIABLES))
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertIn("PATH", env)
+        for name, sub in smoke_wheel.STATE_VARIABLES.items():
+            self.assertEqual(Path(env[name]), (state / sub).resolve())
+
+    def test_a_constraints_file_pins_every_line_and_never_citar(self):
+        self.assertEqual(smoke_wheel.check_constraints(["fastapi==0.120.0", "zope.interface==7.2",
+                                                        "uvicorn[standard]==0.38.0", "pywin32==311"]), [])
+        self.assertEqual(smoke_wheel.check_constraints([]), ["it is empty: the [server] extra installed nothing"])
+        problems = smoke_wheel.check_constraints(["citar==0.1.5", "-e git+https://x/y#egg=z",
+                                                  "local @ file:///tmp/local.whl", "Fast_API==1.0", "fast.api==2.0"])
+        self.assertEqual(problems, ["'citar==0.1.5' is CITAR itself",
+                                    "'-e git+https://x/y#egg=z' pins no version from an index",
+                                    "'local @ file:///tmp/local.whl' pins no version from an index",
+                                    "fast-api is in it twice"])
+
+    def test_the_smoke_line_is_one_object_with_every_key(self):
+        path = self.tmp / "smoke.json"
+        record = dict.fromkeys(smoke_wheel.RECORD_KEYS, 1)
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        self.assertEqual(smoke_wheel.read_record(path), record)
+        path.write_text(json.dumps({"version": "0.1.5"}) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(smoke_wheel.Failed, "lacks smoke, platform"):
+            smoke_wheel.read_record(path)
+        path.write_text("{}\n{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(smoke_wheel.Failed, "holds 2 lines"):
+            smoke_wheel.read_record(path)
+        with self.assertRaises(smoke_wheel.Failed):
+            smoke_wheel.read_record(self.tmp / "missing.json")
+
+    def test_the_version_is_read_by_release_pys_rule(self):
+        self.assertEqual(smoke_wheel.release_version("0.1.6").pep440, "0.1.6")
+        self.assertEqual(smoke_wheel.release_version("0.1.6-rc.1").pep440, "0.1.6rc1")
+        for bad in ("v0.1.6", "0.1.6rc1", "0.1.6;rm"):
+            with self.subTest(bad=bad), self.assertRaises(smoke_wheel.Refused):
+                smoke_wheel.release_version(bad)
+
+    def test_the_lab_job_is_one_seeded_duel_of_30_rounds(self):
+        exp = smoke_wheel.LAB_EXPERIMENT
+        self.assertEqual((exp["size"], exp["turns"], exp["games"], len(exp["seats"])), ("duel", 30, 1, 2))
+        self.assertEqual((smoke_wheel.HOST_THREADS, smoke_wheel.HOST_CPU_PERCENT, smoke_wheel.HOST_MEMORY_MB),
+                         (1, 25, 256))
+
+    def test_the_command_line(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(smoke_wheel.main(["smoke", "--wheel", str(self.tmp), "--python", sys.executable,
+                                               "--work", str(self.tmp / "w"), "--out", str(self.tmp / "o.json"),
+                                               "--version", "0.1.5", "--label", "unknown", "--platform", "x"]), 2)
+            self.assertIn("refused", err.getvalue())
+            with self.assertRaises(SystemExit) as stop:
+                smoke_wheel.main(["smoke"])
+        self.assertEqual(stop.exception.code, 2)
 
 
 if __name__ == "__main__":
