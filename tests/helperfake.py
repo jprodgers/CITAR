@@ -832,7 +832,8 @@ class HubPlayer:
         self.setup_hub = hub
         #: ``CITAR_HELPER_UPDATE_KEY`` as it was before the transcript set it.
         self.update_key_env: Optional[str] = None
-        self.golden = F.committed_golden()
+        # The real hub holds a result to its own build: the golden results as this build gives them.
+        self.golden = F.committed_golden(this_build=True)
         #: The job dispatcher a job transcript plays against, its experiment's name, the job's first ``mem_mb`` and
         #: the benchmark lease a ``benchmark_start`` takes.
         self.dispatcher = None

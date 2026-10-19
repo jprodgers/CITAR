@@ -317,7 +317,9 @@ helper lending its CPU play with the same Rust, so their results can be compared
   invented beside a chain folded from the right start, is refused; what only playing decides is replication's to
   check. The server never hashes or checks JSON in Python: it calls the jobs crate through `citar._engine.jobs`
   (`engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_result_fits`, `job_chain_check`,
-  `jobs_build`); bytes that are not JSON are refused like any spec, result or chain that does not read.
+  `jobs_build`, and `job_result_rebased`, which gives a result recorded under another build id the keys that name
+  this build, as the jobs golden set does); bytes that are not JSON are refused like any spec, result or chain that
+  does not read.
 - **The jobs build** (`citar_jobs::build`), the compatibility key every job carries: 12 hex digits over the build
   id, the content codes of the runner and the jobs crate (each crate's `build.rs`, the engine's
   `content_code.rs` copied) and the build's flavour (debug assertions, overflow checks, the engine's checks), so a

@@ -5,8 +5,10 @@ runner on jobs, and the speed of a lab duel.
 
 - **Parity** (gate 1): the seven games recorded from the Python result building before it was deleted
   (``tests/data/lab_results_*.json``, recorded by ``tests/lab_results.py``: six of 40 rounds, duels and small games,
-  and a duel of 130) give the same result on every deterministic key, ``errors`` as messages, while the build is the
-  one that recorded them; and the Python building kept as an oracle (``tests/lab_play_oracle.py``) agrees with
+  and a duel of 130) give the same result on every deterministic key, ``errors`` as messages, the keys that name the
+  build held to this build's values (``job_result_rebased``, so a release's version bump, which moves the build id,
+  changes nothing here) for as long as this build plays those games as the recording one did; and the Python
+  building kept as an oracle (``tests/lab_play_oracle.py``) agrees with
   ``lab.play`` on those games and on fresh ones, on any build: longer games, and seats whose overrides and levels are
   lists and orders of names.
 - **No clock in a result** (gate 3): a hashed result holds no ``seconds``, ``cpu_s``, ``started_ts``, ``finished`` or
@@ -88,13 +90,20 @@ class Parity(unittest.TestCase):
                 engine_api.job_chain_check(out["spec_hash"], out["chain"])
                 engine_api.job_result_fits("lab_game", lab.job_spec(doc["spec"]), out["result"], out["chain"])
                 self.assertEqual(out["chain"]["rounds"], out["result"]["turns"])
-                if doc["build"]["build_id"] != build:
-                    self.skipTest(f"recorded under build {doc['build']['build_id']} and this is {build}: a result "
-                                  "names its build, so only the live comparison above holds; `python -m "
+                # The recorded line, exactly: what the Python building gave before it was deleted. A result names
+                # the build that played it, and the build id moves with every release's version (DESIGN.md P2.2.1),
+                # so those keys are held to this build's values, as the jobs golden set holds its results.
+                recorded_result = {k: v for k, v in doc["result"].items() if k not in TIMES}
+                spec = lab.job_spec(doc["spec"])
+                rebased = engine_api.job_result_rebased("lab_game", spec, recorded_result)
+                if doc["build"]["build_id"] == build:
+                    self.assertEqual(rebased, recorded_result, "rebasing under the recording build changes nothing")
+                elif out["result"] != rebased:
+                    self.skipTest(f"recorded under build {doc['build']['build_id']}, and build {build} plays this "
+                                  "game otherwise: only the live comparison above holds; `python -m "
                                   "tests.lab_results --force` records them again")
-                # The recorded line, exactly: what the Python building gave before it was deleted.
-                self.assertEqual(deterministic(line), deterministic(doc["result"]))
-                self.assertEqual(out["result"], {k: v for k, v in doc["result"].items() if k not in TIMES})
+                self.assertEqual(deterministic(line), deterministic({**doc["result"], **rebased}))
+                self.assertEqual(out["result"], rebased)
 
     def test_the_recorder_in_the_repository_made_these_files(self):
         """``tests/lab_results.py`` names each recorded game, so they can be recorded again."""
@@ -308,6 +317,41 @@ class Results(unittest.TestCase):
         refused("bad_result", "lab_game", spec, ref["result"], out["chain"])
         self.assertIn("seed", refused("bad_result", "reference_game", ref_spec, {**ref["result"], "seed": 1},
                                       ref["chain"]))
+
+    def test_a_result_of_another_build_takes_this_builds_names(self):
+        """``job_result_rebased``: a result names the build that played it (the engine's build id; each seat's build
+        and fingerprint; a reference line's bot), and a release's version bump moves the build id. Rebased, a result
+        recorded under another build id is this build's: it answers its spec here, and the golden jobs' are the
+        results this build plays. Nothing a game decides is touched; a crash comes back as it is."""
+        golden = json.loads((Path(__file__).resolve().parent.parent / "crates" / "citar-jobs" / "golden"
+                             / "jobs.json").read_text(encoding="utf-8"))["jobs"]
+        for name, job in golden.items():
+            with self.subTest(job=name):
+                rebased = engine_api.job_result_rebased(job["kind"], job["spec"], job["result"])
+                chain = {"head": job["chain_head"], "rounds": job["rounds"], "digests": job["digests"]}
+                engine_api.job_result_fits(job["kind"], job["spec"], rebased, chain, job["spec_hash"])
+                self.assertEqual(engine_api.job_result_rebased(job["kind"], job["spec"], rebased), rebased)
+        duel = golden["duel-a"]
+        played = engine_api.run_job(duel["kind"], duel["spec"], spec_hash=duel["spec_hash"])
+        self.assertEqual(engine_api.job_result_rebased(duel["kind"], duel["spec"], duel["result"]), played["result"])
+        # Another build's names, the engine's and a seat's, are this build's again; a score is not touched.
+        other = copy.deepcopy(played["result"])
+        other["engine"] = "000000000000"
+        other["players"]["1"]["build"] = "000000000000"
+        other["players"]["1"]["fingerprint"] = "111111111111"
+        self.assertEqual(engine_api.job_result_rebased("lab_game", duel["spec"], other), played["result"])
+        other["players"]["0"]["score"] += 1
+        self.assertEqual(engine_api.job_result_rebased("lab_game", duel["spec"], other)["players"]["0"]["score"],
+                         played["result"]["players"]["0"]["score"] + 1)
+        crash = {"crash": {"label": "alpha", "turn": 3, "message": "x"}}
+        self.assertEqual(engine_api.job_result_rebased("lab_game", duel["spec"], crash), crash)
+        for code, args in (("bad_spec", ("lab_game", {**duel["spec"], "turns": -1}, played["result"])),
+                           ("bad_spec", ("bogus_game", duel["spec"], played["result"])),
+                           ("bad_result", ("lab_game", duel["spec"], {"engine": float("nan")}))):
+            with self.subTest(code=code, args=args[0]):
+                with self.assertRaises(engine_api.JobRefused) as cm:
+                    engine_api.job_result_rebased(*args)
+                self.assertEqual(cm.exception.code, code)
 
     def test_a_reference_game_takes_list_overrides(self):
         spec = {**REFERENCE, "turn_limit": 10, "params": {"beliefs_pantheon": ["Fertility Rites", "Goddess of Love"],
