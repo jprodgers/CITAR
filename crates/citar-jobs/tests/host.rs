@@ -56,6 +56,8 @@ const NO_SCOPE: &str = "CITAR_JOBS_NO_SCOPE";
 const REQUIRE_SCOPE: &str = "CITAR_JOBS_REQUIRE_SCOPE";
 /// How long a test waits for anything a host should do at once.
 const WAIT: Duration = Duration::from_secs(60);
+/// The longest a run may take to end in [`until_end`].
+const RUN_WAIT: Duration = Duration::from_secs(300);
 
 type Outcome = Result<(), Failed>;
 
@@ -137,9 +139,16 @@ fn frame(host: &mut Host) -> Result<(FromHost, Instant), Failed> {
 }
 
 /// Frames until `run` ends (a result, a failure, an abort or a refusal), each with when it came.
+/// The host's heartbeats keep [`frame`] from timing out, so a run that never ends fails here after
+/// [`RUN_WAIT`] rather than at nextest's timeout.
 fn until_end(host: &mut Host, run: &str) -> Result<Vec<(FromHost, Instant)>, Failed> {
     let mut seen = Vec::new();
+    let deadline = Instant::now() + RUN_WAIT;
     loop {
+        if Instant::now() > deadline {
+            let last = &seen[seen.len().saturating_sub(5)..];
+            return fail(format!("{run} had not ended in {RUN_WAIT:?}; the last frames: {last:?}"));
+        }
         let (f, at) = frame(host)?;
         let end = f.run() == Some(run)
             && matches!(
@@ -533,55 +542,68 @@ fn a_pause_holds_a_run_and_extends_its_deadline() -> Outcome {
     let set = GoldenSet::committed()?;
     let job = &set.jobs[SELF_CHECK];
     send(&mut host, &offer("cr_game", "lab_game", &job.spec, &job.spec_hash, 600.0))?;
-    // A 1 s burn against 2.5 s: its play stays under the deadline on a slow runner (a 2 s burn played
-    // 3.2 s beside the game on CI's three-core macOS runner, rust.yml at a46e83b), while the 2 s pause
-    // takes its wall time past it.
-    send(&mut host, &test_offer("cr_ok", BURN, &json!({"seconds": 1.0}), BURN_DEADLINE_S)?)?;
     accepted(&mut host, "cr_game")?;
     std::thread::sleep(Duration::from_millis(400));
     send(&mut host, &ToHost::Pause)?;
-    let held_at = |f: &FromHost| match f {
-        FromHost::JobProgress(p) if p.run == "cr_game" => Some(p.clone()),
-        _ => None,
+    // A 1 s burn against 2.5 s: its play stays under the deadline on a slow runner (a 2 s burn played
+    // 3.2 s beside the game on CI's three-core macOS runner, rust.yml at a46e83b), while the 2 s pause
+    // takes its wall time past it. It is offered once the host is paused, so it is held at its first
+    // step however the runner schedules it: offered beside the game, before its accept, it could spin
+    // out its second while the game's thread was still starting, end before the pause, and the wait
+    // below for its end, which heartbeats kept alive, ran into nextest's 600 s (helper.yml's
+    // aarch64-apple-darwin at 5c4bdd7).
+    send(&mut host, &test_offer("cr_ok", BURN, &json!({"seconds": 1.0}), BURN_DEADLINE_S)?)?;
+    let ended = |f: &FromHost| {
+        matches!(
+            f,
+            FromHost::JobResult(_)
+                | FromHost::JobFailed(_)
+                | FromHost::JobAborted(_)
+                | FromHost::JobReject(_)
+        )
     };
+    // Both runs held: the game's paused progress, and the burn's.
+    let mut held: BTreeMap<String, (ProgressFrame, Instant)> = BTreeMap::new();
     let deadline = Instant::now() + Duration::from_secs(60);
-    let (paused, since) = loop {
+    while held.len() < 2 {
         let (f, at) = frame(&mut host)?;
-        if let Some(p) = held_at(&f)
+        if ended(&f) {
+            return fail(format!("a run ended before the pause held both: {f:?}"));
+        }
+        if let FromHost::JobProgress(p) = &f
             && p.paused
         {
-            break (p, at);
-        }
-        if f.run() == Some("cr_game")
-            && matches!(
-                f,
-                FromHost::JobResult(_) | FromHost::JobFailed(_) | FromHost::JobAborted(_)
-            )
-        {
-            return fail(format!("the game ended before its pause was seen: {f:?}"));
+            held.entry(p.run.clone()).or_insert_with(|| (p.clone(), at));
         }
         if Instant::now() > deadline {
-            return fail("no paused progress from the game in 60 s".to_owned());
+            return fail(format!("the pause did not hold both runs in 60 s: {held:?}"));
         }
-    };
+    }
+    let (paused, since) = held.remove("cr_game").ok_or("no paused progress from the game")?;
     std::thread::sleep(Duration::from_secs(2));
     send(&mut host, &ToHost::Resume)?;
     let mut resumed: Option<(ProgressFrame, Instant)> = None;
     let mut ends = BTreeMap::new();
+    let deadline = Instant::now() + Duration::from_secs(120);
     while ends.len() < 2 {
         let (f, at) = frame(&mut host)?;
-        if let Some(p) = held_at(&f) {
+        if let FromHost::JobProgress(p) = &f
+            && p.run == "cr_game"
+        {
             ensure(p.paused || p.round == paused.round || resumed.is_some(), || {
                 format!("the round moved while paused: {paused:?} then {p:?}")
             })?;
             if !p.paused && resumed.is_none() {
-                resumed = Some((p, at));
+                resumed = Some((p.clone(), at));
             }
         }
-        if let Some(run) = f.run().map(str::to_owned)
-            && matches!(f, FromHost::JobResult(_) | FromHost::JobFailed(_))
+        if ended(&f)
+            && let Some(run) = f.run().map(str::to_owned)
         {
             ends.insert(run, f);
+        }
+        if Instant::now() > deadline {
+            return fail(format!("both runs had not ended 120 s after the resume: {ends:?}"));
         }
     }
     let (resumed, back) = resumed.ok_or("no progress when the game was let go")?;
