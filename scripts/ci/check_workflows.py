@@ -429,8 +429,11 @@ def shell_commands(text: str) -> list[list[str]]:
     nested = []
     for words in commands:
         argv = command_words(words)
-        if len(argv) >= 3 and tool_of(argv) in ("bash", "sh", "zsh", "dash") and argv[1] == "-c":
-            nested += shell_commands(argv[2])
+        if tool_of(argv) in ("bash", "sh", "zsh", "dash"):
+            # -c, or -c among bundled options (-lc, -ec): the next word is a script
+            at = next((i for i, w in enumerate(argv[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
+            if at is not None and at + 1 < len(argv):
+                nested += shell_commands(argv[at + 1])
         elif len(argv) >= 2 and argv[0] == "eval":
             nested += shell_commands(" ".join(argv[1:]))
     return commands + nested
@@ -462,11 +465,26 @@ def tool_of(argv: list[str]) -> str:
         return ""
     name = re.split(r"[\\/]", argv[0])[-1].lower()
     name = name[:-4] if name.endswith(".exe") else name
-    if re.fullmatch(r"python[0-9.]*|py|pypy[0-9.]*", name) and "-m" in argv[1:]:
-        at = argv.index("-m", 1)
-        if at + 1 < len(argv):
-            return argv[at + 1].lower()
+    if re.fullmatch(r"python[0-9.]*|py|pypy[0-9.]*", name):
+        # the interpreter's own options come before -m; a script's arguments after its path are its own
+        words = iter(argv[1:])
+        for w in words:
+            if w == "-m":
+                return next(words, name).lower()
+            if w in ("-X", "-W", "-Q"):
+                next(words, None)
+            elif not w.startswith("-"):
+                break
     return name
+
+
+def subcommand(argv: list[str], takes_value: tuple[str, ...]) -> list[str]:
+    """A command's words after its global options: ``git -C dir push`` is ``push``, ``gh -R o/r release create`` is
+    ``release create``. ``takes_value`` names the options whose next word is their value."""
+    rest = argv[1:]
+    while rest and rest[0].startswith("-"):
+        rest = rest[2:] if rest[0] in takes_value else rest[1:]
+    return rest
 
 
 def gh_api_mutates(argv: list[str]) -> bool:
@@ -502,13 +520,14 @@ GH_WRITES = {
 def publishing_command(argv: list[str]) -> str | None:
     tool = tool_of(argv)
     rest = argv[1:]
-    if tool == "gh" and rest:
-        if rest[0] == "api":
+    if tool == "gh":
+        rest = subcommand(argv, ("-R", "--repo", "--hostname"))
+        if rest[:1] == ["api"]:
             return "gh api (a mutating request)" if gh_api_mutates(rest) else None
         if len(rest) >= 2 and rest[1] in GH_WRITES.get(rest[0], ()):
             return f"gh {rest[0]} {rest[1]}"
         return None
-    if tool == "git" and "push" in rest[:3]:
+    if tool == "git" and subcommand(argv, ("-C", "-c", "--git-dir", "--work-tree", "--namespace"))[:1] == ["push"]:
         return "git push"
     if tool == "twine" and "upload" in rest:
         return "twine upload"
@@ -898,9 +917,16 @@ def rule_6(wf: Workflow) -> list[Finding]:
 
 
 def is_prepare(step: dict) -> bool:
-    return isinstance(step.get("run"), str) and any(
-        len(argv) >= 2 and re.split(r"[\\/]", argv[1])[-1] == "release.py" and "prepare" in argv[2:3]
-        for argv in (command_words(c) for c in shell_commands(step["run"])))
+    """A run step whose script runs ``scripts/release.py prepare`` (``python``, ``python3``, ``py``, with options)."""
+    if not isinstance(step.get("run"), str):
+        return False
+    for argv in (command_words(c) for c in shell_commands(step["run"])):
+        if not argv or not re.fullmatch(r"python[0-9.]*|py", tool_of(argv[:1])):
+            continue
+        for j, w in enumerate(argv[1:-1], 1):
+            if re.split(r"[\\/]", w)[-1] == "release.py" and argv[j + 1] == "prepare":
+                return True
+    return False
 
 
 def rule_7(wf: Workflow) -> list[Finding]:
