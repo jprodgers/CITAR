@@ -553,11 +553,27 @@ write to a wiki, and fine-grained tokens have no wiki permission to grant.
 
 ## Releasing
 
-For maintainers: bump `citar/__init__.py` and `[workspace.package] version` in `Cargo.toml`
-together (`cargo xtask check` fails if they differ), add the section to `CHANGELOG.md`, tag
-`vX.Y.Z` and push. CI checks that the tag, the source version and the changelog agree, then
-builds and publishes everything. [packaging/README.md](packaging/README.md) covers the manifests
-that need updating afterwards.
+For maintainers. The version lives in one place, `[workspace.package] version` in `Cargo.toml`,
+and `scripts/release.py` holds every other place that names it to that: both lock files' entries
+for the workspace's crates, `__version__` in `citar/__init__.py`, the installer script's defaults
+(`AppVersion` and the four-number `AppVersionNumeric`), the release `KNOWN_ISSUES.md` describes,
+and the changelog. Bump them all at once, never by hand:
+
+```
+python scripts/release.py bump X.Y.Z --date YYYY-MM-DD
+```
+
+It refuses a version that is not newer than the current one, rewrites only the version in each
+place, turns the changelog's Unreleased section into `## [X.Y.Z] - YYYY-MM-DD` under a new empty
+one with both compare links, and then checks. Review the diff. `python scripts/release.py check`
+names any place out of step with its file and line; the tests workflow's lint job runs it on every
+pull request, so a half-done bump fails there. The script also prints a release's notes (`notes`),
+its asset list (`assets`) and the values the release jobs read (`meta`, `label`).
+
+Packaging for 0.1.6 (the wheel for each platform, the helper's builds and the release workflow
+itself) is being rebuilt; until it is, `release.yml` stops at its first step, and the steps from
+the tag to the published release are not ready to follow. [packaging/README.md](packaging/README.md)
+covers the manifests that need updating after a release.
 
 ## Code of conduct
 
