@@ -1,6 +1,6 @@
 //! `citar._engine.jobs`: the jobs crate for the server (design/phase4-helper.md P4.4), which the
-//! facade's `engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_chain_check`,
-//! `jobs_build` and `run_job_host` wrap. The server never hashes or checks a job's bytes in Python: the same Rust as
+//! facade's `engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_result_fits`,
+//! `job_result_rebased`, `job_chain_check`, `jobs_build` and `run_job_host` wrap. The server never hashes or checks a job's bytes in Python: the same Rust as
 //! the helper's reads the spec, plays the game, hashes the result and folds the chain (P4.4.4).
 //!
 //! Every value crosses as JSON bytes, as the rest of the module's do. A refusal is `JobRefused`
@@ -269,6 +269,32 @@ pub fn result_fits(
         FitError::Result(why) => refused("bad_result", why),
         FitError::Chain(why) => refused("bad_chain", why.to_string()),
     })
+}
+
+/// A finished game's result (`result_json`) with the keys that name the build that played it
+/// (the engine's build id, each seat's build and fingerprint, a reference line's bot) given this
+/// build's values, which the spec (`spec_json`, read as `kind`'s) decides: what a result recorded
+/// under another build id is under this one, by `citar_jobs::rebased`, the rule the `jobs` golden
+/// set holds its results by (design/phase4-helper.md P4.4.5). A crash names no build and comes
+/// back as it is. A release bump moves the build id (DESIGN.md P2.2.1), so the Python suite holds
+/// a recorded result through this rather than by the build that recorded it. JSON bytes, or
+/// `JobRefused`: `bad_spec` or `bad_result`.
+#[pyfunction]
+pub fn result_rebased(
+    py: Python<'_>,
+    kind: &str,
+    spec_json: &[u8],
+    result_json: &[u8],
+) -> PyResult<Bytes> {
+    let c = checked(py, kind_of(kind)?, spec_json, None)?;
+    let result = read(result_json, "The job's result", "bad_result")?;
+    let rules = crate::rules::rules();
+    let out = guarded(py, || Ok(citar_jobs::rebased(rules, &c, &result)))?;
+    let rebased = out.map_err(|e| match e {
+        FitError::Result(why) => refused("bad_result", why),
+        FitError::Chain(why) => refused("bad_chain", why.to_string()),
+    })?;
+    Ok(Bytes(serde_json::to_vec(&rebased).map_err(|e| Failure::Runtime(e.to_string()))?))
 }
 
 /// Checks that a chain (`{head, rounds, digests}`) folds to its head from `chain_0` of
@@ -555,6 +581,7 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_function(wrap_pyfunction!(run, &m)?)?;
     m.add_function(wrap_pyfunction!(result_hash, &m)?)?;
     m.add_function(wrap_pyfunction!(result_fits, &m)?)?;
+    m.add_function(wrap_pyfunction!(result_rebased, &m)?)?;
     m.add_function(wrap_pyfunction!(chain_check, &m)?)?;
     m.add_function(wrap_pyfunction!(jobs_build, &m)?)?;
     m.add_function(wrap_pyfunction!(host_main, &m)?)?;

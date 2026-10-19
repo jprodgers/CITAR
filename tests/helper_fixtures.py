@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from citar import engine_api
 from citar.server import helper_protocol as HP
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -240,10 +241,19 @@ def no_golden(set_name: str, path: tuple):
 JOBS_GOLDEN = ROOT / "crates" / "citar-jobs" / "golden" / "jobs.json"
 
 
-def committed_golden() -> Golden:
+def committed_golden(this_build: bool = False) -> Golden:
     """The committed golden sets: ``jobs``, whose entry NAME is ``jobs[NAME]`` and whose FIELD is that entry's (spec,
-    spec_hash, bots, result, result_hash, chain_head, rounds, digests). Unknown sets and names give None."""
+    spec_hash, bots, result, result_hash, chain_head, rounds, digests). Unknown sets and names give None.
+
+    With ``this_build``, each job's ``result`` and ``result_hash`` are the ones this build gives, as citar-jobs'
+    ``GoldenJob::expected`` makes them: the result's keys that name the build hold this build's values
+    (``engine_api.job_result_rebased``), and the hash is that result's. A real hub holds a result to its own build
+    (``job_result_fits``), and a version bump moves the build id, so a transcript played against the hub needs these."""
     jobs = json.loads(JOBS_GOLDEN.read_text(encoding="utf-8"))["jobs"]
+    if this_build:
+        for job in jobs.values():
+            job["result"] = engine_api.job_result_rebased(job["kind"], job["spec"], job["result"])
+            job["result_hash"] = engine_api.job_result_hash(job["kind"], job["result"])
 
     def golden(set_name: str, path: tuple):
         if set_name != "jobs":

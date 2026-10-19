@@ -1,7 +1,7 @@
 ; Windows installer for CITAR.
 ;
 ;   python -m PyInstaller installer/citar.spec --noconfirm
-;   ISCC.exe /DAppVersion=0.1.5 installer\citar.iss
+;   ISCC.exe /DAppVersion=X.Y.Z /DAppVersionNumeric=X.Y.Z.0 installer\citar.iss
 ;
 ; Produces installer\output\CITAR-<version>-setup.exe.
 ;
@@ -11,8 +11,14 @@
 ; behind by the uninstaller — saved games and benchmark results are the person's work, not the
 ; program's files.
 
+; The defaults of a hand build; CI passes both (design/phase5-release.md P5.6). scripts/release.py holds them to
+; the release's version and bumps them with it. VersionInfoVersion must be four numbers, so a prerelease
+; such as 0.1.6-rc.1 has AppVersionNumeric 0.1.6.0.
 #ifndef AppVersion
   #define AppVersion "0.1.5"
+#endif
+#ifndef AppVersionNumeric
+  #define AppVersionNumeric "0.1.5.0"
 #endif
 
 #define AppName       "CITAR"
@@ -31,7 +37,7 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
 AppUpdatesURL={#AppURL}/releases
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#AppVersionNumeric}
 
 ; Per-user, so no elevation prompt. A user without administrator rights is precisely the person
 ; most likely to want a downloadable installer instead of pip.

@@ -316,8 +316,11 @@ helper lending its CPU play with the same Rust, so their results can be compared
   fingerprints included; the build id) and its turns to the chain's rounds, so another game's result, or one
   invented beside a chain folded from the right start, is refused; what only playing decides is replication's to
   check. The server never hashes or checks JSON in Python: it calls the jobs crate through `citar._engine.jobs`
-  (`engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_result_fits`, `job_chain_check`,
+  (`engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_result_fits`, `job_chain_check` and
   `jobs_build`); bytes that are not JSON are refused like any spec, result or chain that does not read.
+  `engine_api.job_result_rebased` gives a result recorded under another build id this build's build-naming keys,
+  as the jobs golden set does; it exists for the test suite (a release bump moves the build id), and the server
+  never rebases a result: it holds each to its own build with `job_result_fits`.
 - **The jobs build** (`citar_jobs::build`), the compatibility key every job carries: 12 hex digits over the build
   id, the content codes of the runner and the jobs crate (each crate's `build.rs`, the engine's
   `content_code.rs` copied) and the build's flavour (debug assertions, overflow checks, the engine's checks), so a

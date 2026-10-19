@@ -55,8 +55,8 @@ __all__ = [
     "map_ref", "map_file", "map_dir", "scenario_ref", "scenario_file", "scenario_dir",
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
-    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
-    "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
+    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_result_rebased",
+    "job_chain_check", "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
     "ManifestRefused", "verify_manifest", "update_keys_trusted", "helper_version_newer",
     "build_info", "key_fingerprint",
     "DEBUG_ACTIONS", "EngineGame",
@@ -524,6 +524,19 @@ def job_result_fits(kind: str, spec: dict, result: dict, chain: dict, spec_hash:
     replication's to check. Raises JobRefused: ``bad_spec`` (the spec, or ``spec_hash`` given and not its hash),
     ``bad_result`` or ``bad_chain``, naming what does not hold."""
     _E.jobs.result_fits(kind, _dumps(spec), _dumps(result), _dumps(chain), spec_hash)
+
+
+def job_result_rebased(kind: str, spec: dict, result: dict) -> dict:
+    """``result``, a finished game's, with the keys that name the build that played it (the engine's build id; each
+    seat's build and fingerprint; a reference line's bot) given this build's values, which ``spec`` decides: what a
+    result recorded under another build id is under this one, by the same Rust as the jobs golden set's rule
+    (design/phase4-helper.md P4.4.5). A crash names no build and comes back as it is. A release bump moves the build
+    id (crates/citar-engine/DESIGN.md P2.2.1), so the test suite holds a recorded result through this, never by the
+    build that recorded it. It is the suite's alone: the server never rebases a result, a helper's or any other, but
+    holds each to its own build with :func:`job_result_fits`, so another build's result is refused (a test holds that
+    nothing in ``citar`` but this facade and ``engine_api`` names it). Raises JobRefused: ``bad_spec`` as
+    :func:`check_job_spec` does, ``bad_result`` for a result that does not read."""
+    return json.loads(_E.jobs.result_rebased(kind, _dumps(spec), _dumps(result)))
 
 
 def job_chain_check(spec_hash: str, chain: dict) -> None:
