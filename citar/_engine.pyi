@@ -205,7 +205,7 @@ class jobs:
     def result_rebased(kind: str, spec_json: bytes, result_json: bytes) -> bytes:
         """The result with the keys that name the build that played it (the engine's build id, each seat's build and
         fingerprint, a reference line's bot) given this build's values, which the spec decides; a crash as it is.
-        JobRefused (bad_spec or bad_result)."""
+        For the test suite: the server never rebases a result. JobRefused (bad_spec or bad_result)."""
     @staticmethod
     def chain_check(spec_hash: str, chain_json: bytes) -> None:
         """Checks the chain folds to its head from the spec hash's chain_0; JobRefused (bad_chain)."""

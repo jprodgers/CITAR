@@ -353,6 +353,25 @@ class Results(unittest.TestCase):
                     engine_api.job_result_rebased(*args)
                 self.assertEqual(cm.exception.code, code)
 
+    def test_the_server_never_rebases_a_result(self):
+        """``job_result_rebased`` is the test suite's. The server holds a result to its own build: another build's
+        result is refused by the check it makes (``job_result_fits``), and nothing in ``citar`` but the facade and
+        ``engine_api`` names the rebasing, so no server path gives another build's result this build's names."""
+        duel = json.loads((Path(__file__).resolve().parent.parent / "crates" / "citar-jobs" / "golden"
+                           / "jobs.json").read_text(encoding="utf-8"))["jobs"]["duel-a"]
+        chain = {"head": duel["chain_head"], "rounds": duel["rounds"], "digests": duel["digests"]}
+        played = engine_api.run_job(duel["kind"], duel["spec"], spec_hash=duel["spec_hash"])
+        engine_api.job_result_fits(duel["kind"], duel["spec"], played["result"], chain, duel["spec_hash"])
+        other = copy.deepcopy(played["result"])
+        other["engine"] = "000000000000"
+        with self.assertRaises(engine_api.JobRefused) as cm:
+            engine_api.job_result_fits(duel["kind"], duel["spec"], other, chain, duel["spec_hash"])
+        self.assertEqual(cm.exception.code, "bad_result")
+        package = Path(engine_api.__file__).resolve().parent
+        naming = sorted(p.relative_to(package.parent).as_posix() for p in package.rglob("*.py")
+                        if "result_rebased" in p.read_text(encoding="utf-8"))
+        self.assertEqual(naming, ["citar/_facade_rust.py", "citar/engine_api.py"])
+
     def test_a_reference_game_takes_list_overrides(self):
         spec = {**REFERENCE, "turn_limit": 10, "params": {"beliefs_pantheon": ["Fertility Rites", "Goddess of Love"],
                                                             "promo_lines": ["Drill", "Shock"]}}

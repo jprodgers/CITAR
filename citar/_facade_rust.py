@@ -531,9 +531,11 @@ def job_result_rebased(kind: str, spec: dict, result: dict) -> dict:
     seat's build and fingerprint; a reference line's bot) given this build's values, which ``spec`` decides: what a
     result recorded under another build id is under this one, by the same Rust as the jobs golden set's rule
     (design/phase4-helper.md P4.4.5). A crash names no build and comes back as it is. A release bump moves the build
-    id (crates/citar-engine/DESIGN.md P2.2.1), so a recorded result is held through this, never by the build that
-    recorded it. Raises JobRefused: ``bad_spec`` as :func:`check_job_spec` does, ``bad_result`` for a result that does
-    not read."""
+    id (crates/citar-engine/DESIGN.md P2.2.1), so the test suite holds a recorded result through this, never by the
+    build that recorded it. It is the suite's alone: the server never rebases a result, a helper's or any other, but
+    holds each to its own build with :func:`job_result_fits`, so another build's result is refused (a test holds that
+    nothing in ``citar`` but this facade and ``engine_api`` names it). Raises JobRefused: ``bad_spec`` as
+    :func:`check_job_spec` does, ``bad_result`` for a result that does not read."""
     return json.loads(_E.jobs.result_rebased(kind, _dumps(spec), _dumps(result)))
 
 
