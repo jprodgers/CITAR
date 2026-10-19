@@ -22,7 +22,8 @@ pinned job, and a secret that a build or an installer could read. Each rule is c
    ``github.ref == 'refs/heads/main'`` as a conjunct of its ``if:`` or, as the ``wiki`` job has it, of exactly the
    steps that read a secret or push. A guard is weakened by being one side of an ``||`` and by ``always()``,
    ``cancelled()`` or ``failure()`` anywhere in the condition, and neither is allowed. No other workflow publishes;
-3. package.yml and test.yml publish nothing, and name no environment and no secret (``GITHUB_TOKEN`` included);
+3. package.yml and test.yml publish nothing, and name no environment and no secret (``GITHUB_TOKEN`` included, as
+   ``secrets.GITHUB_TOKEN`` or ``github.token``);
 4. a called workflow's (``on: workflow_call``) concurrency group contains ``github.workflow`` and, evaluated as its
    caller runs it, differs from its caller's;
 5. no ``run:`` block interpolates ``inputs.*``, ``github.event.inputs.*``, ``github.head_ref`` or the pull
@@ -31,7 +32,8 @@ pinned job, and a secret that a build or an installer could read. Each rule is c
 7. every job of package.yml and test.yml runs ``scripts/release.py prepare`` after its checkout and before its first
    build or test step (only the checkout, ``setup-*``, cache and download actions may come between), unconditionally;
 8. release.yml has no build step (cargo, maturin, PyInstaller, ISCC, ``python -m build``, ``pip wheel``,
-   ``docker build`` or ``buildx build``, maturin-action, build-push-action);
+   ``docker build`` or ``buildx build``, maturin-action, build-push-action), and no run step in a shell whose
+   commands this check cannot read (anything but bash, sh, pwsh, powershell and cmd: ``shell: python``);
 9. no upload path can include a ``*.key`` file or the throwaway key folder (a path whose last part could match a
    key's name, a ``throwaway`` folder, the runner's temporary folder whole, or a path with ``..``);
 10. release.yml calls neither nightly.yml nor docs.yml (as a called workflow or by ``gh workflow run``), and no
@@ -43,19 +45,26 @@ pinned job, and a secret that a build or an installer could read. Each rule is c
 13. artifact names: package.yml uploads only ``pkg-...``, release.yml only ``rel-...``, and no other workflow either
     prefix; the upload names, each matrix leg's, are unique across test.yml, package.yml and release.yml; every
     download in package.yml and release.yml names one artifact, or the pattern ``pkg-*`` or ``rel-*`` and no other;
-14. environments: release.yml names ``pypi`` (in its ``publish-pypi`` job only) or the tag expression
-    ``${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && '<name>' || '' }}``, which names
-    nothing on a dispatch; docs.yml names ``github-pages`` (in its ``deploy`` job only); no other workflow names one;
+14. environments: release.yml names ``pypi`` (in its ``publish-pypi`` job only) or, for ``helper-signing`` only,
+    the tag expression ``${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+    'helper-signing' || '' }}``, which names nothing on a dispatch; docs.yml names ``github-pages`` (in its
+    ``deploy`` job only); no other workflow names one;
 15. nothing installs or builds where power is held: a step that reads a secret other than ``GITHUB_TOKEN`` runs no
     package tool (cargo, pip, pipx, npm, npx, uv, maturin) and is not a ``uses:`` step; in release.yml, a job that
     reads such a secret, or holds ``id-token: write`` or any write permission, runs no package tool or ``docker
     build``, uses only ``actions/checkout`` (with ``persist-credentials: false``), ``actions/download-artifact``,
-    ``actions/upload-artifact`` and rule 2's publishing actions, and no ``setup-*`` action.
+    ``actions/upload-artifact`` and rule 2's publishing actions, and no ``setup-*`` action. Neither such a step nor
+    such a job runs a step in a shell whose commands this check cannot read.
 
-Rule 16 (release.yml's order and permissions) is package 5-09's. Shell commands are read word by word: quoted text,
-comments and heredocs are not commands, so ``echo "run build_wiki.py --push"`` runs nothing, while ``bash -c`` and
-``eval`` strings are read as commands. Every finding names its file, its job where it has one, and its rule; exit
-status 0 when every rule holds, 1 when any does not, 2 when the check cannot run (no PyYAML, no workflows folder).
+Rule 16 (release.yml's order and permissions) is package 5-09's. Shell commands are read word by word, a
+redirection (``2>&1``) and a launcher (``sudo -E``, ``env``, ``timeout``) seen through, and ``pip3.12`` read as pip.
+Quoted text, comments and heredocs are data, so ``echo "run build_wiki.py --push"`` runs nothing and a ``<<`` in
+quotes starts no heredoc. A script given to a shell is read as commands: the string of ``bash -c`` (``-lc``) or
+``eval``, a here-string (``bash <<< '...'``), ``pwsh -Command`` and ``cmd /c``'s words, and a heredoc a shell reads
+(``bash <<EOF``, ``bash -s <<'EOF'``, ``cat <<EOF | bash``). A script written to a file and run later is not read;
+the permission and secret rules hold there. Every finding names its file, its job where it has one, and its rule;
+exit status 0 when every rule holds, 1 when any does not, 2 when the check cannot run (no PyYAML, no workflows
+folder).
 """
 from __future__ import annotations
 
@@ -91,7 +100,13 @@ SETUP_ACTIONS = ("actions/checkout", "actions/cache", "actions/download-artifact
                  "taiki-e/install-action")
 #: What a release.yml job holding power may use, besides rule 2's publishing actions.
 POWER_ALLOWED = ("actions/checkout", "actions/download-artifact", "actions/upload-artifact")
-PACKAGE_TOOLS = {"cargo", "pip", "pip3", "pipx", "npm", "npx", "uv", "uvx", "maturin"}
+PACKAGE_TOOLS = {"cargo", "pip", "pipx", "npm", "npx", "uv", "uvx", "maturin"}  # tool_of names pip3.12 pip
+#: The shells whose run blocks this check reads. A run step in another (``shell: python``) cannot be read, so it may
+#: not run where rule 8 or 15 must see its commands.
+READABLE_SHELLS = ("bash", "sh", "pwsh", "powershell", "cmd")
+#: The environments release.yml may name through the tag expression (P5.11; P5.18.2 allows github-pages, pypi and
+#: this one, and a misspelt name would create a new environment, with no reviewer and no secret, at the tag push).
+TAG_ENVIRONMENTS = ("helper-signing",)
 #: Expressions a run block may not interpolate (rule 5): a dispatch's inputs and text a pull request's author writes.
 TAINTED = re.compile(
     r"\binputs\s*\.|\bgithub\s*\.\s*event\s*\.\s*inputs\b|\bgithub\s*\.\s*head_ref\b"
@@ -349,34 +364,140 @@ def tag_expression_name(value) -> str | None:
 
 
 # ================================================================================================ shell
-# A run block read as shell, word by word: quotes removed, comments and heredoc bodies dropped, simple commands split
-# at ; & | ( ) ` and newlines. ``${{ }}`` expressions become a placeholder word first.
+# A run block read as shell, word by word: quotes removed, comments dropped, simple commands split at ; & | ( ) `
+# and newlines, each remembering the operator that ended it so that a pipeline can be followed. ``${{ }}``
+# expressions become a placeholder word first. A heredoc's body is data unless a shell reads it as its script.
 
 SEPARATORS = set(";&|()`\n")
 KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}", "time", "case", "esac"}
-WRAPPERS = {"sudo", "nohup", "exec", "command", "builtin"}
-HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+WRAPPERS = {"nohup", "exec", "command", "builtin"}
+#: sudo's options whose next word is their value: ``sudo -u runner pip install`` runs pip.
+SUDO_VALUES = {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U", "--user", "--group", "--close-from",
+               "--chdir", "--host", "--prompt", "--role", "--type", "--command-timeout", "--other-user"}
+#: The POSIX shells, whose ``-c`` string, here-string and heredoc can be a script.
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+#: A shell's options whose next word is their value (``bash -o pipefail``).
+SHELL_VALUES = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+#: A heredoc's delimiter, quotes removed; anything else after ``<<`` (``$((1 << 2))``) starts no heredoc.
+DELIMITER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: A redirection word (``>``, ``2>&1``, ``&>log``, ``<file``); an empty group 1 means its target is the next word.
+REDIRECTION = re.compile(r"\d*(?:&>>?|>&|<&|[<>]{1,2})(.*)", re.DOTALL)
 
 
-def without_heredocs(text: str) -> str:
-    out, lines, i = [], text.split("\n"), 0
-    while i < len(lines):
-        line = lines[i]
-        match = HEREDOC.search(line)
-        out.append(HEREDOC.sub(" ", line) if match else line)
-        i += 1
-        if match:
-            while i < len(lines) and lines[i].strip() != match[2]:
-                i += 1
-            i += 1
-    return "\n".join(out)
+def heredoc_delimiter(text: str, at: int) -> tuple[str | None, int]:
+    """The delimiter of a heredoc whose ``<<`` ends just before ``at`` (quotes removed) and where its word ends; None
+    and ``at`` itself when no heredoc starts there."""
+    start = at
+    if at < len(text) and text[at] == "-":  # <<- strips leading tabs, which the comparison below ignores anyway
+        at += 1
+    while at < len(text) and text[at] in " \t":
+        at += 1
+    out = []
+    while at < len(text) and text[at] not in " \t\r\n;&|()<>`":
+        ch = text[at]
+        if ch in "'\"":
+            close = text.find(ch, at + 1)
+            close = len(text) if close < 0 else close
+            out.append(text[at + 1:close])
+            at = close + 1
+        elif ch == "\\" and at + 1 < len(text):
+            out.append(text[at + 1])
+            at += 2
+        else:
+            out.append(ch)
+            at += 1
+    delimiter = "".join(out)
+    return (delimiter, at) if DELIMITER.fullmatch(delimiter) else (None, start)
+
+
+def heredoc_body(text: str, start: int, delimiter: str) -> tuple[str, int]:
+    """A heredoc's body from ``start`` up to its delimiter's line, and the index of the newline that ends that line
+    (the text's end when the delimiter never comes: bash, too, then reads the rest as the body)."""
+    lines, at = [], start
+    while at < len(text):
+        newline = text.find("\n", at)
+        newline = len(text) if newline < 0 else newline
+        line = text[at:newline]
+        if line.strip() == delimiter:  # YAML has taken the block's indentation; <<- would take the tabs
+            return "\n".join(lines), newline
+        lines.append(line)
+        at = newline + 1
+    return "\n".join(lines), len(text)
+
+
+def without_redirections(argv: list[str]) -> list[str]:
+    out, skip = [], False
+    for w in argv:
+        if skip:
+            skip = False
+            continue
+        match = REDIRECTION.fullmatch(w)
+        if match and w != "<<<":
+            skip = match[1] == ""
+            continue
+        out.append(w)
+    return out
+
+
+def shell_reads_stdin(argv: list[str]) -> bool:
+    """Whether a command is a shell running the script it reads on stdin: ``bash``, ``bash -e``, ``sh -s arg``, but
+    not ``bash x.sh`` (a script file, to which stdin is data) or ``bash -c '...'``."""
+    if tool_of(argv) not in SHELLS:
+        return False
+    words = iter(without_redirections(argv)[1:])
+    for w in words:
+        if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", w):
+            return False
+        if re.fullmatch(r"-[A-Za-z]*s[A-Za-z]*", w):
+            return True
+        if w == "--":
+            return next(words, None) is None
+        if w in SHELL_VALUES:
+            next(words, None)
+        elif not w.startswith(("-", "+")):
+            return False
+    return True
+
+
+def inner_scripts(argv: list[str]) -> list[str]:
+    """The scripts a command runs from its own words: ``bash -c`` (``-lc``, ``-ec``), a here-string given to a shell
+    (``bash <<< '...'``), ``pwsh -c``/``-Command``, ``cmd /c`` and ``eval``."""
+    tool = tool_of(argv)
+    if tool in SHELLS:
+        scripts = []
+        if "<<<" in argv:
+            at = argv.index("<<<")
+            if at + 1 < len(argv) and shell_reads_stdin(argv[:at] + argv[at + 2:]):
+                scripts.append(argv[at + 1])
+        # -c, or -c among bundled options: the next word is the script, the words after it its $0 and arguments
+        at = next((i for i, w in enumerate(argv[1:], 1) if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", w)), None)
+        if at is not None and at + 1 < len(argv):
+            scripts.append(argv[at + 1])
+        return scripts
+    if tool in ("pwsh", "powershell"):
+        # -c, -Command and every prefix of it: the words after it, joined, are the script
+        at = next((i for i, w in enumerate(argv[1:], 1)
+                   if re.fullmatch(r"[-/]c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?", w, re.IGNORECASE)), None)
+        return [" ".join(argv[at + 1:])] if at is not None and at + 1 < len(argv) else []
+    if tool == "cmd":
+        at = next((i for i, w in enumerate(argv[1:], 1) if w.lower() in ("/c", "/k")), None)
+        return [" ".join(argv[at + 1:])] if at is not None and at + 1 < len(argv) else []
+    if tool == "eval" and len(argv) >= 2:
+        return [" ".join(argv[1:])]
+    return []
 
 
 def shell_commands(text: str) -> list[list[str]]:
-    """The simple commands of a script, each its words; ``bash -c``/``sh -c``/``eval`` strings read as commands too."""
+    """The simple commands of a script, each its words. Read as commands too: the scripts of :func:`inner_scripts`,
+    and a heredoc's body when a shell reads it as its script (``bash <<EOF``, ``bash -s <<'EOF'``, ``cat <<EOF |
+    bash``). Other heredocs (``cat > f <<EOF``, ``python3 - <<PY``) are data, and so is quoted text: a ``<<`` inside
+    quotes or a comment starts no heredoc."""
     text = EXPR.sub("__EXPR__", text).replace("\\\r\n", " ").replace("\\\n", " ")
-    text = without_heredocs(text)
-    commands, words, word, quote, started = [], [], [], None, False
+    commands: list[list[str]] = []
+    ends: list[str] = []  # the operator that ended each command
+    bodies: list[tuple[str, list[str]]] = []  # each heredoc's body, with its command's words (the same list)
+    pending: list[tuple[str, list[str]]] = []  # the heredocs met on this line: their delimiter and command
+    words, word, quote, started = [], [], None, False
     i = 0
 
     def end_word():
@@ -385,11 +506,12 @@ def shell_commands(text: str) -> list[list[str]]:
             words.append("".join(word))
         word, started = [], False
 
-    def end_command():
+    def end_command(op):
         nonlocal words
         end_word()
         if words:
             commands.append(words)
+            ends.append(op)
         words = []
 
     while i < len(text):
@@ -417,25 +539,50 @@ def shell_commands(text: str) -> list[list[str]]:
             while i < len(text) and text[i] != "\n":
                 i += 1
             continue
+        elif text.startswith("<<<", i):
+            end_word()
+            words.append("<<<")
+            i += 3
+            continue
+        elif text.startswith("<<", i):
+            end_word()
+            delimiter, i = heredoc_delimiter(text, i + 2)
+            if delimiter:
+                pending.append((delimiter, words))
+            continue
+        elif ch == "&" and (text.startswith("&>", i) or (word and word[-1] in "<>")):
+            word.append(ch)  # a redirection (&>log, 2>&1), not a separator
+            started = True
+        elif ch == "\n":
+            end_command("\n")
+            for delimiter, owner in pending:  # the bodies follow this line, one after another
+                body, i = heredoc_body(text, i + 1, delimiter)
+                bodies.append((body, owner))
+            pending = []
         elif ch in SEPARATORS:
-            end_command()
+            op = text[i:i + 2] if text[i:i + 2] in ("&&", "||", "|&", ";;") else ch
+            end_command("|" if op == "|&" else op)
+            i += len(op)
+            continue
         elif ch in " \t\r":
             end_word()
         else:
             word.append(ch)
             started = True
         i += 1
-    end_command()
+    end_command("")
     nested = []
+    for body, owner in bodies:
+        at = next((n for n, c in enumerate(commands) if c is owner), None)
+        # the heredoc's own command, or a command its output is piped into (cat <<EOF | bash)
+        while at is not None:
+            if shell_reads_stdin(command_words(commands[at])):
+                nested += shell_commands(body)
+                break
+            at = at + 1 if ends[at] == "|" and at + 1 < len(commands) else None
     for words in commands:
-        argv = command_words(words)
-        if tool_of(argv) in ("bash", "sh", "zsh", "dash"):
-            # -c, or -c among bundled options (-lc, -ec): the next word is a script
-            at = next((i for i, w in enumerate(argv[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
-            if at is not None and at + 1 < len(argv):
-                nested += shell_commands(argv[at + 1])
-        elif len(argv) >= 2 and argv[0] == "eval":
-            nested += shell_commands(" ".join(argv[1:]))
+        for script in inner_scripts(command_words(words)):
+            nested += shell_commands(script)
     return commands + nested
 
 
@@ -446,6 +593,13 @@ def command_words(words: list[str]) -> list[str]:
         w = words[i]
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w, re.DOTALL) or w in KEYWORDS or w in WRAPPERS:
             i += 1
+        elif w == "sudo":
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                option = words[i]
+                i += 2 if option in SUDO_VALUES else 1
+                if option == "--":
+                    break
         elif w == "env":
             i += 1
             while i < len(words) and (words[i].startswith("-") or "=" in words[i]):
@@ -465,6 +619,8 @@ def tool_of(argv: list[str]) -> str:
         return ""
     name = re.split(r"[\\/]", argv[0])[-1].lower()
     name = name[:-4] if name.endswith(".exe") else name
+    if re.fullmatch(r"pip-?[0-9.]*", name):  # pip3, pip3.12: the runners ship each
+        return "pip"
     if re.fullmatch(r"python[0-9.]*|py|pypy[0-9.]*", name):
         # the interpreter's own options come before -m; a script's arguments after its path are its own
         words = iter(argv[1:])
@@ -550,7 +706,7 @@ def build_command(argv: list[str]) -> str | None:
     rest = argv[1:]
     if tool in ("cargo", "maturin", "pyinstaller", "iscc", "build"):
         return tool
-    if tool in ("pip", "pip3") and "wheel" in rest[:1]:
+    if tool == "pip" and "wheel" in rest[:1]:
         return "pip wheel"
     if tool in ("docker", "podman") and ("build" in rest[:1] or rest[:2] == ["buildx", "build"]):
         return f"{tool} build"
@@ -593,15 +749,20 @@ def strings(value):
 
 
 SECRET_REF = re.compile(r"\bsecrets\b\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([^']*)'\s*\])?", re.IGNORECASE)
+#: ``github.token`` (or ``github['token']``): the same token as ``secrets.GITHUB_TOKEN``.
+GITHUB_TOKEN_REF = re.compile(r"\bgithub\s*(?:\.\s*token\b|\[\s*'token'\s*\])", re.IGNORECASE)
 
 
 def secrets_read(value) -> set[str]:
-    """The secrets a value's expressions read, by name (``*`` for the whole context)."""
+    """The secrets a value's expressions read, by name (``*`` for the whole context; ``github.token`` is
+    ``GITHUB_TOKEN``)."""
     out = set()
     for s in strings(value):
         for expr in EXPR.findall(s):
             for match in SECRET_REF.finditer(expr):
                 out.add((match[1] or match[2] or "*").upper())
+            if GITHUB_TOKEN_REF.search(expr):
+                out.add("GITHUB_TOKEN")
     return out
 
 
@@ -615,6 +776,30 @@ def write_permissions(perms) -> list[str]:
     if isinstance(perms, dict):
         return sorted(f"{k}: {v}" for k, v in perms.items() if str(v).strip() == "write")
     return []
+
+
+def defaults_shell(holder) -> object:
+    defaults = holder.get("defaults") if isinstance(holder, dict) else None
+    run = defaults.get("run") if isinstance(defaults, dict) else None
+    return run.get("shell") if isinstance(run, dict) else None
+
+
+def unreadable_shell(wf: Workflow, job: dict, step: dict) -> str | None:
+    """The shell of a run step whose commands this check cannot read (``python``, ``perl {0}``, an expression), or
+    None. The step's ``shell:`` counts, else the job's or the workflow's ``defaults.run.shell``, else the runner's
+    default (bash, or pwsh on Windows); a custom template (``bash -e {0}``) by its program."""
+    if not isinstance(step.get("run"), str):
+        return None
+    for value in (step.get("shell"), defaults_shell(job), defaults_shell(wf.data)):
+        text = str(value).strip() if value is not None else ""
+        if not text:
+            continue
+        if "${{" in text:
+            return text
+        name = re.split(r"[\\/]", text.split()[0])[-1].lower()
+        name = name[:-4] if name.endswith(".exe") else name
+        return None if name in READABLE_SHELLS else name
+    return None
 
 
 def environment_name(env) -> str | None:
@@ -972,6 +1157,11 @@ def rule_8(wf: Workflow) -> list[Finding]:
             if action in ("pyo3/maturin-action", "docker/build-push-action"):
                 out.append(Finding(wf.name, job_id, 8, f"{step_label(i, step)} builds ({action}): release.yml "
                                                        f"builds nothing, package.yml does"))
+            shell = unreadable_shell(wf, job, step)
+            if shell is not None:
+                out.append(Finding(wf.name, job_id, 8, f"{step_label(i, step)} runs in the shell {shell!r}, whose "
+                                                       f"commands this check cannot read: release.yml's run steps "
+                                                       f"use {', '.join(READABLE_SHELLS)}"))
             if isinstance(step.get("run"), str):
                 for argv in shell_commands(step["run"]):
                     what = build_command(command_words(argv))
@@ -1167,7 +1357,14 @@ def rule_14(wf: Workflow) -> list[Finding]:
         if wf.name == RELEASE:
             if name == "pypi" and job_id == "publish-pypi":
                 continue
-            if tag_expression_name(name) is not None:
+            through_tag = tag_expression_name(name)
+            if through_tag in TAG_ENVIRONMENTS:
+                continue
+            if through_tag is not None:
+                out.append(Finding(wf.name, job_id, 14, f"names the environment {through_tag!r} through the tag "
+                                                        f"expression: only {', '.join(TAG_ENVIRONMENTS)} is named "
+                                                        f"that way, and any other name would make a new environment "
+                                                        f"at the tag push"))
                 continue
             out.append(Finding(wf.name, job_id, 14, f"names the environment {name!r}: release.yml names pypi (in "
                                                     f"publish-pypi) or the tag expression, which names nothing on a "
@@ -1198,6 +1395,11 @@ def rule_15(wf: Workflow) -> list[Finding]:
                 out.append(Finding(wf.name, job_id, 15, f"{step_label(i, step)} reads {', '.join(sorted(names))} in "
                                                         f"an action's step: a secret reaches only a run step of its "
                                                         f"own"))
+            shell = unreadable_shell(wf, job, step)
+            if shell is not None:
+                out.append(Finding(wf.name, job_id, 15, f"{step_label(i, step)} reads {', '.join(sorted(names))} in "
+                                                        f"the shell {shell!r}, whose commands this check cannot "
+                                                        f"read: use {', '.join(READABLE_SHELLS)}"))
             for argv in shell_commands(step.get("run") or ""):
                 tool = tool_of(command_words(argv))
                 if tool in PACKAGE_TOOLS:
@@ -1225,6 +1427,11 @@ def rule_15(wf: Workflow) -> list[Finding]:
                     out.append(Finding(wf.name, job_id, 15, f"{step_label(i, step)} uses {action} in a job that "
                                                             f"{held}: only the checkout, artifact and publishing "
                                                             f"actions may run there"))
+            shell = unreadable_shell(wf, job, step)
+            if shell is not None:
+                out.append(Finding(wf.name, job_id, 15, f"{step_label(i, step)} runs in the shell {shell!r} in a "
+                                                        f"job that {held}: its commands cannot be read, so it may "
+                                                        f"install or build"))
             for argv in shell_commands(step.get("run") or ""):
                 argv = command_words(argv)
                 tool = tool_of(argv)

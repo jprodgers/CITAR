@@ -274,6 +274,22 @@ steps:
         tree.replace("docs.yml", "    if: github.ref == 'refs/heads/main'\n", "    if: always()\n")
         self.assertFinds(tree, 2, "docs.yml", "deploy")
 
+    def test_rule_2_and_3_a_heredoc_a_shell_reads_in_test_yml(self):
+        for script in ("bash <<'EOF'\n          gh release create v1 dist/*\n          EOF",
+                       "cat <<EOF | bash\n          gh release create v1 dist/*\n          EOF"):
+            with self.subTest(script=script):
+                tree = Tree(self)
+                tree.replace("test.yml", "      - run: ruff check --output-format=github .\n",
+                             f"      - run: ruff check --output-format=github .\n      - run: |\n"
+                             f"          {script}\n")
+                found = self.assertFinds(tree, 3, "test.yml", "lint", "gh release create")
+                self.assertTrue(any(f.rule == 2 and f.job == "lint" for f in found), found)
+        tree = Tree(self)  # a heredoc no shell reads is data
+        tree.replace("test.yml", "      - run: ruff check --output-format=github .\n",
+                     "      - run: ruff check --output-format=github .\n      - run: |\n"
+                     "          cat > notes.txt <<'EOF'\n          gh release create v1 dist/*\n          EOF\n")
+        self.assertPasses(tree)
+
     def test_rule_2_no_other_workflow_publishes(self):
         for name, plant in (("rust.yml", "      - run: git push origin HEAD:refs/heads/x\n"),
                             ("helper.yml", "      - run: gh api -X POST repos/x/y/dispatches\n"),
@@ -294,11 +310,13 @@ steps:
         self.assertTrue(any(f.rule == 14 and f.job == "lint" for f in found), found)
 
     def test_rule_3_a_secret_named_in_test_yml_even_github_token(self):
-        tree = Tree(self)
-        tree.replace("test.yml", "      - run: ruff check --output-format=github .\n",
-                     "      - run: ruff check --output-format=github .\n        env:\n"
-                     "          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n")
-        self.assertFinds(tree, 3, "test.yml", text="GITHUB_TOKEN")
+        for token in ("secrets.GITHUB_TOKEN", "github.token", "github['token']"):
+            with self.subTest(token=token):
+                tree = Tree(self)
+                tree.replace("test.yml", "      - run: ruff check --output-format=github .\n",
+                             "      - run: ruff check --output-format=github .\n        env:\n"
+                             f"          GH_TOKEN: ${{{{ {token} }}}}\n")
+                self.assertFinds(tree, 3, "test.yml", text="GITHUB_TOKEN")
 
     def test_rule_3_package_yml_publishes_nothing(self):
         tree = Tree(self, package=True)
@@ -374,6 +392,52 @@ permissions:
                 tree = Tree(self)
                 tree.replace("release.yml", "          exit 1\n", f"          exit 1\n      - run: {run}\n")
                 self.assertFinds(tree, 8, "release.yml", "phase-5")
+
+    def test_rule_8_a_build_in_a_heredoc_a_shell_reads(self):
+        for script in ("bash -s <<EOF\n          cargo build --release\n          EOF",
+                       "sh <<< 'cargo build --release'", "pwsh -Command \"cargo build --release\""):
+            with self.subTest(script=script):
+                tree = Tree(self)
+                tree.replace("release.yml", "          exit 1\n",
+                             f"          exit 1\n      - run: |\n          {script}\n")
+                self.assertFinds(tree, 8, "release.yml", "phase-5", "runs cargo")
+
+    def test_rule_8_and_15_a_step_in_a_shell_this_check_cannot_read(self):
+        plant = "      - shell: python\n        run: |\n          import subprocess\n" \
+                "          subprocess.run(['cargo', 'build'])\n"
+        tree = Tree(self)
+        tree.replace("release.yml", "          exit 1\n", "          exit 1\n" + plant)
+        self.assertFinds(tree, 8, "release.yml", "phase-5", "'python'")
+        tree = Tree(self)  # the job's defaults count too
+        tree.replace("release.yml", "    runs-on: ubuntu-latest\n",
+                     "    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: perl {0}\n")
+        self.assertFinds(tree, 8, "release.yml", "phase-5", "'perl'")
+        tree = Tree(self)
+        tree.add_job("release.yml", "publish-pypi", f"""
+if: {TAG_GUARD}
+runs-on: ubuntu-latest
+environment: pypi
+permissions:
+  id-token: write
+steps:
+  - shell: python
+    run: |
+      import subprocess
+      subprocess.run(['pip', 'install', 'twine'])
+  - uses: pypa/gh-action-pypi-publish@{SHA} # v1.13.0
+""")
+        found = self.assertFinds(tree, 15, "release.yml", "publish-pypi", "cannot be read")
+        self.assertTrue(any(f.rule == 8 and f.job == "publish-pypi" for f in found), found)
+        tree = Tree(self)  # a step reading a secret, anywhere
+        tree.replace("docs.yml", "        env:\n          WIKI_TOKEN:",
+                     "        shell: python {0}\n        env:\n          WIKI_TOKEN:")
+        self.assertFinds(tree, 15, "docs.yml", "wiki", "'python'")
+        for shell in ("bash --noprofile --norc -eo pipefail {0}", "pwsh", "sh", "cmd", "powershell"):
+            with self.subTest(shell=shell):
+                tree = Tree(self)
+                tree.replace("release.yml", "          exit 1\n",
+                             f"          exit 1\n      - shell: {shell}\n        run: echo done\n")
+                self.assertPasses(tree)
 
     # ---- rule 9
     def test_rule_9_an_upload_of_a_key(self):
@@ -509,7 +573,9 @@ steps:
         self.assertPasses(tree)
         for env in ("${{ startsWith(github.ref, 'refs/tags/v') && 'helper-signing' || '' }}",
                     "${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && 'helper-signing' }}",
-                    "${{ github.event_name == 'push' && 'helper-signing' || '' }}"):
+                    "${{ github.event_name == 'push' && 'helper-signing' || '' }}",
+                    TAG_ENV.replace("'helper-signing'", "'staging'"),
+                    TAG_ENV.replace("'helper-signing'", "'helper_signing'")):
             with self.subTest(env=env):
                 tree = Tree(self)
                 tree.add_job("release.yml", "sign", f"""
@@ -564,6 +630,24 @@ steps:
         found = self.assertFinds(tree, 15, "release.yml", "publish-pypi", "runs pip")
         self.assertEqual({f.rule for f in found}, {15}, found)
 
+    def test_rule_15_pip_by_another_name_in_a_release_job(self):
+        for run in ("pip3.12 install twine", "pip3 install twine", "sudo -E pip install twine",
+                    "sudo -u runner python3.12 -m pip install twine", "bash -s <<'EOF'\n      pip install twine\n      EOF"):
+            with self.subTest(run=run):
+                tree = Tree(self)
+                tree.add_job("release.yml", "publish-pypi", f"""
+if: {TAG_GUARD}
+runs-on: ubuntu-latest
+environment: pypi
+permissions:
+  id-token: write
+steps:
+  - run: |
+      {run}
+  - uses: pypa/gh-action-pypi-publish@{SHA} # v1.13.0
+""")
+                self.assertFinds(tree, 15, "release.yml", "publish-pypi", "runs pip")
+
     def test_rule_15_setup_actions_credentials_and_secrets_in_actions(self):
         tree = Tree(self)
         tree.add_job("release.yml", "image", f"""
@@ -600,6 +684,7 @@ class Expressions(unittest.TestCase):
 
     def test_the_tag_expression(self):
         self.assertEqual(cw.tag_expression_name(TAG_ENV), "helper-signing")
+        self.assertEqual(cw.TAG_ENVIRONMENTS, ("helper-signing",))
         self.assertIsNone(cw.tag_expression_name("helper-signing"))
         self.assertIsNone(cw.tag_expression_name(TAG_ENV.replace("'push'", "'workflow_dispatch'")))
 
@@ -632,6 +717,46 @@ class Shell(unittest.TestCase):
         argvs = self.commands("python3 - <<'PY'\nimport os; os.system('git push')\nPY\n"
                               "echo ${{ runner.os == 'Windows' && 'x' || 'y' }} done")
         self.assertEqual(argvs, [["python3", "-"], ["echo", "__EXPR__", "done"]])
+        # a heredoc a shell reads is its script: the shell's own, or one its output is piped into
+        for script in ("bash <<'EOF'\ngh release create v1 dist/*\nEOF", "bash -s <<EOF\ngh release create v1\nEOF",
+                       "sudo bash -e <<-\"EOF\"\n\tgh release create v1\n\tEOF",
+                       "cat <<EOF | sed s/x/y/ | bash -s -- arg\ngh release create v1\nEOF",
+                       "x=1 sh 2>&1 <<EOF\ngh release create v1\nEOF"):
+            with self.subTest(script=script):
+                self.assertTrue(any(cw.publishing_command(a) == "gh release create" for a in self.commands(script)),
+                                self.commands(script))
+        # and other heredocs are data: a file written, a script file's stdin, a -c script's stdin
+        for script in ("cat > notes.txt <<EOF\ngh release create v1\nEOF", "bash x.sh <<EOF\ngh release create v1\nEOF",
+                       "bash -c 'read x' <<EOF\ngh release create v1\nEOF", "cat <<EOF && bash\ngh release create\nEOF"):
+            with self.subTest(script=script):
+                self.assertFalse(any(cw.publishing_command(a) for a in self.commands(script)), self.commands(script))
+        # two heredocs on a line, each body in turn; the commands after them are read again
+        self.assertEqual(self.commands("diff - /dev/fd/3 <<A 3<<B\ngit push\nA\ngit push\nB\ncargo build"),
+                         [["diff", "-", "/dev/fd/3", "3"], ["cargo", "build"]])
+        # a << in quotes or a comment starts no heredoc, and arithmetic's << none either
+        self.assertEqual(self.commands("echo \"use <<STOP to end\" # or <<END\ncargo build\nx=$((1 << 2))\npip x"),
+                         [["echo", "use <<STOP to end"], ["cargo", "build"], [], ["1", "2"], ["pip", "x"]])
+
+    def test_scripts_given_to_a_shell_and_launchers(self):
+        for script, inner in (("bash -lc 'cargo build'", ["cargo", "build"]),
+                              ("sh <<< \"cargo build\"", ["cargo", "build"]),
+                              ("pwsh -NoProfile -Command \"cargo build; echo built\"", ["cargo", "build"]),
+                              ("powershell -c cargo build", ["cargo", "build"]),
+                              ("cmd /s /c cargo build", ["cargo", "build"]),
+                              ("eval cargo build", ["cargo", "build"]),
+                              ("sudo -E -u runner pip install x", ["pip", "install", "x"]),
+                              ("sudo -- pip install x", ["pip", "install", "x"]),
+                              ("timeout 10m env A=1 nice -n 5 cargo build", ["cargo", "build"])):
+            with self.subTest(script=script):
+                self.assertIn(inner, self.commands(script))
+        self.assertNotIn(["cargo", "build"], self.commands("grep x <<< 'cargo build'"))
+        # a redirection is part of its command, not a separator
+        self.assertEqual(self.commands("cargo build 2>&1 | tee log &>/dev/null && ls >&2 & wait"),
+                         [["cargo", "build", "2>&1"], ["tee", "log", "&>/dev/null"], ["ls", ">&2"], ["wait"]])
+        self.assertTrue(cw.shell_reads_stdin(["bash"]))
+        self.assertTrue(cw.shell_reads_stdin(["bash", "-o", "pipefail", ">", "log"]))
+        self.assertFalse(cw.shell_reads_stdin(["bash", "-o", "pipefail", "x.sh"]))
+        self.assertFalse(cw.shell_reads_stdin(["cat"]))
 
     def test_tools_and_publishing(self):
         self.assertEqual(cw.tool_of(["python", "-m", "pip", "install", "x"]), "pip")
@@ -655,6 +780,14 @@ class Shell(unittest.TestCase):
         self.assertFalse(cw.is_prepare({"run": "echo python scripts/release.py prepare"}))
         self.assertEqual(cw.build_command(["docker", "buildx", "build", "."]), "docker build")
         self.assertIsNone(cw.build_command(["docker", "run", "x"]))
+        for pip in ("pip", "pip3", "pip3.12", "/usr/bin/pip3.12", "pip3.12.exe", "pip-3.12"):
+            with self.subTest(pip=pip):
+                self.assertEqual(cw.tool_of([pip, "install"]), "pip")
+        self.assertEqual(cw.build_command(["pip3.11", "wheel", "."]), "pip wheel")
+        self.assertEqual(cw.tool_of(["pipx", "run", "build"]), "pipx")
+        self.assertEqual(cw.secrets_read({"env": {"T": "${{ github.token }}", "U": "${{ GITHUB.Token }}"}}),
+                         {"GITHUB_TOKEN"})
+        self.assertEqual(cw.secrets_read({"env": {"T": "${{ github.token_x }}", "U": "github.token"}}), set())
 
 
 class Parts(unittest.TestCase):
