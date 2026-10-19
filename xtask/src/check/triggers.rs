@@ -238,16 +238,17 @@ concurrency:
         let reads = super::super::reads(&super::super::metadata::Metadata::load(&root).unwrap());
         assert!(reads.contains(&"pyproject.toml".to_owned()), "{reads:?}");
         assert!(reads.contains(&"crates/citar-py/Cargo.toml".to_owned()), "{reads:?}");
+        assert!(reads.contains(&".github/workflows/package.yml".to_owned()), "{reads:?}");
         for file in TEST_READS {
             assert!(reads.contains(&(*file).to_owned()), "{file}: {reads:?}");
             assert!(root.join(file).is_file(), "{file} is gone: take it out of TEST_READS");
         }
         let found = check(&root, &reads).unwrap();
         assert!(found.is_empty(), "{found:?}");
-        // The check can fail on the real file: without its lines for a file the checks read, or
-        // for one a test reads, both events miss it.
+        // The check can fail on the real file: without its lines for a file the checks read (a
+        // workflow among them, 5-02b's package.yml), or for one a test reads, both events miss it.
         let text = std::fs::read_to_string(root.join(WORKFLOW)).unwrap();
-        for file in ["pyproject.toml", TEST_READS[0]] {
+        for file in ["pyproject.toml", ".github/workflows/package.yml", TEST_READS[0]] {
             let without: String = text
                 .lines()
                 .filter(|l| !l.contains(&format!("\"{file}\"")))

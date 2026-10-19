@@ -19,7 +19,7 @@
 //! - in the bot, `&mut Game` appears only in `driver.rs`; in citar-py, no hand-written `unsafe`;
 //! - Phase 4 (design/phase4-helper.md P4.3.1): no `unsafe` in citar-helper, none in citar-jobs
 //!   outside its `sys` module, and the helper crates' test features and development guard in no
-//!   shipped build (`helper`).
+//!   shipped build (`helper`), which reads release.yml, package.yml and helper.yml's artifact jobs.
 //!
 //! Exit code 0 means every check passed, 1 that at least one found a problem, and 2 that the
 //! checks could not run.
@@ -128,16 +128,10 @@ fn reads(meta: &metadata::Metadata) -> Vec<String> {
     let mut out: Vec<String> = ["Cargo.toml", "Cargo.lock"].map(str::to_owned).to_vec();
     out.extend(meta.members().map(|p| meta.manifest(p)));
     out.extend(
-        [
-            config::FILE,
-            version::PYTHON_FILE,
-            pyproject::FILE,
-            triggers::WORKFLOW,
-            helper::RELEASE_WORKFLOW,
-            helper::HELPER_WORKFLOW,
-        ]
-        .map(str::to_owned),
+        [config::FILE, version::PYTHON_FILE, pyproject::FILE, triggers::WORKFLOW]
+            .map(str::to_owned),
     );
+    out.extend(helper::WORKFLOWS.iter().map(|&(file, _)| file.to_owned()));
     out.extend(triggers::TEST_READS.iter().map(|f| (*f).to_owned()));
     out.extend([ENGINE_SRC, sources::BOT_SRC, sources::PY_SRC].map(|src| format!("{src}/lib.rs")));
     for g in generated::FILES {
