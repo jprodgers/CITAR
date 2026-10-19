@@ -304,7 +304,7 @@ On linux-x64 under Python 3.12, a third venv installs `"<wheel>[server]"` and wr
 
 test.yml's `package`, `installer` and `docker` jobs move into package.yml in 5-02b, onto the release wheels (the installer jobs stop using the ci-profile test wheels), unchanged otherwise until 5-06 and 5-07 replace them; `twine check` moves with `package` and runs over every wheel and the sdist. test.yml keeps the suite and its test-ops wheels (P5.17).
 
-**As built in 5-02b: `package.yml`, the wheel matrix and the sdist** (Appendix F, 5-02b). One agent, from 2026-10-19 12:46 to 15:20 (-04:00), on branch `p-5-02b` from `7313a84`.
+**As built in 5-02b: `package.yml`, the wheel matrix and the sdist** (Appendix F, 5-02b). One agent, from 2026-10-19 12:46 to 15:30 (-04:00), on branch `p-5-02b` from `7313a84`.
 
 - **What was built.**
   - **`.github/workflows/package.yml`** (name `package`): `pull_request`, `push` to `main`, `workflow_dispatch`, and `workflow_call` with `mode`, `version`, `date` and `label`; the group `package-${{ github.workflow }}-${{ github.ref }}`; `contents: read`, no environment, no secret; every action pinned as test.yml pins it; every checkout `persist-credentials: false`; every job a `timeout-minutes`. Its jobs:
