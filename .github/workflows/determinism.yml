@@ -99,12 +99,12 @@ jobs:
           # If this label is retired, run x86_64-apple-darwin under Rosetta on macos-15 instead.
           - { target: macos-x64, os: macos-15-intel, profile: ci }
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Toolchain
         run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: golden-${{ matrix.profile }}
 
@@ -130,7 +130,7 @@ jobs:
           release=$?
           echo "status=$(( ci | release ))" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: golden-report-${{ matrix.target }}
           path: golden-${{ matrix.target }}.json
@@ -138,7 +138,7 @@ jobs:
 
       - name: Keep the states where games left the committed files
         if: steps.golden.outputs.status != '0'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: golden-states-${{ matrix.target }}
           path: golden-states
@@ -154,9 +154,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # The committed files name the rows where targets part, and the script is the repository's.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: golden-report-*
           merge-multiple: true
@@ -175,12 +175,12 @@ jobs:
         if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
         run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
         with:
           shared-key: golden-ci
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
         with:
           pattern: golden-states-*
@@ -192,7 +192,7 @@ jobs:
           cargo build --locked --package citar-testkit --bin golden --profile ci
           python .github/scripts/golden_compare.py states states odd.json target/ci/golden divergence
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
         with:
           name: divergence
