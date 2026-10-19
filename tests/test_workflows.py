@@ -251,9 +251,13 @@ class ThePackageWorkflow(unittest.TestCase):
             got = (leg["runner"], leg["target"], leg["tag"], leg["library"], leg["manylinux"], leg["macos_target"],
                    leg["machine"])
             self.assertEqual(got, want, platform)
-            # each on its own architecture: the Linux ones in the manylinux_2_28 container of the runner's
-            want_container = f"quay.io/pypa/manylinux_2_28_{leg['machine']}:latest" if leg["manylinux"] != "off" else ""
-            self.assertEqual(leg["container"], want_container, platform)
+            # each on its own architecture: the Linux ones in the manylinux_2_28 container of the runner's, pinned
+            # by its digest (rule 11)
+            if leg["manylinux"] == "off":
+                self.assertEqual(leg["container"], "", platform)
+            else:
+                self.assertRegex(leg["container"], rf"^quay\.io/pypa/manylinux_2_28_{leg['machine']}@sha256:[0-9a-f]{{64}}$",
+                                 platform)
         # release.py's asset list (P5.10) names the same five wheels
         self.assertEqual(sorted(leg["tag"].removeprefix("cp311-abi3-") for leg in legs.values()),
                          sorted(release.WHEEL_TAGS))
@@ -267,6 +271,17 @@ class ThePackageWorkflow(unittest.TestCase):
         self.assertEqual(build[0]["with"]["args"], "--release --locked --out dist")
         self.assertEqual(build[0]["with"]["docker-options"], "-e CITAR_BUILD_ID")
         self.assertEqual(build[0]["env"]["MACOSX_DEPLOYMENT_TARGET"], "${{ matrix.macos_target }}")
+        # The native legs install rust-toolchain.toml's release after prepare and before the cache reads `rustc -vV`
+        # for its key, as test.yml's build-ext does.
+        steps = job["steps"]
+        at = {name: next(i for i, s in enumerate(steps) if pick(s)) for name, pick in (
+            ("prepare", lambda s: "scripts/release.py prepare" in s.get("run", "")),
+            ("toolchain", lambda s: s.get("run", "").strip() == "rustup toolchain install"),
+            ("cache", lambda s: str(s.get("uses", "")).startswith("Swatinem/rust-cache@")),
+            ("build", lambda s: str(s.get("uses", "")).startswith("PyO3/maturin-action@")))}
+        self.assertEqual(sorted(at, key=at.get), ["prepare", "toolchain", "cache", "build"])
+        self.assertEqual(steps[at["toolchain"]].get("if"), "matrix.container == ''")
+        self.assertEqual(steps[at["cache"]].get("if"), "matrix.container == ''")
         runs = self.runs(job)
         self.assertIn('check_dist.py wheel dist --tag "$TAG" --library "$LIBRARY" --version "$PEP440"', runs)
         self.assertIn("twine check dist/*.whl", runs)
@@ -327,6 +342,8 @@ class ThePackageWorkflow(unittest.TestCase):
             ("          name: pkg-wheel-linux-x64\n          path: wheelhouse",
              "          pattern: helper-*\n          path: wheelhouse", 13, "docker"),
             ("          path: constraints/*.txt", "          path: ${{ runner.temp }}", 9, "constraints"),
+            ("container: quay.io/pypa/manylinux_2_28_x86_64@sha256:",
+             "container: quay.io/pypa/manylinux_2_28_x86_64:latest #", 11, "wheels"),
         )
         for old, new, rule, job in plants:
             with self.subTest(rule=rule, job=job):
@@ -659,6 +676,94 @@ steps:
   - uses: docker://alpine:3.20
 """)
         self.assertFinds(tree, 11, "rust.yml", "image", "sha256")
+
+    def test_rule_11_the_image_a_maturin_step_builds_in(self):
+        digest = "quay.io/pypa/manylinux_2_28_x86_64@sha256:" + "1e" * 32
+
+        def workflow(linux: dict, step: str = "") -> str:
+            leg = ", ".join(f'{k}: "{v}"' for k, v in linux.items())
+            return f"""name: images
+on: pull_request
+permissions:
+  contents: read
+env:
+  MATURIN_VERSION: v1.15.0
+jobs:
+  wheel:
+    runs-on: ${{{{ matrix.runner }}}}
+    strategy:
+      matrix:
+        include:
+          - {{ platform: linux, runner: ubuntu-24.04, {leg} }}
+          # maturin-action builds on the runner on Windows and macOS, whatever these say
+          - {{ platform: windows, runner: windows-latest, manylinux: "2_28", container: "" }}
+          - {{ platform: macos, runner: macos-15, manylinux: "2_28", container: auto }}
+    steps:
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: ${{{{ env.MATURIN_VERSION }}}}
+          manylinux: ${{{{ matrix.manylinux }}}}
+          container: ${{{{ matrix.container }}}}
+          target: ${{{{ matrix.target }}}}
+{step}"""
+        cases = (  # the Linux leg's matrix values, and what rule 11 says of them (None: it holds)
+            ({"manylinux": "2_28", "container": digest}, None),
+            ({"manylinux": "2_28", "container": "off"}, None),
+            ({"manylinux": "off", "container": ""}, None),
+            ({"manylinux": "", "container": "", "target": "x86_64-unknown-linux-gnu"}, None),
+            ({"manylinux": "2_28", "container": "quay.io/pypa/manylinux_2_28_x86_64:latest"}, "is not pinned"),
+            ({"manylinux": "2_28", "container": "quay.io/pypa/manylinux_2_28_x86_64@sha256:abc"}, "is not pinned"),
+            ({"manylinux": "2_28", "container": ""}, "own image for manylinux 2_28"),
+            ({"manylinux": "manylinux_2_28"}, "own image for manylinux 2_28"),       # no container key: empty
+            ({"manylinux": "off", "container": "auto"}, "own image"),
+            ({"manylinux": "", "container": "", "target": "aarch64-unknown-linux-gnu"}, "own image for manylinux auto"),
+        )
+        for leg, problem in cases:
+            with self.subTest(leg=leg):
+                tree = Tree(self)
+                tree.write("images.yml", workflow(leg))
+                if problem is None:
+                    self.assertPasses(tree)
+                    continue
+                found = self.assertFinds(tree, 11, "images.yml", "wheel", problem)
+                self.assertEqual([f for f in found if f.file == "images.yml"],
+                                 [f for f in found if f.file == "images.yml" and "(leg linux)" in f.message])
+        # the source distribution and a publish: sdist never builds in a container, publish asks for one
+        tree = Tree(self)
+        text = workflow({"manylinux": "", "container": ""}).replace("          target:", "          command: sdist\n"
+                                                                                       "          target:")
+        tree.write("images.yml", text)
+        self.assertPasses(tree)
+        tree.write("images.yml", text.replace("command: sdist", "command: publish"))
+        self.assertFinds(tree, 11, "images.yml", "wheel", "own image for manylinux auto")
+        # a target given in args is read as the action reads it
+        tree.write("images.yml", workflow({"manylinux": "", "container": ""}).replace(
+            "          target: ${{ matrix.target }}\n", "          args: --release --target=aarch64-unknown-linux-gnu\n"))
+        self.assertFinds(tree, 11, "images.yml", "wheel", "own image for manylinux auto")
+
+    def test_rule_11_a_jobs_container_and_services(self):
+        digest = "@sha256:" + "ab" * 32
+        body = """
+runs-on: ubuntu-24.04
+container: {container}
+services:
+  db:
+    image: {db}
+  cache: {cache}
+steps:
+  - run: echo ok
+"""
+        tree = Tree(self)
+        tree.add_job("rust.yml", "inside", body.format(container="node:22", db="postgres:17",
+                                                       cache="{ image: 'redis:8' }"))
+        found = self.assertFinds(tree, 11, "rust.yml", "inside", "its container node:22")
+        self.assertFinds(tree, 11, "rust.yml", "inside", "its service db postgres:17")
+        self.assertFinds(tree, 11, "rust.yml", "inside", "its service cache redis:8")
+        self.assertEqual(len([f for f in found if f.job == "inside"]), 3)
+        tree = Tree(self)
+        tree.add_job("rust.yml", "inside", body.format(container="{ image: 'node" + digest + "' }",
+                                                       db="postgres" + digest, cache="{ image: 'redis" + digest + "' }"))
+        self.assertPasses(tree)
 
     # ---- rule 12
     def test_rule_12_secrets_inherit_on_a_calling_job(self):

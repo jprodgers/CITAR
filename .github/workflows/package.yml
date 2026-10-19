@@ -3,7 +3,8 @@
 #
 # - meta: the version, its PEP 440 form and the build label (scripts/release.py meta), one set for every job.
 # - wheels: the five abi3 wheels, each built natively on its own architecture with maturin MATURIN_VERSION (no
-#   emulation, no cross build: the Linux ones in the manylinux_2_28 container of the runner's own architecture),
+#   emulation, no cross build: the Linux ones in the manylinux_2_28 container of the runner's own architecture,
+#   pinned by digest),
 #   CITAR_BUILD_ID set to the label; each held to the checkout and its tag by scripts/ci/check_dist.py, checked by
 #   twine, then installed in a fresh venv on the runner that built it under Python 3.11 (the floor) and 3.14 (the
 #   newest) and proved there by scripts/ci/smoke_wheel.py: the label arrived, a job host is verifiable on this
@@ -165,7 +166,8 @@ jobs:
             machine: x86_64
             target: x86_64-unknown-linux-gnu
             manylinux: "2_28"
-            container: quay.io/pypa/manylinux_2_28_x86_64:latest
+            # PyPA's 2026.10.16-1, "latest" on 2026-10-19 (rule 11: a build image by digest, moved deliberately).
+            container: quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b8460ad8fb3fb0fbe1cd818845159ac896b4fd17452d56e892c291f3b97a8
             macos_target: ""
             tag: cp311-abi3-manylinux_2_28_x86_64
             library: citar/_engine.abi3.so
@@ -174,8 +176,9 @@ jobs:
             machine: aarch64
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
-            # Named, not left to maturin-action, so no change of its defaults can swap in a cross-compiling image.
-            container: quay.io/pypa/manylinux_2_28_aarch64:latest
+            # Named, not left to maturin-action, so no change of its defaults can swap in a cross-compiling image;
+            # PyPA's 2026.10.16-1, "latest" on 2026-10-19.
+            container: quay.io/pypa/manylinux_2_28_aarch64@sha256:b873ffc316ffe8a154e3dc4872871de2ebd170db4876c8bbd983d42ff320001e
             macos_target: ""
             tag: cp311-abi3-manylinux_2_28_aarch64
             library: citar/_engine.abi3.so
@@ -211,6 +214,13 @@ jobs:
           got=$(uname -m)
           echo "uname -m: $got; label: $CITAR_BUILD_ID; version: $RELEASE_VERSION ($PEP440)"
           [ "$got" = "$WANT" ] || { echo "::error::this runner is $got, not $WANT"; exit 1; }
+
+      - name: Toolchain
+        # rust-toolchain.toml's release, installed before the cache reads `rustc -vV` for its key, as test.yml's
+        # build-ext does (rustup's install on first use can be turned off). The native builds only: a container's
+        # build installs the toolchain inside it.
+        if: matrix.container == ''
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         # The native builds only: a container's build runs as root with a cargo home of its own, so the runner
