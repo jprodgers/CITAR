@@ -544,7 +544,9 @@ class Reports(_ReportCase):
         self.assertTrue(until(lambda: not (self.runner.dir / m["id"]).exists(), 10), "its files went")
         self.assertTrue(until(lambda: not self.runner._builds, 10))
         self.assertEqual(self.record.narratives(), [])
-        self.assertEqual(self.runner._deleting, set())
+        # the build lets go of the id after its folder is gone (so a listing between the two cannot show it): waited
+        # for, not looked at (CI, test.yml at b0ebab0 on ubuntu-latest 3.11 looked in between)
+        self.assertTrue(until(lambda: not self.runner._deleting, 10), self.runner._deleting)
         seat.idle()
 
     def test_a_listing_never_shows_a_report_whose_deletion_ends_while_it_reads(self):

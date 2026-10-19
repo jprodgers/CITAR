@@ -673,6 +673,12 @@ class Scripted(Case):
     def rows(s, nid: int) -> list:
         return [(x["outcome"], x["cause"]) for x in s.metrics.data["negotiations"] if x["nid"] == nid]
 
+    def answered_row(self, s, nid: int) -> None:
+        """Waits for the chat's row. The model's accept settles the negotiation inside its tool call, and its responder
+        writes the row once the step returns, so a look right after the status may come first (CI, test.yml at
+        b0ebab0 on macos-latest: [] where the row followed)."""
+        until(lambda: self.rows(s, nid), 10)
+
     def chats_made(self, nid: Optional[int] = None) -> list:
         return [m for m in Fake.made if not m["phase"] and "end_turn" not in m["tools"]
                 and (nid is None or m["nid"] == nid)]
@@ -973,6 +979,7 @@ class OneMachine(Scripted):
         nid = next(n["id"] for n in s.game.negotiations() if n["initiator"] == 0)
         self.assertTrue(until(lambda: s.game.negotiation(nid)["status"] == "accepted", 30),
                         (s.game.negotiation(nid), s.errors))
+        self.answered_row(s, nid)
         self.assertEqual(self.rows(s, nid), [("answered", None)], "the model's answer, no fallback")
         self.assertEqual(len(self.chats_made(nid)), 1)
         self.assertEqual(s.game.negotiation(nid)["history"][-1]["message"], "model: accept")
@@ -1007,6 +1014,7 @@ class OneMachine(Scripted):
         self.assertTrue(until(lambda: s.game.negotiation(nid)["status"] == "accepted", 30), s.game.negotiation(nid))
         self.assertEqual(s.game.negotiation(nid)["history"][-1]["message"], "model: accept")
         self.assertEqual(len(self.chats_made(nid)), 1, "its model's own conversation for the chat")
+        self.answered_row(s, nid)
         self.assertEqual(self.rows(s, nid), [("answered", None)])
         self.assertTrue(until(lambda: s.game.current == 0 and s.game.turn == turn + 2, 30), "then the turn ended")
 
@@ -1143,6 +1151,7 @@ class PhaseHolds(Scripted):
             t.join(15)
         self.assertFalse(t.is_alive())
         self.assertEqual(s.game.negotiation(nid)["status"], "accepted", "the chat's answer was the model's")
+        self.answered_row(s, nid)
         self.assertEqual(self.rows(s, nid), [("answered", None)])
         row = s.metrics.data["diplomat"][-1]
         self.assertEqual((row["outcome"], row["cause"]), ("done", None))
