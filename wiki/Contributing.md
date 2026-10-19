@@ -80,7 +80,12 @@ its version in a comment. CI checks only that form. The second asks GitHub that 
 action's repository and that the version in the comment names it; CI does not run it, because it needs the network
 and a token that the tests workflow must not hold. To add an action, write it with its tag (`actions/checkout@v7`)
 and let `python scripts/ci/action_pins.py pin --write` replace the tag with the commit (`@3d3c42e... # v7.0.1`).
-Dependabot's weekly pull request moves the pins.
+Dependabot's weekly pull request moves the pins. The images a workflow builds or runs in (maturin-action's
+`container:`, a job's `container:` or `services:`, a `docker://` step) are pinned too, by digest
+(`quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b...`), with the tag and the date in a comment beside them; the first
+check refuses a moving tag there, and a maturin-action step that would pick its own image. Dependabot does not move
+these: to update one, look up the digest its tag names today (for quay.io,
+`https://quay.io/api/v1/repository/pypa/<name>/tag/?specificTag=latest`) and replace it, comment and all.
 
 ## Conventions
 
