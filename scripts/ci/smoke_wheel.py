@@ -277,6 +277,21 @@ def under(path, folder) -> bool:
         return False
 
 
+#: What the extension itself says of its file and its test operations, asked in an interpreter of its own, as
+#: unpack_ext.py asks it: everything else reaches the engine through citar.engine_api (tests/test_engine_boundary.py).
+EXTENSION_FACTS = "import json, citar._engine as E; print(json.dumps([E.__file__, E.HAS_TEST_OPS]))"
+
+
+def extension_facts() -> tuple:
+    """The extension's file and whether it has the test operations, from this venv's Python with ``-P``."""
+    out = run([sys.executable, "-P", "-c", EXTENSION_FACTS], "ask the extension", timeout=COMMAND_TIMEOUT)
+    try:
+        library, test_ops = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError, TypeError):
+        raise Failed(f"the extension's answer did not read: {out!r}") from None
+    return library, test_ops
+
+
 def inside(args) -> int:
     """The checks, run by the venv's Python with ``-P`` from a folder of their own (``smoke`` starts this)."""
     import importlib.metadata
@@ -290,15 +305,18 @@ def inside(args) -> int:
     check(not any(k.startswith("CITAR_") and k not in STATE_VARIABLES for k in os.environ),
           f"CITAR_ variables reached the checks: {sorted(k for k in os.environ if k.startswith('CITAR_'))}",
           "no CITAR_ variable but the state ones")
+    check(sys.flags.safe_path, "the checks run without -P: the working directory is on the import path",
+          "-P: the working directory is not on the import path")
     site = {Path(sysconfig.get_paths()[k]).resolve() for k in ("purelib", "platlib")}
     import citar
-    from citar import _engine, engine_api, paths
+    from citar import engine_api, paths
     check(any(under(citar.__file__, s) for s in site), f"citar is {citar.__file__}, not the venv's site-packages "
           f"({', '.join(map(str, site))})", f"citar from {Path(citar.__file__).parent}")
-    check(any(under(_engine.__file__, s) for s in site), f"the extension is {_engine.__file__}, not the wheel's",
-          f"citar._engine from {Path(_engine.__file__).name}")
+    library, test_ops = extension_facts()
+    check(any(under(library, s) for s in site), f"the extension is {library}, not the wheel's",
+          f"citar._engine from {Path(library).name}")
     check(not paths.in_source_checkout(), "the installed copy thinks it is a checkout", "not a checkout")
-    check(not _engine.HAS_TEST_OPS, "the release wheel carries the test operations", "no test operations")
+    check(test_ops is False, "the release wheel carries the test operations", "no test operations")
     info = engine_api.build_info()
     check(info["version"] == version.text, f"build_info's version is {info['version']}, not {version.text}",
           f"build_info version {info['version']}")
