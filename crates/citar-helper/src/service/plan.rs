@@ -358,6 +358,16 @@ impl Plan {
                     Err(e) => return Err(fail(format!("{}: {e}", shown(p)))),
                 },
                 Step::Start { program, args } => {
+                    // What this starts outlives this process (`run --detach` leaves the Run
+                    // supervisor running), and Windows hands a child every inheritable handle its
+                    // parent holds, not only the three it is given. This process's own output is
+                    // such a handle when its caller made it so (Python's subprocess does, for the
+                    // pipe it reads), so the supervisor would hold that pipe open for as long as it
+                    // runs and the caller would wait for its end until then: helper.yml's Run value
+                    // step did, to the job's 6 h timeout. The child still gets its own copy of this
+                    // output, which `detach` keeps from the supervisor.
+                    #[cfg(windows)]
+                    citar_jobs::sys::keep_std_handles_to_self();
                     let status = Command::new(program)
                         .args(args)
                         .stdin(std::process::Stdio::null())

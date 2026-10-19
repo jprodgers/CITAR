@@ -69,7 +69,19 @@ class FakeHub:
 
 
 def run(*args: str, check: bool = False, timeout: float = 120) -> subprocess.CompletedProcess:
-    got = subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
+    # Not subprocess.run: on Windows its timeout kills the command and then waits for the command's output with no
+    # limit, so a process the command started that still held that output (the Run supervisor did, until 5-02a's
+    # merge) kept this step waiting until the job's own 6 h timeout. Here the timeout fails the step and says which.
+    proc = subprocess.Popen(list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        code = proc.poll()
+        proc.kill()
+        said = (f"exited {code}, but its output was still open after {timeout:.0f} s: a process it started holds it"
+                if code is not None else f"did not end within {timeout:.0f} s")
+        raise SystemExit(f"FAILED: {' '.join(args)} {said}") from None
+    got = subprocess.CompletedProcess(list(args), proc.returncode, out, err)
     print(f"$ {' '.join(args)}\n  exit {got.returncode}\n  {(got.stdout + got.stderr).strip()[-1500:]}", flush=True)
     if check and got.returncode != 0:
         raise SystemExit(f"FAILED: {' '.join(args)} exited {got.returncode}")

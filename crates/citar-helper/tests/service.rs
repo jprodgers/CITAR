@@ -13,6 +13,8 @@
 //! - **Gate 4 (Windows):** the test first checks the process is not elevated and stops if it is;
 //!   `service install --system` unelevated prints the elevated command and exits 2, with nothing
 //!   installed; `service run` from a console is refused; `status` reads and changes nothing.
+//! - **The start step (Windows):** `service install --user`'s `run --detach` leaves its caller's
+//!   output pipe alone, so a caller reading it sees its end when the installer ends (5-02a's merge).
 //! - Service mode idles on settings this binary cannot take (a console run exits 2).
 
 mod common;
@@ -50,7 +52,13 @@ const TOKEN: &str = "cwt_service_test_0123456789abcdef";
 
 /// The binary, with the variables that could point it at a real installation removed.
 fn command() -> std::process::Command {
-    let mut c = std::process::Command::new(BIN);
+    scrubbed(BIN)
+}
+
+/// `program`, with the variables that could point a helper (it, or one it starts) at a real
+/// installation removed.
+fn scrubbed(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut c = std::process::Command::new(program);
     for (k, _) in std::env::vars_os() {
         let k = k.to_string_lossy().into_owned();
         if k.starts_with("CITAR_WORKER_")
@@ -599,6 +607,64 @@ async fn run_detach_leaves_the_supervisor_in_the_background() {
     let bad = command().args(["run", "--detach", "--home"]).arg(&home).output().expect("runs");
     assert_eq!(bad.status.code(), Some(2), "no server, no token: {bad:?}");
     assert!(supervisor::read_record(&home).is_none());
+    let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
+}
+
+/// The hub's port and the home, for the run of [`the_start_step_leaves_its_callers_output_alone`]
+/// that plays the installer.
+#[cfg(all(windows, feature = "dev-guard"))]
+const START_STEP: &str = "CITAR_SERVICE_TEST_START_STEP";
+
+/// `service install --user`'s start step on Windows (`run --detach`, which leaves the Run
+/// supervisor running): a caller reading the installer's output through a pipe sees that pipe end
+/// when the installer ends. Windows hands a child every inheritable handle its parent holds, and
+/// the installer's own output is one when its caller made it so (Python's subprocess does, and so
+/// does this test), so the supervisor used to hold it open for as long as it ran: helper.yml's Run
+/// value step waited for it until the job's 6 h timeout (5-02a's merge). This test's binary runs
+/// again as the installer, carrying out the plan's start step alone with both outputs piped, and
+/// both must end within a minute while the supervisor it started runs on.
+#[cfg(all(windows, feature = "dev-guard"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_start_step_leaves_its_callers_output_alone() {
+    use citar_helper::service::plan::{Plan, Quoting, Step};
+    if let Some(given) = std::env::var_os(START_STEP) {
+        let given = given.to_string_lossy().into_owned();
+        let (port, home) = given.split_once(' ').expect("the port and the home");
+        let mut args = vec!["run".to_owned(), "--detach".to_owned(), "--home".to_owned()];
+        args.push(home.to_owned());
+        args.extend(helper_args(port.parse().expect("the port")));
+        let plan = Plan {
+            title: "the start step".to_owned(),
+            quoting: Quoting::Windows,
+            steps: vec![Step::Start { program: PathBuf::from(bin()), args }],
+        };
+        plan.run(&Log::memory()).expect("the start step");
+        return;
+    }
+    let home = scratch("svc-start-step").join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let _cleanup = Cleanup(home.clone());
+    let (port, mut conns) = loopback_hub().await;
+    let mut installer: tokio::process::Command =
+        scrubbed(std::env::current_exe().expect("this test's binary")).into();
+    installer
+        .args(["--exact", "the_start_step_leaves_its_callers_output_alone", "--nocapture"])
+        .env(START_STEP, format!("{port} {}", home.display()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(60), installer.output())
+        .await
+        .expect("the installer's output ended within a minute: nothing it started holds it")
+        .expect("the installer ran");
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("runs in the background"), "{out:?}");
+    refuse_next(&mut conns, Duration::from_secs(30)).await.expect("the detached helper's hello");
+    let record = record_with_child(&home).await.expect("the record");
+    assert!(supervisor::alive(record.pid), "the supervisor runs on");
+    std::fs::write(supervisor::stop_file(&home), b"stop").expect("stop file");
+    assert!(gone(record.pid, Duration::from_secs(30)).await, "the supervisor stopped");
     let _cleaned = std::fs::remove_dir_all(home.parent().expect("scratch"));
 }
 
