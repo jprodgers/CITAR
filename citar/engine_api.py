@@ -44,8 +44,8 @@ __all__ = [
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     # CPU jobs (design/phase4-helper.md P4.4): the same Rust as the helper's
-    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_chain_check",
-    "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
+    "JobRefused", "JOB_KINDS", "check_job_spec", "run_job", "job_result_hash", "job_result_fits", "job_result_rebased",
+    "job_chain_check", "jobs_build", "run_job_host", "ClaimRefused", "verify_claim", "sample_fraction",
     # the helper's update channel (design/phase4-helper.md P4.5.9): the same Rust as the helper's
     "ManifestRefused", "verify_manifest", "update_keys_trusted", "helper_version_newer",
     # this build
