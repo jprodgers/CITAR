@@ -5,7 +5,10 @@ files (every place moves and nothing else, the installer script keeps its CRLF);
 against release.yml's awk; ``label``, ``meta`` and the version rule; ``assets`` against P5.10's table.
 
 Nothing here names the tree's version: a release dry run bumps the runner's checkout before the suite runs (P5.2's
-``prepare --mode dry-run``), so the tests read the version from the tree (``SOURCE``) and bump past it (``NEXT``).
+``prepare --mode dry-run``), so the tests read the version from the tree (``SOURCE``) and bump past it. A dry run or a
+tag may name a prerelease (``-f version=0.1.6-rc.1``), so the copy tests also run from a copy first bumped to one (the
+``...FromAPrerelease`` classes): a prerelease's next release shares its ``X.Y.Z``, and so the installer's numeric
+version.
 """
 import contextlib
 import importlib.util
@@ -34,6 +37,8 @@ spec.loader.exec_module(release)
 CHECKED = ("Cargo.toml", "Cargo.lock", "crates/citar-engine/fuzz/Cargo.toml", "crates/citar-engine/fuzz/Cargo.lock",
            "citar/__init__.py", "installer/citar.iss", "KNOWN_ISSUES.md", "CHANGELOG.md")
 DATE = "2026-11-01"
+#: The date of the prerelease the ``...FromAPrerelease`` copies start from.
+RC_DATE = "2026-10-25"
 #: A version older than any the tree will hold, so planting it puts any place out of step.
 OLD = "0.0.1"
 
@@ -44,11 +49,20 @@ def _next(version: str) -> str:
     return f"{v.major}.{v.minor}.{v.patch + (0 if v.prerelease else 1)}"
 
 
-#: The tree's version, the release after it, and the release below it in the changelog.
+def _after(version: str) -> str:
+    """The next patch after ``version``'s numbers: newer than ``version`` whether or not it is a prerelease."""
+    v = release.Version.parse(version)
+    return f"{v.major}.{v.minor}.{v.patch + 1}"
+
+
+def _below(root: Path, version: str) -> str:
+    """The release below ``version`` in ``root``'s changelog."""
+    found = [s.name for s in release.sections(release.Text(root, "CHANGELOG.md"))[0] if s.name != "Unreleased"]
+    return found[found.index(version) + 1]
+
+
+#: The tree's version. The copy tests read theirs from the copy (``CopyTest.source``), which may be a prerelease.
 SOURCE = release.Tree(ROOT).source.value
-NEXT = _next(SOURCE)
-_versions = [s.name for s in release.sections(release.Text(ROOT, "CHANGELOG.md"))[0] if s.name != "Unreleased"]
-PREVIOUS = _versions[_versions.index(SOURCE) + 1]
 
 #: release.yml's notes step at 51ce329 (`:380-384`), the program between its single quotes as the shell hands it to
 #: awk. 5-02a reduces release.yml to its gate, so the program is kept here, where `notes` is held to it.
@@ -117,11 +131,20 @@ class Copy:
         for rel in (*CHECKED, *(f"{m}/Cargo.toml" for m in members)):
             (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / rel, tmp / rel)
-        log = release.Text(tmp, "CHANGELOG.md")
+        self._something_to_release()
+        self.before = self.snapshot()
+
+    def _something_to_release(self) -> None:
+        log = release.Text(self.root, "CHANGELOG.md")
         start, end = release.section_lines(log, "Unreleased")
         if not "".join(log.lines[start:end]).strip():
             self.write("CHANGELOG.md", self.read("CHANGELOG.md").replace(
                 "## [Unreleased]\n", "## [Unreleased]\n\n- A change for the tests.\n", 1))
+
+    def bump_to(self, version: str, date: str = RC_DATE) -> None:
+        """Bump the copy to ``version`` and take that as where it starts (``before``), with a line to release."""
+        quiet(release.bump, self.root, version, date, out=print)
+        self._something_to_release()
         self.before = self.snapshot()
 
     def snapshot(self) -> dict[str, bytes]:
@@ -148,14 +171,32 @@ class Copy:
 
 
 class CopyTest(unittest.TestCase):
+    """A test on a copy of the checked files. Its versions are the copy's: ``source`` (the tree's, or with
+    ``prerelease`` set the prerelease the copy was first bumped to), ``next`` (the release after it: a prerelease's own
+    release, which shares its ``X.Y.Z``, else the next patch), ``after`` (the next patch, newer than the source
+    whatever it is) and ``previous`` (the release below it in the changelog)."""
+
+    #: Start from ``X.Y.Z-rc.1`` of the patch after the tree's, as a dry run of a prerelease bumps a runner's checkout.
+    prerelease = False
+
+    def make_copy(self, path: Path) -> Copy:
+        copy = Copy(path)
+        if self.prerelease:
+            copy.bump_to(f"{_after(SOURCE)}-rc.1")
+        return copy
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.copy = Copy(Path(self._tmp.name))
+        self.copy = self.make_copy(Path(self._tmp.name))
         self.root = self.copy.root
         tree = release.Tree(self.root)
         self.source_where = tree.source.where
         self.known = next(p for p in tree.places if p.rule == "at-least")
+        self.source = tree.source.value
+        self.next = _next(self.source)
+        self.after = _after(self.source)
+        self.previous = _below(self.root, self.source)
 
     def problems(self, version=None) -> list[str]:
         try:
@@ -221,6 +262,18 @@ class Check(CopyTest):
         place.file.save()
         return place
 
+    def test_the_copy_starts_at_the_version_meant(self):
+        self.assertEqual(self.source, f"{_after(SOURCE)}-rc.1" if self.prerelease else SOURCE)
+        self.assertEqual(self.problems(), [])
+        self.assertEqual(self.problems(self.source), [])
+        self.assertTrue(release.Version.parse(self.next).newer_than(release.Version.parse(self.source)))
+        self.assertTrue(release.Version.parse(self.after).newer_than(release.Version.parse(self.next))
+                        or self.after == self.next)
+        if self.prerelease:
+            # Bumped from the tree's version, which is the release below it.
+            self.assertEqual(self.previous, SOURCE)
+            self.assertEqual(release.Version.parse(self.source).numeric, release.Version.parse(self.next).numeric)
+
     def test_each_place_planted_out_of_step_is_named_with_its_file_and_line(self):
         count = len(release.Tree(self.root).places)
         self.assertEqual(count, 19)
@@ -257,11 +310,11 @@ class Check(CopyTest):
         self.assertTrue(any(p.startswith("CHANGELOG.md:") for p in problems))
 
     def test_a_source_that_is_no_version_is_named(self):
-        self.plant(0, f"{SOURCE}x")
-        self.assertEqual(self.problems(), [f"{self.source_where}: the source's version '{SOURCE}x' is not a release "
-                                           "version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N or -rc.N"])
+        self.plant(0, f"{self.source}x")
+        self.assertEqual(self.problems(), [f"{self.source_where}: the source's version '{self.source}x' is not a "
+                                           "release version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N or -rc.N"])
         with self.assertRaisesRegex(release.Refused, "out of step before the bump"):
-            self.bump(NEXT)
+            self.bump(self.next)
 
     def test_known_issues_may_name_a_newer_release(self):
         text = self.copy.read("KNOWN_ISSUES.md")
@@ -280,14 +333,14 @@ class Check(CopyTest):
                                            "found 0 (lines: none)"])
         self.copy.write("installer/citar.iss", iss)
         init = self.copy.read("citar/__init__.py")
-        self.copy.write("citar/__init__.py", init + f'__version__ = "{SOURCE}"\n')
+        self.copy.write("citar/__init__.py", init + f'__version__ = "{self.source}"\n')
         [problem] = self.problems()
         self.assertTrue(problem.startswith("citar/__init__.py: expected one __version__ line, found 2"), problem)
         self.copy.write("citar/__init__.py", init)
         lock = self.copy.read("Cargo.lock")
-        entry = f'name = "citar-sim"\nversion = "{SOURCE}"\n'
+        entry = f'name = "citar-sim"\nversion = "{self.source}"\n'
         self.assertIn(entry, lock)
-        self.copy.write("Cargo.lock", lock.replace(entry, f'name = "citar-sim2"\nversion = "{SOURCE}"\n'))
+        self.copy.write("Cargo.lock", lock.replace(entry, f'name = "citar-sim2"\nversion = "{self.source}"\n'))
         self.assertEqual(self.problems(), ["Cargo.lock: no entry for the workspace member citar-sim (run cargo to "
                                            "update it)"])
         (self.root / "CHANGELOG.md").unlink()
@@ -297,49 +350,49 @@ class Check(CopyTest):
         text = self.copy.read("CHANGELOG.md")
         lines = lines_of(text)
         found, _ = release.sections(release.Text(self.root, "CHANGELOG.md"))
-        mine = next(s for s in found if s.name == SOURCE)
-        heading = f"## [{SOURCE}] - {mine.date}"
+        mine = next(s for s in found if s.name == self.source)
+        heading = f"## [{self.source}] - {mine.date}"
         newest = lines.index(heading) + 1
         unreleased = lines.index("## [Unreleased]") + 1
         url = "https://github.com/jprodgers/CITAR"
-        link = lines.index(f"[Unreleased]: {url}/compare/v{SOURCE}...HEAD") + 1
-        own_link = f"[{SOURCE}]: {url}/compare/v{PREVIOUS}...v{SOURCE}"
+        link = lines.index(f"[Unreleased]: {url}/compare/v{self.source}...HEAD") + 1
+        own_link = f"[{self.source}]: {url}/compare/v{self.previous}...v{self.source}"
         own = lines.index(own_link) + 1
-        below = next(s for s in found if s.name == PREVIOUS)
+        below = next(s for s in found if s.name == self.previous)
         cases = {
             "the Unreleased link from the release before": (
-                text.replace(f"compare/v{SOURCE}...HEAD", f"compare/v{PREVIOUS}...HEAD"),
-                [f"CHANGELOG.md:{link}: [Unreleased] links to {url}/compare/v{PREVIOUS}...HEAD, "
-                 f"expected {url}/compare/v{SOURCE}...HEAD"]),
+                text.replace(f"compare/v{self.source}...HEAD", f"compare/v{self.previous}...HEAD"),
+                [f"CHANGELOG.md:{link}: [Unreleased] links to {url}/compare/v{self.previous}...HEAD, "
+                 f"expected {url}/compare/v{self.source}...HEAD"]),
             "the release's link from another": (
-                text.replace(f"compare/v{PREVIOUS}...v{SOURCE}", f"compare/v{OLD}...v{SOURCE}"),
-                [f"CHANGELOG.md:{own}: [{SOURCE}] links to {url}/compare/v{OLD}...v{SOURCE}, "
-                 f"expected {url}/compare/v{PREVIOUS}...v{SOURCE}"]),
+                text.replace(f"compare/v{self.previous}...v{self.source}", f"compare/v{OLD}...v{self.source}"),
+                [f"CHANGELOG.md:{own}: [{self.source}] links to {url}/compare/v{OLD}...v{self.source}, "
+                 f"expected {url}/compare/v{self.previous}...v{self.source}"]),
             "the release's section undated": (
-                text.replace(heading, f"## [{SOURCE}]"),
-                [f"CHANGELOG.md:{newest}: '## [{SOURCE}]' needs its date, ' - YYYY-MM-DD'"]),
+                text.replace(heading, f"## [{self.source}]"),
+                [f"CHANGELOG.md:{newest}: '## [{self.source}]' needs its date, ' - YYYY-MM-DD'"]),
             "a date that is no date": (
-                text.replace(heading, f"## [{SOURCE}] - 2026-09-31"),
-                [f"CHANGELOG.md:{newest}: '## [{SOURCE}]' needs its date, ' - YYYY-MM-DD'"]),
+                text.replace(heading, f"## [{self.source}] - 2026-09-31"),
+                [f"CHANGELOG.md:{newest}: '## [{self.source}]' needs its date, ' - YYYY-MM-DD'"]),
             "a section added by hand above the release": (
-                text.replace("## [Unreleased]\n", f"## [Unreleased]\n\n## [{NEXT}] - {DATE}\n", 1),
-                [f"CHANGELOG.md:{unreleased + 2}: the newest release section is [{NEXT}], but the release is "
-                 f"{SOURCE}"]),
+                text.replace("## [Unreleased]\n", f"## [Unreleased]\n\n## [{self.next}] - {DATE}\n", 1),
+                [f"CHANGELOG.md:{unreleased + 2}: the newest release section is [{self.next}], but the release is "
+                 f"{self.source}"]),
             "no Unreleased section": (
                 text.replace("## [Unreleased]\n", "", 1),
                 ["CHANGELOG.md: expected one '## [Unreleased]', found 0 (lines: none)"]),
             "the Unreleased section below a release": (
-                text.replace("## [Unreleased]\n", "", 1).replace(f"## [{PREVIOUS}]", f"## [Unreleased]\n\n## "
-                                                                f"[{PREVIOUS}]", 1),
+                text.replace("## [Unreleased]\n", "", 1).replace(f"## [{self.previous}]", f"## [Unreleased]\n\n## "
+                                                                f"[{self.previous}]", 1),
                 # The heading's line is the one the release below had, less the removed line.
                 [f"CHANGELOG.md:{below.index}: '## [Unreleased]' must come before every release's section "
-                 f"(## [{SOURCE}] is at line {newest - 1})"]),
+                 f"(## [{self.source}] is at line {newest - 1})"]),
             "no Unreleased link": (
-                text.replace(f"[Unreleased]: {url}/compare/v{SOURCE}...HEAD\n", ""),
-                [f"CHANGELOG.md: no '[Unreleased]: ...' link (expected {url}/compare/v{SOURCE}...HEAD)"]),
+                text.replace(f"[Unreleased]: {url}/compare/v{self.source}...HEAD\n", ""),
+                [f"CHANGELOG.md: no '[Unreleased]: ...' link (expected {url}/compare/v{self.source}...HEAD)"]),
             "the release's link twice": (
                 text + own_link + "\n",
-                [f"CHANGELOG.md: 2 '[{SOURCE}]:' links (lines {own}, {len(lines)})"]),
+                [f"CHANGELOG.md: 2 '[{self.source}]:' links (lines {own}, {len(lines)})"]),
         }
         for name, (planted, expected) in cases.items():
             with self.subTest(name):
@@ -349,131 +402,147 @@ class Check(CopyTest):
         self.assertEqual(self.problems(), [])
 
     def test_a_version_given_holds_every_place_to_it(self):
-        self.assertEqual(self.problems(SOURCE), [])
-        problems = self.problems(NEXT)
+        self.assertEqual(self.problems(self.source), [])
+        problems = self.problems(self.next)
         named = {p.split(": ")[0] for p in problems}
+        numeric = release.Version.parse(self.next).numeric
         for place in release.Tree(self.root).places:
-            if place.rule != "at-least":  # KNOWN_ISSUES may already name the next release
+            with self.subTest(place.where):
+                if place.rule == "at-least":  # KNOWN_ISSUES may already name the next release
+                    continue
+                if place.rule == "numeric" and place.value == numeric:
+                    # A prerelease and its release share X.Y.Z.0: the installer's numeric version already holds.
+                    self.assertTrue(release.Version.parse(self.source).prerelease)
+                    self.assertNotIn(place.where, named)
+                    continue
                 self.assertIn(place.where, named)
         self.assertIn(f"CHANGELOG.md:{self.line_of('CHANGELOG.md', '## [Unreleased]')}", named)
         with self.assertRaises(release.Refused):
-            release.check(self.root, f"{NEXT};rm")
+            release.check(self.root, f"{self.next};rm")
 
 
 class Bump(CopyTest):
     def test_bump_moves_every_place_and_nothing_else(self):
-        (tree, version), output = self.bump(NEXT)
-        self.assertEqual(version, NEXT)
+        (tree, version), output = self.bump(self.next)
+        self.assertEqual(version, self.next)
         changed = self.copy.changed()
-        moves_known_issues = release.Version.parse(NEXT).newer_than(release.Version.parse(self.known.value))
+        moves_known_issues = release.Version.parse(self.next).newer_than(release.Version.parse(self.known.value))
         self.assertEqual(sorted(changed), sorted(["Cargo.toml", "Cargo.lock", "crates/citar-engine/fuzz/Cargo.lock",
                                                   "citar/__init__.py", "installer/citar.iss", "CHANGELOG.md",
                                                   *(["KNOWN_ISSUES.md"] if moves_known_issues else [])]))
-        self.assertEqual(changed["Cargo.toml"], ([f'version = "{SOURCE}"'], [f'version = "{NEXT}"']))
+        self.assertEqual(changed["Cargo.toml"], ([f'version = "{self.source}"'], [f'version = "{self.next}"']))
         for rel, count in (("Cargo.lock", 11), ("crates/citar-engine/fuzz/Cargo.lock", 3)):
             old = lines_of(self.copy.original(rel))
             new = lines_of(self.copy.read(rel))
             diff = [(a, b) for a, b in zip(old, new, strict=True) if a != b]
-            self.assertEqual(diff, [(f'version = "{SOURCE}"', f'version = "{NEXT}"')] * count, rel)
-        self.assertEqual(changed["citar/__init__.py"], ([f'__version__ = "{SOURCE}"'], [f'__version__ = "{NEXT}"']))
-        source, after = release.Version.parse(SOURCE), release.Version.parse(NEXT)
-        self.assertEqual(changed["installer/citar.iss"],
-                         ([f'  #define AppVersion "{SOURCE}"\r', f'  #define AppVersionNumeric "{source.numeric}"\r'],
-                          [f'  #define AppVersion "{NEXT}"\r', f'  #define AppVersionNumeric "{after.numeric}"\r']))
+            self.assertEqual(diff, [(f'version = "{self.source}"', f'version = "{self.next}"')] * count, rel)
+        self.assertEqual(changed["citar/__init__.py"],
+                         ([f'__version__ = "{self.source}"'], [f'__version__ = "{self.next}"']))
+        source, after = release.Version.parse(self.source), release.Version.parse(self.next)
+        # The numeric version moves only when the numbers do: a prerelease's release keeps its X.Y.Z.0.
+        moved = [("AppVersion", self.source, self.next)]
+        if source.numeric != after.numeric:
+            moved.append(("AppVersionNumeric", source.numeric, after.numeric))
+        self.assertEqual(changed["installer/citar.iss"], ([f'  #define {name} "{old}"\r' for name, old, _ in moved],
+                                                          [f'  #define {name} "{new}"\r' for name, _, new in moved]))
         # The installer script keeps its CRLF on every line.
         iss = (self.root / "installer" / "citar.iss").read_bytes()
         self.assertEqual(iss.count(b"\n"), iss.count(b"\r\n"))
+        self.assertIn(f'  #define AppVersionNumeric "{after.numeric}"\r\n'.encode("utf-8"), iss)
         if moves_known_issues:
-            self.assertEqual(self.copy.read("KNOWN_ISSUES.md"),
-                             self.copy.original("KNOWN_ISSUES.md").replace(f"in {self.known.value}.", f"in {NEXT}.", 1))
+            self.assertEqual(self.copy.read("KNOWN_ISSUES.md"), self.copy.original("KNOWN_ISSUES.md").replace(
+                f"in {self.known.value}.", f"in {self.next}.", 1))
         url = "https://github.com/jprodgers/CITAR"
         log = self.copy.read("CHANGELOG.md")
         old_log = self.copy.original("CHANGELOG.md")
         first = lines_of(old_log)[lines_of(old_log).index("## [Unreleased]") + 2]
-        self.assertIn(f"## [Unreleased]\n\n## [{NEXT}] - {DATE}\n\n{first}\n", log)
-        self.assertIn(f"[Unreleased]: {url}/compare/v{NEXT}...HEAD\n"
-                      f"[{NEXT}]: {url}/compare/v{SOURCE}...v{NEXT}\n"
-                      f"[{SOURCE}]: {url}/compare/v{PREVIOUS}...v{SOURCE}\n", log)
-        self.assertEqual(log.replace(f"\n\n## [{NEXT}] - {DATE}", "", 1)
-                         .replace(f"compare/v{NEXT}...HEAD\n[{NEXT}]: {url}/compare/v{SOURCE}...v{NEXT}\n",
-                                  f"compare/v{SOURCE}...HEAD\n"), old_log)
-        self.assertIn(f"{self.source_where}: [workspace.package] version (the source) {SOURCE} -> {NEXT}", output)
-        self.assertEqual(self.problems(NEXT), [])
+        self.assertIn(f"## [Unreleased]\n\n## [{self.next}] - {DATE}\n\n{first}\n", log)
+        self.assertIn(f"[Unreleased]: {url}/compare/v{self.next}...HEAD\n"
+                      f"[{self.next}]: {url}/compare/v{self.source}...v{self.next}\n"
+                      f"[{self.source}]: {url}/compare/v{self.previous}...v{self.source}\n", log)
+        self.assertEqual(log.replace(f"\n\n## [{self.next}] - {DATE}", "", 1)
+                         .replace(f"compare/v{self.next}...HEAD\n"
+                                  f"[{self.next}]: {url}/compare/v{self.source}...v{self.next}\n",
+                                  f"compare/v{self.source}...HEAD\n"), old_log)
+        self.assertIn(f"{self.source_where}: [workspace.package] version (the source) {self.source} -> {self.next}",
+                      output)
+        self.assertEqual(self.problems(self.next), [])
         # The release's notes are what the Unreleased section held.
         before = release.Text(self.root, "CHANGELOG.md")
         before.lines = [line + "\n" for line in lines_of(old_log)[:-1]]
         start, end = release.section_lines(before, "Unreleased")
-        self.assertEqual(release.notes(self.root, NEXT), "".join(before.lines[start:end]))
+        self.assertEqual(release.notes(self.root, self.next), "".join(before.lines[start:end]))
 
     def test_a_second_bump_and_an_older_one_are_refused(self):
-        self.bump(NEXT)
+        self.bump(self.next)
         after = self.copy.snapshot()
-        for version in (NEXT, SOURCE, f"{NEXT}-rc.1"):
+        for version in (self.next, self.source, f"{self.next}-rc.1"):
             with self.subTest(version):
                 with self.assertRaisesRegex(release.Refused, f"{re.escape(version)} is not newer than the source's "
-                                                             f"{re.escape(NEXT)}"):
+                                                             f"{re.escape(self.next)}"):
                     self.bump(version)
                 self.assertEqual(self.copy.snapshot(), after)
-        code, output = run_main("bump", SOURCE, "--date", DATE, "--root", str(self.root))
+        code, output = run_main("bump", self.source, "--date", DATE, "--root", str(self.root))
         self.assertEqual(code, 1)
-        self.assertIn(f"refused: {SOURCE} is not newer than the source's {NEXT}", output)
+        self.assertIn(f"refused: {self.source} is not newer than the source's {self.next}", output)
 
     def test_bump_refuses_a_bad_version_or_date_an_empty_section_and_a_tree_out_of_step(self):
-        for version in (f"{NEXT};rm", f"v{NEXT}", f"{NEXT}-dev.1"):
+        for version in (f"{self.next};rm", f"v{self.next}", f"{self.next}-dev.1"):
             with self.assertRaisesRegex(release.Refused, "is not a release version"):
                 self.bump(version)
         for date in ("2026-13-01", "01-11-2026", "tomorrow", "2026-11-01\n"):
             with self.assertRaisesRegex(release.Refused, "is not a date"):
-                self.bump(NEXT, date)
+                self.bump(self.next, date)
         self.assertEqual(self.copy.changed(), {})
         log = self.copy.read("CHANGELOG.md")
         start = log.index("## [Unreleased]\n") + len("## [Unreleased]\n")
-        self.copy.write("CHANGELOG.md", log[:start] + "\n" + log[log.index(f"## [{SOURCE}]"):])
+        self.copy.write("CHANGELOG.md", log[:start] + "\n" + log[log.index(f"## [{self.source}]"):])
         line = self.line_of("CHANGELOG.md", "## [Unreleased]")
         with self.assertRaisesRegex(release.Refused, rf"CHANGELOG\.md:{line}: the Unreleased section is empty"):
-            self.bump(NEXT)
+            self.bump(self.next)
         self.copy.write("CHANGELOG.md", log)
         init = self.copy.read("citar/__init__.py")
-        self.copy.write("citar/__init__.py", init.replace(f'"{SOURCE}"', f'"{OLD}"'))
+        self.copy.write("citar/__init__.py", init.replace(f'"{self.source}"', f'"{OLD}"'))
         line = self.line_of("citar/__init__.py", f'__version__ = "{OLD}"')
         with self.assertRaisesRegex(release.Refused, rf"out of step before the bump(.|\n)*citar/__init__\.py:{line}:"):
-            self.bump(NEXT)
+            self.bump(self.next)
         self.assertEqual(self.copy.read("Cargo.toml"), self.copy.original("Cargo.toml"))
 
     def test_known_issues_moves_only_when_it_is_older(self):
         text = self.copy.read("KNOWN_ISSUES.md")
         header = f"in {self.known.value}."
-        self.copy.write("KNOWN_ISSUES.md", text.replace(header, f"in {SOURCE}.", 1))
-        _, output = self.bump(NEXT)
-        self.assertIn(f"{self.known.where}: the header's release {SOURCE} -> {NEXT}", output)
-        self.assertEqual(self.copy.read("KNOWN_ISSUES.md"), text.replace(header, f"in {NEXT}.", 1))
+        self.copy.write("KNOWN_ISSUES.md", text.replace(header, f"in {self.source}.", 1))
+        _, output = self.bump(self.next)
+        self.assertIn(f"{self.known.where}: the header's release {self.source} -> {self.next}", output)
+        self.assertEqual(self.copy.read("KNOWN_ISSUES.md"), text.replace(header, f"in {self.next}.", 1))
         # Newer than the release: left alone.
         self.copy.write("KNOWN_ISSUES.md", text.replace(header, "in 99.0.0.", 1))
         self.copy.write("CHANGELOG.md", self.copy.read("CHANGELOG.md").replace(
             "## [Unreleased]\n", "## [Unreleased]\n\n- More.\n", 1))
-        self.bump(_next(NEXT))
+        self.bump(_next(self.next))
         self.assertIn("misleading in 99.0.0.", self.copy.read("KNOWN_ISSUES.md"))
 
     def test_a_prerelease_and_then_its_release(self):
-        rc = f"{NEXT}-rc.1"
+        # Of the next patch, which is newer than the source even when the source is itself a prerelease.
+        rc = f"{self.after}-rc.1"
         self.bump(rc)
         iss = self.copy.read("installer/citar.iss")
         self.assertIn(f'#define AppVersion "{rc}"', iss)
-        self.assertIn(f'#define AppVersionNumeric "{release.Version.parse(NEXT).numeric}"', iss)
+        self.assertIn(f'#define AppVersionNumeric "{release.Version.parse(self.after).numeric}"', iss)
         self.assertIn(f"## [{rc}] - {DATE}", self.copy.read("CHANGELOG.md"))
         self.assertEqual(self.problems(rc), [])
         with self.assertRaises(release.Refused):
-            self.bump(f"{NEXT}-beta.2")
+            self.bump(f"{self.after}-beta.2")
         with self.assertRaisesRegex(release.Refused, "Unreleased section is empty"):
-            self.bump(NEXT)
+            self.bump(self.after)
         log = self.copy.read("CHANGELOG.md")
         self.copy.write("CHANGELOG.md", log.replace("## [Unreleased]\n", f"## [Unreleased]\n\nThe release of {rc}, "
                                                     "unchanged.\n", 1))
-        self.bump(NEXT, "2026-11-08")
+        self.bump(self.after, "2026-11-08")
         url = "https://github.com/jprodgers/CITAR"
-        self.assertIn(f"[{NEXT}]: {url}/compare/v{rc}...v{NEXT}\n[{rc}]: {url}/compare/v{SOURCE}...v{rc}\n",
-                      self.copy.read("CHANGELOG.md"))
-        self.assertEqual(self.problems(NEXT), [])
+        self.assertIn(f"[{self.after}]: {url}/compare/v{rc}...v{self.after}\n"
+                      f"[{rc}]: {url}/compare/v{self.source}...v{rc}\n", self.copy.read("CHANGELOG.md"))
+        self.assertEqual(self.problems(self.after), [])
 
 
 class Prepare(CopyTest):
@@ -485,43 +554,44 @@ class Prepare(CopyTest):
 
     def test_ci_only_checks(self):
         result, output = self.prepare("ci")
-        self.assertEqual(result, SOURCE)
+        self.assertEqual(result, self.source)
         self.assertEqual(self.copy.changed(), {})
-        self.assertIn(f"every place says {SOURCE}", output)
-        self.copy.write("citar/__init__.py", self.copy.read("citar/__init__.py").replace(f'"{SOURCE}"', f'"{OLD}"'))
+        self.assertIn(f"every place says {self.source}", output)
+        init = self.copy.read("citar/__init__.py")
+        self.copy.write("citar/__init__.py", init.replace(f'"{self.source}"', f'"{OLD}"'))
         with self.assertRaises(release.Disagrees):
             self.prepare("ci")
 
     def test_tag_checks_against_its_version(self):
-        self.assertEqual(self.prepare("tag", SOURCE)[0], SOURCE)
+        self.assertEqual(self.prepare("tag", self.source)[0], self.source)
         with self.assertRaises(release.Disagrees) as caught:
-            self.prepare("tag", NEXT)
-        self.assertIn(f"{self.source_where}: [workspace.package] version (the source) is {SOURCE}, but the release is "
-                      f"{NEXT}", caught.exception.problems)
+            self.prepare("tag", self.next)
+        self.assertIn(f"{self.source_where}: [workspace.package] version (the source) is {self.source}, but "
+                      f"the release is {self.next}", caught.exception.problems)
         with self.assertRaisesRegex(release.Refused, "needs --version"):
             self.prepare("tag")
         self.assertEqual(self.copy.changed(), {})
 
     def test_dry_run_bumps_the_runners_checkout_then_checks(self):
-        result, output = self.prepare("dry-run", NEXT)
-        self.assertEqual(result, NEXT)
-        self.assertIn(f"bumped this runner's checkout from {SOURCE} to {NEXT}", output)
+        result, output = self.prepare("dry-run", self.next)
+        self.assertEqual(result, self.next)
+        self.assertIn(f"bumped this runner's checkout from {self.source} to {self.next}", output)
         self.assertNotIn("::notice", output)
         bumped = self.copy.snapshot()
         # The same files as `bump` writes.
-        other = Copy(Path(self._tmp.name + "-bump"))
+        other = self.make_copy(Path(self._tmp.name + "-bump"))
         self.addCleanup(shutil.rmtree, other.root, True)
-        quiet(release.bump, other.root, NEXT, DATE, out=print)
+        quiet(release.bump, other.root, self.next, DATE, out=print)
         self.assertEqual(other.snapshot(), bumped)
         # Again: the source now says the version asked for, so it only checks.
-        _, output = self.prepare("dry-run", NEXT)
+        _, output = self.prepare("dry-run", self.next)
         self.assertNotIn("bumped", output)
         self.assertEqual(self.copy.snapshot(), bumped)
 
     def test_dry_run_on_actions_leaves_a_notice(self):
-        _, output = self.prepare("dry-run", NEXT, env={"GITHUB_ACTIONS": "true"})
-        self.assertIn(f"::notice title=release.py prepare::bumped this runner's checkout from {SOURCE} to {NEXT}",
-                      output)
+        _, output = self.prepare("dry-run", self.next, env={"GITHUB_ACTIONS": "true"})
+        self.assertIn(f"::notice title=release.py prepare::bumped this runner's checkout from {self.source} "
+                      f"to {self.next}", output)
 
     def test_dry_run_refuses_an_older_version_and_needs_one(self):
         with self.assertRaisesRegex(release.Refused, f"{OLD} is not newer"):
@@ -531,15 +601,30 @@ class Prepare(CopyTest):
         self.assertEqual(self.copy.changed(), {})
 
     def test_the_command_line(self):
-        code, output = run_main("prepare", "--mode", "tag", "--version", NEXT, "--root", str(self.root))
+        code, output = run_main("prepare", "--mode", "tag", "--version", self.next, "--root", str(self.root))
         self.assertEqual(code, 1)
         self.assertIn(f"{self.source_where}:", output)
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GITHUB_ACTIONS", None)
-            code, output = run_main("prepare", "--mode", "dry-run", "--version", NEXT, "--date", DATE,
+            code, output = run_main("prepare", "--mode", "dry-run", "--version", self.next, "--date", DATE,
                                     "--root", str(self.root))
         self.assertEqual(code, 0, output)
         self.assertEqual(run_main("prepare", "--mode", "nightly", "--root", str(self.root))[0], 2)
+
+
+class CheckFromAPrerelease(Check):
+    """Check's tests on a copy at a prerelease, as a runner's checkout is after a dry run of ``X.Y.Z-rc.N``."""
+    prerelease = True
+
+
+class BumpFromAPrerelease(Bump):
+    """Bump's tests from a prerelease: its next release keeps the installer's numeric version."""
+    prerelease = True
+
+
+class PrepareFromAPrerelease(Prepare):
+    """Prepare's tests from a prerelease."""
+    prerelease = True
 
 
 class Notes(unittest.TestCase):
