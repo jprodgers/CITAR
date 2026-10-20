@@ -107,6 +107,12 @@ jobs:
 """
 
 
+#: The key the Linux helper builds' container cache is kept under, in package.yml's helpers and helper.yml's artifact
+#: (the same, so the two share it): the image, rustup's version, the lock and the toolchain.
+CONTAINER_CACHE_KEY = ("helper-container-${{ matrix.container }}-rustup-${{ env.RUSTUP_INIT_VERSION }}-"
+                       "${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}")
+
+
 def job_text(job_id, body):
     """A job to append to a workflow's jobs, its body indented under it."""
     return f"\n  {job_id}:\n" + "".join(f"    {line}\n" if line else "\n" for line in body.strip("\n").split("\n"))
@@ -203,6 +209,37 @@ class ThePackageWorkflow(unittest.TestCase):
     def using(job: dict, action: str) -> list:
         return [s for s in job["steps"] if str(s.get("uses", "")).startswith(action + "@")]
 
+    def assert_pinned_rustup(self, step: dict, env: dict):
+        """A container build installs rustup from its archive by version, run only once its SHA-256 is its leg's."""
+        run = step["run"]
+        self.assertRegex(env["RUSTUP_INIT_VERSION"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(step["env"]["RUSTUP_SHA256"], "${{ matrix.rustup_sha256 }}")
+        self.assertIn("-e RUSTUP_INIT_VERSION -e RUSTUP_SHA256", run)
+        self.assertNotIn("sh.rustup.rs", run)
+        fetch = run.index('"https://static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/$TARGET/rustup-init"')
+        checked = run.index('echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c -')
+        ran = run.index("/tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none")
+        self.assertLess(fetch, checked)
+        self.assertLess(checked, ran, "the installer runs only once its hash is checked")
+        self.assertIn("export CARGO_HOME=/io/target/container-cargo RUSTUP_HOME=/io/target/container-rustup", run)
+        self.assertIn("export CARGO_TARGET_DIR=/io/target/container", run)
+
+    def test_no_cache_reaches_a_release_build(self):
+        # rust-cache and actions/cache restore what an earlier run saved: a run of its own (mode ci) only, so a
+        # release's or a dry run's wheels, helpers and the xtask its signing job runs with the key are built from the
+        # locked sources alone (P5.4.2)
+        caches = 0
+        for job_id, job in self.jobs.items():
+            for step in job["steps"]:
+                uses = str(step.get("uses", ""))
+                if not uses.startswith(("Swatinem/rust-cache@", "actions/cache@")):
+                    continue
+                caches += 1
+                with self.subTest(job=job_id, step=uses):
+                    self.assertIn("needs.meta.outputs.mode == 'ci'", [c.strip() for c in step["if"].split("&&")])
+                    self.assertNotIn("||", step["if"])
+        self.assertEqual(caches, 4, "wheels, helpers (twice) and helper-manifest")
+
     def test_its_triggers_inputs_group_and_permissions(self):
         on = self.data[True]
         self.assertEqual(set(on), {"push", "pull_request", "workflow_dispatch", "workflow_call"})
@@ -283,7 +320,7 @@ class ThePackageWorkflow(unittest.TestCase):
             ("build", lambda s: str(s.get("uses", "")).startswith("PyO3/maturin-action@")))}
         self.assertEqual(sorted(at, key=at.get), ["prepare", "toolchain", "cache", "build"])
         self.assertEqual(steps[at["toolchain"]].get("if"), "matrix.container == ''")
-        self.assertEqual(steps[at["cache"]].get("if"), "matrix.container == ''")
+        self.assertEqual(steps[at["cache"]].get("if"), "matrix.container == '' && needs.meta.outputs.mode == 'ci'")
         runs = self.runs(job)
         self.assertIn('check_dist.py wheel dist --tag "$TAG" --library "$LIBRARY" --version "$PEP440"', runs)
         self.assertIn("twine check dist/*.whl", runs)
@@ -360,6 +397,7 @@ class ThePackageWorkflow(unittest.TestCase):
         prepare = at(lambda s: "scripts/release.py prepare" in s.get("run", ""))
         toolchain = at(lambda s: s.get("run", "").strip() == "rustup toolchain install")
         cache = at(lambda s: str(s.get("uses", "")).startswith("Swatinem/rust-cache@"))
+        kept = at(lambda s: str(s.get("uses", "")).startswith("actions/cache@"))
         native = at(lambda s: "cargo build" in s.get("run", "") and "docker run" not in s.get("run", ""))
         container = at(lambda s: "docker run" in s.get("run", "") and "cargo build" in s.get("run", ""))
         glibc = at(lambda s: "helper_release.py glibc" in s.get("run", ""))
@@ -367,15 +405,21 @@ class ThePackageWorkflow(unittest.TestCase):
         check = at(lambda s: "helper_release.py check" in s.get("run", ""))
         self.assertLess(prepare, toolchain)
         self.assertLess(toolchain, cache)
-        self.assertLess(cache, native)
+        self.assertLess(cache, kept)
+        self.assertLess(kept, native)
         self.assertLess(native, container)
         self.assertLess(container, glibc)
         self.assertLess(glibc, stage)
         self.assertLess(stage, check)
-        for i in (toolchain, cache, native):
+        for i in (toolchain, native):
             self.assertEqual(steps[i].get("if"), "matrix.container == ''", steps[i].get("name"))
         for i in (container, glibc):
             self.assertEqual(steps[i].get("if"), "matrix.container != ''", steps[i].get("name"))
+        # the caches, a run of its own's only: what a release or a dry run ships is built from the locked sources
+        self.assertEqual(steps[cache]["if"], "matrix.container == '' && needs.meta.outputs.mode == 'ci'")
+        self.assertEqual(steps[kept]["if"], "matrix.container != '' && needs.meta.outputs.mode == 'ci'")
+        self.assertEqual(steps[kept]["with"]["path"], "target/container\ntarget/container-cargo\ntarget/container-rustup\n")
+        self.assertEqual(steps[kept]["with"]["key"], CONTAINER_CACHE_KEY)
         # both builds, each literally (cargo xtask check reads every line: no test feature, no list in a variable)
         for i in (native, container):
             run = steps[i]["run"]
@@ -386,11 +430,17 @@ class ThePackageWorkflow(unittest.TestCase):
         self.assertIn('-e CITAR_BUILD_ID', run, "the label reaches the container")
         self.assertIn('"$IMAGE"', run)
         self.assertIn("rustup toolchain install", run, "rust-toolchain.toml's toolchain, installed in the image")
+        self.assert_pinned_rustup(steps[container], job["env"])
+        self.assertIn('cp "$CARGO_TARGET_DIR/$TARGET/release/citar-helper" build/packaged/\n', run)
+        self.assertIn('chown -R "$OWNER" build target', run, "the builds and the cached folders, the runner's again")
+        for platform, leg in legs.items():
+            with self.subTest(platform=platform):
+                self.assertRegex(leg["rustup_sha256"], r"^[0-9a-f]{64}$" if leg["container"] else r"^$")
         self.assertIn("--max 2.28 build/self/citar-helper build/packaged/citar-helper", steps[glibc]["run"])
         self.assertIn('--version "$RELEASE_VERSION" --out stage', steps[stage]["run"])
         run = steps[check]["run"]
         for words in ('--label "$CITAR_BUILD_ID"', '--under "$RUNNER_TEMP"', '--work "$RUNNER_TEMP/helper-check"',
-                      '--out "report/helper-$PLATFORM.json"'):
+                      '--out "report/helper-$PLATFORM.json"', '--macos-min "$MACOSX_DEPLOYMENT_TARGET"'):
             self.assertIn(words, run)
         fedora = [s for s in steps if "FEDORA_IMAGE" in (s.get("env") or {})]
         self.assertEqual(len(fedora), 1)
@@ -429,6 +479,9 @@ class ThePackageWorkflow(unittest.TestCase):
         self.assertIn("verify_manifest.py --check-keys crates/citar-jobs/update-keys.pub", run)
         self.assertIn('grep -q "^updates: unavailable"', run)
         self.assertIn("scripts/ci/gate_run.py helper --under \"$RUNNER_TEMP\"", run)
+        # the xtask the release's signing job runs with the key is never linked from a cache
+        self.assertEqual([s.get("if") for s in self.using(job, "Swatinem/rust-cache")],
+                         ["needs.meta.outputs.mode == 'ci'"])
         uploads = {s["with"]["name"]: s["with"]["path"] for s in self.using(job, "actions/upload-artifact")}
         self.assertEqual(uploads, {
             "pkg-helper-manifest": "manifest/citar-helper-manifest.json",
@@ -443,13 +496,39 @@ class ThePackageWorkflow(unittest.TestCase):
         release = {leg["target"]: leg for leg in self.jobs["helpers"]["strategy"]["matrix"]["include"]}
         self.assertEqual({t: (leg["os"], leg["asset"], leg["container"]) for t, leg in legs.items()},
                          {t: (leg["runner"], leg["asset"], leg["container"]) for t, leg in release.items()})
+        # the same rustup-init, by version and SHA-256 a target
+        self.assertEqual({t: leg["rustup_sha256"] for t, leg in legs.items()},
+                         {t: leg["rustup_sha256"] for t, leg in release.items()})
+        self.assertEqual(artifact["env"]["RUSTUP_INIT_VERSION"], self.jobs["helpers"]["env"]["RUSTUP_INIT_VERSION"])
+        self.assertEqual(artifact["env"]["MACOSX_DEPLOYMENT_TARGET"], "11.0")
         steps = artifact["steps"]
         glibc = [s for s in steps if "helper_release.py glibc --max 2.28" in s.get("run", "")]
         self.assertEqual([s.get("if") for s in glibc], ["matrix.container != ''"])
+        macos = [s for s in steps if "helper_release.py macos" in s.get("run", "")]
+        self.assertEqual([(s.get("if"), s["run"]) for s in macos],
+                         [("runner.os == 'macOS'",
+                           'python3 scripts/ci/helper_release.py macos --min "$MACOSX_DEPLOYMENT_TARGET" "dist/$ASSET"')])
+        container = [s for s in steps if "docker run" in s.get("run", "")]
+        self.assertEqual(len(container), 1)
+        self.assert_pinned_rustup(container[0], artifact["env"])
+        self.assertIn('chown -R "$OWNER" dist target', container[0]["run"])
+        kept = self.using(artifact, "actions/cache")
+        self.assertEqual([(s["if"], s["with"]["path"], s["with"]["key"]) for s in kept],
+                         [("matrix.container != ''", "target/container\ntarget/container-cargo\ntarget/container-rustup\n",
+                           CONTAINER_CACHE_KEY)])
         runs = "\n".join(s.get("run", "") for s in steps)
         self.assertIn('"$IMAGE"', runs)
         for flag in ("--version", "--self-test", "service install --dry-run"):
             self.assertIn(f'{flag} --home "$RUNNER_TEMP/citar-dry-run"', runs, flag)
+        # the workspace the container mounts holds no token: nothing in helper.yml needs one
+        for job_id, job in helper["jobs"].items():
+            for step in self.using(job, "actions/checkout"):
+                with self.subTest(job=job_id):
+                    self.assertIs(step["with"]["persist-credentials"], False)
+        # no workflow pipes a network installer into a shell
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            with self.subTest(workflow=path.name):
+                self.assertNotIn("sh.rustup.rs", path.read_text(encoding="utf-8"))
         triggers = helper[True]
         for event in ("push", "pull_request"):
             self.assertIn("scripts/ci/helper_release.py", triggers[event]["paths"])

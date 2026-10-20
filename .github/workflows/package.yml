@@ -237,8 +237,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         # The native builds only: a container's build runs as root with a cargo home of its own, so the runner
-        # neither restores nor saves it.
-        if: matrix.container == ''
+        # neither restores nor saves it. A run of its own only (mode ci): a release's or a dry run's wheels are built
+        # from the locked sources alone, never from what an earlier run left in a cache.
+        if: matrix.container == '' && needs.meta.outputs.mode == 'ci'
         with:
           shared-key: wheel-${{ matrix.target }}
 
@@ -483,8 +484,13 @@ jobs:
       RELEASE_DATE: ${{ needs.meta.outputs.date }}
       # The label every release build carries (P5.2): --version and the helper's hello name it.
       CITAR_BUILD_ID: ${{ needs.meta.outputs.label }}
-      # macOS 11 for both Macs, as the wheels (read by the macOS builds only).
+      # macOS 11 for both Macs, as the wheels (read by the macOS builds only; helper_release.py check holds both
+      # builds' LC_BUILD_VERSION to it).
       MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # The rustup the Linux builds install in their container: this release of rustup-init, fetched from
+      # static.rust-lang.org's archive and run only once its SHA-256 is the one its matrix leg names (rustup_sha256,
+      # the archive's own .sha256 for that target). helper.yml's artifact job, the same (tests/test_workflows.py).
+      RUSTUP_INIT_VERSION: "1.29.1"
     strategy:
       fail-fast: false
       matrix:
@@ -493,11 +499,11 @@ jobs:
         # equal). Each builds on its own architecture; the Linux ones in the wheels' manylinux_2_28 images, by the
         # same digests (tests/test_workflows.py holds them equal; rule 11 holds each to a digest).
         include:
-          - { platform: windows-x64, runner: windows-latest, machine: x86_64, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe, container: "" }
-          - { platform: macos-arm64, runner: macos-15, machine: arm64, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64, container: "" }
-          - { platform: macos-x64, runner: macos-15-intel, machine: x86_64, target: x86_64-apple-darwin, asset: citar-helper-macos-x64, container: "" }
-          - { platform: linux-x64, runner: ubuntu-24.04, machine: x86_64, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64, container: "quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b8460ad8fb3fb0fbe1cd818845159ac896b4fd17452d56e892c291f3b97a8" }
-          - { platform: linux-arm64, runner: ubuntu-24.04-arm, machine: aarch64, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64, container: "quay.io/pypa/manylinux_2_28_aarch64@sha256:b873ffc316ffe8a154e3dc4872871de2ebd170db4876c8bbd983d42ff320001e" }
+          - { platform: windows-x64, runner: windows-latest, machine: x86_64, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe, container: "", rustup_sha256: "" }
+          - { platform: macos-arm64, runner: macos-15, machine: arm64, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64, container: "", rustup_sha256: "" }
+          - { platform: macos-x64, runner: macos-15-intel, machine: x86_64, target: x86_64-apple-darwin, asset: citar-helper-macos-x64, container: "", rustup_sha256: "" }
+          - { platform: linux-x64, runner: ubuntu-24.04, machine: x86_64, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64, container: "quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b8460ad8fb3fb0fbe1cd818845159ac896b4fd17452d56e892c291f3b97a8", rustup_sha256: "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71" }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, machine: aarch64, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64, container: "quay.io/pypa/manylinux_2_28_aarch64@sha256:b873ffc316ffe8a154e3dc4872871de2ebd170db4876c8bbd983d42ff320001e", rustup_sha256: "15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -527,9 +533,23 @@ jobs:
         run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: matrix.container == ''
+        # A run of its own only (mode ci): the binaries a release or a dry run ships are built from the locked
+        # sources alone, never from what an earlier run left in a cache.
+        if: matrix.container == '' && needs.meta.outputs.mode == 'ci'
         with:
           shared-key: pkg-helper-${{ matrix.target }}
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        # The container's cargo home, rustup and target (rust-cache reads the runner's toolchain and cannot), so a pull
+        # request's Linux builds start from the dependencies the last one compiled; helper.yml's artifact builds share
+        # it. Mode ci only, as above.
+        if: matrix.container != '' && needs.meta.outputs.mode == 'ci'
+        with:
+          path: |
+            target/container
+            target/container-cargo
+            target/container-rustup
+          key: helper-container-${{ matrix.container }}-rustup-${{ env.RUSTUP_INIT_VERSION }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Both builds, on the runner (Windows, macOS)
         # The self-updating build (no features), then the packaged one (`packaged`, a feature that ships: cargo xtask
@@ -550,26 +570,36 @@ jobs:
 
       - name: Both builds, in the manylinux_2_28 container (Linux)
         # The image the wheel of this architecture builds in, by its digest: rust-toolchain.toml's toolchain installed
-        # in it, the label passed in by name, its gcc toolset all the helper needs (rustls on ring: no OpenSSL). The
-        # builds then run outside it, on this runner's newer glibc, as a user's machine would run them.
+        # in it by the pinned rustup-init (its SHA-256 checked before it runs), the label passed in by name, its gcc
+        # toolset all the helper needs (rustls on ring: no OpenSSL). The cargo home, rustup and target are the cached
+        # folders above, given back to the runner's user with the builds. The builds then run outside it, on this
+        # runner's newer glibc, as a user's machine would run them.
         if: matrix.container != ''
         shell: bash
         env:
           IMAGE: ${{ matrix.container }}
           TARGET: ${{ matrix.target }}
+          RUSTUP_SHA256: ${{ matrix.rustup_sha256 }}
         run: |
           mkdir -p build/self build/packaged
-          docker run --rm -e CITAR_BUILD_ID -e TARGET -e OWNER="$(id -u):$(id -g)" -v "$PWD:/io" -w /io "$IMAGE" \
-            bash -euo pipefail -c '
+          docker run --rm -e CITAR_BUILD_ID -e TARGET -e RUSTUP_INIT_VERSION -e RUSTUP_SHA256 \
+            -e OWNER="$(id -u):$(id -g)" -v "$PWD:/io" -w /io "$IMAGE" bash -euo pipefail -c '
               echo "container: $(uname -m), $(ldd --version | head -n 1)"
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-              . "$HOME/.cargo/env"
+              export CARGO_HOME=/io/target/container-cargo RUSTUP_HOME=/io/target/container-rustup
+              export CARGO_TARGET_DIR=/io/target/container PATH="/io/target/container-cargo/bin:$PATH"
+              if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+                curl --proto "=https" --tlsv1.2 -sSf -o /tmp/rustup-init \
+                  "https://static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/$TARGET/rustup-init"
+                echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c -
+                chmod +x /tmp/rustup-init
+                /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
+              fi
               rustup toolchain install
               cargo build --release --locked -p citar-helper --target "$TARGET"
-              cp "target/$TARGET/release/citar-helper" build/self/
+              cp "$CARGO_TARGET_DIR/$TARGET/release/citar-helper" build/self/
               cargo build --release --locked -p citar-helper --target "$TARGET" --features packaged
-              cp "target/$TARGET/release/citar-helper" build/packaged/
-              chown -R "$OWNER" build'
+              cp "$CARGO_TARGET_DIR/$TARGET/release/citar-helper" build/packaged/
+              chown -R "$OWNER" build target'
 
       - name: The Linux builds need glibc 2.28 at most, the game's floor
         if: matrix.container != ''
@@ -588,7 +618,8 @@ jobs:
 
       - name: Both run here, each with a home of its own (--version, --self-test, update check)
         # Through scripts/ci/gate_run.py: a release build has no development guard, so without --home its home would
-        # be the runner user's per-user folder. The packaged binary is the one unpacked from its archive.
+        # be the runner user's per-user folder. The packaged binary is the one unpacked from its archive. On a Mac,
+        # both builds' oldest macOS (otool -l) must be MACOSX_DEPLOYMENT_TARGET's.
         shell: bash
         env:
           PLATFORM: ${{ matrix.platform }}
@@ -596,7 +627,8 @@ jobs:
         run: |
           python scripts/ci/helper_release.py check --stage stage --platform "$PLATFORM" --target "$TARGET" \
             --version "$RELEASE_VERSION" --label "$CITAR_BUILD_ID" --under "$RUNNER_TEMP" \
-            --work "$RUNNER_TEMP/helper-check" --out "report/helper-$PLATFORM.json"
+            --work "$RUNNER_TEMP/helper-check" --macos-min "$MACOSX_DEPLOYMENT_TARGET" \
+            --out "report/helper-$PLATFORM.json"
 
       - name: TLS works on a distribution that keeps its certificates elsewhere (Fedora)
         # The helper verifies servers with the OS's own trust store (rustls-platform-verifier), so a distribution that
@@ -689,6 +721,9 @@ jobs:
         run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # A run of its own only (mode ci): the xtask a release's signing job runs with the key (P5.4.2: the key never
+        # meets a build) is compiled from the locked sources alone, never linked from a cache an earlier run wrote.
+        if: needs.meta.outputs.mode == 'ci'
         with:
           shared-key: pkg-xtask
 

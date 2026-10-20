@@ -1,7 +1,8 @@
 // The helper card's downloads (citar/web/js/helperrules.js, design/phase4-helper.md P4.10, 4-14): its five names are the
 // release's, as package.yml's helpers matrix builds them for a release (design/phase5-release.md P5.4.1, 5-03) and
 // helper.yml's artifact matrix builds them on every helper change (one line a target in each, read by pattern: the
-// project has no YAML dependency; the two matrices equal line for line: target, name, runner and build image), and as
+// project has no YAML dependency; the two matrices equal line for line: target, name, runner, build image and the
+// rustup-init it installs), and as
 // cargo xtask helper-manifest lists them; and what a browser is offered. Run with
 // `node --test "citar/web/tests/*.test.mjs"`.
 import { test } from "node:test";
@@ -40,8 +41,10 @@ function manifestTargets() {
 
 const byTarget = (rows) => rows.map((r) => `${r.target} ${r.asset}`).sort();
 
-// One line a target of each matrix, as `target name runner image`: package.yml's legs say runner:, helper.yml's os:.
-const builds = (rows) => rows.map((r) => `${r.target} ${r.asset} ${r.runner ?? r.os} ${r.container ?? "?"}`).sort();
+// One line a target of each matrix, as `target name runner image rustup`: package.yml's legs say runner:, helper.yml's
+// os:; the last is the SHA-256 of the rustup-init a container build installs.
+const builds = (rows) =>
+  rows.map((r) => `${r.target} ${r.asset} ${r.runner ?? r.os} ${r.container ?? "?"} ${r.rustup_sha256 ?? "?"}`).sort();
 
 test("the card's five names are the release's: package.yml's helpers, helper.yml's artifacts, the manifest's", () => {
   const names = HELPERS.map((h) => h.file).sort();
@@ -57,6 +60,8 @@ test("the card's five names are the release's: package.yml's helpers, helper.yml
       const linux = r.target.endsWith("-linux-gnu");
       const want = linux ? new RegExp(`^quay\\.io/pypa/manylinux_2_28_${r.target.split("-")[0]}@sha256:[0-9a-f]{64}$`) : /^$/;
       assert.match(r.container ?? "?", want, `${file}: ${r.target}'s build image`);
+      // a container build's rustup-init is run only once its SHA-256 is this one
+      assert.match(r.rustup_sha256 ?? "?", linux ? /^[0-9a-f]{64}$/ : /^$/, `${file}: ${r.target}'s rustup-init`);
     }
   }
   assert.deepEqual(builds(artifacts), builds(helpers), "helper.yml's artifacts are package.yml's helpers, line for line");
