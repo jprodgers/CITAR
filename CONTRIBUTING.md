@@ -95,8 +95,9 @@ them, the release's constraints in `wheelhouse/` (the `Dockerfile`'s header says
 `podman build --format docker --label org.opencontainers.image.version=<V> -t citar:local .` (the `docker` format
 keeps the health check; the label is the version the check expects) and
 `python3 scripts/ci/check_image.py run --engine podman --image citar:local --arch amd64 --version <V> --label <L>
---wheel <the wheel>`, which runs it with its port on 127.0.0.1 only, checks it as package.yml's `image` job does, and
-removes every container and volume it made.
+--wheel <the wheel> --constraints wheelhouse/constraints.txt --out /tmp/image-amd64.json` (leave out `--constraints`
+if you have none), which runs it with its port on 127.0.0.1 only, checks it as package.yml's `image` job does,
+removes every container and volume it made, and writes its report to `--out` when every check held.
 
 ## Conventions
 
