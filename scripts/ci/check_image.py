@@ -232,6 +232,14 @@ def smoke_script() -> str:
     return SMOKE_SCRIPT.format(exports=exports, venv=VENV, mount=CHECK_MOUNT, mark=SMOKE_MARK)
 
 
+def last_json(out: str, what: str):
+    """The JSON on the last line of a command's output."""
+    try:
+        return json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Failed(f"{what} did not read: {out[-2000:]!r}") from None
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
@@ -309,10 +317,14 @@ class Engine:
 # ------------------------------------------------------------------------------------------------ run
 
 
+#: Straight to the published port: never through a proxy the environment names.
+DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def http_get(port: int, path: str, timeout: float = 3.0) -> tuple:
     """The status and body of ``GET http://127.0.0.1:<port><path>``; (0, reason) when nothing answered."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
+        with DIRECT.open(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
@@ -398,8 +410,7 @@ def run(args) -> int:
         report["restart"] = restart(engine, first, Server(engine, f"{prefix}-b", volume, args.image), servers,
                                     version, args.label)
     finally:
-        cleanup(engine, prefix, servers, volume)
-    left = engine.leftovers(prefix)
+        left = cleanup(engine, prefix, servers, volume)
     check(not left, f"left behind: {', '.join(left)}", "no container or volume of this run left")
     report["seconds"] = round(time.perf_counter() - t0, 1)
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -428,12 +439,12 @@ def check_running(server: Server, version, label: str, constraints) -> dict:
     argv = command[1:] if command[0] == "CMD" else ["/bin/sh", "-c", command[1]]
     server.exec(*argv, what="the image's health check")
     say("ok: the image's health check exits 0")
-    out = server.exec("python", "-P", "-c", smoke_wheel.EXTENSION_FACTS, what="ask the extension")
-    library, test_ops = json.loads(out.strip().splitlines()[-1])
+    library, test_ops = last_json(server.exec("python", "-P", "-c", smoke_wheel.EXTENSION_FACTS,
+                                              what="ask the extension"), "the extension's answer")
     check(library.startswith(f"{VENV}/lib/") and "/site-packages/citar/" in library,
           f"the extension is {library}, not the venv's", f"citar._engine from {library}")
     check(test_ops is False, "the image's engine has the test operations", "no test operations")
-    facts = json.loads(server.exec("python", "-P", "-c", BUILD_FACTS, what="build_info()").strip().splitlines()[-1])
+    facts = last_json(server.exec("python", "-P", "-c", BUILD_FACTS, what="build_info()"), "build_info()'s answer")
     build = facts["build"]
     check(build["version"] == version.text and build["label"] == label,
           f"build_info() gives {build['version']} and {build['label']!r}, not {version.text} and {label!r}",
@@ -497,16 +508,17 @@ def restart(engine: Engine, first: Server, second: Server, servers: list, versio
     check(set(before) <= set(after), f"the state directory lost {sorted(set(before) - set(after))}",
           f"the state directory kept {', '.join(before)}")
     status, body = http_get(second.port, "/api/meta")
-    check(status == 200 and json.loads(body).get("version") == version.text and json.loads(body).get("label") == label,
+    meta = last_json(body, "/api/meta after the restart") if status == 200 else {}
+    check(isinstance(meta, dict) and meta.get("version") == version.text and meta.get("label") == label,
           f"/api/meta after the restart answered {status}: {body[:300]!r}", "the second server's /api/meta")
     stopped_again = second.stop()
     servers.remove(second)
     return {"first": stopped, "second": {**stopped_again, "health_seconds": round(seconds, 1)}, "state": before}
 
 
-def cleanup(engine: Engine, prefix: str, servers: list, volume: str) -> None:
-    """Removes every container and the volume this run made, whatever happened; a failure here is shown, and the
-    leftovers check after it fails the run."""
+def cleanup(engine: Engine, prefix: str, servers: list, volume: str) -> list:
+    """Removes every container and the volume this run made, whatever happened, and returns what is still there
+    (shown at once, so a run that failed earlier says so too; a passing run fails on it)."""
     for name in [s.name for s in servers] + [f"{prefix}-smoke"]:
         try:
             engine("rm", "-f", name, what=f"remove {name}", ok=(0, 1, 125))
@@ -516,6 +528,13 @@ def cleanup(engine: Engine, prefix: str, servers: list, volume: str) -> None:
         engine("volume", "rm", "-f", volume, what=f"remove {volume}", ok=(0, 1, 125))
     except Failed as e:
         say(f"cleanup: {e}")
+    try:
+        left = engine.leftovers(prefix)
+    except Failed as e:
+        left = [f"(the engine could not list them: {e})"]
+    if left:
+        say(f"cleanup: LEFT BEHIND {', '.join(left)}")
+    return left
 
 
 # ------------------------------------------------------------------------------------------------ save

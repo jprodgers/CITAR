@@ -312,6 +312,12 @@ class CheckImageReadings(unittest.TestCase):
             with self.subTest(text=text[:40]), self.assertRaises(ci.Failed):
                 ci.smoke_record(text)
 
+    def test_an_answer_on_a_commands_last_line(self):
+        self.assertEqual(ci.last_json('a warning\n["/opt/venv/x.so", false]\n', "x"), ["/opt/venv/x.so", False])
+        for out in ("", "not json\n", '["a"]\nTraceback (most recent call last):\n'):
+            with self.subTest(out=out), self.assertRaises(ci.Failed):
+                ci.last_json(out, "the answer")
+
     def test_the_smokes_script(self):
         script = ci.smoke_script()
         self.assertIn("unset CITAR_HOST CITAR_PORT", script)
