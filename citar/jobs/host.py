@@ -1,7 +1,8 @@
 """The server's job host, from the parent's side (design/phase4-helper.md P4.4.3, P4.5.6).
 
 The job host is the jobs crate's (``citar_jobs::host``), the same Rust as the helper's ``citar-helper job-host``; the
-server runs it as ``python -m citar.jobs host``, a child process, so that a game's crash, an out-of-memory death or a
+server runs it as ``python -P -m citar.jobs host`` (the Windows bundle: ``citar.exe jobs-host``; :func:`command`), a
+child process, so that a game's crash, an out-of-memory death or a
 hung game stays away from the server, and every OS has one process to put its limits on. This module is what
 ``citar_jobs::host::parent`` is to the helper, the same rules in Python:
 
@@ -44,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from citar import engine_api
+from citar import engine_api, paths
 
 log = logging.getLogger("citar.jobs.host")
 
@@ -81,9 +82,35 @@ def arrived(frame: dict, now: float, clock_now: Optional[float] = None) -> float
     return now - max(0.0, age)
 
 
-def command() -> list:
-    """The server's job host: this Python running ``citar.jobs``."""
-    return [sys.executable, "-m", "citar.jobs", "host"]
+def command(kind: Optional[str] = None) -> list:
+    """The server's job host, for this kind of install (:func:`citar.paths.install_kind`; design/phase5-release.md
+    P5.6):
+
+    - **frozen** (the Windows bundle): ``citar.exe jobs-host``, the console program beside the running one (the
+      windowed ``citar-play.exe`` too), whose argument parser takes no ``-m``; :meth:`JobHost.start` starts it with
+      ``CREATE_NO_WINDOW``, so no console flashes up.
+    - **wheel** and **checkout**: this Python with ``-P -m citar.jobs host``. ``-P`` (Python 3.11, the floor) keeps the
+      working directory off ``sys.path``: a server's is its state directory (``/var/lib/citar`` under the unit), where
+      a file named like the package must never shadow it. A checkout's own folder reaches the host by
+      :func:`command_env` instead.
+    """
+    kind = kind or paths.install_kind()
+    if kind == "frozen":
+        return [str(paths.bundle_program("citar")), "jobs-host"]
+    return [sys.executable, "-P", "-m", "citar.jobs", "host"]
+
+
+def command_env(kind: Optional[str] = None, base: Optional[dict] = None) -> dict:
+    """What :func:`command`'s host adds to its parent's environment (``base``, this process's by default): for a
+    checkout, its folder first on ``PYTHONPATH``, since ``-P`` drops the working directory a server started there
+    found the package by (a checkout's dev venv names it in ``citar-dev.pth`` too); nothing for a wheel, whose
+    site-packages the interpreter finds by itself, or a bundle."""
+    kind = kind or paths.install_kind()
+    if kind != "checkout":
+        return {}
+    base = os.environ if base is None else base
+    rest = base.get("PYTHONPATH", "")
+    return {"PYTHONPATH": str(paths.ROOT) + (os.pathsep + rest if rest else "")}
 
 
 def machine_cpus() -> int:
@@ -248,6 +275,8 @@ class JobHost:
         self.env = dict(env or {})
         self.ready_wait = ready_wait
         self.argv = list(argv or command())
+        #: Whether ``argv`` is :func:`command`'s, which takes :func:`command_env`'s additions.
+        self._own_command = argv is None
         self.ready: Optional[dict] = None
         self.in_flight: set = set()
         self._peaks: dict = {}
@@ -294,7 +323,7 @@ class JobHost:
     def start(self) -> dict:
         """Starts the host and waits for its ``ready``, which it returns. Raises :class:`HostError`; the host is
         ended first."""
-        env = {**os.environ, **self.env}
+        env = {**os.environ, **(command_env() if self._own_command else {}), **self.env}
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
             self._proc = subprocess.Popen(self._argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,

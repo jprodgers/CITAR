@@ -22,6 +22,10 @@ interface, so ``citar bench --all-models`` and ``python -m citar.bench --all-mod
 program. ``python -m citar`` is ``citar``. ``python -m citar.server`` also still works, because the
 deployed systemd unit invokes it that way and a packaging change should not require touching a
 running server.
+
+One more command is left out of ``--help``, since a person never runs it: ``citar jobs-host``, the server's job host
+(``python -m citar.jobs host``) for the Windows bundle, whose ``citar.exe`` takes no ``-m`` (design/phase5-release.md
+P5.6; :func:`citar.jobs.host.command` starts it).
 """
 from __future__ import annotations
 
@@ -73,6 +77,23 @@ def _serve(argv: Sequence[str], open_browser: bool) -> int:
         args.append("--open")
     args = [a for a in args if a != "--no-open"]
     return _delegate("citar.server.__main__", "main", "citar serve", args)
+
+
+#: The hidden command the bundle's job host runs as (``citar.exe jobs-host``).
+JOBS_HOST = "jobs-host"
+
+
+def _jobs_host(argv: Sequence[str]) -> int:
+    """``citar jobs-host``: the job host on this process's standard input and output until its input closes, as
+    ``python -m citar.jobs host`` runs it (``engine_api.run_job_host``). Its standard output is the protocol, so nothing
+    else is printed there; it takes no argument."""
+    if argv:
+        print(f"usage: citar {JOBS_HOST}   (the server's job host: started by the server, not by hand)",
+              file=sys.stderr)
+        return 2
+    from . import engine_api
+
+    return engine_api.run_job_host()
 
 
 def _where() -> int:
@@ -189,6 +210,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _where()
     if command == "ruleset":
         return _ruleset(rest)
+    if command == JOBS_HOST:
+        return _jobs_host(rest)
 
     # Not a command: either an option for the top-level parser (``--version``, ``--help``) or a
     # mistake. argparse prints the right thing and exits in both cases.
