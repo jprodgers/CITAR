@@ -338,6 +338,10 @@ class CheckBundle(unittest.TestCase):
         for name in windows:
             side = (out / f"{name}.sha256").read_text(encoding="ascii")
             self.assertEqual(side, CHECK_BUNDLE.sha256(out / name) + "\n")
+        # The Windows asset's program is citar.exe on any system that writes the zip; a bundle without it is refused.
+        (bundle / "citar.exe").unlink()
+        self.assertEqual(CHECK_BUNDLE.main(["zip", "--dir", str(bundle), "--version", "0.1.6-rc.2", "--out", str(out)]), 1)
+        self.assertFalse((out / "CITAR-0.1.6-rc.2-windows-x64.zip").exists())
 
     def test_the_runs_state_is_isolated(self):
         with mock.patch.dict(os.environ, {"CITAR_MODE": "server", "CITAR_DB_URL": "sqlite:///C:/real.db"}):
@@ -501,8 +505,10 @@ class SpecRules(unittest.TestCase):
         self.assertEqual(len(dropped), 3)
 
     def test_dlls_are_looked_for_in_the_embedded_python_and_windows_only(self):
-        base = os.path.join("C:" + os.sep, "Python312")
-        windows = os.path.join("C:" + os.sep, "Windows")
+        # This system's root (C:\ on Windows, / elsewhere): a drive's colon would split on POSIX's path separator.
+        root = os.path.abspath(os.sep)
+        base = os.path.join(root, "Python312")
+        windows = os.path.join(root, "Windows")
         self.assertEqual(SR.dll_path(base, windows).split(os.pathsep),
                          [base, os.path.join(base, "DLLs"), os.path.join(windows, "System32"), windows])
         self.assertEqual(SR.dll_path(base, None).split(os.pathsep), [base, os.path.join(base, "DLLs")])

@@ -359,7 +359,9 @@ def cmd_uninstalled(args) -> dict:
 
 def cmd_zip(args) -> dict:
     folder = args.dir.resolve()
-    program(folder)
+    # The zip is the Windows asset, so its program is citar.exe on whatever system writes it (program() is the one
+    # this system would run).
+    check((folder / "citar.exe").is_file(), f"no citar.exe in {folder}")
     args.out.mkdir(parents=True, exist_ok=True)
     out = args.out / f"CITAR-{args.version}-windows-x64.zip"
     files = sorted(p for p in folder.rglob("*") if p.is_file())
