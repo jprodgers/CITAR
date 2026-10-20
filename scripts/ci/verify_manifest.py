@@ -156,8 +156,9 @@ def check_keys(path: Path) -> str:
             ed25519_key.from_public_bytes(raw)
         except ValueError as e:
             raise Failed(f"line {number} is not an ed25519 public key ({e})") from e
-    if len(keys) > MAX_KEYS:
-        raise Failed(f"{len(keys)} keys, over the {MAX_KEYS} a key file may hold")
+    distinct = len({raw for _number, raw in keys})  # a key given twice is one key, as citar-jobs reads the file
+    if distinct > MAX_KEYS:
+        raise Failed(f"{distinct} keys, over the {MAX_KEYS} a key file may hold")
     if not keys:
         return f"{path}: no public key (a build from it trusts none, so its helpers report updates unavailable)"
     return f"{path}: {len(keys)} public key(s), each well formed (lines {', '.join(str(n) for n, _ in keys)})"

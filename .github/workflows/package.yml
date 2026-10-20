@@ -763,7 +763,9 @@ jobs:
         shell: bash
         run: |
           python scripts/ci/verify_manifest.py --check-keys crates/citar-jobs/update-keys.pub
-          keys=$(grep -Ecv '^[[:space:]]*(#|$)' crates/citar-jobs/update-keys.pub || true)
+          # distinct keys, as citar-jobs reads the file (blank and # lines read past, a key given twice trusted once)
+          keys=$(python -c "import sys; print(len({l.strip() for l in open(sys.argv[1]) if l.strip() and not l.strip().startswith('#')}))" \
+                 crates/citar-jobs/update-keys.pub)
           out=$(python scripts/ci/gate_run.py helper --under "$RUNNER_TEMP" -- assets/citar-helper-linux-x64 \
                 update check --home "$RUNNER_TEMP/keys-home")
           echo "$out"

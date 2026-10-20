@@ -164,6 +164,11 @@ class VerifyManifest(unittest.TestCase):
         out = run("verify_manifest.py", "--check-keys", three)
         self.assertEqual(out.returncode, 1)
         self.assertIn("over the 2", out.stderr)
+        # one key given three times is one key, as citar-jobs reads the file (and as the helper counts it)
+        once = self.dir / "once.pub"
+        once.write_text((public_line(Ed25519PrivateKey.generate()) + "\n") * 3, encoding="ascii")
+        self.assertEqual(run("verify_manifest.py", "--check-keys", once).returncode, 0)
+        self.assertEqual(helper_release.key_count(once), 1)
         junk = self.dir / "junk.pub"
         junk.write_text("# fine\nnot a key\n", encoding="ascii")
         out = run("verify_manifest.py", "--check-keys", junk)

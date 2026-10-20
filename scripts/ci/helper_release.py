@@ -292,7 +292,8 @@ def stage(self_build: Path, packaged: Path, platform: str, version: str, out: Pa
 def key_count(path: Path) -> int:
     """How many public keys a key file names (``update-keys.pub``: one a line, blank and ``#`` lines read past)."""
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    return sum(1 for line in text.splitlines() if line.strip() and not line.strip().startswith("#"))
+    # distinct, as citar-jobs reads the file: a key given twice is trusted once
+    return len({line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")})
 
 
 class Runner:
