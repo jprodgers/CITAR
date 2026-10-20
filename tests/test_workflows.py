@@ -236,8 +236,9 @@ class ThePackageWorkflow(unittest.TestCase):
                     continue
                 caches += 1
                 with self.subTest(job=job_id, step=uses):
-                    self.assertIn("needs.meta.outputs.mode == 'ci'", [c.strip() for c in step["if"].split("&&")])
-                    self.assertNotIn("||", step["if"])
+                    condition = str(step.get("if", ""))
+                    self.assertIn("needs.meta.outputs.mode == 'ci'", [c.strip() for c in condition.split("&&")])
+                    self.assertNotIn("||", condition)
         self.assertEqual(caches, 4, "wheels, helpers (twice) and helper-manifest")
 
     def test_its_triggers_inputs_group_and_permissions(self):
@@ -524,7 +525,7 @@ class ThePackageWorkflow(unittest.TestCase):
         for job_id, job in helper["jobs"].items():
             for step in self.using(job, "actions/checkout"):
                 with self.subTest(job=job_id):
-                    self.assertIs(step["with"]["persist-credentials"], False)
+                    self.assertIs((step.get("with") or {}).get("persist-credentials"), False)
         # no workflow pipes a network installer into a shell
         for path in sorted(WORKFLOWS.glob("*.yml")):
             with self.subTest(workflow=path.name):
