@@ -548,24 +548,38 @@ in `citar-helper-<version>-<platform>.tar.gz` (`.zip` on Windows) with `LICENSE`
 Linux builds run in the wheels' manylinux_2_28 images, by the same digests, so the helper needs glibc
 2.28 as the game does; `scripts/ci/helper_release.py glibc` reads each binary's symbols (`objdump -T`)
 and fails above it, and `helper.yml`'s artifact jobs build the same way, so a pull request that raises
-the floor fails there. `helper_release.py stage` makes the names, archives and `.sha256` files, and
-`check` runs both builds on the runner (`--version` names the version, the label and the target;
-`--self-test`; `update check` says what `update-keys.pub` and each build's policy make it). The
+the floor fails there. The container installs rustup from `static.rust-lang.org`'s archive by version
+(`RUSTUP_INIT_VERSION`), run only once its SHA-256 is the one its matrix leg names (`rustup_sha256`,
+the archive's `.sha256` for that target): to move it, change the version and both hashes in
+`package.yml` and `helper.yml` together (the tests hold them equal). Every cache in `package.yml` is
+restored in a run of its own only (mode `ci`), so what a release or a dry run ships, and the xtask its
+signing job runs, is built from the locked sources alone. On a Mac, `helper_release.py macos` (and
+`check --macos-min`) reads each build's oldest macOS (`otool -l`) and fails unless it is
+`MACOSX_DEPLOYMENT_TARGET`'s 11.0. `helper_release.py stage` makes the names, archives and `.sha256`
+files, and `check` runs both builds on the runner (`--version` names the version, the label and the
+target; `--self-test`; `update check` says what `update-keys.pub` and each build's policy make it). The
 `helper-manifest` job builds xtask once, writes `citar-helper-manifest.json` with it, signs it with a
 throwaway key made in the runner's temporary folder, and verifies it twice: `cargo xtask verify-manifest
 --pub FILE MANIFEST [SIG]` and `scripts/ci/verify_manifest.py`, which uses the `cryptography` package
 and shares no code with xtask (`tests/data/helper_manifest/` holds the two to one signature). A copy
-with one byte changed, and another key, must fail both. Changing the manifest's format or its domain
-means changing both verifiers.
+with one byte changed, and another key, must fail both. Changing the manifest's format, its domain or
+its limits means changing both verifiers (`tests/test_helper_release.py` holds their limits to
+citar-jobs'). `verify_manifest.py --check-keys` refuses a test key in `update-keys.pub`: the public half
+of a seed of 32 equal bytes, which the tests sign with, or any key in a `.pub` file under `tests/data/`.
 
 **Running a release helper or a server on your own machine.** A release or packaged helper has no
 development guard, so without `--home` it uses the per-user CITAR folder of a real installation, and
 a server in server mode listens on every interface. The package gates run both only through
 `scripts/ci/gate_run.py`: `gate_run.py helper -- BINARY ARGS` refuses a run without `--home` inside
-the target folder (`--under`, by default `$CARGO_TARGET_DIR`), or one that names a server beyond
-loopback, detaches or installs a service; `gate_run.py server --port N --state DIR -- COMMAND`
-starts it on `127.0.0.1:N` (never 8799) with every state folder under `DIR`, and stops its whole
-process tree when `DIR/gate_run.stop` appears.
+the target folder (`--under`, by default `$CARGO_TARGET_DIR`), one that names a file outside it
+(`--config`, `--hardware`, `--ca-file`, `scan`'s report, or the binary `update apply` and `rollback`
+replace), or one that names a server beyond loopback, detaches or installs a service;
+`gate_run.py server --port N --state DIR -- COMMAND` starts it on `127.0.0.1:N` (never 8799) with its
+state folders, its database and its API key file under `DIR`, no OS credential store (keyring's
+failing backend, so a key saved on the Servers page never reaches your Credential Manager or Keychain),
+and the per-user configuration and data folders (`APPDATA` and `LOCALAPPDATA`, or `XDG_CONFIG_HOME`
+and `XDG_DATA_HOME`) moved under `DIR/user`; a `--env` may not undo any of that. It stops the
+server's whole process tree when `DIR/gate_run.stop` appears.
 
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
