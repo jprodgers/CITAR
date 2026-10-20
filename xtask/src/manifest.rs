@@ -970,6 +970,29 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 
+    /// `tests/data/helper_manifest/`: a manifest, its signature and the public key, all made by the
+    /// `cryptography` package (scripts/ci/verify_manifest.py's library) from the seed `[9; 32]`, which
+    /// no file holds. ed25519 is deterministic, so this signer must give the same signature byte for
+    /// byte, and verify-manifest must pass it: the two implementations agree on the domain, the bytes
+    /// signed and the encoding (the Python suite verifies the same files with verify_manifest.py).
+    #[test]
+    fn the_committed_fixture_is_this_signers_signature_and_verifies() {
+        let dir = root().join("tests").join("data").join("helper_manifest");
+        let manifest = dir.join(MANIFEST_FILE);
+        let bytes = std::fs::read(&manifest).expect("the fixture");
+        let committed = std::fs::read_to_string(dir.join(format!("{MANIFEST_FILE}.sig")))
+            .expect("its signature");
+        let key = SigningKey::from_bytes(&[9; 32]);
+        assert_eq!(signature(&bytes, &key), committed.trim(), "the same signature, byte for byte");
+        let keys = public_keys(&std::fs::read_to_string(dir.join("signing.pub")).expect("the key"))
+            .expect("a key file");
+        assert_eq!(keys.iter().map(|(line, _)| *line).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(keys[0].1, key.verifying_key());
+        let p = |x: &Path| x.to_string_lossy().into_owned();
+        verify_manifest(&s(&["--pub", &p(&dir.join("signing.pub")), &p(&manifest)]))
+            .expect("verifies");
+    }
+
     #[test]
     fn version_lines_read_back() {
         let p = read_version_line(

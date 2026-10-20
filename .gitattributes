@@ -74,3 +74,6 @@ crates/citar-bot/src/params/gen.rs linguist-generated=true
 
 # The avatar corpus (tests/test_profiles.py): byte for byte, whatever its extension says it is.
 tests/data/avatars/* binary
+
+# A signed helper manifest (xtask's and scripts/ci/verify_manifest.py's tests): its signature covers its bytes.
+tests/data/helper_manifest/* -text

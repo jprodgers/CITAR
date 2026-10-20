@@ -1,0 +1,39 @@
+{
+  "assets": {
+    "aarch64-apple-darwin": {
+      "name": "citar-helper-macos-arm64",
+      "sha256": "85c0052341c8557f20c24e39ab91466f8f42bf0fcb19f5073f1e4a2915f7e671",
+      "size": 8650752,
+      "url": "https://github.com/jprodgers/CITAR/releases/download/v0.1.7/citar-helper-macos-arm64"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "name": "citar-helper-linux-arm64",
+      "sha256": "256c0520a5f9568fd499ad17008e4a890fc26ba49ade0a696820dc7855d25654",
+      "size": 9961472,
+      "url": "https://github.com/jprodgers/CITAR/releases/download/v0.1.7/citar-helper-linux-arm64"
+    },
+    "x86_64-apple-darwin": {
+      "name": "citar-helper-macos-x64",
+      "sha256": "8e61dab8e9c5337125e97e6b2787303d874ef1651c5bb1618c973279ba7dcdd7",
+      "size": 9175040,
+      "url": "https://github.com/jprodgers/CITAR/releases/download/v0.1.7/citar-helper-macos-x64"
+    },
+    "x86_64-pc-windows-msvc": {
+      "name": "citar-helper-windows-x64.exe",
+      "sha256": "2b18d964944236f2e1a0919c1caeb0ba851d4b06cdf71061416007c4514b09a3",
+      "size": 9437184,
+      "url": "https://github.com/jprodgers/CITAR/releases/download/v0.1.7/citar-helper-windows-x64.exe"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "name": "citar-helper-linux-x64",
+      "sha256": "85cbdc5d98d7adeec6d5184a7e1c65019ab6c85c4f52632d0ee0302ac8320095",
+      "size": 10485760,
+      "url": "https://github.com/jprodgers/CITAR/releases/download/v0.1.7/citar-helper-linux-x64"
+    }
+  },
+  "build": "0b412a18fe95",
+  "protocol": 2,
+  "released_at": "2026-11-01T00:00:00Z",
+  "v": 1,
+  "version": "0.1.7"
+}
