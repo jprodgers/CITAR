@@ -68,8 +68,9 @@ CHECK_MOUNT = "/opt/citar-check/scripts"
 SMOKE_DIR = "/tmp/citar-smoke"
 #: The smoke's line, printed by its container after this marker.
 SMOKE_MARK = "SMOKE-LINE "
-#: The account the restart check makes, and the build facts asked of the running server.
-MARKER_HANDLE, MARKER_EMAIL = "volume-check", "volume-check@example.invalid"
+#: The account the restart check makes (example.com: the account rules refuse a special-use name such as .invalid), and
+#: the build facts asked of the running server.
+MARKER_HANDLE, MARKER_EMAIL = "volume-check", "volume-check@example.com"
 BUILD_FACTS = ("import json; from citar import engine_api; "
                "print(json.dumps({'build': engine_api.build_info(), 'jobs_build': engine_api.jobs_build()}))")
 #: The smoke, as its container's shell runs it: the image's server variables dropped, the state variables pointed into
