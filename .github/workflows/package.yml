@@ -33,8 +33,11 @@
 # - windows: the Windows bundle (PyInstaller) from the Windows wheel installed in a fresh venv, never the checkout;
 #   its checks (scripts/ci/check_bundle.py: the job host started from the bundle among them), the Inno Setup installer,
 #   a silent per-user install on the runner, run and uninstalled, and the portable zip (P5.6).
-# - installer, docker: install.sh and the image, now on the release wheels (moved from test.yml; 5-06 and 5-07
-#   replace them).
+# - installer: install.sh on the release wheels (moved from test.yml; 5-07 replaces it).
+# - image: the server image for linux/amd64 and linux/arm64, each built natively from its own wheel and the
+#   constraints, run and checked (scripts/ci/check_image.py: health, version and label, the job host verifiable as uid
+#   10001, the wheels' smoke, a restart keeping the volume's state), saved and loaded again with the same id; kept as
+#   pkg-image-<arch> on a release's dry run and on a tag, for release.yml to push (P5.7).
 #
 # release.yml calls this workflow on a tag and on a release's dry run (P5.11) with the mode, the version, the date
 # and the label, no secrets and contents: read; a run of its own is mode ci (label ci+<sha>). Every job starts, after
@@ -1100,17 +1103,38 @@ jobs:
           test ! -e "$HOME/.local/bin/citar" || { echo "command survived the uninstall"; exit 1; }
           echo "uninstall is clean"
 
-  docker:
-    name: the image from the Linux x64 wheel
-    needs: [meta, wheels]
-    # It needs only the Linux x64 wheel.
+  image:
+    # The server image (design/phase5-release.md P5.7), for each architecture natively on a runner of its own (no
+    # emulation, no cross build), from this run's wheel for it and the release's tested dependency set (pkg-
+    # constraints, which the Dockerfile installs with --constraint, wheels only). Then run and checked there by
+    # scripts/ci/check_image.py: its port on 127.0.0.1 only, the health route within 60 s, the version and label,
+    # no test operations, citar doctor's job host verifiable as uid 10001, the wheels' smoke and its lab job, the
+    # dependencies the constraints' versions, and a restart keeping the volume's state. Then saved (docker save, zstd),
+    # removed and loaded again with the same id: on a release's dry run and on a tag the file is the artifact
+    # pkg-image-<arch> that release.yml's tag-only jobs push (P5.11), so the image pushed is the image tested. No
+    # cache: what a release ships is built from this run's files.
+    name: image (${{ matrix.arch }})
+    needs: [meta, wheels, constraints]
+    # Each leg needs only its own wheel and the constraints.
     if: ${{ !cancelled() && needs.meta.result == 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     env:
       RELEASE_MODE: ${{ needs.meta.outputs.mode }}
       RELEASE_VERSION: ${{ needs.meta.outputs.version }}
       RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      PEP440: ${{ needs.meta.outputs.pep440 }}
+      # The label the wheel was built with, which the image's engine must name.
+      LABEL: ${{ needs.meta.outputs.label }}
+      # The name release.yml pushes it under (:V-<arch>, then joined as :V); nothing in this workflow pushes.
+      TAG: ghcr.io/jprodgers/citar:${{ needs.meta.outputs.version }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each on the runner its platform's wheel is built on.
+        include:
+          - { arch: amd64, platform: linux-x64, runner: ubuntu-24.04, machine: x86_64 }
+          - { arch: arm64, platform: linux-arm64, runner: ubuntu-24.04-arm, machine: aarch64 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1120,43 +1144,92 @@ jobs:
         shell: bash
         run: python3 scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
 
+      - name: This runner's own architecture, and its Docker
+        shell: bash
+        env:
+          WANT: ${{ matrix.machine }}
+        run: |
+          got=$(uname -m)
+          echo "uname -m: $got; label: $LABEL; version: $RELEASE_VERSION ($PEP440); tag: $TAG"
+          [ "$got" = "$WANT" ] || { echo "::error::this runner is $got, not $WANT"; exit 1; }
+          docker version
+          docker buildx version
+          zstd --version
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         # The Dockerfile installs the package from wheelhouse/, never building Rust in the image.
         with:
-          name: pkg-wheel-linux-x64
+          name: pkg-wheel-${{ matrix.platform }}
           path: wheelhouse
 
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-constraints
+          path: constraints
+
+      - name: The build context
+        # The wheel and the release's constraints, under the name the Dockerfile looks for.
+        shell: bash
+        run: |
+          cp "constraints/citar-$PEP440-server-constraints.txt" wheelhouse/constraints.txt
+          ls -l wheelhouse
 
       - name: Build the image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        # On this runner's own platform, loaded into its Docker; no provenance or SBOM manifest beside it (release.yml
+        # attests the pushed image, P5.12), so the saved file holds the image and nothing else.
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker buildx build --load --platform "linux/$ARCH" --provenance=false --sbom=false --progress plain \
+            --label "org.opencontainers.image.version=$RELEASE_VERSION" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$TAG" .
+          docker image ls "$TAG"
+
+      - name: The image runs, and what it runs is this release
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          python3 scripts/ci/check_image.py run --engine docker --image "$TAG" --arch "$ARCH" \
+            --version "$RELEASE_VERSION" --label "$LABEL" --wheel "$(ls wheelhouse/*.whl)" \
+            --constraints wheelhouse/constraints.txt --out "report/image-$ARCH.json"
+
+      - name: Saved, removed and loaded again, the same image
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          python3 scripts/ci/check_image.py save --engine docker --image "$TAG" \
+            --out "image/citar-image-$RELEASE_VERSION-$ARCH.tar.zst" --report "report/image-$ARCH.json"
+          ls -l image
+
+      - name: docker-compose.yml is a valid Compose file
+        # The image does not depend on it; one leg checks it. Its two required values are given stand-ins.
+        if: matrix.arch == 'amd64'
+        shell: bash
+        run: |
+          CITAR_DOMAIN=citar.example.invalid CITAR_SECRET_KEY=a-stand-in-for-a-generated-secret-of-48-characters \
+            docker compose -f docker-compose.yml config --quiet
+          echo "docker-compose.yml: valid"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The image's id, version, label, build id and jobs build: package 5-08's assemble holds them to the other
+        # builds'.
         with:
-          context: .
-          push: false
-          load: true
-          tags: citar:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          name: pkg-image-report-${{ matrix.arch }}
+          path: report/image-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
 
-      - name: It starts and answers
-        run: |
-          docker run -d --name citar-ci -p 8765:8765 citar:ci
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8765/api/auth/config >/dev/null 2>&1; then
-              echo "answered after ${attempt}s"
-              docker rm -f citar-ci
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "the container never answered:"
-          docker logs citar-ci
-          exit 1
-
-      - name: The image's engine has no test operations
-        run: |
-          docker run --rm --entrypoint python citar:ci -c "
-          import citar._engine as E
-          assert not E.HAS_TEST_OPS, 'the image carries the test operations'
-          print('engine', E.build_info())
-          "
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The image release.yml loads and pushes (a release's dry run and a tag only; a pull request saves it and
+        # loads it back above, and uploads nothing).
+        if: needs.meta.outputs.mode != 'ci'
+        with:
+          name: pkg-image-${{ matrix.arch }}
+          path: image/citar-image-${{ needs.meta.outputs.version }}-${{ matrix.arch }}.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
