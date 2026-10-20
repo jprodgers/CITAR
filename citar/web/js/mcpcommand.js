@@ -19,12 +19,14 @@ export function seatArgs(seat) {
   return ["--server", seat.serverUrl, "--game", String(seat.gameId), "--token", seat.token];
 }
 
-/** A word as a shell takes it: as it is when it holds only characters no shell treats specially (a Windows path's
- *  backslashes included), else in double quotes, which cmd, PowerShell and a POSIX shell all read alike for a path
- *  with spaces (a double quote inside, which no Windows path holds, is written \"). */
+/** A word as a shell takes it: as it is when it holds only characters no shell treats specially, else in double
+ *  quotes, which cmd, PowerShell and a POSIX shell all read alike for a path (a double quote inside, which no Windows
+ *  path holds, is written \"). A word with a backslash, as every Windows path has, is quoted: bare, Git Bash, WSL or
+ *  any POSIX shell would take each backslash as an escape and drop it (C:\dev\citar.exe would run C:devcitar.exe),
+ *  while inside double quotes a backslash before an ordinary character is kept. */
 export function quoteArg(word) {
   const text = String(word);
-  if (/^[A-Za-z0-9_\-.,/\\:=@+%]+$/.test(text)) return text;
+  if (/^[A-Za-z0-9_\-.,/:=@+%]+$/.test(text)) return text;
   return `"${text.replace(/"/g, '\\"')}"`;
 }
 
@@ -40,9 +42,18 @@ export function clientConfig(meta, seat) {
   return { mcpServers: { [`citar-p${seat.player}`]: { command, args: [...args, ...seatArgs(seat)] } } };
 }
 
-/** A line for a server-mode server's seats: the command runs on the player's own computer, from their own install;
- *  null on a local server, whose command is this computer's own. */
+/** A line for a server-mode server's seats: the command runs on the player's own computer, from their own install,
+ *  and says where that install keeps the program the command names; null on a local server, whose command is this
+ *  computer's own. A server run from CITAR's Windows app names its `citar.exe`, which is on a player's PATH only if
+ *  they had the installer add it (not the default) and exists only in that app; every other install has `citar-mcp`. */
 export function mcpHint(meta) {
   if (!meta || meta.mode !== "server") return null;
+  const [program] = mcpCommand(meta);
+  if (/^citar\.exe$/i.test(program)) {
+    return "Run it on your own computer, from your own CITAR install. citar.exe is the program of CITAR's Windows app: "
+      + "run it from the folder the app is installed in, or give its full path, unless the installer added that "
+      + "folder to your PATH. With any other install (pip, pipx, install.sh), write citar-mcp in place of "
+      + "\"citar.exe mcp\": those put citar-mcp on your PATH.";
+  }
   return "Run it on your own computer, from your own CITAR install (pip, pipx and install.sh put citar-mcp on your PATH).";
 }

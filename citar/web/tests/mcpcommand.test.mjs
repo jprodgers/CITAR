@@ -18,10 +18,10 @@ test("a bundle's local server gives its citar.exe mcp, quoted where its folder h
   assert.equal(mcpHint(meta), null);
 });
 
-test("a wheel's local server gives the citar-mcp script beside its interpreter", () => {
+test("a wheel's local server gives the citar-mcp script beside its interpreter, quoted for its backslashes", () => {
   const meta = { mode: "local", mcp_command: ["C:\\dev\\venv\\x\\Scripts\\citar-mcp.exe"] };
   assert.equal(claudeAddCommand(meta, seat),
-    "claude mcp add citar-g42-p1 -- C:\\dev\\venv\\x\\Scripts\\citar-mcp.exe " + SEAT.join(" "));
+    'claude mcp add citar-g42-p1 -- "C:\\dev\\venv\\x\\Scripts\\citar-mcp.exe" ' + SEAT.join(" "));
   assert.deepEqual(clientConfig(meta, seat).mcpServers["citar-p1"],
     { command: "C:\\dev\\venv\\x\\Scripts\\citar-mcp.exe", args: SEAT });
 });
@@ -36,6 +36,22 @@ test("a server-mode server names no path of its own, and says the command is the
   const meta = { mode: "server", mcp_command: ["citar-mcp"] };
   assert.equal(claudeAddCommand(meta, seat), "claude mcp add citar-g42-p1 -- citar-mcp " + SEAT.join(" "));
   assert.match(mcpHint(meta), /your own CITAR install/);
+  assert.match(mcpHint(meta), /put citar-mcp on your PATH/);
+  assert.doesNotMatch(mcpHint(meta), /citar\.exe/);
+});
+
+test("a server-mode server run from the Windows app names its citar.exe mcp, and says where citar.exe is", () => {
+  const meta = { mode: "server", mcp_command: ["citar.exe", "mcp"] };
+  assert.equal(claudeAddCommand(meta, seat), "claude mcp add citar-g42-p1 -- citar.exe mcp " + SEAT.join(" "));
+  const hint = mcpHint(meta);
+  assert.match(hint, /your own CITAR install/);
+  assert.match(hint, /citar\.exe is the program of CITAR's Windows app/);
+  assert.match(hint, /the folder the app is installed in, or give its full path, unless the installer added/);
+  assert.match(hint, /write citar-mcp in place of "citar\.exe mcp"/);
+  // the hint follows the command the server gives, whatever its case
+  assert.equal(mcpHint({ mode: "server", mcp_command: ["CITAR.EXE", "mcp"] }), hint);
+  // a local server's command is this computer's own: no hint
+  assert.equal(mcpHint({ mode: "local", mcp_command: ["citar.exe", "mcp"] }), null);
 });
 
 test("no usable mcp_command (an older server, no answer) falls back to citar-mcp", () => {
@@ -51,7 +67,9 @@ test("no usable mcp_command (an older server, no answer) falls back to citar-mcp
 
 test("words are quoted only when a shell would split or read them", () => {
   assert.equal(quoteArg("http://127.0.0.1:8765"), "http://127.0.0.1:8765");
-  assert.equal(quoteArg("C:\\dev\\citar.exe"), "C:\\dev\\citar.exe");
+  // a POSIX shell (Git Bash, WSL) would drop a bare backslash; in double quotes it keeps one before a letter
+  assert.equal(quoteArg("C:\\dev\\citar.exe"), '"C:\\dev\\citar.exe"');
+  assert.equal(quoteArg("C:/dev/citar.exe"), "C:/dev/citar.exe");
   assert.equal(quoteArg("/home/me/My Games/citar_mcp.py"), '"/home/me/My Games/citar_mcp.py"');
   assert.equal(quoteArg('a"b'), '"a\\"b"');
   assert.equal(quoteArg("a&b"), '"a&b"');
