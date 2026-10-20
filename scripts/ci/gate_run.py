@@ -271,17 +271,65 @@ def start(argv: list[str], env: dict[str, str], capture: bool = False) -> subpro
         raise Refused(f"cannot start {argv[0]}: {e}") from e
 
 
+def windows_process_table() -> dict[int, tuple[int, int]]:
+    """Every process on Windows, from a Toolhelp snapshot (kernel32, read only): its id, its parent's, and its
+    creation time where this user may read it (else 0)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):  # PROCESSENTRY32W
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snapshot_all, query_limited = 0x2, 0x1000  # TH32CS_SNAPPROCESS, PROCESS_QUERY_LIMITED_INFORMATION
+
+    def created(pid: int) -> int:
+        handle = kernel32.OpenProcess(query_limited, False, pid)
+        if not handle:
+            return 0
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+                return 0
+            return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        finally:
+            kernel32.CloseHandle(handle)
+
+    snap = kernel32.CreateToolhelp32Snapshot(snapshot_all, 0)
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+    table: dict[int, tuple[int, int]] = {}
+    try:
+        entry = Entry()
+        entry.dwSize = ctypes.sizeof(Entry)
+        more = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while more:
+            table[int(entry.th32ProcessID)] = (int(entry.th32ParentProcessID), created(entry.th32ProcessID))
+            more = kernel32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snap)
+    return table
+
+
 def process_table() -> dict[int, tuple[int, int]]:
     """Every process: its id, then its parent's and its start (to tell a reused id from a child)."""
-    table: dict[int, tuple[int, int]] = {}
     if os.name == "nt":
-        script = ("Get-CimInstance Win32_Process | ForEach-Object { "
-                  "\"$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate.Ticks)\" }")
-        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                             capture_output=True, text=True, timeout=120).stdout
-    else:
-        out = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid="], capture_output=True, text=True,
-                             timeout=60).stdout
+        return windows_process_table()
+    table: dict[int, tuple[int, int]] = {}
+    out = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid="], capture_output=True, text=True,
+                         timeout=60).stdout
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
