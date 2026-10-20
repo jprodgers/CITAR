@@ -7,7 +7,8 @@
 //! `develop` builds the Python extension for the laptop's venv (DESIGN.md P2.6.7, 2-06a);
 //! `keygen`, `helper-manifest`, `sign-manifest` and `verify-manifest` are the release side of the
 //! helper's update channel (design/phase4-helper.md P4.3.8, 4-13; design/phase5-release.md P5.4.2,
-//! 5-03).
+//! 5-03); `licenses` writes the third-party notices the release's binaries carry
+//! (design/phase5-release.md P5.5, 5-04).
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +17,7 @@ mod develop;
 mod gen_params;
 mod gen_uniques;
 mod lexer;
+mod licenses;
 mod manifest;
 mod perf;
 
@@ -52,7 +54,12 @@ commands:
            this repository or any git working tree (exit 0 signed, 1 failed, 2 refused)
   verify-manifest --pub FILE MANIFEST [SIG]
            whether SIG (MANIFEST.sig) signs MANIFEST with a public key of FILE (update-keys.pub's
-           format), as a helper checks it (exit 0 verified, 1 does not verify, 2 refused)";
+           format), as a helper checks it (exit 0 verified, 1 does not verify, 2 refused)
+  licenses [--check] [--metadata FILE] [--out FILE]
+           packaging/THIRD-PARTY-LICENSES.txt: every third-party crate citar-py and citar-helper
+           link on the release targets, from cargo metadata --locked (or FILE), with its licence
+           and notice texts; a licence outside the allow-list is refused (--check: compare, write
+           nothing; exit 0 written or current, 1 refused or out of date, 2 could not run)";
 
 fn workspace_root() -> PathBuf {
     // xtask/ sits at the root; this is fixed at build time, so each worktree checks itself.
@@ -113,6 +120,10 @@ fn main() -> ExitCode {
         ] => {
             let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
             manifest::run(&workspace_root(), command, &rest)
+        }
+        ["licenses", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
+            licenses::run(&workspace_root(), &rest)
         }
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
