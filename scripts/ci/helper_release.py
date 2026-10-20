@@ -2,10 +2,11 @@
 P5.4.1, package 5-03).
 
     python scripts/ci/helper_release.py glibc [--max 2.28] [--objdump PATH] BINARY...
+    python scripts/ci/helper_release.py macos --min 11.0 [--otool PATH] BINARY...
     python scripts/ci/helper_release.py stage --self FILE --packaged FILE --platform P --version V --out DIR
     python scripts/ci/helper_release.py listing ARCHIVE --platform P --version V
     python scripts/ci/helper_release.py check --stage DIR --platform P --target T --version V --label L --work DIR
-                                              [--under DIR] [--keys FILE] --out FILE
+                                              [--under DIR] [--keys FILE] [--macos-min 11.0] --out FILE
     python scripts/ci/helper_release.py manifest MANIFEST --assets DIR --version V
 
 Each release target is built twice (package.yml's ``helpers`` matrix): the self-updating helper, which the Servers
@@ -15,6 +16,9 @@ and winget install and which never updates itself (P4.3.8).
 - ``glibc``: the newest ``GLIBC_`` version each binary's dynamic symbols need (``objdump -T``), refused when it is
   above ``--max`` (the game's floor, manylinux_2_28's glibc 2.28: the Linux helpers are built in its container so a
   machine that runs the game runs the helper), or when a binary names no glibc version or a private one.
+- ``macos``: the oldest macOS each binary says it runs on (``otool -l``: its ``LC_BUILD_VERSION``'s ``minos``, or an
+  older linker's ``LC_VERSION_MIN_MACOSX``), which must be ``--min`` exactly: ``MACOSX_DEPLOYMENT_TARGET``, 11.0 for
+  both Macs as for the wheels, so a change that dropped or overrode it (rustc's own default for x86_64 is 10.12) fails.
 - ``stage``: the self-updating build under its unversioned name (P4.10: ``citar-helper-<platform>``, ``.exe`` on
   Windows) and the packaged one in its versioned archive, ``citar-helper-<V>-<platform>.tar.gz`` (``.zip`` on
   Windows), holding the binary and the notices that travel with it, each file with its ``.sha256`` (the hex digest
@@ -26,7 +30,8 @@ and winget install and which never updates itself (P4.3.8).
   label and the target (one line, exactly); ``--self-test`` passes; ``update check`` says what the tree's
   ``update-keys.pub`` makes it (no key: updates unavailable) and the policy, ``auto`` for the self-updating build,
   ``notify`` for the packaged one, which refuses ``auto`` in its ``helper.json`` (and ``update apply``). Both builds
-  report one build id and one jobs build. The packaged binary is the one unpacked from the archive. The JSON report
+  report one build id and one jobs build. On a Mac both are held to ``--macos-min`` as ``macos`` holds them (required
+  there, read nowhere else). The packaged binary is the one unpacked from the archive. The JSON report
   (``--out``) is what package 5-08's ``assemble`` holds every helper to: one version, label, build and jobs build.
 - ``manifest``: ``cargo xtask helper-manifest``'s file over the five, read back: version V, a build and a protocol,
   and each target's release name, its URL in the release's download folder, and the SHA-256 and size of the file in
@@ -192,6 +197,51 @@ def glibc(binaries: list[Path], floor: str, objdump: str) -> list[str]:
     return lines
 
 
+# ------------------------------------------------------------------------------------------------ macOS
+
+#: The macOS both Mac helpers are built for (``MACOSX_DEPLOYMENT_TARGET`` in package.yml and helper.yml).
+MACOS_FLOOR = "11.0"
+
+
+def macos_minimums(otool_text: str) -> list[str]:
+    """The oldest macOS each slice of a binary names, from ``otool -l``: ``minos`` in an ``LC_BUILD_VERSION`` load
+    command, or ``version`` in an ``LC_VERSION_MIN_MACOSX`` one (what a linker writes for a target before 10.14)."""
+    found, command = [], None
+    for line in otool_text.splitlines():
+        words = line.split()
+        if len(words) == 2 and words[0] == "cmd":
+            command = words[1]
+        elif len(words) == 2 and ((command == "LC_BUILD_VERSION" and words[0] == "minos")
+                                  or (command == "LC_VERSION_MIN_MACOSX" and words[0] == "version")):
+            found.append(words[1])
+            command = None
+    return found
+
+
+def macos(binaries: list[Path], want: str, otool: str | list[str] = "otool") -> list[str]:
+    """One line a binary; raises Failed naming each whose oldest macOS is not ``want`` exactly."""
+    lines, problems = [], []
+    program = [otool] if isinstance(otool, str) else list(otool)
+    for binary in binaries:
+        try:
+            out = subprocess.run([*program, "-l", str(binary)], capture_output=True, text=True, timeout=120)
+        except OSError as e:
+            raise Unusable(f"cannot run {program[0]}: {e}") from e
+        if out.returncode != 0:
+            raise Unusable(f"{program[0]} -l {binary}: {out.stderr.strip() or out.returncode}")
+        found = macos_minimums(out.stdout)
+        if not found:
+            problems.append(f"{binary}: names no oldest macOS (no LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX)")
+        elif set(found) != {want}:
+            problems.append(f"{binary}: runs on macOS {', '.join(sorted(set(found)))} and later, not {want} (is "
+                            f"MACOSX_DEPLOYMENT_TARGET {want} where it was built?)")
+        else:
+            lines.append(f"{binary}: runs on macOS {want} and later")
+    if problems:
+        raise Failed("; ".join(problems))
+    return lines
+
+
 # ------------------------------------------------------------------------------------------------ the archives
 
 
@@ -337,10 +387,13 @@ def updates_line(out: str, what: str) -> str:
 
 
 def check(staged: Path, platform: str, target: str, version: str, label: str, work: Path, under: Path, keys: Path,
-          timeout: float) -> dict:
+          timeout: float, macos_min: str | None = None, otool: str | list[str] = "otool") -> dict:
     began = time.perf_counter()
     if TARGETS[platform] != target:
         raise Failed(f"{platform}'s target is {TARGETS[platform]}, not {target}")
+    mac = platform.startswith("macos")
+    if mac and not macos_min:
+        raise Unusable(f"{platform}: give --macos-min, the MACOSX_DEPLOYMENT_TARGET both builds must name")
     under = gate_run.check_under(under)
     work = gate_run.inside(work, under, "--work")
     self_build, archive = staged / asset_name(platform), staged / archive_name(version, platform)
@@ -361,6 +414,10 @@ def check(staged: Path, platform: str, target: str, version: str, label: str, wo
 
     report: dict = {"platform": platform, "target": target, "version": version, "label": label,
                     "keys_trusted": trusted}
+    if mac:
+        for line in macos([self_build, packaged], macos_min, otool):
+            print(f"helper_release: {line}")
+        report["macos_min"] = macos_min
     for what, binary in (("self", self_build), ("packaged", packaged)):
         run = Runner(binary, under, timeout)
         home = str(homes[what])
@@ -446,6 +503,10 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--max", default=GLIBC_FLOOR)
     g.add_argument("--objdump", default="objdump")
     g.add_argument("binaries", nargs="+", type=Path)
+    mo = sub.add_parser("macos")
+    mo.add_argument("--min", dest="minimum", required=True)
+    mo.add_argument("--otool", default="otool")
+    mo.add_argument("binaries", nargs="+", type=Path)
     s = sub.add_parser("stage")
     s.add_argument("--self", dest="self_build", type=Path, required=True)
     s.add_argument("--packaged", type=Path, required=True)
@@ -466,6 +527,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--under", type=Path, default=None)
     c.add_argument("--keys", type=Path, default=ROOT / "crates" / "citar-jobs" / "update-keys.pub")
     c.add_argument("--timeout", type=float, default=300.0)
+    c.add_argument("--macos-min", default=None, help="the oldest macOS the Mac builds must name (macOS only)")
     c.add_argument("--out", type=Path, required=True)
     m = sub.add_parser("manifest")
     m.add_argument("manifest", type=Path)
@@ -475,6 +537,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "glibc":
             for line in glibc(args.binaries, args.max, args.objdump):
+                print(f"helper_release: {line}")
+        elif args.command == "macos":
+            for line in macos(args.binaries, args.minimum, args.otool):
                 print(f"helper_release: {line}")
         elif args.command == "stage":
             for line in stage(args.self_build, args.packaged, args.platform, args.version, args.out):
@@ -488,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             under = args.under or Path(os.environ.get("CARGO_TARGET_DIR") or os.environ.get("RUNNER_TEMP") or ".")
             report = check(args.stage, args.platform, args.target, args.version, args.label, args.work, under,
-                           args.keys, args.timeout)
+                           args.keys, args.timeout, args.macos_min)
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
             print(f"helper_release: both builds of {args.platform} hold: build {report['build']}, jobs build "

@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -175,6 +176,76 @@ class VerifyManifest(unittest.TestCase):
         self.assertEqual(out.returncode, 1)
         self.assertIn("line 2 is not a public key", out.stderr)
 
+    def test_check_keys_refuses_a_test_key_whose_private_half_is_public(self):
+        # the committed fixture's key, copied into a key file as update-keys.pub's line would be, and the public half
+        # of the seeds the tests sign with: a helper trusting any of them would install an update anyone signed
+        fixture = self.pub.read_text(encoding="ascii").splitlines()[-1]
+        planted = {"fixture.pub": f"# the owner's key\n{fixture}\n",
+                   "seed9.pub": public_line(Ed25519PrivateKey.from_private_bytes(bytes([9] * 32))) + "\n",
+                   "seed42.pub": public_line(Ed25519PrivateKey.from_private_bytes(bytes([42] * 32))) + "\n",
+                   "seed0.pub": public_line(Ed25519PrivateKey.from_private_bytes(bytes(32))) + "\n",
+                   "beside.pub": f"{public_line(Ed25519PrivateKey.generate())}\n{fixture}\n"}
+        for name, text in planted.items():
+            path = self.dir / name
+            path.write_text(text, encoding="ascii")
+            with self.subTest(file=name):
+                out = run("verify_manifest.py", "--check-keys", path)
+                self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+                self.assertIn("is a test key, whose private half is public", out.stderr)
+                for line in text.splitlines():
+                    if line and not line.startswith("#"):
+                        self.assertNotIn(line, out.stdout + out.stderr, "a key line is never echoed")
+        # the fixture was made from the seed [9; 32], so it is named by its seed
+        self.assertIn("the test seed [9; 32]",
+                      run("verify_manifest.py", "--check-keys", self.dir / "fixture.pub").stderr)
+        self.assertIn("the test seed [42; 32]",
+                      run("verify_manifest.py", "--check-keys", self.dir / "seed42.pub").stderr)
+        fresh = self.dir / "fresh.pub"
+        fresh.write_text(public_line(Ed25519PrivateKey.generate()) + "\n", encoding="ascii")
+        out = run("verify_manifest.py", "--check-keys", fresh)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        # every seed of 32 equal bytes, and every key of a .pub file under tests/data, whatever made it
+        known = verify_manifest.test_keys()
+        self.assertGreaterEqual(len(known), 256)
+        self.assertIn(base64.b64decode(fixture), known)
+        data = self.dir / "repo" / "tests" / "data"
+        (data / "other").mkdir(parents=True)
+        other = Ed25519PrivateKey.generate()
+        (data / "other" / "x.pub").write_text(f"# a test's key\n{public_line(other)}\n", encoding="ascii")
+        (data / "other" / "junk.pub").write_text("not a key\n", encoding="ascii")
+        raw = base64.b64decode(public_line(other))
+        self.assertNotIn(raw, known)
+        self.assertEqual(verify_manifest.test_keys(data)[raw], "tests/data/other/x.pub line 2")
+
+
+class TheLimitsAreCitarJobs(unittest.TestCase):
+    """verify_manifest.py's limits and xtask's are copies of citar-jobs' (crates/citar-jobs/src/update.rs), which every
+    helper reads a manifest and its key file with: a change there that the release's two verifiers missed would let
+    them pass a manifest or a key file helpers refuse, or the reverse."""
+
+    @staticmethod
+    def constants(rel: str) -> dict:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        found = {}
+        for name, value in re.findall(r"pub const ([A-Z_]+): [^=]+= (.+?);", text):
+            if re.fullmatch(r"[0-9_]+", value):
+                found[name] = int(value.replace("_", ""))
+            elif value.startswith('b"') and value.endswith('"'):
+                found[name] = value[2:-1].encode("ascii").decode("unicode_escape").encode("latin-1")
+        return found
+
+    def test_the_domain_the_size_the_version_and_the_keys(self):
+        jobs = self.constants("crates/citar-jobs/src/update.rs")
+        xtask = self.constants("xtask/src/manifest.rs")
+        for name in ("MANIFEST_DOMAIN", "MANIFEST_MAX_BYTES", "MANIFEST_VERSION", "MAX_KEYS"):
+            with self.subTest(name=name):
+                self.assertIn(name, jobs)
+                self.assertEqual(getattr(verify_manifest, name), jobs[name], "verify_manifest.py's copy")
+        for name in ("MANIFEST_DOMAIN", "MANIFEST_MAX_BYTES"):
+            with self.subTest(name=name):
+                self.assertEqual(xtask[name], jobs[name], "xtask's copy")
+        self.assertEqual(jobs["MANIFEST_DOMAIN"], b"CITAR-HELPER-MANIFEST-V1\0")
+
 
 OBJDUMP = """
 citar-helper:     file format elf64-x86-64
@@ -213,6 +284,75 @@ class Glibc(unittest.TestCase):
         private = OBJDUMP + "0000000000000000      DF *UND*\t0000000000000000  GLIBC_PRIVATE _dl_x\n"
         self.assertIn("GLIBC_PRIVATE", helper_release.glibc_problem(helper_release.glibc_needs(private), "2.28")[1])
         self.assertIn("names no glibc version", helper_release.glibc_problem({}, "2.28")[1])
+
+
+#: `otool -l`'s load commands, as a Mac helper built with MACOSX_DEPLOYMENT_TARGET=11.0 shows them (abridged).
+OTOOL = """citar-helper:
+Load command 0
+      cmd LC_SEGMENT_64
+  cmdsize 72
+  segname __PAGEZERO
+Load command 9
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+ platform 1
+    minos {minos}
+      sdk 15.2
+   ntools 1
+     tool 3
+  version 1115.7.3
+Load command 10
+      cmd LC_SOURCE_VERSION
+  cmdsize 16
+  version 0.0
+"""
+
+#: The same for an x86_64 build at rustc's own default (10.12), whose linker writes the older load command.
+OTOOL_OLD = """citar-helper:
+Load command 8
+      cmd LC_VERSION_MIN_MACOSX
+  cmdsize 16
+  version 10.12
+      sdk 14.0
+"""
+
+#: A stand-in otool (run as `python otool.py -l BINARY`): prints what it was made with, or fails.
+OTOOL_STAND_IN = """import sys
+text = {text!r}
+if sys.argv[1:2] != ["-l"] or not text:
+    print("otool: cannot read " + sys.argv[-1], file=sys.stderr)
+    sys.exit(1)
+print(text)
+"""
+
+
+class MacOS(unittest.TestCase):
+    def otool(self, text: str) -> list[str]:
+        path = scratch(self) / "otool.py"
+        path.write_text(OTOOL_STAND_IN.format(text=text), encoding="utf-8")
+        return [sys.executable, str(path)]
+
+    def test_the_oldest_macos_a_binary_names(self):
+        self.assertEqual(helper_release.macos_minimums(OTOOL.format(minos="11.0")), ["11.0"])
+        self.assertEqual(helper_release.macos_minimums(OTOOL_OLD), ["10.12"])
+        # a universal binary names one a slice
+        fat = OTOOL.format(minos="11.0") + OTOOL_OLD.replace("citar-helper:", "citar-helper (x86_64):")
+        self.assertEqual(helper_release.macos_minimums(fat), ["11.0", "10.12"])
+        self.assertEqual(helper_release.macos_minimums("citar-helper:\nLoad command 0\n      cmd LC_SEGMENT_64\n"), [])
+
+    def test_each_binary_is_held_to_the_deployment_target(self):
+        binary = Path(__file__)
+        lines = helper_release.macos([binary], "11.0", self.otool(OTOOL.format(minos="11.0")))
+        self.assertEqual(lines, [f"{binary}: runs on macOS 11.0 and later"])
+        for text, why in ((OTOOL_OLD, "macOS 10.12 and later, not 11.0"),
+                          (OTOOL.format(minos="12.0"), "macOS 12.0 and later, not 11.0"),
+                          (OTOOL.format(minos="11.0") + OTOOL_OLD, "macOS 10.12, 11.0 and later, not 11.0"),
+                          ("citar-helper:\n", "names no oldest macOS")):
+            with self.subTest(why=why), self.assertRaisesRegex(helper_release.Failed, why):
+                helper_release.macos([binary], "11.0", self.otool(text))
+        with self.assertRaisesRegex(helper_release.Unusable, "cannot read"):
+            helper_release.macos([binary], "11.0", self.otool(""))
+        self.assertEqual(helper_release.MACOS_FLOOR, "11.0")
 
 
 class Stage(unittest.TestCase):
@@ -383,18 +523,38 @@ class Check(unittest.TestCase):
         self.keys = self.dir / "update-keys.pub"
         self.keys.write_text("", encoding="ascii")
 
-    def staged(self, label="ci+abc1234", policy_hook="policy"):
+    def staged(self, label="ci+abc1234", policy_hook="policy", platform="linux-x64"):
         build = self.dir / "build"
         build.mkdir(exist_ok=True)
-        script = FAKE.format(python=sys.executable, version="0.1.7", target="x86_64-unknown-linux-gnu", label=label,
-                             policy_hook=policy_hook)
+        script = FAKE.format(python=sys.executable, version="0.1.7", target=helper_release.TARGETS[platform],
+                             label=label, policy_hook=policy_hook)
         for name in ("self", "packaged"):
             path = build / name
             path.write_text(script, encoding="utf-8")
             path.chmod(0o755)
-        out = self.dir / "stage"
-        helper_release.stage(build / "self", build / "packaged", "linux-x64", "0.1.7", out)
+        out = self.dir / f"stage-{platform}"
+        helper_release.stage(build / "self", build / "packaged", platform, "0.1.7", out)
         return out
+
+    def test_a_mac_build_is_held_to_its_deployment_target(self):
+        stage = self.staged(platform="macos-arm64")
+        otool = self.dir / "otool.py"
+
+        def check(work, macos_min, minos="11.0"):
+            otool.write_text(OTOOL_STAND_IN.format(text=OTOOL.format(minos=minos)), encoding="utf-8")
+            return helper_release.check(stage, "macos-arm64", "aarch64-apple-darwin", "0.1.7", "ci+abc1234",
+                                        self.dir / work, self.dir, self.keys, timeout=60, macos_min=macos_min,
+                                        otool=[sys.executable, str(otool)])
+
+        with self.assertRaisesRegex(helper_release.Unusable, "give --macos-min"):
+            check("mac0", None)
+        self.assertEqual(check("mac1", "11.0")["macos_min"], "11.0")
+        with self.assertRaisesRegex(helper_release.Failed, "macOS 10.12 and later, not 11.0"):
+            check("mac2", "11.0", minos="10.12")
+        # elsewhere the flag is not read
+        self.assertNotIn("macos_min", helper_release.check(self.staged(), "linux-x64", "x86_64-unknown-linux-gnu",
+                                                            "0.1.7", "ci+abc1234", self.dir / "lin", self.dir,
+                                                            self.keys, timeout=60, macos_min="11.0"))
 
     def check(self, stage, work="work"):
         return helper_release.check(stage, "linux-x64", "x86_64-unknown-linux-gnu", "0.1.7", "ci+abc1234",
@@ -437,6 +597,9 @@ class TheCommandLine(unittest.TestCase):
         self.assertIn("solaris-sparc", out.stderr)
         out = run("helper_release.py", "glibc", "--objdump", str(ROOT / "no-such-objdump"), __file__)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        out = run("helper_release.py", "macos", "--min", "11.0", "--otool", str(ROOT / "no-such-otool"), __file__)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(run("helper_release.py", "macos", __file__).returncode, 2, "--min is required")
 
     def test_its_targets_are_the_releases(self):
         spec = importlib.util.spec_from_file_location("citar_release_for_helpers", ROOT / "scripts" / "release.py")
