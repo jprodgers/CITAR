@@ -366,7 +366,7 @@ elif args[:2] == ["update", "check"]:
         policy = policy or "auto"
     print(line)
     print("update keys trusted: 0 (this build does not update itself)")
-    print("updates: unavailable, this build trusts no update key; policy: " + {policy_hook})
+    print("updates: unavailable, this build trusts no update key; policy: " + ({policy_hook}))
 elif args[:2] == ["update", "apply"] and packaged:
     print("citar-helper: this helper was installed by a package manager: update it through your package manager",
           file=sys.stderr)
