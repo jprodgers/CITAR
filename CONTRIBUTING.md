@@ -85,7 +85,18 @@ Dependabot's weekly pull request moves the pins. The images a workflow builds or
 (`quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b...`), with the tag and the date in a comment beside them; the first
 check refuses a moving tag there, and a maturin-action step that would pick its own image. Dependabot does not move
 these: to update one, look up the digest its tag names today (for quay.io,
-`https://quay.io/api/v1/repository/pypa/<name>/tag/?specificTag=latest`) and replace it, comment and all.
+`https://quay.io/api/v1/repository/pypa/<name>/tag/?specificTag=latest`) and replace it, comment and all. The
+server image's base in the `Dockerfile` is pinned the same way, by the digest of its multi-architecture index (one
+digest for both stages and both architectures; `tests/test_image.py` holds it), and that one Dependabot's weekly
+`docker` pull request does move. Its Python stays 3.12, the server's, and changes only by hand.
+
+To build and check the image yourself (the laptop has no Docker; WSL has Podman), put a Linux wheel and, if you have
+them, the release's constraints in `wheelhouse/` (the `Dockerfile`'s header says how), then
+`podman build --format docker --label org.opencontainers.image.version=<V> -t citar:local .` (the `docker` format
+keeps the health check; the label is the version the check expects) and
+`python3 scripts/ci/check_image.py run --engine podman --image citar:local --arch amd64 --version <V> --label <L>
+--wheel <the wheel>`, which runs it with its port on 127.0.0.1 only, checks it as package.yml's `image` job does, and
+removes every container and volume it made.
 
 ## Conventions
 
