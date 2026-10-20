@@ -92,13 +92,23 @@ def installed(path: Optional[list] = None) -> dict:
     return out
 
 
+def requirement_class():
+    """PEP 508's reader, ``packaging``'s: the installed one (PyInstaller needs it, so the bundle's venv has it), else the
+    copy pip carries (every venv has pip)."""
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:
+        from pip._vendor.packaging.requirements import Requirement
+    return Requirement
+
+
 def closure(dists: dict, root: str = ROOT, extras: Iterable[str] = EXTRAS,
             environment: Optional[dict] = None) -> dict:
     """The distributions ``root[extras]`` needs here, root excluded, by canonical name: each requirement of a
     distribution reached, whose marker holds for this interpreter (``environment`` over packaging's default) with no
     extra or with one asked of that distribution, followed with the extras it names. Raises Failed for a requirement
     that holds and is not installed."""
-    from packaging.requirements import Requirement
+    Requirement = requirement_class()
 
     want = [(canonical(root), frozenset(extras))]
     done: dict = {}                 # canonical name -> the extras already followed
@@ -205,7 +215,7 @@ def _clean(text: str) -> str:
 
 def render(found: dict, cpython: tuple, bootloader: Optional[tuple], python_version: str) -> str:
     """The file: the header, the index, a section per distribution in name order, CPython's and the bootloader's."""
-    out = [HEADER, "", "Index", "-----"]
+    out = [HEADER.rstrip("\n"), "", "Index", "-----"]
     rows = sorted(found.values(), key=lambda d: canonical(d.metadata["Name"]))
     for dist in rows:
         out.append(f"{dist.metadata['Name']} {dist.version}: {licence_of(dist)}")

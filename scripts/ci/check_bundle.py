@@ -16,8 +16,11 @@ the lab's job host started **from the bundle**, as ``citar.exe jobs-host`` (``ci
 ``citar-play.exe``'s too; the hidden ``jobs-host`` takes no argument. Exactly one ``citar/_engine.pyd``. At the
 root, beside the executables: ``LICENSE``, ``NOTICE.md`` and ``THIRD-PARTY-LICENSES.txt``, byte for byte the
 checkout's, ``README.md``, and ``PYTHON-LICENSES.txt``, whose index names CPython and PyInstaller's bootloader and no
-build tool (PyInstaller, pillow, pip, setuptools); with ``--python`` (the venv the bundle was built in) it must be
-byte for byte what ``installer/python_licenses.py`` writes there, the installed closure of ``citar[all]``.
+build tool (PyInstaller, pillow, pip, setuptools). With ``--python`` (the venv the bundle was built in): every data
+file of the installed package (``installer/spec_rules.py``'s ``package_data``: the web client, the migrations, the
+collectors, ``jobs/costs.json``) is in the bundle, and ``PYTHON-LICENSES.txt`` is byte for byte what
+``installer/python_licenses.py`` writes there, the installed closure of ``citar[all]``. Running the bundle changes
+none of its files.
 
 **installed** (after ``CITAR-V-setup.exe /VERYSILENT ... /DIR=INSTALLED``): the installed ``citar.exe`` says ``CITAR V``
 and ``doctor --quiet`` exits 0; the per-user uninstall key ``{AppId}_is1`` (``installer/citar.iss``'s AppId) is under
@@ -81,6 +84,14 @@ def check(ok: bool, problem: str, done: str = "") -> None:
 
 def _gate_run():
     spec = importlib.util.spec_from_file_location("ci_gate_run_for_bundle", HERE.with_name("gate_run.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _spec_rules():
+    """installer/spec_rules.py, the rules citar.spec built the bundle by."""
+    spec = importlib.util.spec_from_file_location("ci_spec_rules_for_bundle", ROOT / "installer" / "spec_rules.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -171,12 +182,21 @@ def common_runs(exe: Path, version: str, work: Path, label: str | None) -> dict:
     check(jobs.group(1) == "  ok  " and jobs.group(2).startswith("verifiable"),
           f"the job host started from the bundle is not verifiable: [{jobs.group(1)}] {jobs.group(2)}",
           f"the job host started from the bundle: {jobs.group(2)}")
-    return {"version": version, "build_id": engine.group(1), "label": engine.group(2), "jobs": jobs.group(2)}
+    jobs_build = re.search(r"jobs build ([0-9a-f]{12})", jobs.group(2))
+    check(jobs_build is not None, f"the jobs line names no jobs build: {jobs.group(2)}")
+    return {"version": version, "build_id": engine.group(1), "label": engine.group(2),
+            "jobs_build": jobs_build.group(1), "jobs": jobs.group(2)}
+
+
+def listing(folder: Path) -> dict:
+    """Every file of a folder, by its path in it, with its size."""
+    return {p.relative_to(folder).as_posix(): p.stat().st_size for p in folder.rglob("*") if p.is_file()}
 
 
 def cmd_bundle(args) -> dict:
     folder = args.dir.resolve()
     exe = program(folder)
+    before = listing(folder)
     report = common_runs(exe, args.version, args.work, args.label)
     run([exe, "jobs-host", "now"], isolated_env(args.work), "citar jobs-host with an argument", want=2)
     say("ok: the hidden jobs-host command is there, and takes no argument")
@@ -192,22 +212,35 @@ def cmd_bundle(args) -> dict:
     say(f"ok: {', '.join(NOTICES)} at the root; {', '.join(SAME_AS_CHECKOUT)} the checkout's bytes")
     text = (folder / "PYTHON-LICENSES.txt").read_text(encoding="utf-8")
     index = text.split("\nIndex\n-----\n", 1)[1].split("\n\n", 1)[0].splitlines() if "\nIndex\n" in text else []
-    names = [line.split(" ", 1)[0].lower() for line in index]
-    check(any(line.startswith("CPython ") for line in index), "PYTHON-LICENSES.txt names no CPython")
-    check(any(line.startswith("PyInstaller ") and "bootloader" in line for line in index),
-          "PYTHON-LICENSES.txt names no PyInstaller bootloader")
+    runtime = [line for line in index if line.startswith("CPython ")]
+    bootloader = [line for line in index if line.startswith("PyInstaller ") and "'s bootloader: " in line]
+    check(len(runtime) == 1, "PYTHON-LICENSES.txt names no CPython")
+    check(len(bootloader) == 1, "PYTHON-LICENSES.txt names no PyInstaller bootloader")
+    names = [line.split(" ", 1)[0].lower() for line in index if line not in runtime + bootloader]
     tools = sorted(set(names) & set(BUILD_TOOLS))
     check(not tools, f"PYTHON-LICENSES.txt lists build tools the bundle does not ship: {tools}")
     for needed in ("fastapi", "uvicorn", "sqlalchemy", "anthropic", "openai", "mcp", "authlib", "keyring"):
         check(needed in names, f"PYTHON-LICENSES.txt does not list {needed}, which citar[all] needs")
-    say(f"ok: PYTHON-LICENSES.txt: {len(index) - 2} distributions, CPython and the bootloader; no build tool")
+    say(f"ok: PYTHON-LICENSES.txt: {len(names)} distributions, CPython and the bootloader; no build tool")
     if args.python:
+        installed = run([args.python, "-P", "-c", "import citar, os; print(os.path.dirname(citar.__file__))"],
+                        dict(os.environ), "where the bundle's venv has citar").strip().splitlines()[-1]
+        rules = _spec_rules()
+        required = rules.package_data(Path(installed))
+        bundled = engines[0].parent
+        missing = sorted(rel for rel in required if not (bundled / rel).is_file())
+        check(not missing, f"the bundle lacks {len(missing)} of the package's data files: {missing[:10]}",
+              f"every one of the installed package's {len(required)} data files is in the bundle")
         fresh = args.work / "python-licenses-again.txt"
         run([args.python, "-P", ROOT / "installer" / "python_licenses.py", "--out", fresh], dict(os.environ),
             "python_licenses.py in the bundle's venv")
         check(fresh.read_bytes() == (folder / "PYTHON-LICENSES.txt").read_bytes(),
               f"PYTHON-LICENSES.txt is not what python_licenses.py writes in {args.python}'s venv",
               "PYTHON-LICENSES.txt is the bundle venv's closure, byte for byte")
+    after = listing(folder)
+    check(after == before, f"running the bundle changed its folder (the installer and the zip must carry what "
+                           f"PyInstaller made): {sorted(set(after) ^ set(before))[:5] or 'sizes changed'}",
+          f"the bundle's {len(after):,} files are as PyInstaller made them, after every run")
     report.update({"engine": str(engines[0].relative_to(folder)), "engine_bytes": engines[0].stat().st_size,
                    "notices": {n: sha256(folder / n) for n in NOTICES}, "python_licenses": names})
     return report

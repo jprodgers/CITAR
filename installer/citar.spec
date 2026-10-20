@@ -59,14 +59,14 @@ rules.outside(CHECKOUT, **{"--distpath": DISTPATH, "--workpath": workpath})
 PACKAGE = rules.installed_package(CHECKOUT, os.environ.get("CITAR_EXT_DIR"))
 print(f"citar.spec: citar from {PACKAGE}")
 
-# Everything CITAR reads at runtime that is not Python: the browser client, the Alembic migration
-# environment, the hardware collectors offered on the Servers page, all of the installed package.
-# `citar.paths` resolves these relative to the package, which is why they have to land beside it.
-datas = collect_data_files("citar", includes=[
-    "data/collectors/*",
-    "web/**/*",
-    "migrations/**/*.mako",
-])
+# Everything CITAR reads at runtime that is not Python, all of the installed package's: the browser
+# client, the Alembic migration environment, the hardware collectors offered on the Servers page, the
+# lab's committed job costs (jobs/costs.json). `citar.paths` and the job store resolve these relative
+# to the package, which is why they have to land beside it. Every data file the package has, not a
+# list of them: 0.1.5's list missed jobs/costs.json once the package gained it, and the check below
+# (spec_rules.package_data) now fails a bundle that leaves one out. The engine's stub (.pyi) is not
+# needed at run time.
+datas = collect_data_files("citar", excludes=["**/*.pyi"])
 
 # The migration modules are .py files that nothing imports: Alembic discovers them by scanning the
 # versions directory at runtime. collect_data_files skips .py by default - it is collecting *data* -
@@ -133,11 +133,12 @@ windowed_analysis = Analysis(
     noarchive=False,
 )
 
+REQUIRED = rules.package_data(PACKAGE)
 for label, analysis in (("citar.exe", console_analysis), ("citar-play.exe", windowed_analysis)):
-    problems = rules.check_analysis(analysis.pure, analysis.binaries, analysis.datas, PACKAGE, CHECKOUT)
+    problems = rules.check_analysis(analysis.pure, analysis.binaries, analysis.datas, PACKAGE, CHECKOUT, REQUIRED)
     if problems:
         raise rules.Refused(f"{label}'s analysis is not the installed wheel's:\n  " + "\n  ".join(problems))
-print(f"citar.spec: every citar module, its engine and its data from {PACKAGE}")
+print(f"citar.spec: every citar module, its engine and its {len(REQUIRED)} data files from {PACKAGE}")
 
 # Both executables are collected into one folder, which deduplicates the DLLs, the engine's
 # extension and the web client, so there is a single copy of Python and the libraries on disk.

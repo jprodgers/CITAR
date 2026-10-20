@@ -170,14 +170,16 @@ begin
 
   // The user's games, settings, benchmark runs and reports. Never deleted without being asked:
   // somebody uninstalling to fix a problem, or to move to the pip version, would not expect to
-  // lose a multi-day benchmark run.
+  // lose a multi-day benchmark run. A silent uninstall (/VERYSILENT /SUPPRESSMSGBOXES, as winget
+  // and CI run it) is not asked and keeps them: SuppressibleMsgBox answers its last argument, No, where
+  // a plain MsgBox would wait for a click nobody can give.
   StatePath := ExpandConstant('{localappdata}\CITAR');
   if DirExists(StatePath) then
   begin
-    if MsgBox('Delete your CITAR saved games, settings and results as well?' + #13#10#13#10
+    if SuppressibleMsgBox('Delete your CITAR saved games, settings and results as well?' + #13#10#13#10
               + StatePath + #13#10#13#10
               + 'Choose No to keep them for a future installation.',
-              mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+              mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
       DelTree(StatePath, True, True, True);
   end;
 end;

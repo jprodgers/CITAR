@@ -73,11 +73,36 @@ def _parts(name: str) -> tuple:
     return PurePath(name.replace("\\", "/")).parts
 
 
-def check_analysis(pure: Iterable, binaries: Iterable, datas: Iterable, package: Path, checkout: Path) -> list:
+#: What the analysis takes as code (modules and the extension), not as data; a stub (``.pyi``) is never needed.
+CODE_SUFFIXES = {".py", ".pyc", ".pyo", ".pyd", ".so", ".pyi"}
+#: Python files that are data: Alembic reads the migrations by file, and nothing imports them.
+DATA_CODE = ("migrations/",)
+
+
+def package_data(package: Path) -> set:
+    """Every file of the installed package the bundle must carry as data, by its path in the package: all but code
+    (the migrations' ``.py`` files are data) and byte-code caches. ``citar.paths`` and the job store read them beside
+    the package (the web client, the migrations, the hardware collectors, ``jobs/costs.json``)."""
+    out = set()
+    for path in package.rglob("*"):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(package).as_posix()
+        if path.suffix.lower() not in CODE_SUFFIXES or (rel.startswith(DATA_CODE) and path.suffix == ".py"):
+            out.add(rel)
+    return out
+
+
+def check_analysis(pure: Iterable, binaries: Iterable, datas: Iterable, package: Path, checkout: Path,
+                   required: Iterable = ()) -> list:
     """What is wrong with an analysis's TOCs (``(name, source, kind)`` entries): a ``citar`` module, extension or data
-    file whose source is not the installed ``package`` (or is the checkout's), and no engine extension. Empty when all
-    is well."""
+    file whose source is not the installed ``package`` (or is the checkout's), no engine extension, and a file of
+    ``required`` (:func:`package_data`'s paths) not among its data. Empty when all is well."""
+    datas = list(datas)
     problems = []
+    taken = {"/".join(_parts(name)[1:]) for name, _, _ in datas if _parts(name)[:1] == ("citar",)}
+    for rel in sorted(set(required) - taken):
+        problems.append(f"the package's data file {rel} is not in the bundle")
     for name, source, _ in pure:
         if name == "citar" or name.startswith("citar."):
             if not source or not within(Path(source), package) or within(Path(source), checkout):
