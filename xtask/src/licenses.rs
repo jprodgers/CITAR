@@ -18,9 +18,12 @@
 //! crate once, in name order: its version, its licence expression as its package declares it, the
 //! targets it is built for when not all of them, and every licence and notice file its package
 //! ships, read from the crate's sources in the registry (which `cargo metadata` and
-//! `cargo fetch --locked` download). A text that is byte for byte one printed earlier is named
-//! rather than printed again. A crate whose package ships no licence file gets its licence's
-//! standard text, from [`STANDARD_TEXTS`], and is refused when none of its licences has one there.
+//! `cargo fetch --locked` download): those at its top and those below it, where a crate keeps the
+//! notices of code it bundles (ring's `third_party/fiat/LICENSE`, zstd-sys's `zstd/LICENSE`), but
+//! none from its tests, benchmarks, examples or CI folders, which no build links. A text that is
+//! byte for byte one printed earlier is named rather than printed again. A crate whose package
+//! ships no licence file anywhere gets its licence's standard text, from [`STANDARD_TEXTS`], and is
+//! refused when none of its licences has one there.
 //!
 //! A licence outside [`ALLOWED`] is refused by name, crate and version: the expression must be
 //! satisfiable with the allowed licences alone (`OR` takes any branch, `AND` needs both, `WITH`
@@ -82,12 +85,21 @@ pub const ALLOWED_EXCEPTIONS: &[(&str, &str)] = &[("Apache-2.0", "LLVM-exception
 pub const STANDARD_TEXTS: &[(&str, &str)] =
     &[("Apache-2.0", include_str!("../licenses/Apache-2.0.txt"))];
 
-/// File names (lower case) a licence or notice file starts with.
+/// File names (lower case) a licence or notice file starts with, wherever it is in its package.
 const PREFIXES: &[&str] = &["license", "licence", "copying", "copyright", "notice", "unlicense"];
-/// Folders (lower case) whose every file is a licence text (REUSE's `LICENSES/`).
-const FOLDERS: &[&str] = &["licenses", "licences"];
-/// Extensions of files that are not licence texts, whatever their names start with.
-const NOT_TEXTS: &[&str] = &["rs", "toml", "json", "yml", "yaml", "py", "sh", "lock"];
+/// Folders (lower case) whose every file is a licence text, wherever they are (REUSE's
+/// `LICENSES/`, or a `license/` of texts). Only these whole names: the windows crates' module
+/// `LicenseProtection/` holds code.
+const FOLDERS: &[&str] = &["license", "licenses", "licence", "licences"];
+/// Folders (lower case) never searched, wherever they are: tests, benchmarks, examples and CI,
+/// which no build links, so their files' notices are not the binaries'.
+const NOT_SHIPPED: &[&str] = &["tests", "benches", "examples", ".github"];
+/// Extensions of files that are not licence texts, whatever their names start with or whichever
+/// folder holds them: source code, a bundled C library's included.
+const NOT_TEXTS: &[&str] = &[
+    "rs", "toml", "json", "yml", "yaml", "py", "sh", "lock", "c", "h", "cc", "cpp", "hpp", "s",
+    "asm", "pl", "js", "go", "ps1", "bat",
+];
 
 /// The registry every published crate comes from, as Cargo.lock and `cargo metadata` name it.
 const CRATES_IO: &[&str] =
@@ -752,45 +764,58 @@ fn normalise(bytes: &[u8]) -> String {
     format!("{}\n", text[start..].trim_end())
 }
 
-fn is_text_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    let code = Path::new(&lower)
+/// Whether a file named `name` (lower case) is a licence or notice text: in a licence folder, any
+/// file but code; elsewhere, one whose name starts as a licence's does.
+fn is_text_name(lower: &str, in_licence_folder: bool) -> bool {
+    let code = Path::new(lower)
         .extension()
         .is_some_and(|x| NOT_TEXTS.contains(&x.to_string_lossy().as_ref()));
-    PREFIXES.iter().any(|p| lower.starts_with(p)) && !code
+    !code && (in_licence_folder || PREFIXES.iter().any(|p| lower.starts_with(p)))
 }
 
-/// The licence and notice files of the package in `dir`, in name order: those at its top whose
-/// names say so, every file of a top-level `LICENSES/`, and its `license-file` if it names
-/// another. An empty file is no text.
+/// Adds to `out` the paths, from the package's top with `/` separators, of the licence and notice
+/// files in `dir` (at `rel` in the package) and every folder below it but [`NOT_SHIPPED`] ones.
+fn find_texts(
+    dir: &Path,
+    rel: &str,
+    in_licence_folder: bool,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let kind = entry.file_type().map_err(|e| format!("{}: {e}", dir.display()))?;
+        entries.push((entry.file_name().to_string_lossy().into_owned(), kind.is_dir()));
+    }
+    entries.sort();
+    for (name, is_dir) in entries {
+        let lower = name.to_ascii_lowercase();
+        let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+        if is_dir {
+            if !NOT_SHIPPED.contains(&lower.as_str()) {
+                let inside = in_licence_folder || FOLDERS.contains(&lower.as_str());
+                find_texts(&dir.join(&name), &path, inside, out)?;
+            }
+        } else if is_text_name(&lower, in_licence_folder) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// The licence and notice files of the package in `dir`, in path order: those whose names say
+/// so and every file of a licence folder, at its top or below it (a bundled library's notices
+/// sit with its sources), outside its tests, benchmarks, examples and CI; and its `license-file`
+/// if it names another. An empty file is no text.
 fn licence_files(dir: &Path, license_file: Option<&str>) -> Result<Vec<Text>, String> {
     let read = |rel: &str| -> Result<Text, String> {
         let bytes = std::fs::read(dir.join(rel))
             .map_err(|e| format!("{}: {e}", dir.join(rel).display()))?;
         Ok(Text { name: rel.to_owned(), body: normalise(&bytes) })
     };
-    let entries = |d: &Path| -> Result<Vec<(String, bool)>, String> {
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(d).map_err(|e| format!("{}: {e}", d.display()))? {
-            let entry = entry.map_err(|e| format!("{}: {e}", d.display()))?;
-            let kind = entry.file_type().map_err(|e| format!("{}: {e}", d.display()))?;
-            out.push((entry.file_name().to_string_lossy().into_owned(), kind.is_dir()));
-        }
-        out.sort();
-        Ok(out)
-    };
-    let mut out = Vec::new();
-    for (name, is_dir) in entries(dir)? {
-        if is_dir && FOLDERS.contains(&name.to_ascii_lowercase().as_str()) {
-            for (inner, inner_dir) in entries(&dir.join(&name))? {
-                if !inner_dir {
-                    out.push(read(&format!("{name}/{inner}"))?);
-                }
-            }
-        } else if !is_dir && is_text_name(&name) {
-            out.push(read(&name)?);
-        }
-    }
+    let mut paths = Vec::new();
+    find_texts(dir, "", false, &mut paths)?;
+    let mut out = paths.iter().map(|rel| read(rel)).collect::<Result<Vec<_>, _>>()?;
     if let Some(file) = license_file {
         let rel = file.replace('\\', "/");
         let rel = rel.trim_start_matches("./");
@@ -940,7 +965,8 @@ impl Notices {
             ),
             "Each crate is listed once, in name order, with its version, the licence expression \
              its package declares, the targets it is built for when not all of them, and the \
-             licence and notice files its package ships, as they are in its published sources. \
+             licence and notice files its package ships, those of code it bundles included, as \
+             they are in its published sources. \
              A text byte for byte the same as one printed earlier is not printed again: its \
              heading names that one. Where a package ships no licence file, the standard text of \
              a licence it is offered under stands in, marked so."
@@ -1275,6 +1301,78 @@ mod tests {
         assert_eq!(found[1].body, "mit\n");
         // A license-file the package does not hold cannot be read.
         assert!(licence_files(&dir, Some("gone.txt")).is_err());
+        let _gone = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn licence_files_below_the_top_are_found_but_not_in_tests_or_code() {
+        let dir = scratch("nested");
+        for (path, text) in [
+            ("LICENSE-MIT", "top mit"),
+            // A bundled library's notices, with its sources (ring, zstd-sys, tracing-core).
+            ("third_party/fiat/LICENSE", "fiat"),
+            ("zstd/COPYING", "gpl option"),
+            ("zstd/LICENSE", "bsd"),
+            ("src/spin/LICENSE", "spin"),
+            // A folder of licence texts, wherever it is; its code is still code.
+            ("license/MIT.txt", "folder mit"),
+            ("vendor/x/LICENSES/Apache-2.0.txt", "reuse apache"),
+            ("src/license/mod.rs", "pub mod x;"),
+            ("src/license/table.c", "int x;"),
+            // A folder only named like one holds code (the windows crates' module).
+            ("src/Win32/LicenseProtection/mod.rs", "pub fn f() {}"),
+            ("src/Win32/LicenseProtection/notes.txt", "not a licence"),
+            // Not linked: tests, benchmarks, examples and CI, wherever they are.
+            ("tests/data/LICENSE", "test fixture"),
+            ("benches/COPYING", "bench"),
+            ("examples/demo/NOTICE", "example"),
+            (".github/LICENSE", "ci"),
+            ("vendor/x/tests/LICENSE", "vendored test fixture"),
+            ("vendor/x/notice.c", "int notice;"),
+        ] {
+            let file = dir.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        }
+        let found = licence_files(&dir, None).unwrap();
+        let names: Vec<&str> = found.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "LICENSE-MIT",
+                "license/MIT.txt",
+                "src/spin/LICENSE",
+                "third_party/fiat/LICENSE",
+                "vendor/x/LICENSES/Apache-2.0.txt",
+                "zstd/COPYING",
+                "zstd/LICENSE"
+            ]
+        );
+        assert_eq!(found[3].body, "fiat\n");
+        let _gone = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_package_whose_only_licence_file_is_below_its_top_needs_no_standard_text() {
+        let dir = scratch("below");
+        let meta = metadata(
+            &dir,
+            &["citar-py", "citar-helper"],
+            &[
+                ("citar-py", "0.1.5", Some("MPL-2.0"), vec![("bare", None, None)]),
+                ("citar-helper", "0.1.5", Some("MPL-2.0"), vec![]),
+                ("bare", "1.0.0", Some("MIT"), vec![]),
+            ],
+        );
+        // Its only text, in a licence folder: printed under its path, with no standard text (and
+        // not refused, though MIT has none in xtask).
+        let folder = dir.join("bare-1.0.0/license");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("MIT.txt"), "MIT, by bare\n").unwrap();
+        let text = Notices::gather(&meta, ROOTS, &[linux()]).unwrap().render();
+        assert!(text.contains("\nFiles: license/MIT.txt\n"), "{text}");
+        assert!(text.contains("---- bare 1.0.0: license/MIT.txt ----\n\nMIT, by bare\n"));
+        assert!(!text.contains("standard text stands in"));
         let _gone = std::fs::remove_dir_all(&dir);
     }
 
