@@ -140,9 +140,11 @@ TRACKED = {
     "pyproject.toml", "Cargo.toml", "Cargo.lock", "crates/citar-py/Cargo.toml", "crates/citar-py/src/lib.rs",
     "crates/citar-engine/data/game.json", "crates/citar-engine/data/ruleset/units.json",
     "refcheck/intended.toml", "refcheck/README.md", "README.md", "LICENSE", "NOTICE.md",
+    "packaging/THIRD-PARTY-LICENSES.txt",
 }
-#: pyproject.toml's PEP 639 fields, as check_dist's main reads them.
-LICENSES = ("LICENSE", "NOTICE.md")
+#: pyproject.toml's PEP 639 fields, as check_dist's main reads them: one licence file in a folder (5-04's notices).
+NOTICES = "packaging/THIRD-PARTY-LICENSES.txt"
+LICENSES = ("LICENSE", "NOTICE.md", NOTICES)
 EXPRESSION = "MPL-2.0"
 
 
@@ -175,7 +177,8 @@ class CheckDist(unittest.TestCase):
         info = "citar-0.1.5.dist-info/"
         members.update({info + "WHEEL": wheel_meta or f"Wheel-Version: 1.0\nTag: {tag}\n",
                         info + "METADATA": meta if meta is not None else metadata(), info + "RECORD": "",
-                        info + "licenses/LICENSE": "MPL", info + "licenses/NOTICE.md": "notice"})
+                        info + "licenses/LICENSE": "MPL", info + "licenses/NOTICE.md": "notice",
+                        info + "licenses/" + NOTICES: "crates"})
         for member in drop:
             members.pop(member, None)
         members.update(add or {})
@@ -264,7 +267,7 @@ class CheckDist(unittest.TestCase):
         for meta, problem in (
                 (metadata("0.1.4"), f"{info} says Version ['0.1.4'], not 0.1.5"),
                 (metadata(licenses=("LICENSE",)), f"{info} names the licence files ['LICENSE'], not "
-                                                  "['LICENSE', 'NOTICE.md']"),
+                                                  f"['LICENSE', 'NOTICE.md', '{NOTICES}']"),
                 (metadata(expression="MIT"), f"{info} says License-Expression ['MIT'], not MPL-2.0"),
                 (metadata(expression=None, extra=("License: MPL-2.0",)),
                  f"{info} says License-Expression None, not MPL-2.0")):
@@ -285,7 +288,38 @@ class CheckDist(unittest.TestCase):
         problems = check_dist.check_sdist(self.a_sdist(pkg_info=metadata("0.1.4", licenses=("NOTICE.md",))), TRACKED,
                                           MATURIN, **full)
         self.assertEqual(problems, ["PKG-INFO says Version ['0.1.4'], not 0.1.5",
-                                    "PKG-INFO names the licence files ['NOTICE.md'], not ['LICENSE', 'NOTICE.md']"])
+                                    "PKG-INFO names the licence files ['NOTICE.md'], not "
+                                    f"['LICENSE', 'NOTICE.md', '{NOTICES}']"])
+        problems = check_dist.check_sdist(self.a_sdist(drop=[NOTICES]), TRACKED, MATURIN, **full)
+        self.assertEqual(problems, [f"missing (a licence file, PEP 639): {NOTICES}"])
+
+    def test_a_licence_file_in_a_folder_keeps_its_path(self):
+        """5-04: the third-party notices live in packaging/, so PEP 639 puts them at licenses/packaging/ in a wheel;
+        a copy flattened to licenses/ is not the file pyproject names."""
+        full = {"licenses": LICENSES, "expression": EXPRESSION}
+        info = "citar-0.1.5.dist-info/"
+        flat = self.a_wheel(drop=[info + "licenses/" + NOTICES], add={info + "licenses/THIRD-PARTY-LICENSES.txt": "x"})
+        self.assertEqual(self.wheel_problems(flat, **full),
+                         [f"missing (a licence file, PEP 639): {info}licenses/{NOTICES}"])
+
+    def test_licence_fields_are_paths_never_globs(self):
+        good = {"project": {"license": "MPL-2.0", "license-files": list(LICENSES)}}
+        self.assertEqual(check_dist.licence_fields(good), (LICENSES, "MPL-2.0"))
+        for bad, why in (({"project": {"license": "MPL-2.0", "license-files": ["LICENSE", "packaging/*.txt"]}},
+                          "by a glob"),
+                         ({"project": {"license": "MPL-2.0"}}, "no SPDX license expression"),
+                         ({"project": {"license-files": ["LICENSE"]}}, "no SPDX license expression")):
+            with self.subTest(why=why), self.assertRaisesRegex(check_dist.Refused, why):
+                check_dist.licence_fields(bad)
+
+    def test_the_real_pyproject_ships_the_third_party_notices(self):
+        """P5.5: every wheel carries the notices of the crates its extension links, as a licence file."""
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        licenses, expression = check_dist.licence_fields(pyproject)
+        self.assertEqual(licenses, ("LICENSE", "NOTICE.md", NOTICES))
+        self.assertEqual(expression, "MPL-2.0")
+        for name in licenses:
+            self.assertTrue((ROOT / name).is_file(), name)
 
     def test_metadata_fields_stop_at_the_description(self):
         fields = check_dist.metadata_fields("Name: citar\nVersion: 1.0\nSummary: one\n  and two\nLicense-File: A\n"

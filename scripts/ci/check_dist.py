@@ -17,7 +17,8 @@ A wheel must have:
 - everything else inside its one ``citar-<version>.dist-info/``, the version being the file name's, which its
   ``METADATA`` repeats, and which is ``P`` when given (the release's PEP 440 version, ``release.py meta``'s
   ``pep440``);
-- PEP 639's licence files: each of ``[project]``'s ``license-files`` under the dist-info's ``licenses/``, its
+- PEP 639's licence files: each of ``[project]``'s ``license-files`` under the dist-info's ``licenses/`` at its own
+  path (``packaging/THIRD-PARTY-LICENSES.txt``, the third-party notices, as ``licenses/packaging/...``), its
   ``METADATA`` naming exactly those as ``License-File`` and ``[project]``'s ``license`` as ``License-Expression``;
 - every tracked file that a wheel ``include`` names, at its own path;
 - no member twice.
@@ -26,7 +27,8 @@ A source distribution must have:
 
 - one top folder, ``citar-<version>/``, the file name's, which its ``PKG-INFO`` repeats, and which is ``P`` when given;
 - in it, nothing but files git tracks, and ``PKG-INFO``;
-- each licence file at the top, ``PKG-INFO`` naming exactly those as ``License-File`` and the licence's expression;
+- each licence file at its own path, ``PKG-INFO`` naming exactly those as ``License-File`` and the licence's
+  expression;
 - every file git tracks under ``citar/``, every tracked file that an sdist ``include`` names and no ``exclude`` takes
   away, and the files a build from it starts from (``pyproject.toml``, the workspace's ``Cargo.toml`` and
   ``Cargo.lock``, ``crates/citar-py/Cargo.toml``);
@@ -36,6 +38,9 @@ A source distribution must have:
 
 ``WHEEL_OR_DIR`` and ``SDIST_OR_DIR`` are the file, or a directory holding exactly one ``*.whl`` or ``*.tar.gz``. The
 tracked files are ``git ls-files``' in the checkout this script lives in.
+
+``license-files`` are read as the paths they name: a glob there is refused, since this check could not say which
+files it takes.
 
 Exit status 0 when the file is as it should be, 1 when not (every difference listed), 2 when it cannot be checked
 (no such file, no git checkout, a pattern the check does not read) or for a usage error.
@@ -287,6 +292,22 @@ def check_sdist(path: Path, tracked: set[str], maturin: dict, version: str | Non
     return problems
 
 
+def licence_fields(pyproject: dict) -> tuple[tuple[str, ...], str]:
+    """``[project]``'s ``license-files`` and ``license`` (PEP 639), which every wheel and source distribution is held
+    to: refused when either is missing, or when a licence file is named by a glob rather than its path."""
+    project = pyproject.get("project", {})
+    licenses = tuple(project.get("license-files", ()))
+    expression = project.get("license")
+    if not isinstance(expression, str) or not licenses:
+        raise Refused("pyproject.toml's [project] has no SPDX license expression and license-files (PEP 639), "
+                      "which this check holds every file to")
+    globbed = [name for name in licenses if any(c in name for c in "*?[]")]
+    if globbed:
+        raise Refused(f"pyproject.toml's license-files names {globbed} by a glob: name each file by its path, which "
+                      "this check holds every wheel and source distribution to")
+    return licenses, expression
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     kinds = parser.add_subparsers(dest="kind", required=True)
@@ -302,11 +323,7 @@ def main(argv=None) -> int:
     try:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         maturin = pyproject["tool"]["maturin"]
-        licenses = tuple(pyproject["project"].get("license-files", ()))
-        expression = pyproject["project"].get("license")
-        if not isinstance(expression, str) or not licenses:
-            raise Refused("pyproject.toml's [project] has no SPDX license expression and license-files (PEP 639), "
-                          "which this check holds every file to")
+        licenses, expression = licence_fields(pyproject)
         tracked = tracked_files()
         if args.kind == "wheel":
             path = find(args.path, ".whl")
