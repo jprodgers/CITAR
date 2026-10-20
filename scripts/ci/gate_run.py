@@ -248,6 +248,9 @@ def run_helper(binary: Path | str, args: list[str], under: Path, timeout: float 
             out, err = None, None
         message = f"gate_run: {binary} did not end within {timeout:.0f} s; its processes were killed\n"
         return subprocess.CompletedProcess(argv, EXIT_TIMEOUT, out, (err or "") + message if capture else message)
+    except BaseException:  # an interrupt, or anything else: the helper is never left running
+        stop_tree(proc, snapshot_tree(proc.pid), polite=False)
+        raise
 
 
 # ------------------------------------------------------------------------------------------------ processes
@@ -404,13 +407,24 @@ def answers(url: str) -> bool:
             return True
     except urllib.error.HTTPError:
         return True
-    except (urllib.error.URLError, OSError):
+    except (urllib.error.URLError, OSError, ValueError):
         return False
+
+
+def check_ready(path: str | None) -> None:
+    """``--ready`` is a URL's path: ``/`` first, no space or control character. Git Bash turns ``/api/x`` into
+    ``C:/Program Files/Git/api/x`` unless ``MSYS_NO_PATHCONV=1`` is set, which this names."""
+    if path is None:
+        return
+    if not path.startswith("/") or any(c.isspace() or ord(c) < 32 for c in path):
+        raise Refused(f"--ready {path!r} is not a URL's path such as /api/auth/config (in Git Bash, set "
+                      f"MSYS_NO_PATHCONV=1, or it rewrites a leading /)")
 
 
 def serve(command: list[str], port: int, state: Path, under: Path, extra: list[str], ready: str | None,
           stop_file: Path | None, timeout: float) -> int:
     under = check_under(under)
+    check_ready(ready)
     env = check_server(port, state, under, extra, command)
     state = real(state)
     stop_file = inside(stop_file, under, "--stop-file") if stop_file else state / "gate_run.stop"
@@ -439,6 +453,8 @@ def serve(command: list[str], port: int, state: Path, under: Path, extra: list[s
             time.sleep(0.2)
     except KeyboardInterrupt:
         reason, code = "interrupted", 130
+    except Exception as e:  # whatever went wrong here, the server is stopped below, never left behind
+        reason, code = f"gate_run failed while it waited ({type(e).__name__}: {e})", 1
     tree = snapshot_tree(proc.pid)
     left = stop_tree(proc, tree)
     if left:

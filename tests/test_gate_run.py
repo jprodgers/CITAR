@@ -210,6 +210,32 @@ class TheServer(Base):
                               str(self.state), "--", sys.executable, str(self.server)], capture_output=True, text=True)
         self.assertEqual(out.returncode, 2, "--port is required")
 
+    def test_a_ready_path_git_bash_rewrote_is_refused(self):
+        for ready in ("C:/Program Files/Git/api/auth/config", "api/auth/config", "/api/x y"):
+            with self.subTest(ready=ready), self.assertRaisesRegex(gate_run.Refused, "not a URL's path"):
+                gate_run.serve([sys.executable, str(self.server)], free_port(), self.state, self.under, [], ready,
+                               None, 60)
+        self.assertFalse((self.state / "seen.json").exists(), "nothing started")
+
+    def test_a_failure_while_it_waits_still_stops_the_server(self):
+        port = free_port()
+
+        def broken(url):
+            if (self.state / "seen.json").exists():
+                raise RuntimeError("the readiness check broke")
+            return False
+
+        original = gate_run.answers
+        gate_run.answers = broken
+        self.addCleanup(setattr, gate_run, "answers", original)
+        code = gate_run.serve([sys.executable, str(self.server)], port, self.state, self.under, [], "/x", None, 120)
+        self.assertEqual(code, 1)
+        seen = json.loads((self.state / "seen.json").read_text())
+        table = gate_run.process_table()
+        self.assertNotIn(seen["pid"], table, "the server was stopped")
+        self.assertNotIn(seen["child"], table, "and its child")
+        self.assertFalse(gate_run.port_open(port))
+
     def test_it_serves_on_loopback_and_stops_leaving_nothing(self):
         port = free_port()
         os.environ["CITAR_HOST"] = "0.0.0.0"  # an inherited host never reaches the server
