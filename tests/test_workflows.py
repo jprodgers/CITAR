@@ -446,7 +446,8 @@ class ThePackageWorkflow(unittest.TestCase):
         fedora = [s for s in steps if "FEDORA_IMAGE" in (s.get("env") or {})]
         self.assertEqual(len(fedora), 1)
         self.assertEqual(fedora[0]["if"], "matrix.platform == 'linux-x64'")
-        self.assertRegex(fedora[0]["env"]["FEDORA_IMAGE"], r"^quay\.io/fedora/fedora@sha256:[0-9a-f]{64}$")
+        # Docker Hub's official image: quay.io/fedora/fedora deletes a digest within a day of the daily rebuild.
+        self.assertRegex(fedora[0]["env"]["FEDORA_IMAGE"], r"^docker\.io/library/fedora@sha256:[0-9a-f]{64}$")
         self.assertIn('grep -qi "certificate"', fedora[0]["run"])
         self.assertEqual(fedora[0]["run"].count("--home /tmp/citar-helper-home"), 2, "every run has a home")
         uploads = {s["with"]["name"]: s["with"]["path"] for s in self.using(job, "actions/upload-artifact")}
@@ -568,7 +569,7 @@ class ThePackageWorkflow(unittest.TestCase):
             # 5-03: the helpers' builds and the manifest's signing
             ('container: "quay.io/pypa/manylinux_2_28_aarch64@sha256:b873',
              'container: "quay.io/pypa/manylinux_2_28_aarch64:latest", x: "', 11, "helpers"),
-            ("FEDORA_IMAGE: quay.io/fedora/fedora@sha256:0db6", "FEDORA_IMAGE: quay.io/fedora/fedora:44 #", 11,
+            ("FEDORA_IMAGE: docker.io/library/fedora@sha256:be9d", "FEDORA_IMAGE: docker.io/library/fedora:44 #", 11,
              "helpers"),
             ("            dry-run/dry-run-signing.pub\n",
              "            ${{ runner.temp }}/throwaway/citar-update-signing.pub\n", 9, "helper-manifest"),

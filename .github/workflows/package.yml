@@ -640,8 +640,10 @@ jobs:
         if: matrix.platform == 'linux-x64'
         shell: bash
         env:
-          # Fedora 44, linux/amd64, "latest" on 2026-10-19 (rule 11: an image a step runs, by its digest).
-          FEDORA_IMAGE: quay.io/fedora/fedora@sha256:0db60e5a404cb9913c396b0651ed269656554da1cd0a13a92d41409b12d7ecb0
+          # Fedora 44, linux/amd64: Docker Hub's official image, fedora:44 as pushed on 2026-08-26 (rule 11: an image a
+          # step runs, by its digest). Not quay.io/fedora/fedora: it rebuilds 44 and latest every day and deletes the
+          # day before's manifests, so a digest there stops pulling within a day ("manifest unknown", 5-04's merge).
+          FEDORA_IMAGE: docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19
           ASSET: ${{ matrix.asset }}
         run: |
           docker run --rm -v "$PWD/stage:/d:ro" "$FEDORA_IMAGE" "/d/$ASSET" --version --home /tmp/citar-helper-home
