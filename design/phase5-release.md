@@ -485,7 +485,7 @@ A dry run skips this job, and **by construction never names its environment**: t
 ## P5.5 Third-party notices
 
 - **`cargo xtask licenses [--check]`** (5-04) writes `packaging/THIRD-PARTY-LICENSES.txt` from `cargo metadata --locked`: the normal-dependency closure of `citar-py` and `citar-helper` over every release target (Windows-only and Unix-only crates included), each crate's name, version and licence expression, and the text of its licence and NOTICE files from the registry's sources, in name order. A licence outside the allow-list (MIT, Apache-2.0 and its LLVM exception, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0, Unicode-DFS-2016, MPL-2.0, CC0-1.0, BSL-1.0, 0BSD, CDLA-Permissive-2.0) is refused by name. `--check` regenerates and compares; rust.yml's lint job runs it after `cargo fetch --locked`, so a lock change without the file fails.
-- **Where it travels:** the wheels (`license-files`, so pip installs it in the dist-info and the image carries it), the bundle, every packaged helper archive, and the release as an asset. The Windows bundle also gets `PYTHON-LICENSES.txt` for what it ships of Python: `installer/python_licenses.py` (5-05) walks the installed dependency closure of `citar[all]` through `importlib.metadata` (so PyInstaller, pillow and the build tools, which are not shipped, are left out), writes each distribution's name, version, licence and licence files, and adds CPython's own `LICENSE.txt` (from `sys.base_prefix`) and PyInstaller's bootloader licence (P5.6).
+- **Where it travels:** the wheels (`license-files`, so pip installs it in the dist-info and the image carries it), the bundle, every packaged helper archive, and the release as an asset. The Windows bundle also gets `PYTHON-LICENSES.txt` for what it ships of Python: `installer/python_licenses.py` (5-05) walks the installed dependency closure of `citar[all]` through `importlib.metadata` (so PyInstaller, pillow and the build tools, which are not shipped, are left out), writes each distribution's name, version, licence and licence files, and adds CPython's own `LICENSE.txt` (from `sys.base_prefix`) and PyInstaller's bootloader licence (P5.6). (5-05's fix round: also the run-time hooks' licences, PyInstaller's and its community hooks', which the executables carry; CITAR's verbatim copy, `installer/licenses/`, of the licence of a shipped package whose wheel has none; and a bundle that carries no file outside the closure, P5.6.)
 - **`NOTICE.md`**'s "Third-party dependencies" says all this.
 
 **As built in 5-04: third-party notices** (Appendix F, 5-04). One agent, from 2026-10-20 03:21 to 05:05 (-04:00), on branch `p-5-04` from `8ca6890`; its fix round from 05:25 (below, "Fix round").
@@ -548,7 +548,7 @@ A dry run skips this job, and **by construction never names its environment**: t
 
 Code signing stays out (KNOWN_ISSUES): SmartScreen warns, every asset has its SHA-256 and an attestation (P5.12).
 
-**As built in 5-05: the Windows bundle and installer, and the installed copies' fixes** (Appendix F, 5-05). One agent, from 2026-10-20 09:26 to 11:08 (-04:00), on branch `p-5-05` from `5513b72`.
+**As built in 5-05: the Windows bundle and installer, and the installed copies' fixes** (Appendix F, 5-05). One agent, from 2026-10-20 09:26 to 11:08 (-04:00), on branch `p-5-05` from `5513b72`; its fix round from 11:26 (below, "Fix round").
 
 - **What was built.**
   - **The kind of install** (`citar/paths.py`): `install_kind()` is `frozen` (PyInstaller's `sys.frozen`), `checkout` (the folder holding the package holds `pyproject.toml` or `DESIGN.md`, writable or not) or `wheel`; `bundle_program()` is `citar.exe` beside the running executable (the windowed `citar-play.exe` included); `mcp_command(server_mode, kind)` is the command that starts the install's MCP bridge.
@@ -570,7 +570,7 @@ Code signing stays out (KNOWN_ISSUES): SmartScreen warns, every asset has its SH
   - **Every data file of the package, checked**, not a list (gate 2 found the list's gap: below).
   - **`check_bundle.py`** is new (P5.6 names the checks, not a script): the job's steps and the local gate are one program, and 5-08 reads its report.
   - **An empty `--distpath` folder.** PyInstaller makes `--distpath` before it runs the spec, so a refused run that named a folder inside the checkout leaves that folder, empty; the gate's refusal demonstration removed the one it made.
-  - **One package ships no licence file:** dnspython 2.9.0 (ISC, through email-validator) has none in its wheel's metadata, so its section names its licence and project page and says so; no text is written in its name.
+  - **One package ships no licence file:** dnspython 2.9.0 (ISC, through email-validator) has none in its wheel's metadata, so its section names its licence and project page and says so; no text is written in its name. (Superseded in the fix round: the ISC licence asks for its notice in every copy, so CITAR keeps a verbatim copy of dnspython's licence.)
 - **What the gates found, and the fixes.**
   1. **The bundle had no `citar/jobs/costs.json`** (gate 2's first run: the server logged "could not read the committed job costs" with its traceback). 0.1.5's spec listed the data it took, and Phase 4 added the lab's committed costs to the package after it. The spec now takes every data file and fails a bundle that lacks one, and `check_bundle.py` compares the bundle with the venv's package: run on the first bundle it fails naming `jobs/costs.json`.
   2. **A silent uninstall would have hung on the data question** (found writing the job's uninstall step, against Inno Setup's documentation: `/SUPPRESSMSGBOXES` suppresses `SuppressibleMsgBox`, never `MsgBox`). Fixed as above; `test_installer_script` holds it.
@@ -589,7 +589,65 @@ Code signing stays out (KNOWN_ISSUES): SmartScreen warns, every asset has its SH
 - **Left for later.**
   - **5-08's `assemble`** downloads `pkg-windows` (four files: the two assets and their `.sha256`) into `release/`, and holds `pkg-windows-report`'s `windows-bundle.json` (`version`, `label`, `build_id`, `jobs_build`) to the wheels', helpers' and images' lines.
   - **5-06** can prove the image's job host through the same line: `citar doctor` (with `--quiet`, a failure prints and exits 1) as uid 10001.
-  - **5-12's docs:** AI_PLAYERS's bridge line (the bundle's `citar.exe mcp`; a public server's seats show `citar-mcp`, run from the player's own install), the CHANGELOG (the doctor's jobs line; `/api/meta`'s keys, `project_root`, `python` and `mcp_script` gone; the bundle's notices and `PYTHON-LICENSES.txt`; a silent uninstall keeps the data; the job host's `-P`), INSTALL.md's bundle section.
+  - **5-12's docs:** AI_PLAYERS's bridge line (the bundle's `citar.exe mcp`; a public server's seats show `citar-mcp`, run from the player's own install), the CHANGELOG (the doctor's jobs line; `/api/meta`'s keys, `project_root`, `python` and `mcp_script` gone; the bundle's notices and `PYTHON-LICENSES.txt`; a silent uninstall keeps the data; the job host's `-P`), INSTALL.md's bundle section. (The fix round already gave ARCHITECTURE.md, BOTS.md, server/WORKERS.md and the CHANGELOG's job host entry the host's `-P` command.)
+- **Fix round** (2026-10-20 from 11:26 (-04:00), one agent, after the review; logs under `C:/dev/target/citar-p-5-05/logs` (`gates.log`, `gate1-*`, `gate2.log`, `gate3.log`, `quick.log`, `fix-s1*.log`, `fix/`), the implementation's moved to `logs/impl/`; scripts in the session scratchpad's `p505/`). The review found six issues, two major and four minor. All six were valid and all are fixed, in commits `d9266ec`, `08f6d8b`, `42eaee4` and this note.
+  1. **The bundle carried setuptools** (major). cffi's build-time shim (`cffi._shimmed_dist_utils`) imports setuptools. So the first bundle's archives held setuptools' 98 modules, `_distutils_hack`, packaging's 16 modules and setuptools' vendored `*.dist-info` folders, and both executables ran `pyi_rth_setuptools` at every start. None of it is in `citar[all]`'s closure or in `PYTHON-LICENSES.txt`. `check_bundle`'s build-tool test read only the file's index.
+     - **The fix:** `citar.spec` excludes `setuptools`, `pkg_resources` and `_distutils_hack`. Nothing imports them at run time: cffi compiles nothing in the bundle.
+     - **The rule behind it, at build time:** `spec_rules.check_sources` checks where every module, binary, data file and script of both analyses came from.
+       - A file of the venv's site-packages must belong, by the installed distributions' `RECORD`, to `citar` or its closure (`python_licenses.shipped`), or be one of PyInstaller's run-time files (`RUNTIME_FILES`: its loader, its run-time hooks and modules, the community hooks' run-time hooks).
+       - Any other file must come from the embedded Python (its own site-packages excepted), Windows or the work folder, and the entry scripts from `installer/`.
+       - A distribution outside the closure is named once, with how many of its files were taken.
+     - **The same rule on a built bundle:** `spec_rules.py audit DIR`, run with `-P` in the venv, reads the bundle's `_internal` files and its executables' archives (PyInstaller's `pkg_archive_contents`). `check_bundle.py bundle --python` runs it. Without the venv, `check_bundle` still refuses a Universal CRT DLL or a `*.dist-info` folder of a distribution the index does not list.
+  2. **43 DLLs came from the build machine's PATH** (major): `ucrtbase.dll` and 42 `api-ms-win-*.dll` from this laptop's JDK folder (`C:\Program Files\Eclipse Adoptium\jdk-17.0.17.10-hotspot\bin`), which PyInstaller found first on `PATH`. The spec now does three things:
+     - It sets the analysis's `PATH` to the embedded Python (its folder and `DLLs`) and Windows' `System32` and folder (`spec_rules.dll_path`). No tool's folder can lend a DLL, on CI's runner as on this laptop.
+     - It leaves the Universal CRT out (`spec_rules.without_ucrt`). Windows 10 is the installer's `MinVersion`, and it always uses its own UCRT and ignores an application's copy (Microsoft's "Universal CRT deployment"; PyInstaller's `depend/dylib.py` notes the same).
+     - It refuses any file from outside the allowed folders, naming the folder (the rule above).
+
+     Otherwise the bundle's binaries are the same 54, from the same folders.
+  3. **dnspython had no licence text** (minor). dnspython 2.9.0 (ISC, through email-validator) ships no licence file in its wheel, and the ISC licence asks for its notice in every copy.
+     - `installer/licenses/dnspython.txt` is dnspython's `LICENSE`, byte for byte as its 2.8.0 wheel carries it (SHA-256 `c3ea3ff5...d741cd`). It was read against the `v2.9.0` tag's `LICENSE`, which has the same text.
+     - `python_licenses.KEPT` names the file and records where it came from.
+     - A shipped distribution with neither a licence file in its metadata nor a kept copy is refused (exit 1, and the spec refuses).
+  4. **The lobby left Windows paths unquoted** (minor). `quoteArg` now quotes any word with a backslash. Git Bash, WSL and any POSIX shell drop a bare backslash; inside double quotes, a backslash before a letter is kept (checked in Git Bash).
+  5. **The hint for a bundle's server-mode command named the wrong program** (minor). `mcpHint` now follows the command:
+     - For `citar.exe`, it says the program is the Windows app's. It runs from the app's install folder, or by its full path, unless the installer added that folder to PATH. Any other install writes `citar-mcp` in place of `citar.exe mcp`.
+     - For `citar-mcp`, the hint is as before.
+  6. **Three docs named the old host command** (minor). ARCHITECTURE.md, BOTS.md, server/WORKERS.md and the CHANGELOG's job host entry now say `python -P -m citar.jobs host`, or `citar.exe jobs-host` in the Windows app. The wiki was regenerated, not pushed.
+  - **Found while writing the rule: the executables carry two sets of run-time hooks.**
+    - PyInstaller's own run-time hooks (Apache-2.0, in its `COPYING.txt`).
+    - `pyinstaller-hooks-contrib`'s `pyi_rth_cryptography_openssl`, `pyi_rth_pythoncom` and `pyi_rth_pywintypes` (Apache-2.0, in its `LICENSE`).
+
+    `PYTHON-LICENSES.txt`'s PyInstaller line is now "PyInstaller V's bootloader and run-time hooks: GPL-2.0-or-later WITH Bootloader-exception; Apache-2.0". A section "pyinstaller-hooks-contrib V's run-time hooks: Apache-2.0" with that licence follows it. `check_bundle` reads both lines.
+  - **Tests:**
+    - `test_installer_script`, 24 to 32: the kept copy and the refusal without one, dnspython's text, the run-time sections, the index as `check_bundle` reads it, what a bundle carries, the UCRT left out, the DLL path, the source rule (the closure, run-time files, an unowned file, another site-packages, a JDK's folder) and the audit.
+    - `mcpcommand.test.mjs`, 6 to 7.
+- **Fix round gates** (at `42eaee4`, the code's head; this note uncommitted):
+  1. **The bundle** (`gates.log`, `gate1-*.log`).
+     - The wheel `ci+42eaee4` (269 s) passes `check_dist.py` and `twine check`. A fresh 3.12.10 venv holds the wheel with `[all]`, pyinstaller 6.22.3, its hooks 2026.8, pillow, and packaging 26.3, which PyInstaller itself needs.
+     - PyInstaller with `-P` from `gate1/bundle` took 106 s. The spec printed the DLL path, the 77 data files, and "every other file from citar[all]'s closure (63 distributions), the embedded Python, Windows or PyInstaller's run-time files; 0 Universal CRT DLLs left out" (the narrowed `PATH` holds none).
+     - The bundle is 94 MB in **851 files**; the first had 902, with the 43 UCRT DLLs and setuptools' files. Its archives' tables of contents hold no setuptools, `_distutils_hack`, `pkg_resources` or packaging entry. Its run-time hooks are `pyi_rth_cryptography_openssl`, `inspect`, `multiprocessing`, `pkgutil`, `pythoncom` and `pywintypes`; there is no `pyi_rth_setuptools`.
+     - `check_bundle bundle` passes every earlier check: `CITAR 0.1.5`; `where`, `doctor --quiet` and `doctor`; the engine line `0b412a18fe95 (ci+42eaee4)`; jobs verifiable, jobs build `b2a9ff8212e2`; `jobs-host now` exits 2; `mcp --help`; one `_engine.pyd`; the notices; the 77 data files; `PYTHON-LICENSES.txt` byte for byte.
+     - The new checks hold too: "63 distributions, CPython, PyInstaller's bootloader and run-time hooks, the community hooks' run-time hooks; no build tool"; "no Universal CRT DLL; the bundle's 14 *.dist-info folders are of listed distributions"; and the audit's "6,756 files and modules of 63 distributions, each citar, its citar[all] closure or PyInstaller's run-time files".
+     - The zip has 851 files, 60,240,882 bytes.
+     - **The new rules can fail.** A copy of `installer/` under the target, with the three defences off (setuptools not excluded, `PATH` not narrowed, the UCRT not dropped), is refused after the analysis and before `COLLECT` (exit 1, no `dist`, `gate1-fix-refusals.log`). The refusal names packaging (16 files), setuptools (150) and "43 binary(s) from C:\Program Files\Eclipse Adoptium\jdk-17.0.17.10-hotspot\bin".
+     - On the review's bundle (built at `ae20463`), `spec_rules.py audit` and `check_bundle.carried` both fail (`fix/audit-review-bundle.log`). `check_sources` over its analyses' tables names the same three (`fix/check-sources-review-build.log`).
+     - The earlier refusals still hold: `-m` from the checkout's root, a `CITAR_EXT_DIR`, and `--distpath` in the checkout. The last one's empty `dist/` was removed.
+  2. **The bundle serves its lab** (`gate2.log`). Server mode ran on 127.0.0.1:55441 through `gate_run.py server`. `/api/meta` was `{"version": "0.1.5", "label": "ci+42eaee4", "mode": "server", "server_url": ..., "mcp_command": ["citar.exe", "mcp"]}`.
+     - `citar.exe admin create-user` worked: argon2 runs through cffi's backend, with no setuptools in the bundle. `lab submit` queued the duel.
+     - Its results line came in 1.8 s, while `citar.exe jobs-host` ran as the child of `citar.exe serve`.
+     - Stopped: 3 processes stopped, none left.
+  3. **The old command fails** (`gate3.log`). The old command was planted, then `host.py` was restored to the wheel's hash `dbc28c72...`. With it, `doctor --quiet` exits 1 ("invalid choice: 'citar.jobs'"), `check_bundle` exits 1, and the lab played nothing in 90 s.
+  4. **Tests:** in S1, and above.
+  5. **CI-only, unchanged:** package.yml's `windows` job at the merge push. The job's spec and checks are the ones run here.
+  6. **Standard gates.**
+     - S1 (= S1c, 3.14.6): **2,062 run, OK, 6 skipped** (`fix-s1.log`, 1,055 s; 8 more in `test_installer_script`), the known tracebacks only (the teardown race's `owned_items` pair, "disk on fire" twice, the registry import pair).
+     - S1b (3.12.10, `TZ=UTC0`): **2,062 OK, 6 skipped** (`fix-s1b.log`, 1,017 s, run from the worktree with `py312-check` reading this package's extension), the known tracebacks only (the teardown race's `games` pair, "disk on fire" twice, the registry import pair).
+     - S2 to S6, S8 and S11 (`quick.log`): ruff and `sync_requirements --check`; 227 routes, 0 unguarded; 38 files, 339 links.
+     - **S5**, since `docs/` changed: `mkdocs build --strict` built, and `build_wiki.py` (never `--push`) leaves `wiki/` as committed.
+     - Node 145 of 145, 48 modules as ESM.
+     - S8: the 8 workflows parse; `check_workflows.py` reports 8 workflows, 37 jobs and rules 1 to 15; `cargo xtask check` is all clear; `helper.test.mjs` 4 of 4.
+     - S11: `release.py check` finds 19 places agreeing on 0.1.5.
+     - S10 (`fix/s10-*-before.log` at 11:48, `-after` at 12:40): identical apart from the time and the reading's own shell (whose command line names this package's folder): the same servers.json hashes, `citar.db` and `secret_key` times and `keys.enc`; no helper files, service, Run value, task or `CITAR_*` variable; no uninstall key and no Start menu folder; the user's PATH `0937ae9ab8470e3e`; the same two `python.exe` firewall rules; the main checkout showing only `.claude/launch.json`; in WSL nothing of CITAR and no container; GitHub's environments `["github-pages","pypi"]`, 13 tag lines, releases v0.1.0 to v0.1.5.
 
 ---
 
