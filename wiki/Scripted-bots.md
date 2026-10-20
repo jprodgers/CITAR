@@ -234,8 +234,8 @@ played, with the reason, and none of its games starts: delete it and queue it ag
 
 **Where the games are played** (design/phase4-helper.md P4.5.5-P4.5.7). The server's job
 dispatcher turns each game of a queued experiment into a CPU job and offers it to an executor: the
-server's own **job host** (a child process, `python -m citar.jobs host`, the same Rust as the CITAR
-helper's), under the host machine's CPU settings (Servers page, the host's Machine settings: CPU
+server's own **job host** (a child process, `python -P -m citar.jobs host`, or `citar.exe jobs-host`
+in the Windows app, the same Rust as the CITAR helper's), under the host machine's CPU settings (Servers page, the host's Machine settings: CPU
 sharing on, threads, CPU %, memory and the kinds of work; by default in local mode half the logical
 CPUs as threads and a quarter of the memory, up to 512 MB a thread, in server mode one thread, half
 the machine and min(1,024 MB, a quarter of the memory)), held hard by a Job Object on Windows and by

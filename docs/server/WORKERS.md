@@ -700,8 +700,8 @@ CPU work runs in a **job host**: a child process of the helper (`citar-helper jo
 never start yourself) that plays the games under the limits in effect, so that a game's crash, a
 game that runs out of memory or one that hangs never touches the helper's connection, and the
 operating system has one process to hold to the limits. The server plays its own share of the
-lab's games the same way, in a child of its own (`python -m citar.jobs host`), under its machine's
-CPU settings. The limits are **hard** where the operating system can enforce them whatever the
+lab's games the same way, in a child of its own (`python -P -m citar.jobs host`, or
+`citar.exe jobs-host` in the Windows app), under its machine's CPU settings. The limits are **hard** where the operating system can enforce them whatever the
 games do, and **soft** where the job host can only lower its own priority or watch itself; the
 helper reports which, and the server's machine dialog shows it:
 

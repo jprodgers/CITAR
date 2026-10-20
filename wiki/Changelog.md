@@ -207,8 +207,8 @@ that means for an existing install:
   `GET /api/admin/jobs`, `POST /api/admin/jobs/pause`, `/resume` and `/retry`.
   `scripts/qa_phase4.py lab`.
 - **The job host** (design/phase4-helper.md P4.4.3): one program that plays CPU jobs under limits,
-  for a helper (`citar-helper job-host`, its child) and for the server (`python -m citar.jobs host`,
-  started by `citar.jobs.host`). It holds its CPU share and its memory hard on Windows (a Job
+  for a helper (`citar-helper job-host`, its child) and for the server (`python -P -m citar.jobs host`,
+  or `citar.exe jobs-host` in the Windows bundle, started by `citar.jobs.host`). It holds its CPU share and its memory hard on Windows (a Job
   Object) and on Linux under a `systemd --user` scope, its memory hard and its CPU soft on other
   Linux machines (`RLIMIT_DATA`, `nice`), and both soft on macOS (the background band and a
   watchdog), and says which; it counts each game's peak memory, pauses and resumes its games,
