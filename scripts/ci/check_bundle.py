@@ -13,7 +13,8 @@ runs on the same bundle.
 ``CITAR V``; ``where``, ``doctor --quiet`` and ``doctor`` exit 0, every state folder they name under ``--work``; the
 doctor's engine line names the build's label and V, and its jobs line says the job host it started is verifiable:
 the lab's job host started **from the bundle**, as ``citar.exe jobs-host`` (``citar/jobs/host.py``), the windowed
-``citar-play.exe``'s too; the hidden ``jobs-host`` takes no argument. Exactly one ``citar/_engine.pyd``. At the
+``citar-play.exe``'s too; the hidden ``jobs-host`` takes no argument; ``citar.exe mcp``, the MCP bridge ``/api/meta``
+names for a bundle, answers ``--help``. Exactly one ``citar/_engine.pyd``. At the
 root, beside the executables: ``LICENSE``, ``NOTICE.md`` and ``THIRD-PARTY-LICENSES.txt``, byte for byte the
 checkout's, ``README.md``, and ``PYTHON-LICENSES.txt``, whose index names CPython and PyInstaller's bootloader and no
 build tool (PyInstaller, pillow, pip, setuptools). With ``--python`` (the venv the bundle was built in): every data
@@ -200,6 +201,9 @@ def cmd_bundle(args) -> dict:
     report = common_runs(exe, args.version, args.work, args.label)
     run([exe, "jobs-host", "now"], isolated_env(args.work), "citar jobs-host with an argument", want=2)
     say("ok: the hidden jobs-host command is there, and takes no argument")
+    bridge = run([exe, "mcp", "--help"], isolated_env(args.work), "citar mcp --help")
+    check("--game" in bridge and "--token" in bridge, "citar mcp --help names no --game and --token",
+          "citar mcp, the MCP bridge /api/meta names for a bundle, is there")
     engines = [p for p in folder.rglob("_engine.pyd") if p.parent.name == "citar"]
     check(len(engines) == 1, f"the bundle holds {len(engines)} citar/_engine.pyd: {engines}",
           f"{engines[0].relative_to(folder) if engines else ''}, {engines[0].stat().st_size if engines else 0:,} "
