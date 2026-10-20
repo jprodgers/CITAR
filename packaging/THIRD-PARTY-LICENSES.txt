@@ -6,8 +6,9 @@ citar._engine (the citar-py crate), and its helper, citar-helper, statically
 link the third-party Rust crates below: the normal dependencies of the two on
 the release targets, x86_64-pc-windows-msvc, aarch64-apple-darwin,
 x86_64-apple-darwin, x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu,
-as CITAR's Cargo.lock pins them. A crate that only some of the release's
-builds compile in is listed all the same.
+as CITAR's Cargo.lock pins them. The list errs on the side of more: it takes
+the crate features the whole workspace turns on, its tests' included, so it
+may name a crate no release build compiles in.
 
 Each crate is listed once, in name order, with its version, the licence
 expression its package declares, the targets it is built for when not all of

@@ -10,7 +10,11 @@
 //! closure of the two crates on each release target ([`TARGETS`], the helper's five, which are the
 //! wheels' five too), each dependency's platform condition evaluated against that target's
 //! `rustc --print cfg`: so a Windows-only or a Unix-only crate is in, and a crate only WebAssembly,
-//! Android or a target CITAR does not build for would link is out. It writes each third-party
+//! Android or a target CITAR does not build for would link is out. cargo metadata's resolve
+//! unifies features across the whole workspace, its tests' dev-dependencies included, so the
+//! closure can name a crate no release build compiles in (seven at 5-04: ed25519-dalek's `pkcs8`
+//! chain, an older `rand_core`, `zerocopy-derive`), and never misses one: a test holds it to
+//! `cargo tree`'s per-target builds, every crate of which must be in it. It writes each third-party
 //! crate once, in name order: its version, its licence expression as its package declares it, the
 //! targets it is built for when not all of them, and every licence and notice file its package
 //! ships, read from the crate's sources in the registry (which `cargo metadata` and
@@ -930,8 +934,9 @@ impl Notices {
                 "CITAR's own code is MPL-2.0 (LICENSE and NOTICE.md). Its Python extension, \
                  citar._engine (the citar-py crate), and its helper, citar-helper, statically \
                  link the third-party Rust crates below: the normal dependencies of the two on \
-                 the release targets, {targets}, as CITAR's Cargo.lock pins them. A crate that \
-                 only some of the release's builds compile in is listed all the same."
+                 the release targets, {targets}, as CITAR's Cargo.lock pins them. The list errs \
+                 on the side of more: it takes the crate features the whole workspace turns on, \
+                 its tests' included, so it may name a crate no release build compiles in."
             ),
             "Each crate is listed once, in name order, with its version, the licence expression \
              its package declares, the targets it is built for when not all of them, and the \
