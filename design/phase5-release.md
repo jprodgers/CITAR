@@ -658,6 +658,101 @@ Code signing stays out (KNOWN_ISSUES): SmartScreen warns, every asset has its SH
 - **Built natively, no QEMU:** package.yml's `image` matrix builds `linux/amd64` on `ubuntu-24.04` and `linux/arm64` on `ubuntu-24.04-arm`, each from its own wheel, `docker buildx build --load`. Each image is run: the health route answers within 60 s; `citar._engine` has no test operations; `citar --version` and `build_info()` give V and L; `citar doctor --quiet` (the job host verifiable) as uid 10001; a restart keeps the volume's state. `docker compose config` checks `docker-compose.yml`.
 - **What a tag pushes is what was tested:** on a dry run and a tag, each job saves its image (`docker save`, zstd) as the artifact `pkg-image-<arch>`; release.yml's tag-only jobs load those, push them by architecture and join them in one manifest list (P5.11). Pull requests skip the save.
 
+**As built in 5-06: the image from wheels, both architectures** (Appendix F, 5-06). One agent, from 2026-10-20 16:38 to 17:50 (-04:00), on branch `p-5-06` from `4dba759`.
+
+- **What was built.**
+  - **`Dockerfile`.**
+    - **The base** is `python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1`, the multi-architecture index Docker Hub served on 2026-10-20 (read from the registry, read only): Python 3.12.15 on Debian 13, built 2026-10-06; its linux/amd64 manifest is `2b4f19da...` and its linux/arm64 one `16bf2b5c...`. One reference serves both stages and both architectures. The tag is in the reference and the comment above it, so Dependabot's `docker` updates can move the digest.
+    - **The builder** makes a venv and reads the `[server]` requirements with `scripts/ci/requirements.py server`. It installs them with `pip install --only-binary=:all:`, and with `--constraint /tmp/wheelhouse/constraints.txt` when `wheelhouse/constraints.txt` is there (a hand build without it is told it gets the newest wheels in `pyproject.toml`'s ranges). Then `citar` from `wheelhouse/` with `--only-binary=:all: --no-deps --no-index`, then `pip check`, then `import citar._engine` with `-P`.
+    - **No `apt-get` in either stage.** Nothing compiles, so `build-essential` and `libffi-dev` went. The health check is Python, so `curl` went. pip, setuptools and wheel are no longer upgraded from the index. The build reaches PyPI for wheels at the constraints' versions and nothing else, and the image's system packages are the pinned base's.
+    - **The runtime** has `groupadd --gid 10001` and `useradd --uid 10001 --gid citar`, and `/var/lib/citar` is `citar:citar` 0750. The venv is copied from the builder and stays root's. `USER 10001:10001` is given by number. `ENV`, `VOLUME`, `EXPOSE`, `WORKDIR`, `ENTRYPOINT ["citar"]` and `CMD ["serve"]` are as before. The `HEALTHCHECK` is `["python", "-I", "-c", "...urlopen('http://127.0.0.1:%s/api/auth/config' % CITAR_PORT...)"]`: the venv's Python, `-I` because the working directory is the state directory, on the port the server listens on. The image is 280 MB (Podman's figure).
+  - **`.dockerignore`** is an allow-list: `*`, then `!pyproject.toml`, `!scripts/ci/requirements.py` and `!wheelhouse`, exactly what the Dockerfile copies. No state, secret, configuration or source tree can reach a build, and an edit anywhere else changes no layer.
+  - **`.github/dependabot.yml`**: the `docker` ecosystem ignores `python`'s major and minor updates. Its weekly pull request moves the digest, and the Python stays 3.12, the VPS's, until someone moves it by hand with the server. (Dependabot's open pull request #6, 3.14 on bookworm, is superseded; the owner may close it.)
+  - **`scripts/ci/check_image.py`** (standard library; Docker or Podman; exit 0, 1 or 2):
+    - `run --engine E --image REF --arch A --version V --label L --wheel F [--constraints C] --out R`.
+      - **The image as built:** linux/A; `USER 10001:10001`; the state volume and `CITAR_STATE_DIR` at `/var/lib/citar`; port 8765; a health check; the label `org.opencontainers.image.version` equal to V.
+      - **Then run as deployed:** a volume of its own, the port published on 127.0.0.1 only (any other address is a failure). The health route must answer within 60 s, and `/api/meta` must give V and L.
+      - **Inside it, as uid and gid 10001:** `citar --version`; the image's own health check exits 0; the engine is the venv's and has no test operations; `build_info()` gives V and L, the build id and the jobs build; `citar doctor --quiet` exits 0 and `citar doctor`'s jobs line is verifiable; the state directory is `10001:10001:750`; `pip freeze --exclude citar` against C (every installed distribution pinned there at that version; pins not installed are noted).
+      - **Then the wheels' smoke** (`smoke_wheel.py inside`) in a second container: no network, the checkout's `scripts/` mounted read-only, the state in its `/tmp`, the image's server variables unset. Its job host plays the seeded lab job, and the line's version, label, build id and jobs build must be the server's.
+      - **Then the restart:** an account made with `citar admin create-user --password-stdin` (a throwaway passphrase) and the generated secret key's hash. The first container is stopped by SIGTERM (exit 0 within 30 s) and removed, and a second one is started on the same volume: its health within 60 s, the account listed, the key's hash equal, the state folder's entries kept, `/api/meta` again, then stopped the same way.
+      - **Cleanup:** every container and the volume (named `citar-check-<random>`) are removed in a `finally`, and their absence is checked. The report is written only when every check held; it holds the facts above, the smoke line and the timings.
+    - `save --engine E --image REF --out F.tar.zst [--report R]`: the image must be the one the report tested. The engine's `save` (Podman's as `docker-archive`) is followed by `zstd -T0`. The image is removed by its id, the file is loaded again, and the same id is required; the report gains the file's name, size and SHA-256.
+  - **package.yml's `image` matrix replaces the moved `docker` job.** It has `amd64` on `ubuntu-24.04` (`linux-x64`) and `arm64` on `ubuntu-24.04-arm` (`linux-arm64`), each the runner its platform's wheel is built on. It needs `meta`, `wheels` and `constraints`, and runs `!cancelled()` with `meta` passed. Its steps:
+    - prepare; `uname -m` against the leg's, with `docker version`, `docker buildx version` and `zstd --version` printed;
+    - `pkg-wheel-<platform>` into `wheelhouse/` and `pkg-constraints`, copied to `wheelhouse/constraints.txt`;
+    - `docker buildx build --load --platform linux/<arch> --provenance=false --sbom=false` with the version and revision labels, tagged `ghcr.io/jprodgers/citar:<V>-<arch>`, the name release.yml pushes (nothing here pushes);
+    - `check_image.py run`, then `check_image.py save` to `image/citar-image-<V>-<arch>.tar.zst`;
+    - `docker compose -f docker-compose.yml config --quiet` on the amd64 leg, with stand-ins for its two required values;
+    - uploads: `pkg-image-report-<arch>` (`report/image-<arch>.json`) on every run, and `pkg-image-<arch>` (the `.tar.zst`, `compression-level: 0`, 14 days) only when the mode is not `ci`.
+    No cache, no QEMU, no `docker/*` action: `docker/setup-buildx-action` and `docker/build-push-action` left the workflows with the old job (`action_pins.py verify`: 145 references to 12 pins in 12 repositories, 0 problems). check_workflows: 8 workflows, 37 jobs.
+  - **Tests.**
+    - **`tests/test_image.py` (17 tests).** The Dockerfile: one base for both stages, pinned by digest; wheels only; constraints; `pip check`; no apt and no compiler; the runtime's one `COPY`, user, ids, state, volume, port, entry point and labels; the health check `python -I`, run against a stand-in server, passing on 200 and failing on 500 and 404. Also: the context allow-list equal to the Dockerfile's sources; Compose running the repository package.yml tags with the same state path; Dependabot's hold. And check_image's readings: the port on loopback alone; either engine's ids; the image's facts with each wrong field refused, Podman's health-check key included; the doctor's jobs line; the freeze comparison with PEP 503 names; the smoke line; a command's JSON answer; the smoke's script; usage errors exit 2.
+    - **`tests/test_workflows.py` (76, 75 before).** `test_the_image_is_built_natively_for_both_architectures_checked_and_kept` holds the job to P5.7: legs, runners, downloads, step order, the build's flags, the checks' arguments, nothing pushed or cached, the two uploads and when. The rules are planted in the real job: rule 13 on its wheel download, rule 3 on `--push` and on `docker push`, rule 13 on an unprefixed upload, and rule 9 on a `runner.temp` path.
+  - **CONTRIBUTING** names the Dockerfile's pin and how to build and check the image under Podman. The wiki is regenerated, never pushed.
+- **Decided beyond the text.**
+  - **No apt and no curl** (above): P5.7 asks for `--only-binary`, which leaves nothing to compile. A health check in the server's Python with `-I` removes the last package from Debian's archive and the moving mirror state with it.
+  - **`pip check`** after the installs, so a constraints file that does not fit the requirements fails the build, not the run.
+  - **The user by number, the group 10001, the state 0750**, as on the server's release layout (P5.13.1). A platform that admits only images it can tell are not root's (Kubernetes' `runAsNonRoot`) can tell. 0.1.5's group was a system gid; a volume from 0.1.5 stays writable, since its owner is uid 10001 (for 5-12's CHANGELOG).
+  - **The wheels' smoke runs inside the image** (P5.7 names the doctor's job host; this adds the seeded lab job). The image's line carries the wheels' result hash, `4914910c...3e1358`, so 5-08 can hold the images to the wheels as well as to one build.
+  - **The dependencies are read back** (`pip freeze` against the constraints). P5.7 says the image installs with the constraints; this proves it did.
+  - **A restart is a new container on the same volume**, not `docker restart` of the same one: state left in a container's own layer would survive a restart and be lost by a redeploy.
+  - **Pull requests save and load the image too, and upload nothing.** P5.7 says pull requests skip the save. The intent is no artifact on every push, and that holds; the save-and-load path release.yml relies on is proven on every pull request (P5.1.1: no failure left for the release to find). Here it took seconds.
+  - **No cache.** The moved job read and wrote the GHA cache on every run. A release's image is now built from this run's files alone, as the wheels and the bundle are.
+  - **`--provenance=false --sbom=false`:** the loaded image is one plain manifest, so the saved file holds the image and nothing else. release.yml's `attest-image` attests the pushed image (P5.12).
+  - **Tagged as release.yml will push it** (`ghcr.io/jprodgers/citar:<V>-<arch>`), so 5-09 loads and pushes without retagging. The report's `saved.id` is the id it should find.
+  - **`constraints` is a need of both legs:** the file from the linux-x64 wheel serves arm64 too. Every `[server]` dependency has the same markers on both Linux architectures, and the arm64 leg would show a gap as a `pip freeze` finding.
+  - **`docker compose config` on one leg:** the file is the same for both.
+  - **zstd in WSL** (apt, as root, recorded in `ops/p5-notes.md`), so the gate saves as the job does.
+- **What the gates found, and the fixes.**
+  - Gate 1's first run (`logs/wsl-gate1-first.log`, at `75ede57`) failed at the restart check: the account's address was `@example.invalid`, which the account rules (email-validator) refuse as a special-use name. Fixed in `4a18062` (`@example.com`). Every other check of that run passed, the three plants failed as they should, and nothing was left behind. The second run, at `4a18062`, passed whole (`logs/second/`).
+  - Written while that ran, `4274c83`: a command's JSON answer that does not read is a check failure rather than a traceback; the health route and `/api/meta` are asked directly, never through a proxy the environment names; and the cleanup names what is left whether the run passed or failed.
+  - Each `podman build` leaves its builder stage as a nameless image (Podman's cache). The gate script now removes those, and the two the first runs left were removed by hand: Podman holds only the three base images.
+- **Gates** (logs under `C:/dev/target/citar-p-5-06/logs`; the scripts in the session scratchpad's `p506/`: `wsl_gate1.sh`, `s10.ps1`, `s10_wsl.sh`, `s10_github.sh`):
+  1. **WSL, Podman 4.9.3 rootless** (`wsl-gate1.log`, the third run, at `4274c83`, the code's head; the clone `~/p5/p-5-06` from a bundle; P5.18.1 rule 8's guard). The second run's figures (`4a18062`) were the same within a second.
+     - **The wheel:** `citar-0.1.5-cp311-abi3-manylinux_2_28_x86_64.whl`, built in `ghcr.io/pyo3/maturin:v1.15.0` with `--release --locked --compatibility manylinux_2_28` and `CITAR_BUILD_ID=ci+4274c83` (202 s). It passes `check_dist.py` with its tag.
+     - **The constraints:** `smoke_wheel.py constraints` on Python 3.12.3 pins 53 distributions.
+     - **The build:** the context as the job makes it, then `podman build --no-cache --format docker --platform linux/amd64` with the two labels (24 s). The log says "the dependencies at the release's tested versions" and "No broken requirements found". The image is `83627c437270`, 280 MB.
+     - **`check_image.py run`** (32 s). Every check held:
+       - linux/amd64, `USER 10001:10001`, the volume, the port, the health check, the version label;
+       - the health route on 127.0.0.1 in 2.2 s, and `/api/meta` with 0.1.5 and `ci+4274c83`;
+       - uid and gid 10001, `CITAR 0.1.5`, the image's health check exits 0;
+       - `_engine.abi3.so` from the venv, no test operations, build `0b412a18fe95`, jobs build `b2a9ff8212e2`;
+       - `doctor --quiet` exits 0, and the jobs line says "verifiable ... started in 0.2 s ... its cpu limit soft, its memory limit hard";
+       - the state `10001:10001:750`, and the image's 53 distributions at the constraints' versions;
+       - the smoke inside the image on Python 3.12.15: result hash `4914910c318522fe6a2c446f180c3a9eef25ff03d3b160b9edbf75e3ae3e1358`, the wheels' (5-02b, 5-05);
+       - the restart: the first container stopped on SIGTERM in 1.1 s with exit 0; the second answered in 2.0 s and had the account, the same secret key and every entry (`benchmarks`, `citar.db` with its WAL files, `config`, `saves`, `secret_key`); it stopped in 0.8 s with exit 0;
+       - no container or volume left.
+     - **`check_image.py save`:** `citar-image-0.1.5-amd64.tar.zst`, 81,070,595 bytes (SHA-256 `264cf4df...`), in 2 s. The image was removed by its id, then loaded again with **the same id, `83627c437270`**.
+     - **Checks that can fail**, each exiting 1 with nothing left: a wrong label (at `/api/meta`), another architecture (before anything starts), and a constraint the image does not hold (at `pip freeze`). None of them wrote a report.
+     - **The context under Podman** is the allow-list. A probe image that copies the whole context (with a `.env` and a `saves/` file planted in the clone) lists exactly `pyproject.toml`, `scripts/ci/requirements.py`, the wheel and `wheelhouse/constraints.txt`.
+     - The built image and its builder stage were removed afterwards; the three base images stay (P5.18.3).
+  2. **CI-only, at the merge push** (PR #5's `pull_request` runs, watched by the merge agent), and not run here:
+     - both architectures built natively with `docker buildx` and run through `check_image.py` with Docker (the arm64 leg first sees its build there);
+     - the save and load with Docker's image store;
+     - `docker compose config`.
+     Rehearsed here: everything the amd64 leg runs, with Podman in place of Docker.
+  3. **Standard gates.**
+     - **S2:** ruff, and `sync_requirements --check`.
+     - **S4:** 38 files, 339 links.
+     - **S8:** the 8 workflows and `dependabot.yml` parse; `check_workflows.py` (8 workflows, 37 jobs, rules 1 to 15); `cargo xtask check` all clear; `helper.test.mjs` 4 of 4.
+     - **S9:** gate 1 above, and on Linux's Python 3.12.3 `test_image` (17) and `test_workflows` (76) pass and `check_workflows.py` holds.
+     - **S11:** `release.py check`, 19 places on 0.1.5.
+     - **Also run:** S1 in the package's venv (Windows' Python 3.14.6, `cargo xtask develop`): **2,079 run, OK, 6 skipped** (`s1.log`, 1,067 s: the base's 2,062, 16 in `test_image` and 1 in `test_workflows`; `test_image`'s 17th test was written after the run started, and the module passes 17 of 17), only the known tracebacks (the teardown race's `owned_items` and `games` pairs, "disk on fire" twice, the registry import pair). S3: 227 routes, 199 gated, 0 unguarded. S5: `build_wiki.py` regenerated the wiki for CONTRIBUTING; no file under `docs/` changed.
+     - **S10** (`s10-*-before.log` at 17:00, `s10-*-after.log` at 17:42): identical on Windows and GitHub apart from the time. The before reading's process list showed only this package's own `cargo xtask develop`, then building; the after reading lists no process.
+       - **Windows:** servers.json `2561079bd2f123e1`, `586888cbb61aa9c7` and `fc81de79ca59a984` (citar-play's); `citar.db` 2026-09-23 00:38; `secret_key` 2026-09-20 22:16; `keys.enc` `27bb14e856a15c68`.
+       - No `helper.json`, machine key, `app`, `bin` or `config/worker.json`; no service, Run value, task or `CITAR_*` variable.
+       - The user's PATH `0937ae9ab8470e3e`; the same two `python.exe` firewall rules; no uninstall key and no Start menu folder.
+       - The main checkout shows only `.claude/launch.json`, and its ignored folders hold nothing newer than this package's start.
+       - **GitHub:** the environments `["github-pages","pypi"]`, 13 tag lines (`edb5c8d94012e4fd`), releases v0.1.0 to v0.1.5.
+       - **WSL:** no CITAR user, layout, unit or process; nginx not installed; no container and no `citar-check-` volume. It gained what the package was to leave: zstd (recorded), the base image `python:3.12-slim-trixie` by its digest (kept, P5.18.3), `~/p5/p-5-06`, `~/p5/p-5-06-out` and the gate script (the merge removes them), and about 1 GB in `~/target/citar-p5` (the container's build and `maturin-registry/`, its crates).
+- **Left for later.**
+  - **5-08's `assemble`** downloads `pkg-image-report-amd64` and `-arm64`. It holds their `version`, `label`, `build_id` and `jobs_build` to the wheels', helpers' and bundle's lines, and may hold `smoke.result_hash` to the wheels'. The image is no release asset.
+  - **5-09's `publish-image`** downloads `pkg-image-<arch>`, then `zstd -dc ... | docker load`. It checks the loaded id against the report's `saved.id`, pushes `ghcr.io/jprodgers/citar:<V>-<arch>` as tagged, and joins the two with `docker buildx imagetools create -t ...:<V>`. `attest-image` attests that list's digest.
+  - **5-12's docs:**
+    - INSTALL.md's and DEPLOY.md's Docker sections: multi-arch, publishing on `127.0.0.1` where a proxy fronts it.
+    - The CHANGELOG: the image on Debian 13 from the release wheels for amd64 and arm64; dependencies at the release's tested versions; no curl or compiler in it; the health check in Python; `USER 10001:10001`, and the group's id now 10001; the state 0750.
+    - README's "Docker (multi-arch)".
+
 ---
 
 ## P5.8 The install scripts
