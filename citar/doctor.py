@@ -15,8 +15,9 @@ Checks, in the order a failure would stop you:
 6. **Engine** - that the engine loads, and which build it is.
 7. **Ruleset** - which ruleset games use (the one compiled into the engine, or ``CITAR_RULESET_DIR``'s) and how much
    of it there is.
-8. **Model providers** - every server in the registry that CITAR can reach right now.
-9. **Port** - whether the configured port is free, or already has a CITAR on it.
+8. **Jobs** - that the lab's job host starts from this install, as the server starts it, and is verifiable.
+9. **Model providers** - every server in the registry that CITAR can reach right now.
+10. **Port** - whether the configured port is free, or already has a CITAR on it.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ import os
 import platform
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -263,6 +265,49 @@ def _check_ruleset(r: Report) -> None:
         r.line(OK, "loaded", f"{counts}, compiled into the engine (ruleset {info['rules'][:12]})")
 
 
+#: The job host the jobs check starts for a moment: one thread, a quarter of the machine, 256 MB (as the wheels' smoke
+#: test's, scripts/ci/smoke_wheel.py).
+JOBS_THREADS, JOBS_CPU_PERCENT, JOBS_MEMORY_MB = 1, 25, 256
+#: How long that host has to be ready: its limits, its canary and its self-check.
+JOBS_READY_WAIT = 60.0
+
+
+def _check_jobs(r: Report) -> None:
+    """The lab's job host (design/phase4-helper.md P4.4.3), started for a moment from this install as the server starts
+    it (:func:`citar.jobs.host.command`: ``citar.exe jobs-host`` in the Windows bundle, ``python -P -m citar.jobs host``
+    otherwise), then closed: whether it starts, and whether it is verifiable, its canary passed and the shortest golden
+    job replayed to the committed hashes, so its results can be held to other machines'. Every smoke test (the wheels,
+    the sdist's build, the bundle, the image) proves the job host on its platform through this line
+    (design/phase5-release.md P5.6)."""
+    r.section("Jobs")
+    try:
+        from .jobs import host as H
+    except ImportError:
+        r.line(WARN, "jobs", "not checked: the engine does not load (see Engine above)")
+        return
+    began = time.perf_counter()
+    host = H.JobHost(JOBS_THREADS, JOBS_CPU_PERCENT, JOBS_MEMORY_MB, ready_wait=JOBS_READY_WAIT)
+    try:
+        ready = host.start()
+    except H.HostError as exc:              # the host is ended before this is raised
+        r.line(FAIL, "jobs", f"the job host did not start ({exc.code}): {exc}",
+               "The lab cannot play its games on this install. Reinstall CITAR; if this stays, include this line in "
+               "a bug report.")
+        return
+    try:
+        held = ready.get("limits") or {}
+        how = (f"started in {time.perf_counter() - began:.1f} s, jobs build {ready.get('jobs_build')}, "
+               f"its cpu limit {held.get('cpu')}, its memory limit {held.get('memory')}")
+        if ready.get("verifiable") is True:
+            r.line(OK, "jobs", f"verifiable: the job host passed its canary and self-check ({how})")
+        else:
+            r.line(WARN, "jobs", f"not verifiable: {ready.get('reason') or 'the job host gave no reason'} ({how})",
+                   "This server still plays its own lab games, but no other machine's results can be checked "
+                   f"against them. A modded ruleset ({RULESET_DIR}) does this; otherwise reinstall CITAR.")
+    finally:
+        host.close()
+
+
 def _check_providers(r: Report) -> None:
     """Every machine the server dials (the server's database, read where this runs), and whether it answers now."""
     r.section("Model providers")
@@ -369,7 +414,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print(f"CITAR {__version__} - checking this installation\n")
     for check in (_check_versions, _check_dependencies, _check_directories, _check_configuration,
-                  _check_database, _check_engine, _check_ruleset, _check_providers, _check_port):
+                  _check_database, _check_engine, _check_ruleset, _check_jobs, _check_providers, _check_port):
         try:
             check(report)
         except Exception as exc:
