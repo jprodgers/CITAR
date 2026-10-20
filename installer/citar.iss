@@ -1,9 +1,10 @@
 ; Windows installer for CITAR.
 ;
-;   python -m PyInstaller installer/citar.spec --noconfirm
-;   ISCC.exe /DAppVersion=X.Y.Z /DAppVersionNumeric=X.Y.Z.0 installer\citar.iss
+;   (the bundle first: installer\citar.spec says how, from the Windows wheel)
+;   ISCC.exe /DAppVersion=X.Y.Z /DAppVersionNumeric=X.Y.Z.0 /DBundleDir=<the bundle's folder> /O<output folder> installer\citar.iss
 ;
-; Produces installer\output\CITAR-<version>-setup.exe.
+; Produces CITAR-<version>-setup.exe in the output folder (installer\output without /O). package.yml's windows job
+; passes all three defines and /O, with the bundle and the output outside the checkout (design/phase5-release.md P5.6).
 ;
 ; The result needs no Python, no command line and no administrator: it installs per-user so that
 ; somebody on a locked-down work machine can still run it, and so an upgrade does not need an
@@ -19,6 +20,11 @@
 #endif
 #ifndef AppVersionNumeric
   #define AppVersionNumeric "0.1.5.0"
+#endif
+; The PyInstaller folder to install (citar.exe, citar-play.exe, _internal\ and the notices). A hand build's default is
+; the old place beside the checkout; CI passes the bundle it built and checked, wherever that is.
+#ifndef BundleDir
+  #define BundleDir "..\dist\CITAR"
 #endif
 
 #define AppName       "CITAR"
@@ -41,8 +47,9 @@ VersionInfoVersion={#AppVersionNumeric}
 
 ; Per-user, so no elevation prompt. A user without administrator rights is precisely the person
 ; most likely to want a downloadable installer instead of pip.
+; /CURRENTUSER and /ALLUSERS are taken on the command line too: a silent install says which it wants.
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequiredOverridesAllowed=commandline dialog
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -74,9 +81,9 @@ Name: "addtopath"; Description: "Add the &citar command to my PATH"; \
 
 [Files]
 ; The whole PyInstaller folder. recursesubdirs picks up the web client and the migrations, which
-; citar.paths resolves relative to the executable, and the engine's extension (_engine.pyd, with
-; the ruleset compiled in).
-Source: "..\dist\CITAR\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; citar.paths resolves relative to the executable, the engine's extension (_engine.pyd, with
+; the ruleset compiled in), and the notices at its root.
+Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Comment: "Play CITAR"
@@ -163,14 +170,16 @@ begin
 
   // The user's games, settings, benchmark runs and reports. Never deleted without being asked:
   // somebody uninstalling to fix a problem, or to move to the pip version, would not expect to
-  // lose a multi-day benchmark run.
+  // lose a multi-day benchmark run. A silent uninstall (/VERYSILENT /SUPPRESSMSGBOXES, as winget
+  // and CI run it) is not asked and keeps them: SuppressibleMsgBox answers its last argument, No, where
+  // a plain MsgBox would wait for a click nobody can give.
   StatePath := ExpandConstant('{localappdata}\CITAR');
   if DirExists(StatePath) then
   begin
-    if MsgBox('Delete your CITAR saved games, settings and results as well?' + #13#10#13#10
+    if SuppressibleMsgBox('Delete your CITAR saved games, settings and results as well?' + #13#10#13#10
               + StatePath + #13#10#13#10
               + 'Choose No to keep them for a future installation.',
-              mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+              mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
       DelTree(StatePath, True, True, True);
   end;
 end;

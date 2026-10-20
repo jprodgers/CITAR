@@ -219,6 +219,70 @@ def bench_path(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
+# --------------------------------------------------------------------------- the kind of install
+#
+# What a copy of CITAR starts its own programs with (the job host, the MCP bridge) depends on how it was installed:
+# a bundle has no Python to run ``-m`` with, a wheel has console scripts beside its interpreter, and a checkout has
+# neither (design/phase5-release.md P5.6).
+
+#: The kinds :func:`install_kind` names.
+INSTALL_KINDS = ("frozen", "wheel", "checkout")
+
+
+def install_kind() -> str:
+    """How this copy runs: ``frozen`` (the Windows bundle: PyInstaller's ``citar.exe`` and ``citar-play.exe``, which
+    take no ``-m``), ``checkout`` (a source tree: the folder holding the package holds ``pyproject.toml`` or
+    ``DESIGN.md``, writable or not), or ``wheel`` (an installed package, in a venv's or the system's site-packages)."""
+    if getattr(sys, "frozen", False):
+        return "frozen"
+    if any((ROOT / marker).exists() for marker in _CHECKOUT_MARKERS):
+        return "checkout"
+    return "wheel"
+
+
+def bundle_program(name: str = "citar") -> Path:
+    """A program of the bundle this frozen copy runs from: ``citar.exe`` (on Windows) beside the running executable,
+    which may be the windowed ``citar-play.exe``."""
+    return Path(sys.executable).resolve().with_name(name + (".exe" if os.name == "nt" else ""))
+
+
+def _script(name: str) -> Path | None:
+    """An installed console script of this interpreter's (``citar-mcp``): in its scheme's scripts folder, else beside
+    the interpreter (a venv on Windows keeps both in ``Scripts``); None when neither holds it."""
+    import sysconfig
+
+    file = name + (".exe" if os.name == "nt" else "")
+    for folder in (sysconfig.get_path("scripts"), str(Path(sys.executable).parent)):
+        if folder and (Path(folder) / file).is_file():
+            return Path(folder) / file
+    return None
+
+
+#: The MCP bridge's command as a remote player's own install gives it: no folder of this machine's in it.
+MCP_ANYWHERE = ("citar-mcp",)
+
+
+def mcp_command(server_mode: bool, kind: str | None = None) -> list[str]:
+    """The command that starts this install's MCP bridge (``citar mcp``), before the seat's ``--server``, ``--game``
+    and ``--token``: a bundle's ``citar.exe mcp``, a wheel's ``citar-mcp`` script beside its interpreter (or the
+    interpreter with ``-P -m citar.agents.mcp_server`` when no script is found), a checkout's ``python citar_mcp.py``.
+
+    In server mode it names no folder of this machine (``/api/meta`` is public, and a remote player runs the bridge
+    from their own install): a bundle's program by its name alone, ``citar.exe mcp``, and otherwise ``citar-mcp``,
+    which a wheel, ``install.sh`` and pipx put on a player's PATH."""
+    kind = kind or install_kind()
+    if kind not in INSTALL_KINDS:
+        raise ValueError(f"no such install kind: {kind!r} (one of {', '.join(INSTALL_KINDS)})")
+    if server_mode:
+        return [bundle_program().name, "mcp"] if kind == "frozen" else list(MCP_ANYWHERE)
+    if kind == "frozen":
+        return [str(bundle_program()), "mcp"]
+    if kind == "checkout":
+        return [sys.executable, str(ROOT / "citar_mcp.py")]
+    script = _script("citar-mcp")
+    return [str(script)] if script else [sys.executable, "-P", "-m", "citar.agents.mcp_server"]
+
+
 def describe() -> dict[str, str]:
     """Every resolved location, for ``citar doctor`` and bug reports."""
     return {

@@ -30,6 +30,9 @@
 #   by both. Nothing here holds the release's key.
 # - notices: packaging/THIRD-PARTY-LICENSES.txt held to Cargo.lock (cargo xtask licenses --check, P5.5) and uploaded as
 #   the release's asset; the wheels carry it as a licence file and the packaged helpers' archives beside the binary.
+# - windows: the Windows bundle (PyInstaller) from the Windows wheel installed in a fresh venv, never the checkout;
+#   its checks (scripts/ci/check_bundle.py: the job host started from the bundle among them), the Inno Setup installer,
+#   a silent per-user install on the runner, run and uninstalled, and the portable zip (P5.6).
 # - installer, docker: install.sh and the image, now on the release wheels (moved from test.yml; 5-06 and 5-07
 #   replace them).
 #
@@ -882,6 +885,161 @@ jobs:
         with:
           name: pkg-third-party-licenses
           path: packaging/THIRD-PARTY-LICENSES.txt
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  windows:
+    # The Windows bundle and installer (design/phase5-release.md P5.6), from this run's Windows wheel, never the
+    # checkout: the wheel installed with [all] in a fresh venv beside the pinned PyInstaller, which runs with -P from a
+    # folder outside the checkout on installer/citar.spec by its absolute path (the spec refuses unless citar and its
+    # engine are the installed wheel's, and puts the notices and PYTHON-LICENSES.txt at the bundle's root). Then the
+    # bundle's checks (scripts/ci/check_bundle.py: --version, where, doctor with the job host started from the bundle,
+    # _engine.pyd, the notices), Inno Setup's compile, a silent per-user install on the runner, run and uninstalled
+    # (the person's data kept), and the portable zip. No cache: what a release ships is built from this run's files.
+    name: Windows bundle and installer
+    needs: [meta, wheels]
+    # It needs only the Windows wheel.
+    if: ${{ !cancelled() && needs.meta.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      # Inno Setup's VersionInfoVersion must be four numbers (0.1.6-rc.1 is 0.1.6.0).
+      NUMERIC: ${{ needs.meta.outputs.numeric }}
+      # The label the wheel was built with, which the bundle's engine must name.
+      LABEL: ${{ needs.meta.outputs.label }}
+      # The bundle's builder, moved deliberately: PyInstaller 6.22.3 (2026-09-12) and its hooks 2026.8 (2026-09-30).
+      PYINSTALLER_VERSION: "6.22.3"
+      PYINSTALLER_HOOKS_VERSION: "2026.8"
+      # Installed only when the runner image has no Inno Setup (windows-2025's has 6.7.1).
+      INNO_SETUP_VERSION: "6.7.1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # The bundle's Python, as 0.1.5's.
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-windows-x64
+          path: wheel
+
+      - name: The bundle's venv, from the wheel
+        # Wheels only (no sdist is built here), the wheel with every extra, and the pinned PyInstaller beside it.
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/bundle-venv"
+          py="$RUNNER_TEMP/bundle-venv/Scripts/python.exe"
+          "$py" -m pip install --disable-pip-version-check --only-binary=:all: "$(ls wheel/*.whl)[all]" \
+            "pyinstaller==$PYINSTALLER_VERSION" "pyinstaller-hooks-contrib==$PYINSTALLER_HOOKS_VERSION"
+          "$py" -m pip list --disable-pip-version-check
+
+      - name: The bundle, from the installed wheel
+        # -P and a working folder outside the checkout: -m from the checkout's root would put its citar/ ahead of
+        # site-packages. The spec by its absolute path; its output in the runner's temporary folder.
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/bundle"
+          cd "$RUNNER_TEMP/bundle"
+          "$RUNNER_TEMP/bundle-venv/Scripts/python.exe" -P -m PyInstaller "$GITHUB_WORKSPACE/installer/citar.spec" \
+            --noconfirm --distpath "$RUNNER_TEMP/bundle/dist" --workpath "$RUNNER_TEMP/bundle/work"
+
+      - name: The bundle runs, and its job host starts from it
+        # citar.exe --version, where, doctor --quiet and doctor (the job host it starts is citar.exe jobs-host, and
+        # verifiable), every run's state in the runner's temporary folder; the label; _engine.pyd; the notices at the
+        # root, PYTHON-LICENSES.txt the venv's closure of citar[all], and nothing in the bundle outside it (no build
+        # tool's package, no Universal CRT DLL: installer/spec_rules.py audit).
+        shell: bash
+        run: |
+          python scripts/ci/check_bundle.py bundle --dir "$RUNNER_TEMP/bundle/dist/CITAR" --version "$RELEASE_VERSION" \
+            --label "$LABEL" --work "$RUNNER_TEMP/bundle-check" --python "$RUNNER_TEMP/bundle-venv/Scripts/python.exe" \
+            --out report/windows-bundle.json
+
+      - name: Inno Setup
+        # From the runner image when it has it, else installed on the runner at the pinned version.
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "No Inno Setup on this image: installing $env:INNO_SETUP_VERSION"
+            choco install innosetup --version $env:INNO_SETUP_VERSION -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          if (-not (Test-Path $iscc)) { Write-Error "no ISCC.exe at $iscc"; exit 1 }
+          Write-Host "ISCC: $iscc, Inno Setup $((Get-Item $iscc).VersionInfo.ProductVersion)"
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      - name: The installer
+        # The version and its numeric form, and the bundle checked above, all given (installer/citar.iss's defaults
+        # are a hand build's); its output outside the checkout.
+        shell: pwsh
+        run: |
+          & $env:ISCC "/DAppVersion=$env:RELEASE_VERSION" "/DAppVersionNumeric=$env:NUMERIC" `
+            "/DBundleDir=$env:RUNNER_TEMP\bundle\dist\CITAR" "/O$env:RUNNER_TEMP\installer" installer\citar.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: A silent per-user install on the runner, run, then uninstalled
+        # Into a temporary folder, no task (no desktop icon, no PATH change), nothing started. The installed citar.exe
+        # runs; the per-user uninstall key is there. A person's data (%LOCALAPPDATA%\CITAR) survives the silent
+        # uninstall, whose question about it answers No; the folder and the key go.
+        shell: pwsh
+        run: |
+          $setup = "$env:RUNNER_TEMP\installer\CITAR-$env:RELEASE_VERSION-setup.exe"
+          $dir = "$env:RUNNER_TEMP\installed\CITAR"
+          $log = "$env:RUNNER_TEMP\installed-setup.log"
+          $p = Start-Process -FilePath $setup -Wait -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$dir`" /TASKS=`"`" /LOG=`"$log`""
+          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; Write-Error "the installer exited $($p.ExitCode)"; exit 1 }
+          python scripts/ci/check_bundle.py installed --dir $dir --version $env:RELEASE_VERSION `
+            --work "$env:RUNNER_TEMP\installed-check" --out report\windows-installed.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = Join-Path $env:LOCALAPPDATA "CITAR"
+          New-Item -ItemType Directory -Force $data | Out-Null
+          Set-Content (Join-Path $data "keep-me.txt") "a person's saved games"
+          $p = Start-Process -FilePath "$dir\unins000.exe" -Wait -PassThru -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+          python scripts/ci/check_bundle.py uninstalled --dir $dir --wait 180 --out report\windows-uninstalled.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path (Join-Path $data "keep-me.txt"))) { Write-Error "the silent uninstall deleted the person's data"; exit 1 }
+          Write-Host "the person's data in $data was kept"
+          Remove-Item -Recurse -Force $data
+
+      - name: The portable zip, and every file's .sha256
+        # CITAR-V-windows-x64.zip holds the bundle under CITAR/ (Scoop's package).
+        shell: bash
+        run: |
+          python scripts/ci/check_bundle.py zip --dir "$RUNNER_TEMP/bundle/dist/CITAR" --version "$RELEASE_VERSION" \
+            --out windows
+          cp "$RUNNER_TEMP/installer/CITAR-$RELEASE_VERSION-setup.exe" windows/
+          python scripts/ci/check_bundle.py sums "windows/CITAR-$RELEASE_VERSION-setup.exe"
+          ls -l windows
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The release's two Windows assets and their .sha256 (scripts/release.py's windows group).
+        with:
+          name: pkg-windows
+          path: |
+            windows/CITAR-${{ needs.meta.outputs.version }}-setup.exe
+            windows/CITAR-${{ needs.meta.outputs.version }}-setup.exe.sha256
+            windows/CITAR-${{ needs.meta.outputs.version }}-windows-x64.zip
+            windows/CITAR-${{ needs.meta.outputs.version }}-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The bundle's version, label, build and jobs build: package 5-08's assemble holds them to the other builds'.
+        with:
+          name: pkg-windows-report
+          path: report/windows-*.json
           if-no-files-found: error
           retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
 

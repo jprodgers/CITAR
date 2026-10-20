@@ -8,6 +8,7 @@ import { setupState, welcomeBanner } from "./setup.js";
 import { pageHeader } from "./nav.js";
 import { registry } from "./servers.js";
 import { shareButton } from "./share.js";
+import { claudeAddCommand, clientConfig, mcpHint } from "./mcpcommand.js";
 import { CATEGORIES, HANDICAPS, PRESETS, PROMPT_EVERY, firstRefusal, hybridProblem, hybridState, isModelSeat, newHybrid,
   ownersMap, presetOf, seatLabel, seatPayload, seatUpdate } from "./seats.js";
 
@@ -219,13 +220,14 @@ export function showConnectInfo(info, meta) {
     if (agentErr) row.appendChild(el("div", { class: "bad", style: { marginTop: "4px" } }, `Last AI error: ${agentErr}`));
     row.appendChild(extra);
     {
-      const script = (meta && meta.mcp_script) || "citar_mcp.py";
-      const py = (meta && meta.python) || "python";
-      const cmd = `claude mcp add citar-${info.id}-p${s.player} -- "${py}" "${script}" --server ${serverUrl} --game ${info.id} --token ${s.token}`;
+      // The server's own MCP bridge command (/api/meta's mcp_command; in server mode no path of the server's, so a
+      // remote player's own install runs it), then this seat's arguments.
+      const seat = { serverUrl, gameId: info.id, player: s.player, token: s.token };
       row.appendChild(el("details", { style: { marginTop: "6px" } }, el("summary", { class: "muted" }, "MCP / API connection details"),
-        el("div", { class: "muted" }, "Claude Code:"), el("pre", {}, cmd),
+        ...(mcpHint(meta) ? [el("div", { class: "muted" }, mcpHint(meta))] : []),
+        el("div", { class: "muted" }, "Claude Code:"), el("pre", {}, claudeAddCommand(meta, seat)),
         el("div", { class: "muted" }, "Generic MCP client config (stdio):"),
-        el("pre", {}, JSON.stringify({ mcpServers: { [`citar-p${s.player}`]: { command: py, args: [script, "--server", serverUrl, "--game", info.id, "--token", s.token] } } }, null, 2)),
+        el("pre", {}, JSON.stringify(clientConfig(meta, seat), null, 2)),
         el("div", { class: "muted" }, "Raw HTTP: POST /api/games/" + info.id + "/tool with Authorization: Bearer <token> and {\"tool\": ..., \"args\": {...}}"),
         el("div", {}, "Token: ", el("code", {}, s.token))));
     }

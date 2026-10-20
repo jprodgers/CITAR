@@ -275,6 +275,63 @@ class DoctorTests(unittest.TestCase):
         self.assertIn(f"compiled into the engine (ruleset {rules})", r.stdout)
         self.assertIn("failures 0 warnings 0", r.stdout)
 
+    def test_the_doctor_starts_the_job_host_and_says_it_is_verifiable(self):
+        r = child("-c", _DOCTOR_JOBS, "as is")
+        self.assertRegex(r.stdout, r"\[  ok  \] jobs: verifiable: the job host passed its canary and self-check "
+                                   rf"\(started in [0-9.]+ s, jobs build {engine_api.jobs_build()}, ")
+        self.assertIn("failures 0 warnings 0", r.stdout)
+        self.assertIn("host closed", r.stdout)
+
+    def test_the_doctor_says_why_a_job_host_did_not_start(self):
+        """The command the job host is started with (the bundle's before 5-05: ``-m``, which ``citar.exe`` refuses)
+        failing makes the jobs line fail, saying how."""
+        r = child("-c", _DOCTOR_JOBS, "broken")
+        self.assertIn("[ FAIL ] jobs: the job host did not start (died): the job host ended before it was ready: ",
+                      r.stdout)
+        self.assertIn("The lab cannot play its games on this install", r.stdout)
+        self.assertIn("failures 1 warnings 0", r.stdout)
+
+    @unittest.skipUnless(has_test_ops(), "the self-check's test switch needs a build with the test operations")
+    def test_the_doctor_warns_of_a_job_host_that_is_not_verifiable(self):
+        r = child("-c", _DOCTOR_JOBS, "as is", env={"CITAR_JOBS_TEST_SELF_CHECK": "fail"})
+        self.assertIn("[ warn ] jobs: not verifiable: the self-check: failed on purpose (a test switch)", r.stdout)
+        self.assertIn("A modded ruleset (CITAR_RULESET_DIR) does this", r.stdout)
+        self.assertIn("failures 0 warnings 1", r.stdout)
+
+    def test_the_doctor_does_not_check_the_jobs_without_the_engine(self):
+        r = child("-c", _DOCTOR_JOBS, "hide")
+        self.assertIn("[ warn ] jobs: not checked: the engine does not load", r.stdout)
+
+
+#: What `citar doctor` says of the job host, run in a child: as it is, with the extension hidden, or with the host's
+#: command broken (a program that exits at once, as the bundle's `citar.exe -m ...` did). The child says whether every
+#: host it started was closed.
+_DOCTOR_JOBS = """
+import sys
+if sys.argv[1] == "hide":
+    class NoExtension:
+        def find_spec(self, name, path=None, target=None):
+            if name == "citar._engine":
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+    sys.meta_path.insert(0, NoExtension())
+from citar import doctor
+r = doctor.Report()
+started = []
+if sys.argv[1] != "hide":
+    from citar.jobs import host as H
+    if sys.argv[1] == "broken":
+        H.command = lambda kind=None: [sys.executable, "-c", "import sys; sys.exit(5)"]
+    real = H.JobHost.close
+    def close(self, wait=3.0):
+        started.append(self)
+        return real(self, wait)
+    H.JobHost.close = close
+doctor._check_jobs(r)
+if started and all(h._proc.poll() is not None for h in started):
+    print("host closed")
+print("failures", r.failures, "warnings", r.warnings)
+"""
+
 
 #: The ruleset the engine compiles in, in the data layout CITAR_RULESET_DIR names a copy of.
 DATA = ROOT / "crates" / "citar-engine" / "data"

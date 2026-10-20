@@ -457,6 +457,73 @@ class ThePackageWorkflow(unittest.TestCase):
                 "stage/citar-helper-${{ needs.meta.outputs.version }}-${{ matrix.platform }}.*",
             "pkg-helper-report-${{ matrix.platform }}": "report/helper-${{ matrix.platform }}.json"})
 
+    def test_the_windows_bundle_and_installer_come_from_the_wheel(self):
+        """P5.6: the bundle from this run's Windows wheel in a fresh venv (never the checkout), PyInstaller pinned and
+        run with -P from outside the checkout, the bundle's checks, Inno Setup with the three defines, the silent
+        per-user install, run and uninstall, the zip; the release's two Windows assets uploaded."""
+        job = self.jobs["windows"]
+        self.assertEqual(job["needs"], ["meta", "wheels"])
+        self.assertEqual(job["runs-on"], "windows-latest")
+        self.assertEqual(job["if"], "${{ !cancelled() && needs.meta.result == 'success' }}")
+        env = job["env"]
+        self.assertEqual((env["NUMERIC"], env["LABEL"]),
+                         ("${{ needs.meta.outputs.numeric }}", "${{ needs.meta.outputs.label }}"))
+        for name in ("PYINSTALLER_VERSION", "PYINSTALLER_HOOKS_VERSION", "INNO_SETUP_VERSION"):
+            self.assertRegex(env[name], r"^\d+\.\d+(\.\d+)?$", name)
+        self.assertNotIn("CITAR_BUILD_ID", env, "nothing is compiled here: the label is the wheel's")
+        self.assertEqual([s["with"]["python-version"] for s in self.using(job, "actions/setup-python")], ["3.12"])
+        self.assertEqual([(s["with"]["name"], s["with"]["path"]) for s in self.using(job, "actions/download-artifact")],
+                         [("pkg-wheel-windows-x64", "wheel")])
+        steps = job["steps"]
+
+        def at(text):
+            found = [i for i, s in enumerate(steps) if text in s.get("run", "")]
+            self.assertEqual(len(found), 1, text)
+            return found[0]
+
+        order = [at("scripts/release.py prepare"), at('python -m venv "$RUNNER_TEMP/bundle-venv"'),
+                 at("-P -m PyInstaller"), at("check_bundle.py bundle"), at("choco install innosetup"),
+                 at("/DAppVersion="), at("/VERYSILENT"), at("check_bundle.py zip")]
+        self.assertEqual(order, sorted(order))
+        venv = steps[order[1]]["run"]
+        self.assertIn('--only-binary=:all: "$(ls wheel/*.whl)[all]"', venv)
+        self.assertIn('"pyinstaller==$PYINSTALLER_VERSION" "pyinstaller-hooks-contrib==$PYINSTALLER_HOOKS_VERSION"',
+                      venv)
+        bundle = steps[order[2]]["run"]
+        self.assertLess(bundle.index('cd "$RUNNER_TEMP/bundle"'), bundle.index("-P -m PyInstaller"),
+                        "PyInstaller runs from a folder outside the checkout")
+        self.assertIn('-P -m PyInstaller "$GITHUB_WORKSPACE/installer/citar.spec"', bundle)
+        self.assertIn('--distpath "$RUNNER_TEMP/bundle/dist" --workpath "$RUNNER_TEMP/bundle/work"', bundle)
+        check = steps[order[3]]["run"]
+        for words in ('--version "$RELEASE_VERSION"', '--label "$LABEL"',
+                      '--python "$RUNNER_TEMP/bundle-venv/Scripts/python.exe"', "--out report/windows-bundle.json"):
+            self.assertIn(words, check)
+        compile_ = steps[order[5]]["run"]
+        for words in ('"/DAppVersion=$env:RELEASE_VERSION"', '"/DAppVersionNumeric=$env:NUMERIC"',
+                      '"/DBundleDir=$env:RUNNER_TEMP\\bundle\\dist\\CITAR"', '"/O$env:RUNNER_TEMP\\installer"',
+                      "installer\\citar.iss"):
+            self.assertIn(words, compile_)
+        install = steps[order[6]]["run"]
+        for words in ("/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER", '/TASKS=`"`"',
+                      "check_bundle.py installed", 'unins000.exe" -Wait -PassThru -ArgumentList "/VERYSILENT',
+                      "check_bundle.py uninstalled", "keep-me.txt"):
+            self.assertIn(words, install)
+        zip_ = steps[order[7]]["run"]
+        self.assertIn('cp "$RUNNER_TEMP/installer/CITAR-$RELEASE_VERSION-setup.exe" windows/', zip_)
+        self.assertIn('check_bundle.py sums "windows/CITAR-$RELEASE_VERSION-setup.exe"', zip_)
+        for step in steps:
+            self.assertNotIn("make_icon", step.get("run", ""), "the icon is committed; nothing writes the checkout")
+        uploads = {s["with"]["name"]: s["with"]["path"] for s in self.using(job, "actions/upload-artifact")}
+        self.assertEqual(set(uploads), {"pkg-windows", "pkg-windows-report"})
+        self.assertEqual(uploads["pkg-windows-report"], "report/windows-*.json")
+        # exactly the release's Windows assets (scripts/release.py's windows group), each with its .sha256
+        release = load_release()
+        want = [a["name"].replace("9.9.9", "${{ needs.meta.outputs.version }}") for a in release.assets("9.9.9")
+                if a["group"] == "windows"]
+        self.assertEqual(len(want), 2, want)
+        self.assertEqual(sorted(uploads["pkg-windows"].splitlines()),
+                         sorted(f"windows/{name}{sha}" for name in want for sha in ("", ".sha256")))
+
     def test_the_helper_manifest_is_signed_with_a_throwaway_key_and_verified_twice(self):
         job = self.jobs["helper-manifest"]
         self.assertEqual(job["needs"], ["meta", "helpers"])
