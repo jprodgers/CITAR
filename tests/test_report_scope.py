@@ -6,6 +6,7 @@ administrator's covers everything. ``/r/{slug}`` serves a `link` report by its k
 key), and 404s otherwise. The usage ledger here is made up, in a folder of its own.
 """
 import tests  # temporary saves folder and server registry; must be imported before citar
+import itertools
 import json
 import os
 import secrets
@@ -302,6 +303,8 @@ class PublicReportPage(unittest.TestCase):
     """``GET /r/{slug}``: a `link` report by its key, a `global` one by its id or key, 404 for anything else, its owner
     and administrators included (who read it in the app)."""
 
+    serial = itertools.count(1)
+
     @classmethod
     def setUpClass(cls):
         from fastapi.testclient import TestClient
@@ -331,7 +334,9 @@ class PublicReportPage(unittest.TestCase):
                 row, raw = sessions.start(s, u)
                 self.headers[handle] = {"cookie": f"{sessions.COOKIE_NAME}={raw}", sessions.CSRF_HEADER: row.csrf_token,
                                         "origin": "https://citar.test"}
-            self.rid = "20261011-120000-" + secrets.token_hex(2)
+            # A new folder per test: the class's reports folder keeps every earlier test's, and two random bytes
+            # repeated once (macOS CI at 016ef3e: FileExistsError in this mkdir).
+            self.rid = f"20261011-120000-{next(PublicReportPage.serial):04x}"
             folder = reports_api._runner.dir / self.rid
             folder.mkdir(parents=True)
             (folder / "report.html").write_text("<!doctype html><title>QA</title><p>the published figures</p>",
