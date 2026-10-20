@@ -18,7 +18,8 @@ dropped there, and the state ones (``CITAR_STATE_DIR``, ``CITAR_DATA_DIR``, ``CI
   the installed distribution's version is ``V``'s PEP 440 form; the ruleset's counts are sane; the web client, the
   migrations and the hardware collectors are in the package;
 - the state directory is ``WORK/state``, and with the variables unset it would still be outside ``site-packages``;
-- ``citar --version`` says ``CITAR V``; ``citar where`` and ``citar doctor --quiet`` exit 0;
+- ``citar --version`` says ``CITAR V``; ``citar where`` and ``citar doctor --quiet`` exit 0, and ``citar doctor``'s jobs
+  line says the job host it started from the installed copy (``python -P -m citar.jobs host``) is verifiable;
 - **a job host** (``citar.jobs.host.JobHost``) with tiny limits (one thread, 25% of the machine, 256 MB) reaches
   ``ready`` with this build's jobs build and ``verifiable`` true: its canary passed and it replayed the shortest golden
   job to the committed hashes on this platform (design/phase4-helper.md P4.4.3);
@@ -427,11 +428,15 @@ def inside(args) -> int:
     venv_env = dict(os.environ)
     out = run([venv_script(venv, "citar"), "--version"], "citar --version", timeout=COMMAND_TIMEOUT, env=venv_env)
     check(out.strip() == f"CITAR {version.text}", f"citar --version said {out.strip()!r}", out.strip())
-    for argv in (["where"], ["doctor", "--quiet"]):
+    for argv in (["where"], ["doctor", "--quiet"], ["doctor"]):
         out = run([venv_script(venv, "citar"), *argv], f"citar {' '.join(argv)}", timeout=COMMAND_TIMEOUT,
                   env=venv_env)
         print("".join(f"    {line}\n" for line in out.splitlines()), end="", flush=True)
-    say("ok: citar --version, where and doctor --quiet exit 0")
+    say("ok: citar --version, where, doctor --quiet and doctor exit 0")
+    jobs = re.search(r"^\[(.{6})\] jobs: (.*)$", out, re.M)
+    check(jobs is not None and jobs.group(1) == "  ok  " and jobs.group(2).startswith("verifiable"),
+          f"citar doctor's jobs line is not verifiable: {jobs.group(0) if jobs else 'none printed'}",
+          f"citar doctor: the job host it started is {jobs.group(2) if jobs else ''}")
 
     record = play_lab_job(version, info, args)
     record.update({"smoke": 1, "platform": args.platform, "python": platform.python_version(),

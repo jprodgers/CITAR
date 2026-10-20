@@ -428,7 +428,9 @@ class Soak:
         try:
             self.client = self.server.start()
             meta = self.client.get("/api/meta").json()
-            r.data["server"] = {"port": self.server.port, "state": str(state), "engine": meta.get("engine")}
+            # /api/meta's version and build label (it has never had an "engine" key)
+            r.data["server"] = {"port": self.server.port, "state": str(state), "version": meta.get("version"),
+                                "label": meta.get("label")}
             seats = [{"type": "mcp", "name": "Soak model"}] + [{"type": "bot"}] * self.args.bots
             created = self.client.post("/api/games", json={
                 "name": "server soak", "config": {"map_size": self.args.size, "seed": self.args.seed},
