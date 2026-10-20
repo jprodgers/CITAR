@@ -5,8 +5,9 @@
 //! struct from its schema (registered in 2-00a, written in 2-01a); `perf` runs the criterion
 //! suites and holds them to their budgets (perfgate, 1e-03; the `games` suite from 2-00a);
 //! `develop` builds the Python extension for the laptop's venv (DESIGN.md P2.6.7, 2-06a);
-//! `keygen`, `helper-manifest` and `sign-manifest` are the release side of the helper's update
-//! channel (design/phase4-helper.md P4.3.8, 4-13).
+//! `keygen`, `helper-manifest`, `sign-manifest` and `verify-manifest` are the release side of the
+//! helper's update channel (design/phase4-helper.md P4.3.8, 4-13; design/phase5-release.md P5.4.2,
+//! 5-03).
 
 #![forbid(unsafe_code)]
 
@@ -48,7 +49,10 @@ commands:
            citar-helper-manifest.json over the release's helper binaries in DIR
   sign-manifest (--key FILE | --key-env NAME) MANIFEST [--out SIG]
            MANIFEST.sig, the manifest signed for the helpers' updates; refuses a key file inside
-           this repository or any git working tree (exit 0 signed, 1 failed, 2 refused)";
+           this repository or any git working tree (exit 0 signed, 1 failed, 2 refused)
+  verify-manifest --pub FILE MANIFEST [SIG]
+           whether SIG (MANIFEST.sig) signs MANIFEST with a public key of FILE (update-keys.pub's
+           format), as a helper checks it (exit 0 verified, 1 does not verify, 2 refused)";
 
 fn workspace_root() -> PathBuf {
     // xtask/ sits at the root; this is fixed at build time, so each worktree checks itself.
@@ -103,7 +107,10 @@ fn main() -> ExitCode {
             let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
             perf::run(&workspace_root(), &rest)
         }
-        [command @ ("keygen" | "helper-manifest" | "sign-manifest"), rest @ ..] => {
+        [
+            command @ ("keygen" | "helper-manifest" | "sign-manifest" | "verify-manifest"),
+            rest @ ..,
+        ] => {
             let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
             manifest::run(&workspace_root(), command, &rest)
         }

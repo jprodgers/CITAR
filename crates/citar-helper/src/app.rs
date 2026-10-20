@@ -612,6 +612,36 @@ fn update_command(cli: &Cli, home: &Home, action: &UpdateAction, log: &Log) -> R
     }
 }
 
+/// `update check`'s `updates:` line: what this build does with an update its server relays. A build
+/// that trusts no key reports every manifest `unavailable` whatever its policy (the release's
+/// helpers until the owner's key is committed, design/phase5-release.md P5.4.2); a package
+/// manager's build defaults to `notify` and refuses `auto` (P4.3.8), which it says rather than
+/// letting `auto` read as if it would install.
+fn updates_line(
+    no_key: bool,
+    packaged: bool,
+    policy: &Result<crate::protocol::UpdatePolicy, String>,
+) -> String {
+    use crate::protocol::UpdatePolicy;
+    let policy = match policy {
+        Err(e) => format!("unknown ({e})"),
+        Ok(UpdatePolicy::Auto) if packaged => {
+            "auto, which a packaged build refuses: update it through your package manager"
+                .to_owned()
+        }
+        Ok(UpdatePolicy::Notify) if packaged => {
+            "notify (a packaged build: its package manager updates it)".to_owned()
+        }
+        Ok(p) if packaged => format!("{} (a packaged build)", p.as_str()),
+        Ok(p) => p.as_str().to_owned(),
+    };
+    if no_key {
+        format!("unavailable, this build trusts no update key; policy: {policy}")
+    } else {
+        policy
+    }
+}
+
 /// `update check`: what this helper knows of updates.
 fn update_check(cli: &Cli, home: &Home, dir: &UpdateDir) {
     println!("{}", version::build_info().line());
@@ -621,12 +651,8 @@ fn update_check(cli: &Cli, home: &Home, dir: &UpdateDir) {
         keys.len(),
         if keys.is_empty() { " (this build does not update itself)" } else { "" }
     );
-    let policy = config::resolve(&Sources { opts: &cli.opts, env: &env, home }, None)
-        .map_or_else(|e| format!("unknown ({e})"), |c| c.updates.as_str().to_owned());
-    println!(
-        "updates: {policy}{}",
-        if cfg!(feature = "packaged") { " (a packaged build)" } else { "" }
-    );
+    let policy = config::updates(&cli.opts, home);
+    println!("updates: {}", updates_line(keys.is_empty(), cfg!(feature = "packaged"), &policy));
     match dir.kept_manifest() {
         None => println!("the server has relayed no update manifest to this home yet"),
         Some((text, sig)) => match citar_jobs::update::verify(text.as_bytes(), &sig, &keys) {
@@ -1203,6 +1229,30 @@ mod tests {
         let _fresh = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).expect("a scratch directory");
         d
+    }
+
+    /// `update check`'s `updates:` line: unavailable without a key whatever the policy; a packaged
+    /// build's notify says so, and its auto is said to be refused (the run's warning, P4.3.8).
+    #[test]
+    fn update_checks_line_says_unavailable_and_a_packaged_builds_refusal() {
+        use crate::protocol::UpdatePolicy::{Auto, Notify, Off};
+        let line = |no_key, packaged, p| updates_line(no_key, packaged, &Ok(p));
+        assert_eq!(line(false, false, Auto), "auto");
+        assert_eq!(line(false, false, Notify), "notify");
+        assert_eq!(line(false, true, Off), "off (a packaged build)");
+        assert_eq!(
+            line(false, true, Notify),
+            "notify (a packaged build: its package manager updates it)"
+        );
+        assert!(line(false, true, Auto).starts_with("auto, which a packaged build refuses"));
+        let none = line(true, true, Notify);
+        assert!(
+            none.starts_with("unavailable, this build trusts no update key; policy: notify"),
+            "{none}"
+        );
+        assert!(line(true, false, Auto).ends_with("policy: auto"));
+        let unknown = updates_line(false, false, &Err("helper.json: updates must be".to_owned()));
+        assert_eq!(unknown, "unknown (helper.json: updates must be)");
     }
 
     /// Ctrl-C's listener is installed only when the session starts: not before the settings are

@@ -479,6 +479,45 @@ pub fn endpoint(
     endpoint_part(opts, &data, env, &file)
 }
 
+/// The update policy from `--updates`, then the settings file's `updates`, then the build's
+/// default: `notify` in a package manager's build (P4.3.8: it reports updates and leaves installing
+/// them to the package manager; `auto` said there is refused when an update comes,
+/// `crate::update`), else `auto`.
+fn update_policy(
+    opts: &Options,
+    data: &Map<String, Value>,
+    file: &str,
+) -> Result<UpdatePolicy, String> {
+    // A value of another type is refused, as for every new key: `"updates": false` must not
+    // quietly mean the most permissive policy.
+    let from_file = match data.get("updates") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(other) => {
+            return Err(format!("{file}: updates must be auto, notify or off, not {other}"));
+        }
+    };
+    match opts.updates.as_deref().or(from_file) {
+        None if cfg!(feature = "packaged") => Ok(UpdatePolicy::Notify),
+        None | Some("auto") => Ok(UpdatePolicy::Auto),
+        Some("notify") => Ok(UpdatePolicy::Notify),
+        Some("off") => Ok(UpdatePolicy::Off),
+        Some(other) => Err(format!("{file}: updates must be auto, notify or off, not {other:?}")),
+    }
+}
+
+/// The update policy alone, read as [`resolve`] reads it (the flag, then `--config FILE` or
+/// `home`'s `helper.json`, then the build's default), for `update check`: it needs no server or
+/// token, so a helper a package manager has just installed, with no `helper.json` yet, still says
+/// its policy. It asks nothing and writes nothing.
+///
+/// # Errors
+/// A settings file that cannot be read, or an `updates` it cannot take.
+pub fn updates(opts: &Options, home: &Home) -> Result<UpdatePolicy, String> {
+    let (data, file) = settings_file(opts, Some(home))?;
+    update_policy(opts, &data, &file)
+}
+
 /// The effective settings, as protocol 1's `build_config` made them, with protocol 2's added.
 /// `prompt` is the terminal when a person is there to answer the first-run questions.
 ///
@@ -521,26 +560,7 @@ pub fn resolve(src: &Sources<'_>, prompt: Option<&mut dyn Prompt>) -> Result<Con
         &file,
     )?
     .unwrap_or_default();
-    // A value of another type is refused, as for every new key: `"updates": false` must not
-    // quietly mean the most permissive policy.
-    let from_file = match data.get("updates") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(s.as_str()),
-        Some(other) => {
-            return Err(format!("{file}: updates must be auto, notify or off, not {other}"));
-        }
-    };
-    let updates = match opts.updates.as_deref().or(from_file) {
-        // A package manager's build reports updates and leaves installing them to the package
-        // manager (P4.3.8); `auto` given there is refused when an update comes (`crate::update`).
-        None if cfg!(feature = "packaged") => UpdatePolicy::Notify,
-        None | Some("auto") => UpdatePolicy::Auto,
-        Some("notify") => UpdatePolicy::Notify,
-        Some("off") => UpdatePolicy::Off,
-        Some(other) => {
-            return Err(format!("{file}: updates must be auto, notify or off, not {other:?}"));
-        }
-    };
+    let updates = update_policy(opts, &data, &file)?;
     let stream = match data.get("stream") {
         None | Some(Value::Null) => true,
         Some(Value::Bool(b)) => *b,
@@ -849,6 +869,27 @@ mod tests {
         }
         // Even beside a flag that names one: the file is wrong either way.
         assert!(policy(format!(r#"{{{base}, "updates": false}}"#), &["--updates", "off"]).is_err());
+        std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    /// `update check` reads the policy with no server or token: a home a package manager has just
+    /// installed into has no `helper.json`, and its build's default is still said.
+    #[test]
+    fn the_policy_alone_needs_no_server_or_token() {
+        let dir = scratch("updates-alone");
+        let home = Home::at(&dir);
+        let default =
+            if cfg!(feature = "packaged") { UpdatePolicy::Notify } else { UpdatePolicy::Auto };
+        let env = |_: &str| -> Option<OsString> { None };
+        assert_eq!(updates(&opts(&[]), &home), Ok(default), "no helper.json at all");
+        assert!(resolve(&Sources { opts: &opts(&[]), env: &env, home: &home }, None).is_err());
+        std::fs::write(home.config_file(), r#"{"updates": "auto"}"#).expect("written");
+        assert_eq!(updates(&opts(&[]), &home), Ok(UpdatePolicy::Auto));
+        assert_eq!(updates(&opts(&["--updates", "off"]), &home), Ok(UpdatePolicy::Off));
+        std::fs::write(home.config_file(), r#"{"updates": "never"}"#).expect("written");
+        assert!(updates(&opts(&[]), &home).expect_err("not a policy").contains("updates must be"));
+        std::fs::write(home.config_file(), "{not json").expect("written");
+        assert!(updates(&opts(&[]), &home).is_err(), "a file that does not read");
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 }

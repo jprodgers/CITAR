@@ -20,17 +20,26 @@
 //!   working tree (so one known to git too), reads the key from an environment variable instead
 //!   with `--key-env` (CI: the `helper-signing` environment's secret, never written to disk), and
 //!   says when this tree's `update-keys.pub` does not trust the key it signed with.
+//! - `cargo xtask verify-manifest --pub FILE MANIFEST [SIG]` (design/phase5-release.md P5.4.2,
+//!   5-03): whether `SIG` (by default `MANIFEST.sig`) is a signature over the domain and the
+//!   manifest's bytes by one of the public keys in `FILE` (`update-keys.pub`'s format: one standard
+//!   base64 key a line, blank and `#` lines read past), checked as a helper checks it
+//!   (`verify_strict`), then that the signed file is a manifest a helper reads (its size, `v` 1,
+//!   its assets). It names the key's line. package.yml's `helper-manifest` job proves a throwaway
+//!   key's signature with it, and release.yml's signing job holds the real signature to each line
+//!   of the committed `update-keys.pub` with it; `scripts/ci/verify_manifest.py` checks the same
+//!   with code that shares nothing with this.
 //!
-//! xtask links no workspace crate (its row of the crate graph is empty), so it signs with
-//! `ed25519-dalek` directly over the manifest file's bytes: the domain is the one thing it shares
-//! with `citar_jobs::update`, whose test holds the two copies equal.
+//! xtask links no workspace crate (its row of the crate graph is empty), so it signs and verifies
+//! with `ed25519-dalek` directly over the manifest file's bytes: the domain is the one thing it
+//! shares with `citar_jobs::update`, whose test holds the two copies equal.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -47,6 +56,9 @@ pub const PUB_FILE: &str = "citar-update-signing.pub";
 pub const KEY_KIND: &str = "citar-helper-update-signing-key";
 /// The manifest's file name.
 pub const MANIFEST_FILE: &str = "citar-helper-manifest.json";
+/// The largest manifest a helper reads (`citar_jobs::update::MANIFEST_MAX_BYTES`), so the largest
+/// `verify-manifest` passes.
+pub const MANIFEST_MAX_BYTES: usize = 65_536;
 /// Where a release's assets are downloaded from, `{version}` replaced.
 pub const DEFAULT_BASE_URL: &str =
     "https://github.com/jprodgers/CITAR/releases/download/v{version}";
@@ -78,6 +90,7 @@ pub fn run(root: &Path, command: &str, args: &[String]) -> ExitCode {
         "keygen" => keygen(root, args),
         "helper-manifest" => helper_manifest(args),
         "sign-manifest" => sign_manifest(root, args, &|name| std::env::var(name).ok()),
+        "verify-manifest" => verify_manifest(args),
         other => Err(refused(format!("no command {other}"))),
     };
     match done {
@@ -346,9 +359,18 @@ pub fn read_version_line(line: &str) -> Option<Probed> {
     })
 }
 
-/// Runs `exe --version`, when it runs here.
+/// Runs `exe --version`, when it runs here. A release build has no development guard, so without
+/// `--home` it would read the per-user home of whoever runs this (a machine key's fingerprint):
+/// it is given a folder of its own that does not exist, so it reads nothing and writes nothing.
 fn probe(exe: &Path) -> Option<Probed> {
-    let out = Command::new(exe).arg("--version").output().ok()?;
+    let home = std::env::temp_dir().join(format!("citar-xtask-probe-{}", std::process::id()));
+    let out = Command::new(exe)
+        .arg("--version")
+        .arg("--home")
+        .arg(&home)
+        .env("CITAR_DATA_DIR", &home)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -563,6 +585,129 @@ fn sign_manifest(
     Ok(())
 }
 
+/// The public keys a key file holds, each with its line number: `update-keys.pub`'s format (one
+/// standard-base64 ed25519 public key a line; blank lines and lines starting with `#` read past).
+/// A line's text is never echoed, so a private key's file given by mistake is not printed.
+///
+/// # Errors
+/// The first line that is not a public key, by its number.
+pub fn public_keys(text: &str) -> Result<Vec<(usize, VerifyingKey)>, String> {
+    let mut keys = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let key = STANDARD
+            .decode(line)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .and_then(|b| VerifyingKey::from_bytes(&b).ok())
+            .ok_or_else(|| {
+                format!(
+                    "line {} is not a public key (standard base64 of an ed25519 key's 32 bytes)",
+                    i + 1
+                )
+            })?;
+        keys.push((i + 1, key));
+    }
+    Ok(keys)
+}
+
+/// The line of the first key in `keys` whose signature `signature` (standard base64) is, over
+/// [`MANIFEST_DOMAIN`] and `manifest`'s bytes, checked strictly as a helper checks it.
+///
+/// # Errors
+/// The signature is not one, or no key in `keys` made it.
+pub fn verified_by(
+    manifest: &[u8],
+    signature: &str,
+    keys: &[(usize, VerifyingKey)],
+) -> Result<usize, String> {
+    let bytes = STANDARD
+        .decode(signature.trim())
+        .map_err(|e| format!("the signature is not standard base64: {e}"))?;
+    let bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|b: Vec<u8>| format!("the signature is {} bytes, not 64", b.len()))?;
+    let sig = Signature::from_bytes(&bytes);
+    let mut msg = MANIFEST_DOMAIN.to_vec();
+    msg.extend_from_slice(manifest);
+    keys.iter().find(|(_, k)| k.verify_strict(&msg, &sig).is_ok()).map(|(line, _)| *line).ok_or_else(
+        || "the signature does not verify against any key given (a bad signature, a changed manifest, or another key)"
+            .to_owned(),
+    )
+}
+
+/// Why a signed file is not a manifest a helper reads, if it is not: its size, `v` 1, its assets.
+fn manifest_problem(bytes: &[u8]) -> Option<String> {
+    if bytes.len() > MANIFEST_MAX_BYTES {
+        return Some(format!(
+            "it is {} bytes, over the {MANIFEST_MAX_BYTES} a helper reads",
+            bytes.len()
+        ));
+    }
+    let doc: Value = match serde_json::from_slice(bytes) {
+        Ok(doc) => doc,
+        Err(e) => return Some(format!("it is not JSON: {e}")),
+    };
+    if doc.get("v") != Some(&json!(1)) {
+        return Some("its v is not 1".to_owned());
+    }
+    match doc.get("assets").and_then(Value::as_object) {
+        Some(a) if !a.is_empty() => None,
+        _ => Some("it lists no assets".to_owned()),
+    }
+}
+
+/// `verify-manifest --pub FILE MANIFEST [SIG]`.
+fn verify_manifest(args: &[String]) -> Result<(), Stop> {
+    let (named, bare) = flags(args, &["pub"])?;
+    let (manifest, sig) = match bare.as_slice() {
+        [m] => {
+            let mut s = PathBuf::from(m).into_os_string();
+            s.push(".sig");
+            (PathBuf::from(m), PathBuf::from(s))
+        }
+        [m, s] => (PathBuf::from(m), PathBuf::from(s)),
+        _ => {
+            return Err(refused(
+                "it verifies one manifest: verify-manifest --pub FILE MANIFEST [SIG]",
+            ));
+        }
+    };
+    let pub_file = PathBuf::from(
+        flag(&named, "pub")
+            .ok_or_else(|| refused("it needs --pub FILE, the public keys to trust"))?,
+    );
+    let text = std::fs::read_to_string(&pub_file)
+        .map_err(|e| refused(format!("{}: {e}", pub_file.display())))?;
+    let keys = public_keys(&text).map_err(|e| refused(format!("{}: {e}", pub_file.display())))?;
+    if keys.is_empty() {
+        return Err(refused(format!("{} holds no public key", pub_file.display())));
+    }
+    let bytes =
+        std::fs::read(&manifest).map_err(|e| failed(format!("{}: {e}", manifest.display())))?;
+    let signature =
+        std::fs::read_to_string(&sig).map_err(|e| failed(format!("{}: {e}", sig.display())))?;
+    let line = verified_by(&bytes, &signature, &keys)
+        .map_err(|e| failed(format!("{} ({}): {e}", manifest.display(), sig.display())))?;
+    if let Some(why) = manifest_problem(&bytes) {
+        return Err(failed(format!(
+            "{} is signed, but no helper reads it as a manifest: {why}",
+            manifest.display()
+        )));
+    }
+    let key = keys.iter().find(|(l, _)| *l == line).map(|(_, k)| STANDARD.encode(k.to_bytes()));
+    println!(
+        "verified: {} is signed by the key on line {line} of {} ({})",
+        manifest.display(),
+        pub_file.display(),
+        key.unwrap_or_default()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +844,129 @@ mod tests {
         )
         .expect_err("not a key");
         assert!(e.1.contains("not an update-signing key file"), "{}", e.1);
+        std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    /// A manifest helpers read, signed by `key` into `dir`: its path, its signature's, and the
+    /// public key files of `key` and of another key.
+    fn signed_manifest(dir: &Path, key: &SigningKey) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        std::fs::create_dir_all(dir).expect("made");
+        let manifest = dir.join(MANIFEST_FILE);
+        let text = format!(
+            "{{\"v\": 1, \"version\": \"0.1.7\", \"protocol\": 2, \"build\": \"0b412a18fe95\", \
+             \"released_at\": \"2026-11-01T00:00:00Z\", \"assets\": {{\"x86_64-unknown-linux-gnu\": \
+             {{\"name\": \"citar-helper-linux-x64\", \"url\": \"https://example.com/x\", \
+             \"sha256\": \"{}\", \"size\": 13}}}}}}\n",
+            "ab".repeat(32)
+        );
+        std::fs::write(&manifest, &text).expect("written");
+        let sig = dir.join(format!("{MANIFEST_FILE}.sig"));
+        std::fs::write(&sig, signature(text.as_bytes(), key) + "\n").expect("written");
+        let ours = dir.join("ours.pub");
+        std::fs::write(&ours, format!("{}\n", STANDARD.encode(key.verifying_key().to_bytes())))
+            .expect("written");
+        let other = dir.join("other.pub");
+        let another = SigningKey::from_bytes(&[42; 32]);
+        std::fs::write(
+            &other,
+            format!("{}\n", STANDARD.encode(another.verifying_key().to_bytes())),
+        )
+        .expect("written");
+        (manifest, sig, ours, other)
+    }
+
+    #[test]
+    fn verify_manifest_passes_its_key_and_fails_another_key_and_a_changed_byte() {
+        let dir = scratch("verify");
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let (manifest, sig, ours, other) = signed_manifest(&dir, &key);
+        let p = |x: &Path| x.to_string_lossy().into_owned();
+        // Its key, with the signature named and by default beside the manifest.
+        verify_manifest(&s(&["--pub", &p(&ours), &p(&manifest), &p(&sig)])).expect("verifies");
+        verify_manifest(&s(&["--pub", &p(&ours), &p(&manifest)])).expect("MANIFEST.sig by default");
+        // Another key fails (exit 1), and passes once the file holds ours too, on its second key line.
+        let e = verify_manifest(&s(&["--pub", &p(&other), &p(&manifest)])).expect_err("other key");
+        assert_eq!(e.0, 1, "{}", e.1);
+        assert!(e.1.contains("does not verify"), "{}", e.1);
+        let both = dir.join("both.pub");
+        let text = format!(
+            "# the next key, then the current one\n{}\n{}\n",
+            std::fs::read_to_string(&other).expect("read").trim(),
+            std::fs::read_to_string(&ours).expect("read").trim()
+        );
+        std::fs::write(&both, text).expect("written");
+        let keys = public_keys(&std::fs::read_to_string(&both).expect("read")).expect("keys");
+        let bytes = std::fs::read(&manifest).expect("read");
+        let sig_text = std::fs::read_to_string(&sig).expect("read");
+        assert_eq!(verified_by(&bytes, &sig_text, &keys), Ok(3), "the key on line 3");
+        verify_manifest(&s(&["--pub", &p(&both), &p(&manifest)])).expect("either key");
+        // Every single byte changed fails, the first, a middle one and the last (its newline).
+        for at in [0, bytes.len() / 2, bytes.len() - 1] {
+            let mut changed = bytes.clone();
+            changed[at] ^= 0x01;
+            let e = verified_by(&changed, &sig_text, &keys).expect_err("changed");
+            assert!(e.contains("does not verify"), "{at}: {e}");
+        }
+        let changed = dir.join("changed.json");
+        let mut one = bytes.clone();
+        one[10] ^= 0x20;
+        std::fs::write(&changed, &one).expect("written");
+        let e =
+            verify_manifest(&s(&["--pub", &p(&ours), &p(&changed), &p(&sig)])).expect_err("byte");
+        assert_eq!(e.0, 1, "{}", e.1);
+        // A signature over the bytes alone (no domain), and one that is not one.
+        let bare = STANDARD.encode(key.sign(&bytes).to_bytes());
+        assert!(verified_by(&bytes, &bare, &keys).is_err(), "the domain is part of what is signed");
+        assert!(verified_by(&bytes, "AAAA", &keys).expect_err("short").contains("not 64"));
+        assert!(verified_by(&bytes, "not base64!", &keys).expect_err("junk").contains("base64"));
+        std::fs::remove_dir_all(&dir).expect("cleaned");
+    }
+
+    #[test]
+    fn verify_manifest_refuses_a_key_file_that_is_not_one_and_a_file_no_helper_reads() {
+        let dir = scratch("verify-refusals");
+        let key = SigningKey::from_bytes(&[11; 32]);
+        let (manifest, sig, ours, _other) = signed_manifest(&dir, &key);
+        let p = |x: &Path| x.to_string_lossy().into_owned();
+        // The private key's file given as --pub: refused by its line, the secret never printed.
+        let private = dir.join("private.key");
+        std::fs::write(&private, key_json(&key)).expect("written");
+        let e = verify_manifest(&s(&["--pub", &p(&private), &p(&manifest)])).expect_err("not pub");
+        assert_eq!(e.0, 2, "{}", e.1);
+        assert!(e.1.contains("line 1 is not a public key"), "{}", e.1);
+        assert!(!e.1.contains(&STANDARD.encode(key.to_bytes())), "the secret is never echoed");
+        // An empty key file (the committed update-keys.pub before the owner's key), no --pub, two
+        // manifests.
+        let empty = dir.join("empty.pub");
+        std::fs::write(&empty, "# no key yet\n\n").expect("written");
+        let e = verify_manifest(&s(&["--pub", &p(&empty), &p(&manifest)])).expect_err("empty");
+        assert!(e.0 == 2 && e.1.contains("holds no public key"), "{}", e.1);
+        assert_eq!(verify_manifest(&s(&[&p(&manifest)])).expect_err("no --pub").0, 2);
+        let e = verify_manifest(&s(&["--pub", &p(&ours), "a", "b", "c"])).expect_err("three");
+        assert_eq!(e.0, 2, "{}", e.1);
+        // Signed by the key, but not a manifest a helper reads: an array, and one too large.
+        for (name, body) in [
+            ("array.json", b"[1, 2, 3]\n".to_vec()),
+            ("large.json", {
+                let mut b = b"{\"v\": 1, \"pad\": \"".to_vec();
+                b.resize(MANIFEST_MAX_BYTES + 10, b'x');
+                b.extend_from_slice(b"\", \"assets\": {}}");
+                b
+            }),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, &body).expect("written");
+            let sig_path = dir.join(format!("{name}.sig"));
+            std::fs::write(&sig_path, signature(&body, &key)).expect("written");
+            let e = verify_manifest(&s(&["--pub", &p(&ours), &p(&path)])).expect_err(name);
+            assert!(e.0 == 1 && e.1.contains("no helper reads it"), "{name}: {}", e.1);
+        }
+        // A signature file that is missing fails; the manifest checked above still verifies.
+        std::fs::remove_file(&sig).expect("removed");
+        assert_eq!(
+            verify_manifest(&s(&["--pub", &p(&ours), &p(&manifest)])).expect_err("no sig").0,
+            1
+        );
         std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 
