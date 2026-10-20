@@ -25,15 +25,21 @@ Every host is held to at most two cores' worth and 512 MB (P4.7.1).
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import shutil
 import statistics
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from citar import engine_api, lab
+from citar import engine_api, lab, paths
 from citar.jobs import host as H
 from tests import has_test_ops
 
@@ -390,6 +396,81 @@ class ParentRules(unittest.TestCase):
         from citar.jobs import __main__ as M
         self.assertEqual(M.main([]), 2)
         self.assertEqual(M.main(["other"]), 2)
+
+
+#: A package called ``citar`` planted in a job host's working directory: imported, it leaves a file there and exits 97.
+PLANTED = ("import os, sys\n"
+           "open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'planted-ran'), 'w').close()\n"
+           "sys.exit(97)\n")
+
+
+class Commands(unittest.TestCase):
+    """The host's command per kind of install (design/phase5-release.md P5.6): ``python -P -m citar.jobs host`` for a
+    wheel and a checkout (a checkout's folder through ``PYTHONPATH``), ``citar.exe jobs-host`` in the bundle."""
+
+    def test_a_wheel_and_a_checkout_run_this_python_with_P(self):
+        for kind in ("wheel", "checkout"):
+            self.assertEqual(H.command(kind), [sys.executable, "-P", "-m", "citar.jobs", "host"])
+        self.assertEqual(H.command(), H.command(paths.install_kind()))
+        self.assertEqual(H.command_env("wheel"), {})
+        self.assertEqual(H.command_env("frozen"), {})
+        self.assertEqual(H.command_env("checkout", {}), {"PYTHONPATH": str(paths.ROOT)})
+        self.assertEqual(H.command_env("checkout", {"PYTHONPATH": "elsewhere"}),
+                         {"PYTHONPATH": str(paths.ROOT) + os.pathsep + "elsewhere"})
+        # a host started with its own command takes them; one given another argv does not
+        self.assertTrue(H.JobHost(1, two_cores(), 300, scope=False)._own_command)
+        self.assertFalse(H.JobHost(1, two_cores(), 300, scope=False, argv=[sys.executable])._own_command)
+
+    def test_the_bundle_runs_citar_exe_jobs_host_beside_the_running_program(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = "citar.exe" if os.name == "nt" else "citar"
+            for running in ("citar-play.exe", "citar.exe"):
+                with mock.patch.object(sys, "executable", str(Path(tmp) / "CITAR" / running)):
+                    self.assertEqual(H.command("frozen"), [str(Path(tmp).resolve() / "CITAR" / exe), "jobs-host"])
+                    with mock.patch.object(sys, "frozen", True, create=True):
+                        self.assertEqual(H.command(), [str(Path(tmp).resolve() / "CITAR" / exe), "jobs-host"])
+
+    def test_the_hidden_command_is_the_host_and_takes_no_argument(self):
+        from citar import cli
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(cli.main(["jobs-host", "now"]), 2)
+        self.assertIn("usage: citar jobs-host", err.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            cli.main(["--help"])
+        self.assertNotIn("jobs-host", out.getvalue())
+        # what a bundle's citar.exe jobs-host runs, as this Python runs it: a host, ready and verifiable
+        argv = [sys.executable, "-P", "-c", "import sys; from citar.cli import main; sys.exit(main(['jobs-host']))"]
+        host = H.JobHost(1, two_cores(), 300, argv=argv, env=H.command_env(), scope=False)
+        host.start()
+        self.addCleanup(host.close)
+        self.assertEqual(host.ready["jobs_build"], engine_api.jobs_build())
+        self.assertTrue(host.ready["verifiable"], host.ready)
+
+    def run_in(self, work: Path, argv: list) -> subprocess.CompletedProcess:
+        """``argv`` started as a server starts its host, from ``work``, given its limits; its input then closes."""
+        limits = {"t": "limits", "jobs_build": engine_api.jobs_build(), "threads": 1, "cpu_percent": two_cores(),
+                  "memory_mb": 300}
+        return subprocess.run(argv, cwd=work, env={**os.environ, **H.command_env()}, capture_output=True,
+                              input=(json.dumps(limits) + "\n").encode(), timeout=300)
+
+    def test_a_package_planted_in_the_working_directory_is_not_imported(self):
+        """A server's working directory is its state directory, written by the service: a ``citar`` there must never
+        shadow the package. With ``-P`` the host is the real one; without it, the planted one runs."""
+        work = Path(tempfile.mkdtemp(prefix="citar-host-cwd-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        (work / "citar").mkdir()
+        (work / "citar" / "__init__.py").write_text(PLANTED, encoding="utf-8")
+        marker = work / "planted-ran"
+        done = self.run_in(work, H.command())
+        self.assertFalse(marker.exists(), "the host imported the citar planted in its working directory")
+        self.assertNotEqual(done.returncode, 97)
+        frames = [json.loads(line) for line in done.stdout.decode().splitlines() if line.strip()]
+        self.assertEqual(frames[0]["t"], "ready", done.stdout[:500])
+        self.assertEqual(frames[0]["jobs_build"], engine_api.jobs_build())
+        # the same command without -P (the old one) runs the planted package
+        done = self.run_in(work, [a for a in H.command() if a != "-P"])
+        self.assertEqual(done.returncode, 97, done.stderr[-500:])
+        self.assertTrue(marker.exists())
 
 
 if __name__ == "__main__":
