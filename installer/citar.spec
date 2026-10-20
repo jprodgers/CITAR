@@ -12,7 +12,9 @@
 # outside the checkout, nothing here puts the checkout on sys.path or pathex (the entry scripts are read from
 # installer/, which holds no `citar/`), and installer/spec_rules.py refuses to build unless `citar` and
 # `citar._engine` resolve to the installed package, then fails unless the analysis took every module, extension and
-# data file of `citar` from it.
+# data file of `citar` from it, and every other file from a distribution of citar[all]'s closure (the ones
+# PYTHON-LICENSES.txt lists), the Python it embeds, Windows or PyInstaller's run-time files: no build tool's package
+# and no DLL from a folder on the build machine's PATH.
 #
 # Produces one folder, DIST/CITAR, containing two executables that share a single copy of Python and the libraries:
 #
@@ -36,6 +38,7 @@
 # runs its migrations from disk, so it does the second of those constantly.
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -58,6 +61,21 @@ python_licenses = _load("python_licenses")
 rules.outside(CHECKOUT, **{"--distpath": DISTPATH, "--workpath": workpath})
 PACKAGE = rules.installed_package(CHECKOUT, os.environ.get("CITAR_EXT_DIR"))
 print(f"citar.spec: citar from {PACKAGE}")
+
+# What the bundle may carry of the venv: citar and its citar[all] closure, the distributions PYTHON-LICENSES.txt
+# lists (checked after the analysis, file by file, with PyInstaller's own run-time files).
+try:
+    DISTS = python_licenses.installed()
+    SHIPPED = python_licenses.shipped(DISTS)
+except python_licenses.Failed as e:
+    raise rules.Refused(f"citar[all]'s closure: {e}") from None
+
+# The DLLs a binary needs are looked for beside it, then on PATH: only the Python the bundle embeds and Windows' own
+# folders, so that no tool's folder on the build machine's PATH (this laptop's JDK lent the first bundle 43 DLLs)
+# decides what the bundle carries.
+if os.name == "nt":
+    os.environ["PATH"] = rules.dll_path(sys.base_prefix, os.environ.get("SystemRoot"))
+    print(f"citar.spec: DLLs looked for on {os.environ['PATH']}")
 
 # Everything CITAR reads at runtime that is not Python, all of the installed package's: the browser
 # client, the Alembic migration environment, the hardware collectors offered on the Servers page, the
@@ -106,7 +124,12 @@ hiddenimports = [
 excludes = [
     # Never used, and between them they add well over a hundred megabytes.
     "tkinter", "matplotlib", "numpy", "pandas", "scipy", "PIL", "pytest", "IPython",
-    "notebook", "setuptools._distutils",
+    "notebook",
+    # Build tools the venv holds, which the bundle must not carry: cffi's build-time shim (cffi._shimmed_dist_utils)
+    # imports setuptools, which would bring setuptools, its vendored packages, packaging and PyInstaller's
+    # pyi_rth_setuptools run-time hook into both executables, none of them in citar[all]'s closure or
+    # PYTHON-LICENSES.txt. Nothing imports them at run time (cffi compiles nothing in the bundle).
+    "setuptools", "pkg_resources", "_distutils_hack",
 ]
 
 console_analysis = Analysis(
@@ -134,11 +157,28 @@ windowed_analysis = Analysis(
 )
 
 REQUIRED = rules.package_data(PACKAGE)
+OWNED = rules.owners(DISTS.values())
+SITE_PACKAGES = rules.venv_site_packages()
+# Where the rest may come from: the Python the bundle embeds (its own site-packages excepted), Windows, and
+# PyInstaller's work folder (base_library.zip); the entry scripts from installer/.
+ROOTS = [sys.base_prefix, os.environ.get("SystemRoot") or "", workpath]
+ucrt = set()
 for label, analysis in (("citar.exe", console_analysis), ("citar-play.exe", windowed_analysis)):
+    # The Universal CRT is Windows 10's own (the installer's minimum): see spec_rules.UCRT.
+    analysis.binaries, dropped = rules.without_ucrt(analysis.binaries)
+    ucrt.update(name for name, _, _ in dropped)
     problems = rules.check_analysis(analysis.pure, analysis.binaries, analysis.datas, PACKAGE, CHECKOUT, REQUIRED)
+    problems += rules.check_sources(
+        {"module": analysis.pure, "binary": analysis.binaries, "data file": analysis.datas},
+        owned=OWNED, shipped=SHIPPED, site_packages=SITE_PACKAGES, roots=[r for r in ROOTS if r])
+    problems += rules.check_sources({"script": analysis.scripts}, owned=OWNED, shipped=SHIPPED,
+                                    site_packages=SITE_PACKAGES, roots=[str(SPEC_DIR)])
     if problems:
-        raise rules.Refused(f"{label}'s analysis is not the installed wheel's:\n  " + "\n  ".join(problems))
+        raise rules.Refused(f"{label}'s analysis is not the installed wheel's and its closure's:\n  "
+                            + "\n  ".join(problems))
 print(f"citar.spec: every citar module, its engine and its {len(REQUIRED)} data files from {PACKAGE}")
+print(f"citar.spec: every other file from citar[all]'s closure ({len(SHIPPED) - 1} distributions), the embedded "
+      f"Python, Windows or PyInstaller's run-time files; {len(ucrt)} Universal CRT DLLs left out")
 
 # Both executables are collected into one folder, which deduplicates the DLLs, the engine's
 # extension and the web client, so there is a single copy of Python and the libraries on disk.

@@ -957,7 +957,8 @@ jobs:
       - name: The bundle runs, and its job host starts from it
         # citar.exe --version, where, doctor --quiet and doctor (the job host it starts is citar.exe jobs-host, and
         # verifiable), every run's state in the runner's temporary folder; the label; _engine.pyd; the notices at the
-        # root, and PYTHON-LICENSES.txt the venv's closure of citar[all].
+        # root, PYTHON-LICENSES.txt the venv's closure of citar[all], and nothing in the bundle outside it (no build
+        # tool's package, no Universal CRT DLL: installer/spec_rules.py audit).
         shell: bash
         run: |
           python scripts/ci/check_bundle.py bundle --dir "$RUNNER_TEMP/bundle/dist/CITAR" --version "$RELEASE_VERSION" \

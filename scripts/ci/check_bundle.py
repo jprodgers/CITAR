@@ -16,12 +16,15 @@ the lab's job host started **from the bundle**, as ``citar.exe jobs-host`` (``ci
 ``citar-play.exe``'s too; the hidden ``jobs-host`` takes no argument; ``citar.exe mcp``, the MCP bridge ``/api/meta``
 names for a bundle, answers ``--help``. Exactly one ``citar/_engine.pyd``. At the
 root, beside the executables: ``LICENSE``, ``NOTICE.md`` and ``THIRD-PARTY-LICENSES.txt``, byte for byte the
-checkout's, ``README.md``, and ``PYTHON-LICENSES.txt``, whose index names CPython and PyInstaller's bootloader and no
-build tool (PyInstaller, pillow, pip, setuptools). With ``--python`` (the venv the bundle was built in): every data
-file of the installed package (``installer/spec_rules.py``'s ``package_data``: the web client, the migrations, the
-collectors, ``jobs/costs.json``) is in the bundle, and ``PYTHON-LICENSES.txt`` is byte for byte what
-``installer/python_licenses.py`` writes there, the installed closure of ``citar[all]``. Running the bundle changes
-none of its files.
+checkout's, ``README.md``, and ``PYTHON-LICENSES.txt``, whose index names CPython and PyInstaller's bootloader and
+run-time hooks and no build tool (PyInstaller, pillow, pip, setuptools). No Universal CRT DLL anywhere in the bundle,
+and every ``*.dist-info`` folder in it of a distribution the index lists. With ``--python`` (the venv the bundle was
+built in): ``installer/spec_rules.py audit`` holds every file of ``_internal`` and every module of the executables'
+archives to the spec's rule (a file of the venv's site-packages belongs to ``citar``, its ``citar[all]`` closure or
+PyInstaller's run-time files, so nothing the bundle carries is missing from ``PYTHON-LICENSES.txt``); every data
+file of the installed package (``package_data``: the web client, the migrations, the collectors, ``jobs/costs.json``)
+is in the bundle; and ``PYTHON-LICENSES.txt`` is byte for byte what ``installer/python_licenses.py`` writes there.
+Running the bundle changes none of its files.
 
 **installed** (after ``CITAR-V-setup.exe /VERYSILENT ... /DIR=INSTALLED``): the installed ``citar.exe`` says ``CITAR V``
 and ``doctor --quiet`` exits 0; the per-user uninstall key ``{AppId}_is1`` (``installer/citar.iss``'s AppId) is under
@@ -61,6 +64,8 @@ NOTICES = (*SAME_AS_CHECKOUT, "README.md", "PYTHON-LICENSES.txt")
 #: Distributions the bundle's venv holds to build it, which it does not ship: never in PYTHON-LICENSES.txt's index.
 #: (PyInstaller's pywin32-ctypes is not among them: keyring needs it on Windows, so citar[all] ships it.)
 BUILD_TOOLS = ("pyinstaller", "pyinstaller-hooks-contrib", "pillow", "pip", "setuptools", "altgraph", "pefile")
+#: The Universal CRT's DLLs (installer/spec_rules.py's UCRT): never in the bundle.
+UCRT = re.compile(r"^(api-ms-win-[a-z0-9-]+|ucrtbase)\.dll$", re.I)
 #: The uninstall key's place under HKCU (Inno Setup's: ``<AppId>_is1``).
 UNINSTALL = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
 COMMAND_TIMEOUT = 300.0
@@ -74,6 +79,11 @@ class Failed(Exception):
 
 def say(text: str) -> None:
     print(text, flush=True)
+
+
+def canonical(name: str) -> str:
+    """A distribution's name as PEP 503 compares it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def check(ok: bool, problem: str, done: str = "") -> None:
@@ -194,6 +204,43 @@ def listing(folder: Path) -> dict:
     return {p.relative_to(folder).as_posix(): p.stat().st_size for p in folder.rglob("*") if p.is_file()}
 
 
+def licence_index(text: str) -> tuple:
+    """``(the distributions PYTHON-LICENSES.txt's index lists, lower-cased; whether it names the community hooks'
+    run-time hooks)``. Failed unless it names CPython and PyInstaller's bootloader and run-time hooks once each,
+    lists no build tool, and lists the packages ``citar[all]`` cannot do without."""
+    index = text.split("\nIndex\n-----\n", 1)[1].split("\n\n", 1)[0].splitlines() if "\nIndex\n" in text else []
+    runtime = [line for line in index if line.startswith("CPython ")]
+    bootloader = [line for line in index if line.startswith("PyInstaller ")
+                  and "'s bootloader and run-time hooks: " in line]
+    hooks = [line for line in index if line.startswith("pyinstaller-hooks-contrib ") and "'s run-time hooks: " in line]
+    check(len(runtime) == 1, "PYTHON-LICENSES.txt names no CPython")
+    check(len(bootloader) == 1, "PYTHON-LICENSES.txt names no PyInstaller bootloader and run-time hooks")
+    check(len(hooks) <= 1, "PYTHON-LICENSES.txt names the community hooks' run-time hooks twice")
+    names = [line.split(" ", 1)[0].lower() for line in index if line not in runtime + bootloader + hooks]
+    tools = sorted(set(names) & set(BUILD_TOOLS))
+    check(not tools, f"PYTHON-LICENSES.txt lists build tools the bundle does not ship: {tools}")
+    for needed in ("fastapi", "uvicorn", "sqlalchemy", "anthropic", "openai", "mcp", "authlib", "keyring"):
+        check(needed in names, f"PYTHON-LICENSES.txt does not list {needed}, which citar[all] needs")
+    return names, bool(hooks)
+
+
+def carried(folder: Path, names: list) -> int:
+    """What a bundle carries, read without its venv: no Universal CRT DLL (Windows 10's own; a copy found on the build
+    machine's PATH is a third party's), and every distribution metadata folder in it (``*.dist-info``, which hooks
+    copy beside the code they collect) of ``citar`` or a distribution ``names`` (PYTHON-LICENSES.txt's index) lists.
+    The number of those folders; Failed otherwise."""
+    files = sorted(p for p in folder.rglob("*") if p.is_file())
+    ucrt = [p.relative_to(folder).as_posix() for p in files if UCRT.match(p.name)]
+    check(not ucrt, f"the bundle holds {len(ucrt)} Universal CRT DLL(s): {ucrt[:5]}")
+    listed = {canonical(n) for n in names} | {"citar"}
+    metadata = sorted({p.parent for p in files if p.parent.name.endswith(".dist-info")})
+    unlisted = [p.relative_to(folder).as_posix() for p in metadata
+                if canonical(p.name[:-len(".dist-info")].rsplit("-", 1)[0]) not in listed]
+    check(not unlisted, f"the bundle holds the metadata of distributions PYTHON-LICENSES.txt does not list: "
+                        f"{unlisted[:5]}")
+    return len(metadata)
+
+
 def cmd_bundle(args) -> dict:
     folder = args.dir.resolve()
     exe = program(folder)
@@ -214,19 +261,18 @@ def cmd_bundle(args) -> dict:
         check((folder / name).read_bytes() == (args.checkout / rel).read_bytes(),
               f"the bundle's {name} is not the checkout's {rel}")
     say(f"ok: {', '.join(NOTICES)} at the root; {', '.join(SAME_AS_CHECKOUT)} the checkout's bytes")
-    text = (folder / "PYTHON-LICENSES.txt").read_text(encoding="utf-8")
-    index = text.split("\nIndex\n-----\n", 1)[1].split("\n\n", 1)[0].splitlines() if "\nIndex\n" in text else []
-    runtime = [line for line in index if line.startswith("CPython ")]
-    bootloader = [line for line in index if line.startswith("PyInstaller ") and "'s bootloader: " in line]
-    check(len(runtime) == 1, "PYTHON-LICENSES.txt names no CPython")
-    check(len(bootloader) == 1, "PYTHON-LICENSES.txt names no PyInstaller bootloader")
-    names = [line.split(" ", 1)[0].lower() for line in index if line not in runtime + bootloader]
-    tools = sorted(set(names) & set(BUILD_TOOLS))
-    check(not tools, f"PYTHON-LICENSES.txt lists build tools the bundle does not ship: {tools}")
-    for needed in ("fastapi", "uvicorn", "sqlalchemy", "anthropic", "openai", "mcp", "authlib", "keyring"):
-        check(needed in names, f"PYTHON-LICENSES.txt does not list {needed}, which citar[all] needs")
-    say(f"ok: PYTHON-LICENSES.txt: {len(names)} distributions, CPython and the bootloader; no build tool")
+    names, hooks = licence_index((folder / "PYTHON-LICENSES.txt").read_text(encoding="utf-8"))
+    contrib = ", the community hooks' run-time hooks" if hooks else ""
+    say(f"ok: PYTHON-LICENSES.txt: {len(names)} distributions, CPython, PyInstaller's bootloader and run-time hooks"
+        f"{contrib}; no build tool")
+    metadata = carried(folder, names)
+    say(f"ok: no Universal CRT DLL; the bundle's {metadata} *.dist-info folders are of listed distributions")
     if args.python:
+        # The same rule from the venv: every file of _internal and every module of the executables' archives that is
+        # a file of the venv's site-packages belongs to citar, its citar[all] closure or PyInstaller's run-time files.
+        out = run([args.python, "-P", ROOT / "installer" / "spec_rules.py", "audit", folder], dict(os.environ),
+                  "spec_rules.py audit in the bundle's venv")
+        say("ok: " + out.strip().splitlines()[0].removeprefix("spec_rules audit: "))
         installed = run([args.python, "-P", "-c", "import citar, os; print(os.path.dirname(citar.__file__))"],
                         dict(os.environ), "where the bundle's venv has citar").strip().splitlines()[-1]
         rules = _spec_rules()
