@@ -12,8 +12,9 @@
 //! - each layer of the engine uses only the layers below it;
 //! - only `game/mutate.rs`, `save/` and `compat/` call `State`'s mutable accessors;
 //! - generated files are up to date;
-//! - rust.yml's path filters match every file these checks read, and the data files its tests
-//!   read from outside the trees it takes whole, so a change to one runs them;
+//! - rust.yml's path filters match every file these checks read, the data files its tests read
+//!   from outside the trees it takes whole, and the third-party notices its lint job holds to the
+//!   lock (`cargo xtask licenses --check`), so a change to one runs them;
 //! - no `Pending` stage outlives its package, and, once switched on, no `NotPorted` or
 //!   `Pending` remains at all;
 //! - in the bot, `&mut Game` appears only in `driver.rs`; in citar-py, no hand-written `unsafe`;
@@ -122,10 +123,13 @@ fn run_all(root: &Path) -> Result<(Vec<Finding>, String), String> {
 }
 
 /// Every file the checks read, relative to the workspace root, for [`triggers`], with the data
-/// files the tests read from outside the filtered trees (`triggers::TEST_READS`): a change to any
-/// of them must run rust.yml. A source tree stands in by its `lib.rs`.
+/// files the tests read from outside the filtered trees (`triggers::TEST_READS`) and the
+/// third-party notices, which rust.yml's lint job holds to Cargo.lock with `cargo xtask licenses
+/// --check` (design/phase5-release.md P5.5): a change to any of them must run rust.yml. A source
+/// tree stands in by its `lib.rs`.
 fn reads(meta: &metadata::Metadata) -> Vec<String> {
-    let mut out: Vec<String> = ["Cargo.toml", "Cargo.lock"].map(str::to_owned).to_vec();
+    let mut out: Vec<String> =
+        ["Cargo.toml", "Cargo.lock", crate::licenses::OUT].map(str::to_owned).to_vec();
     out.extend(meta.members().map(|p| meta.manifest(p)));
     out.extend(
         [config::FILE, version::PYTHON_FILE, pyproject::FILE, triggers::WORKFLOW]
