@@ -5,7 +5,8 @@ its job and its rule (gate 1 of 5-02a, and more). package.yml's rules are tried 
 the real one in a copy (the fixture passes as written), and on the real one, which 5-02b added; what P5.3 says of
 package.yml that no rule does (the five wheels, the smoke on 3.11 and 3.14, the sdist's build, the moved jobs) is
 held by ThePackageWorkflow, and so is P5.4's part (5-03: the helpers' ten builds on five runners, the manifest signed
-with a throwaway key and verified twice, helper.yml's artifacts built where the release builds them). The parts the
+with a throwaway key and verified twice, helper.yml's artifacts built where the release builds them), and P5.7's (5-06:
+the image for both architectures, each built natively from its wheel, checked, saved and kept). The parts the
 rules stand on (the expression reader, the shell reader, the matrix, an upload path) have tests of their own, and so
 has the pin tool, offline, with GitHub stood in for.
 """
@@ -367,9 +368,71 @@ class ThePackageWorkflow(unittest.TestCase):
         self.assertEqual([s["with"]["name"] for s in self.using(installer, "actions/download-artifact")],
                          ["pkg-wheel-${{ matrix.platform }}"])
         self.assertIn('install.sh --from "$(ls wheels/*.whl)" --no-setup', self.runs(installer))
-        docker = self.jobs["docker"]
-        self.assertEqual([(s["with"]["name"], s["with"]["path"]) for s in self.using(docker, "actions/download-artifact")],
-                         [("pkg-wheel-linux-x64", "wheelhouse")])
+        # 5-06 replaced the moved docker job by the image matrix (test_the_image_is_built_natively_...)
+        self.assertNotIn("docker", self.jobs)
+
+    def test_the_image_is_built_natively_for_both_architectures_checked_and_kept(self):
+        """5-06 (P5.7): linux/amd64 and linux/arm64, each on the runner its platform's wheel is built on, from that
+        wheel and the release's constraints; run and checked by check_image.py; saved and loaded again; the file kept
+        for release.yml on a dry run and a tag only. Nothing pushes, emulates or reads a cache."""
+        job = self.jobs["image"]
+        self.assertEqual(sorted(job["needs"]), ["constraints", "meta", "wheels"])
+        self.assertEqual(job["if"], "${{ !cancelled() && needs.meta.result == 'success' }}")
+        self.assertNotIn("environment", job)
+        self.assertEqual(job["env"]["TAG"],
+                         "ghcr.io/jprodgers/citar:${{ needs.meta.outputs.version }}-${{ matrix.arch }}")
+        self.assertEqual(job["env"]["LABEL"], "${{ needs.meta.outputs.label }}")
+        legs = {leg["arch"]: leg for leg in job["strategy"]["matrix"]["include"]}
+        self.assertEqual({arch: (leg["platform"], leg["runner"], leg["machine"]) for arch, leg in legs.items()},
+                         {"amd64": ("linux-x64", "ubuntu-24.04", "x86_64"),
+                          "arm64": ("linux-arm64", "ubuntu-24.04-arm", "aarch64")})
+        wheels = {leg["platform"]: leg for leg in self.jobs["wheels"]["strategy"]["matrix"]["include"]}
+        for arch, leg in legs.items():
+            with self.subTest(arch=arch):
+                wheel = wheels[leg["platform"]]
+                self.assertEqual((leg["runner"], leg["machine"]), (wheel["runner"], wheel["machine"]))
+        self.assertEqual([(s["with"]["name"], s["with"]["path"]) for s in self.using(job, "actions/download-artifact")],
+                         [("pkg-wheel-${{ matrix.platform }}", "wheelhouse"), ("pkg-constraints", "constraints")])
+        steps, runs = job["steps"], self.runs(job)
+        self.assertIn('[ "$got" = "$WANT" ]', runs, "the job asserts its runner's architecture")
+        self.assertIn('cp "constraints/citar-$PEP440-server-constraints.txt" wheelhouse/constraints.txt', runs)
+        at = {name: next(i for i, s in enumerate(steps) if pick(s.get("run", ""))) for name, pick in (
+            ("prepare", lambda r: "scripts/release.py prepare" in r),
+            ("context", lambda r: "wheelhouse/constraints.txt" in r and "cp " in r),
+            ("build", lambda r: "docker buildx build" in r),
+            ("run", lambda r: "check_image.py run" in r),
+            ("save", lambda r: "check_image.py save" in r))}
+        self.assertEqual(sorted(at, key=at.get), ["prepare", "context", "build", "run", "save"])
+        build = steps[at["build"]]["run"]
+        for flag in ("--load", '--platform "linux/$ARCH"', "--provenance=false", "--sbom=false",
+                     '--label "org.opencontainers.image.version=$RELEASE_VERSION"', '--tag "$TAG" .'):
+            self.assertIn(flag, build)
+        check = steps[at["run"]]["run"]
+        for flag in ('--engine docker --image "$TAG" --arch "$ARCH"', '--version "$RELEASE_VERSION"',
+                     '--label "$LABEL"', '--wheel "$(ls wheelhouse/*.whl)"', "--constraints wheelhouse/constraints.txt",
+                     '--out "report/image-$ARCH.json"'):
+            self.assertIn(flag, check)
+        saved = steps[at["save"]]["run"]
+        self.assertIn('--out "image/citar-image-$RELEASE_VERSION-$ARCH.tar.zst" --report "report/image-$ARCH.json"',
+                      saved)
+        # nothing pushes, logs in, emulates another architecture or reads a cache
+        for word in ("--push", "docker push", "docker login", "cache-from", "cache-to", "qemu", "binfmt"):
+            self.assertNotIn(word, runs)
+        self.assertEqual([s["uses"].split("@")[0] for s in steps if s.get("uses")],
+                         ["actions/checkout", "actions/download-artifact", "actions/download-artifact",
+                          "actions/upload-artifact", "actions/upload-artifact"])
+        compose = [s for s in steps if "docker compose" in s.get("run", "")]
+        self.assertEqual([s.get("if") for s in compose], ["matrix.arch == 'amd64'"])
+        self.assertIn("docker compose -f docker-compose.yml config --quiet", compose[0]["run"])
+        # the report on every run (5-08's assemble reads it); the image itself on a dry run and a tag only
+        uploads = {s["with"]["name"]: s for s in self.using(job, "actions/upload-artifact")}
+        self.assertEqual(set(uploads), {"pkg-image-report-${{ matrix.arch }}", "pkg-image-${{ matrix.arch }}"})
+        report, image = uploads["pkg-image-report-${{ matrix.arch }}"], uploads["pkg-image-${{ matrix.arch }}"]
+        self.assertNotIn("if", report)
+        self.assertEqual(report["with"]["path"], "report/image-${{ matrix.arch }}.json")
+        self.assertEqual(image["if"], "needs.meta.outputs.mode != 'ci'")
+        self.assertEqual(image["with"]["path"],
+                         "image/citar-image-${{ needs.meta.outputs.version }}-${{ matrix.arch }}.tar.zst")
 
     def test_the_helpers_are_p541s_ten_builds_on_five_runners(self):
         job = self.jobs["helpers"]
@@ -628,8 +691,8 @@ class ThePackageWorkflow(unittest.TestCase):
              "python scripts/ci/check_dist.py sdist dist --version ${{ inputs.version }}", 5, "sdist"),
             ("name: pkg-sdist\n          path: dist/*.tar.gz", "name: sdist\n          path: dist/*.tar.gz", 13,
              "sdist"),
-            ("          name: pkg-wheel-linux-x64\n          path: wheelhouse",
-             "          pattern: helper-*\n          path: wheelhouse", 13, "docker"),
+            ("          name: pkg-wheel-${{ matrix.platform }}\n          path: wheelhouse",
+             "          pattern: helper-*\n          path: wheelhouse", 13, "image"),
             ("          path: constraints/*.txt", "          path: ${{ runner.temp }}", 9, "constraints"),
             ("container: quay.io/pypa/manylinux_2_28_x86_64@sha256:",
              "container: quay.io/pypa/manylinux_2_28_x86_64:latest #", 11, "wheels"),
@@ -650,6 +713,12 @@ class ThePackageWorkflow(unittest.TestCase):
             ("          name: pkg-third-party-licenses\n", "          name: third-party-licenses\n", 13, "notices"),
             ("    name: third-party notices\n    needs: meta\n",
              "    name: third-party notices\n    needs: meta\n    environment: notices\n", 3, "notices"),
+            # 5-06: the image is built and kept, never pushed
+            ('            --tag "$TAG" .\n', '            --tag "$TAG" --push .\n', 3, "image"),
+            ('          docker image ls "$TAG"\n', '          docker push "$TAG"\n', 3, "image"),
+            ("          name: pkg-image-${{ matrix.arch }}\n", "          name: image-${{ matrix.arch }}\n", 13,
+             "image"),
+            ("          path: report/image-${{ matrix.arch }}.json", "          path: ${{ runner.temp }}", 9, "image"),
         )
         for old, new, rule, job in plants:
             with self.subTest(rule=rule, job=job):
