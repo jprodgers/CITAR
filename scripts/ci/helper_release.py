@@ -73,9 +73,9 @@ gate_run = sys.modules.get("citar_ci_gate_run") or _beside("gate_run")
 TARGETS = {"windows-x64": "x86_64-pc-windows-msvc", "macos-arm64": "aarch64-apple-darwin",
            "macos-x64": "x86_64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu",
            "linux-arm64": "aarch64-unknown-linux-gnu"}
-#: The notices every packaged archive carries beside the binary, from the checkout's root (5-04 adds the third-party
-#: licences' file).
-ARCHIVE_TEXTS = ("LICENSE", "NOTICE.md")
+#: The notices every packaged archive carries beside the binary: each one's name in the archive, and its file in the
+#: checkout (5-04 adds THIRD-PARTY-LICENSES.txt, from packaging/).
+ARCHIVE_TEXTS = {"LICENSE": "LICENSE", "NOTICE.md": "NOTICE.md"}
 #: Every archive member's time: 1980-01-01, the earliest a zip can hold.
 ARCHIVE_TIME = 315532800
 #: The glibc the game's wheels need (manylinux_2_28), and so the helper's floor.
@@ -197,7 +197,8 @@ def glibc(binaries: list[Path], floor: str, objdump: str) -> list[str]:
 
 def pack(binary: Path, platform: str, version: str, out: Path, root: Path = ROOT) -> Path:
     """The packaged build's archive in ``out``: the binary (executable) and the notices, flat, reproducible."""
-    members = [(binary_name(platform), binary, 0o755)] + [(name, root / name, 0o644) for name in ARCHIVE_TEXTS]
+    members = [(binary_name(platform), binary, 0o755)]
+    members += [(name, root / source, 0o644) for name, source in ARCHIVE_TEXTS.items()]
     for _name, source, _mode in members:
         if not source.is_file():
             raise Unusable(f"{source} is missing")
