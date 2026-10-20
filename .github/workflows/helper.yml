@@ -6,9 +6,11 @@
 #   runs the helper's tests on three of these on every Rust change; this adds macOS x64 and Linux arm64, where the
 #   helper ships too, and the scan and the limits there.
 # - artifact: the release build of each target, as a release ships it (no features: cargo xtask check reads every
-#   line of the jobs whose ids start with "artifact", and this file's workflow-wide env and defaults), run once with
-#   --version (it names its target) and --self-test (the job host's canary and self-check), its .sha256 beside it.
-#   The artifacts are what the service jobs install; they are kept for a week and are not a release.
+#   line of the jobs whose ids start with "artifact", and this file's workflow-wide env and defaults), the Linux ones
+#   in package.yml's manylinux_2_28 containers and held to glibc 2.28 (design/phase5-release.md P5.4.1), run once
+#   with --version (it names its target) and --self-test (the job host's canary and self-check), each with a home of
+#   its own, its .sha256 beside it. The artifacts are what the service jobs install; they are kept for a week and are
+#   not a release (package.yml builds those).
 # - service-*: that build installed as a service for real on the runner, started, connected to a loopback fake server
 #   that refuses its token (so it must idle, not be restarted), stopped and removed (scripts/ci/service_check.py, which
 #   refuses to run anywhere but here): the Windows service under its virtual account NT SERVICE\citar-helper and the
@@ -35,6 +37,9 @@ on:
       # citar-helper's configuration test reads it (4-03)
       - "tests/data/helper_config_cases.json"
       - "scripts/ci/service_check.py"
+      # the artifact jobs' glibc check (and the harness it imports)
+      - "scripts/ci/helper_release.py"
+      - "scripts/ci/gate_run.py"
       - ".github/workflows/helper.yml"
   pull_request:
     paths:
@@ -49,6 +54,9 @@ on:
       - ".config/nextest.toml"
       - "tests/data/helper_config_cases.json"
       - "scripts/ci/service_check.py"
+      # the artifact jobs' glibc check (and the harness it imports)
+      - "scripts/ci/helper_release.py"
+      - "scripts/ci/gate_run.py"
       - ".github/workflows/helper.yml"
   workflow_dispatch:
 
@@ -111,31 +119,41 @@ jobs:
   artifact:
     name: artifact (${{ matrix.asset }})
     runs-on: ${{ matrix.os }}
+    env:
+      # macOS 11 for both Macs, as the release's builds (read by the macOS builds only).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     strategy:
       fail-fast: false
       matrix:
-        # The release's five helpers, one line a target (citar/web/tests/helper.test.mjs holds them to the download
-        # card's names and to cargo xtask helper-manifest's; package.yml's helpers matrix joins them in Phase 5, P5.4.1)
+        # The release's five helpers, one line a target, equal to package.yml's helpers matrix (P5.4.1;
+        # citar/web/tests/helper.test.mjs holds the two equal, and to the download card's names and cargo xtask
+        # helper-manifest's). The Linux ones build in the manylinux_2_28 container of the runner's own architecture,
+        # package.yml's images by the same digests, so a pull request catches a helper that needs a newer glibc than
+        # the game's 2.28.
         include:
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe }
-          - { os: macos-15, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64 }
-          - { os: macos-15-intel, target: x86_64-apple-darwin, asset: citar-helper-macos-x64 }
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64 }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe, container: "" }
+          - { os: macos-15, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64, container: "" }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, asset: citar-helper-macos-x64, container: "" }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64, container: "quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b8460ad8fb3fb0fbe1cd818845159ac896b4fd17452d56e892c291f3b97a8" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64, container: "quay.io/pypa/manylinux_2_28_aarch64@sha256:b873ffc316ffe8a154e3dc4872871de2ebd170db4876c8bbd983d42ff320001e" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Toolchain
+        # The native builds only: the container's build installs the toolchain inside it.
+        if: matrix.container == ''
         shell: bash
         run: |
           rustup toolchain install
           rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: matrix.container == ''
         with:
           shared-key: helper-release-${{ matrix.target }}
 
-      - name: Build
+      - name: Build (on the runner)
+        if: matrix.container == ''
         shell: bash
         run: |
           cargo build --release --locked -p citar-helper --target ${{ matrix.target }}
@@ -144,17 +162,46 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
           cp "target/${{ matrix.target }}/release/citar-helper$ext" "dist/${{ matrix.asset }}"
 
+      - name: Build (in the manylinux_2_28 container)
+        # As package.yml's helpers job builds it: rust-toolchain.toml's toolchain installed in the image.
+        if: matrix.container != ''
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.container }}
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p dist
+          docker run --rm -e TARGET -e ASSET -e OWNER="$(id -u):$(id -g)" -v "$PWD:/io" -w /io "$IMAGE" \
+            bash -euo pipefail -c '
+              echo "container: $(uname -m), $(ldd --version | head -n 1)"
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+              . "$HOME/.cargo/env"
+              rustup toolchain install
+              cargo build --release --locked -p citar-helper --target "$TARGET"
+              cp "target/$TARGET/release/citar-helper" "dist/$ASSET"
+              chown -R "$OWNER" dist'
+
+      - name: The Linux build needs glibc 2.28 at most, the game's floor
+        if: matrix.container != ''
+        shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: python3 scripts/ci/helper_release.py glibc --max 2.28 "dist/$ASSET"
+
       - name: The build runs, names its target, and computes as every other build does
+        # Each run with a home of its own: a release build has no development guard, so without --home its home would
+        # be the runner user's per-user folder.
         shell: bash
         run: |
           chmod +x "dist/${{ matrix.asset }}" || true
-          version="$(./dist/${{ matrix.asset }} --version)"
+          version="$(./dist/${{ matrix.asset }} --version --home "$RUNNER_TEMP/citar-dry-run")"
           echo "$version"
           case "$version" in
             *"target ${{ matrix.target }},"*) ;;
             *) echo "::error::the build does not name its target ${{ matrix.target }}"; exit 1 ;;
           esac
-          ./dist/${{ matrix.asset }} --self-test
+          ./dist/${{ matrix.asset }} --self-test --home "$RUNNER_TEMP/citar-dry-run"
           ./dist/${{ matrix.asset }} service install --dry-run --home "$RUNNER_TEMP/citar-dry-run"
 
       - name: Checksum

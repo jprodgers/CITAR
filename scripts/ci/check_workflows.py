@@ -43,7 +43,10 @@ pinned job, and a secret that a build or an installer could read. Each rule is c
     ``@sha256:`` digest. So does every other image a workflow runs, each matrix leg's: a job's ``container:`` and
     ``services:``, and the one a maturin-action step builds in on Linux, its ``container:`` (``off`` builds on the
     runner); a step that names none while its ``manylinux`` asks for a container (``publish`` and a cross target
-    ask for ``auto``) would build in maturin-action's own image, by a moving tag, and is refused.
+    ask for ``auto``) would build in maturin-action's own image, by a moving tag, and is refused. A script's
+    ``docker run`` is not read, since its words name no image reliably; so an image a script runs is written where
+    this reads it, as a matrix leg's ``container`` or ``image`` or a matrix or ``env:`` key ending in either
+    (``FEDORA_IMAGE``), and each such value that is not an expression needs its digest too (5-03).
     ``scripts/ci/action_pins.py verify`` proves the action pins against GitHub;
 12. a job that calls a workflow passes no ``secrets:`` (never ``inherit``) and sets ``permissions: contents: read``;
 13. artifact names: package.yml uploads only ``pkg-...``, release.yml only ``rel-...``, and no other workflow either
@@ -1329,13 +1332,44 @@ def maturin_image_problem(given: dict, value, os_name: str | None) -> str | None
     return None
 
 
+#: A key whose value names an image a script runs (``docker run "$IMAGE"`` takes it from there, since a script's
+#: words name no image reliably): a matrix leg's ``container`` or ``image``, or a matrix or ``env:`` key ending in
+#: ``image`` or ``container`` (``FEDORA_IMAGE``), added in 5-03 for the helpers' container builds.
+IMAGE_KEY = re.compile(r"(?:^|[_-])(?:container|image)$", re.IGNORECASE)
+
+
+def named_images(wf: Workflow, job: dict) -> list[tuple[str, str]]:
+    """The images a job's matrix and ``env:`` blocks (the workflow's, the job's, each step's) name by key, each
+    with where it is written; an expression or an empty value names none here (its source is read where it is
+    written)."""
+    out = []
+    for index, leg in enumerate(matrix_legs(job)):
+        for key, value in leg.items():
+            if IMAGE_KEY.search(str(key)) and isinstance(value, str):
+                out.append((f"its matrix's {key} (leg {leg.get('platform') or leg.get('os') or index})", value))
+    blocks = [("the workflow's env", wf.data.get("env")), ("its env", job.get("env"))]
+    blocks += [(f"{step_label(i, step)}'s env", step.get("env")) for i, step in enumerate(wf.steps(job))]
+    for where, env in blocks:
+        for key, value in (env.items() if isinstance(env, dict) else ()):
+            if IMAGE_KEY.search(str(key)) and isinstance(value, str):
+                out.append((f"{where} {key}", value))
+    # maturin-action's switches (``off``, ``auto``, ...) name no image: its steps are read above, as it decides
+    switches = (*MATURIN_TABLE_IMAGE, "off")
+    return [(where, value.strip()) for where, value in out
+            if value.strip() and "${{" not in value and value.strip().lower() not in switches]
+
+
 def image_findings(wf: Workflow) -> list[Finding]:
-    """Rule 11's images, each matrix leg's: a job's ``container:`` and ``services:``, and the image each
-    maturin-action step builds in, each pinned by a sha256 digest."""
+    """Rule 11's images, each matrix leg's: a job's ``container:`` and ``services:``, the image each maturin-action
+    step builds in, and an image named by key for a script to run, each pinned by a sha256 digest."""
     out = []
     for job_id, job in wf.jobs.items():
         if not isinstance(job, dict):
             continue
+        for where, image in named_images(wf, job):
+            if not DIGEST.search(image):
+                out.append(Finding(wf.name, job_id, 11, f"{where} names the image {image}, not pinned by a sha256 "
+                                                        f"digest"))
         legs = matrix_legs(job)
         runs_on = job.get("runs-on", "")
         labels = runs_on if isinstance(runs_on, list) else [runs_on]

@@ -114,7 +114,11 @@ helper reports updates **unavailable**. To set it up, once, on a machine of your
    unavailable.
 4. **Check it** before the release: `cargo xtask helper-manifest --assets DIR --version V` over the built binaries and
    `cargo xtask sign-manifest --key ~/citar-update-key/citar-update-signing.key DIR/citar-helper-manifest.json` sign a
-   manifest by hand the same way (the key file must be outside any repository).
+   manifest by hand the same way (the key file must be outside any repository), and `cargo xtask verify-manifest --pub
+   crates/citar-jobs/update-keys.pub DIR/citar-helper-manifest.json` checks the signature against the committed key as
+   a helper checks it (`scripts/ci/verify_manifest.py`, with the `cryptography` package, checks it a second way).
+   Every pull request already proves this path with a throwaway key: `package.yml`'s `helper-manifest` job writes the
+   manifest over the five builds, signs it with a key made on the runner, and verifies it both ways.
 
 **Rotating the key:** make a new one, add its public line to `update-keys.pub` beside the old one in a release (two
 slots), sign that release with the old key, then replace the secret and, a release later, drop the old line. A helper

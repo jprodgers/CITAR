@@ -1,8 +1,9 @@
 // The helper card's downloads (citar/web/js/helperrules.js, design/phase4-helper.md P4.10, 4-14): its five names are the
-// release's, as helper.yml's artifact matrix builds them (one line a target, read by pattern: the project has no YAML
-// dependency) and as cargo xtask helper-manifest lists them; and what a browser is offered. release.yml is only its
-// gate until Phase 5 rebuilds it (design/phase5-release.md P5.11), so helper.yml's matrix is the one read here (5-02a);
-// package.yml's helpers matrix joins it in 5-03. Run with `node --test "citar/web/tests/*.test.mjs"`.
+// release's, as package.yml's helpers matrix builds them for a release (design/phase5-release.md P5.4.1, 5-03) and
+// helper.yml's artifact matrix builds them on every helper change (one line a target in each, read by pattern: the
+// project has no YAML dependency; the two matrices equal line for line: target, name, runner and build image), and as
+// cargo xtask helper-manifest lists them; and what a browser is offered. Run with
+// `node --test "citar/web/tests/*.test.mjs"`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -23,7 +24,11 @@ function matrix(file, job) {
   return block.split("\n")
     .map((line) => line.match(/^\s*- \{(.*)\}\s*$/))
     .filter(Boolean)
-    .map((m) => Object.fromEntries(m[1].split(",").map((pair) => pair.split(":").map((s) => s.trim()))));
+    .map((m) => Object.fromEntries(m[1].split(",").map((pair) => {
+      // the key before the first colon; a value may hold more (an image's `@sha256:` digest), and may be quoted
+      const at = pair.indexOf(":");
+      return [pair.slice(0, at).trim(), pair.slice(at + 1).trim().replace(/^"(.*)"$/, "$1")];
+    })));
 }
 
 // cargo xtask helper-manifest's (target, name) table (xtask/src/manifest.rs).
@@ -35,14 +40,27 @@ function manifestTargets() {
 
 const byTarget = (rows) => rows.map((r) => `${r.target} ${r.asset}`).sort();
 
-test("the card's five names are the release's: helper.yml's artifacts, the manifest's", () => {
+// One line a target of each matrix, as `target name runner image`: package.yml's legs say runner:, helper.yml's os:.
+const builds = (rows) => rows.map((r) => `${r.target} ${r.asset} ${r.runner ?? r.os} ${r.container ?? "?"}`).sort();
+
+test("the card's five names are the release's: package.yml's helpers, helper.yml's artifacts, the manifest's", () => {
   const names = HELPERS.map((h) => h.file).sort();
   assert.equal(names.length, 5);
+  const helpers = matrix(".github/workflows/package.yml", "helpers");
   const artifacts = matrix(".github/workflows/helper.yml", "artifact");
-  assert.equal(artifacts.length, 5, JSON.stringify(artifacts));
-  assert.deepEqual(artifacts.map((r) => r.asset).sort(), names, "helper.yml builds the card's names");
-  assert.equal(new Set(artifacts.map((r) => r.target)).size, 5, "one build a target");
-  assert.deepEqual(byTarget(manifestTargets()), byTarget(artifacts), "the manifest lists each name for its target");
+  for (const [file, rows] of [["package.yml", helpers], ["helper.yml", artifacts]]) {
+    assert.equal(rows.length, 5, `${file}: ${JSON.stringify(rows)}`);
+    assert.deepEqual(rows.map((r) => r.asset).sort(), names, `${file} builds the card's names`);
+    assert.equal(new Set(rows.map((r) => r.target)).size, 5, `${file}: one build a target`);
+    for (const r of rows) {
+      // the Linux builds in a manylinux_2_28 image of their own architecture, by digest; the others on the runner
+      const linux = r.target.endsWith("-linux-gnu");
+      const want = linux ? new RegExp(`^quay\\.io/pypa/manylinux_2_28_${r.target.split("-")[0]}@sha256:[0-9a-f]{64}$`) : /^$/;
+      assert.match(r.container ?? "?", want, `${file}: ${r.target}'s build image`);
+    }
+  }
+  assert.deepEqual(builds(artifacts), builds(helpers), "helper.yml's artifacts are package.yml's helpers, line for line");
+  assert.deepEqual(byTarget(manifestTargets()), byTarget(helpers), "the manifest lists each name for its target");
   for (const h of HELPERS) {
     assert.ok(download(h.file).endsWith(`/releases/latest/download/${h.file}`), h.file);
   }

@@ -15,6 +15,19 @@
 #   unknown.
 # - constraints: the [server] extra's tested dependency set, from the Linux x64 wheel on Python 3.12, which the image
 #   and the server's deploy install with --constraint (P5.7, P5.13).
+# - helpers: the CITAR helper twice on each of its five targets (P5.4.1), natively on the target's own runner, the
+#   Linux ones in the wheels' manylinux_2_28 containers so the helper needs glibc 2.28 as the game does (checked from
+#   its dynamic symbols): the self-updating build under its unversioned release name, and the `packaged` build
+#   (Homebrew, Scoop, winget; it never updates itself) in its versioned archive with the notices. Both are run on the
+#   runner, outside any container, through scripts/ci/gate_run.py with a home of their own (scripts/ci/
+#   helper_release.py): --version names the version, the label and the target, --self-test passes, and update check
+#   says what the tree's update-keys.pub and each build's policy make it. Linux x64 also connects from Fedora, whose
+#   certificates are kept elsewhere.
+# - helper-manifest: citar-helper-manifest.json over the five self-updating builds, written by the xtask binary
+#   this job builds once and uploads (release.yml's signing job runs that binary and builds nothing, P5.11); signed
+#   with a throwaway key made in the runner's temporary folder, and the signature verified by xtask and by
+#   scripts/ci/verify_manifest.py, which shares no code with it, a copy with one byte changed and another key refused
+#   by both. Nothing here holds the release's key.
 # - installer, docker: install.sh and the image, now on the release wheels (moved from test.yml; 5-06 and 5-07
 #   replace them).
 #
@@ -456,6 +469,331 @@ jobs:
         with:
           name: pkg-constraints
           path: constraints/*.txt
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  helpers:
+    name: helper (${{ matrix.platform }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      # The label every release build carries (P5.2): --version and the helper's hello name it.
+      CITAR_BUILD_ID: ${{ needs.meta.outputs.label }}
+      # macOS 11 for both Macs, as the wheels (read by the macOS builds only).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        # P4.10's targets and unversioned names, one line a target: helper.yml's artifact matrix builds the same five
+        # (citar/web/tests/helper.test.mjs holds the two, the download card and cargo xtask helper-manifest's table
+        # equal). Each builds on its own architecture; the Linux ones in the wheels' manylinux_2_28 images, by the
+        # same digests (tests/test_workflows.py holds them equal; rule 11 holds each to a digest).
+        include:
+          - { platform: windows-x64, runner: windows-latest, machine: x86_64, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe, container: "" }
+          - { platform: macos-arm64, runner: macos-15, machine: arm64, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64, container: "" }
+          - { platform: macos-x64, runner: macos-15-intel, machine: x86_64, target: x86_64-apple-darwin, asset: citar-helper-macos-x64, container: "" }
+          - { platform: linux-x64, runner: ubuntu-24.04, machine: x86_64, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64, container: "quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b8460ad8fb3fb0fbe1cd818845159ac896b4fd17452d56e892c291f3b97a8" }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, machine: aarch64, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64, container: "quay.io/pypa/manylinux_2_28_aarch64@sha256:b873ffc316ffe8a154e3dc4872871de2ebd170db4876c8bbd983d42ff320001e" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: This runner's own architecture (no emulation, no cross build)
+        shell: bash
+        env:
+          WANT: ${{ matrix.machine }}
+        run: |
+          got=$(uname -m)
+          echo "uname -m: $got; label: $CITAR_BUILD_ID; version: $RELEASE_VERSION"
+          [ "$got" = "$WANT" ] || { echo "::error::this runner is $got, not $WANT"; exit 1; }
+
+      - name: Toolchain
+        # rust-toolchain.toml's release, before the cache reads `rustc -vV` for its key. The native builds only: the
+        # container's build installs the toolchain inside it.
+        if: matrix.container == ''
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: matrix.container == ''
+        with:
+          shared-key: pkg-helper-${{ matrix.target }}
+
+      - name: Both builds, on the runner (Windows, macOS)
+        # The self-updating build (no features), then the packaged one (`packaged`, a feature that ships: cargo xtask
+        # check reads every line of this file and refuses a test feature or a list it cannot read). They share every
+        # crate but citar-helper itself, so the second costs that crate and the link.
+        if: matrix.container == ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          mkdir -p build/self build/packaged
+          cargo build --release --locked -p citar-helper --target "$TARGET"
+          cp "target/$TARGET/release/citar-helper$ext" build/self/
+          cargo build --release --locked -p citar-helper --target "$TARGET" --features packaged
+          cp "target/$TARGET/release/citar-helper$ext" build/packaged/
+
+      - name: Both builds, in the manylinux_2_28 container (Linux)
+        # The image the wheel of this architecture builds in, by its digest: rust-toolchain.toml's toolchain installed
+        # in it, the label passed in by name, its gcc toolset all the helper needs (rustls on ring: no OpenSSL). The
+        # builds then run outside it, on this runner's newer glibc, as a user's machine would run them.
+        if: matrix.container != ''
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.container }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p build/self build/packaged
+          docker run --rm -e CITAR_BUILD_ID -e TARGET -e OWNER="$(id -u):$(id -g)" -v "$PWD:/io" -w /io "$IMAGE" \
+            bash -euo pipefail -c '
+              echo "container: $(uname -m), $(ldd --version | head -n 1)"
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+              . "$HOME/.cargo/env"
+              rustup toolchain install
+              cargo build --release --locked -p citar-helper --target "$TARGET"
+              cp "target/$TARGET/release/citar-helper" build/self/
+              cargo build --release --locked -p citar-helper --target "$TARGET" --features packaged
+              cp "target/$TARGET/release/citar-helper" build/packaged/
+              chown -R "$OWNER" build'
+
+      - name: The Linux builds need glibc 2.28 at most, the game's floor
+        if: matrix.container != ''
+        shell: bash
+        run: python scripts/ci/helper_release.py glibc --max 2.28 build/self/citar-helper build/packaged/citar-helper
+
+      - name: The self-updating build under its release name, the packaged one in its archive
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          python scripts/ci/helper_release.py stage --self "build/self/citar-helper$ext" \
+            --packaged "build/packaged/citar-helper$ext" --platform "$PLATFORM" --version "$RELEASE_VERSION" --out stage
+
+      - name: Both run here, each with a home of its own (--version, --self-test, update check)
+        # Through scripts/ci/gate_run.py: a release build has no development guard, so without --home its home would
+        # be the runner user's per-user folder. The packaged binary is the one unpacked from its archive.
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          python scripts/ci/helper_release.py check --stage stage --platform "$PLATFORM" --target "$TARGET" \
+            --version "$RELEASE_VERSION" --label "$CITAR_BUILD_ID" --under "$RUNNER_TEMP" \
+            --work "$RUNNER_TEMP/helper-check" --out "report/helper-$PLATFORM.json"
+
+      - name: TLS works on a distribution that keeps its certificates elsewhere (Fedora)
+        # The helper verifies servers with the OS's own trust store (rustls-platform-verifier), so a distribution that
+        # keeps its CA roots elsewhere than the build machine (Fedora; 0.1.1's Python helper failed every handshake
+        # there) must still connect: any answer from the server is fine here (it refuses the token), a certificate
+        # error is not. Fedora 44's own glibc runs the build first. (4-14's check, moved here with the build.)
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        env:
+          # Fedora 44, linux/amd64, "latest" on 2026-10-19 (rule 11: an image a step runs, by its digest).
+          FEDORA_IMAGE: quay.io/fedora/fedora@sha256:0db60e5a404cb9913c396b0651ed269656554da1cd0a13a92d41409b12d7ecb0
+          ASSET: ${{ matrix.asset }}
+        run: |
+          docker run --rm -v "$PWD/stage:/d:ro" "$FEDORA_IMAGE" "/d/$ASSET" --version --home /tmp/citar-helper-home
+          out=$(docker run --rm -v "$PWD/stage:/d:ro" "$FEDORA_IMAGE" timeout 15 "/d/$ASSET" \
+                --home /tmp/citar-helper-home --server https://github.com --token x --no-hardware \
+                --base-url http://127.0.0.1:9/v1 2>&1 || true)
+          echo "$out"
+          if echo "$out" | grep -qi "certificate"; then echo "::error::the helper's TLS failed on Fedora"; exit 1; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-helper-${{ matrix.platform }}
+          path: |
+            stage/${{ matrix.asset }}
+            stage/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-helper-packaged-${{ matrix.platform }}
+          path: stage/citar-helper-${{ needs.meta.outputs.version }}-${{ matrix.platform }}.*
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Both builds' version lines, hashes and checks: package 5-08's assemble holds every helper to one version,
+        # label, build and jobs build with it.
+        with:
+          name: pkg-helper-report-${{ matrix.platform }}
+          path: report/helper-${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  helper-manifest:
+    name: the helper manifest, signed with a throwaway key
+    needs: [meta, helpers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-windows-x64
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-macos-arm64
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-macos-x64
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-linux-x64
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-linux-arm64
+          path: assets
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: pkg-xtask
+
+      - name: xtask, built once
+        # Every step below runs this binary, and it is the one uploaded (pkg-xtask-linux-x64, with its SHA-256):
+        # release.yml's signing job runs it on the same runner image and builds nothing (P5.4.2, P5.11).
+        shell: bash
+        run: |
+          cargo build --release --locked -p xtask
+          mkdir -p xtask-bin
+          cp target/release/xtask xtask-bin/xtask
+          (cd xtask-bin && sha256sum xtask | cut -d' ' -f1 > xtask.sha256 && cat xtask.sha256)
+
+      - name: The manifest over the five self-updating builds
+        # Its build and protocol read from the Linux x64 build, which runs here; each asset's URL, SHA-256 and size.
+        shell: bash
+        run: |
+          chmod +x assets/citar-helper-linux-x64
+          ls -l assets
+          mkdir -p manifest
+          xtask-bin/xtask helper-manifest --assets assets --version "$RELEASE_VERSION" \
+            --out manifest/citar-helper-manifest.json
+          cat manifest/citar-helper-manifest.json
+          python scripts/ci/helper_release.py manifest manifest/citar-helper-manifest.json --assets assets \
+            --version "$RELEASE_VERSION"
+
+      - name: Signed with a throwaway key, and the signature verified twice
+        # The key is made in the runner's temporary folder (outside the checkout, which keygen insists on) and dies with
+        # the runner; check_workflows.py's rule 9 refuses an upload that could take it. The second verifier is the
+        # cryptography package's Ed25519, which shares no code with xtask's. The real signature is release.yml's alone,
+        # on a tag, under its environment's reviewer (P5.11).
+        shell: bash
+        run: |
+          key="$RUNNER_TEMP/throwaway"
+          xtask-bin/xtask keygen --out "$key"
+          mkdir -p dry-run
+          xtask-bin/xtask sign-manifest --key "$key/citar-update-signing.key" \
+            --out dry-run/citar-helper-manifest.json.sig manifest/citar-helper-manifest.json
+          cp "$key/citar-update-signing.pub" dry-run/dry-run-signing.pub
+          xtask-bin/xtask verify-manifest --pub dry-run/dry-run-signing.pub manifest/citar-helper-manifest.json \
+            dry-run/citar-helper-manifest.json.sig
+          python -m pip install --disable-pip-version-check "cryptography>=42.0"
+          python scripts/ci/verify_manifest.py --pub dry-run/dry-run-signing.pub manifest/citar-helper-manifest.json \
+            dry-run/citar-helper-manifest.json.sig
+
+      - name: A copy with one byte changed, and another key, are refused by both verifiers
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/changed"
+          changed="$RUNNER_TEMP/changed/citar-helper-manifest.json"
+          python -c "import sys; b = bytearray(open(sys.argv[1], 'rb').read()); b[len(b) // 2] ^= 1; open(sys.argv[2], 'wb').write(b)" \
+            manifest/citar-helper-manifest.json "$changed"
+          xtask-bin/xtask keygen --out "$RUNNER_TEMP/throwaway-other"
+          sig=dry-run/citar-helper-manifest.json.sig
+          for case in "dry-run/dry-run-signing.pub $changed" "$RUNNER_TEMP/throwaway-other/citar-update-signing.pub manifest/citar-helper-manifest.json"; do
+            set -- $case
+            for verifier in xtask python; do
+              rc=0
+              if [ "$verifier" = xtask ]; then
+                xtask-bin/xtask verify-manifest --pub "$1" "$2" "$sig" || rc=$?
+              else
+                python scripts/ci/verify_manifest.py --pub "$1" "$2" "$sig" || rc=$?
+              fi
+              [ "$rc" = 1 ] || { echo "::error::$verifier gave $rc, not 1 (does not verify), for $case"; exit 1; }
+              echo "refused by $verifier, as it must be: $case"
+            done
+          done
+
+      - name: The release's helpers trust what the tree's update-keys.pub says
+        # Empty until the owner commits the public key (RELEASING.md step 1): then update check says updates are
+        # unavailable. With a key: each line well formed, at most two, and the helper trusts that many.
+        shell: bash
+        run: |
+          python scripts/ci/verify_manifest.py --check-keys crates/citar-jobs/update-keys.pub
+          keys=$(grep -Ecv '^[[:space:]]*(#|$)' crates/citar-jobs/update-keys.pub || true)
+          out=$(python scripts/ci/gate_run.py helper --under "$RUNNER_TEMP" -- assets/citar-helper-linux-x64 \
+                update check --home "$RUNNER_TEMP/keys-home")
+          echo "$out"
+          echo "$out" | grep -q "^update keys trusted: $keys\b"
+          if [ "$keys" = 0 ]; then echo "$out" | grep -q "^updates: unavailable"; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The manifest alone: the release attaches it, and release.yml's signing job signs it on a tag.
+        with:
+          name: pkg-helper-manifest
+          path: manifest/citar-helper-manifest.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The throwaway key's signature and public key, named as a dry run's: never a release asset.
+        with:
+          name: pkg-helper-manifest-dry-run
+          path: |
+            dry-run/citar-helper-manifest.json.sig
+            dry-run/dry-run-signing.pub
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-xtask-linux-x64
+          path: |
+            xtask-bin/xtask
+            xtask-bin/xtask.sha256
           if-no-files-found: error
           retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
 

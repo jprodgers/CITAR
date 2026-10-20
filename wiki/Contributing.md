@@ -541,6 +541,32 @@ connects and idles when its token is revoked, and removes it, all in one `wsl` i
 build for real on the runners through `scripts/ci/service_check.py`, which refuses to run anywhere
 else.
 
+**The helper's release builds** (design/phase5-release.md P5.4). `package.yml`'s `helpers` job builds
+the helper twice on each of its five targets, each on its own runner: the self-updating build under its
+unversioned release name and the `packaged` one (`--features packaged`, for Homebrew, Scoop and winget)
+in `citar-helper-<version>-<platform>.tar.gz` (`.zip` on Windows) with `LICENSE` and `NOTICE.md`. The
+Linux builds run in the wheels' manylinux_2_28 images, by the same digests, so the helper needs glibc
+2.28 as the game does; `scripts/ci/helper_release.py glibc` reads each binary's symbols (`objdump -T`)
+and fails above it, and `helper.yml`'s artifact jobs build the same way, so a pull request that raises
+the floor fails there. `helper_release.py stage` makes the names, archives and `.sha256` files, and
+`check` runs both builds on the runner (`--version` names the version, the label and the target;
+`--self-test`; `update check` says what `update-keys.pub` and each build's policy make it). The
+`helper-manifest` job builds xtask once, writes `citar-helper-manifest.json` with it, signs it with a
+throwaway key made in the runner's temporary folder, and verifies it twice: `cargo xtask verify-manifest
+--pub FILE MANIFEST [SIG]` and `scripts/ci/verify_manifest.py`, which uses the `cryptography` package
+and shares no code with xtask (`tests/data/helper_manifest/` holds the two to one signature). A copy
+with one byte changed, and another key, must fail both. Changing the manifest's format or its domain
+means changing both verifiers.
+
+**Running a release helper or a server on your own machine.** A release or packaged helper has no
+development guard, so without `--home` it uses the per-user CITAR folder of a real installation, and
+a server in server mode listens on every interface. The package gates run both only through
+`scripts/ci/gate_run.py`: `gate_run.py helper -- BINARY ARGS` refuses a run without `--home` inside
+the target folder (`--under`, by default `$CARGO_TARGET_DIR`), or one that names a server beyond
+loopback, detaches or installs a service; `gate_run.py server --port N --state DIR -- COMMAND`
+starts it on `127.0.0.1:N` (never 8799) with every state folder under `DIR`, and stops its whole
+process tree when `DIR/gate_run.stop` appears.
+
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
 benchmarks need valgrind, so they run there too, and so do the helper's Linux checks (`cargo
