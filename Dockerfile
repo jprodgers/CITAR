@@ -105,9 +105,11 @@ WORKDIR /var/lib/citar
 # Asks the app a question only a working app can answer: this route reads the settings and the database, where a TCP
 # check would pass while the server answered 500 to everything. Run by the server's own Python with -I, so nothing in
 # the working directory (the state directory) and no PYTHON* variable can stand in for the standard library, on the
-# port the server listens on.
+# port the server listens on. It asks the server directly, through an opener with no proxies: urlopen() would send
+# the request to any proxy the container's environment names (http_proxy set for the model APIs' traffic, say, with
+# no NO_PROXY), and a server answering normally would be reported unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD ["python", "-I", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/api/auth/config' % os.environ.get('CITAR_PORT', '8765'), timeout=4)"]
+  CMD ["python", "-I", "-c", "import os, urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:%s/api/auth/config' % os.environ.get('CITAR_PORT', '8765'), timeout=4)"]
 
 ENTRYPOINT ["citar"]
 CMD ["serve"]

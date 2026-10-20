@@ -5,17 +5,24 @@ What the image does when it runs is check_image.py's to prove, on a runner of ea
 job) and under Podman in WSL (5-06's gate). These tests hold what can be read without an engine: one base for both
 stages pinned by its index digest; wheels only, at the release's tested versions, nothing compiled and nothing from
 Debian's archive; a runtime of the venv alone, run as 10001:10001 with its state in the volume; a health check by the
-server's own Python with -I that fails when the server does; a build context of exactly the files the Dockerfile
-copies (scripts/check_workflows.py's rule 11 reads workflows, never the Dockerfile, so this module holds its pin).
+server's own Python with -I that fails when the server does and asks no proxy; a build context of exactly the files
+the Dockerfile copies (scripts/check_workflows.py's rule 11 reads workflows, never the Dockerfile, so this module holds
+its pin). And how check_image.py drives an engine, through a recording stand-in: every wait well inside the image
+job's time, the smoke on a volume the run names, and a cleanup that leaves no anonymous volume behind.
 """
+import argparse
+import contextlib
 import http.server
 import importlib.util
+import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -149,6 +156,10 @@ class TheDockerfile(unittest.TestCase):
         self.assertEqual(command[:3], ["python", "-I", "-c"], "-I: nothing in the state directory is imported")
         self.assertIn("/api/auth/config", command[3])
         self.assertIn("CITAR_PORT", command[3])
+        # Straight to the server: urlopen() would ask any proxy the container's environment names (one set for the
+        # model APIs' traffic, say), and report a healthy server unhealthy.
+        self.assertIn("urllib.request.build_opener(urllib.request.ProxyHandler({}))", command[3])
+        self.assertNotIn("urlopen", command[3])
 
     def test_the_health_check_passes_on_a_200_and_fails_otherwise(self):
         code = self.health()[3]
@@ -168,9 +179,16 @@ class TheDockerfile(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        env = {**os.environ, "CITAR_PORT": str(server.server_address[1])}
-        for status, exits in ((200, 0), (500, 1), (404, 1)):
-            with self.subTest(status=status):
+        # None of the developer's own proxy settings, so the answer is the check's alone; then a proxy named where
+        # nothing listens, which a check that asked it would fail on (Windows' names are not case-sensitive).
+        clean = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
+        clean["CITAR_PORT"] = str(server.server_address[1])
+        dead = "http://127.0.0.1:9"
+        names = ("HTTP_PROXY",) if os.name == "nt" else ("http_proxy", "HTTP_PROXY")
+        proxied = {**clean, **dict.fromkeys(names, dead)}
+        for status, env, exits in ((200, clean, 0), (500, clean, 1), (404, clean, 1), (200, proxied, 0),
+                                   (500, proxied, 1)):
+            with self.subTest(status=status, proxy=env is proxied):
                 answer["status"] = status
                 done = subprocess.run([sys.executable, "-I", "-c", code], env=env, capture_output=True, timeout=60)
                 self.assertEqual(done.returncode, exits, done.stderr.decode("utf-8", "replace")[-500:])
@@ -331,6 +349,103 @@ class CheckImageReadings(unittest.TestCase):
         self.assertTrue(script.startswith("set -eu\n"))
 
 
+class Recording(ci.Engine):
+    """An engine that runs nothing: it records each command and answers by the first ``answers`` key its arguments
+    start with."""
+
+    def __init__(self, answers: dict | None = None):
+        self.name, self.exe, self.calls, self.answers = "podman", "podman", [], answers or {}
+
+    def __call__(self, *args, what: str, timeout: float = ci.QUICK, stdin=None, ok=(0,)):
+        args = tuple(map(str, args))
+        self.calls.append((args, timeout))
+        for start, answer in self.answers.items():
+            if args[:len(start)] == start:
+                return 0, answer
+        return 0, ""
+
+
+class CheckImageEngineUse(unittest.TestCase):
+    """How check_image.py drives the engine: what it runs, how long it waits, and what it leaves."""
+
+    def setUp(self):
+        original = ci.say
+        ci.say = lambda line: None
+        self.addCleanup(setattr, ci, "say", original)
+
+    def test_every_wait_ends_well_inside_the_image_jobs_time(self):
+        # A wait as long as the job's would be cut short by the runner's cancel: no message naming the step, and no
+        # cleanup. So each is a quarter of the job's at most.
+        import yaml
+        package = yaml.safe_load((ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8"))
+        job = package["jobs"]["image"]["timeout-minutes"] * 60
+        waits = {"QUICK": ci.QUICK, "EXEC": ci.EXEC, "SMOKE": ci.SMOKE, "SAVE": ci.SAVE,
+                 "the health route": ci.HEALTH_SECONDS + ci.QUICK, "a stop": ci.STOP_SECONDS + 60,
+                 "the containers gone": ci.GONE_SECONDS}
+        for name, seconds in waits.items():
+            with self.subTest(name):
+                self.assertLessEqual(seconds, job / 4, f"{name}: {seconds} s of the job's {job} s")
+
+    def test_a_command_that_hangs_is_named_with_what_it_printed(self):
+        engine = ci.Engine.__new__(ci.Engine)       # the real one, with this Python standing in for the engine
+        engine.name, engine.exe = "docker", sys.executable
+        code = "import sys, time; print('line one'); print('line two', flush=True); time.sleep(60)"
+        with self.assertRaises(ci.Failed) as caught:
+            engine("-c", code, what="a step that hangs", timeout=3)
+        message = str(caught.exception)
+        self.assertIn("a step that hangs (docker -c) did not end within 3 s", message)
+        self.assertIn("line one\nline two", message.replace("\r\n", "\n"))
+        self.assertNotIn("b'", message, "the output as text, not a bytes literal")
+
+    def test_exec_adds_the_environment_before_the_container(self):
+        engine = Recording()
+        engine.exec("citar-check-ab12-a", "python", "-c", "pass", what="x", env=ci.DEAD_PROXY)
+        (argv, timeout), = engine.calls
+        self.assertEqual(timeout, ci.EXEC)
+        want = ["exec"]
+        for key, value in ci.DEAD_PROXY.items():
+            want += ["-e", f"{key}={value}"]
+        self.assertEqual(argv, (*want, "citar-check-ab12-a", "python", "-c", "pass"))
+        self.assertEqual(ci.DEAD_PROXY["http_proxy"], ci.DEAD_PROXY["HTTP_PROXY"])
+        self.assertEqual((ci.DEAD_PROXY["no_proxy"], ci.DEAD_PROXY["NO_PROXY"]), ("", ""))
+
+    def test_the_smoke_mounts_a_volume_of_the_run_at_the_state_path(self):
+        record = dict.fromkeys(ci.smoke_wheel.RECORD_KEYS, 1)
+        engine = Recording({("run",): f"smoke_wheel: ok\n{ci.SMOKE_MARK}{json.dumps(record)}\n"})
+        args = argparse.Namespace(image="citar:x", arch="arm64", label="ci+abc", wheel="/w/citar-0.1.6-x.whl")
+        with contextlib.redirect_stdout(io.StringIO()):     # the smoke's output, echoed
+            got = ci.smoke(engine, "citar-check-ab12", args, ci.smoke_wheel.release_version("0.1.6"))
+        self.assertEqual(got, record)
+        (argv, timeout), = engine.calls
+        self.assertEqual(timeout, ci.SMOKE)
+        self.assertEqual(argv[:4], ("run", "--rm", "--name", "citar-check-ab12-smoke"))
+        self.assertEqual(argv[argv.index("--network") + 1], "none")
+        mounts = [argv[i + 1] for i, word in enumerate(argv) if word == "-v"]
+        self.assertEqual(mounts, [f"{ci.SCRIPTS}:{ci.CHECK_MOUNT}:ro", f"citar-check-ab12-smoke-state:{ci.STATE_DIR}"])
+        self.assertEqual(argv[-4:], ("0.1.6", "ci+abc", "image-arm64", "citar-0.1.6-x.whl"))
+
+    def test_the_cleanup_removes_each_container_with_its_volumes_then_the_runs_volumes(self):
+        servers = [argparse.Namespace(name="citar-check-ab12-b")]
+        engine = Recording()
+        self.assertEqual(ci.cleanup(engine, "citar-check-ab12", servers), [])
+        removed = [argv for argv, _ in engine.calls if argv[0] == "rm" or argv[:2] == ("volume", "rm")]
+        self.assertEqual(removed, [("rm", "-f", "-v", "citar-check-ab12-b"), ("rm", "-f", "-v", "citar-check-ab12-smoke"),
+                                   ("volume", "rm", "-f", "citar-check-ab12-state"),
+                                   ("volume", "rm", "-f", "citar-check-ab12-smoke-state")])
+        # whatever the engine still lists under the run's names is named, another run's never; a container still
+        # there is waited for (a while) before its volume is removed
+        self.addCleanup(setattr, ci, "GONE_SECONDS", ci.GONE_SECONDS)
+        ci.GONE_SECONDS = 1.2
+        engine = Recording({("ps",): "citar-check-ab12-smoke\ncitar-check-ffff-a\n",
+                            ("volume", "ls"): "citar-check-ab12-smoke-state\n"})
+        t0 = time.perf_counter()
+        self.assertEqual(ci.cleanup(engine, "citar-check-ab12", []),
+                         ["citar-check-ab12-smoke", "citar-check-ab12-smoke-state"])
+        self.assertGreaterEqual(time.perf_counter() - t0, 1.2)
+        order = [argv[:2] for argv, _ in engine.calls]
+        self.assertGreater(order.index(("volume", "rm")), order.index(("ps", "-a")), "the wait comes first")
+
+
 class CheckImageCommandLine(unittest.TestCase):
     def run_script(self, *argv, env=None):
         return subprocess.run([sys.executable, str(CHECK_IMAGE), *argv], capture_output=True, text=True,
@@ -354,6 +469,21 @@ class CheckImageCommandLine(unittest.TestCase):
                 self.assertEqual(done.returncode, 2, done.stderr)
         done = self.run_script("run", "--engine", "docker", "--arch", "s390x", *common[:2], *common[4:])
         self.assertEqual(done.returncode, 2, done.stderr)
+
+    def test_the_command_contributing_gives_is_one_it_takes(self):
+        # CONTRIBUTING (and the wiki page made from it) tells a contributor how to check an image they built.
+        text = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        commands = re.findall(r"`(python3 scripts/ci/check_image\.py [^`]+)`", text)
+        self.assertEqual(len(commands), 1, commands)
+        argv = shlex.split(re.sub(r"<[^>]+>", "x", commands[0].replace("\n", " ")))
+        self.assertEqual(argv[:2], ["python3", "scripts/ci/check_image.py"])
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            try:
+                args = ci.parser().parse_args(argv[2:])
+            except SystemExit:
+                self.fail(f"check_image.py refuses CONTRIBUTING's command: {said.getvalue()}")
+        self.assertEqual((args.command, args.engine, args.arch), ("run", "podman", "amd64"))
+        self.assertIsNotNone(args.out)
 
 
 if __name__ == "__main__":

@@ -10,21 +10,25 @@ check, the version label), then runs it as it is deployed, its port published on
 volume of its own:
 
 - the health route answers within 60 s, and ``/api/meta`` names the version and the label;
-- in the running container, as uid and gid 10001: ``citar --version``; the image's own health check exits 0; the
-  engine is the venv's and has no test operations; ``build_info()`` gives the version and the label; ``citar doctor
-  --quiet`` exits 0 and ``citar doctor``'s jobs line says the job host it started there is verifiable; the state
-  directory is the server's (10001:10001, 0750); every installed distribution is the one ``--constraints`` pins
-  (the release's tested set, ``pip freeze`` against it);
-- in a container of its own (no network, the checkout's ``scripts/`` mounted read-only), the wheels' smoke
-  (``scripts/ci/smoke_wheel.py inside``, the state in the container's ``/tmp``): its job host plays the seeded lab
-  job, whose result hash every wheel's smoke line shares;
+- in the running container, as uid and gid 10001: ``citar --version``; the image's own health check exits 0, and
+  again with ``http_proxy`` naming an address where nothing listens (it asks the server directly); the engine is the
+  venv's and has no test operations; ``build_info()`` gives the version and the label; ``citar doctor --quiet``
+  exits 0 and ``citar doctor``'s jobs line says the job host it started there is verifiable; the state directory is
+  the server's (10001:10001, 0750); every installed distribution is the one ``--constraints`` pins (the release's
+  tested set, ``pip freeze`` against it);
+- in a container of its own (no network, the checkout's ``scripts/`` mounted read-only, a volume of its own at the
+  image's state path), the wheels' smoke (``scripts/ci/smoke_wheel.py inside``, the state in the container's
+  ``/tmp``): its job host plays the seeded lab job, whose result hash every wheel's smoke line shares;
 - **a restart keeps the volume's state**: an account made in the first container (``citar admin create-user``) and the
   generated secret key are there in a second container started on the same volume after the first was stopped (by
   SIGTERM, within 30 s) and removed.
 
-Every container and the volume are removed afterwards, whatever happened (their names start ``citar-check-``). The
-report (``--out``) holds the image's id and architecture, the version, label, build id and jobs build (package 5-08's
-``assemble`` holds them to the wheels', the helpers' and the bundle's), the smoke line, and what each check measured.
+Every container (with any anonymous volume it has) and both volumes are removed afterwards, whatever happened (their
+names start ``citar-check-``, so what is left can be listed and named). Each wait has a limit well inside package.yml's
+image job's (a quarter of it at most), so a hung step is named here and cleaned up rather than cancelled by the runner.
+The report (``--out``) holds the image's id and architecture, the version, label, build id and jobs build (package
+5-08's ``assemble`` holds them to the wheels', the helpers' and the bundle's), the smoke line, and what each check
+measured.
 
 ``save`` writes the image to ``FILE.tar.zst`` (the engine's ``save``, then zstd), removes the image, loads the file
 again and requires the same image id: what release.yml loads and pushes is what ``run`` tested. With ``--report`` it
@@ -63,6 +67,11 @@ VERSION_LABEL = "org.opencontainers.image.version"
 HEALTH_SECONDS, STOP_SECONDS = 60.0, 30
 #: Every container and volume a run makes is named with this, then a random part.
 PREFIX = "citar-check-"
+#: The run's volumes, after its prefix: the servers' state, and the smoke's (which mounts one at the image's state path
+#: so the engine makes it no anonymous volume, which no name could find again).
+VOLUMES = ("state", "smoke-state")
+#: How long the cleanup waits for the run's containers to be gone before it removes their volumes.
+GONE_SECONDS = 30.0
 #: Where the smoke's container sees the checkout's scripts (read-only), and its state and run folders.
 CHECK_MOUNT = "/opt/citar-check/scripts"
 SMOKE_DIR = "/tmp/citar-smoke"
@@ -86,8 +95,13 @@ cd "$run"
   --wheel-name "$4" --state "$state" --venv {venv} --out "$out"
 printf '{mark}%s\\n' "$(cat "$out")"
 """
-#: Timeouts, in seconds, for an engine's commands.
-QUICK, EXEC, SMOKE, SAVE = 120, 600, 2400, 1200
+#: Timeouts, in seconds, for an engine's commands. Each is a quarter of package.yml's image job (40 minutes) at most
+#: (a test holds it), so a step that hangs ends here, with its name and the cleanup, and not in the runner's cancel.
+#: The smoke and the save each take seconds here; ten minutes is the slowest runner's margin.
+QUICK, EXEC, SMOKE, SAVE = 120, 600, 600, 600
+#: Proxy variables naming an address in the container where nothing listens: the image's health check is run once
+#: more with them, and must still ask the server itself.
+DEAD_PROXY = {"http_proxy": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9", "no_proxy": "", "NO_PROXY": ""}
 
 
 class Failed(Exception):
@@ -272,8 +286,11 @@ class Engine:
                                   errors="replace", timeout=timeout, stdin=None if stdin is not None
                                   else subprocess.DEVNULL)
         except subprocess.TimeoutExpired as e:
-            raise Failed(f"{what} ({self.name} {args[0]}) did not end within {timeout:.0f} s: "
-                         f"{(e.stdout or '')[-2000:]}") from None
+            # What it printed until then says where it hung; the exception holds bytes whatever text= said.
+            said = "".join(part.decode("utf-8", "replace") if isinstance(part, bytes) else part
+                           for part in (e.stdout or "", e.stderr or ""))
+            raise Failed(f"{what} ({self.name} {args[0]}) did not end within {timeout:.0f} s; its output until "
+                         f"then:\n{said[-4000:]}") from None
         except OSError as e:
             raise Failed(f"{what} could not start: {e}") from None
         if done.returncode not in ok:
@@ -295,8 +312,12 @@ class Engine:
         code, _ = self("image", "inspect", ref, what=f"look for {ref}", ok=(0, 1, 125))
         return code == 0
 
-    def exec(self, name: str, *argv, what: str, timeout: float = EXEC, stdin: str | None = None) -> str:
+    def exec(self, name: str, *argv, what: str, timeout: float = EXEC, stdin: str | None = None,
+             env: dict | None = None) -> str:
+        """Runs ``argv`` in the container ``name``, with ``env`` added to its environment."""
         flags = ["-i"] if stdin is not None else []
+        for key, value in (env or {}).items():
+            flags += ["-e", f"{key}={value}"]
         return self("exec", *flags, name, *argv, what=what, timeout=timeout, stdin=stdin)[1]
 
     def logs(self, name: str) -> str:
@@ -369,11 +390,11 @@ class Server:
         check(not state.get("Running") and code == 0 and not state.get("OOMKilled") and seconds < STOP_SECONDS,
               f"{self.name} stopped with exit code {code} in {seconds:.1f} s (OOM killed: {state.get('OOMKilled')}):\n"
               f"{self.engine.logs(self.name)}", f"{self.name} stopped on SIGTERM in {seconds:.1f} s, exit 0")
-        self.engine("rm", self.name, what=f"remove {self.name}")
+        self.engine("rm", "-v", self.name, what=f"remove {self.name}")
         return {"stop_seconds": round(seconds, 1), "exit_code": code}
 
-    def exec(self, *argv, what: str, stdin: str | None = None) -> str:
-        return self.engine.exec(self.name, *argv, what=what, stdin=stdin)
+    def exec(self, *argv, what: str, stdin: str | None = None, env: dict | None = None) -> str:
+        return self.engine.exec(self.name, *argv, what=what, stdin=stdin, env=env)
 
 
 def run(args) -> int:
@@ -395,7 +416,7 @@ def run(args) -> int:
     report = {"image": args.image, "engine": engine.name, "platform": f"image-{args.arch}",
               **image_facts(engine.inspect("image", args.image), args.arch, version.text)}
     prefix = f"{PREFIX}{secrets.token_hex(4)}"
-    volume = f"{prefix}-state"
+    volume = f"{prefix}-{VOLUMES[0]}"
     servers = []
     try:
         engine("volume", "create", volume, what="make the state volume")
@@ -410,7 +431,7 @@ def run(args) -> int:
         report["restart"] = restart(engine, first, Server(engine, f"{prefix}-b", volume, args.image), servers,
                                     version, args.label)
     finally:
-        left = cleanup(engine, prefix, servers, volume)
+        left = cleanup(engine, prefix, servers)
     check(not left, f"left behind: {', '.join(left)}", "no container or volume of this run left")
     report["seconds"] = round(time.perf_counter() - t0, 1)
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -439,6 +460,8 @@ def check_running(server: Server, version, label: str, constraints) -> dict:
     argv = command[1:] if command[0] == "CMD" else ["/bin/sh", "-c", command[1]]
     server.exec(*argv, what="the image's health check")
     say("ok: the image's health check exits 0")
+    server.exec(*argv, what="the image's health check with http_proxy set", env=DEAD_PROXY)
+    say(f"ok: and with http_proxy {DEAD_PROXY['http_proxy']} (nothing listens there): it asks the server directly")
     library, test_ops = last_json(server.exec("python", "-P", "-c", smoke_wheel.EXTENSION_FACTS,
                                               what="ask the extension"), "the extension's answer")
     check(library.startswith(f"{VENV}/lib/") and "/site-packages/citar/" in library,
@@ -474,12 +497,14 @@ def check_running(server: Server, version, label: str, constraints) -> dict:
 
 def smoke(engine: Engine, prefix: str, args, version) -> dict:
     """smoke_wheel.py's inside checks in a container of their own: no network, the scripts read-only, the state in
-    its /tmp, as the image's user."""
+    its /tmp, as the image's user. The image's state path gets the run's named volume, not the anonymous one the
+    image's VOLUME would make: a container that outlives its ``--rm`` (its engine command timed out) leaves nothing the
+    cleanup cannot name."""
     name = f"{prefix}-smoke"
     _, out = engine("run", "--rm", "--name", name, "--network", "none", "-v", f"{SCRIPTS}:{CHECK_MOUNT}:ro",
-                    "--entrypoint", "/bin/sh", args.image, "-c", smoke_script(), "smoke", version.text, args.label,
-                    f"image-{args.arch}", Path(args.wheel).name, what="the wheels' smoke in the image",
-                    timeout=SMOKE)
+                    "-v", f"{prefix}-{VOLUMES[1]}:{STATE_DIR}", "--entrypoint", "/bin/sh", args.image, "-c",
+                    smoke_script(), "smoke", version.text, args.label, f"image-{args.arch}", Path(args.wheel).name,
+                    what="the wheels' smoke in the image", timeout=SMOKE)
     print("".join(f"    {line}\n" for line in out.splitlines()), end="", flush=True)
     record = smoke_record(out)
     say(f"ok: the smoke in the image: result hash {record['result_hash']}")
@@ -516,18 +541,30 @@ def restart(engine: Engine, first: Server, second: Server, servers: list, versio
     return {"first": stopped, "second": {**stopped_again, "health_seconds": round(seconds, 1)}, "state": before}
 
 
-def cleanup(engine: Engine, prefix: str, servers: list, volume: str) -> list:
-    """Removes every container and the volume this run made, whatever happened, and returns what is still there
-    (shown at once, so a run that failed earlier says so too; a passing run fails on it)."""
-    for name in [s.name for s in servers] + [f"{prefix}-smoke"]:
+def cleanup(engine: Engine, prefix: str, servers: list) -> list:
+    """Removes every container this run made with its anonymous volumes (``-v``; the run's own mounts are named, so
+    there should be none), then the run's volumes, whatever happened, and returns what is still there (shown at once,
+    so a run that failed earlier says so too; a passing run fails on it)."""
+    containers = [s.name for s in servers] + [f"{prefix}-smoke"]
+    for name in containers:
         try:
-            engine("rm", "-f", name, what=f"remove {name}", ok=(0, 1, 125))
+            engine("rm", "-f", "-v", name, what=f"remove {name}", ok=(0, 1, 125))
         except Failed as e:
             say(f"cleanup: {e}")
-    try:
-        engine("volume", "rm", "-f", volume, what=f"remove {volume}", ok=(0, 1, 125))
-    except Failed as e:
-        say(f"cleanup: {e}")
+    # A container the engine was removing already (its --rm, as it ended) holds its volume until it is gone.
+    deadline = time.perf_counter() + GONE_SECONDS
+    while time.perf_counter() < deadline:
+        try:
+            if not set(containers) & set(engine.leftovers(prefix)):
+                break
+        except Failed:
+            break
+        time.sleep(0.5)
+    for volume in (f"{prefix}-{v}" for v in VOLUMES):
+        try:
+            engine("volume", "rm", "-f", volume, what=f"remove {volume}", ok=(0, 1, 125))
+        except Failed as e:
+            say(f"cleanup: {e}")
     try:
         left = engine.leftovers(prefix)
     except Failed as e:
