@@ -13,22 +13,33 @@ checkout nor the per-user CITAR folder (``%LOCALAPPDATA%\\CITAR``, ``~/Library/A
 **helper.** A release or packaged helper has no development guard: without ``--home`` its home is the per-user
 folder, where a real installation keeps ``helper.json`` and the machine key. So the run is refused unless ARGS give
 ``--home DIR`` exactly once, in full, with DIR inside ``--under``; any abbreviation of ``--home``, ``--server``,
-``--base-url``, ``--config``, ``--detach`` or ``--supervisor`` is refused (the helper accepts unambiguous prefixes, and
-this reads only full names). It is also refused when it would reach beyond loopback or leave something behind: a
-``--server`` or ``--base-url`` (or the home's ``helper.json``'s ``server_url`` or ``base_url``) that is not a
-loopback address, a ``--config`` file outside ``--under``, ``--detach`` or ``--supervisor`` (a process that outlives
-the run), and ``service install``, ``uninstall`` or ``run`` without ``--dry-run`` (nothing is installed on this
-laptop, P5.18.1 rule 1). The helper runs with every ``CITAR_*`` variable of this environment dropped,
-``CITAR_DATA_DIR`` set to its home, and the per-user base (``LOCALAPPDATA`` on Windows, ``XDG_DATA_HOME`` on Linux)
-pointed inside ``--under``; its output passes through, and its exit status is this command's.
+``--base-url``, ``--config``, ``--hardware``, ``--ca-file``, ``--detach`` or ``--supervisor`` is refused (the helper
+accepts unambiguous prefixes, and this reads only full names). Every file the run names is inside ``--under`` too:
+``--config``, ``--hardware`` and ``--ca-file``, the FILE ``scan`` writes its report to, and the BINARY itself for
+``update apply`` and ``update rollback``, which put a binary in its place and keep the old one beside it. It is also
+refused when it would reach beyond loopback or leave something behind: a ``--server`` or ``--base-url`` (or the
+home's ``helper.json``'s ``server_url`` or ``base_url``) that is not a loopback address, ``--detach`` or
+``--supervisor`` (a process that outlives the run), and ``service install``, ``uninstall`` or ``run`` without
+``--dry-run`` (nothing is installed on this laptop, P5.18.1 rule 1). The helper runs with every ``CITAR_*`` variable
+of this environment dropped, ``CITAR_DATA_DIR`` set to its home, and the per-user base (``LOCALAPPDATA`` on Windows,
+``XDG_DATA_HOME`` on Linux) pointed inside ``--under``; its output passes through, and its exit status is this
+command's.
 
 **server.** Server mode's default host is ``0.0.0.0`` (``citar/settings.py``), and an unsigned program listening
 on every interface raises Windows Defender Firewall's prompt, whose dismissal adds block rules. So the server runs
 with ``CITAR_HOST=127.0.0.1`` and ``CITAR_PORT`` the ``--port`` given, which must be free on loopback and not 8799
 (the owner's); a ``--env`` that names another host or port, or a COMMAND argument ``--host`` or ``--port`` that
-differs, is refused. Every ``CITAR_*`` variable of this environment is dropped, and the five state variables
-(``CITAR_STATE_DIR``, ``CITAR_DATA_DIR``, ``CITAR_SAVE_DIR``, ``CITAR_CONFIG_DIR``, ``CITAR_BENCH_DIR``) point into
-``--state``, inside ``--under``. With ``--ready PATH`` it prints ``gate_run: ready <url>`` once
+differs, is refused. Every ``CITAR_*`` variable of this environment is dropped, and the server's state is all under
+``--state``, inside ``--under``: the five state variables (``CITAR_STATE_DIR``, ``CITAR_DATA_DIR``,
+``CITAR_SAVE_DIR``, ``CITAR_CONFIG_DIR``, ``CITAR_BENCH_DIR``); the API key store (``citar/keystore.py``): its
+encrypted file, ``CITAR_KEYS_FILE``, in ``<state>/config``, and no operating-system credential store
+(``PYTHON_KEYRING_BACKEND`` is keyring's failing backend, so the Servers page offers the file and the environment
+only, never the owner's Windows Credential Manager or Keychain); and the per-user configuration and data bases
+(``APPDATA`` and ``LOCALAPPDATA`` on Windows, ``XDG_CONFIG_HOME`` and ``XDG_DATA_HOME`` on Linux) in
+``<state>/user``, so a default the variables above miss lands there too. A ``--env`` may not undo that: it may not
+name ``PYTHON_KEYRING_BACKEND`` or a per-user base, its ``CITAR_KEYS_FILE`` must be inside ``--under``, and its
+``CITAR_DB_URL`` must be a SQLite database inside ``--under`` (or in memory). With ``--ready PATH`` it prints
+``gate_run: ready <url>`` once
 ``http://127.0.0.1:N<PATH>`` answers. It runs until the stop file appears (``--stop-file``, by default
 ``<state>/gate_run.stop``; the gate makes it when it is done), until ``--timeout``, or until the server exits by
 itself; then it stops the server's whole process tree (a polite signal, then a kill), and checks that none of those
@@ -60,8 +71,19 @@ STATE_VARIABLES = {"CITAR_STATE_DIR": ".", "CITAR_DATA_DIR": "data", "CITAR_SAVE
 #: The owner's own server's port on this laptop: never used by a gate.
 OWNER_PORT = 8799
 LOOPBACK_HOST = "127.0.0.1"
+#: keyring's backend that stores nothing (``citar/keystore.py`` reads it as no OS credential store).
+NO_KEYRING = "keyring.backends.fail.Keyring"
+#: Where a server's encrypted API key file is kept, under ``--state`` (``citar/keystore.py``'s ``CITAR_KEYS_FILE``).
+KEYS_FILE = Path("config") / "keys.enc"
+#: The per-user bases a server's defaults fall back on, each pointed under ``<state>/user``.
+USER_BASES = {"APPDATA": "Roaming", "LOCALAPPDATA": "Local"} if os.name == "nt" else (
+    {} if sys.platform == "darwin" else {"XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "share"})
+#: What a server's ``--env`` may never set: the isolation above would be undone.
+FIXED = {"PYTHON_KEYRING_BACKEND", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME"}
 #: The helper's options this reads, which must be written in full (the helper takes unambiguous prefixes).
-WATCHED = ("--home", "--server", "--base-url", "--config", "--detach", "--supervisor")
+WATCHED = ("--home", "--server", "--base-url", "--config", "--hardware", "--ca-file", "--detach", "--supervisor")
+#: The helper's options that name a file it reads, each inside ``--under``.
+FILE_OPTIONS = ("--config", "--hardware", "--ca-file")
 #: The helper's options that take a value (``--name VALUE``), so their value is not read as a command.
 TAKES_VALUE = {"--home", "--server", "--token", "--config", "--base-url", "--provider", "--api-key-env",
                "--max-concurrent", "--name", "--model", "--quiet", "--ca-file", "--hardware", "--updates",
@@ -177,8 +199,9 @@ def bare_words(args: list[str]) -> list[str]:
     return out
 
 
-def check_helper(args: list[str], under: Path) -> Path:
-    """The helper's home from its arguments, every rule above checked; raises Refused."""
+def check_helper(args: list[str], under: Path, binary: Path | str | None = None) -> Path:
+    """The helper's home from its arguments (and ``binary``, the program run), every rule above checked; raises
+    Refused."""
     for word in args:
         if not word.startswith("--") or word == "--":
             continue
@@ -197,13 +220,24 @@ def check_helper(args: list[str], under: Path) -> Path:
     words = bare_words(args)
     if "service" in words and "--dry-run" not in args and {"install", "uninstall", "run"} & set(words):
         raise Refused("service install, uninstall and run change this machine: only --dry-run runs here")
+    # read wherever the command stands among the bare words, as service above (a launcher's script may come first)
+    for at, word in enumerate(words):
+        if word == "scan" and at + 1 < len(words):  # scan FILE writes its report there
+            inside(Path(words[at + 1]), under, "scan's FILE")
+        if word == "update" and words[at + 1:at + 2] in (["apply"], ["rollback"]):
+            # each puts a binary in BINARY's place and keeps the one it replaced beside it
+            command = f"update {words[at + 1]}"
+            if binary is None:
+                raise Refused(f"{command} replaces the binary it runs: give it, to check it is inside {under}")
+            inside(Path(binary), under, f"the binary {command} replaces,")
     for name in ("--server", "--base-url"):
         for value in option_values(args, name):
             if not is_loopback(value):
                 raise Refused(f"{name} {value} is not a loopback address: a test helper never reaches another "
                               f"machine")
-    for value in option_values(args, "--config"):
-        inside(Path(value), under, "--config")
+    for name in FILE_OPTIONS:
+        for value in option_values(args, name):
+            inside(Path(value), under, name)
     settings = home / "helper.json"
     for config in [settings, *(Path(v) for v in option_values(args, "--config"))]:
         if not config.is_file():
@@ -234,7 +268,7 @@ def run_helper(binary: Path | str, args: list[str], under: Path, timeout: float 
                capture: bool = True) -> subprocess.CompletedProcess:
     """Runs ``binary ARGS`` under the rules above, its tree killed at ``timeout`` (``returncode`` 124 then)."""
     under = check_under(under)
-    home = check_helper(list(args), under)
+    home = check_helper(list(args), under, binary)
     argv = [str(binary), *args]
     proc = start(argv, helper_env(home, under), capture=capture)
     try:
@@ -323,19 +357,50 @@ def windows_process_table() -> dict[int, tuple[int, int]]:
     return table
 
 
-def process_table() -> dict[int, tuple[int, int]]:
-    """Every process: its id, then its parent's and its start (to tell a reused id from a child)."""
-    if os.name == "nt":
-        return windows_process_table()
+def linux_process_table() -> dict[int, tuple[int, int]]:
+    """Every process on Linux, from ``/proc``: its id, its parent's, and its start in clock ticks since boot
+    (``/proc/<pid>/stat``'s fields 4 and 22, counted after the command's closing parenthesis, since the command may
+    hold spaces and parentheses itself)."""
     table: dict[int, tuple[int, int]] = {}
-    out = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid="], capture_output=True, text=True,
-                         timeout=60).stdout
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            with open(os.path.join(entry.path, "stat"), encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:  # it ended while the table was read
+            continue
+        fields = text[text.rfind(")") + 1:].split()  # fields[0] is field 3, the state
+        if len(fields) >= 20 and fields[1].isdigit() and fields[19].isdigit():
+            table[int(entry.name)] = (int(fields[1]), int(fields[19]))
+    return table
+
+
+def ps_process_table() -> dict[int, tuple[int, int]]:
+    """Every process on macOS (or another Unix without ``/proc``), from ``ps``: its id, its parent's, and its start
+    (``lstart``, read in the C locale, as seconds since the epoch)."""
+    table: dict[int, tuple[int, int]] = {}
+    out = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "lstart="], capture_output=True, text=True,
+                         timeout=60, env={**os.environ, "LC_ALL": "C"}).stdout
     for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-            began = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            try:
+                began = int(time.mktime(time.strptime(parts[2].strip(), "%a %b %d %H:%M:%S %Y")))
+            except ValueError:
+                began = 0
             table[int(parts[0])] = (int(parts[1]), began)
     return table
+
+
+def process_table() -> dict[int, tuple[int, int]]:
+    """Every process: its id, then its parent's and its start (to tell a reused id from a child): the start is a
+    process's creation time on Windows, its clock ticks since boot on Linux, and its second on macOS."""
+    if os.name == "nt":
+        return windows_process_table()
+    if os.path.isfile("/proc/self/stat"):
+        return linux_process_table()
+    return ps_process_table()
 
 
 def snapshot_tree(root: int) -> dict[int, int]:
@@ -412,6 +477,21 @@ def port_open(port: int) -> bool:
         return s.connect_ex((LOOPBACK_HOST, port)) == 0
 
 
+def check_db_url(item: str, value: str, under: Path) -> None:
+    """A ``CITAR_DB_URL`` a gate's server may be given: a SQLite database inside ``under``, or one in memory."""
+    scheme, sep, rest = value.partition("://")
+    if not sep or scheme.split("+", 1)[0].lower() != "sqlite":
+        raise Refused(f"--env {item}: a gate's server keeps its own SQLite database, under {under}")
+    path, _, query = rest.partition("?")
+    if "uri" in query.lower():
+        raise Refused(f"--env {item}: give the database as sqlite:///PATH, not a URI this cannot read")
+    if path in ("", "/", "/:memory:"):  # in memory: nothing is written
+        return
+    if not path.startswith("/"):
+        raise Refused(f"--env {item}: give the database as sqlite:///PATH")
+    inside(Path(path[1:]), under, f"--env {item}'s database")
+
+
 def check_server(port: int, state: Path, under: Path, extra: list[str], command: list[str]) -> dict[str, str]:
     """The server's environment, every rule above checked; raises Refused."""
     if port == OWNER_PORT:
@@ -420,6 +500,7 @@ def check_server(port: int, state: Path, under: Path, extra: list[str], command:
         raise Refused(f"--port {port} is not a port above 1024")
     state = inside(state, under, "--state")
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("CITAR_")}
+    env["CITAR_KEYS_FILE"] = str(state / KEYS_FILE)
     for item in extra:
         name, sep, value = item.partition("=")
         if not sep or not name:
@@ -430,6 +511,13 @@ def check_server(port: int, state: Path, under: Path, extra: list[str], command:
             raise Refused(f"--env {item}: the port is --port's, {port}")
         if name.upper() in STATE_VARIABLES:
             raise Refused(f"--env {item}: the state variables are --state's")
+        if name.upper() in FIXED:
+            raise Refused(f"--env {item}: the key store and the per-user bases are --state's (no OS credential "
+                          f"store, no per-user folder of this machine)")
+        if name.upper() == "CITAR_KEYS_FILE":
+            inside(Path(value), under, f"--env {item}'s key file")
+        if name.upper() == "CITAR_DB_URL":
+            check_db_url(item, value, under)
         env[name] = value
     for value in option_values(command, "--host"):
         if value != LOOPBACK_HOST:
@@ -441,8 +529,13 @@ def check_server(port: int, state: Path, under: Path, extra: list[str], command:
         raise Refused(f"port {port} is in use on {LOOPBACK_HOST}")
     env["CITAR_HOST"] = LOOPBACK_HOST
     env["CITAR_PORT"] = str(port)
+    env["PYTHON_KEYRING_BACKEND"] = NO_KEYRING
     for name, sub in STATE_VARIABLES.items():
         folder = state / sub
+        folder.mkdir(parents=True, exist_ok=True)
+        env[name] = str(folder)
+    for name, sub in USER_BASES.items():
+        folder = state / "user" / sub
         folder.mkdir(parents=True, exist_ok=True)
         env[name] = str(folder)
     return env

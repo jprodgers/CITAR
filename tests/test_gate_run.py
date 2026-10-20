@@ -1,8 +1,9 @@
 """scripts/ci/gate_run.py, the harness every package's gates run a release helper or a server through on the laptop
 (design/phase5-release.md P5.18.1 rules 2 and 11, package 5-03): it refuses a helper without --home inside the
-package's folder, or one that would reach beyond loopback or leave something behind, and a server not bound to
-127.0.0.1, on the owner's port, or with its state outside the folder; what it runs gets an environment with no
-inherited CITAR_ variable; and a server it stops leaves no process behind.
+package's folder, one that names a file outside it, or one that would reach beyond loopback or leave something
+behind, and a server not bound to 127.0.0.1, on the owner's port, or with its state, its database or its API keys
+outside the folder; what it runs gets an environment with no inherited CITAR_ variable, and a server no OS credential
+store and per-user bases of its own; and a server it stops leaves no process behind.
 
 Stand-ins play the helper and the server (Python scripts), so these run on every OS and touch nothing real.
 """
@@ -57,6 +58,8 @@ from pathlib import Path
 state = Path(os.environ["CITAR_STATE_DIR"])
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
 seen = {k: v for k, v in os.environ.items() if k.startswith("CITAR_")}
+for name in ("PYTHON_KEYRING_BACKEND", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+    seen[name] = os.environ.get(name)
 (state / "seen.json").write_text(json.dumps({"env": seen, "child": child.pid, "pid": os.getpid()}))
 class Answer(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -65,6 +68,21 @@ class Answer(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 http.server.HTTPServer((os.environ["CITAR_HOST"], int(os.environ["CITAR_PORT"])), Answer).serve_forever()
+"""
+
+#: What the real server's key store makes of the environment it is given (citar/keystore.py): where its encrypted
+#: file is, whether it has an OS credential store, and the keyring backend keyring itself chose.
+KEYSTORE_PROBE = """import json, sys
+sys.path.insert(0, sys.argv[1])
+from citar import keystore
+try:
+    import keyring
+    chosen = type(keyring.get_keyring()).__module__ + "." + type(keyring.get_keyring()).__name__
+except ImportError:
+    chosen = None
+print(json.dumps({"file": str(keystore._file_path()), "keyring": keystore._keyring() is not None,
+                  "name": keystore._keyring_name(keystore._keyring()), "chosen": chosen,
+                  "available": keystore.backends()["keyring"]["available"]}))
 """
 
 
@@ -82,9 +100,9 @@ class Base(unittest.TestCase):
         self.helper.write_text(HELPER, encoding="utf-8")
         self.home = self.under / "home"
 
-    def refused(self, why, args, under=None):
+    def refused(self, why, args, under=None, binary=None):
         with self.assertRaisesRegex(gate_run.Refused, why):
-            gate_run.check_helper(list(args), gate_run.check_under(under or self.under))
+            gate_run.check_helper(list(args), gate_run.check_under(under or self.under), binary)
 
 
 class TheHelperIsRefused(Base):
@@ -99,9 +117,33 @@ class TheHelperIsRefused(Base):
             self.refused("is not inside", ["--version", "--home", str(base / "helper")])
 
     def test_an_abbreviation_of_an_option_it_reads(self):
-        for word in ("--hom", "--ho=x", "--serv", "--base", "--conf", "--det", "--superv"):
+        for word in ("--hom", "--ho=x", "--serv", "--base", "--conf", "--det", "--superv", "--hard", "--ca"):
             with self.subTest(word=word):
                 self.refused("write it in full", ["--home", str(self.home), word, "x"])
+
+    def test_a_file_it_names_outside_the_folder(self):
+        # scan FILE writes the hardware report there; update apply and rollback put a binary in the binary's place
+        home = ["--home", str(self.home)]
+        outside = Path(tempfile.gettempdir()) / "citar-gate-run-outside.json"
+        self.refused("scan's FILE .* is not inside", home + ["scan", str(outside)])
+        self.refused("scan's FILE .* is not inside", ["scan", "--home", str(self.home), "--no-power", str(outside)])
+        for name in ("--hardware", "--ca-file", "--config"):
+            with self.subTest(option=name):
+                self.refused(f"{name} .* is not inside", home + [name, str(outside), "--version"])
+                self.refused(f"{name} .* is not inside", home + [f"{name}={outside}", "--version"])
+        elsewhere = Path(tempfile.gettempdir()) / "citar-helper-elsewhere"
+        for words in (["update", "apply"], ["update", "rollback"]):
+            with self.subTest(words=words):
+                self.refused("replaces the binary it runs", home + words)
+                self.refused(f"the binary {' '.join(words)} replaces, .* is not inside", home + words,
+                             binary=elsewhere)
+                self.assertEqual(gate_run.check_helper(home + words, gate_run.check_under(self.under),
+                                                       self.under / "bin" / "citar-helper"), gate_run.real(self.home))
+        under = gate_run.check_under(self.under)
+        for args in (["scan"], ["scan", str(self.under / "hw.json")], ["--hardware", str(self.under / "hw.json")],
+                     ["--ca-file", str(self.under / "ca.pem"), "--version"], ["update", "check"]):
+            with self.subTest(args=args):
+                self.assertEqual(gate_run.check_helper(home + args, under, elsewhere), gate_run.real(self.home))
 
     def test_anything_beyond_loopback_or_left_behind(self):
         home = ["--home", str(self.home)]
@@ -165,6 +207,16 @@ class TheHelperRuns(Base):
         out = subprocess.run([sys.executable, str(SCRIPT), "helper", "--", sys.executable, str(self.helper), "--home",
                               str(self.home)], capture_output=True, text=True, env=env)
         self.assertEqual(out.returncode, 2, "no --under and no CARGO_TARGET_DIR")
+        # a report scan would write outside the folder: refused, and nothing is written there
+        outside = Path(tempfile.mkdtemp(prefix="citar-gate-run-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        out = subprocess.run([sys.executable, str(SCRIPT), "helper", "--under", str(self.under), "--",
+                              sys.executable, str(self.helper), "--home", str(self.home / "scan"), "scan",
+                              str(outside / "hw.json")], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("scan's FILE", out.stderr)
+        self.assertEqual(list(outside.iterdir()), [], "nothing ran")
+        self.assertFalse((self.home / "scan").exists(), "nothing ran")
 
     def test_a_timeout_stops_the_whole_tree(self):
         began = time.monotonic()
@@ -178,6 +230,34 @@ class TheHelperRuns(Base):
         while child in gate_run.process_table() and time.monotonic() < deadline:
             time.sleep(0.5)
         self.assertNotIn(child, gate_run.process_table(), "the helper's child was stopped too")
+
+
+class TheProcessTable(unittest.TestCase):
+    """Each process with its parent and its start, read on every OS (Windows' snapshot, Linux's /proc, macOS's ps), so
+    a process that took a stopped one's id is not counted as left, nor as one of a tree."""
+
+    def test_this_process_its_parent_and_its_start(self):
+        table = gate_run.process_table()
+        parent, began = table[os.getpid()]
+        self.assertEqual(parent, os.getppid())
+        self.assertNotEqual(began, 0, "the start is read on this OS")
+        self.assertEqual(gate_run.left_of({os.getpid(): began}), [os.getpid()])
+        # the same id with another start is another process: one that took the id of a process that ended
+        self.assertEqual(gate_run.left_of({os.getpid(): began - 1}), [])
+        self.assertEqual(gate_run.left_of({os.getpid(): began + 1}), [])
+
+    def test_a_tree_holds_a_child_started_after_its_parent(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(child.wait, 30)
+        self.addCleanup(child.kill)
+        deadline = time.monotonic() + 30
+        tree = gate_run.snapshot_tree(os.getpid())
+        while child.pid not in tree and time.monotonic() < deadline:
+            time.sleep(0.2)
+            tree = gate_run.snapshot_tree(os.getpid())
+        self.assertIn(child.pid, tree)
+        self.assertGreaterEqual(tree[child.pid], tree[os.getpid()])
+        self.assertNotEqual(tree[child.pid], 0)
 
 
 class TheServer(Base):
@@ -209,6 +289,53 @@ class TheServer(Base):
         out = subprocess.run([sys.executable, str(SCRIPT), "server", "--under", str(self.under), "--state",
                               str(self.state), "--", sys.executable, str(self.server)], capture_output=True, text=True)
         self.assertEqual(out.returncode, 2, "--port is required")
+
+    def test_a_key_store_database_or_per_user_base_outside_the_folder_is_refused(self):
+        outside = Path(tempfile.gettempdir()) / "citar-gate-run-outside"
+        for item in ("PYTHON_KEYRING_BACKEND=keyring.backends.Windows.WinVaultKeyring",
+                     "PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring", f"APPDATA={outside}",
+                     f"LOCALAPPDATA={outside}", f"XDG_CONFIG_HOME={outside}", f"XDG_DATA_HOME={outside}"):
+            with self.subTest(item=item):
+                self.refused("the key store and the per-user bases are --state's", extra=[item])
+        self.refused("key file .* is not inside", extra=[f"CITAR_KEYS_FILE={outside / 'keys.enc'}"])
+        for url in (f"sqlite:///{(outside / 'citar.db').as_posix()}", "postgresql://citar@127.0.0.1/citar",
+                    "postgresql+psycopg://citar@db.example.com/citar", f"sqlite:///file:{self.under.as_posix()}/x.db"
+                    "?mode=rwc&uri=true", "sqlite://host/x.db", str(self.under / "citar.db")):
+            with self.subTest(url=url):
+                self.refused("CITAR_DB_URL", extra=[f"CITAR_DB_URL={url}"])
+        under = gate_run.check_under(self.under)
+        for item in (f"CITAR_DB_URL=sqlite:///{(self.under / 'db' / 'citar.db').as_posix()}", "CITAR_DB_URL=sqlite://",
+                     "CITAR_DB_URL=sqlite:///:memory:", f"CITAR_KEYS_FILE={self.under / 'keys' / 'keys.enc'}"):
+            with self.subTest(item=item):
+                env = gate_run.check_server(free_port(), self.state, under, [item], [sys.executable])
+                name, _, value = item.partition("=")
+                self.assertEqual(env[name], value)
+
+    def test_the_key_store_and_the_per_user_bases_are_the_states(self):
+        # what citar/keystore.py makes of the server's environment: its file under --state, no OS credential store
+        os.environ["CITAR_KEYS_FILE"] = str(Path(tempfile.gettempdir()) / "keys.enc")  # inherited: dropped
+        self.addCleanup(os.environ.pop, "CITAR_KEYS_FILE", None)
+        os.environ["PYTHON_KEYRING_BACKEND"] = "keyring.backends.chainer.ChainerBackend"  # inherited: replaced
+        self.addCleanup(os.environ.pop, "PYTHON_KEYRING_BACKEND", None)
+        env = gate_run.check_server(free_port(), self.state, gate_run.check_under(self.under), [], [sys.executable])
+        state = gate_run.real(self.state)
+        self.assertEqual(Path(env["CITAR_KEYS_FILE"]), state / "config" / "keys.enc")
+        self.assertEqual(env["PYTHON_KEYRING_BACKEND"], "keyring.backends.fail.Keyring")
+        for name, sub in gate_run.USER_BASES.items():
+            self.assertEqual(Path(env[name]), state / "user" / sub, name)
+            self.assertTrue(Path(env[name]).is_dir(), name)
+        self.assertEqual(set(gate_run.USER_BASES), {"APPDATA", "LOCALAPPDATA"} if os.name == "nt" else
+                         set() if sys.platform == "darwin" else {"XDG_CONFIG_HOME", "XDG_DATA_HOME"})
+        out = subprocess.run([sys.executable, "-c", KEYSTORE_PROBE, str(ROOT)], env=env, capture_output=True,
+                             text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        seen = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertTrue(gate_run.within(Path(seen["file"]), state), seen["file"])
+        self.assertFalse(seen["keyring"], seen)
+        self.assertFalse(seen["available"], "the Servers page offers no OS credential store")
+        self.assertEqual(seen["name"], "OS credential store (unavailable)")
+        if seen["chosen"] is not None:
+            self.assertEqual(seen["chosen"], "keyring.backends.fail.Keyring")
 
     def test_a_ready_path_git_bash_rewrote_is_refused(self):
         for ready in ("C:/Program Files/Git/api/auth/config", "api/auth/config", "/api/x y"):
@@ -261,6 +388,10 @@ class TheServer(Base):
         for name, sub in gate_run.STATE_VARIABLES.items():
             self.assertEqual(Path(env[name]), gate_run.real(self.state) / sub, name)
             self.assertTrue(Path(env[name]).is_dir(), name)
+        self.assertEqual(Path(env["CITAR_KEYS_FILE"]), gate_run.real(self.state) / "config" / "keys.enc")
+        self.assertEqual(env["PYTHON_KEYRING_BACKEND"], "keyring.backends.fail.Keyring")
+        for name, sub in gate_run.USER_BASES.items():
+            self.assertEqual(Path(env[name]), gate_run.real(self.state) / "user" / sub, name)
         (self.state / "gate_run.stop").write_text("")
         rest, _ = proc.communicate(timeout=180)
         self.assertEqual(proc.returncode, 0, "".join(lines) + rest)
