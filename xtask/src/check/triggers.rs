@@ -239,6 +239,7 @@ concurrency:
         assert!(reads.contains(&"pyproject.toml".to_owned()), "{reads:?}");
         assert!(reads.contains(&"crates/citar-py/Cargo.toml".to_owned()), "{reads:?}");
         assert!(reads.contains(&".github/workflows/package.yml".to_owned()), "{reads:?}");
+        assert!(reads.contains(&crate::licenses::OUT.to_owned()), "{reads:?}");
         for file in TEST_READS {
             assert!(reads.contains(&(*file).to_owned()), "{file}: {reads:?}");
             assert!(root.join(file).is_file(), "{file} is gone: take it out of TEST_READS");
@@ -246,9 +247,12 @@ concurrency:
         let found = check(&root, &reads).unwrap();
         assert!(found.is_empty(), "{found:?}");
         // The check can fail on the real file: without its lines for a file the checks read (a
-        // workflow among them, 5-02b's package.yml), or for one a test reads, both events miss it.
+        // workflow among them, 5-02b's package.yml), for one a test reads, or for the notices
+        // the lint job holds to the lock (5-04), both events miss it.
         let text = std::fs::read_to_string(root.join(WORKFLOW)).unwrap();
-        for file in ["pyproject.toml", ".github/workflows/package.yml", TEST_READS[0]] {
+        for file in
+            ["pyproject.toml", ".github/workflows/package.yml", TEST_READS[0], crate::licenses::OUT]
+        {
             let without: String = text
                 .lines()
                 .filter(|l| !l.contains(&format!("\"{file}\"")))

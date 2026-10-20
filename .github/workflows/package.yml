@@ -28,6 +28,8 @@
 #   with a throwaway key made in the runner's temporary folder, and the signature verified by xtask and by
 #   scripts/ci/verify_manifest.py, which shares no code with it, a copy with one byte changed and another key refused
 #   by both. Nothing here holds the release's key.
+# - notices: packaging/THIRD-PARTY-LICENSES.txt held to Cargo.lock (cargo xtask licenses --check, P5.5) and uploaded as
+#   the release's asset; the wheels carry it as a licence file and the packaged helpers' archives beside the binary.
 # - installer, docker: install.sh and the image, now on the release wheels (moved from test.yml; 5-06 and 5-07
 #   replace them).
 #
@@ -831,6 +833,53 @@ jobs:
           path: |
             xtask-bin/xtask
             xtask-bin/xtask.sha256
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  notices:
+    # The third-party notices (design/phase5-release.md P5.5): packaging/THIRD-PARTY-LICENSES.txt must be what cargo
+    # xtask licenses writes from this checkout's Cargo.lock (every crate the wheels' extension and the helper link on
+    # the five release targets, each licence on the allow-list, with its texts), and this is the copy the release
+    # carries as an asset, beside the wheels and the packaged helpers' archives, which hold it too. release.yml calls
+    # no rust.yml, so a tag's or a dry run's notices are proved here; a dry run's version bump changes no third-party
+    # crate, so the file holds.
+    name: third-party notices
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - name: The notices are Cargo.lock's
+        # cargo fetch downloads every locked crate for every platform, whose licence files cargo xtask licenses reads.
+        # No cache: what a release carries is read from the locked sources alone.
+        shell: bash
+        run: |
+          cargo fetch --locked
+          cargo xtask licenses --check
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The release's asset of that name (scripts/release.py's notices group).
+        with:
+          name: pkg-third-party-licenses
+          path: packaging/THIRD-PARTY-LICENSES.txt
           if-no-files-found: error
           retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
 

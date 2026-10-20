@@ -381,7 +381,8 @@ class Stage(unittest.TestCase):
                     self.assertEqual(side, hashlib.sha256(path.read_bytes()).hexdigest().encode() + b"\n")
                 listing = helper_release.listing(archive, platform, "0.1.7-rc.1")
                 binary = "citar-helper.exe" if platform == "windows-x64" else "citar-helper"
-                self.assertEqual([line.split()[0] for line in listing], [binary, "LICENSE", "NOTICE.md"])
+                self.assertEqual([line.split()[0] for line in listing],
+                                 [binary, "LICENSE", "NOTICE.md", "THIRD-PARTY-LICENSES.txt"])
                 self.assertEqual(listing[0], f"{binary} 755")
         self.assertEqual(helper_release.archive_name("0.1.6", "windows-x64"), "citar-helper-0.1.6-windows-x64.zip")
         self.assertEqual(helper_release.asset_name("macos-arm64"), "citar-helper-macos-arm64")
@@ -399,11 +400,18 @@ class Stage(unittest.TestCase):
                 if platform == "linux-x64":
                     with tarfile.open(a / name) as t:
                         notice = t.extractfile("NOTICE.md").read()
+                        third = t.extractfile("THIRD-PARTY-LICENSES.txt").read()
                         self.assertTrue(all(m.uid == 0 and m.mtime == helper_release.ARCHIVE_TIME for m in t))
                 else:
                     with zipfile.ZipFile(a / name) as z:
                         notice = z.read("NOTICE.md")
+                        third = z.read("THIRD-PARTY-LICENSES.txt")
                 self.assertEqual(notice, (ROOT / "NOTICE.md").read_bytes())
+                # The third-party notices are the checkout's, byte for byte: LF on every OS (.gitattributes), as
+                # cargo xtask licenses writes them.
+                self.assertEqual(third, (ROOT / "packaging" / "THIRD-PARTY-LICENSES.txt").read_bytes())
+                self.assertNotIn(b"\r", third)
+                self.assertIn(b"\nThe crates (", third)
 
     def test_listing_refuses_an_extra_file_a_missing_one_a_folder_and_no_exec_bit(self):
         archive = self.dir / helper_release.archive_name("0.1.7", "linux-x64")
@@ -418,10 +426,11 @@ class Stage(unittest.TestCase):
                     t.addfile(info, io.BytesIO(data))
 
         good = [("citar-helper", 0o755, tarfile.REGTYPE), ("LICENSE", 0o644, tarfile.REGTYPE),
-                ("NOTICE.md", 0o644, tarfile.REGTYPE)]
+                ("NOTICE.md", 0o644, tarfile.REGTYPE), ("THIRD-PARTY-LICENSES.txt", 0o644, tarfile.REGTYPE)]
         tar(good)
-        self.assertEqual(len(helper_release.listing(archive, "linux-x64", "0.1.7")), 3)
+        self.assertEqual(len(helper_release.listing(archive, "linux-x64", "0.1.7")), 4)
         for members, why in ((good + [("extra.txt", 0o644, tarfile.REGTYPE)], "not exactly"),
+                             (good[:3], "not exactly"),
                              (good[:2], "not exactly"),
                              ([("citar-helper", 0o755, tarfile.DIRTYPE)] + good[1:], "not a regular file"),
                              ([("citar-helper", 0o644, tarfile.REGTYPE)] + good[1:], "not executable"),

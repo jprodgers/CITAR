@@ -40,6 +40,9 @@ on:
       - ".github/workflows/release.yml"
       - ".github/workflows/package.yml"
       - ".github/workflows/helper.yml"
+      # The lint job holds the third-party notices to Cargo.lock (cargo xtask licenses --check,
+      # design/phase5-release.md P5.5), so an edit to the file alone runs it too.
+      - "packaging/THIRD-PARTY-LICENSES.txt"
   pull_request:
     paths:
       - "crates/**"
@@ -72,6 +75,9 @@ on:
       - ".github/workflows/release.yml"
       - ".github/workflows/package.yml"
       - ".github/workflows/helper.yml"
+      # The lint job holds the third-party notices to Cargo.lock (cargo xtask licenses --check,
+      # design/phase5-release.md P5.5), so an edit to the file alone runs it too.
+      - "packaging/THIRD-PARTY-LICENSES.txt"
   workflow_dispatch:
     inputs:
       chaos_seconds:
@@ -145,6 +151,17 @@ jobs:
       - name: xtask check
         # Dependency allow-list, version equality, layering, mutation access, generated files.
         run: cargo xtask check
+
+      - name: Third-party notices
+        # packaging/THIRD-PARTY-LICENSES.txt, which every wheel, packaged helper archive and release
+        # carries, must be what cargo xtask licenses writes from Cargo.lock: every crate citar-py
+        # and citar-helper link on the five release targets, each licence on the allow-list, with
+        # the texts from the crates' sources, which cargo fetch downloads first for every platform
+        # (design/phase5-release.md P5.5). A lock changed without the file (a dependency update)
+        # fails here: run `cargo xtask licenses` and commit the file.
+        run: |
+          cargo fetch --locked
+          cargo xtask licenses --check
 
       - name: Docs
         # citar-py included.

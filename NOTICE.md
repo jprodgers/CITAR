@@ -47,9 +47,29 @@ use it.
 
 ## Third-party dependencies
 
-CITAR depends on the packages listed in [`pyproject.toml`](pyproject.toml), each under its own
-licence — notably FastAPI, Starlette and uvicorn (MIT/BSD), SQLAlchemy (MIT), Alembic (MIT), Authlib
-(BSD), argon2-cffi (MIT), httpx (BSD), and the official `anthropic`, `openai` and `mcp` clients
-(MIT). Run `pip-licenses` in an installed environment for the exact set and versions you have.
+**The Rust crates in the binaries.** CITAR's Python extension (`citar._engine`, built from
+`crates/citar-py`) and its helper (`citar-helper`) statically link about 180 third-party Rust
+crates, among them tokio, rustls and ring, reqwest and hyper, serde, PyO3, clap, sysinfo and the
+Windows crates, each under its own permissive licence: most under MIT or Apache-2.0, the others
+under BSD-3-Clause, ISC or Unicode-3.0 (the file names each crate's). Their notices travel with
+every binary in [`packaging/THIRD-PARTY-LICENSES.txt`](packaging/THIRD-PARTY-LICENSES.txt): each
+crate the two link on CITAR's release targets, with its version, its licence and the licence and
+notice texts its package ships, those of code it bundles included. Every wheel carries the file in
+its `.dist-info/licenses/`, every packaged helper archive (the Homebrew, Scoop and winget builds)
+beside the binary, and each release as an asset of its own.
 
-No dependency is vendored into this repository.
+`cargo xtask licenses` writes the file from `Cargo.lock` and the crates' published sources, and
+refuses any crate whose licence is outside an allow-list of permissive licences: MIT, Apache-2.0
+(with or without its LLVM exception), BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0,
+Unicode-DFS-2016, MPL-2.0, CC0-1.0, BSL-1.0, 0BSD and CDLA-Permissive-2.0. CI fails when the lock
+changes without the file.
+
+**The Python packages.** CITAR depends on the packages listed in [`pyproject.toml`](pyproject.toml),
+each under its own licence: notably FastAPI, Starlette and uvicorn (MIT/BSD), SQLAlchemy (MIT),
+Alembic (MIT), Authlib (BSD), argon2-cffi (MIT), httpx (BSD), and the official `anthropic`,
+`openai` and `mcp` clients (MIT). pip installs each with its own licence files; run `pip-licenses`
+in an installed environment for the exact set and versions you have. The Windows bundle, which
+carries the Python packages it runs on, lists them with their licences in `PYTHON-LICENSES.txt`.
+
+No dependency's source is vendored into this repository: the crates come from crates.io, pinned
+by `Cargo.lock`, and the Python packages from PyPI.

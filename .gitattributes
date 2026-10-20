@@ -71,6 +71,11 @@ wiki/* linguist-generated=true
 Cargo.lock linguist-generated=true
 crates/citar-engine/src/unique/gen.rs linguist-generated=true
 crates/citar-bot/src/params/gen.rs linguist-generated=true
+# The third-party notices (cargo xtask licenses, design/phase5-release.md P5.5): the bytes every wheel,
+# packaged helper archive and release carries, LF on every OS, as the generator writes them and its --check
+# compares them; and the standard licence texts it prints for a crate that ships none, apache.org's byte for byte.
+packaging/THIRD-PARTY-LICENSES.txt text eol=lf linguist-generated=true
+xtask/licenses/*.txt text eol=lf
 
 # The avatar corpus (tests/test_profiles.py): byte for byte, whatever its extension says it is.
 tests/data/avatars/* binary

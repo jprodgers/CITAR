@@ -489,6 +489,23 @@ class ThePackageWorkflow(unittest.TestCase):
             "pkg-helper-manifest-dry-run": "dry-run/citar-helper-manifest.json.sig\ndry-run/dry-run-signing.pub\n",
             "pkg-xtask-linux-x64": "xtask-bin/xtask\nxtask-bin/xtask.sha256\n"})
 
+    def test_the_notices_are_held_to_the_lock_and_uploaded_for_the_release(self):
+        """5-04 (P5.5): the third-party notices a release carries are proved current in the release's own run (release.yml
+        calls no rust.yml), from the locked sources alone, and uploaded under the release asset's name."""
+        job = self.jobs["notices"]
+        self.assertEqual(job["needs"], "meta")
+        self.assertNotIn("environment", job)
+        run = self.runs(job)
+        self.assertLess(run.index("cargo fetch --locked"), run.index("cargo xtask licenses --check"))
+        self.assertFalse(self.using(job, "Swatinem/rust-cache") or self.using(job, "actions/cache"))
+        uploads = [(s["with"]["name"], s["with"]["path"]) for s in self.using(job, "actions/upload-artifact")]
+        self.assertEqual(uploads, [("pkg-third-party-licenses", "packaging/THIRD-PARTY-LICENSES.txt")])
+        release = load_release()
+        notices = [a["name"] for a in release.assets("0.1.6") if a["group"] == "notices"]
+        self.assertEqual(notices, [Path(uploads[0][1]).name])
+        # the packaged helpers' archives carry the same file beside the binary
+        self.assertEqual(helper_release_texts()["THIRD-PARTY-LICENSES.txt"], uploads[0][1])
+
     def test_helper_ymls_artifacts_build_where_the_release_builds(self):
         import yaml
         helper = yaml.safe_load((WORKFLOWS / "helper.yml").read_text(encoding="utf-8"))
@@ -561,6 +578,10 @@ class ThePackageWorkflow(unittest.TestCase):
              "    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    environment: helper-signing\n", 3,
              "helper-manifest"),
             ("          name: pkg-helper-manifest\n", "          name: helper-manifest\n", 13, "helper-manifest"),
+            # 5-04: the notices
+            ("          name: pkg-third-party-licenses\n", "          name: third-party-licenses\n", 13, "notices"),
+            ("    name: third-party notices\n    needs: meta\n",
+             "    name: third-party notices\n    needs: meta\n    environment: notices\n", 3, "notices"),
         )
         for old, new, rule, job in plants:
             with self.subTest(rule=rule, job=job):
@@ -575,6 +596,17 @@ class ThePackageWorkflow(unittest.TestCase):
         found = tree.findings()
         self.assertTrue([f for f in found if f.rule == 11 and f.job == "artifact" and f.file == "helper.yml"],
                         "\n".join(map(str, found)))
+
+
+def helper_release_texts() -> dict:
+    """scripts/ci/helper_release.py's ARCHIVE_TEXTS (each notice's name in a packaged archive, and its file), read
+    from the source without importing it."""
+    import ast
+    tree = ast.parse((ROOT / "scripts" / "ci" / "helper_release.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] == ["ARCHIVE_TEXTS"]:
+            return ast.literal_eval(node.value)
+    raise AssertionError("helper_release.py has no ARCHIVE_TEXTS")
 
 
 def load_release():

@@ -13,7 +13,10 @@ dynamic = ["version"]
 description = "Civ Inspired Tool for AI Research - a Civilization V-style 4X game for benchmarking language models"
 readme = "README.md"
 license = "MPL-2.0"
-license-files = ["LICENSE", "NOTICE.md"]
+# PEP 639: each lands in the wheel's dist-info under licenses/ at its own path, and in the sdist. The
+# third-party notices are every Rust crate the extension links, with its licence texts
+# (`cargo xtask licenses`, design/phase5-release.md P5.5); scripts/ci/check_dist.py holds both to them.
+license-files = ["LICENSE", "NOTICE.md", "packaging/THIRD-PARTY-LICENSES.txt"]
 requires-python = ">=3.11"
 authors = [{ name = "Jimmie Rodgers" }]
 keywords = [

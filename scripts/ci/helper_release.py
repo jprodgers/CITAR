@@ -79,8 +79,10 @@ TARGETS = {"windows-x64": "x86_64-pc-windows-msvc", "macos-arm64": "aarch64-appl
            "macos-x64": "x86_64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu",
            "linux-arm64": "aarch64-unknown-linux-gnu"}
 #: The notices every packaged archive carries beside the binary: each one's name in the archive, and its file in the
-#: checkout (5-04 adds THIRD-PARTY-LICENSES.txt, from packaging/).
-ARCHIVE_TEXTS = {"LICENSE": "LICENSE", "NOTICE.md": "NOTICE.md"}
+#: checkout. THIRD-PARTY-LICENSES.txt is every crate the helper links, with its licence texts (P5.5: cargo xtask
+#: licenses writes it, and rust.yml and package.yml's notices job hold it to Cargo.lock).
+ARCHIVE_TEXTS = {"LICENSE": "LICENSE", "NOTICE.md": "NOTICE.md",
+                 "THIRD-PARTY-LICENSES.txt": "packaging/THIRD-PARTY-LICENSES.txt"}
 #: Every archive member's time: 1980-01-01, the earliest a zip can hold.
 ARCHIVE_TIME = 315532800
 #: The glibc the game's wheels need (manylinux_2_28), and so the helper's floor.
