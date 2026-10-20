@@ -478,13 +478,21 @@ def probe_models(body: ModelProbe, me=Depends(require_user)):
         return {"ok": False, "error": f"Could not reach {body.base_url or provider}: {e}"}
 
 
+def meta_payload(server_mode: bool, server_url: str) -> dict:
+    """``/api/meta``'s answer: this server's version and build label, its mode, its URL as the request reached it, and
+    ``mcp_command``, the command that starts the MCP bridge for a seat (the lobby adds ``--server``, ``--game`` and
+    ``--token``; :func:`citar.paths.mcp_command`). The route is public, so in server mode nothing in it names a folder
+    of this machine: a remote player runs the bridge from their own install (design/phase5-release.md P5.6)."""
+    from .. import __version__, paths
+    return {"version": __version__, "label": engine_api.build_info()["label"],
+            "mode": "server" if server_mode else "local", "server_url": server_url,
+            "mcp_command": paths.mcp_command(server_mode)}
+
+
 @app.get("/api/meta")
 def meta(request: Request):
-    """Server version, mode and capabilities, for the client to adapt to."""
-    import sys
-    root = Path(__file__).resolve().parent.parent.parent
-    return {"project_root": str(root), "python": sys.executable, "server_url": str(request.base_url).rstrip("/"),
-            "mcp_script": str(root / "citar_mcp.py")}
+    """Server version, mode and capabilities, for the client to adapt to (:func:`meta_payload`)."""
+    return meta_payload(citar_settings.get().server_mode, str(request.base_url).rstrip("/"))
 
 
 # ----------------------------------------------------------------------------
