@@ -164,6 +164,7 @@ follows, and [crates/citar-engine/DESIGN.md](https://github.com/jprodgers/CITAR/
 cargo nextest run --workspace --exclude citar-py    # tests (cargo install cargo-nextest)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo xtask check                                   # layering, dependencies, version, and more
+cargo xtask licenses --check                        # third-party notices (Cargo.lock changed: drop --check)
 cargo golden check                                  # determinism goldens
 cargo fmt --all
 ```
@@ -208,6 +209,20 @@ result building played them before the lab moved to the jobs crate; `tests/test_
 hand (after a change that moves the games, for the exact comparison), run `python -m
 tests.lab_results --force` from the repository's root with the extension built, and commit the
 files saying why.
+
+**Third-party notices.** `packaging/THIRD-PARTY-LICENSES.txt` lists every third-party crate the
+extension (`citar-py`) and the helper (`citar-helper`) link on the five release targets, with its
+licence and the licence and notice texts its package ships; every wheel, packaged helper archive
+and release carries it (design/phase5-release.md P5.5). `cargo xtask licenses` writes it from
+`cargo metadata --locked` and the crates' sources (each dependency's platform condition held to
+each target's `rustc --print cfg`), and refuses a crate whose licence is outside the allow-list in
+`xtask/src/licenses.rs` (an `OR` takes any branch, an `AND` needs both), naming it. Any change to
+`Cargo.lock`, a Dependabot update included, must regenerate and commit the file: rust.yml's lint
+job and package.yml's `notices` job run `cargo xtask licenses --check` after `cargo fetch --locked`
+and fail otherwise, naming the crates added and removed. A crate whose package ships no licence
+file gets the Apache-2.0 standard text (`xtask/licenses/`) when its licence offers Apache-2.0, and
+is refused otherwise: add the text it needs there, from the licence's own source. Never edit the
+file by hand, and never widen the allow-list without the owner.
 
 When the targets disagree, the determinism workflow's `divergence` artifact holds each odd
 target's state at the first round where a game parted from the committed file, the same state
@@ -544,7 +559,8 @@ else.
 **The helper's release builds** (design/phase5-release.md P5.4). `package.yml`'s `helpers` job builds
 the helper twice on each of its five targets, each on its own runner: the self-updating build under its
 unversioned release name and the `packaged` one (`--features packaged`, for Homebrew, Scoop and winget)
-in `citar-helper-<version>-<platform>.tar.gz` (`.zip` on Windows) with `LICENSE` and `NOTICE.md`. The
+in `citar-helper-<version>-<platform>.tar.gz` (`.zip` on Windows) with `LICENSE`, `NOTICE.md` and
+`THIRD-PARTY-LICENSES.txt` (the third-party notices, from `packaging/`). The
 Linux builds run in the wheels' manylinux_2_28 images, by the same digests, so the helper needs glibc
 2.28 as the game does; `scripts/ci/helper_release.py glibc` reads each binary's symbols (`objdump -T`)
 and fails above it, and `helper.yml`'s artifact jobs build the same way, so a pull request that raises
