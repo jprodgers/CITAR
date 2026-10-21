@@ -27,6 +27,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SH = ROOT / "install.sh"
@@ -683,10 +684,12 @@ class GateRunInstallPs1(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_its_environment_points_every_per_user_folder_inside(self):
-        os.environ["CITAR_SECRET_KEY"] = "x"
-        self.addCleanup(os.environ.pop, "CITAR_SECRET_KEY", None)
-        env = gate_run.install_ps1_env(gate_run.check_under(self.under), ["CITAR_RELEASE_URL=http://127.0.0.1:1"])
-        self.assertNotIn("CITAR_SECRET_KEY", env)
+        # patch.dict puts the environment back as it was: other modules set CITAR_ variables the whole suite reads
+        with mock.patch.dict(os.environ, {"CITAR_GATE_RUN_PROBE": "x"}):
+            env = gate_run.install_ps1_env(gate_run.check_under(self.under), ["CITAR_RELEASE_URL=http://127.0.0.1:1"])
+        self.assertNotIn("CITAR_GATE_RUN_PROBE", env)
+        self.assertFalse([k for k in env if k.startswith("CITAR_") and k not in (
+            "CITAR_RELEASE_URL", "CITAR_KEYS_FILE", *gate_run.STATE_VARIABLES)], "an inherited CITAR_ variable")
         self.assertEqual(env["CITAR_RELEASE_URL"], "http://127.0.0.1:1")
         for name in ("LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "CITAR_DATA_DIR", "CITAR_STATE_DIR", "CITAR_KEYS_FILE"):
             with self.subTest(name):
@@ -811,12 +814,9 @@ class InstallCheck(unittest.TestCase):
         self.assertEqual(install_check.main([mode, *base]), 2)
         here = "sh" if os.name != "nt" else "ps1"
         self.assertEqual(install_check.main([here, *base]), 2, "the wheel is missing")
-        saved = os.environ.pop("GITHUB_ACTIONS", None)
-        try:
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GITHUB_ACTIONS", None)
             self.assertEqual(install_check.main([here, *base, "--path-route"]), 2, "--path-route is CI's")
-        finally:
-            if saved is not None:
-                os.environ["GITHUB_ACTIONS"] = saved
         self.assertFalse((tmp / "work").exists())
 
 
