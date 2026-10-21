@@ -112,8 +112,11 @@ There is no prebuilt CITAR for this platform: $Why.
 "@
 }
 
+# A folder named relative to here made absolute, its separators Windows' own and no trailing one: the shims name it,
+# and the uninstall compares them with it.
 function Full-Path([string]$Path) {
-    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path).TrimEnd('\', '/')
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    return [IO.Path]::GetFullPath($resolved).TrimEnd('\', '/')
 }
 
 # ----------------------------------------------------------------------------- arguments
@@ -164,6 +167,8 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     [void][CitarInstaller.Broadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000,
         [ref]$result)
 }
+# The entry is appended as ";<dir>" (or alone), and taken away the same way, so an install and its uninstall leave
+# the value as it was, byte for byte.
 function Add-ToUserPath([string]$Dir) {
     if ($NoPath) {
         if (-not (($env:Path -split ';') -contains $Dir)) {
@@ -173,16 +178,30 @@ function Add-ToUserPath([string]$Dir) {
     }
     $path = Get-UserPath
     if (($path.Value -split ';') -contains $Dir) { return }
-    Set-UserPath (($path.Value.TrimEnd(';') + ";" + $Dir).Trim(';')) $path.Kind
+    Set-UserPath $(if ($path.Value) { $path.Value + ";" + $Dir } else { $Dir }) $path.Kind
     $env:Path = $env:Path + ";" + $Dir
     Warn "Added $Dir to your PATH. Open a new terminal for it to take effect everywhere."
 }
 function Remove-FromUserPath([string]$Dir) {
     if ($NoPath) { return }
     $path = Get-UserPath
-    $entries = $path.Value -split ';'
+    $value = $path.Value
+    $entries = $value -split ';'
     if (-not ($entries -contains $Dir)) { return }
-    Set-UserPath (($entries | Where-Object { $_ -and $_ -ne $Dir }) -join ';') $path.Kind
+    if ($value -ieq $Dir) {
+        $value = ""
+    } elseif ($value.EndsWith(";" + $Dir, [StringComparison]::OrdinalIgnoreCase)) {
+        $value = $value.Substring(0, $value.Length - $Dir.Length - 1)
+    } else {
+        # moved since: the first entry that is the folder goes, every other entry (empty ones too) stays
+        $kept = New-Object System.Collections.Generic.List[string]
+        $dropped = $false
+        foreach ($entry in $entries) {
+            if (-not $dropped -and $entry -ieq $Dir) { $dropped = $true } else { $kept.Add($entry) }
+        }
+        $value = $kept -join ';'
+    }
+    Set-UserPath $value $path.Kind
     Ok "Removed $Dir from your PATH."
 }
 
