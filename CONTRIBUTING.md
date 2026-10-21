@@ -607,7 +607,30 @@ state folders, its database and its API key file under `DIR`, no OS credential s
 failing backend, so a key saved on the Servers page never reaches your Credential Manager or Keychain),
 and the per-user configuration and data folders (`APPDATA` and `LOCALAPPDATA`, or `XDG_CONFIG_HOME`
 and `XDG_DATA_HOME`) moved under `DIR/user`; a `--env` may not undo any of that. It stops the
-server's whole process tree when `DIR/gate_run.stop` appears.
+server's whole process tree when `DIR/gate_run.stop` appears. `gate_run.py install-ps1 -- ARGS` runs
+the checkout's `install.ps1` only with `-Prefix` and `-BinDir` inside the target folder and `-NoPath`
+(and `-NoSetup` for an install), every parameter written in full (PowerShell takes any unambiguous
+prefix), `CITAR_RELEASE_URL` (a loopback server's) and the scripts' test hook its only additions to
+the environment, the per-user and temporary folders moved under the target, and the user's PATH (as
+`HKCU\Environment` stores it) compared before and after.
+
+**The install scripts** (design/phase5-release.md P5.8). `install.sh` and `install.ps1` install CITAR
+from its prebuilt wheels only (`--only-binary=citar`; `--from` a wheel or a folder of wheels, never an
+sdist or a checkout), after a platform check that says plainly when there is no wheel. The check reads
+its facts through a test hook, `CITAR_INSTALL_TEST_FACTS` (`name=value ...`: `system`, `machine`,
+`libc` as `glibc-2.39`, `musl` or `unknown`, `macos`, and the Python's `python`, `implementation`,
+`free_threaded`, `bits` and, in `install.ps1`, `machine` and `python_platform`), so the tests play musl,
+an unknown architecture, glibc 2.27, macOS 10.15 and free-threaded, ARM64 and 32-bit Pythons on any
+machine. `--worker` (`-Worker`) downloads the self-updating helper from `CITAR_RELEASE_URL` (by default
+the GitHub releases; https, or plain http to this machine only) and checks its `.sha256` before
+anything is written. `tests/test_install_scripts.py` runs `install.sh` in bash (Git Bash's on Windows,
+never `System32\bash.exe`, which is WSL's) with a temporary `HOME`, and `install.ps1` through
+`gate_run.py`, against stand-in helpers on a loopback server. `package.yml`'s `install` matrix runs
+both scripts on their five platforms against that run's own wheel and helper with
+`scripts/ci/install_check.py`, which you can run too: `python scripts/ci/install_check.py sh --wheel W
+--helper H --version V --label L --work DIR --out FILE` in WSL or on a Mac (`H` the staged
+`citar-helper-<platform>` with its `.sha256`; the game installs into `DIR`, inside `--under`, by default
+`$CARGO_TARGET_DIR`), and `... ps1 ...` on Windows.
 
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
