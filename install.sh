@@ -180,11 +180,10 @@ probe_libc() {
 
 # Whether the dotted version $1 is $2 or newer (numbers only: "2.28", "11", "15.1"); anything else is not.
 at_least() {
-	local IFS=. i x y
+	local i x y
 	local -a a b
-	set -f
-	a=($1); b=($2)
-	set +f
+	IFS=. read -r -a a <<< "$1"
+	IFS=. read -r -a b <<< "$2"
 	[ "${#a[@]}" -gt 0 ] || return 1
 	for i in 0 1 2; do
 		x="${a[i]:-0}"; y="${b[i]:-0}"
@@ -589,7 +588,7 @@ if [ -n "$WHEEL_DIR" ]; then
 	SOURCE="$(ls "$PICKED"/citar-*.whl)"
 fi
 if [ -n "$SOURCE" ]; then
-	SPEC="$SOURCE[$EXTRAS]"
+	SPEC="${SOURCE}[$EXTRAS]"
 else
 	SPEC="citar[$EXTRAS]"
 	[ -n "$VERSION" ] && SPEC="citar[$EXTRAS]==$VERSION"
