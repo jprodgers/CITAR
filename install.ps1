@@ -155,7 +155,10 @@ function Get-UserPath {
 }
 function Set-UserPath([string]$Value, $Kind) {
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
-    try { $key.SetValue("Path", $Value, $Kind) } finally { $key.Close() }
+    try {
+        # a PATH this script began (there was none) goes with its one entry, rather than staying as an empty value
+        if ($Value) { $key.SetValue("Path", $Value, $Kind) } else { $key.DeleteValue("Path", $false) }
+    } finally { $key.Close() }
     if (-not ("CitarInstaller.Broadcast" -as [type])) {
         Add-Type -Namespace CitarInstaller -Name Broadcast -MemberDefinition @'
 [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
