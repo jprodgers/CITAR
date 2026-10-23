@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+#
+# winget installer manifest for CITAR, the game: the Inno Setup installer, per user. Written by
+# scripts/release_checksums.py from this template (packaging/README.md); submitted to microsoft/winget-pkgs,
+# never published from this repository. InstallerSha256 is the hash of the exact file at InstallerUrl, which the
+# validation pipeline downloads and checks.
+
+PackageIdentifier: JimmieRodgers.CITAR
+PackageVersion: {{version}}
+InstallerType: inno
+# Per user, as the installer is built (PrivilegesRequired=lowest): no elevation prompt, and it works for somebody
+# without administrator rights on their own machine.
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: {{date}}
+InstallerSwitches:
+  # Inno's own switches. /NORESTART matters: without it a silent install may restart the machine.
+  Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+  SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART
+  Log: /LOG="<LOGPATH>"
+  InstallLocation: /DIR="<INSTALLPATH>"
+ExpectedReturnCodes:
+  - InstallerReturnCode: 2
+    ReturnResponse: cancelledByUser
+Installers:
+  - Architecture: x64
+    InstallerUrl: {{url:CITAR-{{version}}-setup.exe}}
+    InstallerSha256: {{SHA256:CITAR-{{version}}-setup.exe}}
+ManifestType: installer
+ManifestVersion: 1.12.0

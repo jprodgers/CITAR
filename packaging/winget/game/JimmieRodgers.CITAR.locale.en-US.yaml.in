@@ -1,9 +1,10 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 #
-# winget locale manifest for CITAR. Everything a person sees in `winget show` and in the store UI.
+# winget locale manifest for CITAR, the game: everything a person sees in `winget show` and in the store's pages.
+# Written by scripts/release_checksums.py from this template.
 
 PackageIdentifier: JimmieRodgers.CITAR
-PackageVersion: 0.1.5
+PackageVersion: {{version}}
 PackageLocale: en-US
 Publisher: Jimmie Rodgers
 PublisherUrl: https://github.com/jprodgers
@@ -44,7 +45,9 @@ Tags:
   - research
   - strategy
   - turn-based
-ReleaseNotesUrl: https://github.com/jprodgers/CITAR/releases/tag/v0.1.5
+ReleaseNotesUrl: https://github.com/jprodgers/CITAR/releases/tag/v{{version}}
+# Documentations, not Documentation: the published schemas allow unknown fields, so a misspelt one validates and is
+# silently dropped (packaging/README.md).
 Documentations:
   - DocumentLabel: Getting started
     DocumentUrl: https://github.com/jprodgers/CITAR/blob/main/docs/QUICKSTART.md
