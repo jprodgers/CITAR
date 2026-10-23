@@ -4,9 +4,9 @@ P5.11, package 5-09).
 P5.4.2's four states are tried twice. ``States`` runs the script's own logic with xtask stood in by a function, so
 every suite environment holds the rules. ``WithTheRealXtask`` runs the command line with the xtask binary a release
 build makes (``CITAR_TEST_XTASK`` names it: package 5-09's gate 2 builds it with ``cargo build --release -p xtask``),
-with throwaway keys made by its own ``keygen`` in a temporary folder outside any git working tree, and with a
-``cargo`` that fails first on ``PATH``: the signing job builds nothing, so nothing here may run cargo. Its signature
-is then checked against the committed line by xtask and, independently, by ``verify_manifest.py``.
+with throwaway keys made by its own ``keygen`` in a temporary folder outside any git working tree, and with cargo
+trapped (``trapped``): the signing job builds nothing, so nothing here may run cargo. Its signature is then checked
+against the committed line by xtask and, independently, by ``verify_manifest.py``.
 """
 import ast
 import base64
@@ -51,6 +51,27 @@ def scratch(test) -> Path:
     path = Path(tempfile.mkdtemp(prefix="citar-release-sign-", dir=base or None))
     test.addCleanup(shutil.rmtree, path, ignore_errors=True)
     return path
+
+
+#: The toolchain the trap names: none is installed by that name, so rustup's cargo proxy refuses to run.
+TRAP_TOOLCHAIN = "citar-trap-no-such-toolchain"
+
+
+def trapped(env: dict, trap: Path) -> dict:
+    """``env`` with every way to cargo closed, each failing loudly:
+    - a ``cargo`` (sh) and a ``cargo.cmd`` first on ``PATH``, which say "cargo was run" and exit 97: what a shell
+      finds (on Windows only a shell finds the .cmd);
+    - ``CARGO`` naming that stand-in: xtask runs ``$CARGO`` before a bare ``cargo``, as cargo's own children do;
+    - ``RUSTUP_TOOLCHAIN`` naming no installed toolchain, with rustup's auto-install off: a program started without a
+      shell on Windows looks for ``cargo.exe`` alone (Rust's ``Command::new("cargo")`` as well), and finds rustup's
+      proxy, which then refuses to run rather than run cargo.
+    """
+    out = dict(env)
+    out["PATH"] = str(trap) + os.pathsep + env.get("PATH", "")
+    out["CARGO"] = str(trap / ("cargo.cmd" if os.name == "nt" else "cargo"))
+    out["RUSTUP_TOOLCHAIN"] = TRAP_TOOLCHAIN
+    out["RUSTUP_AUTO_INSTALL"] = "0"
+    return out
 
 
 def a_key_line(seed: int) -> str:
@@ -255,7 +276,7 @@ class TheScript(unittest.TestCase):
 
 @unittest.skipUnless(XTASK, "CITAR_TEST_XTASK names no xtask binary (package 5-09's gate 2 builds one)")
 class WithTheRealXtask(unittest.TestCase):
-    """The command line with the real xtask, throwaway keys and a cargo that fails first on PATH (gate 2)."""
+    """The command line with the real xtask, throwaway keys and cargo trapped (gate 2)."""
 
     @classmethod
     def setUpClass(cls):
@@ -275,7 +296,7 @@ class WithTheRealXtask(unittest.TestCase):
         shutil.copyfile(FIXTURE / rs.MANIFEST, self.manifest)
         self.keys = self.dir / "update-keys.pub"
         self.out = self.dir / "signature"
-        # A cargo that fails, first on PATH: the signing job builds nothing.
+        # A cargo that fails, first on PATH and named by CARGO (trapped): the signing job builds nothing.
         self.trap = self.dir / "trap"
         self.trap.mkdir()
         (self.trap / "cargo").write_text("#!/bin/sh\necho 'cargo was run' >&2\nexit 97\n", encoding="utf-8")
@@ -296,8 +317,7 @@ class WithTheRealXtask(unittest.TestCase):
 
     def sign(self, keys: str, secret: str | None, actions: bool = False) -> subprocess.CompletedProcess:
         self.keys.write_text(keys, encoding="utf-8")
-        env = {k: v for k, v in os.environ.items() if k not in (ENV, "GITHUB_ACTIONS")}
-        env["PATH"] = str(self.trap) + os.pathsep + env.get("PATH", "")
+        env = trapped({k: v for k, v in os.environ.items() if k not in (ENV, "GITHUB_ACTIONS")}, self.trap)
         if secret is not None:
             env[ENV] = secret
         if actions:
@@ -308,15 +328,27 @@ class WithTheRealXtask(unittest.TestCase):
                               capture_output=True, text=True, encoding="utf-8", env=env)
         said = done.stdout + done.stderr
         self.assertNotIn("cargo was run", said)
+        self.assertNotIn(TRAP_TOOLCHAIN, said, "rustup's cargo proxy was started")
         for key in (self.a, self.b):
             self.assertNotIn(key["secret"], said, "the secret is never printed")
         return done
 
     def test_the_trap_is_set(self):
-        env = dict(os.environ, PATH=str(self.trap) + os.pathsep + os.environ.get("PATH", ""))
-        done = subprocess.run(["cargo", "--version"], capture_output=True, text=True, env=env,
-                              shell=os.name == "nt")
-        self.assertEqual(done.returncode, 97, "the stand-in cargo comes first on PATH")
+        # Each way a program reaches cargo fails, and says so: without a shell (as xtask's Command would start it),
+        # through a shell, and by CARGO.
+        env = trapped(dict(os.environ), self.trap)
+        try:
+            bare = subprocess.run(["cargo", "--version"], capture_output=True, text=True, env=env)
+        except FileNotFoundError:
+            bare = None  # no cargo on this machine at all: nothing to run
+        if bare is not None:
+            self.assertNotEqual(bare.returncode, 0, bare.stdout + bare.stderr)
+            said = bare.stdout + bare.stderr
+            self.assertTrue("cargo was run" in said or TRAP_TOOLCHAIN in said, said)
+        shell = subprocess.run("cargo --version", capture_output=True, text=True, env=env, shell=True)
+        self.assertEqual(shell.returncode, 97, "a shell finds the stand-in first on PATH")
+        named = subprocess.run([env["CARGO"], "--version"], capture_output=True, text=True, env=env)
+        self.assertEqual(named.returncode, 97, "CARGO names the stand-in")
 
     def test_no_key_and_no_secret_is_a_notice(self):
         done = self.sign("", None, actions=True)
