@@ -94,16 +94,22 @@ Updates are signed in CI by the release workflow's `sign-helper-manifest` job, w
 Actions secret (the owner's choice of 2026-10-14). Until it is set up the job says so and signs nothing, and every
 helper reports updates **unavailable**. To set it up, once, on a machine of your own:
 
-1. **Make the key**, in a folder outside every git repository (the tool refuses one inside):
-   `cargo xtask keygen --out ~/citar-update-key`. It writes `citar-update-signing.key` (the private key: JSON with its
-   `secret`) and `citar-update-signing.pub` (one line, the public key). The key file is its owner's alone before the
+1. **Make the key**, in a folder outside every git repository (the tool refuses one inside), from the repository's
+   root: `cargo xtask keygen --out "$HOME/citar-update-key"` (Git Bash and PowerShell alike; in cmd,
+   `%USERPROFILE%\citar-update-key`). Write the folder as a full path: Windows PowerShell 5.1 passes a `~` to a program
+   as it is, so `~/citar-update-key` would name a folder inside the repository, which the tool refuses. It writes
+   `citar-update-signing.key` (the private key: JSON with its `secret`) and `citar-update-signing.pub` (one line, the public key). The key file is its owner's alone before the
    secret is written into it: mode 0600 on Unix; on Windows `keygen` gives it a protected access list (you, SYSTEM and
    Administrators, nothing inherited from the folder, so a folder such as `C:\keys`, which every signed-in user may
    change, does not open it to them). Keep the private file somewhere safe and offline as well: it is the only way to
    sign updates helpers already trust.
-2. **Store the private key in GitHub:** the repository's Settings → Environments → New environment, named
-   `helper-signing`; add a **required reviewer** (yourself) so every signing run waits for your approval; add an
-   environment secret `CITAR_UPDATE_SIGNING_KEY` whose value is the whole content of `citar-update-signing.key`.
+2. **Store the private key in GitHub**, before the first tagged release: a tag's run names `helper-signing`, and
+   GitHub makes a missing environment by itself, with no protection (if one was made that way, give it the two rules
+   below before it gets the secret). The repository's Settings → Environments → New environment, named
+   `helper-signing`; add a **required reviewer** (yourself) so every signing run waits for your approval; under
+   "Deployment branches and tags" choose **Selected branches and tags** and add a **Tag** rule `v*`, so only a tag's
+   run can reach the secret; add an environment secret `CITAR_UPDATE_SIGNING_KEY` whose value is the whole content of
+   `citar-update-signing.key`.
 3. **Commit the public key:** put the line of `citar-update-signing.pub` in `crates/citar-jobs/update-keys.pub` (one key
    a line, at most two) in a release commit. Helpers and servers built from it trust that key; the next tagged
    release's `sign-helper-manifest` job (after your approval) signs `citar-helper-manifest.json` and attaches it and its
@@ -112,11 +118,16 @@ helper reports updates **unavailable**. To set it up, once, on a machine of your
    empty, and the tests of updates sign with throwaway keys of their own, so the commit keeps CI green; `qa_phase4.py
    update` then expects the run's own helper to refuse the throwaway key's manifest rather than report updates
    unavailable.
-4. **Check it** before the release: `cargo xtask helper-manifest --assets DIR --version V` over the built binaries and
-   `cargo xtask sign-manifest --key ~/citar-update-key/citar-update-signing.key DIR/citar-helper-manifest.json` sign a
-   manifest by hand the same way (the key file must be outside any repository), and `cargo xtask verify-manifest --pub
+4. **Check it** before the release, in a scratch folder `DIR` outside the repository (never in
+   `tests/data/helper_manifest/`, whose `.sig` is a fixture the tests hold byte for byte: signing writes
+   `MANIFEST.sig` beside the manifest). `cargo xtask helper-manifest --assets DIR --version V` over the built binaries
+   (or a copy of `tests/data/helper_manifest/citar-helper-manifest.json` in `DIR`) and `cargo xtask sign-manifest
+   --key "$HOME/citar-update-key/citar-update-signing.key" DIR/citar-helper-manifest.json` sign a manifest by hand the
+   same way (the key file must be outside any repository), and `cargo xtask verify-manifest --pub
    crates/citar-jobs/update-keys.pub DIR/citar-helper-manifest.json` checks the signature against the committed key as
    a helper checks it (`scripts/ci/verify_manifest.py`, with the `cryptography` package, checks it a second way).
+   [RELEASING.md](https://github.com/jprodgers/CITAR/blob/main/packaging/RELEASING.md), step 1, has these as
+   commands to copy.
    Every pull request already proves this path with a throwaway key: `package.yml`'s `helper-manifest` job writes the
    manifest over the five builds, signs it with a key made on the runner, and verifies it both ways.
 

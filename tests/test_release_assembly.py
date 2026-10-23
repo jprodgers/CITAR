@@ -324,6 +324,194 @@ class Assemble(unittest.TestCase):
         self.assertIn(f"{signature}  citar-helper-manifest.json.sig\n", sums)
 
 
+class TheTagOnlyJobsFiles(unittest.TestCase):
+    """release.yml's file steps (package 5-09's gate 3): check-signature's ``sums --out`` (rel-release-sums), then
+    attest-files' and github-release's ``final`` over a fresh download of pkg-release-assets: what is attested and
+    uploaded is release.py assets V's files, and the signature only on a signed tag."""
+
+    def setUp(self):
+        self.dir = scratch("p509-final-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.fake = FakeRelease(self.dir / "built")
+        code, out, err = self.fake.run()
+        self.assertEqual(code, 0, out + err)
+        self.signature = bytes([7]) * 64
+
+    def download(self, name: str) -> Path:
+        """pkg-release-assets, as a later job downloads it: assemble's folder, byte for byte."""
+        folder = self.dir / name
+        shutil.copytree(self.fake.release, folder)
+        return folder
+
+    def sums(self, signed: bool) -> tuple[Path, Path]:
+        """check-signature: the download, the signature copied in when signed, then sums --out."""
+        release_dir = self.download("check-signature")
+        args = ["sums", "--version", VERSION, "--release", str(release_dir), "--out", str(self.dir / "sums")]
+        if signed:
+            (release_dir / assemble.SIGNATURE).write_bytes(self.signature)
+            args.append("--signed")
+        code, out, err = quiet(assemble.main, args)
+        self.assertEqual(code, 0, out + err)
+        return release_dir, self.dir / "sums"
+
+    def final(self, sums: Path, name: str, listing: Path | None = None) -> tuple[int, str, str, Path]:
+        folder = self.download(name)
+        args = ["final", "--version", VERSION, "--release", str(folder), "--sums", str(sums)]
+        if listing is not None:
+            args += ["--list", str(listing)]
+        return (*quiet(assemble.main, args), folder)
+
+    def test_unsigned_the_sums_and_notes_are_assembles(self):
+        _, sums = self.sums(signed=False)
+        self.assertEqual(sorted(p.name for p in sums.iterdir()), ["SHA256SUMS", "notes.md"])
+        for name in ("SHA256SUMS", "notes.md"):
+            self.assertEqual((sums / name).read_bytes(), (self.fake.preview / name).read_bytes(), name)
+        for job in ("attest-files", "github-release"):
+            listing = self.dir / f"{job}.txt"
+            code, out, err, folder = self.final(sums, job, listing)
+            self.assertEqual(code, 0, out + err)
+            self.assertIn("unsigned", out)
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(release.asset_files(VERSION)))
+            self.assertEqual(listing.read_text(encoding="utf-8").split(), release.asset_files(VERSION))
+
+    def test_signed_the_signature_joins_the_sums_the_notes_and_the_list(self):
+        _, sums = self.sums(signed=True)
+        sig = assemble.SIGNATURE
+        self.assertEqual(sorted(p.name for p in sums.iterdir()),
+                         sorted(["SHA256SUMS", "notes.md", sig, f"{sig}.sha256"]))
+        line = f"{sha(self.signature)}  {sig}"
+        self.assertIn(line + "\n", (sums / "SHA256SUMS").read_text(encoding="ascii"))
+        self.assertIn(line, (sums / "notes.md").read_text(encoding="utf-8"), "the notes list the signature's hash")
+        self.assertNotIn(line, (self.fake.preview / "notes.md").read_text(encoding="utf-8"))
+        listing = self.dir / "list.txt"
+        code, out, err, folder = self.final(sums, "attest-files", listing)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("signed", out)
+        self.assertEqual(listing.read_text(encoding="utf-8").split(), release.asset_files(VERSION, signed=True))
+        self.assertEqual((folder / sig).read_bytes(), self.signature)
+        self.assertEqual((folder / "SHA256SUMS").read_bytes(), (sums / "SHA256SUMS").read_bytes())
+        self.assertNotEqual((folder / "SHA256SUMS").read_bytes(),
+                            (self.fake.release / "SHA256SUMS").read_bytes(), "the download's unsigned sums replaced")
+
+    def test_final_refuses_what_does_not_hold(self):
+        _, sums = self.sums(signed=True)
+        cases = {
+            "a changed byte": (lambda f: (f / f"citar-{release.Version.parse(VERSION).pep440}.tar.gz").write_bytes(
+                b"changed"), "tar.gz.sha256: says"),
+            "an extra file": (lambda f: (f / "notes.md").write_text("x", encoding="utf-8"), "notes.md: extra"),
+            "an asset gone": (lambda f: (f / "THIRD-PARTY-LICENSES.txt").unlink(), "THIRD-PARTY-LICENSES.txt: missing"),
+            "another signature": (lambda f: (f / assemble.SIGNATURE).write_bytes(b"other"), "another one"),
+        }
+        for what, (plant, named) in cases.items():
+            with self.subTest(what):
+                folder = self.download(f"plant-{what.replace(' ', '-')}")
+                plant(folder)
+                code, out, err = quiet(assemble.main, ["final", "--version", VERSION, "--release", str(folder),
+                                                       "--sums", str(sums)])
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(named, err)
+
+    def test_final_refuses_sums_that_are_not_the_files_and_a_signature_unsums_name(self):
+        _, sums = self.sums(signed=False)
+        text = (sums / "SHA256SUMS").read_text(encoding="ascii")
+        first = text.splitlines()[0]
+        (sums / "SHA256SUMS").write_text(text.replace(first, "0" * 64 + first[64:]), encoding="ascii")
+        code, out, err, _ = self.final(sums, "wrong-sums")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("SHA256SUMS: not the sums of these files", err)
+        (sums / "SHA256SUMS").write_text(text, encoding="ascii")
+        folder = self.download("stray-signature")
+        (folder / assemble.SIGNATURE).write_bytes(self.signature)
+        code, out, err = quiet(assemble.main, ["final", "--version", VERSION, "--release", str(folder), "--sums",
+                                               str(sums)])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("an unsigned release", err)
+        (sums / f"{assemble.SIGNATURE}").write_bytes(self.signature)
+        code, out, err, _ = self.final(sums, "no-side")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"{assemble.SIGNATURE}.sha256: missing", err)
+
+    def test_sums_out_must_be_empty_and_outside_the_release(self):
+        release_dir = self.download("out-checks")
+        code, out, err = quiet(assemble.main, ["sums", "--version", VERSION, "--release", str(release_dir), "--out",
+                                               str(release_dir / "sums")])
+        self.assertEqual(code, 2, err)
+        full = self.dir / "full"
+        full.mkdir()
+        (full / "left.txt").write_text("x", encoding="utf-8")
+        code, out, err = quiet(assemble.main, ["sums", "--version", VERSION, "--release", str(release_dir), "--out",
+                                               str(full)])
+        self.assertEqual(code, 2, err)
+        self.assertIn("must be empty", err)
+
+    def images(self) -> Path:
+        folder = self.dir / "images"
+        folder.mkdir()
+        for arch in assemble.IMAGES:
+            (folder / f"{arch}.json").write_text(json.dumps({
+                "arch": arch, "os": "linux", "id": "ab" * 32, "file": f"citar-image-{VERSION}-{arch}.tar.zst",
+                "sha256": "cd" * 32, "image": f"ghcr.io/jprodgers/citar:{VERSION}-{arch}"}), encoding="utf-8")
+        return folder
+
+    def summary(self, *extra: str) -> tuple[int, str, str, str]:
+        keys = self.dir / "update-keys.pub"
+        if not keys.exists():
+            keys.write_text("", encoding="utf-8")
+        out_file = self.dir / "summary.md"
+        out_file.unlink(missing_ok=True)
+        code, out, err = quiet(assemble.main, ["summary", "--version", VERSION, "--label", LABEL, "--preview",
+                                               str(self.fake.preview), "--keys", str(keys), "--out", str(out_file),
+                                               *extra])
+        return code, out, err, out_file.read_text(encoding="utf-8") if out_file.exists() else ""
+
+    def test_the_dry_runs_summary(self):
+        _, sums = self.sums(signed=False)
+        listing = self.dir / "list.txt"
+        code, out, err, _ = self.final(sums, "rehearsal", listing)
+        self.assertEqual(code, 0, out + err)
+        code, out, err, text = self.summary("--images", str(self.images()), "--upload-list", str(listing))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"# Release dry run: {VERSION}", text)
+        self.assertIn(LABEL, text)
+        for job, env, _what in assemble.TAG_ONLY_JOBS:
+            self.assertIn(f"| `{job}` | {f'`{env}`' if env else 'none'} |", text)
+        self.assertIn("gives the notice that nothing is signed", text)
+        for asset in release.assets(VERSION):
+            self.assertIn(f"`{asset['name']}`", text)
+        self.assertIn(f"## The attestation's subjects ({len(release.asset_files(VERSION))})", text)
+        self.assertIn("| arm64 | linux |", text)
+        self.assertIn(f"release.py assets {VERSION}'s {len(release.asset_files(VERSION))} files", text)
+        # With a key committed, the signing job's line says it would sign.
+        (self.dir / "update-keys.pub").write_text("# the key\n" + "A" * 43 + "=\n", encoding="utf-8")
+        code, out, err, text = self.summary()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("verifies it against update-keys.pub's 1 key(s)", text)
+
+    def test_the_summary_refuses_a_wrong_upload_list_or_image_set(self):
+        listing = self.dir / "list.txt"
+        listing.write_text("\n".join(release.asset_files(VERSION, signed=True)) + "\n", encoding="utf-8")
+        code, out, err, _ = self.summary("--upload-list", str(listing))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("the rehearsed upload list is not release.py assets", err)
+        images = self.images()
+        (images / "arm64.json").unlink()
+        code, out, err, _ = self.summary("--images", str(images))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("the images loaded are ['amd64']", err)
+
+    def test_the_summarys_jobs_are_release_ymls_tag_only_jobs(self):
+        import yaml
+        data = yaml.safe_load((ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8"))
+        guard = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+        tag_only = [job_id for job_id, job in data["jobs"].items() if guard in str(job.get("if", ""))]
+        self.assertEqual([job for job, _env, _what in assemble.TAG_ONLY_JOBS], tag_only)
+        for job, env, _what in assemble.TAG_ONLY_JOBS:
+            named = str(data["jobs"][job].get("environment", ""))
+            self.assertEqual(f"'{env}'" in named or named == env, True, f"{job}: {named!r}")
+            if not env:
+                self.assertNotIn("environment", data["jobs"][job], job)
+
+
 class Templates(unittest.TestCase):
     """release_checksums.py's templates and vocabulary."""
 

@@ -1,8 +1,11 @@
 """A release assembled from package.yml's artifacts, and every build in it held to one (design/phase5-release.md
-P5.10, package 5-08).
+P5.10, package 5-08), then finished by release.yml's tag-only jobs (P5.11, package 5-09).
 
     python scripts/ci/assemble_release.py assemble --version V --label L --release DIR --reports DIR --preview DIR
-    python scripts/ci/assemble_release.py sums --version V --release DIR [--signed]
+    python scripts/ci/assemble_release.py sums --version V --release DIR [--signed] [--out DIR]
+    python scripts/ci/assemble_release.py final --version V --release DIR --sums DIR [--list FILE]
+    python scripts/ci/assemble_release.py summary --version V --label L --preview DIR --keys FILE [--images DIR]
+        [--upload-list FILE] --out FILE
 
 package.yml's ``assemble`` job downloads the release's files by their artifacts' exact names into one folder
 (``--release``) and the builds' reports into another (``--reports``), then runs ``assemble``:
@@ -34,8 +37,23 @@ package.yml's ``assemble`` job downloads the release's files by their artifacts'
    these files, with the release's real URLs).
 
 ``sums`` (re)writes ``SHA256SUMS`` over a release folder that holds exactly ``release.py assets V [--signed]``'s
-assets, writing any ``.sha256`` missing beside one and refusing one that differs: release.yml's own step once the
-manifest's signature (``--signed``) joins the files.
+assets, writing any ``.sha256`` missing beside one and refusing one that differs: release.yml's ``check-signature``
+step once the manifest's signature (``--signed``) joins the files. ``--out DIR`` then receives what the release's
+later jobs need of it, computed once in a job that holds nothing: ``SHA256SUMS``, ``notes.md`` (the notes with these
+sums, so a signed release's notes list the signature's hash) and, signed, the signature and its ``.sha256``
+(release.yml uploads the folder as ``rel-release-sums``).
+
+``final`` is what ``attest-files`` and ``github-release`` run before they attest or publish: into the release folder
+(``pkg-release-assets``, as ``assemble`` uploaded it) it copies ``--sums``' ``SHA256SUMS`` and, when ``--sums``
+holds the signature, the signature and its ``.sha256``; then the folder must be exactly ``release.py assets V
+[--signed]``'s files, each ``.sha256`` its file's, and ``SHA256SUMS`` exactly the sums of its files. ``--list FILE``
+writes the files, one a line: what is attested and uploaded.
+
+``summary`` writes a release dry run's job summary (release.yml's ``dry-run-summary``): V and L, the one build, what
+each tag-only job would do on the tag and with which environment, the asset list with sizes and hashes, the
+attestation's subjects, the image tarballs loaded and their architectures (``check_image.py load``'s reports in
+``--images``), and the tag-only jobs' file steps rehearsed (``--upload-list``, which must be ``release.py assets
+V``'s files).
 
 Standard library only. Exit status 0 when everything holds; 1 when something does not (each named, all of them); 2 for
 a usage error.
@@ -48,6 +66,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -72,6 +91,8 @@ helper_release = _load("citar_ci_helper_release", HERE.parent / "helper_release.
 smoke_wheel = _load("citar_ci_smoke_wheel", HERE.parent / "smoke_wheel.py")
 
 SUMS = "SHA256SUMS"
+#: The manifest's signature, which joins the release on a signed tag (release.yml's sign-helper-manifest).
+SIGNATURE = "citar-helper-manifest.json.sig"
 #: The interpreters every wheel is smoke-tested on (P5.3.4: the floor and the newest).
 SMOKE_PYTHONS = ("3.11", "3.14")
 #: The image's architectures and the wheel platform each is built from (P5.7).
@@ -157,9 +178,13 @@ def write_sides(folder: Path, version: str, signed: bool = False) -> list[str]:
     return written
 
 
-def write_sums(folder: Path, version: str, signed: bool = False) -> str:
+def sums_text(folder: Path, version: str, signed: bool = False) -> str:
     """SHA256SUMS over every asset, in P5.10's order, as ``sha256sum`` writes it."""
-    lines = "".join(f"{sha256(folder / a['name'])}  {a['name']}\n" for a in release.assets(version, signed))
+    return "".join(f"{sha256(folder / a['name'])}  {a['name']}\n" for a in release.assets(version, signed))
+
+
+def write_sums(folder: Path, version: str, signed: bool = False) -> str:
+    lines = sums_text(folder, version, signed)
     (folder / SUMS).write_text(lines, encoding="ascii", newline="\n")
     return lines
 
@@ -460,7 +485,7 @@ def assemble(root: Path, folder: Path, reports: Path, preview: Path, version: st
     return one
 
 
-def sums_command(folder: Path, version: str, signed: bool) -> str:
+def sums_command(folder: Path, version: str, signed: bool, out: Path | None = None, root: Path = ROOT) -> str:
     problems = check_files(folder, version, signed)
     if problems:
         raise Problems(problems)
@@ -470,7 +495,158 @@ def sums_command(folder: Path, version: str, signed: bool) -> str:
     problems = check_final(folder, version, signed)
     if problems:
         raise Problems(problems)
+    if out is not None:
+        out.mkdir(parents=True, exist_ok=True)
+        stale = sorted(p.name for p in out.iterdir())
+        if stale:
+            raise Usage(f"--out {out} must be empty (it holds {', '.join(stale)})")
+        names = [SUMS] + ([SIGNATURE, f"{SIGNATURE}.sha256"] if signed else [])
+        for name in names:
+            shutil.copyfile(folder / name, out / name)
+        (out / "notes.md").write_text(notes(root, version, sums), encoding="utf-8", newline="\n")
+        say(f"{out}: {', '.join([*names, 'notes.md'])}")
     return sums
+
+
+# ------------------------------------------------------------------------------------------------ release.yml's
+
+
+def final(folder: Path, version: str, sums_dir: Path, listing: Path | None = None) -> tuple[bool, list[str]]:
+    """The release folder finished with the sums (and the signature) ``sums --out`` wrote, and held to the release's
+    list: what ``attest-files`` attests and ``github-release`` uploads. Whether it is signed, and its files."""
+    if not folder.is_dir():
+        raise Usage(f"--release {folder}: no such folder")
+    if not (sums_dir / SUMS).is_file():
+        raise Usage(f"--sums {sums_dir} holds no {SUMS} (the rel-release-sums artifact)")
+    signed = (sums_dir / SIGNATURE).is_file()
+    problems = []
+    names = [SUMS] + ([SIGNATURE, f"{SIGNATURE}.sha256"] if signed else [])
+    for name in names[1:]:
+        if not (sums_dir / name).is_file():
+            problems.append(f"{name}: missing from {sums_dir}, beside the signature")
+        elif (folder / name).exists() and (folder / name).read_bytes() != (sums_dir / name).read_bytes():
+            problems.append(f"{name}: the release folder already holds another one")
+    if not signed and (folder / SIGNATURE).exists():
+        problems.append(f"{SIGNATURE}: in the release folder, but {sums_dir} has none (an unsigned release)")
+    if problems:
+        raise Problems(problems)
+    for name in names:
+        shutil.copyfile(sums_dir / name, folder / name)
+    problems = check_files(folder, version, signed) + check_final(folder, version, signed)
+    if not problems:
+        stated, computed = (folder / SUMS).read_text(encoding="ascii", errors="replace"), sums_text(folder, version,
+                                                                                                  signed)
+        if stated != computed:
+            wrong = [line for line in stated.splitlines() if line + "\n" not in computed.splitlines(keepends=True)]
+            problems.append(f"{SUMS}: not the sums of these files ({'; '.join(wrong[:3]) or 'the lines differ'})")
+    if problems:
+        raise Problems(problems)
+    files = release.asset_files(version, signed)
+    if listing is not None:
+        listing.write_text("".join(f"{n}\n" for n in files), encoding="utf-8", newline="\n")
+    say(f"{'signed' if signed else 'unsigned'}: the release folder is release.py assets {version}"
+        f"{' --signed' if signed else ''}'s {len(files)} files, each .sha256 its file's, {SUMS} their sums")
+    return signed, files
+
+
+#: What each of release.yml's tag-only jobs does on a tag, and the environment it names there (P5.11's table): the
+#: dry run's summary shows it. tests/test_release_assembly.py holds the jobs and environments to release.yml's and
+#: to check_workflows.py's rule 16.
+TAG_ONLY_JOBS = (
+    ("sign-helper-manifest", "helper-signing",
+     "waits for the environment's reviewer, then {signing} (scripts/ci/release_sign.py, the prebuilt xtask)"),
+    ("check-signature", "",
+     "holds the signature to the committed update-keys.pub ({keys} key(s)) with verify_manifest.py, and writes the "
+     "release's {sums} and notes once more with it"),
+    ("attest-files", "",
+     "build provenance for the release's {files} files (the subjects below), before anything is published"),
+    ("publish-pypi", "pypi",
+     "uploads the five wheels and the sdist (pkg-python-dists) by trusted publishing, skip-existing, with PyPI's "
+     "attestations"),
+    ("publish-image", "",
+     "pushes {image}:{version}-amd64 and :{version}-arm64 (the tested images, loaded) and joins them as "
+     ":{version}"),
+    ("attest-image", "", "build provenance for :{version}'s manifest-list digest, pushed to the registry"),
+    ("github-release", "",
+     "makes the draft v{version} with the {files} files and these notes, compares its list with release.py assets "
+     "{version}, then publishes it{latest}"),
+    ("image-tags", "", "{moves}"),
+)
+
+
+def summary(version: str, label: str, preview: Path, keys_file: Path, images: Path | None,
+            upload_list: Path | None) -> str:
+    """A release dry run's job summary, in Markdown."""
+    v = release.Version.parse(version)
+    try:
+        assets = json.loads((preview / "assets.json").read_text(encoding="utf-8"))
+        one = json.loads((preview / "build.json").read_text(encoding="utf-8"))
+        subjects = (preview / "subjects.txt").read_text(encoding="utf-8").split()
+    except (OSError, ValueError) as e:
+        raise Usage(f"--preview {preview}: {e} (the pkg-release-preview artifact)") from None
+    problems = []
+    if assets.get("version") != v.text or assets.get("label") != label:
+        problems.append(f"assets.json: {assets.get('version')} {assets.get('label')}, not {v.text} {label}")
+    if subjects != release.asset_files(version):
+        problems.append(f"subjects.txt: not release.py assets {version}'s files")
+    keys = sum(1 for line in keys_file.read_text(encoding="utf-8").splitlines()
+               if line.strip() and not line.strip().startswith("#")) if keys_file.is_file() else 0
+    uploads = None
+    if upload_list is not None:
+        uploads = upload_list.read_text(encoding="utf-8").split()
+        if uploads != release.asset_files(version):
+            problems.append(f"{upload_list.name}: the rehearsed upload list is not release.py assets {version}'s")
+    loaded = []
+    for report in sorted(images.glob("*.json")) if images is not None and images.is_dir() else []:
+        try:
+            loaded.append(json.loads(report.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as e:
+            problems.append(f"{report.name}: {e}")
+    if images is not None and sorted(i.get("arch") for i in loaded) != sorted(IMAGES):
+        problems.append(f"the images loaded are {sorted(i.get('arch') for i in loaded)}, not {sorted(IMAGES)}")
+    if problems:
+        raise Problems(problems)
+    signed = keys > 0
+    minor = ".".join(v.text.split("-")[0].split(".")[:2])
+    values = {
+        "signing": (f"signs citar-helper-manifest.json with the secret CITAR_UPDATE_SIGNING_KEY and verifies it "
+                    f"against update-keys.pub's {keys} key(s)") if signed else
+                   "gives the notice that nothing is signed (update-keys.pub holds no key), so the helpers report "
+                   "updates unavailable; with the secret set it would refuse",
+        "keys": keys, "sums": SUMS, "files": len(release.asset_files(version, signed)),
+        "image": "ghcr.io/jprodgers/citar", "version": v.text,
+        "latest": ", as a prerelease (never latest)" if v.prerelease else ", marked latest",
+        "moves": ("moves nothing: a prerelease is never latest, and never the newest of its series" if v.prerelease
+                  else f"points :{minor} and :latest at :{v.text}'s digest, after the release is published"),
+    }
+    out = [f"# Release dry run: {v.text}", "",
+           f"Label `{label}`. Nothing was published: every tag-only job below was skipped, and none names an "
+           f"environment on a dispatch. On the tag `v{v.text}` they would run in this order.", "",
+           "| Job | Environment | On the tag |", "|---|---|---|"]
+    for job, env, what in TAG_ONLY_JOBS:
+        out.append(f"| `{job}` | {f'`{env}`' if env else 'none'} | {what.format(**values)} |")
+    out += ["", "## The one build", "",
+            f"Version {one.get('version')}, label `{one.get('label')}`, build `{one.get('build_id')}`, jobs build "
+            f"`{one.get('jobs_build')}`, protocol {one.get('protocol')}, result hash `{one.get('result_hash')}` "
+            f"({len(one.get('sources', []))} reports).", "",
+            f"## The assets ({len(assets['assets'])}, {assets.get('bytes', 0):,} bytes with their sums)", "",
+            "| File | Group | Bytes | SHA-256 |", "|---|---|---:|---|"]
+    out += [f"| `{a['name']}` | {a['group']} | {a['size']:,} | `{a['sha256']}` |" for a in assets["assets"]]
+    out += ["", f"## The attestation's subjects ({len(subjects)})", "",
+            "Every file of the release" + (", and on a signed tag the signature and its `.sha256`" if signed else "")
+            + ": `attest-files` attests them before anything is published.", "", "<details><summary>The list"
+            "</summary>", "", "```", *subjects, "```", "", "</details>", ""]
+    if images is not None:
+        out += ["## The images, loaded", "", "| Architecture | OS | Image id | File | SHA-256 |", "|---|---|---|---|---|"]
+        out += [f"| {i.get('arch')} | {i.get('os')} | `{str(i.get('id'))[:12]}` | `{i.get('file')}` | "
+                f"`{i.get('sha256')}` |" for i in loaded]
+        out.append("")
+    if uploads is not None:
+        out += ["## The tag-only jobs' file steps, rehearsed", "",
+                f"`sums --out` and `final` over this run's files: the folder `attest-files` would attest and "
+                f"`github-release` would upload is release.py assets {v.text}'s {len(uploads)} files (unsigned here: "
+                f"a dry run has no signature).", ""]
+    return "\n".join(out)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -488,6 +664,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--version", required=True)
     p.add_argument("--release", type=Path, required=True)
     p.add_argument("--signed", action="store_true", help="the folder holds the manifest's signature too")
+    p.add_argument("--out", type=Path, help="an empty folder for SHA256SUMS, notes.md and the signature")
+    p.add_argument("--root", type=Path, default=ROOT, help="the checkout (default: this script's)")
+    p = sub.add_parser("final", allow_abbrev=False, help="finish a release folder with its sums and check it whole")
+    p.add_argument("--version", required=True)
+    p.add_argument("--release", type=Path, required=True, help="the release's files (pkg-release-assets)")
+    p.add_argument("--sums", type=Path, required=True, help="sums --out's folder (rel-release-sums)")
+    p.add_argument("--list", type=Path, help="write the release's files here, one a line")
+    p = sub.add_parser("summary", allow_abbrev=False, help="a release dry run's job summary")
+    p.add_argument("--version", required=True)
+    p.add_argument("--label", required=True)
+    p.add_argument("--preview", type=Path, required=True, help="the pkg-release-preview download")
+    p.add_argument("--keys", type=Path, required=True, help="the committed update-keys.pub")
+    p.add_argument("--images", type=Path, help="check_image.py load's reports, one an architecture")
+    p.add_argument("--upload-list", type=Path, help="final --list's file from the rehearsal")
+    p.add_argument("--out", type=Path, required=True, help="the summary ($GITHUB_STEP_SUMMARY)")
     args = top.parse_args(argv)
     try:
         version = release.Version.parse(args.version).text
@@ -500,9 +691,20 @@ def main(argv: list[str] | None = None) -> int:
                 raise Usage("--preview must be outside --release: the release holds its assets and nothing else")
             assemble(args.root.resolve(), folder, args.reports.resolve(), preview, version, args.label)
             say(f"{version} assembled in {folder}")
-        else:
-            sums = sums_command(args.release.resolve(), version, args.signed)
+        elif args.command == "sums":
+            out = args.out.resolve() if args.out is not None else None
+            folder = args.release.resolve()
+            if out is not None and (out == folder or folder in out.parents):
+                raise Usage("--out must be outside --release: the release holds its assets and nothing else")
+            sums = sums_command(folder, version, args.signed, out, args.root.resolve())
             say(f"{SUMS}: {len(sums.splitlines())} assets")
+        elif args.command == "final":
+            final(args.release.resolve(), version, args.sums.resolve(), args.list)
+        else:
+            text = summary(version, args.label, args.preview.resolve(), args.keys, args.images, args.upload_list)
+            with open(args.out, "a", encoding="utf-8", newline="\n") as f:
+                f.write(text + "\n")
+            say(f"the dry run's summary: {len(text.splitlines())} lines in {args.out}")
     except (release.Refused, Usage) as e:
         print(f"assemble_release: {e}", file=sys.stderr)
         return 2

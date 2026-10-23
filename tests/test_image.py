@@ -12,6 +12,7 @@ job's time, the smoke on a volume the run names, and a cleanup that leaves no an
 """
 import argparse
 import contextlib
+import hashlib
 import http.server
 import importlib.util
 import io
@@ -19,11 +20,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -444,6 +448,78 @@ class CheckImageEngineUse(unittest.TestCase):
         self.assertGreaterEqual(time.perf_counter() - t0, 1.2)
         order = [argv[:2] for argv, _ in engine.calls]
         self.assertGreater(order.index(("volume", "rm")), order.index(("ps", "-a")), "the wait comes first")
+
+
+class CheckImageLoad(unittest.TestCase):
+    """``load``, release.yml's side of ``save`` (package 5-09): publish-image pushes, and the dry run's summary
+    shows, only the file the report names and the image ``run`` tested."""
+
+    ID = "ab" * 32
+
+    def setUp(self):
+        original = ci.say
+        ci.say = lambda line: None
+        self.addCleanup(setattr, ci, "say", original)
+        self.dir = Path(tempfile.mkdtemp(prefix="citar-image-load-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.file = self.dir / "citar-image-0.1.6-arm64.tar.zst"
+        self.file.write_bytes(b"a saved image, compressed")
+        digest = hashlib.sha256(self.file.read_bytes()).hexdigest()
+        self.report = {"image": "ghcr.io/jprodgers/citar:0.1.6-arm64", "arch": "arm64", "version": "0.1.6",
+                       "id": self.ID, "saved": {"file": self.file.name, "sha256": digest, "id": self.ID,
+                                                "bytes": self.file.stat().st_size}}
+
+    def load(self, inspect: dict | None = None, version: str = "0.1.6",
+             image: str = "ghcr.io/jprodgers/citar:0.1.6-arm64"):
+        (self.dir / "report.json").write_text(json.dumps(self.report), encoding="utf-8")
+        found = {"Id": f"sha256:{self.ID}", "Os": "linux", "Architecture": "arm64", **(inspect or {})}
+        engine = Recording({("image", "inspect"): json.dumps([found])})
+        unpacked = []
+
+        def zstd(argv, what):
+            tar = Path(argv[argv.index("-o") + 1])
+            tar.write_bytes(b"tar")
+            unpacked.append(tar)
+
+        args = argparse.Namespace(engine="docker", file=self.file, report=self.dir / "report.json",
+                                  version=version, image=image, out=self.dir / "loaded.json")
+        with mock.patch.object(ci, "Engine", lambda name: engine), \
+                mock.patch.object(ci, "zstd", zstd), \
+                mock.patch.object(ci.shutil, "which", lambda name: f"/usr/bin/{name}"):
+            ci.load(args)
+        return engine, unpacked
+
+    def test_the_file_and_the_image_the_report_names_are_loaded(self):
+        engine, unpacked = self.load()
+        (tar,) = unpacked
+        self.assertFalse(tar.exists(), "the unpacked tarball is removed")
+        self.assertEqual([argv for argv, _ in engine.calls],
+                         [("load", "-i", str(tar)), ("image", "inspect", "ghcr.io/jprodgers/citar:0.1.6-arm64")])
+        loaded = json.loads((self.dir / "loaded.json").read_text(encoding="utf-8"))
+        self.assertEqual((loaded["arch"], loaded["os"], loaded["id"], loaded["file"]),
+                         ("arm64", "linux", self.ID, self.file.name))
+
+    def test_anything_else_is_refused(self):
+        pushed = "ghcr.io/jprodgers/citar:0.1.6-arm64"
+        plants = {
+            "a changed byte": (lambda: self.file.write_bytes(b"another image"), {}, "0.1.6", pushed, "SHA-256"),
+            "another id": (lambda: None, {"Id": "sha256:" + "cd" * 32}, "0.1.6", pushed, "and the report tested"),
+            "another architecture": (lambda: None, {"Architecture": "amd64"}, "0.1.6", pushed, "not linux/arm64"),
+            "another release": (lambda: None, {}, "0.1.7", pushed, "not 0.1.7's arm64 image"),
+            # release.yml's IMAGE_NAME and package.yml's image job's TAG apart: the push would go elsewhere
+            "another repository pushed": (lambda: None, {}, "0.1.6", "ghcr.io/jprodgers/citar-image:0.1.6-arm64",
+                                          "name different images"),
+            "another repository tested": (
+                lambda: self.report.update(image="ghcr.io/someone/citar:0.1.6-arm64"), {}, "0.1.6", pushed,
+                "the report's image is ghcr.io/someone/citar:0.1.6-arm64"),
+        }
+        for what, (plant, inspect, version, image, named) in plants.items():
+            with self.subTest(what):
+                self.setUp()
+                plant()
+                with self.assertRaises(ci.Failed) as caught:
+                    self.load(inspect, version, image)
+                self.assertIn(named, str(caught.exception))
 
 
 class CheckImageCommandLine(unittest.TestCase):

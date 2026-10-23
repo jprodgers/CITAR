@@ -31,9 +31,14 @@ here as files to copy rather than pushed by a workflow.
    `pkg-release-preview` (the notes, the sums, the subjects, the asset list with sizes, the one build, the
    manifests). Its `managers` job installs each package manager's packages from a loopback copy of that folder.
 2. **`release.yml`**, on a tag, signs the helper manifest, attests every file, publishes PyPI and the image, then the
-   GitHub release with every file, published last and as a whole (design/phase5-release.md P5.11).
+   GitHub release with every file, published last and as a whole (design/phase5-release.md P5.11). Dispatched on a
+   branch it is a dry run that publishes nothing.
 3. **Homebrew, Scoop, winget**: their manifests carry the SHA-256 of files that exist only once step 2 is done.
-   Copy them from the `pkg-release-preview` artifact, or write them again from the published release (below).
+   Copy them from the `pkg-release-preview` artifact, or write them again from the published release (below);
+   `scripts/release/managers.sh V` puts them in the tap and the bucket, and pushes only with `--push`.
+
+[RELEASING.md](RELEASING.md) is the checklist, each step a command: the bump, the dry run, the tag, what to re-run
+when a job of the release run fails, verifying what was published, the package managers and the deploy.
 
 ## The manifests: templates, and `release_checksums.py`
 

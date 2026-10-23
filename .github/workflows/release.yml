@@ -1,15 +1,32 @@
-# Build and publish a release: being rebuilt in Phase 5 (design/phase5-release.md).
+# Build and publish a release (design/phase5-release.md P5.11 and P5.12; packaging/RELEASING.md is the checklist).
 #
-# Until package 5-09 writes it whole (P5.11), this workflow is only its gate: one job that fails every run, a tag's
-# or a dry run's, with the notice below. It builds nothing, publishes nothing and names no environment, so nothing a
-# tag or a dispatch starts here can reach PyPI, the registry, the release page or the update-signing key while the
-# release's builds move to package.yml (5-02b to 5-08) and the tag-only publishing jobs are written (5-09). The
-# triggers stay as the release keeps them: a pushed `v*` tag, and a dispatch with the version (a dry run).
+# It builds nothing itself: every build is package.yml's and every test test.yml's, both called here with the mode,
+# the version and the date, so a release can contain nothing a pull request did not build and test. The calling jobs
+# pass no secrets and hold contents: read (check_workflows.py's rule 12).
 #
-# scripts/ci/check_workflows.py (test.yml's lint job) holds this file to P5.17's rules on every pull request: no
-# build step, no publishing job outside the tag guard, no environment but those the rules allow, every action pinned.
-# cargo xtask check still reads every line of it (no helper test feature may be named here, design/phase4-helper.md
-# P4.3.1).
+# - A pushed v* tag is the release. meta reads the version from the tag, and release.py prepare --mode tag holds the
+#   tree, the source and the changelog to it in every job. Then, in this order, and only after the tests and every
+#   build passed: the helper manifest is signed (sign-helper-manifest, in the environment helper-signing, whose
+#   reviewer approves it; P5.4.2's four rules, by the xtask binary package.yml built, through
+#   scripts/ci/release_sign.py), the signature is checked by a verifier that shares no code with the signer
+#   (check-signature), every file's provenance is attested (attest-files); nothing before this point is public, so a
+#   failure stops the release with PyPI, the registry and the release page untouched. Then PyPI (publish-pypi, trusted
+#   publishing) and the image's version tags (publish-image: the tested images loaded, pushed by architecture and
+#   joined as :V), the image's provenance (attest-image), the GitHub release (github-release: a draft with every file,
+#   its list held to release.py assets V, then published, latest unless a prerelease), and the moving image tags last
+#   (image-tags), so releases/latest/download/<helper> and :latest never name a release that is not whole.
+# - A dispatch (gh workflow run release.yml --ref <branch> -f version=V) is a dry run, on a tag ref too: package.yml
+#   and test.yml run in mode dry-run, each runner's checkout bumped to V first, so it builds and tests exactly what a
+#   tag of the bumped branch would; every tag-only job is skipped, and none names an environment on a dispatch (the
+#   tag expression below is empty there, whatever the job's if: does); dry-run-summary shows what the tag would
+#   publish and rehearses the tag-only jobs' file steps on this run's files.
+#
+# A publishing job carries the tag guard (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) as a
+# conjunct of its job-level if:, never under always() or !cancelled(); a job that holds a secret or a write permission
+# installs and builds nothing and uses only the pinned checkout, artifact and publishing actions;
+# scripts/ci/check_workflows.py holds all of it and this needs graph with each job's permissions (rules 1 to 16) on
+# every pull request and before any dispatch. cargo xtask check reads every line of it (no helper test feature may be
+# named here, design/phase4-helper.md P4.3.1). RELEASING.md says which job to re-run after a failure at each point.
 name: release
 
 on:
@@ -21,16 +38,593 @@ on:
         description: "Version to build, without the leading v (a dry run; nothing is published)"
         required: true
 
+concurrency:
+  # One release run at a time for a ref, and never cut off mid-publish.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
+env:
+  # The image's repository on GHCR (package.yml's image job tags each build :V-<arch> under it).
+  IMAGE_NAME: ghcr.io/jprodgers/citar
+
 jobs:
-  phase-5:
-    name: release packaging is Phase 5
-    runs-on: ubuntu-latest
+  meta:
+    name: version and label
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      pep440: ${{ steps.meta.outputs.pep440 }}
+      numeric: ${{ steps.meta.outputs.numeric }}
+      label: ${{ steps.meta.outputs.label }}
+      date: ${{ steps.meta.outputs.date }}
+      mode: ${{ steps.meta.outputs.mode }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
-      - name: The release workflow is being rebuilt (design/phase5-release.md P5.11, package 5-09)
-        # Nothing follows this job: a tag or a dry run stops here, before any build, with the reason.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The release this run is
+        # A pushed tag is mode tag, its version the tag's; a dispatch is a dry run of the version asked for, wherever
+        # it runs. release.py meta refuses anything that is not a version before any job uses it.
+        id: meta
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          echo "::error title=release packaging is Phase 5::this workflow is reduced to its gate until package 5-09 writes it (design/phase5-release.md P5.11): every release build moves to package.yml, and the tag-only publishing jobs come with 5-09"
-          exit 1
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if [ "$GITHUB_REF_TYPE" != tag ] || [ "${GITHUB_REF_NAME#v}" = "$GITHUB_REF_NAME" ]; then
+              echo "::error title=release meta::a push runs this workflow for a v* tag only, not $GITHUB_REF"
+              exit 1
+            fi
+            mode=tag
+            version=${GITHUB_REF_NAME#v}
+          else
+            mode=dry-run
+            version=$INPUT_VERSION
+          fi
+          python scripts/release.py meta --mode "$mode" --version "$version" --sha "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: The tree is the release (a tag), or is bumped to it (a dry run)
+        # On a tag every place, the source and the changelog must say V already; a dry run bumps this checkout, as
+        # every job of the two called workflows does first.
+        shell: bash
+        env:
+          MODE: ${{ steps.meta.outputs.mode }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DATE: ${{ steps.meta.outputs.date }}
+        run: python scripts/release.py prepare --mode "$MODE" --version "$VERSION" --date "$DATE"
+
+  tests:
+    name: tests
+    needs: meta
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+    with:
+      mode: ${{ needs.meta.outputs.mode }}
+      version: ${{ needs.meta.outputs.version }}
+      date: ${{ needs.meta.outputs.date }}
+
+  package:
+    name: package
+    needs: meta
+    uses: ./.github/workflows/package.yml
+    permissions:
+      contents: read
+    with:
+      mode: ${{ needs.meta.outputs.mode }}
+      version: ${{ needs.meta.outputs.version }}
+      date: ${{ needs.meta.outputs.date }}
+      label: ${{ needs.meta.outputs.label }}
+
+  sign-helper-manifest:
+    # P5.4.2: the real signature, on a tag only, under the environment's reviewer. It builds and installs nothing:
+    # the checkout (for update-keys.pub and release_sign.py), the manifest and the xtask binary package.yml built and
+    # used, one step whose only env is the secret, run on the runner's own Python, and the upload. The environment is
+    # the tag expression, so a dispatch names none, and whether a skipped job would create one never matters.
+    name: the helper manifest, signed (a tag only)
+    needs: [tests, package]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && 'helper-signing' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-manifest
+          path: manifest
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        # The binary that wrote the manifest and proved the signing path with a throwaway key, and its SHA-256:
+        # release_sign.py runs it only once the two agree.
+        with:
+          name: pkg-xtask-linux-x64
+          path: xtask-bin
+
+      - name: Signed as update-keys.pub and the secret say
+        # Empty key file and no secret: a notice, nothing signed (the helpers report updates unavailable). Either one
+        # without the other, or a secret that is not the committed key: refused, naming the cause. Both: signed, and
+        # the signature verified against the committed lines. The secret reaches xtask through the environment only.
+        shell: bash
+        env:
+          CITAR_UPDATE_SIGNING_KEY: ${{ secrets.CITAR_UPDATE_SIGNING_KEY }}
+        run: >-
+          python3 scripts/ci/release_sign.py sign --xtask xtask-bin/xtask
+          --manifest manifest/citar-helper-manifest.json --keys crates/citar-jobs/update-keys.pub
+          --key-env CITAR_UPDATE_SIGNING_KEY --out signature
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # signing.json always (signed or not), and the signature when there is one.
+        with:
+          name: rel-helper-signature
+          path: signature
+          if-no-files-found: error
+          retention-days: 14
+
+  check-signature:
+    # The signature checked by code that shares nothing with the signer, in a job that holds no secret: it must be
+    # there exactly when the committed update-keys.pub holds a key, and verify against one of its lines. Here, once,
+    # the release's SHA256SUMS and notes are written again with the signature (rel-release-sums), before anything
+    # from PyPI runs; then the verifier's cryptography comes from hash-pinned wheels.
+    name: the signature, checked (a tag only)
+    needs: [meta, sign-helper-manifest]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-release-assets
+          path: release
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rel-helper-signature
+          path: signature
+
+      - name: The signature is there exactly when update-keys.pub holds a key
+        id: expect
+        shell: bash
+        run: >-
+          python3 scripts/ci/release_sign.py expect --keys crates/citar-jobs/update-keys.pub --signature signature
+          --release release --github-output "$GITHUB_OUTPUT"
+
+      - name: The release's sums and notes, with the signature when there is one
+        shell: bash
+        env:
+          SIGNED: ${{ steps.expect.outputs.signed }}
+        run: |
+          signed=
+          if [ "$SIGNED" = true ]; then signed=--signed; fi
+          python3 scripts/ci/assemble_release.py sums --version "$VERSION" --release release $signed --out sums
+          (cd release && sha256sum -c SHA256SUMS)
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # SHA256SUMS and notes.md, and on a signed tag the signature with its .sha256: what attest-files attests and
+        # github-release publishes beside pkg-release-assets.
+        with:
+          name: rel-release-sums
+          path: sums
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # After the upload (the steps above ran the runner's own python3): a Python whose venv and pip are there,
+        # whatever the runner image's python3 ships with.
+        with:
+          python-version: "3.12"
+
+      - name: The independent verifier, from hash-pinned wheels
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/verify"
+          "$RUNNER_TEMP/verify/bin/python" -m pip install --disable-pip-version-check --require-hashes \
+            --only-binary :all: -r scripts/ci/verify-manifest-requirements.txt
+
+      - name: Each committed key well formed, and the signature made by one of them
+        shell: bash
+        env:
+          SIGNED: ${{ steps.expect.outputs.signed }}
+        run: |
+          py="$RUNNER_TEMP/verify/bin/python"
+          "$py" scripts/ci/verify_manifest.py --check-keys crates/citar-jobs/update-keys.pub
+          if [ "$SIGNED" = true ]; then
+            "$py" scripts/ci/verify_manifest.py --pub crates/citar-jobs/update-keys.pub \
+              release/citar-helper-manifest.json release/citar-helper-manifest.json.sig
+          else
+            echo "unsigned: update-keys.pub holds no key, and no signature came (this release's helpers report updates unavailable)"
+          fi
+
+  attest-files:
+    # P5.12: build provenance for every file of the release and the signature, before anything is published (a
+    # failure here leaves PyPI, the registry and the release page untouched). Attestations of a public repository
+    # go to Sigstore's public log, so a dry run makes none.
+    name: provenance for every file (a tag only)
+    needs: [meta, check-signature]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-release-assets
+          path: release
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rel-release-sums
+          path: sums
+
+      - name: The release folder, whole
+        # SHA256SUMS (and the signature) from check-signature; then exactly release.py assets V's files, each
+        # .sha256 its file's, the sums theirs.
+        shell: bash
+        run: python3 scripts/ci/assemble_release.py final --version "$VERSION" --release release --sums sums
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+
+  publish-pypi:
+    # PyPI's trusted publisher names this workflow and the environment pypi, so publishing stays here. skip-existing:
+    # a re-run after a partial upload completes it. PyPI adds its own attestations (PEP 740).
+    name: PyPI (a tag only)
+    needs: [meta, attest-files]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: pypi
+    permissions:
+      id-token: write
+    env:
+      PEP440: ${{ needs.meta.outputs.pep440 }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-python-dists
+          path: dist
+
+      - name: The five wheels and the sdist, and nothing else
+        shell: bash
+        run: |
+          ls -l dist
+          wheels=$(find dist -maxdepth 1 -name "citar-$PEP440-cp311-abi3-*.whl" | wc -l)
+          files=$(find dist -mindepth 1 | wc -l)
+          if [ "$wheels" != 5 ] || [ "$files" != 6 ] || [ ! -f "dist/citar-$PEP440.tar.gz" ]; then
+            echo "::error title=publish-pypi::dist holds $files files ($wheels wheels), not the five wheels and the sdist of $PEP440"
+            exit 1
+          fi
+
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
+  publish-image:
+    # The images package.yml built, ran and saved (pkg-image-<arch>), each loaded and proved the one tested by its
+    # report (check_image.py load), pushed as :V-amd64 and :V-arm64 and joined as :V. No :latest and no :<major.minor>
+    # here: image-tags moves them once the release is published.
+    name: the image's version tags (a tag only)
+    needs: [meta, attest-files]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.join.outputs.digest }}
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-amd64
+          path: image
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-arm64
+          path: image
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-report-amd64
+          path: report
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-report-arm64
+          path: report
+
+      - name: Each image the one tested
+        shell: bash
+        run: |
+          for arch in amd64 arm64; do
+            python3 scripts/ci/check_image.py load --engine docker --file "image/citar-image-$VERSION-$arch.tar.zst" \
+              --report "report/image-$arch.json" --version "$VERSION" --image "$IMAGE_NAME:$VERSION-$arch"
+          done
+
+      - name: Signed in to the registry
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pushed by architecture, and joined as :V
+        id: join
+        shell: bash
+        run: |
+          for arch in amd64 arm64; do
+            docker push "$IMAGE_NAME:$VERSION-$arch"
+          done
+          docker buildx imagetools create --tag "$IMAGE_NAME:$VERSION" "$IMAGE_NAME:$VERSION-amd64" \
+            "$IMAGE_NAME:$VERSION-arm64"
+          docker buildx imagetools inspect "$IMAGE_NAME:$VERSION"
+          digest=$(docker buildx imagetools inspect "$IMAGE_NAME:$VERSION" --format '{{json .Manifest}}' \
+                   | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=publish-image::no manifest-list digest for $IMAGE_NAME:$VERSION ($digest)"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  attest-image:
+    # P5.12: provenance for the :V manifest list's digest, pushed to the registry beside it.
+    name: provenance for the image (a tag only)
+    needs: [meta, publish-image]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Signed in to the registry
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ needs.publish-image.outputs.digest }}
+          push-to-registry: true
+          # A storage record needs an organization's repository; this is a user's.
+          create-storage-record: false
+
+  github-release:
+    # A draft with every file and the notes, its file list held to release.py assets V (the signature only on a
+    # signed tag), then published as a whole, latest unless a prerelease. A re-run finds its draft and finishes it.
+    name: the GitHub release (a tag only)
+    needs: [meta, publish-pypi, attest-image]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-release-assets
+          path: release
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rel-release-sums
+          path: sums
+
+      - name: The release folder, whole
+        shell: bash
+        run: >-
+          python3 scripts/ci/assemble_release.py final --version "$VERSION" --release release --sums sums
+          --list upload.txt
+
+      - name: A draft with every file and the notes
+        shell: bash
+        run: |
+          tag="v$VERSION"
+          pre=
+          if [ "$PRERELEASE" = true ]; then pre=--prerelease; fi
+          mapfile -t files < <(sed 's|^|release/|' upload.txt)
+          if state=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            echo "$tag exists (draft: $state)"
+            if [ "$state" = true ]; then
+              gh release upload "$tag" --clobber "${files[@]}"
+              gh release edit "$tag" --title "CITAR $VERSION" --notes-file sums/notes.md $pre
+            fi
+          else
+            gh release create "$tag" --draft --verify-tag --title "CITAR $VERSION" --notes-file sums/notes.md $pre \
+              "${files[@]}"
+          fi
+
+      - name: The release holds exactly the release's files
+        shell: bash
+        run: |
+          (cd release && while read -r name; do printf '%s %s\n' "$name" "$(stat -c %s "$name")"; done < ../upload.txt) \
+            | sort > want.txt
+          gh release view "v$VERSION" --json assets --jq '.assets[] | "\(.name) \(.size)"' | sort > have.txt
+          if ! diff want.txt have.txt; then
+            echo "::error title=github-release::v$VERSION's files are not release.py assets $VERSION's (above: < wanted, > on the release)"
+            exit 1
+          fi
+          echo "v$VERSION holds the $(wc -l < want.txt) files of release.py assets $VERSION"
+
+      - name: Published, and marked latest unless a prerelease
+        shell: bash
+        run: |
+          latest=--latest
+          if [ "$PRERELEASE" = true ]; then latest=--latest=false; fi
+          gh release edit "v$VERSION" --draft=false $latest
+          gh release view "v$VERSION" --json isDraft,isPrerelease,url
+
+  image-tags:
+    # The moving tags last, so :latest never names an image whose release does not exist: :<major.minor> and
+    # :latest at :V's digest. A prerelease moves neither.
+    name: the image's moving tags (a tag only)
+    needs: [meta, publish-image, github-release]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+      DIGEST: ${{ needs.publish-image.outputs.digest }}
+    steps:
+      - name: Signed in to the registry
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: ":<major.minor> and :latest at :V's digest"
+        shell: bash
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            echo "::notice title=image-tags::$VERSION is a prerelease: :latest and the series tag stay where they are"
+            exit 0
+          fi
+          series=$(printf '%s' "$VERSION" | cut -d. -f1,2)
+          docker buildx imagetools create --tag "$IMAGE_NAME:$series" --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$DIGEST"
+          docker buildx imagetools inspect "$IMAGE_NAME:latest"
+
+  dry-run-summary:
+    # A dispatch only: what the tag would publish (the summary), with the tag-only jobs' file steps rehearsed on this
+    # run's files (sums --out, final --list) and the images loaded as publish-image loads them. It publishes nothing
+    # and holds nothing.
+    name: what a tag would publish (a dry run only)
+    needs: [meta, tests, package]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      LABEL: ${{ needs.meta.outputs.label }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The version this run builds
+        # This checkout bumped as every build's was (the same date), so the notes the rehearsal writes are the
+        # release's: on a tag the tree says V already.
+        shell: bash
+        env:
+          MODE: ${{ needs.meta.outputs.mode }}
+          DATE: ${{ needs.meta.outputs.date }}
+        run: python3 scripts/release.py prepare --mode "$MODE" --version "$VERSION" --date "$DATE"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-release-preview
+          path: preview
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-release-assets
+          path: release
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-amd64
+          path: image
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-arm64
+          path: image
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-report-amd64
+          path: report
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-report-arm64
+          path: report
+
+      - name: The images, loaded as publish-image loads them
+        shell: bash
+        run: |
+          for arch in amd64 arm64; do
+            python3 scripts/ci/check_image.py load --engine docker --file "image/citar-image-$VERSION-$arch.tar.zst" \
+              --report "report/image-$arch.json" --version "$VERSION" --image "$IMAGE_NAME:$VERSION-$arch" \
+              --out "summary/images/$arch.json"
+          done
+
+      - name: The tag-only jobs' file steps, rehearsed (unsigned)
+        # check-signature's sums --out, then attest-files' and github-release's final over this run's files: the
+        # upload list must be release.py assets V's, and the sums and notes those assemble wrote.
+        shell: bash
+        run: |
+          python3 scripts/ci/assemble_release.py sums --version "$VERSION" --release release --out summary/sums
+          python3 scripts/ci/assemble_release.py final --version "$VERSION" --release release --sums summary/sums \
+            --list summary/upload.txt
+          python3 scripts/release.py assets "$VERSION" > summary/assets.txt
+          diff summary/assets.txt summary/upload.txt
+          cmp summary/sums/SHA256SUMS preview/SHA256SUMS
+          cmp summary/sums/notes.md preview/notes.md
+
+      - name: The summary
+        shell: bash
+        run: |
+          python3 scripts/ci/assemble_release.py summary --version "$VERSION" --label "$LABEL" --preview preview \
+            --keys crates/citar-jobs/update-keys.pub --images summary/images --upload-list summary/upload.txt \
+            --out summary/summary.md
+          cat summary/summary.md
+          cat summary/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rel-dry-run-summary
+          path: summary
+          if-no-files-found: error
+          retention-days: 14

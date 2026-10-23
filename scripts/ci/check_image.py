@@ -34,6 +34,16 @@ measured.
 again and requires the same image id: what release.yml loads and pushes is what ``run`` tested. With ``--report`` it
 adds the file's name, size and SHA-256 to that report.
 
+``load`` is release.yml's side of it (package 5-09): the file (``pkg-image-<arch>``) must be the one the report
+(``pkg-image-report-<arch>``) names, by its SHA-256, and the image it loads the one ``run`` tested, by its id, of the
+report's architecture and the release's version, under the tag ``publish-image`` pushes: ``--image`` names that tag,
+as publish-image writes it, and the report's must be the same, so a name changed in package.yml or in release.yml
+alone fails here (on the dry run, too) rather than at the tag's ``docker push``. ``--out`` records what was loaded (the
+dry run's summary shows it).
+
+    python scripts/ci/check_image.py load --engine docker|podman --file FILE.tar.zst --report FILE --version V
+        --image REF [--out FILE]
+
 Exit status 0 when every check held, 1 when one failed (the message says which), 2 for a usage error or a run that
 could not start (no such engine, image or file).
 """
@@ -626,6 +636,56 @@ def save(args) -> int:
     return 0
 
 
+def load(args) -> int:
+    """The image ``save`` wrote, loaded again where release.yml pushes it (``publish-image``) or shows it (the dry
+    run's summary): the file must be the one the report names, by its SHA-256, and the image loaded from it the one
+    ``run`` tested, by its id, of the report's architecture."""
+    engine = Engine(args.engine)
+    if shutil.which("zstd") is None:
+        raise Refused("no zstd on PATH")
+    version = smoke_wheel.release_version(args.version)
+    try:
+        report = json.loads(args.report.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise Refused(f"--report {args.report}: {e}") from None
+    saved = report.get("saved") if isinstance(report.get("saved"), dict) else {}
+    image, arch = str(report.get("image", "")), report.get("arch")
+    if not saved or arch not in ARCHES or not image:
+        raise Refused(f"--report {args.report}: no saved file, architecture or image (check_image.py save's report)")
+    check(report.get("version") == version.text and image.endswith(f":{version.text}-{arch}"),
+          f"the report is of {image} at {report.get('version')}, not {version.text}'s {arch} image",
+          f"the report is {version.text}'s {arch} image, {image}")
+    check(image == args.image, f"the report's image is {image}, and the tag pushed is {args.image}: package.yml's "
+          f"image job and release.yml's IMAGE_NAME name different images",
+          f"{image} is the tag publish-image pushes")
+    if not args.file.is_file():
+        raise Refused(f"--file {args.file}: no such file")
+    check(args.file.name == saved.get("file"), f"{args.file.name} is not the file the report names "
+          f"({saved.get('file')})", f"{args.file.name} is the file the report names")
+    digest = sha256(args.file)
+    check(digest == saved.get("sha256"), f"{args.file.name}'s SHA-256 is {digest}, and the report says "
+          f"{saved.get('sha256')}", f"{args.file.name}: SHA-256 {digest}, the one saved")
+    tar = args.file.resolve().with_name(args.file.name.removesuffix(".zst"))
+    zstd(["-q", "-d", "-f", "-o", tar, args.file], "decompress the image")
+    try:
+        engine("load", "-i", tar, what=f"load {tar.name}", timeout=SAVE)
+    finally:
+        tar.unlink(missing_ok=True)
+    data = engine.inspect("image", image)
+    loaded = image_id(str(data.get("Id", "")))
+    check(loaded == saved.get("id") == report.get("id"), f"{image} loaded as {loaded}, and the report tested "
+          f"{report.get('id')} (saved {saved.get('id')})", f"{image} loaded, the id run tested, {loaded[:12]}")
+    check(data.get("Os") == "linux" and data.get("Architecture") == arch,
+          f"{image} is {data.get('Os')}/{data.get('Architecture')}, not linux/{arch}", f"{image} is linux/{arch}")
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps({"image": image, "arch": arch, "os": data.get("Os"), "id": loaded,
+                                        "file": args.file.name, "bytes": args.file.stat().st_size, "sha256": digest},
+                                       indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        say(f"ok: wrote {args.out}")
+    return 0
+
+
 def zstd(argv: list, what: str) -> None:
     try:
         done = subprocess.run(["zstd", *map(str, argv)], stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -656,6 +716,13 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--image", required=True, help="the image, by its tag")
     p.add_argument("--out", type=Path, required=True, help="the file, FILE.tar.zst")
     p.add_argument("--report", type=Path, help="run's report, which gains the file's name, size and hash")
+    p = sub.add_parser("load", help="load a saved image again: the file and the id the report names")
+    p.add_argument("--engine", required=True, help="docker or podman")
+    p.add_argument("--file", type=Path, required=True, help="the saved image, FILE.tar.zst (pkg-image-<arch>)")
+    p.add_argument("--report", type=Path, required=True, help="its report (pkg-image-report-<arch>)")
+    p.add_argument("--version", required=True, help="the release's version, X.Y.Z[-rc.N]")
+    p.add_argument("--image", required=True, help="the tag publish-image pushes, REPOSITORY:V-<arch>: the report's")
+    p.add_argument("--out", type=Path, help="write what was loaded here (the dry run's summary reads it)")
     return top
 
 
@@ -665,7 +732,7 @@ def main(argv=None) -> int:
             stream.reconfigure(errors="backslashreplace")
     args = parser().parse_args(argv)
     try:
-        return {"run": run, "save": save}[args.command](args)
+        return {"run": run, "save": save, "load": load}[args.command](args)
     except (Refused, smoke_wheel.Refused) as e:
         print(f"check_image {args.command}: refused: {e}", file=sys.stderr)
         return 2
