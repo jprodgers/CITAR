@@ -634,6 +634,23 @@ both scripts on their five platforms against that run's own wheel and helper wit
 `citar-helper-<platform>` with its `.sha256`; the game installs into `DIR`, inside `--under`, by default
 `$CARGO_TARGET_DIR`), and `... ps1 ...` on Windows.
 
+**The release assembled, and the package managers** (design/phase5-release.md P5.9 and P5.10).
+`package.yml`'s `assemble` job downloads every file of the release by its artifact's name into one
+folder and every build's report into another, and `scripts/ci/assemble_release.py assemble --version V
+--label L --release DIR --reports DIR --preview DIR` holds them together: the folder is exactly
+`release.py assets V`, every report says one version, label (the sdist build's is `unknown`), build
+id and jobs build, every wheel played the seeded lab job to one result hash, and each helper report
+tested the very file released; then it writes `SHA256SUMS`, the notes and the manifests.
+`tests/test_release_assembly.py` runs it on a fake release. The Homebrew, Scoop and winget manifests
+are templates, `packaging/**/*.in`, which `scripts/release_checksums.py V --from-dir DIR --out OUT`
+fills in from a folder of the release's files (packaging/README.md has the vocabulary and the
+options); `--verify V` checks a published release against its `SHA256SUMS` and PyPI, and with
+`--base-url http://127.0.0.1:<port>` and `--pypi-json FILE` a copy of one on a loopback server.
+`scripts/ci/check_managers.py structure --dir OUT --version V --assets DIR` checks the manifests
+anywhere, `winget-schemas --dir OUT` checks winget's against Microsoft's schemas; its `scoop`,
+`winget` and `brew` commands install packages, so they run on CI's runners only (`package.yml`'s
+`managers` job), never on your machine.
+
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
 benchmarks need valgrind, so they run there too, and so do the helper's Linux checks (`cargo
