@@ -75,8 +75,9 @@ python scripts/ci/action_pins.py verify       # local only: reads GitHub through
 ```
 
 The first holds every workflow to the release's rules: nothing publishes outside a tag push (`release.yml`) or
-`main` (`docs.yml`), no secret or environment where it does not belong, and every action is pinned to a commit with
-its version in a comment. CI checks only that form. The second asks GitHub that each pinned commit belongs to its
+`main` (`docs.yml`), no secret or environment where it does not belong, nothing installed or built in a job that
+holds a secret or a write permission, `release.yml`'s jobs in their order with their permissions (rule 16), and every
+action is pinned to a commit with its version in a comment. CI checks only that form. The second asks GitHub that each pinned commit belongs to its
 action's repository and that the version in the comment names it; CI does not run it, because it needs the network
 and a token that the tests workflow must not hold. To add an action, write it with its tag (`actions/checkout@v7`)
 and let `python scripts/ci/action_pins.py pin --write` replace the tag with the commit (`@3d3c42e... # v7.0.1`).
@@ -706,10 +707,19 @@ names any place out of step with its file and line; the tests workflow's lint jo
 pull request, so a half-done bump fails there. The script also prints a release's notes (`notes`),
 its asset list (`assets`) and the values the release jobs read (`meta`, `label`).
 
-Packaging for 0.1.6 (the wheel for each platform, the helper's builds and the release workflow
-itself) is being rebuilt; until it is, `release.yml` stops at its first step, and the steps from
-the tag to the published release are not ready to follow. [packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md)
-covers the manifests that need updating after a release.
+The steps from the bump to the published release, each a command, are
+[packaging/RELEASING.md](https://github.com/jprodgers/CITAR/blob/main/packaging/RELEASING.md): the bump's pull request, a dry run, the tag, what
+to do when a job of the release run fails, how to verify what was published, the package managers
+(`scripts/release/managers.sh` updates the tap and the bucket, and pushes only with `--push`) and
+the deploy. `release.yml` builds nothing: it calls `test.yml` and `package.yml`, and only on a
+pushed `v*` tag signs the helper manifest, attests every file, and publishes PyPI, the image and
+the GitHub release, in that order. A dispatch of it (`gh workflow run release.yml --ref <branch>
+-f version=X.Y.Z`) is a dry run that publishes nothing and names no environment.
+`scripts/ci/check_workflows.py`'s rule 16 holds its order and each job's permissions. Its tag-only
+scripts are tested without a tag: `tests/test_release_sign.py` runs `scripts/ci/release_sign.py`'s
+four signing states with the real xtask binary when `CITAR_TEST_XTASK` names one (`cargo build
+--release --locked -p xtask` into your target folder), and stands xtask in otherwise.
+[packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md) covers each install route and the manifests.
 
 ## Code of conduct
 
