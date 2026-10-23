@@ -548,11 +548,13 @@ ${Why}: this installer installs CITAR's prebuilt wheels only.
     }
     $spec = if ($wheel) { "$wheel[$extras]" } elseif ($Version) { "citar[$extras]==$Version" } else { "citar[$extras]" }
 
-    # --only-binary=citar: CITAR from a wheel or not at all (its dependencies as pip chooses). Without it, a machine
-    # with no wheel would download the source distribution and fail minutes later, building Rust.
+    # --only-binary=citar: CITAR from a wheel or not at all. Without it, a machine with no wheel would download the
+    # source distribution and fail minutes later, building Rust. --prefer-binary: each dependency at its newest
+    # version with a wheel for this machine, not a newer source distribution (as install.sh).
     Step "Downloading CITAR and its dependencies"
     try {
-        Invoke-Native $venvPython @("-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--only-binary=citar", $spec)
+        Invoke-Native $venvPython @("-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--only-binary=citar",
+            "--prefer-binary", $spec)
         $code = $LASTEXITCODE
     } finally {
         if ($wheelDir -and $picked) { Remove-Item -LiteralPath $picked -Recurse -Force -ErrorAction SilentlyContinue }

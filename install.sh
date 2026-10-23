@@ -609,10 +609,12 @@ else
 	[ -n "$VERSION" ] && SPEC="citar[$EXTRAS]==$VERSION"
 fi
 
-# --only-binary=citar: CITAR from a wheel or not at all (its dependencies as pip chooses). Without it, a machine
-# with no wheel would download the source distribution and fail minutes later, building Rust.
+# --only-binary=citar: CITAR from a wheel or not at all. Without it, a machine with no wheel would download the
+# source distribution and fail minutes later, building Rust. --prefer-binary: each dependency at its newest version
+# with a wheel for this machine, not a newer source distribution (cryptography has shipped no macOS x86_64 wheel
+# since 49.0, and its source needs Rust too).
 step "Downloading CITAR and its dependencies"
-$SUDO "$VENV_PIP" install --quiet --disable-pip-version-check --only-binary=citar "$SPEC" \
+$SUDO "$VENV_PIP" install --quiet --disable-pip-version-check --only-binary=citar --prefer-binary "$SPEC" \
 	|| die "pip could not install $SPEC. If pip found no matching distribution, there is no prebuilt CITAR${VERSION:+ $VERSION}
 for this machine: 'pip install citar' builds it from source, with a Rust toolchain (https://rustup.rs)."
 INSTALLED="$("$PREFIX/venv/bin/citar" --version 2>/dev/null || echo "CITAR")"

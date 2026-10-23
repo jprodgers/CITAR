@@ -882,9 +882,13 @@ class TheScripts(unittest.TestCase):
         sh_installs = [line for line in self.sh.splitlines() if re.search(r'"\$VENV_PIP" install .*\$SPEC', line)]
         self.assertEqual(len(sh_installs), 1)
         self.assertIn("--only-binary=citar", sh_installs[0])
-        ps1_installs = [line for line in self.ps1.splitlines() if '"install"' in line and "$spec" in line]
+        # Each dependency at its newest version with a wheel for the machine: cryptography ships no macOS x86_64
+        # wheel since 49.0, and without --prefer-binary pip took its source distribution (package.yml at cfa205a).
+        self.assertIn("--prefer-binary", sh_installs[0])
+        ps1_installs = re.findall(r'Invoke-Native \$venvPython @\("-m", "pip", "install",[^)]*\$spec\)', self.ps1)
         self.assertEqual(len(ps1_installs), 1)
         self.assertIn('"--only-binary=citar"', ps1_installs[0])
+        self.assertIn('"--prefer-binary"', ps1_installs[0])
         for text in (self.sh, self.ps1):
             self.assertIn("--no-index", text, "a folder's wheel is picked from the folder alone")
 

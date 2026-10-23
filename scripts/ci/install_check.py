@@ -502,7 +502,14 @@ def check_path_route(c: Check, s: Script) -> None:
     c.record("without -NoPath the bin folder goes on the user's PATH", code == 0 and str(bin_dir) in entries
              and (during or ("", 0))[1] == (before or ("", winreg.REG_EXPAND_SZ))[1], f"exit {code}")
     run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE) as key:
+    # A fresh runner's profile may have no Run key at all (windows-latest at cfa205a): made here, and removed again
+    # if this made it.
+    try:
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key))
+        made = False
+    except FileNotFoundError:
+        made = True
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, "CITAR helper", 0, winreg.REG_SZ, f'"{bin_dir / "citar-helper.exe"}" run --detach')
     try:
         code, out, _ = run([*argv, "-Uninstall", "-Worker", "-Prefix", str(s.work / "prefix-path"), "-BinDir",
@@ -512,6 +519,8 @@ def check_path_route(c: Check, s: Script) -> None:
     finally:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE) as key:
             winreg.DeleteValue(key, "CITAR helper")
+        if made:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, run_key)
     code, out, _ = run([*argv, "-Uninstall", "-Worker", "-Prefix", str(s.work / "prefix-path"), "-BinDir",
                         str(bin_dir)], env)
     after = gate_run.user_path()
