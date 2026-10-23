@@ -362,14 +362,52 @@ class ThePackageWorkflow(unittest.TestCase):
 
     def test_the_moved_jobs_left_test_yml_for_the_release_wheels(self):
         self.assertFalse({"package", "installer", "docker"} & set(self.tests["jobs"]))
-        installer = self.jobs["installer"]
-        self.assertEqual({leg["platform"] for leg in installer["strategy"]["matrix"]["include"]},
-                         {"linux-x64", "macos-arm64"})
-        self.assertEqual([s["with"]["name"] for s in self.using(installer, "actions/download-artifact")],
-                         ["pkg-wheel-${{ matrix.platform }}"])
-        self.assertIn('install.sh --from "$(ls wheels/*.whl)" --no-setup', self.runs(installer))
-        # 5-06 replaced the moved docker job by the image matrix (test_the_image_is_built_natively_...)
+        # 5-06 replaced the moved docker job by the image matrix (test_the_image_is_built_natively_...), and 5-07 the
+        # moved installer job by the install matrix (test_the_install_scripts_run_on_every_platform_...)
         self.assertNotIn("docker", self.jobs)
+        self.assertNotIn("installer", self.jobs)
+
+    def test_the_install_scripts_run_on_every_platform_against_its_own_files(self):
+        """5-07 (P5.8): install.sh on Linux x64 and arm64 and both Macs, install.ps1 on Windows, each on the runner
+        its wheel and helper are built on, against those two files (the helper from a loopback server), through
+        install_check.py; the default route that writes the profile or PATH taken too, a runner's being its own."""
+        job = self.jobs["install"]
+        self.assertEqual(sorted(job["needs"]), ["helpers", "meta", "wheels"])
+        self.assertEqual(job["if"], "${{ !cancelled() && needs.meta.result == 'success' }}")
+        self.assertNotIn("environment", job)
+        self.assertEqual(job["env"]["LABEL"], "${{ needs.meta.outputs.label }}")
+        legs = {leg["platform"]: leg for leg in job["strategy"]["matrix"]["include"]}
+        wheels = {leg["platform"]: leg for leg in self.jobs["wheels"]["strategy"]["matrix"]["include"]}
+        helpers = {leg["platform"]: leg for leg in self.jobs["helpers"]["strategy"]["matrix"]["include"]}
+        self.assertEqual(set(legs), set(load_release().HELPER_PLATFORMS))
+        for platform, leg in legs.items():
+            with self.subTest(platform=platform):
+                for built in (wheels[platform], helpers[platform]):
+                    self.assertEqual((leg["runner"], leg["machine"]), (built["runner"], built["machine"]))
+                self.assertEqual(leg["asset"], helpers[platform]["asset"])
+                self.assertEqual(leg["script"], "ps1" if platform.startswith("windows") else "sh")
+        downloads = [(s["with"]["name"], s["with"]["path"]) for s in self.using(job, "actions/download-artifact")]
+        self.assertEqual(downloads, [("pkg-wheel-${{ matrix.platform }}", "wheel"),
+                                     ("pkg-helper-${{ matrix.platform }}", "helper")])
+        runs = self.runs(job)
+        self.assertIn('[ "$got" = "$WANT" ]', runs, "the job asserts its runner's architecture")
+        check = [s for s in job["steps"] if "scripts/ci/install_check.py" in s.get("run", "")]
+        self.assertEqual(len(check), 1)
+        for flag in ('"$SCRIPT"', '--wheel "$(ls wheel/*.whl)"', '--helper "helper/$ASSET"',
+                     '--version "$RELEASE_VERSION"', '--label "$LABEL"', '--under "$RUNNER_TEMP"',
+                     '--work "$RUNNER_TEMP/install-check"', "--path-route", '--out "report/install-$PLATFORM.json"'):
+            self.assertIn(flag, check[0]["run"])
+        self.assertEqual(check[0]["env"]["SCRIPT"], "${{ matrix.script }}")
+        self.assertEqual(self.using(job, "actions/setup-python")[0]["with"]["python-version"], "3.12")
+        # install.ps1 runs through gate_run (install_check.py does that); no step installs, pushes or publishes
+        self.assertNotIn("install.ps1", runs)
+        self.assertNotIn("install.sh", runs)
+        uploads = self.using(job, "actions/upload-artifact")
+        self.assertEqual([(s["with"]["name"], s["with"]["path"]) for s in uploads],
+                         [("pkg-install-report-${{ matrix.platform }}", "report/install-${{ matrix.platform }}.json")])
+        self.assertEqual([s["uses"].split("@")[0] for s in job["steps"] if s.get("uses")],
+                         ["actions/checkout", "actions/setup-python", "actions/download-artifact",
+                          "actions/download-artifact", "actions/upload-artifact"])
 
     def test_the_image_is_built_natively_for_both_architectures_checked_and_kept(self):
         """5-06 (P5.7): linux/amd64 and linux/arm64, each on the runner its platform's wheel is built on, from that
@@ -719,6 +757,16 @@ class ThePackageWorkflow(unittest.TestCase):
             ("          name: pkg-image-${{ matrix.arch }}\n", "          name: image-${{ matrix.arch }}\n", 13,
              "image"),
             ("          path: report/image-${{ matrix.arch }}.json", "          path: ${{ runner.temp }}", 9, "image"),
+            # 5-07: the install scripts' checks publish nothing and name their artifacts
+            ("          name: pkg-install-report-${{ matrix.platform }}\n",
+             "          name: install-report-${{ matrix.platform }}\n", 13, "install"),
+            ("          path: report/install-${{ matrix.platform }}.json", "          path: ${{ runner.temp }}", 9,
+             "install"),
+            ("    name: install scripts (${{ matrix.platform }})\n",
+             "    name: install scripts (${{ matrix.platform }})\n    environment: release\n", 3, "install"),
+            ('            --path-route --out "report/install-$PLATFORM.json"\n',
+             '            --path-route --out "report/install-$PLATFORM.json" --version ${{ inputs.version }}\n', 5,
+             "install"),
         )
         for old, new, rule, job in plants:
             with self.subTest(rule=rule, job=job):

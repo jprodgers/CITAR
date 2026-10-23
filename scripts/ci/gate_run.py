@@ -1,9 +1,12 @@
-"""The gate harness: how a package's gates run a release helper or a server on this laptop, so neither can touch a
-real installation or open a port beyond loopback (design/phase5-release.md P5.18.1 rules 2 and 11, package 5-03).
+"""The gate harness: how a package's gates run a release helper, a server or install.ps1 on this laptop, so none can
+touch a real installation, the user's PATH or open a port beyond loopback (design/phase5-release.md P5.18.1 rules 2,
+3 and 11; packages 5-03 and 5-07).
 
     python scripts/ci/gate_run.py helper [--under DIR] [--timeout S] -- BINARY ARGS...
     python scripts/ci/gate_run.py server --port N --state DIR [--under DIR] [--env NAME=VALUE]... [--ready PATH]
                                          [--stop-file FILE] [--timeout S] -- COMMAND ARGS...
+    python scripts/ci/gate_run.py install-ps1 [--under DIR] [--env NAME=VALUE]... [--shell powershell|pwsh]
+                                              [--as-scriptblock] [--timeout S] -- ARGS...
 
 ``--under`` is the folder every run's files must be in: the package's target folder (by default
 ``$CARGO_TARGET_DIR``), or the runner's temporary folder on CI. It must exist, and must be neither inside this
@@ -45,6 +48,27 @@ name ``PYTHON_KEYRING_BACKEND`` or a per-user base, its ``CITAR_KEYS_FILE`` must
 itself; then it stops the server's whole process tree (a polite signal, then a kill), and checks that none of those
 processes is left and the port is closed. Exit status 0 when it was stopped on request and nothing is left.
 
+**install-ps1.** The checkout's ``install.ps1``, in Windows PowerShell (or ``pwsh``) with ``-NoProfile`` and this
+process's execution policy only, given ARGS. Without ``-Prefix`` and ``-BinDir`` it would install into the per-user
+CITAR folder, and without ``-NoPath`` write the user's PATH (the registry): so the run is refused unless ARGS give
+``-Prefix DIR`` and ``-BinDir DIR``, each once and strictly inside ``--under``, and ``-NoPath``. Each DIR is an
+absolute path (with its drive letter on Windows) with no leading ``~`` and no other ``:``, since the script resolves
+the text through PowerShell, which reads those as the home folder, a provider's path or a drive of its own; and the
+script is given the folders as resolved here, never the text. Every parameter is written in full (PowerShell binds
+any unambiguous prefix, ``-Pre`` for ``-Prefix``, and this reads only full names), a switch takes no ``:value``
+(``-NoPath:$false`` would undo it), and nothing else is passed: no bare word, no common parameter. An install runs
+only with ``-NoSetup`` (the wizard would wait for answers). With ``--as-scriptblock`` the script runs as its
+documented one-liner does (``& ([scriptblock]::Create((iwr -useb URL))) ARGS``, the checkout's file for the
+download), and ``gate_run: the session continues`` is printed once it has ended without ending its PowerShell (an
+``exit`` in it would have closed the user's window); the exit status is its ``$LASTEXITCODE``. The environment it
+gets is ``--env``'s (only ``CITAR_RELEASE_URL``, which must be a loopback address, or for a test of the script's
+refusal a documentation address, RFC 5737, which no machine has; and ``CITAR_INSTALL_TEST_FACTS``, the script's test
+hook) with every ``CITAR_*`` variable of this one dropped, the five state variables under ``--under``, no OS
+credential store, and the per-user bases (``LOCALAPPDATA``, ``APPDATA``) and the temporary folder (``TEMP``,
+``TMP``) pointed inside ``--under``; ``-Worker`` needs a ``CITAR_RELEASE_URL``, since without it the helper would
+come from GitHub. The user's PATH as stored (``HKCU\\Environment``, read only) is compared before and after: a run
+that changed it exits 1. Output passes through; the exit status is the script's.
+
 Exit status 2 and ``gate_run: refused: <why>`` when a run is refused (nothing is started); 124 on a timeout.
 """
 from __future__ import annotations
@@ -53,6 +77,8 @@ import argparse
 import ipaddress
 import json
 import os
+import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -88,6 +114,17 @@ FILE_OPTIONS = ("--config", "--hardware", "--ca-file")
 TAKES_VALUE = {"--home", "--server", "--token", "--config", "--base-url", "--provider", "--api-key-env",
                "--max-concurrent", "--name", "--model", "--quiet", "--ca-file", "--hardware", "--updates",
                "--update-key", "--test-fault"}
+#: install.ps1's parameters as it declares them, each a switch (False) or one taking a value (True).
+PS1_DECLARED = {"-Worker": False, "-Version": True, "-Prefix": True, "-BinDir": True, "-NoPath": False,
+                "-From": True, "-Python": True, "-NoSetup": False, "-Uninstall": False}
+#: The same by lower-cased name (PowerShell reads a parameter's name in any case), and each name as declared.
+PS1_PARAMETERS = {name.lower(): value for name, value in PS1_DECLARED.items()}
+PS1_SPELLING = {name.lower(): name for name in PS1_DECLARED}
+#: What the script-block run prints once the script block has ended and its PowerShell goes on.
+SESSION_CONTINUES = "gate_run: the session continues"
+#: The variables an install.ps1 run may be given: where -Worker downloads from, and the script's test hook.
+PS1_ENV = ("CITAR_RELEASE_URL", "CITAR_INSTALL_TEST_FACTS")
+INSTALL_PS1 = ROOT / "install.ps1"
 #: How long a stopped server's tree may take to end by itself before it is killed.
 GRACE = 10.0
 EXIT_REFUSED, EXIT_TIMEOUT = 2, 124
@@ -165,6 +202,19 @@ def is_loopback(url: str) -> bool:
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+#: The documentation networks (RFC 5737): never routed, so an address in them reaches no machine.
+DOCUMENTATION = tuple(ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"))
+
+
+def is_documentation(url: str) -> bool:
+    """Whether a URL's host is a documentation address (a test of a refusal names one: nothing answers it)."""
+    try:
+        host = urllib.parse.urlsplit(url.strip()).hostname
+        return bool(host) and any(ipaddress.ip_address(host) in net for net in DOCUMENTATION)
     except ValueError:
         return False
 
@@ -285,6 +335,215 @@ def run_helper(binary: Path | str, args: list[str], under: Path, timeout: float 
     except BaseException:  # an interrupt, or anything else: the helper is never left running
         stop_tree(proc, snapshot_tree(proc.pid), polite=False)
         raise
+
+
+# ------------------------------------------------------------------------------------------------ install.ps1
+
+
+#: A path with its drive letter, as Windows writes one in full.
+DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+
+
+def ps1_folder(value: str, under: Path, what: str) -> Path:
+    """-Prefix's or -BinDir's DIR resolved, strictly inside ``under``; refused unless PowerShell reads the same folder
+    from it. install.ps1 resolves the text itself (``GetUnresolvedProviderPathFromPSPath``), which expands a leading
+    ``~`` to the real home folder and takes a provider's path (``FileSystem::C:\\x``) or a drive of PowerShell's own
+    (``Temp:\\x``), none of which Python reads alike: so DIR is absolute (with its drive letter on Windows) and has no
+    other ``:``. The run then passes the folder resolved here, never the text."""
+    if value.startswith("~"):
+        raise Refused(f"{what} {value}: PowerShell reads a leading ~ as the home folder; give the folder in full")
+    if ":" in (value[2:] if re.match(r"[A-Za-z]:", value) else value):
+        raise Refused(f"{what} {value}: PowerShell reads a provider's path (::) or a drive of its own (Temp:, Env:) "
+                      f"in its own way; give the folder in full")
+    if not (DRIVE_PATH.match(value) if os.name == "nt" else value.startswith("/")):
+        raise Refused(f"{what} {value} is not an absolute path{' with its drive letter' if os.name == 'nt' else ''}")
+    return inside(Path(value), under, what)
+
+
+def check_install_ps1(args: list[str], under: Path, extra: list[str]) -> dict[str, str | bool]:
+    """install.ps1's parameters from ARGS (lower-cased names; a switch is True; -Prefix and -BinDir the folders
+    resolved), every rule above checked; raises Refused."""
+    given: dict[str, str | bool] = {}
+    i = 0
+    while i < len(args):
+        word = args[i]
+        name, sep, inline = word.partition(":")
+        key = name.lower()
+        if not word.startswith("-") or word == "-":
+            raise Refused(f"{word!r} is not a parameter of install.ps1 (it takes no positional argument)")
+        if key not in PS1_PARAMETERS:
+            full = [p for p in PS1_PARAMETERS if p.startswith(key)]
+            hint = f": write {full[0]} in full, so this harness reads it" if len(full) == 1 else ""
+            raise Refused(f"{name} is not a parameter of install.ps1{hint}")
+        if key in given:
+            raise Refused(f"{name} is given twice")
+        if PS1_PARAMETERS[key]:
+            if sep:
+                value = inline
+            elif i + 1 < len(args):
+                i += 1
+                value = args[i]
+            else:
+                raise Refused(f"{name} needs a value")
+            if not value:
+                raise Refused(f"{name} needs a value")
+            given[key] = value
+        else:
+            if sep:
+                raise Refused(f"{word}: a switch is given alone here ({name}:$false would turn it off)")
+            given[key] = True
+        i += 1
+    for key, what in (("-prefix", "-Prefix"), ("-bindir", "-BinDir")):
+        if key not in given:
+            raise Refused(f"install.ps1 runs here only with {what} DIR inside {under}: without it, it would use the "
+                          f"per-user CITAR folder, a real installation's")
+        given[key] = str(ps1_folder(str(given[key]), under, what))
+    if "-nopath" not in given:
+        raise Refused("install.ps1 runs here only with -NoPath: without it, it writes the user's PATH (the registry)")
+    installs = "-uninstall" not in given and "-worker" not in given
+    if installs and "-nosetup" not in given:
+        raise Refused("an install runs here only with -NoSetup: the setup wizard would wait for answers")
+    names = []
+    for item in extra:
+        name, sep, value = item.partition("=")
+        if not sep or name.upper() not in PS1_ENV:
+            raise Refused(f"--env {item}: install.ps1 is given only {' and '.join(PS1_ENV)}")
+        if name.upper() == "CITAR_RELEASE_URL":
+            scheme = urllib.parse.urlsplit(value).scheme.lower()
+            if scheme not in ("http", "https") or not (is_loopback(value) or is_documentation(value)):
+                raise Refused(f"--env {item}: a test's downloads come from a loopback server (http://127.0.0.1:PORT); "
+                              f"a refusal's test may name a documentation address (192.0.2.1), which no machine has")
+        names.append(name.upper())
+    if "-worker" in given and "-uninstall" not in given and "CITAR_RELEASE_URL" not in names:
+        raise Refused("-Worker downloads the helper: give --env CITAR_RELEASE_URL=http://127.0.0.1:PORT (a loopback "
+                      "server), or it would come from GitHub")
+    return given
+
+
+def install_ps1_env(under: Path, extra: list[str]) -> dict[str, str]:
+    """The environment install.ps1 runs with (the module's doc)."""
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("CITAR_")}
+    base = under / "gate-run-base"
+    for name, sub in (("LOCALAPPDATA", "Local"), ("APPDATA", "Roaming"), ("TEMP", "Temp"), ("TMP", "Temp")):
+        folder = base / sub
+        folder.mkdir(parents=True, exist_ok=True)
+        env[name] = str(folder)
+    for name, sub in STATE_VARIABLES.items():
+        folder = base / "state" / sub
+        folder.mkdir(parents=True, exist_ok=True)
+        env[name] = str(folder)
+    env["CITAR_KEYS_FILE"] = str(base / "state" / KEYS_FILE)
+    env["PYTHON_KEYRING_BACKEND"] = NO_KEYRING
+    for item in extra:
+        name, _, value = item.partition("=")
+        env[name.upper()] = value
+    return env
+
+
+def user_path() -> tuple[str, int] | None:
+    """The user's PATH as stored (``HKCU\\Environment``'s ``Path``, read only, unexpanded) and its kind, or None."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ) as key:
+            value, kind = winreg.QueryValueEx(key, "Path")
+    except FileNotFoundError:
+        return None
+    return str(value), int(kind)
+
+
+def fingerprint(path: tuple[str, int] | None) -> str:
+    """A short digest of the PATH (its value is the user's own, never printed)."""
+    import hashlib
+    text = "<none>" if path is None else f"{path[1]}:{path[0]}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def ps1_arguments(given: dict[str, str | bool]) -> list[str]:
+    """install.ps1's arguments rebuilt from what ``check_install_ps1`` read: each name as the script declares it, and
+    -Prefix and -BinDir the folders it resolved and checked, so PowerShell resolves nothing of its own."""
+    out: list[str] = []
+    for key, value in given.items():
+        out.append(PS1_SPELLING[key])
+        if value is not True:
+            out.append(str(value))
+    return out
+
+
+#: The quotes PowerShell reads as a single quote: the ASCII one and four typographic ones.
+PS_QUOTES = "'‘’‚‛"
+
+
+def ps1_literal(text: str) -> str:
+    """``text`` as a PowerShell single-quoted string (nothing in it expanded), each quote doubled."""
+    return "'" + "".join(c * 2 if c in PS_QUOTES else c for c in text) + "'"
+
+
+def scriptblock_command(given: dict[str, str | bool]) -> str:
+    """The PowerShell a user runs as the documented one-liner, ``& ([scriptblock]::Create((iwr -useb URL))) ARGS``,
+    with this checkout's install.ps1 for the download; then, once the script block has ended, ``SESSION_CONTINUES``
+    and its ``$LASTEXITCODE`` as the exit status. The script's ``exit`` would end this PowerShell before that line,
+    as it would close the user's window. An error the script block lets out (shown to the user as PowerShell shows
+    one) is named, and the status is then 1 at least."""
+    words: list[str] = []
+    for key, value in given.items():
+        words.append(PS1_SPELLING[key])
+        if value is not True:
+            words.append(ps1_literal(str(value)))
+    call = f"& ([scriptblock]::Create([IO.File]::ReadAllText({ps1_literal(str(INSTALL_PS1))}))) {' '.join(words)}"
+    return "\n".join([
+        "$global:LASTEXITCODE = 0",
+        "$escaped = $null",
+        f"try {{ {call} }} catch {{ $escaped = $_ }}",
+        "$code = $global:LASTEXITCODE",
+        "if ($escaped) {",
+        '    Write-Host "gate_run: an error left the script block: $escaped"',
+        "    if (-not $code) { $code = 1 }",
+        "}",
+        f'Write-Host "{SESSION_CONTINUES} (install.ps1 as a script block, status $code)"',
+        "exit $code",
+    ])
+
+
+def run_install_ps1(args: list[str], under: Path, extra: list[str], timeout: float = 1800.0,
+                    shell: str = "powershell", capture: bool = False,
+                    as_scriptblock: bool = False) -> subprocess.CompletedProcess:
+    """Runs install.ps1 ARGS under the rules above, its tree killed at ``timeout`` (``returncode`` 124 then); a run
+    that changed the user's PATH returns 1. PowerShell is given the parameters as they were checked (``ps1_arguments``):
+    with ``-File``, or with ``as_scriptblock`` as the documented one-liner runs it (``scriptblock_command``)."""
+    under = check_under(under)
+    given = check_install_ps1(list(args), under, list(extra))
+    if os.name != "nt":
+        raise Refused("install.ps1 runs on Windows")
+    exe = shutil.which(shell)
+    if shell not in ("powershell", "pwsh") or exe is None:
+        raise Refused(f"no {shell} here (give --shell powershell or pwsh)")
+    argv = [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"]
+    if as_scriptblock:
+        # -Command, not -EncodedCommand: Windows PowerShell answers the latter with its output as CLIXML on stderr
+        argv += ["-Command", scriptblock_command(given)]
+    else:
+        argv += ["-File", str(INSTALL_PS1), *ps1_arguments(given)]
+    before = user_path()
+    proc = start(argv, install_ps1_env(under, list(extra)), capture=capture)
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            stop_tree(proc, snapshot_tree(proc.pid), polite=False)
+            out, err, code = None, None, EXIT_TIMEOUT
+            print(f"gate_run: install.ps1 did not end within {timeout:.0f} s; its processes were killed", flush=True)
+        except BaseException:  # an interrupt, or anything else: the script is never left running
+            stop_tree(proc, snapshot_tree(proc.pid), polite=False)
+            raise
+    finally:
+        after = user_path()
+        if after != before:
+            print(f"gate_run: the user's PATH changed during the run ({fingerprint(before)} -> "
+                  f"{fingerprint(after)})", file=sys.stderr, flush=True)
+    if after != before:
+        code = code or 1
+    return subprocess.CompletedProcess(argv, code, out, err)
 
 
 # ------------------------------------------------------------------------------------------------ processes
@@ -624,20 +883,24 @@ def main(argv: list[str] | None = None) -> int:
         argv, rest = argv[:at], argv[at + 1:]
     ap = argparse.ArgumentParser(prog="gate_run.py", description=__doc__.split("\n\n", 1)[0])
     sub = ap.add_subparsers(dest="mode", required=True)
-    for mode in ("helper", "server"):
-        p = sub.add_parser(mode)
+    for mode in ("helper", "server", "install-ps1"):
+        p = sub.add_parser(mode, allow_abbrev=False)
         p.add_argument("--under", type=Path, default=None)
         p.add_argument("--timeout", type=float, default=300.0 if mode == "helper" else 1800.0)
         if mode == "server":
             p.add_argument("--port", type=int, required=True)
             p.add_argument("--state", type=Path, required=True)
-            p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE")
             p.add_argument("--ready", default=None, metavar="PATH")
             p.add_argument("--stop-file", type=Path, default=None)
+        if mode in ("server", "install-ps1"):
+            p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE")
+        if mode == "install-ps1":
+            p.add_argument("--shell", choices=("powershell", "pwsh"), default="powershell")
+            p.add_argument("--as-scriptblock", action="store_true")
     args = ap.parse_args(argv)
     under = args.under or (Path(os.environ["CARGO_TARGET_DIR"]) if os.environ.get("CARGO_TARGET_DIR") else None)
     try:
-        if not rest:
+        if not rest and args.mode != "install-ps1":
             raise Refused(f"give the command after --: gate_run.py {args.mode} ... -- COMMAND ARGS...")
         if args.mode == "helper":
             print(f"gate_run: helper {' '.join(rest)}", flush=True)
@@ -645,6 +908,11 @@ def main(argv: list[str] | None = None) -> int:
             if done.returncode == EXIT_TIMEOUT and done.stderr:
                 print(done.stderr.strip(), file=sys.stderr)
             return done.returncode
+        if args.mode == "install-ps1":
+            how = " (as a script block)" if args.as_scriptblock else ""
+            print(f"gate_run: install.ps1{how} {' '.join(rest)}", flush=True)
+            return run_install_ps1(rest, under, args.env, timeout=args.timeout, shell=args.shell,
+                                   as_scriptblock=args.as_scriptblock).returncode
         return serve(rest, args.port, args.state, under, args.env, args.ready, args.stop_file, args.timeout)
     except Refused as e:
         print(f"gate_run: refused: {e}", file=sys.stderr)

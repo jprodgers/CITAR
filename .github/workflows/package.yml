@@ -33,7 +33,10 @@
 # - windows: the Windows bundle (PyInstaller) from the Windows wheel installed in a fresh venv, never the checkout;
 #   its checks (scripts/ci/check_bundle.py: the job host started from the bundle among them), the Inno Setup installer,
 #   a silent per-user install on the runner, run and uninstalled, and the portable zip (P5.6).
-# - installer: install.sh on the release wheels (moved from test.yml; 5-07 replaces it).
+# - install: install.sh (Linux and macOS) and install.ps1 (Windows) on each platform, against this run's wheel and
+#   helper for it, served from a loopback server as a release serves them (scripts/ci/install_check.py): the
+#   platform check, wheels only, the game and its commands, --worker's helper and its checksum, the uninstall
+#   (P5.8).
 # - image: the server image for linux/amd64 and linux/arm64, each built natively from its own wheel and the
 #   constraints, run and checked (scripts/ci/check_image.py: health, version and label, the job host verifiable as uid
 #   10001, the wheels' smoke, a restart keeping the volume's state), saved and loaded again with the same id; kept as
@@ -1046,10 +1049,20 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
 
-  installer:
-    name: install.sh works (${{ matrix.platform }})
-    needs: [meta, wheels]
-    # Each leg needs only its own platform's wheel.
+  install:
+    # The install scripts (design/phase5-release.md P5.8) on each platform the wheels and helpers are built for, each
+    # against this run's own wheel and helper for it, the helper served from a loopback server laid out as a release
+    # (never PyPI's CITAR or GitHub's downloads): scripts/ci/install_check.py. install.sh on Linux and macOS,
+    # install.ps1 on Windows (through gate_run.py install-ps1). The platform check's messages through the scripts'
+    # test hook; wheels only (a folder holding only an sdist refused); the game from its wheel, its commands run
+    # (citar doctor naming the version and the label); --worker/-Worker installing the self-updating helper with its
+    # .sha256, which then runs (gate_run.py helper: the version, target and label); a wrong checksum and plain http to
+    # another machine refused before anything is written; the uninstall leaving nothing. A runner's profile and PATH
+    # are its own, so --path-route also takes the default route that writes them (install.ps1's user PATH put back
+    # byte for byte by its uninstall).
+    name: install scripts (${{ matrix.platform }})
+    needs: [meta, wheels, helpers]
+    # Each leg needs only its own platform's wheel and helper.
     if: ${{ !cancelled() && needs.meta.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -1057,12 +1070,18 @@ jobs:
       RELEASE_MODE: ${{ needs.meta.outputs.mode }}
       RELEASE_VERSION: ${{ needs.meta.outputs.version }}
       RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      # The label the wheel and the helper were built with, which citar doctor and citar-helper --version must name.
+      LABEL: ${{ needs.meta.outputs.label }}
     strategy:
       fail-fast: false
       matrix:
+        # Each on the runner its wheel and helper are built on (tests/test_workflows.py holds the three equal).
         include:
-          - { platform: linux-x64, runner: ubuntu-24.04 }
-          - { platform: macos-arm64, runner: macos-15 }
+          - { platform: windows-x64, runner: windows-latest, machine: x86_64, script: ps1, asset: citar-helper-windows-x64.exe }
+          - { platform: macos-arm64, runner: macos-15, machine: arm64, script: sh, asset: citar-helper-macos-arm64 }
+          - { platform: macos-x64, runner: macos-15-intel, machine: x86_64, script: sh, asset: citar-helper-macos-x64 }
+          - { platform: linux-x64, runner: ubuntu-24.04, machine: x86_64, script: sh, asset: citar-helper-linux-x64 }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, machine: aarch64, script: sh, asset: citar-helper-linux-arm64 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1076,32 +1095,45 @@ jobs:
         shell: bash
         run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
 
+      - name: This runner's own architecture
+        shell: bash
+        env:
+          WANT: ${{ matrix.machine }}
+        run: |
+          got=$(uname -m)
+          echo "uname -m: $got; label: $LABEL; version: $RELEASE_VERSION; $(python -V); $(curl --version | head -n 1)"
+          [ "$got" = "$WANT" ] || { echo "::error::this runner is $got, not $WANT"; exit 1; }
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        # --from lets the script install a local wheel instead of PyPI's, so the installer is tested on this pull
-        # request's release wheel for this platform.
         with:
           name: pkg-wheel-${{ matrix.platform }}
-          path: wheels
+          path: wheel
 
-      - name: Install
-        run: bash install.sh --from "$(ls wheels/*.whl)" --no-setup
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        # The self-updating helper and its .sha256, which the loopback server serves as a release does.
+        with:
+          name: pkg-helper-${{ matrix.platform }}
+          path: helper
 
-      - name: It installed, and it runs
+      - name: The install script against this run's wheel and helper
+        shell: bash
+        env:
+          SCRIPT: ${{ matrix.script }}
+          PLATFORM: ${{ matrix.platform }}
+          ASSET: ${{ matrix.asset }}
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          citar --version
-          citar where
-          citar doctor --quiet
-          # The unattended path the installers use. With no model server running on a CI runner it configures for
-          # scripted bots, which is the correct outcome and the one least tested by hand.
-          citar setup --local --non-interactive
+          python scripts/ci/install_check.py "$SCRIPT" --wheel "$(ls wheel/*.whl)" --helper "helper/$ASSET" \
+            --version "$RELEASE_VERSION" --label "$LABEL" --under "$RUNNER_TEMP" --work "$RUNNER_TEMP/install-check" \
+            --path-route --out "report/install-$PLATFORM.json"
 
-      - name: Uninstall leaves no program behind, and no data missing
-        run: |
-          bash install.sh --uninstall
-          test ! -e "$HOME/.local/share/citar-app" || { echo "prefix survived the uninstall"; exit 1; }
-          test ! -e "$HOME/.local/bin/citar" || { echo "command survived the uninstall"; exit 1; }
-          echo "uninstall is clean"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Every check and what the game's and the helper's runs said.
+        if: ${{ !cancelled() }}
+        with:
+          name: pkg-install-report-${{ matrix.platform }}
+          path: report/install-${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
 
   image:
     # The server image (design/phase5-release.md P5.7), for each architecture natively on a runner of its own (no

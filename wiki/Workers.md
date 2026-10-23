@@ -299,8 +299,10 @@ On macOS and Linux, make the download executable first (`chmod +x citar-helper-*
 If the server restarts, the helper reconnects by itself (after 2 s, then backing off to a minute).
 Only a refused token or key, or a machine taken away, stops it for good.
 
-`citar worker`, `citar setup --worker`, `install.sh --worker` and `install.ps1 -Worker`, which set up
-the Python worker before 0.1.6, now say where to download the helper and exit with code 2.
+`citar worker` and `citar setup --worker`, which set up the Python worker before 0.1.6, now say where
+to download the helper and exit with code 2; `install.sh --worker` and `install.ps1 -Worker` download
+it (the self-updating build for the machine, checked against its `.sha256` before anything is written)
+into the bin folder, `~/.local/bin` or `%LOCALAPPDATA%\CITAR\bin`.
 
 ### Moving from 0.1.5
 

@@ -69,10 +69,11 @@ that means for an existing install:
   0.1.5 worker with one message telling its owner to download the new helper (close code 4426), and a
   0.1.6 helper waits for a 0.1.5 server to be upgraded. The helper reads a 0.1.5 `helper.json` or
   `worker.json` with the same meaning, lends no CPU unless its owner turns that on, and registers a
-  machine key with its first connection. `citar worker`, `citar setup --worker`, `install.sh --worker`
-  and `install.ps1 -Worker` now say where to download the helper and exit 2; the `worker` extra and the
-  `citar-worker` command are gone. A 0.1.5 worker installed as a system service is restarted into the
-  refusal every 15 s until it is disabled (`sudo systemctl disable --now citar-worker`):
+  machine key with its first connection. `citar worker` and `citar setup --worker` now say where to
+  get the helper and exit 2, and `install.sh --worker` and `install.ps1 -Worker` download it, checked
+  against its `.sha256`; the `worker` extra and the `citar-worker` command are gone. A 0.1.5 worker
+  installed as a system service is restarted into the refusal every 15 s until it is disabled
+  (`sudo systemctl disable --now citar-worker`):
   [docs/server/WORKERS.md](docs/server/WORKERS.md#moving-from-015).
 - **The lab plays each game as a job,** built in Rust by the jobs crate (`crates/citar-jobs`, the code
   a helper lending its CPU will run): the result line holds what 0.1.5's did, with `seconds`,

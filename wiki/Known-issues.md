@@ -80,9 +80,10 @@ playing is played again elsewhere.
 **Homebrew, Scoop and winget lag the release** by a day or so — each needs the GitHub release to
 exist before its manifest can be updated.
 
-**`install.sh` is verified in CI, not on every distribution.** It is tested on Ubuntu and macOS
-runners. On something unusual, read it first; it is short, and `--no-setup` makes it do nothing but
-install.
+**`install.sh` is verified in CI, not on every distribution.** It is tested on Ubuntu (x64 and ARM64)
+and macOS (Apple silicon and Intel) runners, and `install.ps1` on Windows, each against the release's
+own wheel and helper. On something unusual, read it first; it is short, and `--no-setup` makes it do
+nothing but install.
 
 ---
 
