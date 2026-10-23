@@ -8,6 +8,8 @@
 class CitarHelper < Formula
   desc "Lend this machine's model endpoint and spare CPU to a CITAR server"
   homepage "https://github.com/jprodgers/CITAR"
+  # Stated, not read from the URLs: Homebrew would read "64" from the archives' names (...-arm64.tar.gz).
+  version "{{version}}"
   license "MPL-2.0"
 
   on_macos do

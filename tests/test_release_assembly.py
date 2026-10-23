@@ -445,6 +445,11 @@ class Manifests(unittest.TestCase):
             ("homebrew/citar-helper.rb", "    on_intel do\n      url", "    on_arm do\n      url",
              "on_macos has two on_arm blocks"),
             ("scoop/citar.json", '"extract_dir": "CITAR"', '"extract_dir": "citar"', "extract_dir 'citar'"),
+            # The merge's CI: without it Homebrew read the version "64" from ...-arm64.tar.gz, and brew test failed.
+            ("homebrew/citar-helper.rb", f'  version "{VERSION}"\n', "", f'no version "{VERSION}" line'),
+            # winget validate warns "Scope is not supported for InstallerType portable".
+            ("winget/helper/JimmieRodgers.CITAR.Helper.installer.yaml", "ReleaseDate:", "Scope: user\nReleaseDate:",
+             "a Scope, which winget does not support for a portable installer"),
         )
         for rel, old, new, finding in plants:
             with self.subTest(manifest=rel, finding=finding):
@@ -490,6 +495,33 @@ class Manifests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("winget/helper/JimmieRodgers.CITAR.Helper.yaml: (the document): 'DefaultLocale' is a required "
                       "property", err)
+
+    def test_winget_validate_passes_on_an_older_clients_header_warnings_only(self):
+        # The merge's CI: windows-latest's winget 1.11.510 holds each header to its own newest schema, so it warned on
+        # every 1.12.0 header and exited non-zero. That warning alone passes on an older client, and nothing else does.
+        code, out, err = self.write()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(managers.manifest_version(self.out / "winget" / "helper"), (1, 12))
+        self.assertEqual(managers.version_tuple("v1.11.510\n"), (1, 11))
+        header = ("Manifest Warning: The schema header URL does not match the expected pattern. Value: "
+                  "# yaml-language-server: $schema=https://aka.ms/winget-manifest.{}.1.12.0.schema.json Line: 1, "
+                  "Column: 25 File: JimmieRodgers.CITAR.{}.yaml")
+        headers = "\n".join(header.format(kind, kind) for kind in ("installer", "defaultLocale", "version"))
+        warned = "Manifest validation succeeded with warnings.\n" + headers + "\n"
+        older, same, newer = (1, 11), (1, 12), (1, 13)
+        self.assertEqual(managers.validate_outcome(0, "Manifest validation succeeded.\n", same, same), (True, ""))
+        passed, why = managers.validate_outcome(-1978335138, warned, older, same)
+        self.assertTrue(passed)
+        self.assertIn("only the schema header warning (3 files), from a winget 1.11 older than ManifestVersion 1.12",
+                      why)
+        for client in (same, newer, None):
+            with self.subTest(client=client):
+                self.assertEqual(managers.validate_outcome(1, warned, client, same), (False, ""))
+        scope = warned + "Manifest Warning: Scope is not supported for InstallerType portable.\n"
+        self.assertEqual(managers.validate_outcome(1, scope, older, same), (False, ""))
+        error = "Manifest validation failed.\nManifest Error: Field type is not supported. Field: Scope\n" + headers
+        self.assertEqual(managers.validate_outcome(1, error, older, same), (False, ""))
+        self.assertEqual(managers.validate_outcome(1, warned, older, None), (False, ""))
 
     def test_a_release_date_stays_a_string(self):
         self.assertEqual(managers.yaml_load("ReleaseDate: 2026-11-01\n"), {"ReleaseDate": "2026-11-01"})

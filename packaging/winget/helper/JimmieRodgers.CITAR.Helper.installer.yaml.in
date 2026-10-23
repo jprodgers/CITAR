@@ -1,8 +1,9 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 #
 # winget installer manifest for the CITAR helper: the packaged build (it never updates itself; winget upgrades it)
-# in its versioned zip, installed as a portable command, per user. Written by scripts/release_checksums.py from this
-# template (packaging/README.md); submitted to microsoft/winget-pkgs, never published from this repository.
+# in its versioned zip, installed as a portable command, per user (winget's default for a portable, which takes no
+# Scope: winget validate warns on one). Written by scripts/release_checksums.py from this template
+# (packaging/README.md); submitted to microsoft/winget-pkgs, never published from this repository.
 
 PackageIdentifier: JimmieRodgers.CITAR.Helper
 PackageVersion: {{version}}
@@ -11,7 +12,6 @@ NestedInstallerType: portable
 NestedInstallerFiles:
   - RelativeFilePath: citar-helper.exe
     PortableCommandAlias: citar-helper
-Scope: user
 ReleaseDate: {{date}}
 Installers:
   - Architecture: x64

@@ -75,7 +75,8 @@ A personal tap, not homebrew-core, holding one formula: **`citar-helper`**, the 
 Apple silicon and Intel and Linux on x64 and arm64 (one archive and SHA-256 under each of the formula's four
 `on_macos`/`on_linux` × `on_arm`/`on_intel` blocks). It installs `citar-helper` and its notices (`LICENSE`,
 `NOTICE.md`, `THIRD-PARTY-LICENSES.txt`, into the formula's `doc`), and its `test` runs `--version` and
-`--self-test`. The game itself installs from its wheels (`pipx install citar`, or `install.sh`), so 0.1.5's `citar`
+`--self-test`. It states its `version`: from the archives' names alone Homebrew reads "64" (`...-arm64.tar.gz`). The
+game itself installs from its wheels (`pipx install citar`, or `install.sh`), so 0.1.5's `citar`
 formula, which built the sdist, is gone; the tap's `Formula/citar.rb` is removed when `citar-helper.rb` is added, and
 `brew uninstall citar` removes an old copy.
 
@@ -123,7 +124,8 @@ checks. Two packages, each three files (version, installer, default locale):
 
 - **`JimmieRodgers.CITAR`**: the game's Inno Setup installer, per user (no elevation);
 - **`JimmieRodgers.CITAR.Helper`**: the helper's packaged build in its zip, installed as a portable command
-  (`NestedInstallerType: portable`, the command alias `citar-helper`), per user; winget upgrades it.
+  (`NestedInstallerType: portable`, the command alias `citar-helper`), per user; winget upgrades it. A portable
+  takes no `Scope` (winget validate warns on one).
 
 On a Windows machine, once:
 
@@ -161,7 +163,9 @@ written against (1.12.0, what current submissions use), not CITAR's version: che
 
 **Checked on every pull request** (`managers` on Windows): every file against the JSON schema its header names
 (`jsonschema`; the gate), then `winget validate` and `winget install --manifest` from a loopback copy of the release
-where the runner has winget, and a notice saying they were not run where it has not.
+where the runner has winget, and a notice saying they were not run where it has not. A winget older than the
+files' `ManifestVersion` (windows-latest's 1.11 against 1.12.0) warns on every schema header, holding it to its own
+newest schema; that warning alone passes, with a notice, and any other warning fails.
 
 ## The CITAR helper
 

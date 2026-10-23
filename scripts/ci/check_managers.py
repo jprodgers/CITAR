@@ -16,10 +16,11 @@
   $schema=https://aka.ms/winget-manifest.<type>.<version>.schema.json``, without which winget refuses the whole
   set), its ``ManifestType`` and ``ManifestVersion`` the header's, the fields its type requires, one identifier and
   version across a package's three files, ``Documentations`` spelt so (the published schemas allow unknown fields,
-  so ``Documentation`` would validate and be dropped), and the installer's URL and SHA-256 the asset's; the formula
-  has a URL and SHA-256 under each of its four platform blocks (``on_macos``/``on_linux`` x ``on_arm``/``on_intel``),
-  each its platform's packaged archive, and installs the binary and the notices, with a service and a test. With
-  ``--assets`` every hash is held to the file's.
+  so ``Documentation`` would validate and be dropped), the installer's URL and SHA-256 the asset's, and no ``Scope``
+  on the portable helper (winget supports none there); the formula states its ``version`` (Homebrew would read "64"
+  from the archives' names), has a URL and SHA-256 under each of its four platform blocks (``on_macos``/``on_linux``
+  x ``on_arm``/``on_intel``), each its platform's packaged archive, and installs the binary and the notices, with a
+  service and a test. With ``--assets`` every hash is held to the file's.
 - ``winget-schemas``: each winget file validated against the JSON schema its header names (``jsonschema``), fetched
   from that URL, or read from ``--schemas DIR`` by the URL's file name; YAML read as winget reads it (a date stays a
   string). PyYAML and jsonschema are this command's only packages.
@@ -29,7 +30,9 @@
   (``citar --version``; ``citar-helper --version`` through ``gate_run.py helper`` with a home under ``--under``) and
   uninstalled. ``scoop`` installs both of Scoop's packages. ``winget`` runs ``winget validate`` on the real-URL
   manifests (``--manifests``) and ``winget install --manifest`` on the loopback ones, where the runner has winget;
-  where it has none it says so as a workflow notice and passes (the schemas are the gate). ``brew`` makes a tap of
+  where it has none it says so as a workflow notice and passes (the schemas are the gate). A winget older than the
+  files' ``ManifestVersion`` warns on every schema header (it holds them to its own newest schema); that warning
+  alone passes with a notice saying so, and any other warning or error fails. ``brew`` makes a tap of
   its own (``brew tap-new --no-git``), runs ``brew audit --strict`` and ``brew style`` on the formula with the real
   release URLs (offline: nothing is published yet), then ``brew install`` and ``brew test`` on the loopback copy,
   checks the notices in its ``doc``, and uninstalls it and removes the tap. Each writes a JSON report.
@@ -254,6 +257,9 @@ def check_winget(rel: str, text: str, kind: str, package: str, asset: str | None
                     nested[0].get("RelativeFilePath") != "citar-helper.exe" or \
                     nested[0].get("PortableCommandAlias") != "citar-helper":
                 problems.append(f"{rel}: not the portable citar-helper.exe with the command alias citar-helper")
+            if "Scope" in data or any("Scope" in i for i in installers):
+                problems.append(f"{rel}: a Scope, which winget does not support for a portable installer (winget "
+                                f"validate warns)")
     return problems
 
 
@@ -264,6 +270,9 @@ def check_formula(rel: str, text: str, expect: Expect) -> list[str]:
                    '    run [opt_bin/"citar-helper", "run", "--service"]', "  test do\n", "--self-test", "--version"):
         if needle not in text:
             problems.append(f"{rel}: lacks {needle.strip()!r}")
+    if f'\n  version "{expect.version}"\n' not in text:
+        problems.append(f'{rel}: no version "{expect.version}" line (Homebrew would read the version "64" from the '
+                        f"archives' names)")
     found: dict[tuple[str, str], tuple[list[str], list[str]]] = {}
     for outer in OUTER_BLOCK.finditer(text):
         body = outer[2] if outer[2].endswith("\n") else outer[2] + "\n"
@@ -504,6 +513,43 @@ def cmd_scoop(args) -> int:
     return report.write(args.out)
 
 
+#: winget validate's one warning that says nothing of the files when the client is older than their ManifestVersion:
+#: it holds the header to its own newest schema's ``$id``, so a 1.11 client warns on every 1.12.0 header.
+HEADER_WARNING = "The schema header URL does not match the expected pattern"
+
+
+def version_tuple(text: str) -> tuple[int, int] | None:
+    m = re.search(r"(\d+)\.(\d+)", text)
+    return (int(m[1]), int(m[2])) if m else None
+
+
+def manifest_version(folder: Path) -> tuple[int, int] | None:
+    """The ManifestVersion of a package's files (their headers'), or None when they disagree or have none."""
+    found = set()
+    for path in sorted(folder.glob("*.yaml")):
+        m = WINGET_HEADER.fullmatch(path.read_text(encoding="utf-8").split("\n", 1)[0].rstrip("\r"))
+        found.add(version_tuple(m[3]) if m else None)
+    return found.pop() if len(found) == 1 else None
+
+
+def validate_outcome(code: int, out: str, client: tuple[int, int] | None,
+                     manifests: tuple[int, int] | None) -> tuple[bool, str]:
+    """Whether ``winget validate`` passed: exit 0; or, on a client older than the files' ManifestVersion, warnings
+    that are all the schema header's (which such a client cannot match; the JSON schemas, checked before, are the
+    files' real schema check). Any other warning, or any error, fails: (passed, why it passed on warnings)."""
+    if code == 0:
+        return True, ""
+    lines = [line.strip() for line in out.splitlines()]
+    warnings = [line for line in lines if line.startswith("Manifest Warning:")]
+    if ("Manifest validation succeeded with warnings." in lines and warnings
+            and not any(line.startswith("Manifest Error:") for line in lines)
+            and all(HEADER_WARNING in line for line in warnings)
+            and client is not None and manifests is not None and client < manifests):
+        return True, (f"exit {code}: only the schema header warning ({len(warnings)} files), from a winget "
+                      f"{client[0]}.{client[1]} older than ManifestVersion {manifests[0]}.{manifests[1]}")
+    return False, ""
+
+
 def cmd_winget(args) -> int:
     on_a_runner("winget")
     report = Report("winget", args.version)
@@ -516,10 +562,14 @@ def cmd_winget(args) -> int:
         return report.write(args.out)
     code, out = run([winget, "--version"], "winget --version")
     report.record("winget --version", code == 0, out.strip()[-80:])
+    client = version_tuple(out) if code == 0 else None
     for package in ("game", "helper"):
-        code, out = run([winget, "validate", "--manifest", args.manifests / "winget" / package],
-                        f"winget validate {package}")
-        report.record(f"winget validate --manifest ({package}, the real URLs)", code == 0, out.strip()[-300:])
+        folder = args.manifests / "winget" / package
+        code, out = run([winget, "validate", "--manifest", folder], f"winget validate {package}")
+        passed, why = validate_outcome(code, out, client, manifest_version(folder))
+        if why:
+            print(f"::notice title=winget validate ({package})::{why}", flush=True)
+        report.record(f"winget validate --manifest ({package}, the real URLs)", passed, why or out.strip()[-300:])
     code, out = run([winget, "settings", "--enable", "LocalManifestFiles"], "winget settings")
     report.record("winget settings --enable LocalManifestFiles", code == 0, out.strip()[-200:])
     served = Served(args.release)
@@ -533,8 +583,9 @@ def cmd_winget(args) -> int:
         links = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "citar-helper.exe"
         helper_runs(report, shutil.which("citar-helper") or links, args.version, args.label, args.under,
                     args.work / "helper-home", "winget's citar-helper")
-        code, out = run([winget, "uninstall", "--id", "JimmieRodgers.CITAR.Helper", "--disable-interactivity"],
-                        "winget uninstall the helper")
+        # The source agreements again: uninstall looks the package up in the sources too, msstore's included.
+        code, out = run([winget, "uninstall", "--id", "JimmieRodgers.CITAR.Helper", "--accept-source-agreements",
+                         "--disable-interactivity"], "winget uninstall the helper")
         report.record("winget uninstall JimmieRodgers.CITAR.Helper", code == 0, out.strip()[-200:])
     finally:
         served.close()
