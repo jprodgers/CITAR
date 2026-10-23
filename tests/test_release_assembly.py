@@ -445,8 +445,9 @@ class Manifests(unittest.TestCase):
             ("homebrew/citar-helper.rb", "    on_intel do\n      url", "    on_arm do\n      url",
              "on_macos has two on_arm blocks"),
             ("scoop/citar.json", '"extract_dir": "CITAR"', '"extract_dir": "citar"', "extract_dir 'citar'"),
-            # The merge's CI: without it Homebrew read the version "64" from ...-arm64.tar.gz, and brew test failed.
-            ("homebrew/citar-helper.rb", f'  version "{VERSION}"\n', "", f'no version "{VERSION}" line'),
+            # The merge's CI: Homebrew reads the version from .../releases/download/vV/, and audit --strict refuses a
+            # stated one as redundant.
+            ("homebrew/citar-helper.rb", '  license "', f'  version "{VERSION}"\n  license "', "states a version"),
             # winget validate warns "Scope is not supported for InstallerType portable".
             ("winget/helper/JimmieRodgers.CITAR.Helper.installer.yaml", "ReleaseDate:", "Scope: user\nReleaseDate:",
              "a Scope, which winget does not support for a portable installer"),
@@ -522,6 +523,32 @@ class Manifests(unittest.TestCase):
         error = "Manifest validation failed.\nManifest Error: Field type is not supported. Field: Scope\n" + headers
         self.assertEqual(managers.validate_outcome(1, error, older, same), (False, ""))
         self.assertEqual(managers.validate_outcome(1, warned, older, None), (False, ""))
+
+    def test_the_loopback_formula_states_the_version_its_url_cannot_carry(self):
+        # The merge's CI: from http://127.0.0.1:<port>/citar-helper-V-macos-arm64.tar.gz Homebrew read the version
+        # "64", so brew test failed; the real URLs' /releases/download/vV/ gives V, and stating it there is refused.
+        code, out, err = self.write("--base-url", "http://127.0.0.1:9/")
+        self.assertEqual(code, 0, out + err)
+        text = (self.out / "homebrew" / "citar-helper.rb").read_text(encoding="utf-8")
+        stated = managers.loopback_formula(text, VERSION)
+        self.assertEqual(stated.count(f'  version "{VERSION}"\n'), 1)
+        self.assertIn(f'  homepage "https://github.com/jprodgers/CITAR"\n  version "{VERSION}"\n  license "', stated)
+        self.assertEqual(stated.replace(f'  version "{VERSION}"\n', ""), text)
+        with self.assertRaisesRegex(managers.Failed, "states a version already"):
+            managers.loopback_formula(stated, VERSION)
+        with self.assertRaisesRegex(managers.Failed, "no homepage line"):
+            managers.loopback_formula(text.replace("  homepage ", "  # homepage "), VERSION)
+        info = json.dumps({"formulae": [{"name": "citar-helper", "versions": {"stable": VERSION, "head": None}}],
+                           "casks": []})
+        self.assertEqual(managers.formula_version("Fetching nothing\n" + info), VERSION)
+        self.assertEqual(managers.formula_version(info + "\nWarning: stderr after the JSON\n"), VERSION)
+        self.assertIsNone(managers.formula_version("no JSON here"))
+        self.assertIsNone(managers.formula_version('{"formulae": []}'))
+        audit = ("Fetching gem metadata\ncitar/dryrun/citar-helper\n  * Stable: `version 0.1.5` is redundant with "
+                 "version scanned from URL\nError: 1 problem in 1 formula detected.\n")
+        self.assertEqual(managers.brew_problems(audit),
+                         "* Stable: `version 0.1.5` is redundant with version scanned from URL")
+        self.assertEqual(managers.brew_problems("all fine\n"), "all fine")
 
     def test_a_release_date_stays_a_string(self):
         self.assertEqual(managers.yaml_load("ReleaseDate: 2026-11-01\n"), {"ReleaseDate": "2026-11-01"})

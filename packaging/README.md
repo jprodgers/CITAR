@@ -75,10 +75,10 @@ A personal tap, not homebrew-core, holding one formula: **`citar-helper`**, the 
 Apple silicon and Intel and Linux on x64 and arm64 (one archive and SHA-256 under each of the formula's four
 `on_macos`/`on_linux` × `on_arm`/`on_intel` blocks). It installs `citar-helper` and its notices (`LICENSE`,
 `NOTICE.md`, `THIRD-PARTY-LICENSES.txt`, into the formula's `doc`), and its `test` runs `--version` and
-`--self-test`. It states its `version`: from the archives' names alone Homebrew reads "64" (`...-arm64.tar.gz`). The
-game itself installs from its wheels (`pipx install citar`, or `install.sh`), so 0.1.5's `citar`
-formula, which built the sdist, is gone; the tap's `Formula/citar.rb` is removed when `citar-helper.rb` is added, and
-`brew uninstall citar` removes an old copy.
+`--self-test`. It states no `version`: Homebrew reads it from the release URLs (`.../releases/download/vV/`), and
+`brew audit --strict` refuses a stated one as redundant. The game itself installs from its wheels (`pipx install
+citar`, or `install.sh`), so 0.1.5's `citar` formula, which built the sdist, is gone; the tap's `Formula/citar.rb` is
+removed when `citar-helper.rb` is added, and `brew uninstall citar` removes an old copy.
 
 A packaged build never updates itself (`brew upgrade citar-helper` does), and its service runs through Homebrew:
 
@@ -94,7 +94,9 @@ record this version's Cellar path, which the next `brew upgrade` removes. The fo
 **Checked on every pull request** (`package.yml`'s `managers`, on macOS arm64, macOS x64 and Linux x64): `brew audit
 --strict` and `brew style` on the formula with the release's real URLs (offline: the files are not published yet),
 then `brew install` and `brew test` on a copy pointed at a loopback server holding the release, each in a tap of its
-own (`brew tap-new --no-git citar/dryrun`). Linux arm64's block is held by `scripts/ci/check_managers.py structure`.
+own (`brew tap-new --no-git citar/dryrun`). `brew info` must read the release's version from the real URLs; the
+loopback copy states it, since a loopback URL has no `/releases/download/vV/` (from `...-arm64.tar.gz` alone Homebrew
+reads `64`). Linux arm64's block is held by `scripts/ci/check_managers.py structure`.
 
 ## Scoop
 

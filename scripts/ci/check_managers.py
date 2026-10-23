@@ -17,10 +17,10 @@
   set), its ``ManifestType`` and ``ManifestVersion`` the header's, the fields its type requires, one identifier and
   version across a package's three files, ``Documentations`` spelt so (the published schemas allow unknown fields,
   so ``Documentation`` would validate and be dropped), the installer's URL and SHA-256 the asset's, and no ``Scope``
-  on the portable helper (winget supports none there); the formula states its ``version`` (Homebrew would read "64"
-  from the archives' names), has a URL and SHA-256 under each of its four platform blocks (``on_macos``/``on_linux``
-  x ``on_arm``/``on_intel``), each its platform's packaged archive, and installs the binary and the notices, with a
-  service and a test. With ``--assets`` every hash is held to the file's.
+  on the portable helper (winget supports none there); the formula states no ``version`` (Homebrew reads it from the
+  release's URLs, ``.../releases/download/vV/``), has a URL and SHA-256 under each of its four platform blocks
+  (``on_macos``/``on_linux`` x ``on_arm``/``on_intel``), each its platform's packaged archive, and installs the binary
+  and the notices, with a service and a test. With ``--assets`` every hash is held to the file's.
 - ``winget-schemas``: each winget file validated against the JSON schema its header names (``jsonschema``), fetched
   from that URL, or read from ``--schemas DIR`` by the URL's file name; YAML read as winget reads it (a date stays a
   string). PyYAML and jsonschema are this command's only packages.
@@ -34,8 +34,10 @@
   files' ``ManifestVersion`` warns on every schema header (it holds them to its own newest schema); that warning
   alone passes with a notice saying so, and any other warning or error fails. ``brew`` makes a tap of
   its own (``brew tap-new --no-git``), runs ``brew audit --strict`` and ``brew style`` on the formula with the real
-  release URLs (offline: nothing is published yet), then ``brew install`` and ``brew test`` on the loopback copy,
-  checks the notices in its ``doc``, and uninstalls it and removes the tap. Each writes a JSON report.
+  release URLs (offline: nothing is published yet) and reads the version Homebrew finds there (``brew info``), then
+  ``brew install`` and ``brew test`` on the loopback copy, which states that version (a loopback URL has no
+  ``/releases/download/vV/`` to read it from), checks the notices in its ``doc``, and uninstalls it and removes the
+  tap. Each writes a JSON report.
 
 Exit status 0 when every check holds; 1 when one does not (each named); 2 for a usage error.
 """
@@ -109,6 +111,8 @@ OUTER_BLOCK = re.compile(r"^  on_(macos|linux) do\n(.*?)^  end\n", re.M | re.S)
 INNER_BLOCK = re.compile(r"^    on_(arm|intel) do\n((?:^      .*\n)*?)^    end\n", re.M)
 FORMULA_URL = re.compile(r'^      url "([^"]+)"$', re.M)
 FORMULA_SHA = re.compile(r'^      sha256 "([0-9a-f]{64})"$', re.M)
+FORMULA_VERSION = re.compile(r'^\s+version\s+"', re.M)
+FORMULA_HOMEPAGE = re.compile(r'^  homepage "[^"]*"\n', re.M)
 HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 TIMEOUT = 600.0
 
@@ -270,9 +274,9 @@ def check_formula(rel: str, text: str, expect: Expect) -> list[str]:
                    '    run [opt_bin/"citar-helper", "run", "--service"]', "  test do\n", "--self-test", "--version"):
         if needle not in text:
             problems.append(f"{rel}: lacks {needle.strip()!r}")
-    if f'\n  version "{expect.version}"\n' not in text:
-        problems.append(f'{rel}: no version "{expect.version}" line (Homebrew would read the version "64" from the '
-                        f"archives' names)")
+    if FORMULA_VERSION.search(text):
+        problems.append(f"{rel}: states a version, which Homebrew reads from the release's URLs "
+                        f"(.../releases/download/v{expect.version}/); brew audit --strict refuses it as redundant")
     found: dict[tuple[str, str], tuple[list[str], list[str]]] = {}
     for outer in OUTER_BLOCK.finditer(text):
         body = outer[2] if outer[2].endswith("\n") else outer[2] + "\n"
@@ -447,7 +451,9 @@ def run(argv: list, what: str, timeout: float = TIMEOUT, env: dict | None = None
     except subprocess.TimeoutExpired:
         return 124, f"{what}: no end within {timeout:.0f} s"
     out = (done.stdout or "") + (done.stderr or "")
-    for line in out.strip().splitlines()[-60:]:
+    # All of a failure's output: its cause can sit in stdout, ahead of a long stderr (brew audit's problems).
+    lines = out.strip().splitlines()
+    for line in lines if done.returncode != 0 else lines[-60:]:
         print(f"    {line}", flush=True)
     return done.returncode, out
 
@@ -583,10 +589,19 @@ def cmd_winget(args) -> int:
         links = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "citar-helper.exe"
         helper_runs(report, shutil.which("citar-helper") or links, args.version, args.label, args.under,
                     args.work / "helper-home", "winget's citar-helper")
-        # The source agreements again: uninstall looks the package up in the sources too, msstore's included.
-        code, out = run([winget, "uninstall", "--id", "JimmieRodgers.CITAR.Helper", "--accept-source-agreements",
-                         "--disable-interactivity"], "winget uninstall the helper")
-        report.record("winget uninstall JimmieRodgers.CITAR.Helper", code == 0, out.strip()[-200:])
+        # By the manifest it was installed from: `--id` finds no installed package for a local manifest's install
+        # (the merge's CI). The source agreements again, since uninstall looks in the sources too, msstore's included.
+        quiet = ["--accept-source-agreements", "--disable-interactivity"]
+        code, out = run([winget, "uninstall", "--manifest", manifests / "winget" / "helper", *quiet],
+                        "winget uninstall the helper")
+        how = "--manifest"
+        if code != 0:
+            run([winget, "list", "--name", "CITAR", *quiet], "winget list (what winget sees installed)")
+            code, out = run([winget, "uninstall", "--name", "CITAR helper", "--exact", *quiet],
+                            "winget uninstall the helper by name")
+            how = "--name 'CITAR helper'"
+        report.record("winget uninstall JimmieRodgers.CITAR.Helper", code == 0, f"{how}: {out.strip()[-200:]}")
+        report.record("winget's citar-helper command is gone", not links.exists(), str(links))
     finally:
         served.close()
     return report.write(args.out)
@@ -598,6 +613,32 @@ def find_brew() -> str | None:
         if candidate and Path(candidate).is_file():
             return candidate
     return None
+
+
+def brew_problems(out: str) -> str:
+    """brew audit's problem lines (``  * ...``), else its output's tail."""
+    problems = [line.strip() for line in out.splitlines() if line.lstrip().startswith("* ")]
+    return "; ".join(problems) if problems else out.strip()[-600:]
+
+
+def formula_version(info: str) -> str | None:
+    """The stable version in ``brew info --json=v2``'s output (its stdout's JSON, whatever stderr adds), or None."""
+    try:
+        return json.JSONDecoder().raw_decode(info, info.index("{"))[0]["formulae"][0]["versions"]["stable"]
+    except (ValueError, LookupError, TypeError):
+        return None
+
+
+def loopback_formula(text: str, version: str) -> str:
+    """The loopback copy with the version stated. The real formula states none: Homebrew reads it from the release's
+    URLs (``.../releases/download/vV/``), and ``brew audit --strict`` refuses a stated one as redundant. A loopback URL
+    has no such path, and from ``citar-helper-V-macos-arm64.tar.gz`` alone Homebrew reads ``64``."""
+    if FORMULA_VERSION.search(text):
+        raise Failed("the formula states a version already")
+    stated, n = FORMULA_HOMEPAGE.subn(lambda m: f'{m[0]}  version "{version}"\n', text, count=1)
+    if n != 1:
+        raise Failed("the formula has no homepage line to put the version after")
+    return stated
 
 
 def cmd_brew(args) -> int:
@@ -624,16 +665,26 @@ def cmd_brew(args) -> int:
     real = manifests_for(args.release, args.version, checksums.base_url(None, args.version), args.work / "real")
     shutil.copyfile(real / "homebrew" / "citar-helper.rb", target)
     code, out = run([brew, "audit", "--strict", "--formula", formula], "brew audit", env=env)
-    report.record("brew audit --strict (the real release URLs, offline)", code == 0, out.strip()[-600:])
+    report.record("brew audit --strict (the real release URLs, offline)", code == 0, brew_problems(out))
     code, out = run([brew, "style", formula], "brew style", env=env)
     report.record("brew style (the real release URLs)", code == 0, out.strip()[-600:])
+    code, out = run([brew, "info", "--json=v2", "--formula", formula], "brew info", env=env)
+    stable = formula_version(out) if code == 0 else None
+    report.record(f"Homebrew reads the version {args.version} from the real release URLs", stable == args.version,
+                  f"versions.stable {stable!r}")
     platform = {"Darwin": "macos", "Linux": "linux"}.get(host.system(), "?") + "-" + \
         ("arm64" if host.machine().lower() in ("arm64", "aarch64") else "x64")
     archive = helper_release.archive_name(args.version, platform)
     served = Served(args.release)
     try:
         loopback = manifests_for(args.release, args.version, served.url, args.work / "loopback")
-        shutil.copyfile(loopback / "homebrew" / "citar-helper.rb", target)
+        try:
+            stated = loopback_formula((loopback / "homebrew" / "citar-helper.rb").read_text(encoding="utf-8"),
+                                      args.version)
+        except Failed as e:
+            report.record("the loopback copy states the version", False, str(e))
+            return report.write(args.out)
+        target.write_text(stated, encoding="utf-8", newline="\n")
         before = len(served.requests)
         code, out = run([brew, "install", "--formula", formula], "brew install", env=env, timeout=1200)
         fetched = [r for r in served.requests[before:] if r.endswith(archive)]
