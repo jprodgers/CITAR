@@ -13,6 +13,7 @@ import importlib.util
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,20 @@ def find_bash() -> str | None:
 BASH = find_bash()
 
 
+def remove_tree(path: Path) -> None:
+    """``path`` removed whole. git writes its object files read-only, which Windows will not delete, so each one
+    refused is made writable and removed again; ``ignore_errors`` alone would leave every repository behind."""
+
+    def writable_then_again(func, name, *_):
+        os.chmod(name, stat.S_IWRITE)
+        func(name)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable_then_again)
+    else:  # 3.11, the suite's floor: onexc is 3.12's
+        shutil.rmtree(path, onerror=writable_then_again)
+
+
 def msys(path: Path | str) -> str:
     """A path as bash reads it: on Windows Git Bash's /c/... form, elsewhere as it is."""
     text = str(path)
@@ -72,7 +87,7 @@ class Managers(unittest.TestCase):
         if base:
             Path(base).mkdir(parents=True, exist_ok=True)
         self.dir = Path(tempfile.mkdtemp(prefix="citar-managers-test-", dir=base or None))
-        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.addCleanup(lambda: self.dir.exists() and remove_tree(self.dir))
         empty = self.dir / "gitconfig"
         empty.write_text("", encoding="utf-8")
         (self.dir / "tmp").mkdir()
@@ -191,6 +206,14 @@ class Managers(unittest.TestCase):
         done = self.run_script("--help", manifests=False)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("--push", done.stdout)
+
+    def test_its_folder_is_removed_whole(self):
+        # The cleanup's own call, on the stand-ins setUp made: git's read-only object files included (Windows).
+        self.git("clone", "--quiet", str(self.tap), str(self.dir / "a-clone"))
+        objects = [p for p in (self.dir / "homebrew-citar.git" / "objects").rglob("*") if p.is_file()]
+        self.assertTrue(objects)
+        remove_tree(self.dir)
+        self.assertFalse(self.dir.exists(), "nothing of the test is left behind")
 
     def test_the_defaults_are_ours_and_packaging(self):
         # What a run without --tap and --bucket would clone (never run here: it would reach GitHub).
