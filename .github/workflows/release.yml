@@ -228,10 +228,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # After the upload (the steps above ran the runner's own python3): a Python whose venv and pip are there,
+        # whatever the runner image's python3 ships with.
+        with:
+          python-version: "3.12"
+
       - name: The independent verifier, from hash-pinned wheels
         shell: bash
         run: |
-          python3 -m venv "$RUNNER_TEMP/verify"
+          python -m venv "$RUNNER_TEMP/verify"
           "$RUNNER_TEMP/verify/bin/python" -m pip install --disable-pip-version-check --require-hashes \
             --only-binary :all: -r scripts/ci/verify-manifest-requirements.txt
 

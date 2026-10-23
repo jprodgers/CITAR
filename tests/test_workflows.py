@@ -1621,6 +1621,8 @@ class TheReleaseWorkflow(unittest.TestCase):
         upload = next(i for i, s in enumerate(steps) if cw.action_of(s.get("uses")) == "actions/upload-artifact")
         pip = next(i for i, s in enumerate(steps) if "pip install" in s.get("run", ""))
         self.assertLess(upload, pip, names)
+        setup = next(i for i, s in enumerate(steps) if cw.action_of(s.get("uses")) == "actions/setup-python")
+        self.assertLess(upload, setup, "the sums and the expectation run on the runner's own python3")
         self.assertIn("--require-hashes", steps[pip]["run"])
         self.assertIn("--only-binary :all: -r scripts/ci/verify-manifest-requirements.txt", steps[pip]["run"])
         before = "\n".join(s.get("run", "") for s in steps[:upload])
