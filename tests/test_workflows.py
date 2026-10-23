@@ -776,9 +776,38 @@ class ThePackageWorkflow(unittest.TestCase):
             "pkg-python-dists": "release/citar-${{ needs.meta.outputs.pep440 }}.tar.gz\n"
                                 "release/citar-${{ needs.meta.outputs.pep440 }}-cp311-abi3-*.whl\n",
             "pkg-release-preview": "preview"})
+        # The release's files are compressed already: uploaded as they are, not zipped again
+        levels = {s["with"]["name"]: s["with"].get("compression-level") for s in self.using(job,
+                                                                                         "actions/upload-artifact")}
+        self.assertEqual(levels, {"pkg-release-assets": 0, "pkg-python-dists": 0, "pkg-release-preview": None})
         # assemble_release.py reads exactly the reports downloaded (each artifact's one file, the bundle's three)
         assemble = load("assemble_release")
         self.assertEqual(len(assemble.expected_reports()), len(reports))
+
+    def test_assemble_runs_nothing_from_pypi_before_its_uploads(self):
+        """5-08's review: what assemble uploads is what release.yml attests and publishes, so until the uploads the
+        job runs only the checkout's scripts and coreutils (assemble_release.py, sha256sum -c), and twine and PyYAML
+        are installed (wheels only) after them; their checks still fail the job."""
+        steps = self.jobs["assemble"]["steps"]
+        uploads = [i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
+        self.assertEqual(len(uploads), 3)
+        self.assertEqual(uploads, list(range(uploads[0], uploads[0] + 3)), "the three uploads together")
+        before, after = steps[:uploads[0]], steps[uploads[-1] + 1:]
+        actions = {str(s["uses"]).split("@")[0] for s in before if "uses" in s}
+        self.assertEqual(actions, {"actions/checkout", "actions/setup-python", "actions/download-artifact"})
+        runs_before = self.runs({"steps": before})
+        for word in ("pip", "twine", "uv ", "pipx", "check_managers.py"):
+            self.assertNotIn(word, runs_before, f"{word} runs before the uploads")
+        self.assertIn("assemble_release.py assemble", runs_before)
+        self.assertIn("(cd release && sha256sum -c SHA256SUMS)", runs_before)
+        self.assertLess(runs_before.index("assemble_release.py assemble"), runs_before.index("sha256sum -c"))
+        runs_after = self.runs({"steps": after})
+        self.assertIn("pip install --disable-pip-version-check --only-binary=:all: --upgrade twine pyyaml", runs_after)
+        self.assertLess(runs_after.index("pip install"), runs_after.index("check_managers.py structure"))
+        self.assertLess(runs_after.index("pip install"), runs_after.index("twine check"))
+        for step in after:
+            self.assertNotIn("if", step, "the checks after the uploads run, and fail the job, on every run")
+            self.assertNotIn("continue-on-error", step)
 
     def test_the_managers_install_from_the_assembled_release(self):
         """5-08 (P5.9): Scoop and winget on Windows, Homebrew on both Macs and Linux x64, each on the runner its

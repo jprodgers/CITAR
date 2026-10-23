@@ -1299,8 +1299,9 @@ jobs:
     # builds do not write, then SHA256SUMS; the preview: the notes (the CHANGELOG section, the checksums, gh
     # attestation verify, the ways to install), the attestation's subjects, the asset list with sizes and hashes, the
     # one build, and the package managers' manifests from these files with the release's real URLs
-    # (scripts/release_checksums.py). twine checks the wheels and the sdist together, sha256sum -c the sums. release.yml
-    # publishes what this job uploads and builds nothing (P5.11).
+    # (scripts/release_checksums.py). sha256sum -c checks the sums before the uploads; the manifests' structure and
+    # twine (the wheels and the sdist together) after them. release.yml publishes what this job uploads and builds
+    # nothing (P5.11).
     name: the release, assembled
     needs: [meta, wheels, sdist, sdist-build, constraints, helpers, helper-manifest, notices, windows, install, image]
     runs-on: ubuntu-24.04
@@ -1507,6 +1508,9 @@ jobs:
           name: pkg-install-report-linux-arm64
           path: reports
 
+      # Up to the uploads this job runs only the checkout's own scripts (the standard library) and coreutils: no
+      # package from PyPI runs while the release's files and SHA256SUMS are on this disk to be changed, since what is
+      # uploaded here is what release.yml attests and publishes without building it again.
       - name: One release, of one build
         shell: bash
         run: |
@@ -1514,21 +1518,18 @@ jobs:
             --release release --reports reports --preview preview
           ls -l release
 
-      - name: The manifests hold, the wheels and the sdist are valid for PyPI, and the sums check
+      - name: The sums check
         shell: bash
-        run: |
-          python -m pip install --disable-pip-version-check --upgrade twine pyyaml
-          python scripts/ci/check_managers.py structure --dir preview/managers --version "$RELEASE_VERSION" \
-            --assets release
-          python -m twine check "release/citar-$PEP440.tar.gz" release/citar-"$PEP440"-cp311-abi3-*.whl
-          (cd release && sha256sum -c SHA256SUMS)
+        run: (cd release && sha256sum -c SHA256SUMS)
 
+      # The release's files are compressed already (zip, exe, wheels, tar.gz): zipping them again buys nothing.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         # Every file of the release (release.yml attests, publishes and attaches them: P5.11).
         with:
           name: pkg-release-assets
           path: release
           if-no-files-found: error
+          compression-level: 0
           retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1539,6 +1540,7 @@ jobs:
             release/citar-${{ needs.meta.outputs.pep440 }}.tar.gz
             release/citar-${{ needs.meta.outputs.pep440 }}-cp311-abi3-*.whl
           if-no-files-found: error
+          compression-level: 0
           retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1549,6 +1551,17 @@ jobs:
           path: preview
           if-no-files-found: error
           retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - name: The manifests hold, and the wheels and the sdist are valid for PyPI
+        # After the uploads, so no package's code can change the uploaded files by changing them on disk: twine and
+        # PyYAML come from PyPI (wheels only, so no package's build code runs either). A failure here still fails the
+        # job, so release.yml (whose package job is this workflow) publishes nothing, and managers never starts.
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --upgrade twine pyyaml
+          python scripts/ci/check_managers.py structure --dir preview/managers --version "$RELEASE_VERSION" \
+            --assets release
+          python -m twine check "release/citar-$PEP440.tar.gz" release/citar-"$PEP440"-cp311-abi3-*.whl
 
   managers:
     # The package managers (design/phase5-release.md P5.9), each against this run's assembled release served from a
