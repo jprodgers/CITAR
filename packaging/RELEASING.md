@@ -17,20 +17,41 @@ describes each install route.
 - The version number is decided (0.1.6).
 - **Helper updates.** A helper trusts only the update keys it was built with, so if a release ships with
   `crates/citar-jobs/update-keys.pub` empty, no helper installed from it can ever update itself (each would be
-  replaced by hand at the next release). For updates to work from this release on, before the tag:
+  replaced by hand at the next release). For updates to work from this release on, before the tag (from the
+  repository's root; the commands are bash's, Git Bash's on Windows, and the `cargo xtask` lines work as written in
+  PowerShell too):
   1. Make the key on a machine of your own, in a folder outside every git repository (the tool refuses one inside):
-     `cargo xtask keygen --out ~/citar-update-key`. It writes `citar-update-signing.key` (the private key, readable by
-     you alone) and `citar-update-signing.pub` (one line, the public key). Keep a copy of the private file offline
-     too: it is the only way to sign updates that helpers already trust.
-  2. On GitHub, the repository's **Settings → Environments → New environment**, named exactly `helper-signing`. Under
-     "Deployment protection rules" tick **Required reviewers** and add yourself. Under "Environment secrets" add
-     `CITAR_UPDATE_SIGNING_KEY`, whose value is the whole content of `citar-update-signing.key`.
+     `cargo xtask keygen --out "$HOME/citar-update-key"` (in cmd, `%USERPROFILE%\citar-update-key`). Write the
+     folder as a full path: Windows PowerShell 5.1 passes a `~` to a program as it is, so `~/citar-update-key` would
+     name a folder inside the repository, which the tool refuses. It writes `citar-update-signing.key` (the private
+     key, readable by you alone) and `citar-update-signing.pub` (one line, the public key). Keep a copy of the
+     private file offline too: it is the only way to sign updates that helpers already trust.
+  2. On GitHub, the repository's **Settings → Environments → New environment**, named exactly `helper-signing`,
+     **before the first tag**: a tag's run names it, and GitHub makes a missing environment by itself, with no
+     protection at all. (If one was made that way, give it the two rules below before it gets the secret.)
+     - Under "Deployment protection rules" tick **Required reviewers** and add yourself, so every signing run waits
+       for your approval.
+     - Under "Deployment branches and tags" choose **Selected branches and tags** and add a rule of type **Tag** with
+       the pattern `v*`, so only a tag's run can reach the secret, whatever a branch's workflow says.
+     - Under "Environment secrets" add `CITAR_UPDATE_SIGNING_KEY`, whose value is the whole content of
+       `citar-update-signing.key`.
   3. Commit the line of `citar-update-signing.pub` to `crates/citar-jobs/update-keys.pub` (one key a line, at most
      two) in the release's bump pull request (step 2), so the release's helpers are built trusting it.
   4. Check: `gh api repos/jprodgers/CITAR/environments --jq '[.environments[].name]'` lists `helper-signing`
-     (beside `github-pages` and `pypi`), and on your machine `cargo xtask verify-manifest --pub
-     crates/citar-jobs/update-keys.pub DIR/citar-helper-manifest.json` accepts a manifest you signed by hand with
-     `cargo xtask sign-manifest --key ~/citar-update-key/citar-update-signing.key DIR/citar-helper-manifest.json`.
+     (beside `github-pages` and `pypi`). Then sign and verify a copy of the test manifest in a scratch folder outside
+     the repository, never the one in `tests/data/helper_manifest/` (signing writes `MANIFEST.sig` beside it, and
+     that folder's `.sig` is a fixture the tests hold byte for byte):
+
+     ```bash
+     mkdir -p "$HOME/citar-sign-check"
+     cp tests/data/helper_manifest/citar-helper-manifest.json "$HOME/citar-sign-check/"
+     cargo xtask sign-manifest --key "$HOME/citar-update-key/citar-update-signing.key" "$HOME/citar-sign-check/citar-helper-manifest.json"
+     cargo xtask verify-manifest --pub crates/citar-jobs/update-keys.pub "$HOME/citar-sign-check/citar-helper-manifest.json"
+     git status --short                                   # nothing new in the repository
+     ```
+
+     `verify-manifest` reads the `.sig` beside the manifest and names the line of `update-keys.pub` that verified it.
+     Delete the scratch folder afterwards.
 
   The release checks the two halves against each other (`scripts/ci/release_sign.py`): an empty key file and no
   secret gives a notice and an unsigned release (its helpers report updates unavailable); a secret with no committed
@@ -44,14 +65,21 @@ On a branch from `main` (once the 0.1.6 work is merged there):
 
 ```bash
 git switch -c release-0.1.6 origin/main
-python scripts/release.py bump 0.1.6 --date YYYY-MM-DD    # the release's date
+python scripts/release.py bump 0.1.6 --date YYYY-MM-DD    # the release's date; it prints each place it moves
+git status --short                # only the files bump printed (and update-keys.pub, from step 1.3)
 git diff                                                  # every place moves, nothing else
 python scripts/release.py check --version 0.1.6
 python scripts/check_links.py --strict
-git commit -am "Release 0.1.6"
+git add -u -- . ':!.claude'       # the tracked files bump changed, never an editor's or a local setting
+git status --short                # the same list, now staged
+git commit -m "Release 0.1.6"
 git push -u origin release-0.1.6
 gh pr create --base main --title "Release 0.1.6" --fill
 ```
+
+Never `git commit -a` or `git add -A` here: a checkout with local changes of its own (an editor's settings,
+`.claude/launch.json`) would put them in the release. If `git status --short` lists anything that is not the
+release's, leave it out of the `git add` (or name the files one by one).
 
 `bump` refuses a version that is not newer, rewrites the version in each place (`Cargo.toml`, both lock files, the
 package, the installer script, `KNOWN_ISSUES.md`) and turns the changelog's Unreleased section into `## [0.1.6] -
