@@ -40,6 +40,8 @@ SHA = "0123456789abcdef0123456789abcdef01234567"
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 TAG_GUARD = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
 TAG_ENV = "${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && 'helper-signing' || '' }}"
+#: The last line of release.yml's meta job: plants that need a step in a release.yml job go after it.
+META_END = '        run: python scripts/release.py prepare --mode "$MODE" --version "$VERSION" --date "$DATE"\n'
 
 #: A package.yml in 5-02b's shape, small: it passes every rule as written (Tree writes it over the real one).
 PACKAGE_YML = f"""name: package
@@ -149,6 +151,21 @@ class Tree:
     def add_job(self, name, job_id, body):
         self.write(name, self.read(name).rstrip("\n") + "\n" + job_text(job_id, body))
 
+    def replace_in_job(self, name, job_id, old, new):
+        """``old`` replaced by ``new`` once, inside the job ``job_id``'s block only."""
+        text = self.read(name)
+        start = text.index(f"\n  {job_id}:\n")
+        following = [text.index(f"\n  {other}:\n") for other in self.jobs(name) if f"\n  {other}:\n" in text
+                     and text.index(f"\n  {other}:\n") > start]
+        end = min(following, default=len(text))
+        block = text[start:end]
+        assert old in block, f"{job_id} in {name} has no {old!r}"
+        self.write(name, text[:start] + block.replace(old, new, 1) + text[end:])
+
+    def jobs(self, name):
+        import yaml
+        return list(yaml.safe_load(self.read(name))["jobs"])
+
     def findings(self):
         return cw.check(self.root)[1]
 
@@ -169,7 +186,7 @@ class TheTree(unittest.TestCase):
         out = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "check_workflows.py")],
                              capture_output=True, text=True, encoding="utf-8", cwd=ROOT)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertIn("rules 1 to 15 hold", out.stdout)
+        self.assertIn("rules 1 to 16 hold", out.stdout)
         tree = Tree(self)
         tree.replace("test.yml", "name: ext-${{ runner.os }}", "name: pkg-x")
         out = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "check_workflows.py"),
@@ -188,8 +205,7 @@ class TheTree(unittest.TestCase):
         self.assertIn("python scripts/ci/check_workflows.py", lint)
         self.assertIn("python scripts/release.py check", lint)
         release = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
-        self.assertEqual(list(release["jobs"]), ["phase-5"], "release.yml is only its gate until 5-09")
-        self.assertIn("exit 1", release["jobs"]["phase-5"]["steps"][-1]["run"])
+        self.assertEqual(list(release["jobs"]), list(cw.RELEASE_JOBS), "release.yml is P5.11's table, in its order")
 
 
 class ThePackageWorkflow(unittest.TestCase):
@@ -956,8 +972,10 @@ class Planted(unittest.TestCase):
                 self.assertIn(f"job {job}:", str(f))
         return found
 
-    def assertPasses(self, tree):
-        found = tree.findings()
+    def assertPasses(self, tree, besides=()):
+        """No finding (``besides``: rules set aside, e.g. 16 where a test adds a job P5.11's table does not have, which
+        rule 16 names: its own plants test that)."""
+        found = [f for f in tree.findings() if f.rule not in besides]
         self.assertEqual(found, [], "\n".join(map(str, found)))
 
     # ---- rule 1
@@ -1025,7 +1043,7 @@ steps:
       persist-credentials: false
   - run: gh release create "$TAG" --draft release/*
 """)
-                self.assertPasses(tree)
+                self.assertPasses(tree, besides=(16,))
 
     def test_rule_2_docs_ymls_wiki_step_without_its_main_guard(self):
         tree = Tree(self)
@@ -1095,20 +1113,14 @@ steps:
 
     def test_rule_4_a_caller_whose_group_is_the_called_ones(self):
         tree = Tree(self)
-        tree.replace("release.yml", "permissions:\n  contents: read\n",
-                     "concurrency:\n  group: tests-release-${{ github.ref }}\n\npermissions:\n  contents: read\n")
-        tree.add_job("release.yml", "tests", """
-uses: ./.github/workflows/test.yml
-permissions:
-  contents: read
-""")
+        tree.replace("release.yml", "  group: release-${{ github.ref }}\n", "  group: tests-release-${{ github.ref }}\n")
         self.assertFinds(tree, 4, "release.yml", "tests", "wait on itself")
 
     # ---- rule 5
     def test_rule_5_inputs_in_a_run(self):
         tree = Tree(self)
-        tree.replace("release.yml", "          exit 1\n", "          echo ${{ inputs.version }}\n          exit 1\n")
-        self.assertFinds(tree, 5, "release.yml", "phase-5", "inputs.version")
+        tree.replace("release.yml", META_END, META_END + "      - run: echo ${{ inputs.version }}\n")
+        self.assertFinds(tree, 5, "release.yml", "meta", "inputs.version")
 
     def test_rule_5_the_head_ref_and_the_event_inputs(self):
         for expr in ("github.head_ref", "github.event.inputs.version", "github.event.pull_request.title"):
@@ -1157,28 +1169,28 @@ permissions:
                     "docker build -t x .", "python -m build"):
             with self.subTest(run=run):
                 tree = Tree(self)
-                tree.replace("release.yml", "          exit 1\n", f"          exit 1\n      - run: {run}\n")
-                self.assertFinds(tree, 8, "release.yml", "phase-5")
+                tree.replace("release.yml", META_END, META_END + f"      - run: {run}\n")
+                self.assertFinds(tree, 8, "release.yml", "meta")
 
     def test_rule_8_a_build_in_a_heredoc_a_shell_reads(self):
         for script in ("bash -s <<EOF\n          cargo build --release\n          EOF",
                        "sh <<< 'cargo build --release'", "pwsh -Command \"cargo build --release\""):
             with self.subTest(script=script):
                 tree = Tree(self)
-                tree.replace("release.yml", "          exit 1\n",
-                             f"          exit 1\n      - run: |\n          {script}\n")
-                self.assertFinds(tree, 8, "release.yml", "phase-5", "runs cargo")
+                tree.replace("release.yml", META_END, META_END + f"      - run: |\n          {script}\n")
+                self.assertFinds(tree, 8, "release.yml", "meta", "runs cargo")
 
     def test_rule_8_and_15_a_step_in_a_shell_this_check_cannot_read(self):
         plant = "      - shell: python\n        run: |\n          import subprocess\n" \
                 "          subprocess.run(['cargo', 'build'])\n"
         tree = Tree(self)
-        tree.replace("release.yml", "          exit 1\n", "          exit 1\n" + plant)
-        self.assertFinds(tree, 8, "release.yml", "phase-5", "'python'")
-        tree = Tree(self)  # the job's defaults count too
-        tree.replace("release.yml", "    runs-on: ubuntu-latest\n",
-                     "    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: perl {0}\n")
-        self.assertFinds(tree, 8, "release.yml", "phase-5", "'perl'")
+        tree.replace("release.yml", META_END, META_END + plant)
+        self.assertFinds(tree, 8, "release.yml", "meta", "'python'")
+        tree = Tree(self)  # the job's defaults count too, for a step that names no shell
+        tree.replace_in_job("release.yml", "meta", "    runs-on: ubuntu-24.04\n",
+                            "    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: perl {0}\n")
+        tree.replace("release.yml", META_END, META_END + "      - run: print 'done'\n")
+        self.assertFinds(tree, 8, "release.yml", "meta", "'perl'")
         tree = Tree(self)
         tree.add_job("release.yml", "publish-pypi", f"""
 if: {TAG_GUARD}
@@ -1202,8 +1214,7 @@ steps:
         for shell in ("bash --noprofile --norc -eo pipefail {0}", "pwsh", "sh", "cmd", "powershell"):
             with self.subTest(shell=shell):
                 tree = Tree(self)
-                tree.replace("release.yml", "          exit 1\n",
-                             f"          exit 1\n      - shell: {shell}\n        run: echo done\n")
+                tree.replace("release.yml", META_END, META_END + f"      - shell: {shell}\n        run: echo done\n")
                 self.assertPasses(tree)
 
     # ---- rule 9
@@ -1230,8 +1241,8 @@ permissions:
 """)
         self.assertFinds(tree, 10, "release.yml", "nightly")
         tree = Tree(self)
-        tree.replace("release.yml", "          exit 1\n", "          exit 1\n      - run: gh workflow run docs.yml\n")
-        self.assertFinds(tree, 10, "release.yml", "phase-5")
+        tree.replace("release.yml", META_END, META_END + "      - run: gh workflow run docs.yml\n")
+        self.assertFinds(tree, 10, "release.yml", "meta")
 
     # ---- rule 11
     def test_rule_11_an_action_referenced_by_tag(self):
@@ -1380,30 +1391,21 @@ steps:
 
     # ---- rule 12
     def test_rule_12_secrets_inherit_on_a_calling_job(self):
-        tree = Tree(self)
-        tree.add_job("release.yml", "tests", """
-uses: ./.github/workflows/test.yml
-permissions:
-  contents: read
-secrets: inherit
-""")
-        self.assertFinds(tree, 12, "release.yml", "tests", "inherit")
+        for job in ("tests", "package"):
+            with self.subTest(job=job):
+                tree = Tree(self)
+                tree.replace_in_job("release.yml", job, "    permissions:\n      contents: read\n",
+                                    "    permissions:\n      contents: read\n    secrets: inherit\n")
+                self.assertFinds(tree, 12, "release.yml", job, "inherit")
 
     def test_rule_12_a_calling_job_without_contents_read(self):
         tree = Tree(self)
-        tree.add_job("release.yml", "tests", """
-uses: ./.github/workflows/test.yml
-""")
+        tree.replace_in_job("release.yml", "tests", "    permissions:\n      contents: read\n", "")
         self.assertFinds(tree, 12, "release.yml", "tests", "contents: read")
         tree = Tree(self)
-        tree.add_job("release.yml", "tests", """
-uses: ./.github/workflows/test.yml
-permissions:
-  contents: read
-with:
-  mode: dry-run
-""")
-        self.assertPasses(tree)
+        tree.replace_in_job("release.yml", "package", "      contents: read\n", "      contents: read\n      packages: write\n")
+        self.assertFinds(tree, 12, "release.yml", "package", "contents: read")
+        self.assertPasses(Tree(self))  # the real calling jobs: contents: read, inputs through with:, no secrets
 
     # ---- rule 13
     def test_rule_13_an_unnamed_and_a_patterned_download_in_package_yml(self):
@@ -1458,7 +1460,7 @@ environment: {TAG_ENV}
 steps:
   - run: echo signing
 """)
-        self.assertPasses(tree)
+        self.assertPasses(tree, besides=(16,))
         for env in ("${{ startsWith(github.ref, 'refs/tags/v') && 'helper-signing' || '' }}",
                     "${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && 'helper-signing' }}",
                     "${{ github.event_name == 'push' && 'helper-signing' || '' }}",
@@ -1516,7 +1518,7 @@ steps:
   - uses: pypa/gh-action-pypi-publish@{SHA} # v1.13.0
 """)
         found = self.assertFinds(tree, 15, "release.yml", "publish-pypi", "runs pip")
-        self.assertEqual({f.rule for f in found}, {15}, found)
+        self.assertEqual({f.rule for f in found} - {16}, {15}, found)  # 16: the planted job replaces P5.11's
 
     def test_rule_15_pip_by_another_name_in_a_release_job(self):
         for run in ("pip3.12 install twine", "pip3 install twine", "sudo -E pip install twine",
@@ -1554,6 +1556,313 @@ steps:
         messages = " | ".join(f.message for f in found if f.rule == 15)
         for what in ("persist-credentials: false", "actions/setup-python", "in an action's step"):
             self.assertIn(what, messages)
+
+
+class TheReleaseWorkflow(unittest.TestCase):
+    """release.yml as P5.11 writes it (package 5-09), beyond what rule 16 holds: what each job runs."""
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        cls.data = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
+        cls.jobs = cls.data["jobs"]
+        cls.wf = cw.Workflow("release.yml", WORKFLOWS / "release.yml",
+                             (WORKFLOWS / "release.yml").read_text(encoding="utf-8"), cls.data)
+
+    def uses(self, job_id):
+        return [cw.action_of(s.get("uses")) for s in self.jobs[job_id]["steps"] if s.get("uses")]
+
+    def runs(self, job_id) -> str:
+        return "\n".join(s.get("run", "") for s in self.jobs[job_id]["steps"])
+
+    def downloads(self, job_id) -> dict:
+        return {s["with"]["name"]: s["with"]["path"] for s in self.jobs[job_id]["steps"]
+                if cw.action_of(s.get("uses")) == "actions/download-artifact"}
+
+    def test_its_triggers_and_meta(self):
+        on = self.data[True]
+        self.assertEqual(on["push"], {"tags": ["v*"]})
+        self.assertEqual(list(on["workflow_dispatch"]["inputs"]), ["version"])
+        meta = self.runs("meta")
+        self.assertIn('mode=tag', meta)
+        self.assertIn('version=${GITHUB_REF_NAME#v}', meta)
+        self.assertIn('mode=dry-run', meta)
+        self.assertIn('python scripts/release.py meta --mode "$mode" --version "$version"', meta)
+        self.assertIn('python scripts/release.py prepare --mode "$MODE" --version "$VERSION" --date "$DATE"', meta)
+        self.assertEqual(set(self.jobs["meta"]["outputs"]),
+                         {"version", "pep440", "numeric", "label", "date", "mode", "prerelease"})
+
+    def test_the_calls_pass_the_release_and_nothing_else(self):
+        for job_id, inputs in (("tests", {"mode", "version", "date"}), ("package", {"mode", "version", "date",
+                                                                                    "label"})):
+            job = self.jobs[job_id]
+            self.assertEqual(set(job["with"]), inputs, job_id)
+            for key in inputs:
+                self.assertEqual(job["with"][key], f"${{{{ needs.meta.outputs.{key} }}}}")
+            self.assertNotIn("secrets", job)
+
+    def test_the_signing_job_builds_and_installs_nothing(self):
+        job = self.jobs["sign-helper-manifest"]
+        self.assertEqual(job["environment"], TAG_ENV)
+        self.assertEqual(self.uses("sign-helper-manifest"), ["actions/checkout", "actions/download-artifact",
+                                                             "actions/download-artifact", "actions/upload-artifact"])
+        self.assertEqual(self.downloads("sign-helper-manifest"), {"pkg-helper-manifest": "manifest",
+                                                                  "pkg-xtask-linux-x64": "xtask-bin"})
+        (step,) = [s for s in job["steps"] if "run" in s]
+        self.assertEqual(step["env"], {"CITAR_UPDATE_SIGNING_KEY": "${{ secrets.CITAR_UPDATE_SIGNING_KEY }}"})
+        self.assertTrue(step["run"].startswith("python3 scripts/ci/release_sign.py sign --xtask xtask-bin/xtask"))
+        self.assertIn("--keys crates/citar-jobs/update-keys.pub --key-env CITAR_UPDATE_SIGNING_KEY", step["run"])
+        upload = job["steps"][-1]["with"]
+        self.assertEqual((upload["name"], upload["path"]), ("rel-helper-signature", "signature"))
+
+    def test_check_signature_sums_and_uploads_before_anything_from_pypi(self):
+        steps = self.jobs["check-signature"]["steps"]
+        names = [s.get("uses", "").split("@")[0] or s.get("run", "").split()[0] for s in steps]
+        upload = next(i for i, s in enumerate(steps) if cw.action_of(s.get("uses")) == "actions/upload-artifact")
+        pip = next(i for i, s in enumerate(steps) if "pip install" in s.get("run", ""))
+        self.assertLess(upload, pip, names)
+        self.assertIn("--require-hashes", steps[pip]["run"])
+        self.assertIn("--only-binary :all: -r scripts/ci/verify-manifest-requirements.txt", steps[pip]["run"])
+        before = "\n".join(s.get("run", "") for s in steps[:upload])
+        self.assertIn("release_sign.py expect", before)
+        self.assertIn("assemble_release.py sums", before)
+        self.assertNotIn("pip", before)
+        self.assertEqual(steps[upload]["with"]["name"], "rel-release-sums")
+        after = self.runs("check-signature")
+        self.assertIn("verify_manifest.py --check-keys crates/citar-jobs/update-keys.pub", after)
+        self.assertIn("verify_manifest.py --pub crates/citar-jobs/update-keys.pub", after)
+
+    def test_the_verifiers_requirements_are_hash_pinned(self):
+        text = (ROOT / "scripts" / "ci" / "verify-manifest-requirements.txt").read_text(encoding="utf-8")
+        reqs = {}
+        for block in text.replace("\\\n", " ").splitlines():
+            if block.strip() and not block.startswith("#"):
+                name, _, rest = block.partition("==")
+                version = rest.split()[0]
+                hashes = [w for w in rest.split() if w.startswith("--hash=sha256:")]
+                self.assertTrue(hashes, name)
+                self.assertTrue(all(len(h) == len("--hash=sha256:") + 64 for h in hashes), name)
+                reqs[name.strip()] = version
+        self.assertEqual(set(reqs), {"cryptography", "cffi", "pycparser"})
+        self.assertGreaterEqual(int(reqs["cryptography"].split(".")[0]), 42, "pyproject's floor")
+
+    def test_the_publishing_jobs_use_only_what_they_publish_with(self):
+        self.assertEqual(self.uses("publish-pypi"), ["actions/download-artifact", "pypa/gh-action-pypi-publish"])
+        pypi = self.jobs["publish-pypi"]["steps"][-1]["with"]
+        self.assertEqual((pypi["packages-dir"], pypi["skip-existing"]), ("dist/", True))
+        self.assertEqual(self.downloads("publish-pypi"), {"pkg-python-dists": "dist"})
+        self.assertEqual(self.uses("attest-files")[-1], "actions/attest-build-provenance")
+        self.assertEqual(self.uses("attest-image"), ["actions/attest-build-provenance"])
+        image = self.jobs["attest-image"]["steps"][-1]["with"]
+        self.assertEqual(image["create-storage-record"], False)
+        self.assertEqual(self.downloads("publish-image"), {
+            "pkg-image-amd64": "image", "pkg-image-arm64": "image", "pkg-image-report-amd64": "report",
+            "pkg-image-report-arm64": "report"})
+        self.assertIn("check_image.py load --engine docker", self.runs("publish-image"))
+        self.assertEqual(self.jobs["publish-image"]["outputs"], {"digest": "${{ steps.join.outputs.digest }}"})
+        for job_id in ("publish-image", "attest-image", "image-tags"):
+            self.assertIn('docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin', self.runs(job_id))
+
+    def test_the_release_is_whole_before_it_is_public(self):
+        runs = self.runs("github-release")
+        self.assertIn("assemble_release.py final", runs)
+        self.assertIn("--list upload.txt", runs)
+        self.assertIn('gh release create "$tag" --draft --verify-tag', runs)
+        self.assertIn("gh release upload \"$tag\" --clobber", runs, "a re-run finishes its draft")
+        self.assertLess(runs.index("diff want.txt have.txt"), runs.index("--draft=false"))
+        self.assertIn("latest=--latest=false", runs)
+        tags = self.runs("image-tags")
+        self.assertLess(tags.index('if [ "$PRERELEASE" = true ]'), tags.index("imagetools create"))
+
+    def test_the_dry_runs_summary_rehearses_the_tag_only_jobs_file_steps(self):
+        self.assertEqual(set(self.downloads("dry-run-summary")), {
+            "pkg-release-preview", "pkg-release-assets", "pkg-image-amd64", "pkg-image-arm64",
+            "pkg-image-report-amd64", "pkg-image-report-arm64"})
+        runs = self.runs("dry-run-summary")
+        for command in ("check_image.py load", "assemble_release.py sums", "assemble_release.py final",
+                        "assemble_release.py summary", '"$GITHUB_STEP_SUMMARY"', "diff summary/assets.txt"):
+            self.assertIn(command, runs)
+        self.assertNotIn("environment", self.jobs["dry-run-summary"])
+
+
+class ReleasePlanted(unittest.TestCase):
+    """Gate 1 of package 5-09: each plant in release.yml fails naming its job and rule."""
+
+    assertFinds = Planted.assertFinds
+    assertPasses = Planted.assertPasses
+
+    def test_the_real_file_passes_rule_16(self):
+        self.assertPasses(Tree(self))
+
+    def test_a_publishing_job_guarded_by_a_tag_ref_alone(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-pypi", f"    if: {TAG_GUARD}\n",
+                            "    if: startsWith(github.ref, 'refs/tags/')\n")
+        self.assertFinds(tree, 2, "release.yml", "publish-pypi", "github.event_name == 'push'")
+        self.assertFinds(tree, 16, "release.yml", "publish-pypi", "tag-only")
+
+    def test_publish_pypi_not_needing_attest_files(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-pypi", "needs: [meta, attest-files]",
+                            "needs: [meta, check-signature]")
+        self.assertFinds(tree, 16, "release.yml", "publish-pypi", "not ['attest-files']")
+
+    def test_attest_files_after_publish_pypi(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "attest-files", "needs: [meta, check-signature]",
+                            "needs: [meta, publish-pypi]")
+        tree.replace_in_job("release.yml", "publish-pypi", "needs: [meta, attest-files]",
+                            "needs: [meta, check-signature]")
+        self.assertFinds(tree, 16, "release.yml", "attest-files", "not ['check-signature']")
+        self.assertFinds(tree, 16, "release.yml", "publish-pypi", "not ['attest-files']")
+
+    def test_latest_or_the_series_pushed_in_publish_image(self):
+        for plant in ('            docker push "$IMAGE_NAME:latest"\n',
+                      '            docker push "$IMAGE_NAME:$series"\n'):
+            with self.subTest(plant=plant):
+                tree = Tree(self)
+                tree.replace_in_job("release.yml", "publish-image", '            docker push "$IMAGE_NAME:$VERSION-$arch"\n',
+                                    '            docker push "$IMAGE_NAME:$VERSION-$arch"\n' + plant)
+                self.assertFinds(tree, 16, "release.yml", "publish-image", "pushes the version's tags alone")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-image", '--tag "$IMAGE_NAME:$VERSION"',
+                            '--tag "$IMAGE_NAME:$VERSION" --tag "$IMAGE_NAME:latest"')
+        self.assertFinds(tree, 16, "release.yml", "publish-image", ":latest")
+
+    def test_attest_image_without_packages_write(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "attest-image", "      packages: write\n", "")
+        self.assertFinds(tree, 16, "release.yml", "attest-image", "not P5.11's ['attestations', 'id-token', 'packages']")
+
+    def test_a_docker_build_step_in_release_yml(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-image", "      - name: Each image the one tested\n",
+                            "      - run: docker build -t ghcr.io/jprodgers/citar:x .\n"
+                            "      - name: Each image the one tested\n")
+        self.assertFinds(tree, 8, "release.yml", "publish-image", "docker build")
+        self.assertFinds(tree, 15, "release.yml", "publish-image", "docker build")
+
+    def test_github_release_without_its_draft_first(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "github-release", 'gh release create "$tag" --draft --verify-tag',
+                            'gh release create "$tag" --verify-tag')
+        self.assertFinds(tree, 16, "release.yml", "github-release", "without --draft")
+        tree = Tree(self)  # made public before the files are up
+        tree.replace_in_job("release.yml", "github-release", "      - name: A draft with every file and the notes\n",
+                            "      - run: gh release edit \"v$VERSION\" --draft=false\n"
+                            "      - name: A draft with every file and the notes\n")
+        self.assertFinds(tree, 16, "release.yml", "github-release", "not after every file is uploaded")
+
+    def test_the_signing_job_with_a_cargo_step_setup_python_or_kept_credentials(self):
+        anchor = "      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n" \
+                 "        with:\n          name: pkg-helper-manifest\n"
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "sign-helper-manifest", anchor,
+                            "      - run: cargo build --release --locked -p xtask\n" + anchor)
+        self.assertFinds(tree, 15, "release.yml", "sign-helper-manifest", "runs cargo")
+        self.assertFinds(tree, 8, "release.yml", "sign-helper-manifest", "runs cargo")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "sign-helper-manifest", anchor,
+                            "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0\n"
+                            + anchor)
+        self.assertFinds(tree, 15, "release.yml", "sign-helper-manifest", "actions/setup-python")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "sign-helper-manifest", "        with:\n          persist-credentials: false\n",
+                            "")
+        self.assertFinds(tree, 15, "release.yml", "sign-helper-manifest", "persist-credentials: false")
+
+    def test_a_calling_job_with_secrets_inherit(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "package", "    permissions:\n      contents: read\n",
+                            "    permissions:\n      contents: read\n    secrets: inherit\n")
+        self.assertFinds(tree, 12, "release.yml", "package", "inherit")
+
+    # ---- the rest of rule 16
+    def test_a_job_outside_the_table_and_one_missing(self):
+        tree = Tree(self)
+        tree.add_job("release.yml", "publish-early", f"""
+needs: package
+if: {TAG_GUARD}
+runs-on: ubuntu-latest
+permissions:
+  contents: write
+steps:
+  - run: gh release upload "v1" dist/*
+""")
+        self.assertFinds(tree, 16, "release.yml", "publish-early", "not one of P5.11's jobs")
+        self.assertFinds(tree, 16, "release.yml", "publish-early", "only github-release makes the release")
+        tree = Tree(self)
+        text = tree.read("release.yml")
+        start = text.index("\n  image-tags:\n")
+        end = text.index("\n  dry-run-summary:\n")
+        tree.write("release.yml", text[:start] + text[end:])
+        self.assertFinds(tree, 16, "release.yml", "image-tags", "is missing")
+
+    def test_conditions_and_environments(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "dry-run-summary", "    if: github.event_name == 'workflow_dispatch'\n",
+                            "    if: always()\n")
+        self.assertFinds(tree, 16, "release.yml", "dry-run-summary", "workflow_dispatch")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "meta", "    runs-on: ubuntu-24.04\n",
+                            f"    if: {TAG_GUARD}\n    runs-on: ubuntu-24.04\n")
+        self.assertFinds(tree, 16, "release.yml", "meta", "takes no if:")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "sign-helper-manifest", f"    environment: {TAG_ENV}\n", "")
+        self.assertFinds(tree, 16, "release.yml", "sign-helper-manifest", "helper-signing through the tag expression")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-pypi", "    environment: pypi\n", "")
+        self.assertFinds(tree, 16, "release.yml", "publish-pypi", "not pypi")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "check-signature", "    runs-on: ubuntu-24.04\n",
+                            f"    environment: {TAG_ENV}\n    runs-on: ubuntu-24.04\n")
+        self.assertFinds(tree, 16, "release.yml", "check-signature", "P5.11 gives it none")
+
+    def test_permissions_beyond_the_table(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "github-release", "      contents: write\n",
+                            "      contents: write\n      packages: write\n")
+        self.assertFinds(tree, 16, "release.yml", "github-release", "not P5.11's ['contents']")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "dry-run-summary", "    runs-on: ubuntu-24.04\n",
+                            "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write\n")
+        self.assertFinds(tree, 16, "release.yml", "dry-run-summary", "not P5.11's none")
+
+    def test_the_secret_in_its_one_step_alone(self):
+        step_env = "        env:\n          CITAR_UPDATE_SIGNING_KEY: ${{ secrets.CITAR_UPDATE_SIGNING_KEY }}\n"
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "sign-helper-manifest", step_env,
+                            step_env + "          HOME_DIR: /tmp\n")
+        self.assertFinds(tree, 16, "release.yml", "sign-helper-manifest", "alone")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "sign-helper-manifest", "    timeout-minutes: 15\n",
+                            "    timeout-minutes: 15\n    env:\n"
+                            "      CITAR_UPDATE_SIGNING_KEY: ${{ secrets.CITAR_UPDATE_SIGNING_KEY }}\n")
+        self.assertFinds(tree, 16, "release.yml", "sign-helper-manifest", "at the job's level")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "check-signature", "    env:\n",
+                            "    env:\n      TOKEN: ${{ secrets.PYPI_TOKEN }}\n")
+        self.assertFinds(tree, 16, "release.yml", "check-signature", "reads one secret")
+
+    def test_attest_files_attests_the_finished_folder(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "attest-files", "          subject-path: release/*\n",
+                            "          subject-path: release/*.whl\n")
+        self.assertFinds(tree, 16, "release.yml", "attest-files", "not the folder pkg-release-assets fills")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "attest-files",
+                            '        run: python3 scripts/ci/assemble_release.py final --version "$VERSION" '
+                            '--release release --sums sums\n', "        run: ls release\n")
+        self.assertFinds(tree, 16, "release.yml", "attest-files", "comes before assemble_release.py final")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "attest-image", "          push-to-registry: true\n", "")
+        self.assertFinds(tree, 16, "release.yml", "attest-image", "push-to-registry")
+
+    def test_the_concurrency_is_never_cancelled(self):
+        tree = Tree(self)
+        tree.replace("release.yml", "  cancel-in-progress: false\n", "  cancel-in-progress: true\n")
+        found = self.assertFinds(tree, 16, "release.yml", None, "never cut off mid-publish")
+        self.assertTrue([f for f in found if f.rule == 16 and f.job is None], found)
 
 
 class Expressions(unittest.TestCase):

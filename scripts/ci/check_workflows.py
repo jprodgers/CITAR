@@ -61,9 +61,23 @@ pinned job, and a secret that a build or an installer could read. Each rule is c
     reads such a secret, or holds ``id-token: write`` or any write permission, runs no package tool or ``docker
     build``, uses only ``actions/checkout`` (with ``persist-credentials: false``), ``actions/download-artifact``,
     ``actions/upload-artifact`` and rule 2's publishing actions, and no ``setup-*`` action. Neither such a step nor
-    such a job runs a step in a shell whose commands this check cannot read.
+    such a job runs a step in a shell whose commands this check cannot read;
+16. **release.yml's order and permissions** (P5.11's table, package 5-09): its jobs are exactly the table's
+    (``RELEASE_JOBS``), each with its direct ``needs`` (``meta`` besides, where it reads its outputs), so
+    ``publish-pypi`` and ``publish-image`` need ``attest-files``, which needs ``check-signature``, and ``image-tags``
+    needs ``github-release``; the tag-only jobs carry the tag guard, ``dry-run-summary`` ``github.event_name ==
+    'workflow_dispatch'``, and ``meta``, ``tests`` and ``package`` no condition; each job's write permissions are
+    exactly the table's; ``sign-helper-manifest`` names ``helper-signing`` through the tag expression and
+    ``publish-pypi`` names ``pypi``; the signing job reads its one secret, ``CITAR_UPDATE_SIGNING_KEY``, in one run
+    step whose ``env:`` holds it alone and runs ``release_sign.py sign``; ``github-release`` alone runs ``gh
+    release`` writes, every ``gh release create`` with ``--draft``, and makes the release public (``--draft=false``)
+    only in a step after every create and upload; ``publish-image`` pushes and joins only tags naming the version
+    (never ``latest``), and only it and ``image-tags`` push; ``attest-files`` attests (``subject-path``) the folder
+    its ``pkg-release-assets`` download fills, after ``assemble_release.py final`` has finished that folder with the
+    sums and the signature from ``rel-release-sums``; ``attest-image`` pushes its attestation to the registry for
+    ``publish-image``'s digest; and the workflow's concurrency is ``release-${{ github.ref }}``, never cancelled.
 
-Rule 16 (release.yml's order and permissions) is package 5-09's. Shell commands are read word by word, a
+Shell commands are read word by word, a
 redirection (``2>&1``) and a launcher (``sudo -E``, ``env``, ``timeout``) seen through, and ``pip3.12`` read as pip.
 Quoted text, comments and heredocs are data, so ``echo "run build_wiki.py --push"`` runs nothing and a ``<<`` in
 quotes starts no heredoc. A script given to a shell is read as commands: the string of ``bash -c`` (``-lc``) or
@@ -1570,11 +1584,276 @@ def rule_15(wf: Workflow) -> list[Finding]:
     return out
 
 
+@dataclass(frozen=True)
+class ReleaseJob:
+    """A row of P5.11's table: the jobs it needs directly (``meta`` may be added to any), when it runs (``tag``,
+    ``dispatch`` or ``both``), the write permissions it holds, exactly, and the environment it names."""
+    needs: frozenset
+    when: str
+    writes: frozenset = frozenset()
+    environment: str | None = None
+    calls: str | None = None
+
+
+RELEASE_JOBS = {
+    "meta": ReleaseJob(frozenset(), "both"),
+    "tests": ReleaseJob(frozenset({"meta"}), "both", calls="test.yml"),
+    "package": ReleaseJob(frozenset({"meta"}), "both", calls="package.yml"),
+    "sign-helper-manifest": ReleaseJob(frozenset({"tests", "package"}), "tag", environment="helper-signing"),
+    "check-signature": ReleaseJob(frozenset({"sign-helper-manifest"}), "tag"),
+    "attest-files": ReleaseJob(frozenset({"check-signature"}), "tag", frozenset({"id-token", "attestations"})),
+    "publish-pypi": ReleaseJob(frozenset({"attest-files"}), "tag", frozenset({"id-token"}), "pypi"),
+    "publish-image": ReleaseJob(frozenset({"attest-files"}), "tag", frozenset({"packages"})),
+    "attest-image": ReleaseJob(frozenset({"publish-image"}), "tag",
+                               frozenset({"packages", "id-token", "attestations"})),
+    "github-release": ReleaseJob(frozenset({"publish-pypi", "attest-image"}), "tag", frozenset({"contents"})),
+    # publish-image besides: the digest it outputs is the one the moving tags point at
+    "image-tags": ReleaseJob(frozenset({"github-release", "publish-image"}), "tag", frozenset({"packages"})),
+    "dry-run-summary": ReleaseJob(frozenset({"tests", "package"}), "dispatch"),
+}
+#: The secret the signing job holds, and the only one release.yml reads (P5.4.2; WORKERS.md's setup names it).
+SIGNING_SECRET = "CITAR_UPDATE_SIGNING_KEY"
+#: Where the version is, in a tag publish-image pushes: the variable its jobs set from meta, or meta's output.
+VERSION_IN_TAG = re.compile(r"\$\{?VERSION\}?|__EXPR__")
+
+
+def needs_of(job: dict) -> set[str]:
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return {needs}
+    return {str(n) for n in needs} if isinstance(needs, list) else set()
+
+
+def run_commands(wf: Workflow, job: dict) -> list[tuple[int, list[str]]]:
+    """Every command a job's run steps run, with its step's index (words as command_words gives them)."""
+    out = []
+    for i, step in enumerate(wf.steps(job)):
+        if isinstance(step.get("run"), str):
+            out += [(i, command_words(argv)) for argv in shell_commands(step["run"])]
+    return out
+
+
+def gh_release(argv: list[str]) -> list[str]:
+    """``gh release``'s subcommand and its words (``create``, ``edit``, ...), or ``[]``."""
+    if tool_of(argv) != "gh":
+        return []
+    rest = subcommand(argv, ("-R", "--repo", "--hostname"))
+    return rest[1:] if rest[:1] == ["release"] and len(rest) > 1 else []
+
+
+def flag_value(words: list[str], name: str) -> str | None:
+    """``--name``'s value: ``--name=x`` as ``x``, a bare ``--name`` as ``true``; None when absent."""
+    for w in words:
+        if w == name:
+            return "true"
+        if w.startswith(name + "="):
+            return w.split("=", 1)[1]
+    return None
+
+
+def image_refs(argv: list[str]) -> list[str]:
+    """The image references a ``docker push`` names, or the ``--tag``/``-t`` targets of ``imagetools create``."""
+    tool = tool_of(argv)
+    if tool not in ("docker", "podman"):
+        return []
+    rest = argv[1:]
+    if rest[:1] == ["push"]:
+        return [w for w in rest[1:] if not w.startswith("-")][:1]
+    if "imagetools" in rest and "create" in rest:
+        out = []
+        for i, w in enumerate(rest):
+            if w in ("--tag", "-t") and i + 1 < len(rest):
+                out.append(rest[i + 1])
+            elif w.startswith("--tag="):
+                out.append(w.split("=", 1)[1])
+        return out
+    return []
+
+
+def rule_16(wf: Workflow) -> list[Finding]:
+    if wf.name != RELEASE:
+        return []
+    out = []
+
+    def find(job, message):
+        out.append(Finding(wf.name, job, 16, message))
+
+    group = concurrency_group(wf.data.get("concurrency"))
+    cancel = wf.data.get("concurrency", {}).get("cancel-in-progress") if isinstance(wf.data.get("concurrency"),
+                                                                                    dict) else None
+    if group is None or re.sub(r"\s+", "", group) != "release-${{github.ref}}" or cancel not in (False, "false"):
+        find(None, f"its concurrency is {wf.data.get('concurrency')!r}, not group release-${{{{ github.ref }}}} "
+                   f"with cancel-in-progress: false (a release is never cut off mid-publish)")
+    jobs = wf.jobs
+    for job_id in sorted(set(RELEASE_JOBS) - set(jobs)):
+        find(job_id, f"P5.11's job {job_id} is missing")
+    for job_id in sorted(set(jobs) - set(RELEASE_JOBS)):
+        find(job_id, f"is not one of P5.11's jobs ({', '.join(RELEASE_JOBS)}): a job outside the table is outside "
+                     f"its order")
+    for job_id, row in RELEASE_JOBS.items():
+        job = jobs.get(job_id)
+        if not isinstance(job, dict):
+            continue
+        needs = needs_of(job)
+        if needs - {"meta"} != row.needs - {"meta"} or not row.needs <= needs:
+            find(job_id, f"needs {sorted(needs) or 'nothing'}, not {sorted(row.needs)}"
+                         f"{' (and meta, for its outputs)' if 'meta' not in row.needs else ''}: P5.11's order")
+        when = job.get("if")
+        if row.when == "tag":
+            problem = guard_problem(when, "tag")
+            if problem:
+                find(job_id, f"is tag-only but {problem}")
+        elif row.when == "dispatch":
+            parsed = condition(when) if when is not None else None
+            weak = parsed is not None and any(n[0] == "call" and n[1] in WEAKENERS for n in walk(parsed))
+            if parsed is None or weak or not any(is_equal(p, "github.event_name", "workflow_dispatch")
+                                                 for p in conjuncts(parsed)):
+                find(job_id, f"is a dry run's alone, but its if: ({when!r}) lacks github.event_name == "
+                             f"'workflow_dispatch' as a conjunct")
+        elif when is not None:
+            find(job_id, f"runs on a tag and on a dry run alike, so it takes no if: ({when!r})")
+        writes = {w.split(":")[0].strip() for w in write_permissions(job.get("permissions"))}
+        if isinstance(job.get("permissions"), str):
+            writes.add(str(job["permissions"]))
+        if writes != set(row.writes):
+            find(job_id, f"holds {sorted(writes) or 'no'} write permission(s), not P5.11's "
+                         f"{sorted(row.writes) or 'none'}")
+        env = job.get("environment")
+        named = tag_expression_name(environment_name(env)) if env is not None else None
+        if row.environment == "helper-signing" and named != "helper-signing":
+            find(job_id, f"names {environment_name(env)!r}: the signing job names helper-signing through the tag "
+                         f"expression, so its secret waits for the environment's reviewer")
+        elif row.environment == "pypi" and environment_name(env) != "pypi":
+            find(job_id, f"names {environment_name(env)!r}, not pypi (PyPI's trusted publisher names it)")
+        elif row.environment is None and env is not None:
+            find(job_id, f"names the environment {environment_name(env)!r}; P5.11 gives it none")
+        if row.calls and str(job.get("uses", "")).split("@")[0] != f"./.github/workflows/{row.calls}":
+            find(job_id, f"calls {job.get('uses')!r}, not ./.github/workflows/{row.calls}")
+    out += release_signing(wf) + release_publishing(wf) + release_attestations(wf)
+    return out
+
+
+def release_signing(wf: Workflow) -> list[Finding]:
+    """The signing job reads its one secret in one run step, whose env holds it alone, running release_sign.py."""
+    out = []
+    job_id = "sign-helper-manifest"
+    for other_id, job in wf.jobs.items():
+        if not isinstance(job, dict):
+            continue
+        names = other_secrets(secrets_read(job) | secrets_read(wf.data.get("env")))
+        if names and (other_id != job_id or names != {SIGNING_SECRET}):
+            out.append(Finding(wf.name, other_id, 16, f"reads {', '.join(sorted(names))}: release.yml reads one "
+                                                      f"secret, {SIGNING_SECRET}, in {job_id} alone"))
+    job = wf.jobs.get(job_id)
+    if not isinstance(job, dict):
+        return out
+    if other_secrets(secrets_read({k: v for k, v in job.items() if k != "steps"})):
+        out.append(Finding(wf.name, job_id, 16, "reads the secret at the job's level: every step would hold it"))
+    holders = [(i, s) for i, s in enumerate(wf.steps(job)) if other_secrets(secrets_read(s))]
+    if len(holders) != 1:
+        out.append(Finding(wf.name, job_id, 16, f"reads {SIGNING_SECRET} in {len(holders)} steps, not one"))
+    for i, step in holders:
+        env = step.get("env") if isinstance(step.get("env"), dict) else {}
+        if list(env) != [SIGNING_SECRET] or other_secrets(secrets_read({k: v for k, v in step.items() if k != "env"})):
+            out.append(Finding(wf.name, job_id, 16, f"{step_label(i, step)}: the secret goes in the env: of its one "
+                                                    f"step, alone, as {SIGNING_SECRET}"))
+        signs = any(any(re.split(r"[\\/]", w)[-1] == "release_sign.py" for w in argv) and "sign" in argv
+                    for argv in (command_words(c) for c in shell_commands(step.get("run") or "")))
+        if not signs:
+            out.append(Finding(wf.name, job_id, 16, f"{step_label(i, step)} holds the secret but does not run "
+                                                    f"scripts/ci/release_sign.py sign"))
+    return out
+
+
+def release_publishing(wf: Workflow) -> list[Finding]:
+    """github-release's draft before it is public; publish-image's tags; who pushes images."""
+    out = []
+    for job_id, job in wf.jobs.items():
+        if not isinstance(job, dict):
+            continue
+        commands = run_commands(wf, job)
+        creates = [(i, argv) for i, argv in commands if gh_release(argv)[:1] == ["create"]]
+        writes = [(i, argv) for i, argv in commands if gh_release(argv)[:1] and gh_release(argv)[0] in
+                  GH_WRITES["release"]]
+        if job_id != "github-release":
+            if writes:
+                out.append(Finding(wf.name, job_id, 16, "runs gh release writes: only github-release makes the "
+                                                        "release"))
+        else:
+            for i, argv in creates:
+                if flag_value(argv, "--draft") in (None, "false"):
+                    out.append(Finding(wf.name, job_id, 16, f"step {i + 1} runs gh release create without --draft: "
+                                                            f"the release is a draft until it is whole"))
+            public = [i for i, argv in commands if gh_release(argv)[:1] == ["edit"]
+                      and flag_value(argv, "--draft") == "false"]
+            if not creates or not public:
+                out.append(Finding(wf.name, job_id, 16, "does not create a draft (gh release create --draft) and then "
+                                                        "publish it (gh release edit --draft=false)"))
+            last = max([i for i, argv in writes if gh_release(argv)[0] in ("create", "upload")], default=-1)
+            if public and min(public) <= last:
+                out.append(Finding(wf.name, job_id, 16, f"makes the release public in step {min(public) + 1}, not "
+                                                        f"after every file is uploaded (step {last + 1})"))
+        pushed = [ref for _i, argv in commands for ref in image_refs(argv)]
+        if pushed and job_id not in ("publish-image", "image-tags"):
+            out.append(Finding(wf.name, job_id, 16, f"pushes {', '.join(pushed)}: only publish-image and image-tags "
+                                                    f"push the image"))
+        if job_id == "publish-image":
+            for ref in pushed:
+                tag = ref.rsplit(":", 1)[-1] if ":" in ref.split("/")[-1] else ""
+                if "latest" in ref or not VERSION_IN_TAG.search(tag):
+                    out.append(Finding(wf.name, job_id, 16, f"pushes {ref}: publish-image pushes the version's tags "
+                                                            f"alone (:V-<arch>, :V); :latest and :<major.minor> are "
+                                                            f"image-tags', after the release is published"))
+    return out
+
+
+def release_attestations(wf: Workflow) -> list[Finding]:
+    """attest-files attests the folder pkg-release-assets fills, once final has finished it with the sums and the
+    signature; attest-image attests publish-image's digest in the registry."""
+    out = []
+    job = wf.jobs.get("attest-files")
+    if isinstance(job, dict):
+        steps = wf.steps(job)
+        downloads = {str((s.get("with") or {}).get("name")): str((s.get("with") or {}).get("path", ".")).rstrip("/")
+                     for s in steps if action_of(s.get("uses")) == "actions/download-artifact"}
+        folder = downloads.get("pkg-release-assets")
+        attest = [(i, s) for i, s in enumerate(steps) if action_of(s.get("uses")) == "actions/attest-build-provenance"]
+        finished = [i for i, argv in run_commands(wf, job)
+                    if any(re.split(r"[\\/]", w)[-1] == "assemble_release.py" for w in argv) and "final" in argv
+                    and folder is not None and "--release" in argv
+                    and argv[argv.index("--release") + 1:argv.index("--release") + 2] == [folder]]
+        if folder is None or "rel-release-sums" not in downloads:
+            out.append(Finding(wf.name, "attest-files", 16, "does not download pkg-release-assets and rel-release-sums "
+                                                            "(the files, and the sums and signature) by name"))
+        elif not attest:
+            out.append(Finding(wf.name, "attest-files", 16, "has no actions/attest-build-provenance step"))
+        else:
+            for i, step in attest:
+                paths = [p.strip().rstrip("/") for p in str((step.get("with") or {}).get("subject-path", ""))
+                         .splitlines() if p.strip()]
+                if not any(p in (folder, f"{folder}/*", f"{folder}/**") for p in paths):
+                    out.append(Finding(wf.name, "attest-files", 16, f"{step_label(i, step)} attests {paths}, not the "
+                                                                    f"folder pkg-release-assets fills ({folder}/*)"))
+                if not finished or min(finished) > i:
+                    out.append(Finding(wf.name, "attest-files", 16, f"{step_label(i, step)} comes before "
+                                                                    f"assemble_release.py final --release {folder} "
+                                                                    f"(the sums and the signature joining the files)"))
+    job = wf.jobs.get("attest-image")
+    if isinstance(job, dict):
+        attest = [s for s in wf.steps(job) if action_of(s.get("uses")) == "actions/attest-build-provenance"]
+        given = (attest[0].get("with") or {}) if attest else {}
+        if (len(attest) != 1 or given.get("push-to-registry") not in (True, "true")
+                or "needs.publish-image.outputs.digest" not in re.sub(r"\s+", "", str(given.get("subject-digest")))):
+            out.append(Finding(wf.name, "attest-image", 16, "does not attest publish-image's digest "
+                                                            "(subject-digest) with push-to-registry: true"))
+    return out
+
+
 def check(root: Path) -> tuple[list[Workflow], list[Finding]]:
     workflows, findings = load(root)
     for wf in workflows:
         for rule in (rule_1, rule_2_3, rule_5, rule_6, rule_7, rule_8, rule_9, rule_10, rule_11, rule_12, rule_14,
-                     rule_15):
+                     rule_15, rule_16):
             findings += rule(wf)
     findings += rule_4(workflows)
     findings += rule_13(workflows)
@@ -1599,7 +1878,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"check_workflows: {len(findings)} finding(s) in {len(workflows)} workflows ({jobs} jobs)",
               file=sys.stderr)
         return 1
-    print(f"check_workflows: {len(workflows)} workflows, {jobs} jobs: rules 1 to 15 hold")
+    print(f"check_workflows: {len(workflows)} workflows, {jobs} jobs: rules 1 to 16 hold")
     return 0
 
 
