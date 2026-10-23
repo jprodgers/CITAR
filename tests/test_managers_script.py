@@ -88,7 +88,7 @@ class Managers(unittest.TestCase):
                                                 "README.md": "# The bucket\n"})
         self.manifests = self.dir / "managers"
         names = checksums.needed(ROOT, VERSION)
-        checksums.write_manifests(ROOT, VERSION, "2026-11-01", {n: "ab" * 32 for n in names},
+        checksums.write_manifests(ROOT, VERSION, "2026-11-01", dict.fromkeys(names, "ab" * 32),
                                   checksums.base_url(None, VERSION), self.manifests)
 
     def git(self, *args, cwd=None) -> str:
@@ -163,7 +163,7 @@ class Managers(unittest.TestCase):
     def test_manifests_that_are_not_the_releases_are_refused_before_any_clone(self):
         other = self.dir / "other"
         names = checksums.needed(ROOT, "0.1.7")
-        checksums.write_manifests(ROOT, "0.1.7", "2026-12-01", {n: "cd" * 32 for n in names},
+        checksums.write_manifests(ROOT, "0.1.7", "2026-12-01", dict.fromkeys(names, "cd" * 32),
                                   checksums.base_url(None, "0.1.7"), other)
         done = self.run_script(VERSION, manifests=other)
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
