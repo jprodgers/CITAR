@@ -546,6 +546,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: The version this run builds
+        # This checkout bumped as every build's was (the same date), so the notes the rehearsal writes are the
+        # release's: on a tag the tree says V already.
+        shell: bash
+        env:
+          MODE: ${{ needs.meta.outputs.mode }}
+          DATE: ${{ needs.meta.outputs.date }}
+        run: python3 scripts/release.py prepare --mode "$MODE" --version "$VERSION" --date "$DATE"
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: pkg-release-preview
@@ -586,7 +595,7 @@ jobs:
 
       - name: The tag-only jobs' file steps, rehearsed (unsigned)
         # check-signature's sums --out, then attest-files' and github-release's final over this run's files: the
-        # upload list must be release.py assets V's.
+        # upload list must be release.py assets V's, and the sums and notes those assemble wrote.
         shell: bash
         run: |
           python3 scripts/ci/assemble_release.py sums --version "$VERSION" --release release --out summary/sums
@@ -594,6 +603,8 @@ jobs:
             --list summary/upload.txt
           python3 scripts/release.py assets "$VERSION" > summary/assets.txt
           diff summary/assets.txt summary/upload.txt
+          cmp summary/sums/SHA256SUMS preview/SHA256SUMS
+          cmp summary/sums/notes.md preview/notes.md
 
       - name: The summary
         shell: bash

@@ -77,8 +77,8 @@ pinned job, and a secret that a build or an installer could read. Each rule is c
     sums and the signature from ``rel-release-sums``; ``attest-image`` pushes its attestation to the registry for
     ``publish-image``'s digest; and the workflow's concurrency is ``release-${{ github.ref }}``, never cancelled.
 
-Shell commands are read word by word, a
-redirection (``2>&1``) and a launcher (``sudo -E``, ``env``, ``timeout``) seen through, and ``pip3.12`` read as pip.
+Shell commands are read word by word, a redirection (``2>&1``) and a launcher (``sudo -E``, ``env``, ``timeout``)
+seen through, and ``pip3.12`` read as pip.
 Quoted text, comments and heredocs are data, so ``echo "run build_wiki.py --push"`` runs nothing and a ``<<`` in
 quotes starts no heredoc. A script given to a shell is read as commands: the string of ``bash -c`` (``-lc``) or
 ``eval``, a here-string (``bash <<< '...'``), ``pwsh -Command`` and ``cmd /c``'s words, and a heredoc a shell reads

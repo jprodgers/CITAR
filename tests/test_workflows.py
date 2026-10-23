@@ -1680,9 +1680,16 @@ class TheReleaseWorkflow(unittest.TestCase):
             "pkg-image-report-amd64", "pkg-image-report-arm64"})
         runs = self.runs("dry-run-summary")
         for command in ("check_image.py load", "assemble_release.py sums", "assemble_release.py final",
-                        "assemble_release.py summary", '"$GITHUB_STEP_SUMMARY"', "diff summary/assets.txt"):
+                        "assemble_release.py summary", '"$GITHUB_STEP_SUMMARY"', "diff summary/assets.txt",
+                        "cmp summary/sums/notes.md preview/notes.md"):
             self.assertIn(command, runs)
         self.assertNotIn("environment", self.jobs["dry-run-summary"])
+        # Its checkout is bumped first, as every build's was, or a dry run's notes (the CHANGELOG's V section)
+        # could not be written there.
+        steps = self.jobs["dry-run-summary"]["steps"]
+        self.assertEqual(cw.action_of(steps[0].get("uses")), "actions/checkout")
+        self.assertTrue(cw.is_prepare(steps[1]), steps[1])
+        self.assertIn('--date "$DATE"', steps[1]["run"])
 
 
 class ReleasePlanted(unittest.TestCase):
