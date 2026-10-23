@@ -632,11 +632,36 @@ class Verify(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(f"SHA256SUMS lists no citar-helper-{VERSION}-macos-x64.tar.gz", err)
 
+    def test_the_checklists_spelling_with_the_version_first(self):
+        # P5.15 step 7 (RELEASING.md) writes `release_checksums.py V --verify`; it must check the same release
+        args = ["--base-url", self.served.url, "--pypi-json", str(self.pypi)]
+        for argv in ([VERSION, "--verify", *args], ["--verify", *args, VERSION], [VERSION, "--verify", VERSION, *args]):
+            with self.subTest(argv=argv[:3]):
+                code, out, err = quiet(checksums.main, argv)
+                self.assertEqual(code, 0, out + err)
+                self.assertIn(f"release_checksums: verifying {VERSION} at {self.served.url}", out)
+                self.assertEqual(out.count("release_checksums: ok: "),
+                                 len(release.assets(VERSION)) + len(checksums.python_dists(VERSION)))
+        path = self.fake.release / f"citar-helper-{VERSION}-linux-x64.tar.gz"
+        path.write_bytes(path.read_bytes() + b"\0")
+        code, out, err = quiet(checksums.main, [VERSION, "--verify", *args])
+        self.assertEqual(code, 1)
+        self.assertIn(f"FAILED: citar-helper-{VERSION}-linux-x64.tar.gz: its SHA-256 is", err)
+
     def test_verify_takes_only_its_own_options(self):
         code, out, err = quiet(checksums.main, ["--verify", VERSION, "--out", str(self.dir / "x")])
         self.assertEqual(code, 2, err)
+        code, out, err = quiet(checksums.main, [VERSION, "--verify", "--from-dir", str(self.fake.release)])
+        self.assertEqual(code, 2, err)
         code, out, err = quiet(checksums.main, ["--verify", VERSION, "--base-url", "http://example.com/"])
         self.assertEqual(code, 2, err)
+        code, out, err = quiet(checksums.main, ["--verify", "--base-url", self.served.url])
+        self.assertEqual(code, 2, err)
+        self.assertIn("--verify needs the release's version", err)
+        code, out, err = quiet(checksums.main, ["9.9.9", "--verify", VERSION, "--base-url", self.served.url])
+        self.assertEqual(code, 2, err)
+        self.assertIn(f"--verify {VERSION} and the version 9.9.9 differ", err)
+        self.assertNotIn("verifying", out)
 
 
 if __name__ == "__main__":

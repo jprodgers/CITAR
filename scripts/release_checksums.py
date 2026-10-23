@@ -4,7 +4,7 @@
     python scripts/release_checksums.py V --from-dir DIR [--base-url URL] [--date YYYY-MM-DD] (--out DIR | --write)
     python scripts/release_checksums.py V [--base-url URL] [--date YYYY-MM-DD] (--out DIR | --write)
     python scripts/release_checksums.py V --from-dir DIR --write-pypi-json FILE
-    python scripts/release_checksums.py --verify V [--base-url URL] [--pypi-json FILE]
+    python scripts/release_checksums.py --verify V [--base-url URL] [--pypi-json FILE]   (or: V --verify ...)
 
 Homebrew, Scoop and winget each pin the SHA-256 of a release file, so their manifests are written from the release's
 files, never by hand. Each manifest is a template under ``packaging/`` (``packaging/**/*.in``; the manifest is the
@@ -374,7 +374,9 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="release_checksums.py", description=__doc__.split("\n\n")[0],
                                 allow_abbrev=False)
     p.add_argument("version", nargs="?", help="the release's version (V), without a leading v")
-    p.add_argument("--verify", metavar="V", help="check the published release V and PyPI's files")
+    # Both spellings check the same release: P5.15's checklist writes `V --verify`, the gates `--verify V`.
+    p.add_argument("--verify", nargs="?", const="", metavar="V",
+                   help="check the published release V (here, or as the version) and PyPI's files")
     p.add_argument("--from-dir", type=Path, help="hash the release's files in DIR (else the published SHA256SUMS)")
     p.add_argument("--base-url", help="where the manifests point and --verify downloads from")
     p.add_argument("--date", help="the release's date (default: its CHANGELOG section's)")
@@ -392,18 +394,23 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     try:
         if args.verify is not None:
-            if args.version or args.from_dir or args.out or args.write or args.write_pypi_json or args.date:
-                raise Usage("--verify V takes only --base-url and --pypi-json")
-            release.Version.parse(args.verify)
-            base = base_url(args.base_url, args.verify)
-            say(f"verifying {args.verify} at {base}")
-            problems = verify(args.verify, base, args.pypi_json)
+            if args.verify and args.version and args.verify != args.version:
+                raise Usage(f"--verify {args.verify} and the version {args.version} differ: give one")
+            target = args.verify or args.version
+            if not target:
+                raise Usage("--verify needs the release's version: --verify V, or V --verify")
+            if args.from_dir or args.out or args.write or args.write_pypi_json or args.date:
+                raise Usage("--verify takes only the version, --base-url and --pypi-json")
+            release.Version.parse(target)
+            base = base_url(args.base_url, target)
+            say(f"verifying {target} at {base}")
+            problems = verify(target, base, args.pypi_json)
             for problem in problems:
                 print(f"release_checksums: FAILED: {problem}", file=sys.stderr, flush=True)
             if problems:
-                print(f"release_checksums: {len(problems)} problem(s) with {args.verify}", file=sys.stderr)
+                print(f"release_checksums: {len(problems)} problem(s) with {target}", file=sys.stderr)
                 return 1
-            say(f"{args.verify}: every asset holds to {SUMS} and its .sha256, and PyPI's files are the release's")
+            say(f"{target}: every asset holds to {SUMS} and its .sha256, and PyPI's files are the release's")
             return 0
         if not args.version:
             raise Usage("give the release's version, or --verify V")

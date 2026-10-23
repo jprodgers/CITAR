@@ -63,7 +63,8 @@ python scripts/release_checksums.py --verify 0.1.6                      # the pu
 - `--from-dir DIR` hashes the files in DIR; without it the hashes come from the published release's `SHA256SUMS`.
 - `--base-url` points the manifests at another copy of the release (https, or http to a loopback address only):
   the `managers` job's loopback server.
-- `--verify V` downloads the release's `SHA256SUMS`, which must list exactly the release's files, then every file and
+- `--verify V` (or `V --verify`, as the release checklist writes it; the two must not name different versions)
+  downloads the release's `SHA256SUMS`, which must list exactly the release's files, then every file and
   its `.sha256`, each held to the sums, and checks that PyPI holds exactly the release's wheels and sdist with the same
   hashes. Every problem names its file. Its dry-run form, `--base-url http://127.0.0.1:<port>` and `--pypi-json FILE`
   (`--from-dir DIR --write-pypi-json FILE` writes one from the built wheels and sdist), is rehearsed before a release.
