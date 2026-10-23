@@ -36,11 +36,13 @@ adds the file's name, size and SHA-256 to that report.
 
 ``load`` is release.yml's side of it (package 5-09): the file (``pkg-image-<arch>``) must be the one the report
 (``pkg-image-report-<arch>``) names, by its SHA-256, and the image it loads the one ``run`` tested, by its id, of the
-report's architecture and the release's version, under the tag ``publish-image`` pushes. ``--out`` records what was
-loaded (the dry run's summary shows it).
+report's architecture and the release's version, under the tag ``publish-image`` pushes: ``--image`` names that tag,
+as publish-image writes it, and the report's must be the same, so a name changed in package.yml or in release.yml
+alone fails here (on the dry run, too) rather than at the tag's ``docker push``. ``--out`` records what was loaded (the
+dry run's summary shows it).
 
     python scripts/ci/check_image.py load --engine docker|podman --file FILE.tar.zst --report FILE --version V
-        [--out FILE]
+        --image REF [--out FILE]
 
 Exit status 0 when every check held, 1 when one failed (the message says which), 2 for a usage error or a run that
 could not start (no such engine, image or file).
@@ -653,6 +655,9 @@ def load(args) -> int:
     check(report.get("version") == version.text and image.endswith(f":{version.text}-{arch}"),
           f"the report is of {image} at {report.get('version')}, not {version.text}'s {arch} image",
           f"the report is {version.text}'s {arch} image, {image}")
+    check(image == args.image, f"the report's image is {image}, and the tag pushed is {args.image}: package.yml's "
+          f"image job and release.yml's IMAGE_NAME name different images",
+          f"{image} is the tag publish-image pushes")
     if not args.file.is_file():
         raise Refused(f"--file {args.file}: no such file")
     check(args.file.name == saved.get("file"), f"{args.file.name} is not the file the report names "
@@ -716,6 +721,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--file", type=Path, required=True, help="the saved image, FILE.tar.zst (pkg-image-<arch>)")
     p.add_argument("--report", type=Path, required=True, help="its report (pkg-image-report-<arch>)")
     p.add_argument("--version", required=True, help="the release's version, X.Y.Z[-rc.N]")
+    p.add_argument("--image", required=True, help="the tag publish-image pushes, REPOSITORY:V-<arch>: the report's")
     p.add_argument("--out", type=Path, help="write what was loaded here (the dry run's summary reads it)")
     return top
 

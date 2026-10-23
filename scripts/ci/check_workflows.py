@@ -1613,8 +1613,26 @@ RELEASE_JOBS = {
 }
 #: The secret the signing job holds, and the only one release.yml reads (P5.4.2; WORKERS.md's setup names it).
 SIGNING_SECRET = "CITAR_UPDATE_SIGNING_KEY"
-#: Where the version is, in a tag publish-image pushes: the variable its jobs set from meta, or meta's output.
-VERSION_IN_TAG = re.compile(r"\$\{?VERSION\}?|__EXPR__")
+#: The tags publish-image may push, exactly: the version (its job's VERSION, which is meta's), alone or with an
+#: architecture. Any other expansion of VERSION (``${VERSION%.*}``, the series) or any other word is refused.
+PUBLISH_TAG = re.compile(r"\$(VERSION|\{VERSION\})(-(\$arch|\$\{arch\}|amd64|arm64))?")
+#: The repository every image release.yml pushes names: the workflow's IMAGE_NAME, which package.yml's image job tags.
+IMAGE_NAME_REF = re.compile(r"\$(IMAGE_NAME|\{IMAGE_NAME\})")
+#: What publish-image's VERSION must be: meta's output, as every other job of release.yml takes it.
+META_VERSION = "${{needs.meta.outputs.version}}"
+#: docker's, podman's and buildah's global options that take a value (``docker --config DIR push ...``).
+ENGINE_GLOBALS = ("--config", "-c", "--context", "-H", "--host", "-l", "--log-level", "--tlscacert", "--tlscert",
+                  "--tlskey", "--root", "--runroot", "--storage-driver", "--storage-opt", "--url", "--connection",
+                  "--identity", "--cgroup-manager", "--conmon", "--events-backend", "--tmpdir", "--module",
+                  "--registries-conf", "--userns-uid-map", "--userns-gid-map")
+#: A push's own options that take a value: that value is not a reference.
+PUSH_VALUES = ("--platform", "--authfile", "--cert-dir", "--creds", "--digestfile", "--format", "-f",
+               "--compression-format", "--compression-level", "--sign-by", "--sign-by-sigstore",
+               "--sign-by-sigstore-private-key", "--sign-passphrase-file", "--signature-policy", "--encryption-key",
+               "--encrypt-layer", "--retry", "--retry-delay")
+#: Tools that copy images to a registry by other means than the two rule 16 reads (``docker push`` and ``docker
+#: buildx imagetools create``, and their podman and buildah forms): release.yml uses none of them.
+OTHER_PUSHERS = ("skopeo", "crane", "gcrane", "oras", "regctl", "nerdctl", "ko", "jib")
 
 
 def needs_of(job: dict) -> set[str]:
@@ -1652,13 +1670,24 @@ def flag_value(words: list[str], name: str) -> str | None:
 
 
 def image_refs(argv: list[str]) -> list[str]:
-    """The image references a ``docker push`` names, or the ``--tag``/``-t`` targets of ``imagetools create``."""
+    """The image references a push names: ``push``, ``image push`` and ``manifest push`` of docker, podman or buildah
+    (each word it names, podman's and buildah's destination included), or the ``--tag``/``-t`` targets of
+    ``imagetools create``."""
     tool = tool_of(argv)
-    if tool not in ("docker", "podman"):
+    if tool not in ("docker", "podman", "buildah"):
         return []
-    rest = argv[1:]
-    if rest[:1] == ["push"]:
-        return [w for w in rest[1:] if not w.startswith("-")][:1]
+    rest = subcommand(argv, ENGINE_GLOBALS)
+    if rest[:1] == ["push"] or rest[:2] in (["image", "push"], ["manifest", "push"]):
+        words = rest[1:] if rest[0] == "push" else rest[2:]
+        refs, skip = [], False
+        for w in words:
+            if skip:
+                skip = False
+            elif w in PUSH_VALUES:
+                skip = True
+            elif not w.startswith("-"):  # a repository named without a tag (--all-tags, or :latest) has no version
+                refs.append(w)
+        return refs
     if "imagetools" in rest and "create" in rest:
         out = []
         for i, w in enumerate(rest):
@@ -1797,13 +1826,58 @@ def release_publishing(wf: Workflow) -> list[Finding]:
         if pushed and job_id not in ("publish-image", "image-tags"):
             out.append(Finding(wf.name, job_id, 16, f"pushes {', '.join(pushed)}: only publish-image and image-tags "
                                                     f"push the image"))
-        if job_id == "publish-image":
+        for _i, argv in commands:
+            if tool_of(argv) in OTHER_PUSHERS:
+                out.append(Finding(wf.name, job_id, 16, f"runs {tool_of(argv)}: release.yml pushes images with docker "
+                                                        f"push and docker buildx imagetools create alone, the forms "
+                                                        f"rule 16 reads"))
+        if job_id in ("publish-image", "image-tags"):
             for ref in pushed:
-                tag = ref.rsplit(":", 1)[-1] if ":" in ref.split("/")[-1] else ""
-                if "latest" in ref or not VERSION_IN_TAG.search(tag):
+                name, _, tag = ref.rpartition(":") if ":" in ref.split("/")[-1] else (ref, "", "")
+                if not IMAGE_NAME_REF.fullmatch(name):
+                    out.append(Finding(wf.name, job_id, 16, f"pushes {ref}: every image release.yml pushes is "
+                                                            f"$IMAGE_NAME, the repository package.yml's image job "
+                                                            f"tags"))
+                elif job_id == "publish-image" and not PUBLISH_TAG.fullmatch(tag):
                     out.append(Finding(wf.name, job_id, 16, f"pushes {ref}: publish-image pushes the version's tags "
-                                                            f"alone (:V-<arch>, :V); :latest and :<major.minor> are "
-                                                            f"image-tags', after the release is published"))
+                                                            f"alone, exactly :$VERSION or :$VERSION-<arch>; :latest "
+                                                            f"and :<major.minor> are image-tags', after the release "
+                                                            f"is published"))
+        if job_id == "publish-image":
+            out += publish_image_version(wf, job, commands)
+    return out
+
+
+def publish_image_version(wf: Workflow, job: dict, commands: list[tuple[int, list[str]]]) -> list[Finding]:
+    """publish-image's VERSION is meta's, set once at the job's level: no step and no command sets it (or
+    IMAGE_NAME) again, so ``:$VERSION`` is the release's version and nothing else."""
+    out = []
+    env = job.get("env") if isinstance(job.get("env"), dict) else {}
+    if re.sub(r"\s+", "", str(env.get("VERSION", ""))) != META_VERSION:
+        out.append(Finding(wf.name, "publish-image", 16, f"its env VERSION is {env.get('VERSION')!r}, not "
+                                                         f"${{{{ needs.meta.outputs.version }}}}: the tags it pushes "
+                                                         f"are the release's version"))
+    if "IMAGE_NAME" in env:
+        out.append(Finding(wf.name, "publish-image", 16, "sets IMAGE_NAME again: the workflow's is the one package.yml "
+                                                         "tags"))
+    for i, step in enumerate(wf.steps(job)):
+        named = set(step.get("env") or {}) & {"VERSION", "IMAGE_NAME"} if isinstance(step.get("env"), dict) else set()
+        if named:
+            out.append(Finding(wf.name, "publish-image", 16, f"{step_label(i, step)} sets {', '.join(sorted(named))} "
+                                                             f"in its env: the job's are meta's version and the "
+                                                             f"workflow's image"))
+    for i, step in enumerate(wf.steps(job)):
+        if not isinstance(step.get("run"), str):
+            continue
+        for words in shell_commands(step["run"]):
+            assigned = [w.split("=", 1)[0] for w in words
+                        if re.fullmatch(r"(VERSION|IMAGE_NAME)=.*", w, re.DOTALL)]
+            if words[:1] in (["read"], ["for"]) and {"VERSION", "IMAGE_NAME"} & set(words[1:]):
+                assigned.append(next(w for w in words[1:] if w in ("VERSION", "IMAGE_NAME")))
+            if assigned:
+                out.append(Finding(wf.name, "publish-image", 16, f"{step_label(i, step)} assigns "
+                                                                 f"{', '.join(sorted(set(assigned)))}: the job's are "
+                                                                 f"meta's version and the workflow's image"))
     return out
 
 

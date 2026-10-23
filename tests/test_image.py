@@ -469,7 +469,8 @@ class CheckImageLoad(unittest.TestCase):
                        "id": self.ID, "saved": {"file": self.file.name, "sha256": digest, "id": self.ID,
                                                 "bytes": self.file.stat().st_size}}
 
-    def load(self, inspect: dict | None = None, version: str = "0.1.6"):
+    def load(self, inspect: dict | None = None, version: str = "0.1.6",
+             image: str = "ghcr.io/jprodgers/citar:0.1.6-arm64"):
         (self.dir / "report.json").write_text(json.dumps(self.report), encoding="utf-8")
         found = {"Id": f"sha256:{self.ID}", "Os": "linux", "Architecture": "arm64", **(inspect or {})}
         engine = Recording({("image", "inspect"): json.dumps([found])})
@@ -481,7 +482,7 @@ class CheckImageLoad(unittest.TestCase):
             unpacked.append(tar)
 
         args = argparse.Namespace(engine="docker", file=self.file, report=self.dir / "report.json",
-                                  version=version, out=self.dir / "loaded.json")
+                                  version=version, image=image, out=self.dir / "loaded.json")
         with mock.patch.object(ci, "Engine", lambda name: engine), \
                 mock.patch.object(ci, "zstd", zstd), \
                 mock.patch.object(ci.shutil, "which", lambda name: f"/usr/bin/{name}"):
@@ -499,18 +500,25 @@ class CheckImageLoad(unittest.TestCase):
                          ("arm64", "linux", self.ID, self.file.name))
 
     def test_anything_else_is_refused(self):
+        pushed = "ghcr.io/jprodgers/citar:0.1.6-arm64"
         plants = {
-            "a changed byte": (lambda: self.file.write_bytes(b"another image"), {}, "0.1.6", "SHA-256"),
-            "another id": (lambda: None, {"Id": "sha256:" + "cd" * 32}, "0.1.6", "and the report tested"),
-            "another architecture": (lambda: None, {"Architecture": "amd64"}, "0.1.6", "not linux/arm64"),
-            "another release": (lambda: None, {}, "0.1.7", "not 0.1.7's arm64 image"),
+            "a changed byte": (lambda: self.file.write_bytes(b"another image"), {}, "0.1.6", pushed, "SHA-256"),
+            "another id": (lambda: None, {"Id": "sha256:" + "cd" * 32}, "0.1.6", pushed, "and the report tested"),
+            "another architecture": (lambda: None, {"Architecture": "amd64"}, "0.1.6", pushed, "not linux/arm64"),
+            "another release": (lambda: None, {}, "0.1.7", pushed, "not 0.1.7's arm64 image"),
+            # release.yml's IMAGE_NAME and package.yml's image job's TAG apart: the push would go elsewhere
+            "another repository pushed": (lambda: None, {}, "0.1.6", "ghcr.io/jprodgers/citar-image:0.1.6-arm64",
+                                          "name different images"),
+            "another repository tested": (
+                lambda: self.report.update(image="ghcr.io/someone/citar:0.1.6-arm64"), {}, "0.1.6", pushed,
+                "the report's image is ghcr.io/someone/citar:0.1.6-arm64"),
         }
-        for what, (plant, inspect, version, named) in plants.items():
+        for what, (plant, inspect, version, image, named) in plants.items():
             with self.subTest(what):
                 self.setUp()
                 plant()
                 with self.assertRaises(ci.Failed) as caught:
-                    self.load(inspect, version)
+                    self.load(inspect, version, image)
                 self.assertIn(named, str(caught.exception))
 
 

@@ -376,7 +376,7 @@ jobs:
         run: |
           for arch in amd64 arm64; do
             python3 scripts/ci/check_image.py load --engine docker --file "image/citar-image-$VERSION-$arch.tar.zst" \
-              --report "report/image-$arch.json" --version "$VERSION"
+              --report "report/image-$arch.json" --version "$VERSION" --image "$IMAGE_NAME:$VERSION-$arch"
           done
 
       - name: Signed in to the registry
@@ -596,7 +596,8 @@ jobs:
         run: |
           for arch in amd64 arm64; do
             python3 scripts/ci/check_image.py load --engine docker --file "image/citar-image-$VERSION-$arch.tar.zst" \
-              --report "report/image-$arch.json" --version "$VERSION" --out "summary/images/$arch.json"
+              --report "report/image-$arch.json" --version "$VERSION" --image "$IMAGE_NAME:$VERSION-$arch" \
+              --out "summary/images/$arch.json"
           done
 
       - name: The tag-only jobs' file steps, rehearsed (unsigned)

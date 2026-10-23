@@ -1662,6 +1662,25 @@ class TheReleaseWorkflow(unittest.TestCase):
             "pkg-image-report-arm64": "report"})
         self.assertIn("check_image.py load --engine docker", self.runs("publish-image"))
         self.assertEqual(self.jobs["publish-image"]["outputs"], {"digest": "${{ steps.join.outputs.digest }}"})
+
+    def test_the_image_pushed_is_the_one_package_yml_tags(self):
+        # package.yml's image job tags and saves the image as TAG; publish-image pushes "$IMAGE_NAME:$VERSION-$arch".
+        # The two names are written apart, so they are held together here, and check_image.py load holds the
+        # report's name to the pushed one on every dry run and tag.
+        import yaml
+        package = yaml.safe_load((WORKFLOWS / "package.yml").read_text(encoding="utf-8"))
+        tag = package["jobs"]["image"]["env"]["TAG"]
+        pushed = (f"{self.data['env']['IMAGE_NAME']}:${{{{ needs.meta.outputs.version }}}}-"
+                  f"${{{{ matrix.arch }}}}")
+        self.assertEqual(tag, pushed)
+        self.assertEqual(self.data["env"]["IMAGE_NAME"], "ghcr.io/jprodgers/citar")
+        self.assertEqual(self.jobs["publish-image"]["env"]["VERSION"], "${{ needs.meta.outputs.version }}")
+        self.assertEqual(self.jobs["dry-run-summary"]["env"]["VERSION"], "${{ needs.meta.outputs.version }}")
+        for job_id in ("publish-image", "dry-run-summary"):
+            loads = [line for line in self.runs(job_id).replace("\\\n", " ").splitlines() if "check_image.py load" in line]
+            self.assertEqual(len(loads), 1, job_id)
+            self.assertIn('--image "$IMAGE_NAME:$VERSION-$arch"', loads[0], job_id)
+        self.assertIn('docker push "$IMAGE_NAME:$VERSION-$arch"', self.runs("publish-image"))
         for job_id in ("publish-image", "attest-image", "image-tags"):
             self.assertIn('docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin', self.runs(job_id))
 
@@ -1727,16 +1746,65 @@ class ReleasePlanted(unittest.TestCase):
 
     def test_latest_or_the_series_pushed_in_publish_image(self):
         for plant in ('            docker push "$IMAGE_NAME:latest"\n',
-                      '            docker push "$IMAGE_NAME:$series"\n'):
+                      '            docker push "$IMAGE_NAME:$series"\n',
+                      # the same pushes in other forms: each is a push
+                      '            docker image push "$IMAGE_NAME:latest"\n',
+                      '            podman image push "$IMAGE_NAME:latest"\n',
+                      '            docker manifest push "$IMAGE_NAME:latest"\n',
+                      '            docker --config "$RUNNER_TEMP/docker" push "$IMAGE_NAME:latest"\n',
+                      '            docker push --platform linux/amd64 "$IMAGE_NAME:latest"\n',
+                      # the series as an expansion of VERSION, and a repository without a tag (:latest, or every tag)
+                      '            docker push "$IMAGE_NAME:${VERSION%.*}"\n',
+                      '            docker push "$IMAGE_NAME:${VERSION}-rc"\n',
+                      '            docker push --all-tags "$IMAGE_NAME"\n'):
             with self.subTest(plant=plant):
                 tree = Tree(self)
                 tree.replace_in_job("release.yml", "publish-image", '            docker push "$IMAGE_NAME:$VERSION-$arch"\n',
                                     '            docker push "$IMAGE_NAME:$VERSION-$arch"\n' + plant)
                 self.assertFinds(tree, 16, "release.yml", "publish-image", "pushes the version's tags alone")
+        for plant in ('            podman push "$IMAGE_NAME:$VERSION-$arch" "docker://$IMAGE_NAME:latest"\n',
+                      '            docker push "ghcr.io/jprodgers/citar-image:$VERSION-$arch"\n'):
+            with self.subTest(plant=plant):
+                tree = Tree(self)
+                tree.replace_in_job("release.yml", "publish-image", '            docker push "$IMAGE_NAME:$VERSION-$arch"\n',
+                                    '            docker push "$IMAGE_NAME:$VERSION-$arch"\n' + plant)
+                self.assertFinds(tree, 16, "release.yml", "publish-image", "is $IMAGE_NAME")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-image", '            docker push "$IMAGE_NAME:$VERSION-$arch"\n',
+                            '            docker push "$IMAGE_NAME:$VERSION-$arch"\n'
+                            '            skopeo copy "docker-daemon:$IMAGE_NAME:$VERSION-$arch" '
+                            '"docker://$IMAGE_NAME:latest"\n')
+        self.assertFinds(tree, 16, "release.yml", "publish-image", "runs skopeo")
         tree = Tree(self)
         tree.replace_in_job("release.yml", "publish-image", '--tag "$IMAGE_NAME:$VERSION"',
                             '--tag "$IMAGE_NAME:$VERSION" --tag "$IMAGE_NAME:latest"')
         self.assertFinds(tree, 16, "release.yml", "publish-image", ":latest")
+
+    def test_publish_images_version_is_meta_s_alone(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-image", "      VERSION: ${{ needs.meta.outputs.version }}\n",
+                            "      VERSION: latest\n")
+        self.assertFinds(tree, 16, "release.yml", "publish-image", "not ${{ needs.meta.outputs.version }}")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-image", "          for arch in amd64 arm64; do\n"
+                            "            docker push",
+                            "          VERSION=\"${VERSION%.*}\"\n          for arch in amd64 arm64; do\n"
+                            "            docker push")
+        self.assertFinds(tree, 16, "release.yml", "publish-image", "assigns VERSION")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "publish-image", "        id: join\n        shell: bash\n",
+                            "        id: join\n        shell: bash\n        env:\n          IMAGE_NAME: ghcr.io/x/y\n")
+        self.assertFinds(tree, 16, "release.yml", "publish-image", "sets IMAGE_NAME in its env")
+
+    def test_another_repository_in_image_tags_or_a_push_elsewhere(self):
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "image-tags", '--tag "$IMAGE_NAME:latest"',
+                            '--tag "ghcr.io/jprodgers/other:latest"')
+        self.assertFinds(tree, 16, "release.yml", "image-tags", "is $IMAGE_NAME")
+        tree = Tree(self)
+        tree.replace_in_job("release.yml", "dry-run-summary", "          cat summary/summary.md\n",
+                            "          cat summary/summary.md\n          docker image push \"$IMAGE_NAME:$VERSION-amd64\"\n")
+        self.assertFinds(tree, 16, "release.yml", "dry-run-summary", "only publish-image and image-tags push")
 
     def test_attest_image_without_packages_write(self):
         tree = Tree(self)
