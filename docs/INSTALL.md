@@ -174,8 +174,10 @@ and run it with a token from whoever runs the server; they issue one on the Serv
 with the machine or from your sign-in. Since 0.1.6 the helper replaces the Python worker: `citar
 worker` says where to download it, and `install.sh --worker` (`curl -fsSL
 https://raw.githubusercontent.com/jprodgers/CITAR/main/install.sh | bash -s -- --worker`) or
-`install.ps1 -Worker` downloads the build for your computer, checks it against its `.sha256` and puts
-`citar-helper` in `~/.local/bin` (`%LOCALAPPDATA%\CITAR\bin` on Windows). See
+`install.ps1 -Worker` (in PowerShell, `& ([scriptblock]::Create((iwr -useb
+https://raw.githubusercontent.com/jprodgers/CITAR/main/install.ps1))) -Worker`) downloads the build
+for your computer, checks it against its `.sha256` and puts `citar-helper` in `~/.local/bin`
+(`%LOCALAPPDATA%\CITAR\bin` on Windows). See
 [server/WORKERS.md](server/WORKERS.md).
 
 ---

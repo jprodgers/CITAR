@@ -608,11 +608,13 @@ failing backend, so a key saved on the Servers page never reaches your Credentia
 and the per-user configuration and data folders (`APPDATA` and `LOCALAPPDATA`, or `XDG_CONFIG_HOME`
 and `XDG_DATA_HOME`) moved under `DIR/user`; a `--env` may not undo any of that. It stops the
 server's whole process tree when `DIR/gate_run.stop` appears. `gate_run.py install-ps1 -- ARGS` runs
-the checkout's `install.ps1` only with `-Prefix` and `-BinDir` inside the target folder and `-NoPath`
-(and `-NoSetup` for an install), every parameter written in full (PowerShell takes any unambiguous
-prefix), `CITAR_RELEASE_URL` (a loopback server's) and the scripts' test hook its only additions to
-the environment, the per-user and temporary folders moved under the target, and the user's PATH (as
-`HKCU\Environment` stores it) compared before and after.
+the checkout's `install.ps1` only with `-Prefix` and `-BinDir` inside the target folder (each an
+absolute path, with no `~`, provider or PowerShell drive, and passed to the script as resolved) and
+`-NoPath` (and `-NoSetup` for an install), every parameter written in full (PowerShell takes any
+unambiguous prefix), `CITAR_RELEASE_URL` (a loopback server's) and the scripts' test hook its only
+additions to the environment, the per-user and temporary folders moved under the target, and the
+user's PATH (as `HKCU\Environment` stores it) compared before and after; with `--as-scriptblock` it
+runs the script as its one-liner does, a script block, and says whether the session went on.
 
 **The install scripts** (design/phase5-release.md P5.8). `install.sh` and `install.ps1` install CITAR
 from its prebuilt wheels only (`--only-binary=citar`; `--from` a wheel or a folder of wheels, never an
