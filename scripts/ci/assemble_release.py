@@ -421,8 +421,8 @@ def write_preview(root: Path, folder: Path, preview: Path, version: str, label: 
     files = release.asset_files(version)
     (preview / "subjects.txt").write_text("".join(f"{n}\n" for n in files), encoding="utf-8", newline="\n")
     v = release.Version.parse(version)
-    assets = [{**a, "size": (folder / a["name"]).stat().st_size, "sha256_hex": sha256(folder / a["name"])}
-              for a in release.assets(version)]
+    assets = [{"name": a["name"], "group": a["group"], "size": (folder / a["name"]).stat().st_size,
+               "sha256": sha256(folder / a["name"])} for a in release.assets(version)]
     (preview / "assets.json").write_text(json.dumps({
         "version": version, "pep440": v.pep440, "label": label, "assets": assets, "files": files,
         "bytes": sum((folder / n).stat().st_size for n in files)}, indent=2) + "\n", encoding="utf-8", newline="\n")

@@ -22,7 +22,8 @@ naming the template and its line. So no manifest can point at a file a release d
 sdist (whose URL 404s until PyPI has caught up).
 
 - With ``--from-dir DIR`` the hashes are the files' in DIR: CI's route (package.yml's ``assemble``), before anything
-  is published. Without it they are the published release's ``SHA256SUMS`` (after publishing, P5.15 step 8).
+  is published. Without it they are the published release's ``SHA256SUMS``, read from the base URL (after
+  publishing, P5.15 step 8).
 - ``--base-url URL`` points the manifests elsewhere: a dry run's loopback server (package.yml's ``managers``). It is
   https, or http to a loopback address only.
 - ``--out DIR`` writes the manifests under DIR in ``packaging/``'s layout; ``--write`` writes them beside their
@@ -421,8 +422,8 @@ def main(argv: list[str] | None = None) -> int:
             raise Usage("--out DIR or --write, not both")
         base = base_url(args.base_url, version)
         names = needed(root, version)
-        hashes = hashes_from_dir(args.from_dir, names) if args.from_dir else hashes_from_release(
-            base_url(None, version), names)
+        # Without --from-dir the hashes are the published release's: its SHA256SUMS, where the manifests point.
+        hashes = hashes_from_dir(args.from_dir, names) if args.from_dir else hashes_from_release(base, names)
         date = release_date(root, version, args.date)
         width = max(len(n) for n in names)
         for name in names:

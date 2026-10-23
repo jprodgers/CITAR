@@ -203,7 +203,11 @@ class Assemble(unittest.TestCase):
                          release.asset_files(VERSION))
         assets = json.loads((preview / "assets.json").read_text(encoding="utf-8"))
         self.assertEqual([a["name"] for a in assets["assets"]], [a["name"] for a in release.assets(VERSION)])
-        self.assertTrue(all(a["size"] > 0 and len(a["sha256_hex"]) == 64 for a in assets["assets"]))
+        for a in assets["assets"]:
+            data = (self.fake.release / a["name"]).read_bytes()
+            self.assertEqual((a["size"], a["sha256"]), (len(data), sha(data)), a["name"])
+        self.assertEqual(assets["bytes"], sum((self.fake.release / n).stat().st_size
+                                              for n in release.asset_files(VERSION)))
         build = json.loads((preview / "build.json").read_text(encoding="utf-8"))
         self.assertEqual((build["build_id"], build["jobs_build"], build["result_hash"], build["protocol"]),
                          (BUILD, JOBS, RESULT, PROTOCOL))
@@ -614,6 +618,19 @@ class Verify(unittest.TestCase):
         code, out, err = self.verify()
         self.assertEqual(code, 0, out + err)
         self.assertIn("ok: citar-helper-manifest.json.sig", out)
+
+    def test_the_manifests_from_the_published_sums(self):
+        # Without --from-dir the hashes come from SHA256SUMS where the manifests point (here the loopback copy)
+        out = self.dir / "from-sums"
+        code, stdout, err = quiet(checksums.main, [VERSION, "--base-url", self.served.url, "--out", str(out)])
+        self.assertEqual(code, 0, stdout + err)
+        self.assertEqual(managers.structure(out, VERSION, self.served.url, self.fake.release), [])
+        lines = (self.fake.release / "SHA256SUMS").read_text(encoding="ascii").splitlines()
+        (self.fake.release / "SHA256SUMS").write_text(
+            "\n".join(line for line in lines if "macos-x64.tar.gz" not in line) + "\n", encoding="ascii")
+        code, stdout, err = quiet(checksums.main, [VERSION, "--base-url", self.served.url, "--out", str(out)])
+        self.assertEqual(code, 1)
+        self.assertIn(f"SHA256SUMS lists no citar-helper-{VERSION}-macos-x64.tar.gz", err)
 
     def test_verify_takes_only_its_own_options(self):
         code, out, err = quiet(checksums.main, ["--verify", VERSION, "--out", str(self.dir / "x")])
