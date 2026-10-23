@@ -22,6 +22,11 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 const BIN: &str = env!("CARGO_BIN_EXE_citar-helper");
 
 /// Runs the binary with `home` against a hub that refuses every hello with a 4401 close.
+///
+/// With `--no-hardware --no-power`, as real_binary.rs's runs that do not check the scan: what is
+/// checked here is the key, not the machine's report, and the machine's own probes (PowerShell's
+/// hardware queries on Windows) can take most of a minute on a cold CI runner (helper.yml at
+/// cfa205a: 59 to 63 s for these tests, against 4 to 8 s before), past this run's 60 s.
 async fn run_refused(home: &Path) -> std::process::Output {
     let (port, mut conns) = loopback_hub().await;
     tokio::spawn(async move {
@@ -36,6 +41,7 @@ async fn run_refused(home: &Path) -> std::process::Output {
         .arg(home)
         .args(["--server", &format!("http://127.0.0.1:{port}"), "--token", "cwt_keys_test"])
         .args(["--base-url", "http://127.0.0.1:9/v1", "--no-llm"])
+        .args(["--no-hardware", "--no-power"])
         .env("CITAR_DATA_DIR", home)
         .env_remove("CITAR_WORKER_SERVER")
         .env_remove("CITAR_WORKER_TOKEN")
