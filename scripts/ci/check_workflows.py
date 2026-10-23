@@ -1844,11 +1844,11 @@ def release_publishing(wf: Workflow) -> list[Finding]:
                                                             f"and :<major.minor> are image-tags', after the release "
                                                             f"is published"))
         if job_id == "publish-image":
-            out += publish_image_version(wf, job, commands)
+            out += publish_image_version(wf, job)
     return out
 
 
-def publish_image_version(wf: Workflow, job: dict, commands: list[tuple[int, list[str]]]) -> list[Finding]:
+def publish_image_version(wf: Workflow, job: dict) -> list[Finding]:
     """publish-image's VERSION is meta's, set once at the job's level: no step and no command sets it (or
     IMAGE_NAME) again, so ``:$VERSION`` is the release's version and nothing else."""
     out = []
@@ -1860,8 +1860,9 @@ def publish_image_version(wf: Workflow, job: dict, commands: list[tuple[int, lis
     if "IMAGE_NAME" in env:
         out.append(Finding(wf.name, "publish-image", 16, "sets IMAGE_NAME again: the workflow's is the one package.yml "
                                                          "tags"))
+    held = {"VERSION", "IMAGE_NAME"}
     for i, step in enumerate(wf.steps(job)):
-        named = set(step.get("env") or {}) & {"VERSION", "IMAGE_NAME"} if isinstance(step.get("env"), dict) else set()
+        named = set(step["env"]) & held if isinstance(step.get("env"), dict) else set()
         if named:
             out.append(Finding(wf.name, "publish-image", 16, f"{step_label(i, step)} sets {', '.join(sorted(named))} "
                                                              f"in its env: the job's are meta's version and the "
@@ -1870,13 +1871,14 @@ def publish_image_version(wf: Workflow, job: dict, commands: list[tuple[int, lis
         if not isinstance(step.get("run"), str):
             continue
         for words in shell_commands(step["run"]):
-            assigned = [w.split("=", 1)[0] for w in words
-                        if re.fullmatch(r"(VERSION|IMAGE_NAME)=.*", w, re.DOTALL)]
-            if words[:1] in (["read"], ["for"]) and {"VERSION", "IMAGE_NAME"} & set(words[1:]):
-                assigned.append(next(w for w in words[1:] if w in ("VERSION", "IMAGE_NAME")))
+            assigned = {w.split("=", 1)[0] for w in words if re.fullmatch(r"(VERSION|IMAGE_NAME)=.*", w, re.DOTALL)}
+            if words[:1] == ["for"]:  # for NAME in ...: the loop's variable
+                assigned |= set(words[1:2]) & held
+            elif words[:1] == ["read"]:  # read [options] NAME...: each name it sets
+                assigned |= {w for w in words[1:] if not w.startswith("-")} & held
             if assigned:
                 out.append(Finding(wf.name, "publish-image", 16, f"{step_label(i, step)} assigns "
-                                                                 f"{', '.join(sorted(set(assigned)))}: the job's are "
+                                                                 f"{', '.join(sorted(assigned))}: the job's are "
                                                                  f"meta's version and the workflow's image"))
     return out
 

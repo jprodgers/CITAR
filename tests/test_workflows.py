@@ -1785,12 +1785,16 @@ class ReleasePlanted(unittest.TestCase):
         tree.replace_in_job("release.yml", "publish-image", "      VERSION: ${{ needs.meta.outputs.version }}\n",
                             "      VERSION: latest\n")
         self.assertFinds(tree, 16, "release.yml", "publish-image", "not ${{ needs.meta.outputs.version }}")
-        tree = Tree(self)
-        tree.replace_in_job("release.yml", "publish-image", "          for arch in amd64 arm64; do\n"
-                            "            docker push",
-                            "          VERSION=\"${VERSION%.*}\"\n          for arch in amd64 arm64; do\n"
-                            "            docker push")
-        self.assertFinds(tree, 16, "release.yml", "publish-image", "assigns VERSION")
+        for assignment, named in (("VERSION=\"${VERSION%.*}\"", "VERSION"), ("export VERSION=0.1", "VERSION"),
+                                  ("read -r IMAGE_NAME < image-name.txt", "IMAGE_NAME"),
+                                  ("for VERSION in 0.1; do :; done", "VERSION")):
+            with self.subTest(assignment=assignment):
+                tree = Tree(self)
+                tree.replace_in_job("release.yml", "publish-image", "          for arch in amd64 arm64; do\n"
+                                    "            docker push",
+                                    f"          {assignment}\n          for arch in amd64 arm64; do\n"
+                                    "            docker push")
+                self.assertFinds(tree, 16, "release.yml", "publish-image", f"assigns {named}")
         tree = Tree(self)
         tree.replace_in_job("release.yml", "publish-image", "        id: join\n        shell: bash\n",
                             "        id: join\n        shell: bash\n        env:\n          IMAGE_NAME: ghcr.io/x/y\n")
