@@ -281,12 +281,15 @@ put_on_path() {
 
 # ----------------------------------------------------------------------------- uninstall
 # The helper as a service names its binary in its unit or LaunchAgent: removing the file under it would leave a
-# service that cannot start, so its own uninstall comes first.
+# service that cannot start, so its own uninstall comes first. `service install` names the path the helper found for
+# itself, which on Linux has every symbolic link resolved (/proc/self/exe): so a bin folder reached through a link
+# (a dotfile manager's ~/.local/bin) is looked for in both its forms.
 helper_service() {
-	local definition
+	local definition real
+	real="$(cd "$BIN_DIR" 2>/dev/null && pwd -P)" || real="$BIN_DIR"
 	for definition in "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/citar-helper.service" \
 		/etc/systemd/system/citar-helper.service "$HOME/Library/LaunchAgents/org.citar.helper.plist"; do
-		if [ -f "$definition" ] && grep -qF "$BIN_DIR/citar-helper" "$definition" 2>/dev/null; then
+		if [ -f "$definition" ] && grep -qF -e "$BIN_DIR/citar-helper" -e "$real/citar-helper" "$definition" 2>/dev/null; then
 			printf '%s' "$definition"
 			return 0
 		fi
@@ -324,11 +327,23 @@ then run this again. Nothing was removed."
 			fi
 		done
 	fi
-	if [ -e "$BIN_DIR/citar-helper" ] || [ -e "$BIN_DIR/citar-helper.old" ]; then
-		# the binary, the one its last update replaced, and an update's half-written file
-		$SUDO rm -f "$BIN_DIR/citar-helper" "$BIN_DIR/citar-helper.old" "$BIN_DIR/.citar-helper.new"
-		ok "Removed citar-helper from $BIN_DIR."
-	fi
+	# The binary and what its updates leave beside it (crates/citar-helper/src/update/files.rs): the binary the last
+	# update replaced (.old), one rolled back while it ran (.failed), either set aside under a process id (.old.<pid>,
+	# .failed.<pid>), an update's half-written file, and this script's own. The helper clears these at its next start,
+	# and after an uninstall there is none.
+	removed=0
+	for file in "$BIN_DIR/citar-helper" "$BIN_DIR/citar-helper.old" "$BIN_DIR/citar-helper.failed" \
+		"$BIN_DIR/.citar-helper.new" "$BIN_DIR/.citar-helper.install" \
+		"$BIN_DIR"/citar-helper.old.* "$BIN_DIR"/citar-helper.failed.*; do
+		[ -e "$file" ] || [ -L "$file" ] || continue
+		case "${file##*/}" in
+			citar-helper.old.*|citar-helper.failed.*)
+				case "${file##*.}" in ""|*[!0-9]*) continue ;; esac ;;
+		esac
+		$SUDO rm -f "$file"
+		removed=1
+	done
+	[ "$removed" -eq 0 ] || ok "Removed citar-helper and what its updates left from $BIN_DIR."
 	say ""
 	say "Your games, settings and results were NOT deleted. They are in:"
 	say "  ${XDG_DATA_HOME:-$HOME/.local/share}/citar   (or /var/lib/citar for a server)"

@@ -33,7 +33,9 @@ The checks, in order (each recorded in the report, ``--out``):
    ``--version V`` it comes from ``download/v<V>/``.
 5. **The download's checks:** a ``.sha256`` that is not the file's is refused before anything is written (the bin
    folder is never made), and so is plain http to a host that is not this machine (a documentation address, RFC
-   5737, which no machine answers), before any request.
+   5737, which no machine answers), before any request. install.ps1 then runs as its one-liner does, a script
+   block (``gate_run.py install-ps1 --as-scriptblock``): ``-Worker`` installs the helper and a wrong ``.sha256`` is
+   refused, each ending the script without ending its PowerShell.
 6. **The uninstall** with the same prefix and bin folder: the prefix is gone and the bin folder empty, and nothing
    else under ``--work`` moved; install.sh refuses while the helper is a service (its unit names the binary).
 7. **With ``--path-route``** (on a CI runner only, ``GITHUB_ACTIONS=true``: it writes the user's profile or PATH):
@@ -250,7 +252,7 @@ class Script:
 
     # install.ps1: only through gate_run.py install-ps1, -NoPath always
     def ps1(self, args: list[str], facts: str = "", release_url: str | None = None,
-            timeout: float = RUN_TIMEOUT) -> tuple[int, str, float]:
+            timeout: float = RUN_TIMEOUT, scriptblock: bool = False) -> tuple[int, str, float]:
         extra = []
         if facts:
             extra.append(f"CITAR_INSTALL_TEST_FACTS={facts}")
@@ -258,7 +260,8 @@ class Script:
             extra.append(f"CITAR_RELEASE_URL={release_url}")
         began = time.perf_counter()
         try:
-            done = gate_run.run_install_ps1([*args, "-NoPath"], self.under, extra, timeout=timeout, capture=True)
+            done = gate_run.run_install_ps1([*args, "-NoPath"], self.under, extra, timeout=timeout, capture=True,
+                                            as_scriptblock=scriptblock)
         except gate_run.Refused as e:
             return 2, f"gate_run: refused: {e}", time.perf_counter() - began
         return done.returncode, (done.stdout or "") + (done.stderr or ""), time.perf_counter() - began
@@ -282,7 +285,8 @@ class Script:
         if sh:
             return self.sh(args, facts=opts.get("facts", ""), release_url=opts.get("url"),
                            profile=opts.get("profile", False))
-        return self.ps1(args, facts=opts.get("facts", ""), release_url=opts.get("url"))
+        return self.ps1(args, facts=opts.get("facts", ""), release_url=opts.get("url"),
+                        scriptblock=opts.get("scriptblock", False))
 
 
 # ------------------------------------------------------------------------------------------------ the checks
@@ -425,7 +429,29 @@ def check_helper(c: Check, s: Script, helper: Path, version: str, label: str, ta
         c.record(f"CITAR_RELEASE_URL {url} is refused before any request",
                  code == 1 and says in out and seconds < REFUSE_SECONDS and not created(refused),
                  f"exit {code} in {seconds:.1f} s" + ("" if code == 1 and says in out else f"\n{tail(out)}"))
+    if s.mode == "ps1":
+        check_scriptblock(c, s, helper, name)
     return found
+
+
+def check_scriptblock(c: Check, s: Script, helper: Path, name: str) -> None:
+    """4 and 5 again as the documented one-liner runs install.ps1, a script block, where an exit would end the
+    user's PowerShell (closing a console window before its message is read): the script must end, the session
+    go on."""
+    folder = s.work / "bin-scriptblock"
+    code, out, _ = s("worker", bin=folder, url=s.release.url, scriptblock=True)
+    same = (folder / name).is_file() and (folder / name).read_bytes() == helper.read_bytes()
+    went_on = gate_run.SESSION_CONTINUES in out and "an error left the script block" not in out
+    c.record("-Worker as a script block (the one-liner) installs the helper, and the session goes on",
+             code == 0 and same and went_on, f"exit {code}, {'the same file' if same else 'not the helper'}, "
+             + ("the session went on" if went_on else f"\n{tail(out)}"))
+    refused = s.work / "bin-scriptblock-bad"
+    code, out, _ = s("worker", bin=refused, url=s.release.url + "/bad", scriptblock=True)
+    went_on = gate_run.SESSION_CONTINUES in out and "an error left the script block" not in out
+    c.record("a refusal in a script block ends the script, not the session",
+             code == 1 and "SHA-256" in out and went_on and not created(refused),
+             f"exit {code}, bin folder {'made' if created(refused) else 'never made'}, "
+             + ("the session went on" if went_on else f"\n{tail(out)}"))
 
 
 def check_uninstall(c: Check, s: Script) -> None:

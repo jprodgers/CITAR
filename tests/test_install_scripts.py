@@ -163,13 +163,16 @@ class InstallSh(unittest.TestCase):
         (self.tmp / "tmp").mkdir()
 
     def sh(self, *args: str, facts: str = LINUX, url: str | None = None, profile: bool = False,
-           prefix: str | None = None, timeout: float = 120) -> tuple[int, str, float]:
+           prefix: str | None = None, timeout: float = 120, curl_log: Path | None = None) -> tuple[int, str, float]:
         env = {k: v for k, v in os.environ.items() if not k.upper().startswith("CITAR_")}
         env.update(HOME=msys(self.home), TMPDIR=msys(self.tmp / "tmp"), NO_COLOR="1", SHELL="/bin/bash",
                    XDG_CONFIG_HOME=msys(self.home / ".config"), XDG_DATA_HOME=msys(self.home / ".local" / "share"),
                    CITAR_INSTALL_TEST_FACTS=facts)
         if url is not None:
             env["CITAR_RELEASE_URL"] = url
+        if curl_log is not None:
+            env["PATH"] = str(self.stub_curl()) + os.pathsep + env.get("PATH", "")
+            env["STUB_CURL_LOG"] = str(curl_log)
         argv = [BASH, msys(INSTALL_SH), *args, "--prefix", prefix or msys(self.prefix), "--bin-dir", msys(self.bin)]
         if not profile:
             argv.append("--no-profile")
@@ -177,6 +180,17 @@ class InstallSh(unittest.TestCase):
         done = subprocess.run(argv, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout)
         return done.returncode, done.stdout + done.stderr, time.perf_counter() - began
+
+    def stub_curl(self) -> Path:
+        """A folder holding a curl that reaches nothing: it adds its arguments to $STUB_CURL_LOG and fails as an
+        unreachable host does (exit 7). Off Windows only: Git for Windows' bash puts its own folders first on PATH."""
+        folder = self.tmp / "stub-bin"
+        if not folder.is_dir():
+            folder.mkdir()
+            (folder / "curl").write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" >> "$STUB_CURL_LOG"\nexit 7\n',
+                                         encoding="ascii", newline="\n")
+            (folder / "curl").chmod(0o755)
+        return folder
 
     def assertNothingMade(self):
         self.assertFalse(self.prefix.exists(), "the prefix was made")
@@ -359,11 +373,22 @@ class InstallSh(unittest.TestCase):
                 self.assertLess(seconds, 30)
                 self.assertEqual(len(self.downloads.requests), asked)
                 self.assertNothingMade()
-        for url in ("http://localhost:9/x", "http://[::1]:9/x", "http://127.1.2.3:9/x"):
+        for url in ("http://localhost:9/x", "http://[::1]:9/x"):
             with self.subTest(url):
                 code, out, _ = self.sh("--worker", facts=POSIX_PLATFORMS["linux-x64"], url=url)
                 self.assertEqual(code, 1, out)
                 self.assertIn("Could not download", out, "loopback http is allowed: the download itself failed")
+        # 127.1.2.3 is this machine too; but macOS answers only 127.0.0.1 on lo0 (unless an alias is added), where a
+        # connection would wait out curl's timeout and retries. So off Windows a stand-in curl, which reaches
+        # nothing, shows the address let through; Windows (and Linux) refuse a connection to all of 127/8 at once.
+        url = "http://127.1.2.3:9/x"
+        log = None if os.name == "nt" else self.tmp / "curl.log"
+        code, out, seconds = self.sh("--worker", facts=POSIX_PLATFORMS["linux-x64"], url=url, curl_log=log)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"Could not download {url}/latest/download/citar-helper-linux-x64.sha256", out)
+        self.assertLess(seconds, 30)
+        if log is not None:
+            self.assertIn(f"{url}/latest/download/citar-helper-linux-x64.sha256", log.read_text().splitlines())
 
     def test_worker_takes_neither_server_nor_from(self):
         for extra, says in ((("--server",), "choose one"), (("--from", "x.whl"), "choose one")):
@@ -384,12 +409,23 @@ class InstallSh(unittest.TestCase):
             (venv_bin / name).write_text("#!/bin/sh\n")
             os.symlink(venv_bin / name, self.bin / name)
 
+    #: What the helper's updates leave beside it (crates/citar-helper/src/update/files.rs), and this script's own
+    #: half-copied file: the uninstall removes each.
+    LEFTOVERS = ("citar-helper.old", "citar-helper.failed", "citar-helper.old.4242", "citar-helper.failed.17",
+                 ".citar-helper.new", ".citar-helper.install")
+    #: Names like those that are not theirs: they stay.
+    LOOKALIKES = ("citar-helper.old.bak", "citar-helper.failed.x9", "citar-helper.older")
+
+    def leave_leftovers(self) -> None:
+        for name in (*self.LEFTOVERS, *self.LOOKALIKES):
+            (self.bin / name).write_bytes(b"left by an update")
+
     @unittest.skipIf(os.name == "nt", "the game's links are symbolic links (Linux and macOS)")
     def test_the_uninstall_removes_the_prefix_its_links_and_the_helper_and_nothing_else(self):
         self.fake_game()
         code, out, _ = self.sh("--worker", facts=POSIX_PLATFORMS["linux-x64"], url=self.downloads.url)
         self.assertEqual(code, 0, out)
-        (self.bin / "citar-helper.old").write_bytes(b"the binary an update replaced")
+        self.leave_leftovers()
         (self.bin / "other-tool").write_text("not CITAR's")
         elsewhere = self.tmp / "elsewhere"
         elsewhere.mkdir()
@@ -397,10 +433,18 @@ class InstallSh(unittest.TestCase):
         code, out, _ = self.sh("--uninstall")
         self.assertEqual(code, 0, out)
         self.assertFalse(self.prefix.exists())
-        self.assertEqual(sorted(p.name for p in self.bin.iterdir()), ["citar-mcp-elsewhere", "other-tool"])
+        self.assertEqual(sorted(p.name for p in self.bin.iterdir()),
+                         sorted(["citar-mcp-elsewhere", "other-tool", *self.LOOKALIKES]))
         self.assertIn("Your games, settings and results were NOT deleted", out)
         code, out, _ = self.sh("--uninstall")
         self.assertEqual(code, 0, out)
+
+    def test_the_helpers_leftovers_go_without_the_helper_too(self):
+        self.bin.mkdir()
+        self.leave_leftovers()
+        code, out, _ = self.sh("--uninstall", "--worker")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(p.name for p in self.bin.iterdir()), sorted(self.LOOKALIKES))
 
     @unittest.skipIf(os.name == "nt", "the game's links are symbolic links (Linux and macOS)")
     def test_a_link_of_the_same_name_from_elsewhere_stays(self):
@@ -417,6 +461,8 @@ class InstallSh(unittest.TestCase):
         self.fake_game()
         code, out, _ = self.sh("--worker", facts=POSIX_PLATFORMS["linux-x64"], url=self.downloads.url)
         self.assertEqual(code, 0, out)
+        for name in self.LEFTOVERS:
+            (self.bin / name).write_bytes(b"left by an update")
         code, out, _ = self.sh("--uninstall", "--worker")
         self.assertEqual(code, 0, out)
         self.assertTrue(self.prefix.is_dir())
@@ -438,6 +484,29 @@ class InstallSh(unittest.TestCase):
         code, out, _ = self.sh("--uninstall")
         self.assertEqual(code, 0, out)
         self.assertFalse((self.bin / "citar-helper").exists())
+
+    @unittest.skipIf(os.name == "nt", "a bin folder reached through a symbolic link (Linux and macOS)")
+    def test_the_service_guard_sees_a_bin_folder_through_a_link(self):
+        # `service install` names the path the helper found for itself, every link resolved on Linux
+        # (/proc/self/exe): a dotfile manager's ~/.local/bin, a link to its own folder, is named by the folder's path
+        real_bin = self.tmp / "dotfiles-bin"
+        real_bin.mkdir()
+        os.symlink(real_bin, self.bin)
+        code, out, _ = self.sh("--worker", facts=POSIX_PLATFORMS["linux-x64"], url=self.downloads.url)
+        self.assertEqual(code, 0, out)
+        unit = self.home / ".config" / "systemd" / "user" / "citar-helper.service"
+        unit.parent.mkdir(parents=True)
+        named = os.path.realpath(real_bin / "citar-helper")
+        unit.write_text(f'[Service]\nExecStart="{named}" run --service --home "/x"\n')
+        code, out, _ = self.sh("--uninstall", "--worker")
+        self.assertEqual(code, 1, out)
+        self.assertIn("runs as a service", out)
+        self.assertTrue((real_bin / "citar-helper").is_file(), "the helper under an enabled unit was removed")
+        unit.unlink()
+        code, out, _ = self.sh("--uninstall", "--worker")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(list(real_bin.iterdir()), [])
+        self.assertTrue(self.bin.is_symlink(), "the link to the bin folder stays")
 
     def test_a_prefix_that_is_not_citars_is_never_removed(self):
         self.prefix.mkdir()
@@ -478,7 +547,8 @@ class InstallPs1(unittest.TestCase):
         cls.downloads.close()
 
     def setUp(self):
-        self.tmp = scratch("citar-install-ps1-")
+        # resolved, as gate_run passes the folders (a runner's TEMP is written short, C:\Users\RUNNER~1\...)
+        self.tmp = Path(os.path.realpath(scratch("citar-install-ps1-")))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.prefix, self.bin = self.tmp / "prefix", self.tmp / "bin"
         self.path_before = gate_run.user_path()
@@ -486,7 +556,8 @@ class InstallPs1(unittest.TestCase):
     def tearDown(self):
         self.assertEqual(gate_run.user_path(), self.path_before, "the user's PATH changed")
 
-    def ps1(self, *args: str, facts: str = "", url: str | None = None) -> tuple[int, str, float]:
+    def ps1(self, *args: str, facts: str = "", url: str | None = None, scriptblock: bool = False,
+            shell: str = "powershell") -> tuple[int, str, float]:
         extra = []
         if facts:
             extra.append(f"CITAR_INSTALL_TEST_FACTS={facts}")
@@ -494,7 +565,8 @@ class InstallPs1(unittest.TestCase):
             extra.append(f"CITAR_RELEASE_URL={url}")
         began = time.perf_counter()
         done = gate_run.run_install_ps1([*args, "-Prefix", str(self.prefix), "-BinDir", str(self.bin), "-NoPath"],
-                                        self.tmp, extra, timeout=300, capture=True)
+                                        self.tmp, extra, timeout=300, capture=True, shell=shell,
+                                        as_scriptblock=scriptblock)
         return done.returncode, (done.stdout or "") + (done.stderr or ""), time.perf_counter() - began
 
     def assertNothingMade(self):
@@ -585,14 +657,56 @@ class InstallPs1(unittest.TestCase):
         for name in ("citar", "citar-admin"):
             (self.bin / f"{name}.cmd").write_text(f'@echo off\r\n"{scripts / name}.exe" %*', encoding="ascii")
         (self.bin / "citar-mcp.cmd").write_text('@echo off\r\n"C:\\elsewhere\\citar-mcp.exe" %*', encoding="ascii")
-        (self.bin / "citar-helper.exe.old").write_bytes(b"the binary an update replaced")
+        # what the helper's updates leave beside it (crates/citar-helper/src/update/files.rs), and the script's own
+        # half-copied file; then names like those that are not theirs
+        leftovers = ("citar-helper.exe.old", "citar-helper.exe.failed", "citar-helper.exe.old.4242",
+                     "citar-helper.exe.failed.17", ".citar-helper.exe.new", ".citar-helper.install")
+        lookalikes = ("citar-helper.exe.old.bak", "citar-helper.exe.failed.x9", "citar-helper.exe.older")
+        for name in (*leftovers, *lookalikes):
+            (self.bin / name).write_bytes(b"left by an update")
         (self.bin / "other-tool.exe").write_bytes(b"not CITAR's")
         code, out, _ = self.ps1("-Uninstall")
         self.assertEqual(code, 0, out)
         self.assertFalse(self.prefix.exists())
-        self.assertEqual(sorted(p.name for p in self.bin.iterdir()), ["citar-mcp.cmd", "other-tool.exe"])
+        self.assertEqual(sorted(p.name for p in self.bin.iterdir()),
+                         sorted(["citar-mcp.cmd", "other-tool.exe", *lookalikes]))
         code, out, _ = self.ps1("-Uninstall")
         self.assertEqual(code, 0, out)
+        # the leftovers alone (no helper) go too: else the bin folder, and its PATH entry, would stay for good
+        for name in (*leftovers, *lookalikes):
+            (self.bin / name).unlink(missing_ok=True)
+        for name in leftovers:
+            (self.bin / name).write_bytes(b"left by an update")
+        code, out, _ = self.ps1("-Uninstall", "-Worker")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(p.name for p in self.bin.iterdir()), ["citar-mcp.cmd", "other-tool.exe"])
+
+    def test_as_a_script_block_it_ends_without_ending_the_session(self):
+        """The documented one-liner runs the script as a script block (& ([scriptblock]::Create((iwr ...))) ARGS),
+        where an exit would end the user's PowerShell, closing a console window before its message is read."""
+        name = "citar-helper-windows-x64.exe"
+        for shell in [s for s in ("powershell", "pwsh") if shutil.which(s)]:
+            with self.subTest(shell):
+                cases = (("a refusal", ("-Version", "bad", "-NoSetup"), None, 1, "is not a CITAR release"),
+                         ("a refusal deep in the download", ("-Worker",), self.downloads.url + "/bad", 1,
+                          "Nothing was installed"),
+                         ("the helper installed", ("-Worker",), self.downloads.url, 0, "service install"),
+                         ("the uninstall", ("-Uninstall", "-Worker"), None, 0, "were NOT deleted"))
+                for what, args, url, want, says in cases:
+                    with self.subTest(what):
+                        code, out, _ = self.ps1(*args, url=url, scriptblock=True, shell=shell)
+                        self.assertEqual(code, want, out)
+                        self.assertIn(says, " ".join(out.split()))
+                        self.assertIn(f"{gate_run.SESSION_CONTINUES} (install.ps1 as a script block, status {want})",
+                                      out)
+                        self.assertNotIn("an error left the script block", out)
+                        self.assertNotIn("CITAR's installer stopped", out, "the stop was shown as an error")
+                        if what == "the helper installed":
+                            self.assertEqual((self.bin / "citar-helper.exe").read_bytes(), stand_in(name))
+                        elif what.startswith("a refusal"):
+                            self.assertNothingMade()
+                self.assertEqual(list(self.bin.iterdir()), [], "the uninstall left the bin folder empty")
+                self.bin.rmdir()
 
     def test_a_prefix_that_is_not_citars_is_never_removed(self):
         self.prefix.mkdir()
@@ -619,7 +733,8 @@ class GateRunInstallPs1(unittest.TestCase):
     """What gate_run.py install-ps1 refuses (read on every OS; it runs install.ps1 on Windows only)."""
 
     def setUp(self):
-        self.under = scratch("citar-gate-ps1-")
+        # resolved, as gate_run passes the folders (a runner's TEMP is written short, C:\Users\RUNNER~1\...)
+        self.under = Path(os.path.realpath(scratch("citar-gate-ps1-")))
         self.addCleanup(shutil.rmtree, self.under, ignore_errors=True)
         self.prefix, self.bin = str(self.under / "p"), str(self.under / "b")
 
@@ -653,6 +768,56 @@ class GateRunInstallPs1(unittest.TestCase):
         self.refused("-Prefix", outside, "-BinDir", self.bin, "-NoPath", "-NoSetup", says="is not inside")
         self.refused("-Prefix", self.prefix, "-BinDir", outside, "-NoPath", "-NoSetup", says="is not inside")
         self.refused("-Prefix", str(self.under), "-BinDir", self.bin, "-NoPath", "-NoSetup", says="is not inside")
+
+    def test_a_folder_powershell_reads_its_own_way_is_refused(self):
+        # install.ps1 resolves -Prefix and -BinDir through PowerShell (GetUnresolvedProviderPathFromPSPath), which
+        # expands a leading ~ to the real home folder and takes a provider's path or a drive of its own; Python reads
+        # each as a folder under its working folder, which here is inside --under
+        old = os.getcwd()
+        os.chdir(self.under)
+        self.addCleanup(os.chdir, old)
+        cases = [("~", "a leading ~"), (os.path.join("~", "p"), "a leading ~"),
+                 ("FileSystem::" + self.prefix, "a provider's path"), (os.path.join("Temp:", "p"), "a drive of its own"),
+                 ("p", "is not an absolute path")]
+        if os.name == "nt":
+            cases += [(self.prefix[2:], "with its drive letter"),           # \dev\...: the current drive's root
+                      (self.prefix[:2] + self.prefix[3:], "with its drive letter")]  # C:dev\...: that drive's folder
+        for value, says in cases:
+            with self.subTest(value):
+                self.refused("-Prefix", value, "-BinDir", self.bin, "-NoPath", "-Uninstall", says=says)
+                self.refused("-Prefix", self.prefix, "-BinDir", value, "-NoPath", "-Uninstall", says=says)
+
+    def test_powershell_is_given_the_folders_as_checked(self):
+        given = self.check("-nopath", "-prefix", os.path.join(self.prefix, "x", ".."), "-BINDIR", self.bin,
+                           "-NoSetup", "-From", "w.whl")
+        self.assertEqual(gate_run.ps1_arguments(given),
+                         ["-NoPath", "-Prefix", self.prefix, "-BinDir", self.bin, "-NoSetup", "-From", "w.whl"])
+        given = self.check("-Prefix", self.prefix, "-BinDir", self.bin, "-NoPath", "-NoSetup", "-From",
+                           "C:\\it's $here\u2019\\w.whl")
+        command = gate_run.scriptblock_command(given)
+        self.assertIn("& ([scriptblock]::Create([IO.File]::ReadAllText("
+                      f"{gate_run.ps1_literal(str(gate_run.INSTALL_PS1))}))) -Prefix '{self.prefix}' -BinDir "
+                      f"'{self.bin}' -NoPath -NoSetup -From 'C:\\it''s $here\u2019\u2019\\w.whl'", command)
+        self.assertIn(gate_run.SESSION_CONTINUES, command)
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "install.ps1 runs on Windows")
+    def test_the_run_passes_powershell_what_was_checked(self):
+        class Started(Exception):
+            pass
+
+        for scriptblock in (False, True):
+            with self.subTest(scriptblock=scriptblock), mock.patch.object(gate_run, "start",
+                                                                          side_effect=Started) as start:
+                with self.assertRaises(Started):
+                    gate_run.run_install_ps1(["-Prefix", os.path.join(self.prefix, "x", ".."), "-BinDir", self.bin,
+                                              "-NoPath", "-Uninstall"], self.under, [], as_scriptblock=scriptblock)
+                argv = start.call_args.args[0]
+                if scriptblock:
+                    self.assertEqual(argv[-2], "-Command")
+                    self.assertIn(f"-Prefix '{self.prefix}' -BinDir '{self.bin}' -NoPath -Uninstall", argv[-1])
+                else:
+                    self.assertEqual(argv[-8:], ["-File", str(gate_run.INSTALL_PS1), "-Prefix", self.prefix,
+                                                 "-BinDir", self.bin, "-NoPath", "-Uninstall"])
 
     def test_abbreviations_unknown_parameters_and_bare_words(self):
         self.refused("-Pre", self.prefix, "-BinDir", self.bin, "-NoPath", "-NoSetup", says="write -prefix in full")
@@ -750,6 +915,21 @@ class TheScripts(unittest.TestCase):
         self.assertIn('at_least "$macos" 11', self.sh)
         self.assertIn('$plat -ne "win-amd64"', self.ps1)
         self.assertIn("win_amd64", tags)
+
+    def test_install_ps1_exits_only_when_run_as_a_file(self):
+        """Run as a script block (its one-liners), an exit would end the user's PowerShell: every exit is a file's."""
+        exits = [line.split("#", 1)[0].strip() for line in self.ps1.splitlines()]
+        exits = [line for line in exits if re.search(r"\bexit\b", line)]
+        self.assertEqual(len(exits), 5, exits)
+        for line in exits:
+            self.assertRegex(line, r"^if \(\$AsFile\) \{ exit [^{}]+ \}$")
+        # the one-liners are the script-block form, which takes parameters and leaves the session's settings alone
+        one_liner = ("& ([scriptblock]::Create((iwr -useb https://raw.githubusercontent.com/jprodgers/CITAR/main/"
+                     "install.ps1)))")
+        self.assertIn(one_liner + "\n", self.ps1)
+        self.assertIn(one_liner + " -Worker\n", self.ps1)
+        self.assertIn("`& ([scriptblock]::Create((iwr …)))`", (ROOT / "packaging" / "README.md").read_text(
+            encoding="utf-8"))
 
     def test_the_test_hook_is_named_alike(self):
         for text in (self.sh, self.ps1):

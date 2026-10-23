@@ -6,7 +6,7 @@ How each install route is published, and what has to happen for a release to rea
 |---|---|---|---|
 | `pip install citar` | [`../pyproject.toml`](../pyproject.toml) | `.github/workflows/release.yml` | PyPI trusted publishing |
 | `curl … \| bash` | [`../install.sh`](../install.sh) | the file on `main` | nothing — it installs from PyPI |
-| `iwr … \| iex` | [`../install.ps1`](../install.ps1) | the file on `main` | nothing |
+| `& ([scriptblock]::Create((iwr …)))` | [`../install.ps1`](../install.ps1) | the file on `main` | nothing |
 | Windows installer | [`../installer/`](../installer/) | release workflow | a Windows runner |
 | Docker image | [`../Dockerfile`](../Dockerfile) | release workflow | GHCR (no secret; `GITHUB_TOKEN` is enough) |
 | Homebrew | [`homebrew/citar.rb`](homebrew/citar.rb) | you, once per release | a `homebrew-citar` tap repository |
