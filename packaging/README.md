@@ -1,74 +1,128 @@
 # Packaging
 
-How each install route is published, and what has to happen for a release to reach it.
+How each install route is built and published, and what a release needs for it to reach each one.
 
-| Route | Lives in | Published by | Needs |
+| Route | What it installs | Built and checked by | Published by |
 |---|---|---|---|
-| `pip install citar` | [`../pyproject.toml`](../pyproject.toml) | `.github/workflows/release.yml` | PyPI trusted publishing |
-| `curl … \| bash` | [`../install.sh`](../install.sh) | the file on `main` | nothing — it installs from PyPI |
-| `& ([scriptblock]::Create((iwr …)))` | [`../install.ps1`](../install.ps1) | the file on `main` | nothing |
-| Windows installer | [`../installer/`](../installer/) | release workflow | a Windows runner |
-| Docker image | [`../Dockerfile`](../Dockerfile) | release workflow | GHCR (no secret; `GITHUB_TOKEN` is enough) |
-| Homebrew | [`homebrew/citar.rb`](homebrew/citar.rb) | you, once per release | a `homebrew-citar` tap repository |
-| Scoop | [`scoop/citar.json`](scoop/citar.json) | you, once per release | a `scoop-citar` bucket repository |
-| winget | [`winget/`](winget/) | you, once per release | a pull request to `microsoft/winget-pkgs` |
-| The CITAR helper's five binaries, and their signed manifest | `crates/citar-helper` | release workflow (`build-helper`, `sign-helper-manifest`) | the `helper-signing` environment's key, for the manifest ([below](#the-citar-helper)) |
+| `pip install citar`, `pipx install citar` | the game, from the wheel for the machine (Windows x64, macOS 11+ on Apple silicon and Intel, Linux x64 and arm64 with glibc 2.28+; Python 3.11+); elsewhere pip builds the sdist with a Rust toolchain | `package.yml`: `wheels`, `sdist`, `sdist-build` | `release.yml`, PyPI trusted publishing |
+| `curl … \| bash` | the game from its wheel ([`../install.sh`](../install.sh)); `--worker`, the self-updating helper | `package.yml`: `install` | the file on `main` |
+| `& ([scriptblock]::Create((iwr …)))` | the same on Windows ([`../install.ps1`](../install.ps1)); `-Worker`, the helper | `package.yml`: `install` | the file on `main` |
+| Windows installer and zip | the game, bundled ([`../installer/`](../installer/)): `CITAR-V-setup.exe`, per user, and the portable `CITAR-V-windows-x64.zip` | `package.yml`: `windows` | `release.yml`, on the GitHub release |
+| The server image | `ghcr.io/jprodgers/citar:V`, linux/amd64 and linux/arm64 ([`../Dockerfile`](../Dockerfile)) | `package.yml`: `image` | `release.yml` (GHCR; `GITHUB_TOKEN` is enough) |
+| The CITAR helper | five self-updating binaries under names that never change, and their manifest | `package.yml`: `helpers`, `helper-manifest` | `release.yml`, on the GitHub release ([below](#the-citar-helper)) |
+| Homebrew | `citar-helper`, the packaged helper (macOS arm64 and x64, Linux x64 and arm64) | `package.yml`: `managers` | you, once per release: the tap [jprodgers/homebrew-citar](https://github.com/jprodgers/homebrew-citar) |
+| Scoop | `citar` (the game's zip) and `citar-helper` (the packaged helper) | `package.yml`: `managers` | you, once per release: the bucket [jprodgers/scoop-citar](https://github.com/jprodgers/scoop-citar) |
+| winget | `JimmieRodgers.CITAR` (the game's installer) and `JimmieRodgers.CITAR.Helper` (the packaged helper) | `package.yml`: `managers` | you, once per release: a pull request to `microsoft/winget-pkgs` |
 
-The first five are automatic on a tag. The last three need a repository or a pull request outside
-this one, which is why they are checked in here as files you copy rather than as workflow steps
-that would fail on a fork.
+Everything a release ships is built, installed and tested on every pull request by `.github/workflows/package.yml`
+(design/phase5-release.md P5.3 to P5.10); `release.yml` builds nothing, and publishes what `package.yml` assembled. The
+last three routes need a repository outside this one, or Microsoft's review, which is why their manifests are written
+here as files to copy rather than pushed by a workflow.
 
-## The order things have to happen in
+## The order things happen in
 
-A release is not a single event. Each of these depends on the one before it:
+1. **`package.yml`** builds every file of the release, each on its own platform, and tests each one where it was
+   built. Its `assemble` job then downloads them by name into one folder, which must be exactly the release's list
+   (`python scripts/release.py assets V`), and holds every build to one: one version, one label, one build id and
+   one jobs build across the wheels, the helpers, the bundle, both images and the install scripts' runs, and one
+   result hash for the seeded lab job every wheel played (`scripts/ci/assemble_release.py`). It writes `SHA256SUMS`,
+   the release notes, the attestation's subject list and the package managers' manifests, and uploads three
+   artifacts: `pkg-release-assets` (every file), `pkg-python-dists` (the wheels and the sdist) and
+   `pkg-release-preview` (the notes, the sums, the subjects, the asset list with sizes, the one build, the
+   manifests). Its `managers` job installs each package manager's packages from a loopback copy of that folder.
+2. **`release.yml`**, on a tag, signs the helper manifest, attests every file, publishes PyPI and the image, then the
+   GitHub release with every file, published last and as a whole (design/phase5-release.md P5.11).
+3. **Homebrew, Scoop, winget**: their manifests carry the SHA-256 of files that exist only once step 2 is done.
+   Copy them from the `pkg-release-preview` artifact, or write them again from the published release (below).
 
-1. **Tag and push.** `release.yml` builds the wheel, the installer and the image.
-2. **PyPI.** Everything else installs *from* PyPI, so nothing below works until this has landed.
-3. **GitHub release.** The installer `.exe` and its checksum are attached here; Scoop and winget
-   point at those URLs.
-4. **Homebrew, Scoop, winget.** Each needs the SHA-256 of a file that did not exist until step 3.
+## The manifests: templates, and `release_checksums.py`
 
-`scripts/release_checksums.py` prints the hashes and the edited manifests once the release assets
-are up, so this is copy and paste rather than arithmetic.
+Each manifest is a template here, `packaging/**/*.in`, filled in from a release's files by
+[`scripts/release_checksums.py`](../scripts/release_checksums.py) in this vocabulary: `{{version}}`, `{{date}}` (the
+date of the version's CHANGELOG section), `{{url:NAME}}`, `{{sha256:NAME}}` and `{{SHA256:NAME}}` (upper case, as
+winget writes it), where `NAME` is one of the release's files. A name that is not one of them, or a placeholder it
+does not know, is refused with the template's line, so no manifest can point at a file a release does not have. None
+names PyPI: the game's routes install from the release's own files.
+
+| Template | Becomes | Copied to |
+|---|---|---|
+| `homebrew/citar-helper.rb.in` | `homebrew/citar-helper.rb` | the tap's `Formula/citar-helper.rb` |
+| `scoop/citar.json.in`, `scoop/citar-helper.json.in` | `scoop/citar.json`, `scoop/citar-helper.json` | the bucket's `bucket/` |
+| `winget/game/*.yaml.in` | `winget/game/`, three files | `wingetcreate submit` |
+| `winget/helper/*.yaml.in` | `winget/helper/`, three files | `wingetcreate submit` |
+
+```bash
+python scripts/release_checksums.py 0.1.6 --write                       # from the published release's SHA256SUMS
+python scripts/release_checksums.py 0.1.6 --from-dir release --out m    # from built files (CI's assemble job)
+python scripts/release_checksums.py 0.1.6 --from-dir release --base-url http://127.0.0.1:8123/ --out m
+python scripts/release_checksums.py --verify 0.1.6                      # the published release and PyPI's files
+```
+
+- `--write` writes the manifests beside their templates for review; git ignores them (one release's numbers, never
+  source). `--out DIR` writes them elsewhere, in this folder's layout.
+- `--from-dir DIR` hashes the files in DIR; without it the hashes come from the published release's `SHA256SUMS`.
+- `--base-url` points the manifests at another copy of the release (https, or http to a loopback address only):
+  the `managers` job's loopback server.
+- `--verify V` downloads the release's `SHA256SUMS`, which must list exactly the release's files, then every file and
+  its `.sha256`, each held to the sums, and checks that PyPI holds exactly the release's wheels and sdist with the same
+  hashes. Every problem names its file. Its dry-run form, `--base-url http://127.0.0.1:<port>` and `--pypi-json FILE`
+  (`--from-dir DIR --write-pypi-json FILE` writes one from the built wheels and sdist), is rehearsed before a release.
 
 ## Homebrew
 
-A personal tap, not homebrew-core. Core requires every Python dependency to be listed as a pinned
-`resource` block, which for CITAR is around forty of them, regenerated on every dependency change —
-worth doing if CITAR is ever submitted to core, and not worth doing before anyone has asked for it.
+A personal tap, not homebrew-core, holding one formula: **`citar-helper`**, the helper's packaged build, for macOS on
+Apple silicon and Intel and Linux on x64 and arm64 (one archive and SHA-256 under each of the formula's four
+`on_macos`/`on_linux` × `on_arm`/`on_intel` blocks). It installs `citar-helper` and its notices (`LICENSE`,
+`NOTICE.md`, `THIRD-PARTY-LICENSES.txt`, into the formula's `doc`), and its `test` runs `--version` and
+`--self-test`. The game itself installs from its wheels (`pipx install citar`, or `install.sh`), so 0.1.5's `citar`
+formula, which built the sdist, is gone; the tap's `Formula/citar.rb` is removed when `citar-helper.rb` is added, and
+`brew uninstall citar` removes an old copy.
 
-The tap exists: [jprodgers/homebrew-citar](https://github.com/jprodgers/homebrew-citar). Each
-release, after `release_checksums.py` has filled in the version and hash:
+A packaged build never updates itself (`brew upgrade citar-helper` does), and its service runs through Homebrew:
 
 ```bash
-cp packaging/homebrew/citar.rb ../homebrew-citar/Formula/citar.rb
-cd ../homebrew-citar && git commit -am "CITAR X.Y.Z" && git push
+brew install jprodgers/citar/citar-helper
+citar-helper setup                      # the server's address and a token
+brew services start citar-helper        # runs `citar-helper run --service` at login, through opt_bin
 ```
 
-Then `brew install jprodgers/citar/citar`.
+`brew services` points at Homebrew's `opt` path, which survives upgrades; `citar-helper service install` would
+record this version's Cellar path, which the next `brew upgrade` removes. The formula's caveats say so.
+
+**Checked on every pull request** (`package.yml`'s `managers`, on macOS arm64, macOS x64 and Linux x64): `brew audit
+--strict` and `brew style` on the formula with the release's real URLs (offline: the files are not published yet),
+then `brew install` and `brew test` on a copy pointed at a loopback server holding the release, each in a tap of its
+own (`brew tap-new --no-git citar/dryrun`). Linux arm64's block is held by `scripts/ci/check_managers.py structure`.
 
 ## Scoop
 
-A bucket is a repository with a `bucket/` directory of JSON manifests. The manifest points at the
-GitHub release asset, so it needs the release to exist first.
+A bucket is a repository with a `bucket/` folder of JSON manifests:
+[jprodgers/scoop-citar](https://github.com/jprodgers/scoop-citar). It holds two:
 
-The bucket exists: [jprodgers/scoop-citar](https://github.com/jprodgers/scoop-citar).
+- **`citar`**: the game's portable zip, `CITAR-V-windows-x64.zip` (its `CITAR/` folder; `citar` and `citar-play` on
+  PATH, a Start menu shortcut);
+- **`citar-helper`**: the helper's packaged build, `citar-helper-V-windows-x64.zip` (`citar-helper` on PATH), which
+  Scoop updates (`scoop update citar-helper`) and which never updates itself.
 
 ```bash
-cp packaging/scoop/citar.json ../scoop-citar/bucket/citar.json
-cd ../scoop-citar && git commit -am "CITAR X.Y.Z" && git push
+scoop bucket add citar https://github.com/jprodgers/scoop-citar
+scoop install citar citar-helper
 ```
 
-The manifest carries `checkver` and `autoupdate` blocks, so Scoop's own tooling can raise the
-version from a new GitHub release without either file being edited by hand.
-
-Then `scoop bucket add citar https://github.com/jprodgers/scoop-citar && scoop install citar`.
+Each carries `checkver` and `autoupdate` blocks, so Scoop's own tooling can raise the version from a new GitHub
+release (each file's `.sha256` beside it is its hash). **Checked on every pull request** (`managers` on Windows):
+Scoop installed by its installer (pinned to a commit and its SHA-256, with `-RunAsAdmin`, since a runner's shell is
+elevated), then `scoop install` of both manifests from a loopback copy of the release, `citar --version`,
+`citar-helper --version`, and `scoop uninstall`.
 
 ## winget
 
-winget manifests live in Microsoft's own repository, and a submission is a pull request that a
-validation pipeline checks. The three files here are the complete manifest set for one version, so
-`wingetcreate` has nothing to generate and only has to submit them.
+winget's manifests live in Microsoft's repository, and a submission is a pull request that a validation pipeline
+checks. Two packages, each three files (version, installer, default locale):
+
+- **`JimmieRodgers.CITAR`**: the game's Inno Setup installer, per user (no elevation);
+- **`JimmieRodgers.CITAR.Helper`**: the helper's packaged build in its zip, installed as a portable command
+  (`NestedInstallerType: portable`, the command alias `citar-helper`), per user; winget upgrades it.
 
 On a Windows machine, once:
 
@@ -77,101 +131,76 @@ winget install Microsoft.WingetCreate
 wingetcreate token --store
 ```
 
-`token --store` opens a GitHub sign-in. It needs a **classic** personal access token with the
-`public_repo` scope - fine-grained tokens are not supported - and it creates the fork of
-`microsoft/winget-pkgs` that the pull request comes from.
-
-Validate before submitting, every time:
+`token --store` opens a GitHub sign-in. It needs a **classic** personal access token with the `public_repo` scope
+(fine-grained tokens are not supported), and it creates the fork of `microsoft/winget-pkgs` that the pull request
+comes from. Then, per release, for each package:
 
 ```powershell
-winget validate --manifest packaging\winget
+winget validate --manifest packaging\winget\game
+wingetcreate submit --prtitle "New package: JimmieRodgers.CITAR 0.1.6" packaging\winget\game
+winget validate --manifest packaging\winget\helper
+wingetcreate submit --prtitle "New package: JimmieRodgers.CITAR.Helper 0.1.6" packaging\winget\helper
 ```
 
-This is not optional politeness. `wingetcreate submit` validates too, but when it fails it
-prints `ERROR: Path does not exist` underneath the real errors, which sends you looking at the
-path instead of at the manifests. `winget validate` says what is actually wrong.
-
-Two things it catches that nothing else does:
+Validate every time. `wingetcreate submit` validates too, but when it fails it prints `ERROR: Path does not exist`
+underneath the real errors, which sends you looking at the path instead of at the manifests. Two things only winget's
+own validator catches, which `scripts/ci/check_managers.py structure` now checks as well:
 
 * **The schema header.** Every file must *begin* with its
-  `# yaml-language-server: $schema=https://aka.ms/winget-manifest.<type>.<version>.schema.json`
-  line. Without it the whole set is rejected with "Schema header not found", however correct
-  the contents are.
-* **Field names.** The published JSON schemas do not set `additionalProperties: false`, so a
-  misspelled or renamed field validates happily against them and is silently dropped. It was
-  `Documentations`, not `Documentation`, and only winget's own validator said so.
+  `# yaml-language-server: $schema=https://aka.ms/winget-manifest.<type>.<version>.schema.json` line. Without it the
+  whole set is rejected with "Schema header not found", however correct the contents are.
+* **Field names.** The published JSON schemas do not set `additionalProperties: false`, so a misspelled or renamed
+  field validates against them and is silently dropped. It is `Documentations`, not `Documentation`.
 
-Then, per release:
+`submit` is the command for a package's first version; `wingetcreate update <id>` is for later ones, and fails until
+the package is in the repository. The first submission is reviewed by a person and can take days; later ones are
+usually automatic. A package identifier is permanent once accepted. `ManifestVersion` is the schema the files are
+written against (1.12.0, what current submissions use), not CITAR's version: check what new submissions in
+`winget-pkgs` use before a release, and move the templates' headers and `ManifestVersion` together.
 
-```powershell
-wingetcreate submit --prtitle "New package: JimmieRodgers.CITAR 0.1.0" packaging\winget
-```
-
-`submit` is the right command for a first version. `wingetcreate update JimmieRodgers.CITAR` is for
-later ones and only works once the package is already in the repository - used too early it fails,
-because there is nothing there to update.
-
-The first submission is reviewed by a person and can take a few days; later versions are usually
-automatic. The package identifier is permanent once accepted, so `JimmieRodgers.CITAR` is a
-decision rather than a placeholder.
-
-`ManifestVersion` is the schema version the files are written against, not CITAR's version. Check
-what current submissions in `winget-pkgs` use before a release and match it: an old schema is
-accepted for a while, and then one day is not.
+**Checked on every pull request** (`managers` on Windows): every file against the JSON schema its header names
+(`jsonschema`; the gate), then `winget validate` and `winget install --manifest` from a loopback copy of the release
+where the runner has winget, and a notice saying they were not run where it has not.
 
 ## The CITAR helper
 
-The helper (`crates/citar-helper`, design/phase4-helper.md P4.10) is one Rust binary per target, attached to every
-release under five names that never change, so the server's download links (`releases/latest/download/<name>`)
-always fetch the newest:
+The helper (`crates/citar-helper`, design/phase4-helper.md P4.10) is one Rust binary per target, built twice on each
+target's own runner by `package.yml`'s `helpers` job (the Linux ones in the manylinux_2_28 containers, so they need
+glibc 2.28 at most, as the game does):
 
-| Target | Runner | Asset |
-|---|---|---|
-| `x86_64-pc-windows-msvc` | `windows-latest` | `citar-helper-windows-x64.exe` |
-| `aarch64-apple-darwin` | `macos-15` | `citar-helper-macos-arm64` |
-| `x86_64-apple-darwin` | `macos-15-intel` | `citar-helper-macos-x64` |
-| `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | `citar-helper-linux-x64` |
-| `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` | `citar-helper-linux-arm64` |
+| Target | Runner | Self-updating (release asset) | Packaged (Homebrew, Scoop, winget) |
+|---|---|---|---|
+| `x86_64-pc-windows-msvc` | `windows-latest` | `citar-helper-windows-x64.exe` | `citar-helper-V-windows-x64.zip` |
+| `aarch64-apple-darwin` | `macos-15` | `citar-helper-macos-arm64` | `citar-helper-V-macos-arm64.tar.gz` |
+| `x86_64-apple-darwin` | `macos-15-intel` | `citar-helper-macos-x64` | `citar-helper-V-macos-x64.tar.gz` |
+| `x86_64-unknown-linux-gnu` | `ubuntu-24.04` | `citar-helper-linux-x64` | `citar-helper-V-linux-x64.tar.gz` |
+| `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | `citar-helper-linux-arm64` | `citar-helper-V-linux-arm64.tar.gz` |
 
-`release.yml`'s `build-helper` builds them (`cargo build --release --locked -p citar-helper --target ...`, no
-features), runs each once with `--version` (which must name its target) and `--self-test`, and writes each one's
-`.sha256` beside it. The Linux builds are glibc-based on Ubuntu 22.04, so they run on older distributions, and TLS uses
-the OS's own trust store (checked on Fedora in the job). `citar/web/tests/helper.test.mjs` holds the five names equal
-in the download card (`citar/web/js/helperrules.js`), this matrix, `helper.yml`'s artifact matrix and `cargo xtask
-helper-manifest`'s table. `helper.yml` builds the same five on every change to the helper, runs its tests there, and
-installs the builds as services on the runners (the Windows service, the Run value, a systemd user unit, the
-LaunchAgent).
-
-Then `sign-helper-manifest` writes `citar-helper-manifest.json` over the five (`cargo xtask helper-manifest`) and signs
-it with the key the protected `helper-signing` environment holds (`cargo xtask sign-manifest --key-env
-CITAR_UPDATE_SIGNING_KEY`): the manifest and its `.sig` are attached beside the binaries, and helpers update themselves
-from them. Without the secret the job signs nothing and says so; the owner's one-time setup is
-[WORKERS.md, "Signing helper updates"](../docs/server/WORKERS.md#signing-helper-updates-the-owners-one-time-setup).
-
-**What Phase 5 does for the helper** (the release workflow's helper jobs stay behind its "Release packaging is Phase
-5" gate until then):
-
-- **The gate removed**, and a release dry run (`workflow_dispatch`) before the first tag that ships the helper.
-- **The key:** the owner's public key in `crates/citar-jobs/update-keys.pub` (one line, two slots for rotation) in a
-  release commit, and the secret in `helper-signing`; until then every helper reports updates unavailable.
-- **The Homebrew tap ships only the helper** (R4 of the plan: the prebuilt binaries for macOS arm64 and x64 and Linux,
-  not the whole game), and Scoop and winget gain a helper package. Each of these is built with the `packaged`
-  feature: `updates` defaults to `notify` and `auto` is refused ("update through your package manager"), so the helper
-  never fights the package manager over its own binary. The GitHub release assets are built without it.
-- **Install scripts:** `install.sh --worker` and `install.ps1 -Worker`, which only say where to download the helper
-  today, download it.
-- **Attestations** of the built binaries, and code signing and notarisation if ever (below): the macOS binaries are
-  not notarised, so a download needs `xattr -d com.apple.quarantine`.
+- **The self-updating builds** keep names that never change, so the server's download links
+  (`releases/latest/download/<name>`) always fetch the newest; `install.sh --worker` and `install.ps1 -Worker`
+  download them with their `.sha256`. They update themselves from the signed `citar-helper-manifest.json`, which
+  `package.yml`'s `helper-manifest` job writes over the five and signs there only with a throwaway key, to prove the
+  path. The real signature is a tag-only job of `release.yml`'s, in the protected `helper-signing` environment, with
+  the owner's key (design/phase5-release.md P5.4.2 and P5.11); until the public key is in
+  `crates/citar-jobs/update-keys.pub`, every helper reports updates unavailable. The owner's one-time setup is
+  [WORKERS.md, "Signing helper updates"](../docs/server/WORKERS.md#signing-helper-updates-the-owners-one-time-setup).
+- **The packaged builds** (`--features packaged`) are in versioned archives with the notices beside the binary:
+  `updates` defaults to `notify` and `auto` is refused ("update it through your package manager"), so the helper
+  never fights its package manager over its own binary.
+- `citar/web/tests/helper.test.mjs` holds the five names equal in the download card, `package.yml`'s `helpers`
+  matrix, `helper.yml`'s artifact matrix and `cargo xtask helper-manifest`'s table.
+- The macOS binaries are not notarised, so a download needs `xattr -d com.apple.quarantine`; Homebrew's install does
+  not.
 
 ## Code signing
 
-None of the Windows artifacts are signed, because a certificate costs money every year and a
-personal one now needs a hardware token. What that means in practice:
+None of the Windows files are signed, because a certificate costs money every year and a personal one now needs a
+hardware token. What that means in practice:
 
 - SmartScreen shows "Windows protected your PC" on the installer until enough people have run it.
 - Some antivirus products flag PyInstaller output on sight, regardless of contents.
 
-The honest mitigations, all of which this release does: publish the SHA-256 of every asset, build
-the artifacts in a public CI run whose log anyone can read, and tell people plainly in the README
-what they will see. If CITAR ever gets a certificate, the signing step goes in `release.yml` between
-the build and the upload.
+The honest mitigations, all of which a release does: the SHA-256 of every file (`SHA256SUMS`, and a `.sha256` beside
+each), build provenance for every file (`gh attestation verify <file> --repo jprodgers/CITAR`), every file built in
+a public CI run whose log anyone can read, and the README telling people plainly what they will see. If CITAR ever
+gets a certificate, the signing step goes in `package.yml`'s `windows` job, between the bundle and the installer.
