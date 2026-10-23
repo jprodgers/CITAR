@@ -38,6 +38,8 @@ Dockerfile  text eol=lf
 *.rs        text eol=lf
 *.tsv       text eol=lf
 *.sha256    text eol=lf
+# The package managers' templates (scripts/release_checksums.py): the manifests they become are JSON, YAML and Ruby
+*.in        text eol=lf
 # The helper's service plans (crates/citar-helper/src/service), compared byte for byte on every OS
 crates/citar-helper/tests/data/service/*.txt text eol=lf
 Cargo.lock  text eol=lf

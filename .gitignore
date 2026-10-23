@@ -67,6 +67,11 @@ installer/build/
 *.spec.bak
 site/
 wiki/.git/
+# The package managers' manifests `scripts/release_checksums.py V --write` writes beside their templates
+# (packaging/**/*.in) for review: one release's numbers, never source (packaging/README.md).
+packaging/scoop/*.json
+packaging/winget/*/*.yaml
+packaging/homebrew/*.rb
 
 # --------------------------------------------------------------------------- editors / OS
 .vscode/

@@ -1,0 +1,33 @@
+{
+    "version": "{{version}}",
+    "description": "Lend this machine's model endpoint, and its spare CPU if you choose, to a CITAR server",
+    "homepage": "https://github.com/jprodgers/CITAR/blob/main/docs/server/WORKERS.md",
+    "license": "MPL-2.0",
+    "notes": [
+        "Run 'citar-helper setup' to connect it to a CITAR server, with a token from whoever runs the server.",
+        "Scoop updates this helper ('scoop update citar-helper'); it never updates itself.",
+        "'citar-helper service install' records the path of this version's folder: run it again after an update.",
+        "",
+        "Its settings and machine key are kept in %LOCALAPPDATA%\\CITAR and are not removed when you uninstall it."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "{{url:citar-helper-{{version}}-windows-x64.zip}}",
+            "hash": "{{sha256:citar-helper-{{version}}-windows-x64.zip}}"
+        }
+    },
+    "bin": "citar-helper.exe",
+    "checkver": {
+        "github": "https://github.com/jprodgers/CITAR"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/jprodgers/CITAR/releases/download/v$version/citar-helper-$version-windows-x64.zip"
+            }
+        },
+        "hash": {
+            "url": "$url.sha256"
+        }
+    }
+}

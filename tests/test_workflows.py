@@ -5,8 +5,9 @@ its job and its rule (gate 1 of 5-02a, and more). package.yml's rules are tried 
 the real one in a copy (the fixture passes as written), and on the real one, which 5-02b added; what P5.3 says of
 package.yml that no rule does (the five wheels, the smoke on 3.11 and 3.14, the sdist's build, the moved jobs) is
 held by ThePackageWorkflow, and so is P5.4's part (5-03: the helpers' ten builds on five runners, the manifest signed
-with a throwaway key and verified twice, helper.yml's artifacts built where the release builds them), and P5.7's (5-06:
-the image for both architectures, each built natively from its wheel, checked, saved and kept). The parts the
+with a throwaway key and verified twice, helper.yml's artifacts built where the release builds them), P5.7's (5-06:
+the image for both architectures, each built natively from its wheel, checked, saved and kept), and P5.9's and P5.10's
+(5-08: the release assembled from every build's artifact by name, and the package managers run from it). The parts the
 rules stand on (the expression reader, the shell reader, the matrix, an upload path) have tests of their own, and so
 has the pin tool, offline, with GitHub stood in for.
 """
@@ -721,6 +722,127 @@ class ThePackageWorkflow(unittest.TestCase):
             self.assertIn("scripts/ci/helper_release.py", triggers[event]["paths"])
             self.assertIn("scripts/ci/gate_run.py", triggers[event]["paths"])
 
+    def uploads_of(self, job_id: str) -> set:
+        """The artifact names a job uploads, each matrix leg's."""
+        job = self.jobs[job_id]
+        names = set()
+        for step in self.using(job, "actions/upload-artifact"):
+            for index, leg in enumerate(cw.matrix_legs(job)):
+                names.add(cw.expand(step["with"]["name"], leg, None, index))
+        return names
+
+    def test_assemble_downloads_every_release_file_and_report_by_name(self):
+        """5-08 (P5.10): every build first; each artifact by its exact name, the release's files into one folder and
+        the reports into another; each uploaded by a job of this workflow on every run (none on a dry run or a tag
+        alone); then assemble_release.py, twine, the manifests' structure and sha256sum -c; and the three uploads."""
+        release = load_release()
+        job = self.jobs["assemble"]
+        self.assertEqual(set(job["needs"]), set(self.jobs) - {"assemble", "managers"},
+                         "assemble needs every build and every check")
+        self.assertNotIn("if", job, "a failed build or check leaves nothing to assemble")
+        self.assertEqual(job["env"]["LABEL"], "${{ needs.meta.outputs.label }}")
+        downloads = [(s["with"]["name"], s["with"]["path"]) for s in self.using(job, "actions/download-artifact")]
+        platforms = release.HELPER_PLATFORMS
+        files = {f"pkg-wheel-{p}" for p in platforms} | {f"pkg-helper-{p}" for p in platforms} | \
+            {f"pkg-helper-packaged-{p}" for p in platforms} | \
+            {"pkg-sdist", "pkg-constraints", "pkg-windows", "pkg-helper-manifest", "pkg-third-party-licenses"}
+        reports = {f"pkg-smoke-{p}-{py}" for p in platforms for py in ("3.11", "3.14")} | \
+            {f"pkg-helper-report-{p}" for p in platforms} | {f"pkg-install-report-{p}" for p in platforms} | \
+            {"pkg-smoke-sdist", "pkg-windows-report", "pkg-image-report-amd64", "pkg-image-report-arm64"}
+        self.assertEqual(sorted(n for n, path in downloads if path == "release"), sorted(files))
+        self.assertEqual(sorted(n for n, path in downloads if path == "reports"), sorted(reports))
+        self.assertEqual(len(downloads), len(files) + len(reports), "two folders, each name once")
+        uploaded = set()
+        for job_id, other in self.jobs.items():
+            if job_id in ("assemble", "managers"):
+                continue
+            for step in self.using(other, "actions/upload-artifact"):
+                if "mode != 'ci'" in str(step.get("if", "")):
+                    continue          # pkg-image-<arch>: a dry run's and a tag's only, and no release file
+                for index, leg in enumerate(cw.matrix_legs(other)):
+                    uploaded.add(cw.expand(step["with"]["name"], leg, None, index))
+        self.assertLessEqual(files | reports, uploaded, "every artifact assemble reads is uploaded on every run")
+        run = self.runs(job)
+        self.assertIn('assemble_release.py assemble --version "$RELEASE_VERSION" --label "$LABEL"', run)
+        self.assertIn("--release release --reports reports --preview preview", run)
+        self.assertIn('check_managers.py structure --dir preview/managers --version "$RELEASE_VERSION"', run)
+        self.assertIn("--assets release", run)
+        self.assertIn('twine check "release/citar-$PEP440.tar.gz" release/citar-"$PEP440"-cp311-abi3-*.whl', run)
+        self.assertIn("(cd release && sha256sum -c SHA256SUMS)", run)
+        self.assertLess(run.index("assemble_release.py assemble"), run.index("sha256sum -c"))
+        uploads = {s["with"]["name"]: s["with"]["path"] for s in self.using(job, "actions/upload-artifact")}
+        self.assertEqual(uploads, {
+            "pkg-release-assets": "release",
+            "pkg-python-dists": "release/citar-${{ needs.meta.outputs.pep440 }}.tar.gz\n"
+                                "release/citar-${{ needs.meta.outputs.pep440 }}-cp311-abi3-*.whl\n",
+            "pkg-release-preview": "preview"})
+        # The release's files are compressed already: uploaded as they are, not zipped again
+        levels = {s["with"]["name"]: s["with"].get("compression-level") for s in self.using(job,
+                                                                                         "actions/upload-artifact")}
+        self.assertEqual(levels, {"pkg-release-assets": 0, "pkg-python-dists": 0, "pkg-release-preview": None})
+        # assemble_release.py reads exactly the reports downloaded (each artifact's one file, the bundle's three)
+        assemble = load("assemble_release")
+        self.assertEqual(len(assemble.expected_reports()), len(reports))
+
+    def test_assemble_runs_nothing_from_pypi_before_its_uploads(self):
+        """5-08's review: what assemble uploads is what release.yml attests and publishes, so until the uploads the
+        job runs only the checkout's scripts and coreutils (assemble_release.py, sha256sum -c), and twine and PyYAML
+        are installed (wheels only) after them; their checks still fail the job."""
+        steps = self.jobs["assemble"]["steps"]
+        uploads = [i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
+        self.assertEqual(len(uploads), 3)
+        self.assertEqual(uploads, list(range(uploads[0], uploads[0] + 3)), "the three uploads together")
+        before, after = steps[:uploads[0]], steps[uploads[-1] + 1:]
+        actions = {str(s["uses"]).split("@")[0] for s in before if "uses" in s}
+        self.assertEqual(actions, {"actions/checkout", "actions/setup-python", "actions/download-artifact"})
+        runs_before = self.runs({"steps": before})
+        for word in ("pip", "twine", "uv ", "pipx", "check_managers.py"):
+            self.assertNotIn(word, runs_before, f"{word} runs before the uploads")
+        self.assertIn("assemble_release.py assemble", runs_before)
+        self.assertIn("(cd release && sha256sum -c SHA256SUMS)", runs_before)
+        self.assertLess(runs_before.index("assemble_release.py assemble"), runs_before.index("sha256sum -c"))
+        runs_after = self.runs({"steps": after})
+        self.assertIn("pip install --disable-pip-version-check --only-binary=:all: --upgrade twine pyyaml", runs_after)
+        self.assertLess(runs_after.index("pip install"), runs_after.index("check_managers.py structure"))
+        self.assertLess(runs_after.index("pip install"), runs_after.index("twine check"))
+        for step in after:
+            self.assertNotIn("if", step, "the checks after the uploads run, and fail the job, on every run")
+            self.assertNotIn("continue-on-error", step)
+
+    def test_the_managers_install_from_the_assembled_release(self):
+        """5-08 (P5.9): Scoop and winget on Windows, Homebrew on both Macs and Linux x64, each on the runner its
+        platform's builds come from, from pkg-release-assets; Scoop's installer pinned by commit and SHA-256 and run
+        with -RunAsAdmin only once checked; a report per platform."""
+        job = self.jobs["managers"]
+        self.assertEqual(job["needs"], ["meta", "assemble"])
+        legs = {leg["platform"]: leg["runner"] for leg in job["strategy"]["matrix"]["include"]}
+        wheels = {leg["platform"]: leg["runner"] for leg in self.jobs["wheels"]["strategy"]["matrix"]["include"]}
+        self.assertEqual(sorted(legs), ["linux-x64", "macos-arm64", "macos-x64", "windows-x64"])
+        self.assertEqual(legs, {p: wheels[p] for p in legs})
+        downloads = [(s["with"]["name"], s["with"]["path"]) for s in self.using(job, "actions/download-artifact")]
+        self.assertEqual(downloads, [("pkg-release-assets", "release"), ("pkg-release-preview", "preview")])
+        self.assertRegex(job["env"]["SCOOP_INSTALL_COMMIT"], r"^[0-9a-f]{40}$")
+        self.assertRegex(job["env"]["SCOOP_INSTALL_SHA256"], r"^[0-9a-f]{64}$")
+        steps = {s.get("name"): s for s in job["steps"] if s.get("name")}
+        scoop = steps["Scoop, from its pinned installer"]
+        self.assertEqual(scoop["if"], "matrix.platform == 'windows-x64'")
+        run = scoop["run"]
+        self.assertIn("ScoopInstaller/Install/$env:SCOOP_INSTALL_COMMIT/install.ps1", run)
+        self.assertLess(run.index("Get-FileHash -Algorithm SHA256"), run.index("& $installer -RunAsAdmin"),
+                        "the installer runs only once its hash is checked")
+        windows = {name: s for name, s in steps.items() if s.get("if") == "matrix.platform == 'windows-x64'"}
+        others = {name: s for name, s in steps.items() if s.get("if") == "matrix.platform != 'windows-x64'"}
+        runs = "\n".join(s["run"] for s in windows.values())
+        for words in ("check_managers.py scoop --release release", "check_managers.py winget-schemas --dir "
+                      "preview/managers", "check_managers.py winget --release release --manifests preview/managers"):
+            self.assertIn(words, runs)
+        self.assertEqual(len(others), 1)
+        self.assertIn("check_managers.py brew --release release", next(iter(others.values()))["run"])
+        for step in (*windows.values(), *others.values()):
+            if "check_managers.py" in step["run"] and "winget-schemas" not in step["run"]:
+                self.assertIn('--label "$LABEL"', step["run"])
+        self.assertEqual(self.uploads_of("managers"), {f"pkg-managers-report-{p}" for p in legs})
+
     def test_the_rules_hold_the_real_file(self):
         plants = (
             ("    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 90\n",
@@ -767,6 +889,24 @@ class ThePackageWorkflow(unittest.TestCase):
             ('            --path-route --out "report/install-$PLATFORM.json"\n',
              '            --path-route --out "report/install-$PLATFORM.json" --version ${{ inputs.version }}\n', 5,
              "install"),
+            # 5-08: the release assembled, and the package managers, publish nothing and name their artifacts
+            ("          name: pkg-release-assets\n", "          name: release-assets\n", 13, "assemble"),
+            ("          name: pkg-install-report-linux-arm64\n          path: reports\n",
+             "          pattern: pkg-install-report-*\n          path: reports\n", 13, "assemble"),
+            ("          name: pkg-release-preview\n          path: preview\n          if-no-files-found",
+             "          name: pkg-release-preview\n          path: ${{ runner.temp }}\n          if-no-files-found",
+             9, "assemble"),
+            ("    name: the release, assembled\n", "    name: the release, assembled\n    environment: pypi\n", 3,
+             "assemble"),
+            ('          python -m twine check "release/citar-$PEP440.tar.gz"',
+             '          python -m twine upload "release/citar-$PEP440.tar.gz"', 2, "assemble"),
+            ("    name: package managers (${{ matrix.platform }})\n",
+             "    name: package managers (${{ matrix.platform }})\n    environment: release\n", 3, "managers"),
+            ("          name: pkg-managers-report-${{ matrix.platform }}\n",
+             "          name: managers-report-${{ matrix.platform }}\n", 13, "managers"),
+            ('            --work "$RUNNER_TEMP/brew" --out report/managers-brew.json\n',
+             '            --work "$RUNNER_TEMP/brew" --out report/managers-brew.json\n          brew tap-new x/y && '
+             'cd "$(brew --repository x/y)" && git push\n', 2, "managers"),
         )
         for old, new, rule, job in plants:
             with self.subTest(rule=rule, job=job):

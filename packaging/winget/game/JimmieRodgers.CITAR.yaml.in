@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+#
+# winget version manifest for CITAR, the game: the file that ties the installer and locale manifests together.
+# Written by scripts/release_checksums.py from this template.
+
+PackageIdentifier: JimmieRodgers.CITAR
+PackageVersion: {{version}}
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.12.0
