@@ -50,11 +50,12 @@ units = _load("citar_wizard_units_for_tests", ROOT / "citar" / "wizard" / "units
 
 def scratch(prefix: str) -> Path:
     """A temporary folder: under CARGO_TARGET_DIR when it is set (a package's own folder on the laptop), else the
-    system's."""
+    system's. Resolved, as the code under test resolves what it is given: macOS's temporary folder is under the /var
+    symbolic link (/private/var), and a Windows runner's TEMP is an 8.3 short name (RUNNER~1 for runneradmin)."""
     base = os.environ.get("CARGO_TARGET_DIR")
     if base:
         Path(base).mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=base or None))
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=base or None)).resolve()
 
 
 def find_bash() -> str | None:
