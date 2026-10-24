@@ -130,8 +130,22 @@ impl Played {
         Self::ready_with(threads, |_| None)
     }
 
+    /// Ready, with a wait of `step` before every seat step of every game, so that a game outlasts
+    /// what a test sends it on any machine: a fast runner played a 330-turn duel in under a second.
+    fn ready_slowed(threads: u32, step: Duration) -> Self {
+        Self::ready_from(threads, Setup { step_delay: step, ..Setup::default() }, |_| None)
+    }
+
     fn ready_with(threads: u32, hook: impl FnOnce(Sender<Vec<u8>>) -> Option<Hook>) -> Self {
-        let mut p = Self::hooked(&limits(threads), Setup::default(), hook);
+        Self::ready_from(threads, Setup::default(), hook)
+    }
+
+    fn ready_from(
+        threads: u32,
+        setup: Setup,
+        hook: impl FnOnce(Sender<Vec<u8>>) -> Option<Hook>,
+    ) -> Self {
+        let mut p = Self::hooked(&limits(threads), setup, hook);
         let FromHost::Ready(r) = p.next() else { panic!("a ready host") };
         assert!(r.verifiable, "{r:?}");
         p.ready = Some(r);
@@ -462,7 +476,10 @@ fn a_host_playing_its_parents_own_work_plays_when_it_is_not_verifiable() {
 
 #[test]
 fn abort_ends_a_run_within_a_second_and_a_deadline_ends_one() {
-    let p = Played::ready(2);
+    // 10 ms before each seat step makes a 330-turn duel last at least 6.6 s, so cr_a is still
+    // playing when its abort comes and cr_d when its 1 s deadline (the least an offer may ask)
+    // passes. Unslowed, a fast ARM runner's release build finished cr_d first (2026-10-24).
+    let p = Played::ready_slowed(2, Duration::from_millis(10));
     let (spec, hash) = duel(330);
     p.send(&offer("cr_a", "lab_game", spec.clone(), &hash, 600.0));
     assert!(matches!(p.about("cr_a"), FromHost::JobAccept(_)));
