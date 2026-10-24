@@ -74,7 +74,7 @@ else
   io="--pipe"
 fi
 
-command=(systemd-run --quiet --wait --collect "$io" --service-type=exec)
+invocation=(systemd-run --quiet --wait --collect "$io" --service-type=exec)
 # systemd 254 and later expand ${VARIABLE} and $VARIABLE in the command's arguments unless told
 # not to; a reason, a display name or a password could hold a dollar sign. Older ones cannot be
 # told, so an argument with one is refused there rather than changed.
@@ -86,7 +86,7 @@ else
   expand_flag=0
 fi
 if [ "$expand_flag" -eq 1 ]; then
-  command+=(--expand-environment=no)
+  invocation+=(--expand-environment=no)
 else
   for argument in "$@"; do
     case "$argument" in
@@ -95,13 +95,13 @@ else
   done
 fi
 if [ -n "${CITAR_DEPLOY_SLICE:-}" ]; then
-  command+=("--slice=$CITAR_DEPLOY_SLICE")
+  invocation+=("--slice=$CITAR_DEPLOY_SLICE")
 fi
-command+=("${properties[@]}" -- "$ROOT$PROGRAM" "$@")
+invocation+=("${properties[@]}" -- "$ROOT$PROGRAM" "$@")
 
 if [ "$PLAN" -eq 1 ]; then
   printf 'citar-admin would run, as root:\n  '
-  printf '%q ' "${command[@]}"
+  printf '%q ' "${invocation[@]}"
   printf '\n'
   exit 0
 fi
@@ -112,4 +112,4 @@ fi
 command -v systemd-run >/dev/null 2>&1 || die "systemd-run is not here: citar-admin needs systemd"
 [ -f "$ROOT$ENV_FILE" ] || die "no $ROOT$ENV_FILE: is CITAR set up? (citar setup --server writes it)"
 [ -x "$ROOT$PROGRAM" ] || die "no $ROOT$PROGRAM: is CITAR installed there?"
-exec "${command[@]}"
+exec "${invocation[@]}"
