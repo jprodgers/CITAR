@@ -29,7 +29,9 @@
 # `citar setup --server` then writes /etc/citar/citar.env and, if asked, the service (which runs
 # /opt/citar/current/venv/bin/citar with /var/lib/citar as its state and working directory), citar-admin and the
 # nightly backup. Run again with a newer --version, it installs that release beside the running one and switches to
-# it, keeping the configuration.
+# it, keeping the configuration: with the service stopped and right after a backup, the unit and scripts written
+# again from the new release, and undone (the database put back if it was migrated) if the new release does not
+# answer. An older release is refused, and the release that runs is never removed.
 #
 # Flags:
 #   --server            install for a public server (implies a system-wide prefix)
@@ -553,6 +555,8 @@ if [ -z "$PYTHON" ]; then
 Then run this installer again."
 fi
 ok "$("$PYTHON" -V 2>&1) at $(command -v "$PYTHON")"
+# By its path from here on: sudo's PATH (secure_path) may not hold the folder it was found in.
+PYTHON="$(command -v "$PYTHON")"
 
 # python3-venv is a separate package on Debian and Ubuntu, and its absence is the single most
 # common failure of an installer like this one. Checked here so the message names the package.
@@ -650,6 +654,12 @@ if [ -L "$CURRENT" ]; then
 	CURRENT_VERSION="${CURRENT_VERSION%/}"
 	CURRENT_VERSION="${CURRENT_VERSION##*/}"
 fi
+# Where citar-backup puts its folders (its default, deploy/citar-backup.sh), and how long a switched release has to
+# answer. CITAR_DEPLOY_ROOT (tests only) prefixes the backups and the database a backup names, as it prefixes every
+# path in citar-backup itself; CITAR_INSTALL_HEALTH_SECONDS (tests only) shortens the wait.
+DEPLOY_ROOT="${CITAR_DEPLOY_ROOT:-}"
+BACKUPS="$DEPLOY_ROOT/var/backups/citar"
+HEALTH_SECONDS="${CITAR_INSTALL_HEALTH_SECONDS:-60}"
 
 # Whether PEP 440 version $1 is older than $2 (CITAR's own: X.Y.Z with an optional aN, bN or rcN); exit 2 when either
 # is not such a version.
@@ -670,6 +680,26 @@ sys.exit(0 if key(sys.argv[1]) < key(sys.argv[2]) else 1)
 PY
 }
 
+# Refuses release $1 when it is older than the one that runs, before anything changes (the run and --plan alike).
+refuse_older() {
+	local order=0
+	if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "$1" ]; then
+		return 0
+	fi
+	older_than "$1" "$CURRENT_VERSION" || order=$?
+	case "$order" in
+		0) die "CITAR $1 is older than the release that runs ($CURRENT -> releases/$CURRENT_VERSION). This script never
+takes a server back: the running release has migrated the database, which $1 cannot open. Nothing was changed." ;;
+		2) die "Cannot compare $1 with the release that runs ($CURRENT -> releases/$CURRENT_VERSION). Nothing was changed." ;;
+	esac
+}
+
+# Whether release folder $1 is the one $CURRENT resolves to.
+is_current() {
+	[ -L "$CURRENT" ] && [ -d "$1" ] || return 1
+	[ "$(cd "$1" && pwd -P)" = "$(cd "$CURRENT" && pwd -P)" ]
+}
+
 # Points $CURRENT at releases/$1 in one rename, so there is no moment without a current release (ln -sfn removes the
 # old link first).
 switch_current() {
@@ -682,26 +712,210 @@ os.symlink(target, staged)
 os.replace(staged, link)' "$CURRENT" "releases/$1"
 }
 
-plan_server() {
-	local p="$PLAN_VERSION" release
-	release="$RELEASES/$p"
-	say "The plan (nothing is changed; run it without --plan to do it):"
-	say "  python      $PYTHON_DESC"
-	say "  wheel       $WHEEL_DESC"
-	say "  as          root$( [ "$(id -u)" -eq 0 ] || printf ' (through sudo)')"
-	say "This script makes the release layout:"
-	say "  prefix      $PREFIX, marked by $PREFIX/.citar-installer"
-	say "  release     $release/venv: a venv of its own, root's, read-only to the service"
-	say "              $release/: the wheel, freeze.txt and SHA256SUMS beside it"
-	if [ -n "$CURRENT_VERSION" ]; then
-		say "  running     $CURRENT -> releases/$CURRENT_VERSION, kept beside the new release"
+mark_prefix() {   # $1 the release that is current
+	printf 'installed by install.sh: CITAR %s (%s)\nbin: %s\n' "$1" "$CURRENT" "$BIN_DIR" \
+		| $SUDO tee "$PREFIX/.citar-installer" >/dev/null
+}
+
+# citar and citar-mcp, linked through current so they follow a switch. citar-admin is not linked: the venv's own
+# command would run as root with no configuration (so on a database of its own); `citar setup --server` installs the
+# wrapper that runs it as the service runs.
+link_commands() {
+	step "Putting citar on the PATH"
+	$SUDO mkdir -p "$BIN_DIR"
+	for command_name in citar citar-mcp; do
+		$SUDO ln -sfn "$CURRENT/venv/bin/$command_name" "$BIN_DIR/$command_name"
+	done
+	ok "Linked into $BIN_DIR"
+	put_on_path
+}
+
+# The citar service's unit as systemd has it (its drop-ins after it), or nothing when none is installed.
+service_unit() {
+	command -v systemctl >/dev/null 2>&1 || return 0
+	$SUDO systemctl cat citar.service 2>/dev/null || true
+}
+
+# The last value of directive $2 in the unit text $1 (a drop-in's comes after the unit's own), without the - that
+# makes a file optional.
+unit_value() {
+	local value
+	value="$(printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" | tail -n 1)"
+	printf '%s' "${value#-}"
+}
+
+# Whether the server answers /api/meta as CITAR $1 within HEALTH_SECONDS; prints what it last saw. Its address is
+# CITAR_HOST and CITAR_PORT from env file $2, read as systemd reads it (the last assignment wins), else the server's
+# defaults. Never through a proxy.
+healthy() {
+	$SUDO "$PYTHON" -I - "$1" "$2" "$HEALTH_SECONDS" <<'PY'
+import json
+import sys
+import time
+import urllib.request
+
+want, env_file, seconds = sys.argv[1], sys.argv[2], float(sys.argv[3])
+values = {}
+try:
+    with open(env_file, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line[0] in "#;" or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            values[key.strip()] = value
+except OSError:
+    pass
+host = values.get("CITAR_HOST") or "127.0.0.1"
+host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+if ":" in host:
+    host = f"[{host}]"
+url = f"http://{host}:{values.get('CITAR_PORT') or '8765'}/api/meta"
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def pep440(version):
+    return version.replace("-alpha.", "a").replace("-beta.", "b").replace("-rc.", "rc")
+
+
+deadline = time.monotonic() + seconds
+seen = f"{url}: no answer"
+while True:
+    try:
+        with opener.open(url, timeout=5) as response:
+            got = str(json.load(response).get("version", ""))
+        if pep440(got) == want:
+            print(f"{url} answers as CITAR {got}")
+            sys.exit(0)
+        seen = f"{url} answers as CITAR {got}, not {want}"
+    except Exception as exc:
+        seen = f"{url}: {exc}"
+    if time.monotonic() >= deadline:
+        print(seen)
+        sys.exit(1)
+    time.sleep(1)
+PY
+}
+
+# The alembic revision of the database at $1 (opened read-only), or "unknown".
+db_revision() {
+	$SUDO "$PYTHON" -I -c 'import pathlib, sqlite3, sys
+try:
+    db = sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri() + "?mode=ro", uri=True)
+    print(db.execute("SELECT version_num FROM alembic_version").fetchone()[0])
+except Exception:
+    print("unknown")' "$1"
+}
+
+# Puts snapshot $2 back as the database $1 in one rename, with the owner and mode $1 had, its write-ahead log and
+# journal removed (they belong to the database being replaced).
+restore_db() {
+	$SUDO "$PYTHON" -I -c 'import os, shutil, sys
+db, snapshot = sys.argv[1], sys.argv[2]
+info = os.stat(db)
+staged = db + ".citar-restore"
+shutil.copyfile(snapshot, staged)
+os.chown(staged, info.st_uid, info.st_gid)
+os.chmod(staged, info.st_mode & 0o7777)
+for suffix in ("-wal", "-shm", "-journal"):
+    if os.path.lexists(db + suffix):
+        os.remove(db + suffix)
+os.replace(staged, db)' "$1" "$2"
+}
+
+# The switch's backup, with the service stopped: citar-backup.service is a oneshot, so starting it waits for it. Sets
+# BACKUP to the new folder, or returns 1 when there is no trustworthy one. Exit 3 is a whole backup whose offsite copy
+# failed: a switch may use it.
+BACKUP=""
+take_backup() {
+	local before status=0 newest
+	before="$(date -u +%Y%m%d-%H%M%S)"
+	$SUDO systemctl start citar-backup || status=$?
+	if [ "$status" -ne 0 ]; then
+		[ "$($SUDO systemctl show -p ExecMainStatus --value citar-backup 2>/dev/null)" = "3" ] || return 1
+		warn "The backup's offsite copy failed (journalctl -u citar-backup); the backup on this disk is whole."
 	fi
-	say "  current     $CURRENT -> releases/$p, switched atomically once it is installed"
-	say "  commands    $BIN_DIR/citar and $BIN_DIR/citar-mcp -> $CURRENT/venv/bin/"
-	if [ -n "$CURRENT_VERSION" ]; then
-		say "and then nothing more: the configuration and the service stay as they are; restart it to run $p."
+	newest="$($SUDO ls -1 "$BACKUPS" 2>/dev/null | grep -E '^[0-9]{8}-[0-9]{6}(-[0-9]+)?$' | sort | tail -n 1 || true)"
+	[ -n "$newest" ] || return 1
+	[[ ! "$newest" < "$before" ]] || return 1
+	BACKUP="$BACKUPS/$newest"
+	$SUDO test -f "$BACKUP/RELEASE" && ! $SUDO test -e "$BACKUP/UNTRUSTWORTHY"
+}
+
+# A newer release while one runs. With the citar service installed, P5.13.3's switch: the service stopped, a backup
+# taken, current switched, the unit and scripts written again from the new release, and the service started; a release
+# that does not answer as itself is undone, its database put back from that backup if it moved the revision. Without a
+# service nothing runs from the layout here, so current is switched alone.
+upgrade_server() {   # $1 the new release, installed and complete
+	local p="$1" old="$CURRENT_VERSION" unit env_file info before_rev after_rev database said="" back restored="no"
+	unit="$(service_unit)"
+	if [ -z "$unit" ]; then
+		switch_current "$p"
+		ok "$CURRENT -> releases/$p; $old stays in $RELEASES/$old."
+		mark_prefix "$p"
+		link_commands
+		cleanup
+		say ""
+		say "No citar service is installed here, so nothing was stopped or started: CITAR runs $p from $CURRENT the next"
+		say "time it starts. It migrates the database then, after which $old cannot open it."
 		exit 0
 	fi
+	env_file="$(unit_value "$unit" EnvironmentFile)"
+	step "Switching the citar service from $old to $p: stopped, backed up, switched, started"
+	$SUDO systemctl stop citar
+	if ! take_backup; then
+		$SUDO systemctl start citar || true
+		die "The backup before the switch failed or is not trustworthy (journalctl -u citar-backup), so nothing was
+switched and citar was started again on $old. $p is installed in $RELEASES/$p: run this again once the backup works."
+	fi
+	ok "Backed up into $BACKUP"
+	info="$($SUDO cat "$BACKUP/RELEASE")"
+	before_rev="$(printf '%s\n' "$info" | sed -n 's/^revision=//p' | head -n 1)"
+	database="$(printf '%s\n' "$info" | sed -n 's/^database=//p' | head -n 1)"
+	switch_current "$p"
+	ok "$CURRENT -> releases/$p"
+	if $SUDO "$CURRENT/venv/bin/citar" setup --server --refresh-units && $SUDO systemctl daemon-reload \
+		&& $SUDO systemctl start citar && said="$(healthy "$p" "$env_file")"; then
+		ok "$said"
+		mark_prefix "$p"
+		link_commands
+		cleanup
+		say ""
+		ok "CITAR $p runs. $old stays in $RELEASES/$old, and the backup taken before the switch is $BACKUP."
+		exit 0
+	fi
+	warn "CITAR $p did not come up${said:+ ($said)}: undoing the switch."
+	$SUDO systemctl stop citar || true
+	case "$before_rev" in
+		""|unknown|none) ;;
+		*)
+			case "$database" in
+				/*)
+					after_rev="$(db_revision "$DEPLOY_ROOT$database")"
+					if [ "$after_rev" != "$before_rev" ] && $SUDO test -f "$BACKUP/citar.db"; then
+						restore_db "$DEPLOY_ROOT$database" "$BACKUP/citar.db"
+						restored="yes, from $BACKUP/citar.db ($p had moved its revision from $before_rev to $after_rev)"
+					fi ;;
+			esac ;;
+	esac
+	switch_current "$old"
+	$SUDO "$CURRENT/venv/bin/citar" setup --server --refresh-units \
+		|| warn "$old could not write its own unit and scripts again: $p's are in place."
+	$SUDO systemctl daemon-reload || true
+	$SUDO systemctl start citar || true
+	if back="$(healthy "$old" "$env_file")"; then
+		back="citar runs $old again ($back)"
+	else
+		back="citar did not come back on $old either ($back): see journalctl -u citar"
+	fi
+	die "CITAR $p was not switched to, because it did not answer as $p. $CURRENT -> releases/$old again, and $back.
+The database was restored: $restored. The backup is $BACKUP; $p stays in $RELEASES/$p."
+}
+
+plan_setup() {   # the wizard's part of a plan; then the plan ends
 	if [ "$RUN_SETUP" -eq 1 ]; then
 		say "Then $CURRENT/venv/bin/citar setup --server writes, after showing them and asking (its defaults):"
 	else
@@ -715,8 +929,65 @@ plan_server() {
 	exit 0
 }
 
+# The steps install_server takes, as far as they are known before pip has chosen the wheel.
+plan_server() {
+	local p="$PLAN_VERSION" release unit
+	release="$RELEASES/$p"
+	[ "$p" = "<version>" ] || refuse_older "$p"
+	say "The plan (nothing is changed; run it without --plan to do it):"
+	say "  python      $PYTHON_DESC"
+	say "  wheel       $WHEEL_DESC"
+	say "  as          root$( [ "$(id -u)" -eq 0 ] || printf ' (through sudo)')"
+	if [ -n "$CURRENT_VERSION" ] && [ "$p" = "$CURRENT_VERSION" ]; then
+		say "CITAR $p is the release that runs, so the layout stays as it is:"
+		if [ -f "$release/.complete" ]; then
+			say "  release     $release: installed already"
+		else
+			say "  release     $release: marked complete if its own citar --version says $p, else refused (the"
+			say "              release that runs is never made again)"
+		fi
+		say "  current     $CURRENT -> releases/$p, unchanged"
+		say "  commands    $BIN_DIR/citar and $BIN_DIR/citar-mcp -> $CURRENT/venv/bin/"
+		plan_setup
+	fi
+	say "This script makes the release layout:"
+	say "  prefix      $PREFIX, marked by $PREFIX/.citar-installer"
+	say "  release     $release/venv: a venv of its own, root's, read-only to the service"
+	say "              $release/: the wheel, freeze.txt and SHA256SUMS beside it, then .complete"
+	if [ -z "$CURRENT_VERSION" ]; then
+		say "  current     $CURRENT -> releases/$p, switched atomically once it is installed"
+		say "  commands    $BIN_DIR/citar and $BIN_DIR/citar-mcp -> $CURRENT/venv/bin/"
+		plan_setup
+	fi
+	say "  running     $CURRENT -> releases/$CURRENT_VERSION, kept beside the new release"
+	if [ "$p" = "<version>" ]; then
+		say "  (if the newest is older than $CURRENT_VERSION it is refused; if it is $CURRENT_VERSION it is kept and the"
+		say "  setup runs; if it is newer, as follows)"
+	fi
+	unit="$(service_unit)"
+	if [ -z "$unit" ]; then
+		say "  current     $CURRENT -> releases/$p, switched atomically once it is installed"
+		say "  commands    $BIN_DIR/citar and $BIN_DIR/citar-mcp -> $CURRENT/venv/bin/"
+		say "and nothing more: no citar service is installed here, so nothing is stopped or started."
+		exit 0
+	fi
+	say "The citar service is installed, so the switch is made with it stopped:"
+	say "  1. systemctl stop citar"
+	say "  2. systemctl start citar-backup: a new, trustworthy backup in $BACKUPS (else citar starts again"
+	say "     on $CURRENT_VERSION and nothing is switched)"
+	say "  3. current     $CURRENT -> releases/$p, switched atomically"
+	say "  4. $CURRENT/venv/bin/citar setup --server --refresh-units: the unit, citar-admin and the backup from $p"
+	say "  5. systemctl daemon-reload, then systemctl start citar"
+	say "  6. /api/meta (CITAR_HOST and CITAR_PORT in $(unit_value "$unit" EnvironmentFile)) answers as CITAR $p within ${HEALTH_SECONDS} s"
+	say "  7. commands    $BIN_DIR/citar and $BIN_DIR/citar-mcp -> $CURRENT/venv/bin/"
+	say "If $p does not answer: citar is stopped, the database is put back from step 2's backup if $p moved its"
+	say "revision, current goes back to releases/$CURRENT_VERSION (its unit and scripts written again), citar starts"
+	say "on $CURRENT_VERSION, and the run exits 1."
+	exit 0
+}
+
 install_server() {
-	local wheel p release staged digest order
+	local wheel p release staged digest said
 	BOOT="$(mktemp -d "${TMPDIR:-/tmp}/citar-server.XXXXXX")"
 	# The release's folder is named by the version pip chooses, and a venv cannot be moved once it is made: so the
 	# wheel is chosen first, by pip in a venv of its own here, then installed as a file.
@@ -740,24 +1011,27 @@ with a Rust toolchain (https://rustup.rs)."
 	p="$(basename "$wheel" | cut -d- -f2)"
 	release="$RELEASES/$p"
 	ok "CITAR $p: $(basename "$wheel")"
-
-	if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$p" ]; then
-		order=0
-		older_than "$p" "$CURRENT_VERSION" || order=$?
-		case "$order" in
-			0) die "CITAR $p is older than the release that runs ($CURRENT -> releases/$CURRENT_VERSION). This script never
-takes a server back: the running release has migrated the database, which $p cannot open. Nothing was changed." ;;
-			2) die "Cannot compare $p with the release that runs ($CURRENT -> releases/$CURRENT_VERSION). Nothing was changed." ;;
-		esac
-	fi
+	refuse_older "$p"
 
 	$SUDO mkdir -p "$RELEASES"
 	# The marker first, so an install that fails half way can be run again (or removed with --uninstall).
 	[ -f "$PREFIX/.citar-installer" ] || printf 'installing with install.sh\n' | $SUDO tee "$PREFIX/.citar-installer" >/dev/null
 	if [ -f "$release/.complete" ]; then
 		ok "CITAR $p is already installed in $release"
+	elif is_current "$release"; then
+		# The release that runs, without the mark (a release citar-deploy or a hand made, or one marked before 0.1.6's
+		# installer): never removed under the running server. Its own citar says whether it is whole.
+		said="$("$release/venv/bin/citar" --version 2>/dev/null || true)"
+		if [ "$(pep440 "${said#CITAR }")" != "$p" ]; then
+			die "$release is the release that runs ($CURRENT), but it has no .complete and its citar --version says
+'${said:-nothing}', not CITAR $p. This script never removes the release that runs: point current at a whole release
+first (citar-deploy rollback), then run this again. Nothing was changed."
+		fi
+		printf 'marked by install.sh: %s, the release that runs\n' "$said" | $SUDO tee "$release/.complete" >/dev/null
+		ok "CITAR $p is the release that runs ($said): kept as it is, and marked complete"
 	else
-		# A release folder without its .complete is what an install that failed half way left: made again whole.
+		# A release folder without its .complete, and not current, is what an install that failed half way left: made
+		# again whole.
 		[ ! -e "$release" ] || $SUDO rm -rf "$release"
 		step "Installing CITAR $p into $release"
 		$SUDO mkdir -p "$release"
@@ -777,31 +1051,14 @@ takes a server back: the running release has migrated the database, which $p can
 			| $SUDO tee "$release/.complete" >/dev/null
 		ok "$("$release/venv/bin/citar" --version 2>/dev/null || echo "CITAR $p") installed in $release"
 	fi
+	if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$p" ]; then
+		upgrade_server "$p"
+	fi
 	switch_current "$p"
 	ok "$CURRENT -> releases/$p"
-	printf 'installed by install.sh: CITAR %s (%s)\nbin: %s\n' "$p" "$CURRENT" "$BIN_DIR" \
-		| $SUDO tee "$PREFIX/.citar-installer" >/dev/null
-
-	step "Putting citar on the PATH"
-	$SUDO mkdir -p "$BIN_DIR"
-	# Through current, so they follow a switch. citar-admin is not linked: the venv's own command would run as root
-	# with no configuration (so on a database of its own); `citar setup --server` installs the wrapper that runs it
-	# as the service runs.
-	for command_name in citar citar-mcp; do
-		$SUDO ln -sfn "$CURRENT/venv/bin/$command_name" "$BIN_DIR/$command_name"
-	done
-	ok "Linked into $BIN_DIR"
-	put_on_path
+	mark_prefix "$p"
+	link_commands
 	cleanup
-
-	if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$p" ]; then
-		say ""
-		ok "CITAR $p is the current release; $CURRENT_VERSION stays in $RELEASES/$CURRENT_VERSION."
-		say "The configuration and the service are as they were, and the server runs $CURRENT_VERSION until it restarts."
-		say "It migrates the database when it starts, after which $CURRENT_VERSION cannot open it, so back up first:"
-		say "    sudo systemctl start citar-backup && sudo systemctl restart citar"
-		exit 0
-	fi
 	run_setup "$CURRENT/venv/bin/citar"
 }
 
