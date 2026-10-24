@@ -1,0 +1,90 @@
+[Unit]
+Description=CITAR — Civ Inspired Tool for AI Research
+Documentation=https://citar.example.com
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting. The box is small; a transient OOM should recover on its own rather
+# than needing a human. (This key belongs in [Unit] — systemd ignores it in [Service].)
+StartLimitIntervalSec=0
+
+# The release layout (design/phase5-release.md P5.13.1): each release is a venv of its own under
+# /opt/citar/releases/<version>, and /opt/citar/current links to the one that runs, switched
+# atomically by citar-deploy. `citar setup --server` writes this file with its own paths put in
+# (citar/wizard/units.py), so there is one definition.
+
+[Service]
+Type=exec
+User=citar
+Group=citar
+# A console script puts its own bin/ folder first on sys.path, never the working directory, so
+# neither a source tree nor this service-writable state directory is ever on the import path. The
+# job host it starts runs with python -P for the same reason.
+ExecStart=/opt/citar/current/venv/bin/citar serve
+# All state, and the working directory. A default the env file may override (settings from
+# EnvironmentFile= win over Environment=), so a server whose env file names no state directory
+# still keeps everything here rather than in the account's home.
+WorkingDirectory=/var/lib/citar
+Environment=CITAR_STATE_DIR=/var/lib/citar
+EnvironmentFile=/etc/citar/citar.env
+
+Restart=on-failure
+RestartSec=5s
+
+# --- memory ---
+# This box has 961 MB and also serves three other sites. The lab's job host is a child of this
+# service (0.1.6 has no citar-lab unit), so these limits hold the server AND its games. What
+# MemoryMax guarantees is that when something DOES go wrong, the kernel kills CITAR rather than
+# choosing another site's database or php-fpm.
+# The rule for the figures: the server's measured peak plus the job host's memory figure (the host
+# machine's settings; server mode's default is about 240 MB on this box) stays under MemoryHigh
+# with 40 MB to spare. MemoryHigh throttles the whole cgroup, the web server included, so sizing
+# against MemoryMax would slow every page whenever a lab game ran. Kept at 400M/320M until the
+# staging measurement (design/phase5-release.md P5.14) records the peaks here.
+MemoryMax=400M
+MemoryHigh=320M
+# Prefer this process when the OOM killer is choosing a victim, for the same reason.
+OOMScoreAdjust=500
+
+# --- CPU and IO ---
+# Under contention the other sites win. 0.1.5's separate lab unit ran at weight 20; this unit holds
+# the web server as well as the lab, so it starts at 50 (the range is 20 to 50) and the staging
+# run's response-time measurement settles it. Inside, the job host is held further by nice and its
+# one thread.
+CPUWeight=50
+IOWeight=50
+
+# --- filesystem ---
+# The service can write to its state directory and nothing else. A bug, or a compromise through
+# the web app, then cannot touch the other sites' files, nginx config or anyone's home directory.
+# citar-admin runs every admin command with these same settings.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/citar
+PrivateTmp=yes
+
+# --- privileges ---
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# AF_UNIX is needed too: SQLite and the resolver use it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# --- logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=citar
+
+[Install]
+WantedBy=multi-user.target
