@@ -15,10 +15,20 @@
 #                    integrity-checked
 #   state.tar.gz     the whole state directory (saves, config, benchmarks, everything 0.1.6 writes
 #                    there) without the live database files, which citar.db replaces
+#   data.tar.gz, saves.tar.gz, config.tar.gz, benchmarks.tar.gz
+#                    only for a directory the env file moves outside the state directory
+#                    (CITAR_DATA_DIR, CITAR_SAVE_DIR, CITAR_CONFIG_DIR, CITAR_BENCH_DIR), the same way
 #   citar.env        the configuration and secrets (0600)
-#   RELEASE          what wrote them: the release (/opt/citar/current), the database's revision
+#   RELEASE          what wrote them: the release (/opt/citar/current), the database's revision,
+#                    where each directory was, and which archives hold them
 #   UNTRUSTWORTHY    only when something above failed, saying what; such a backup prunes nothing
-#                    and the script exits 2
+#
+# The exit status, which `systemctl start citar-backup` reports (citar-deploy and install.sh take
+# their switch's backup that way):
+#   0  the backup is complete; its last line is "backup complete: <folder>"
+#   1  it could not start (no backup folder could be made)
+#   2  the backup is not trustworthy (UNTRUSTWORTHY says why)
+#   3  the backup is complete and trustworthy on this disk, but the offsite copy failed
 #
 # Restoring is in docs/server/RUNBOOK.md. A backup nobody has restored is a hope, not a backup, so
 # the runbook has an actual drill.
@@ -39,19 +49,50 @@ STAMP=$(date -u +%Y%m%d-%H%M%S)
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
-# A setting as systemd reads the env file: the first KEY=value line, the value without the quotes
-# around it. Inline comments are not systemd's, so none are stripped.
+# A setting as systemd 255 reads the env file (EnvironmentFile=, probed in WSL): the LAST
+# assignment of the key wins; lines starting with # or ; are comments; whitespace around the key,
+# the = and the value is dropped; one pair of quotes around the value is taken off. `export KEY=`
+# is not an assignment to systemd, and a # after a value is part of it. (A value continued on the
+# next line with a backslash, or with escapes inside its quotes, is read as written: no CITAR
+# setting needs either.)
 env_get() {
   local value
   [ -f "$ROOT$ENV_FILE" ] || return 0
-  value=$(grep -E "^$1=" "$ROOT$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
-  value="${value%"${value##*[![:space:]]}"}"
+  value=$(awk -v key="$1" '
+    { sub(/^[ \t\r]+/, ""); sub(/[ \t\r]+$/, "") }
+    $0 == "" || /^[#;]/ { next }
+    {
+      eq = index($0, "=")
+      if (eq == 0) next
+      name = substr($0, 1, eq - 1)
+      sub(/[ \t]+$/, "", name)
+      if (name != key) next
+      found = substr($0, eq + 1)
+      sub(/^[ \t]+/, "", found)
+    }
+    END { printf "%s", found }' "$ROOT$ENV_FILE" 2>/dev/null)
   case "$value" in
     \"*\") value="${value#\"}"; value="${value%\"}" ;;
     \'*\') value="${value#\'}"; value="${value%\'}" ;;
   esac
   printf '%s' "$value"
 }
+
+# A directory setting as the service resolves it: absolute, or relative to its working directory
+# (the unit's state directory), without a trailing slash; nothing for an empty setting.
+at() {
+  local path="$1"
+  case "$path" in
+    "") return 0 ;;
+    /*) path="$ROOT$path" ;;
+    *)  path="$ROOT$STATE_DIR/$path" ;;
+  esac
+  while [ "${#path}" -gt 1 ] && [ "${path%/}" != "$path" ]; do path="${path%/}"; done
+  printf '%s' "$path"
+}
+
+# Whether directory $1 is $2 or inside it.
+inside() { case "$1" in "$2"|"$2"/*) return 0 ;; esac; return 1; }
 
 UNTRUSTWORTHY=""
 distrust() {
@@ -60,21 +101,28 @@ distrust() {
 }
 
 # --- where things are ------------------------------------------------------
-# As the service sees them: the unit's state directory unless the env file names another, the
-# database where the settings put it (citar/settings.py: CITAR_DB_URL, else citar.db in the data
-# directory, which is the state directory unless CITAR_DATA_DIR says otherwise).
-state="$(env_get CITAR_STATE_DIR)"
-STATE="$ROOT${state:-$STATE_DIR}"
-while [ "${#STATE}" -gt 1 ] && [ "${STATE%/}" != "$STATE" ]; do STATE="${STATE%/}"; done
-data="$(env_get CITAR_DATA_DIR)"
-DATA="${data:+$ROOT$data}"
+# As the service sees them (citar/paths.py): the unit's state directory unless the env file names
+# another; the data directory (the database and the secret key), the saves, the configuration and
+# the benchmarks inside it unless the env file moves them; and the database where the settings put
+# it (citar/settings.py: CITAR_DB_URL, else citar.db in the data directory).
+STATE="$(at "$(env_get CITAR_STATE_DIR)")"
+STATE="${STATE:-$(at "$STATE_DIR")}"
+DATA="$(at "$(env_get CITAR_DATA_DIR)")"
 DATA="${DATA:-$STATE}"
-while [ "${#DATA}" -gt 1 ] && [ "${DATA%/}" != "$DATA" ]; do DATA="${DATA%/}"; done
+saves="$(env_get CITAR_SAVE_DIR)"
+SAVES="$(at "$saves")"
+SAVES="${SAVES:-$STATE/saves}"
+CONFIG="$(at "$(env_get CITAR_CONFIG_DIR)")"
+CONFIG="${CONFIG:-$STATE/config}"
+BENCH="$(at "$(env_get CITAR_BENCH_DIR)")"
+if [ -z "$BENCH" ] && [ -n "$saves" ]; then
+  BENCH="$(dirname "$SAVES")/benchmarks"     # paths.bench_dir: beside moved saves
+fi
+BENCH="${BENCH:-$STATE/benchmarks}"
 url="$(env_get CITAR_DB_URL)"
 case "$url" in
   "")          DB="$DATA/citar.db" ;;
-  sqlite*:///*) path="${url#*:///}"; path="${path%%\?*}"
-               case "$path" in /*) DB="$ROOT$path" ;; *) DB="$STATE/$path" ;; esac ;;
+  sqlite*:///*) path="${url#*:///}"; DB="$(at "${path%%\?*}")" ;;
   *)           DB="" ;;
 esac
 
@@ -136,32 +184,58 @@ fi
 # --- the state directory ----------------------------------------------------
 # Everything the server writes: games, scenarios, maps, probes, reports, the usage ledger, lab
 # results, benchmarks, configuration. The live database files are left out (the snapshot above is
-# the consistent copy), and so is this backup folder if it was put inside the state directory.
-if [ -d "$STATE" ]; then
-  excludes=()
+# the consistent copy), and so is this backup folder if it was put inside the directory.
+archive() {   # $1 the tarball's name in the backup, $2 the directory
+  local name="$1" dir="$2" rel status suffix
+  local -a excludes=()
   case "$DB" in
-    "$STATE"/*)
-      rel="${DB#"$STATE"/}"
+    "$dir"/*)
+      rel="${DB#"$dir"/}"
       for suffix in "" -wal -shm -journal; do excludes+=("--exclude=./$rel$suffix"); done ;;
   esac
   case "$BACKUP_DIR" in
-    "$STATE"/*) excludes+=("--exclude=./${BACKUP_DIR#"$STATE"/}") ;;
+    "$dir"/*) excludes+=("--exclude=./${BACKUP_DIR#"$dir"/}") ;;
   esac
-  tar --create --gzip --file "$OUT/state.tar.gz" --directory "$STATE" --anchored ${excludes[@]+"${excludes[@]}"} . 2>"$OUT/tar.err"
+  tar --create --gzip --file "$OUT/$name" --directory "$dir" --anchored ${excludes[@]+"${excludes[@]}"} . 2>"$OUT/tar.err"
   status=$?
   if [ "$status" -eq 0 ]; then
-    log "state archived ($(du -h "$OUT/state.tar.gz" | cut -f1))"
+    log "${dir#"$ROOT"} archived as $name ($(du -h "$OUT/$name" | cut -f1))"
   elif [ "$status" -eq 1 ]; then
     # GNU tar's 1: a file changed while it was read (the server was running). The archive is whole;
     # that file is as it was part way through being written.
-    log "state archived; files changed while being read: $(head -c 300 "$OUT/tar.err" | tr '\n' ' ')"
+    log "${dir#"$ROOT"} archived as $name; files changed while being read: $(head -c 300 "$OUT/tar.err" | tr '\n' ' ')"
   else
-    distrust "the state archive failed (tar exit $status): $(head -c 300 "$OUT/tar.err" | tr '\n' ' ')"
+    distrust "the archive of ${dir#"$ROOT"} failed (tar exit $status): $(head -c 300 "$OUT/tar.err" | tr '\n' ' ')"
   fi
   rm -f "$OUT/tar.err"
+  ARCHIVES="${ARCHIVES:+$ARCHIVES }$name"
+}
+
+ARCHIVES=""
+archived=()
+if [ -d "$STATE" ]; then
+  archive state.tar.gz "$STATE"
+  archived+=("$STATE")
 else
-  distrust "no state directory at $STATE"
+  distrust "no state directory at ${STATE#"$ROOT"}"
 fi
+# A directory the env file moved outside the state directory is archived on its own; one that does
+# not exist yet holds nothing (the server makes each when it first writes there).
+for pair in "data.tar.gz|$DATA" "saves.tar.gz|$SAVES" "config.tar.gz|$CONFIG" "benchmarks.tar.gz|$BENCH"; do
+  name="${pair%%|*}"
+  dir="${pair#*|}"
+  covered=0
+  for done_dir in ${archived[@]+"${archived[@]}"}; do
+    if inside "$dir" "$done_dir"; then covered=1; break; fi
+  done
+  [ "$covered" -eq 0 ] || continue
+  if [ -d "$dir" ]; then
+    archive "$name" "$dir"
+    archived+=("$dir")
+  else
+    log "no ${name%.tar.gz} directory at ${dir#"$ROOT"} yet: nothing to archive there"
+  fi
+done
 
 # --- configuration ----------------------------------------------------------
 # Contains the secret key: losing it logs everyone out and invalidates outstanding email links.
@@ -191,6 +265,11 @@ fi
   printf 'release=%s\n' "$release"
   printf 'version=%s\n' "$version"
   printf 'state=%s\n' "${STATE#"$ROOT"}"
+  printf 'data=%s\n' "${DATA#"$ROOT"}"
+  printf 'saves=%s\n' "${SAVES#"$ROOT"}"
+  printf 'config=%s\n' "${CONFIG#"$ROOT"}"
+  printf 'benchmarks=%s\n' "${BENCH#"$ROOT"}"
+  printf 'archives=%s\n' "$ARCHIVES"
   printf 'database=%s\n' "$database"
   printf 'revision=%s\n' "$revision"
 } > "$OUT/RELEASE"
@@ -207,19 +286,21 @@ fi
 # leaves you with fewer backups than you started with.
 find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name '20*' -mtime "+$KEEP_DAYS" -exec rm -rf {} + 2>/dev/null
 log "kept $(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name '20*' | wc -l) backup(s), pruning older than ${KEEP_DAYS}d"
-log "backup complete: $OUT"
 
 # --- OFFSITE ----------------------------------------------------------------
 # Everything above is on the same disk as the thing it is backing up, so it survives a mistake but
-# not a dead VPS. If CITAR_BACKUP_RSYNC_TARGET is set, the newest backup is copied there.
+# not a dead VPS. If CITAR_BACKUP_RSYNC_TARGET is set, the newest backup is copied there. A failed
+# copy is its own exit status (3): the backup itself is whole and trustworthy, and a deploy may
+# switch on it, but the unit fails so the failure is seen.
 #   CITAR_BACKUP_RSYNC_TARGET="user@host:/path/citar-backups/"
 if [ -n "${CITAR_BACKUP_RSYNC_TARGET:-}" ]; then
   if rsync -az --delete-after "$OUT/" "$CITAR_BACKUP_RSYNC_TARGET${OUT##*/}/" 2>&1; then
     log "copied offsite to $CITAR_BACKUP_RSYNC_TARGET${OUT##*/}/"
   else
-    log "OFFSITE COPY FAILED"
-    exit 1
+    log "OFFSITE COPY FAILED: $OUT is complete and checked, but on this disk only"
+    exit 3
   fi
 else
   log "no offsite target configured (set CITAR_BACKUP_RSYNC_TARGET); backups are on this disk only"
 fi
+log "backup complete: $OUT"
