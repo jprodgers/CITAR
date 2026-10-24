@@ -65,6 +65,9 @@ def _build_parser() -> argparse.ArgumentParser:
     remote.add_argument("--proxy-hops", type=int, help="how many reverse proxies are in front")
     remote.add_argument("--state-dir", help="where saves, the database and runs are kept")
     remote.add_argument("--env-path", help="where to write the environment file")
+    remote.add_argument("--refresh-units", action="store_true",
+                        help="write the installed service's unit, citar-admin and backup again from this release, "
+                             "keeping their paths; ask nothing, start nothing (install.sh's switch runs it)")
 
     return parser
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly CITAR backup
+
+[Timer]
+# 03:20 local, with jitter so it never lines up exactly with certbot or unattended-upgrades.
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=20m
+# If the box was off at 03:20, run on the next boot rather than skipping the night entirely.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

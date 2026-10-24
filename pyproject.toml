@@ -123,6 +123,8 @@ editable-profile = "ci"
 # crates/citar-engine/data/, which the source distribution carries with the crate.
 include = [
     { path = "citar/data/collectors/*", format = ["sdist", "wheel"] },
+    # deploy/'s unit and scripts, which `citar setup --server` writes (citar/wizard/units.py).
+    { path = "citar/wizard/deploy/*", format = ["sdist", "wheel"] },
     { path = "citar/web/**/*", format = ["sdist", "wheel"] },
     { path = "citar/migrations/**/*.py", format = ["sdist", "wheel"] },
     { path = "citar/migrations/**/*.mako", format = ["sdist", "wheel"] },

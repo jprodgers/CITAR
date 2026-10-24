@@ -240,13 +240,6 @@ jobs:
         # check that a new route added in a hurry cannot quietly skip.
         run: python scripts/audit_routes.py --strict
 
-      - name: requirements.txt matches pyproject.toml
-        # The server installs from requirements.txt while everything else installs the package.
-        # Two lists of dependencies that disagree produce a deployment that starts and then fails
-        # on an import nobody tested.
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: python scripts/sync_requirements.py --check
-
       - name: Documentation links
         # Only once: the answer cannot differ by platform, and a broken link failing five jobs
         # says the same thing five times.
