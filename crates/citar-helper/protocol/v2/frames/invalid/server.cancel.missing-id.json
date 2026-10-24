@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "cancel", "ts": 1760000000.0},
+  "code": "missing",
+  "path": "id",
+  "why": "a cancel naming nothing"
+}

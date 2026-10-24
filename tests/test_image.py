@@ -1,0 +1,566 @@
+"""The server image (design/phase5-release.md P5.7, package 5-06): the Dockerfile, its build context, the Compose file
+beside it, Dependabot's hold on its base, and what scripts/ci/check_image.py reads.
+
+What the image does when it runs is check_image.py's to prove, on a runner of each architecture (package.yml's image
+job) and under Podman in WSL (5-06's gate). These tests hold what can be read without an engine: one base for both
+stages pinned by its index digest; wheels only, at the release's tested versions, nothing compiled and nothing from
+Debian's archive; a runtime of the venv alone, run as 10001:10001 with its state in the volume; a health check by the
+server's own Python with -I that fails when the server does and asks no proxy; a build context of exactly the files
+the Dockerfile copies (scripts/check_workflows.py's rule 11 reads workflows, never the Dockerfile, so this module holds
+its pin). And how check_image.py drives an engine, through a recording stand-in: every wait well inside the image
+job's time, the smoke on a volume the run names, and a cleanup that leaves no anonymous volume behind.
+"""
+import argparse
+import contextlib
+import hashlib
+import http.server
+import importlib.util
+import io
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DOCKERFILE = ROOT / "Dockerfile"
+CHECK_IMAGE = ROOT / "scripts" / "ci" / "check_image.py"
+
+
+def load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module      # dataclasses look their module up while the class is made
+    spec.loader.exec_module(module)
+    return module
+
+
+ci = load(CHECK_IMAGE, "check_image_under_test")
+BASE = re.compile(r"^python:3\.12-slim-trixie@sha256:[0-9a-f]{64}$")
+
+
+def instructions(text: str) -> list:
+    """The Dockerfile's instructions as (INSTRUCTION, arguments), continuation lines joined and comments dropped."""
+    out, pending = [], ""
+    for line in text.splitlines():
+        if line.lstrip().startswith("#") or (not line.strip() and not pending):
+            continue
+        if line.rstrip().endswith("\\"):
+            pending += line.rstrip()[:-1] + " "
+            continue
+        whole = (pending + line).strip()
+        pending = ""
+        word, _, rest = whole.partition(" ")
+        out.append((word.upper(), rest.strip()))
+    return out
+
+
+def stages(found: list) -> list:
+    """Each stage's name and its instructions, in order."""
+    out = []
+    for word, rest in found:
+        if word == "FROM":
+            ref, _, name = rest.partition(" AS ")
+            out.append({"base": ref.strip(), "name": name.strip(), "body": []})
+        elif out:
+            out[-1]["body"].append((word, rest))
+    return out
+
+
+def env_values(body: list) -> dict:
+    """The variables a stage's ENV instructions set (``KEY=value`` pairs, a value quoted or plain)."""
+    values = {}
+    for word, rest in body:
+        if word == "ENV":
+            for key, quoted, plain in re.findall(r'([A-Z_][A-Z0-9_]*)=(?:"([^"]*)"|(\S+))', rest):
+                values[key] = quoted or plain
+    return values
+
+
+class TheDockerfile(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = DOCKERFILE.read_text(encoding="utf-8")
+        cls.found = instructions(cls.text)
+        cls.stages = stages(cls.found)
+        cls.runtime = cls.stages[-1]["body"]
+
+    def single(self, body: list, word: str) -> str:
+        values = [rest for w, rest in body if w == word]
+        self.assertEqual(len(values), 1, f"{word}: {values}")
+        return values[0]
+
+    def test_both_stages_are_one_base_pinned_by_its_index_digest(self):
+        self.assertEqual([(s["name"]) for s in self.stages], ["builder", "runtime"])
+        bases = {s["base"] for s in self.stages}
+        self.assertEqual(len(bases), 1, "both stages on one base, so Dependabot moves them together")
+        self.assertRegex(bases.pop(), BASE)
+        self.assertNotIn("bookworm", self.text)
+        # the comment above them says which tag and when
+        self.assertIn("python:3.12-slim-trixie (Debian 13, glibc 2.41", self.text)
+
+    def test_every_install_is_a_wheel_at_the_releases_versions_and_nothing_compiles(self):
+        runs = " ".join(rest for word, rest in self.found if word == "RUN")
+        installs = re.findall(r"pip install [^;&|]*", runs)
+        self.assertEqual(len(installs), 2, installs)
+        for command in installs:
+            self.assertIn("--only-binary=:all:", command)
+        deps, citar = installs
+        self.assertIn('"$@" -r /tmp/requirements.txt', deps)
+        self.assertIn("set -- --constraint /tmp/wheelhouse/constraints.txt", runs)
+        self.assertIn("if [ -f /tmp/wheelhouse/constraints.txt ]", runs)
+        self.assertIn("python scripts/ci/requirements.py server > /tmp/requirements.txt", runs)
+        self.assertTrue(citar.rstrip().endswith("--no-deps --no-index --find-links /tmp/wheelhouse citar"), citar)
+        self.assertIn("pip check", runs)
+        # nothing from Debian's archive and no compiler: the system packages are the base image's
+        for word in ("apt-get", "apt ", "build-essential", "gcc", "libffi-dev", "curl"):
+            self.assertNotIn(word, runs)
+        self.assertNotIn("--upgrade", runs, "pip, setuptools and wheel are the base's, not the index's of the day")
+
+    def test_the_runtime_holds_the_venv_alone_and_runs_as_10001(self):
+        copies = [rest for word, rest in self.runtime if word == "COPY"]
+        self.assertEqual(copies, ["--from=builder /opt/venv /opt/venv"])
+        self.assertEqual(self.single(self.runtime, "USER"), ci.USER)
+        users = self.single(self.runtime, "RUN")
+        self.assertIn("groupadd --system --gid 10001 citar", users)
+        self.assertIn("useradd --system --uid 10001 --gid citar", users)
+        self.assertIn("chown citar:citar /var/lib/citar", users)
+        self.assertIn("chmod 0750 /var/lib/citar", users)
+        self.assertEqual(ci.STATE_OWNER, "10001:10001:750")
+        env = env_values(self.runtime)
+        self.assertEqual(env["CITAR_STATE_DIR"], ci.STATE_DIR)
+        self.assertEqual(json.loads(self.single(self.runtime, "VOLUME")), [ci.STATE_DIR])
+        self.assertEqual(self.single(self.runtime, "WORKDIR"), ci.STATE_DIR)
+        self.assertEqual(env["CITAR_PORT"], str(ci.PORT))
+        self.assertEqual(self.single(self.runtime, "EXPOSE"), str(ci.PORT))
+        self.assertEqual(env["CITAR_HOST"], "0.0.0.0")
+        self.assertTrue(env["PATH"].startswith(f"{ci.VENV}/bin:"))
+        self.assertEqual(json.loads(self.single(self.runtime, "ENTRYPOINT")), ["citar"])
+        self.assertEqual(json.loads(self.single(self.runtime, "CMD")), ["serve"])
+        labels = self.single(self.runtime, "LABEL")
+        self.assertIn('org.opencontainers.image.source="https://github.com/jprodgers/CITAR"', labels)
+        self.assertIn('org.opencontainers.image.licenses="MPL-2.0"', labels)
+
+    def health(self) -> list:
+        line = self.single(self.runtime, "HEALTHCHECK")
+        self.assertIn("--start-period=40s", line)
+        command = json.loads(line[line.index(" CMD ") + len(" CMD "):])
+        return command
+
+    def test_the_health_check_is_the_servers_own_python_isolated(self):
+        command = self.health()
+        self.assertEqual(command[:3], ["python", "-I", "-c"], "-I: nothing in the state directory is imported")
+        self.assertIn("/api/auth/config", command[3])
+        self.assertIn("CITAR_PORT", command[3])
+        # Straight to the server: urlopen() would ask any proxy the container's environment names (one set for the
+        # model APIs' traffic, say), and report a healthy server unhealthy.
+        self.assertIn("urllib.request.build_opener(urllib.request.ProxyHandler({}))", command[3])
+        self.assertNotIn("urlopen", command[3])
+
+    def test_the_health_check_passes_on_a_200_and_fails_otherwise(self):
+        code = self.health()[3]
+        answer = {"status": 200}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                status = answer["status"] if self.path == "/api/auth/config" else 404
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        # None of the developer's own proxy settings, so the answer is the check's alone; then a proxy named where
+        # nothing listens, which a check that asked it would fail on (Windows' names are not case-sensitive).
+        clean = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
+        clean["CITAR_PORT"] = str(server.server_address[1])
+        dead = "http://127.0.0.1:9"
+        names = ("HTTP_PROXY",) if os.name == "nt" else ("http_proxy", "HTTP_PROXY")
+        proxied = {**clean, **dict.fromkeys(names, dead)}
+        for status, env, exits in ((200, clean, 0), (500, clean, 1), (404, clean, 1), (200, proxied, 0),
+                                   (500, proxied, 1)):
+            with self.subTest(status=status, proxy=env is proxied):
+                answer["status"] = status
+                done = subprocess.run([sys.executable, "-I", "-c", code], env=env, capture_output=True, timeout=60)
+                self.assertEqual(done.returncode, exits, done.stderr.decode("utf-8", "replace")[-500:])
+
+    def test_the_build_context_is_exactly_what_the_dockerfile_copies(self):
+        lines = [line.strip() for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(lines[0], "*", "an allow-list: everything out, then what the image is built from")
+        allowed = {line[1:] for line in lines[1:]}
+        self.assertTrue(all(line.startswith("!") for line in lines[1:]), lines)
+        copied = set()
+        for word, rest in self.found:
+            if word == "COPY" and not rest.startswith("--from="):
+                copied.update(source.rstrip("*") for source in rest.split()[:-1])
+        self.assertEqual(allowed, copied)
+        self.assertEqual(copied, {"pyproject.toml", "scripts/ci/requirements.py", "wheelhouse"})
+
+    def test_compose_runs_the_image_package_yml_builds_with_its_state_in_a_volume(self):
+        import yaml
+        compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+        service = compose["services"]["citar"]
+        package = yaml.safe_load((ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8"))
+        tag = package["jobs"]["image"]["env"]["TAG"]
+        self.assertEqual(service["image"].split(":")[0], tag.split(":")[0])
+        self.assertEqual(service["environment"]["CITAR_STATE_DIR"], ci.STATE_DIR)
+        self.assertEqual([v.split(":")[1] for v in service["volumes"]], [ci.STATE_DIR])
+        self.assertEqual(service["expose"], [str(ci.PORT)])
+
+    def test_dependabot_moves_the_digest_and_keeps_python_312(self):
+        import yaml
+        config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+        docker = [u for u in config["updates"] if u["package-ecosystem"] == "docker"]
+        self.assertEqual([u["directory"] for u in docker], ["/"])
+        self.assertEqual(docker[0]["ignore"], [{"dependency-name": "python", "update-types": [
+            "version-update:semver-major", "version-update:semver-minor"]}])
+
+
+#: An image as `docker image inspect` describes the one the Dockerfile builds.
+DOCKER_INSPECT = {
+    "Id": "sha256:" + "ab" * 32, "Architecture": "amd64", "Os": "linux", "Created": "2026-10-20T00:00:00Z",
+    "Size": 250_000_000,
+    "Config": {"User": "10001:10001", "ExposedPorts": {"8765/tcp": {}}, "Volumes": {"/var/lib/citar": {}},
+               "Env": ["PATH=/opt/venv/bin:/usr/local/bin:/usr/bin", "CITAR_STATE_DIR=/var/lib/citar",
+                       "CITAR_HOST=0.0.0.0", "CITAR_PORT=8765"],
+               "Healthcheck": {"Test": ["CMD", "python", "-I", "-c", "pass"]},
+               "Labels": {"org.opencontainers.image.version": "0.1.6"}},
+}
+
+
+def inspect(**changes) -> dict:
+    data = json.loads(json.dumps(DOCKER_INSPECT))
+    for path, value in changes.items():
+        *parents, key = path.split("__")
+        target = data
+        for p in parents:
+            target = target[p]
+        if value is None:
+            target.pop(key, None)
+        else:
+            target[key] = value
+    return data
+
+
+class CheckImageReadings(unittest.TestCase):
+    """check_image.py's parts that need no engine."""
+
+    def setUp(self):
+        self.said = []
+        original = ci.say
+        ci.say = self.said.append
+        self.addCleanup(setattr, ci, "say", original)
+
+    def test_the_port_is_on_loopback_alone(self):
+        self.assertEqual(ci.parse_port("127.0.0.1:32768\n"), 32768)
+        self.assertEqual(ci.parse_port("127.0.0.1:41000\n\n127.0.0.1:41000\n"), 41000)
+        for text in ("0.0.0.0:32768\n", "[::]:32768\n", "127.0.0.1:1\n127.0.0.1:2\n", "", "127.0.0.1:x\n",
+                     "127.0.0.1:32768\n0.0.0.0:32768\n"):
+            with self.subTest(text=text), self.assertRaises(ci.Failed):
+                ci.parse_port(text)
+
+    def test_an_image_id_as_either_engine_prints_it(self):
+        self.assertEqual(ci.image_id("sha256:" + "ab" * 32), "ab" * 32)
+        self.assertEqual(ci.image_id("ab" * 32 + "\n"), "ab" * 32)
+        for raw in ("", "sha256:abc", "AB" * 32, "sha512:" + "ab" * 32):
+            with self.subTest(raw=raw), self.assertRaises(ci.Failed):
+                ci.image_id(raw)
+
+    def test_the_image_as_built(self):
+        facts = ci.image_facts(inspect(), "amd64", "0.1.6")
+        self.assertEqual((facts["id"], facts["arch"], facts["user"]), ("ab" * 32, "amd64", "10001:10001"))
+        self.assertEqual(facts["healthcheck"][:3], ["CMD", "python", "-I"])
+        # Podman keeps the health check beside the configuration
+        podman = inspect(Id="ab" * 32, Config__Healthcheck=None)
+        podman["HealthCheck"] = {"Test": ["CMD", "python", "-I", "-c", "pass"]}
+        self.assertEqual(ci.image_facts(podman, "amd64", "0.1.6")["id"], "ab" * 32)
+        self.assertEqual(ci.image_facts(inspect(Architecture="arm64"), "arm64", "0.1.6")["arch"], "arm64")
+        for name, data, arch, version in (
+                ("another architecture", inspect(Architecture="arm64"), "amd64", "0.1.6"),
+                ("another system", inspect(Os="windows"), "amd64", "0.1.6"),
+                ("root", inspect(Config__User=""), "amd64", "0.1.6"),
+                ("a user by name", inspect(Config__User="citar"), "amd64", "0.1.6"),
+                ("no volume", inspect(Config__Volumes={}), "amd64", "0.1.6"),
+                ("the state elsewhere", inspect(Config__Env=["CITAR_STATE_DIR=/data", "CITAR_PORT=8765"]), "amd64",
+                 "0.1.6"),
+                ("another port", inspect(Config__ExposedPorts={"80/tcp": {}}), "amd64", "0.1.6"),
+                ("no health check", inspect(Config__Healthcheck=None), "amd64", "0.1.6"),
+                ("a disabled health check", inspect(Config__Healthcheck={"Test": ["NONE"]}), "amd64", "0.1.6"),
+                ("another version", inspect(), "amd64", "0.1.7"),
+                ("no version label", inspect(Config__Labels={}), "amd64", "0.1.6")):
+            with self.subTest(name), self.assertRaises(ci.Failed):
+                ci.image_facts(data, arch, version)
+
+    def test_the_doctors_jobs_line_must_be_verifiable(self):
+        ok = "[  ok  ] engine: build 0b412a18fe95\n[  ok  ] jobs: verifiable: the job host passed its canary\n"
+        self.assertTrue(ci.jobs_line(ok).startswith("verifiable"))
+        for text in ("[ warn ] jobs: not verifiable: a modded ruleset\n", "[ FAIL ] jobs: the job host did not start\n",
+                     "[  ok  ] engine: build x\n", ""):
+            with self.subTest(text=text), self.assertRaises(ci.Failed):
+                ci.jobs_line(text)
+
+    def test_the_images_dependencies_are_the_constraints(self):
+        constraints = ["fastapi==0.121.0", "PyYAML==6.0.3", "typing_extensions==4.15.0", "uvloop==0.22.1"]
+        frozen = ["fastapi==0.121.0", "pyyaml==6.0.3", "typing-extensions==4.15.0", "uvloop==0.22.1"]
+        self.assertEqual(ci.freeze_problems(constraints, frozen), ([], []))
+        problems, notes = ci.freeze_problems(constraints, frozen[:-1] + ["uvloop==0.22.2", "six==1.17.0"])
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(any("six 1.17.0" in p and "nothing of that name" in p for p in problems))
+        self.assertTrue(any("uvloop 0.22.2" in p and "0.22.1" in p for p in problems))
+        self.assertEqual(notes, [])
+        problems, notes = ci.freeze_problems(constraints, frozen[:-1])
+        self.assertEqual((problems, notes), ([], ["uvloop 0.22.1 is pinned and not installed"]))
+
+    def test_the_smoke_line(self):
+        record = dict.fromkeys(ci.smoke_wheel.RECORD_KEYS, 1)
+        out = f"smoke_wheel: ok: ...\n{ci.SMOKE_MARK}{json.dumps(record)}\n"
+        self.assertEqual(ci.smoke_record(out), record)
+        for text in ("", out + out, f"{ci.SMOKE_MARK}not json\n",
+                     f"{ci.SMOKE_MARK}{json.dumps({'smoke': 1})}\n", f"{ci.SMOKE_MARK}[1]\n"):
+            with self.subTest(text=text[:40]), self.assertRaises(ci.Failed):
+                ci.smoke_record(text)
+
+    def test_an_answer_on_a_commands_last_line(self):
+        self.assertEqual(ci.last_json('a warning\n["/opt/venv/x.so", false]\n', "x"), ["/opt/venv/x.so", False])
+        for out in ("", "not json\n", '["a"]\nTraceback (most recent call last):\n'):
+            with self.subTest(out=out), self.assertRaises(ci.Failed):
+                ci.last_json(out, "the answer")
+
+    def test_the_smokes_script(self):
+        script = ci.smoke_script()
+        self.assertIn("unset CITAR_HOST CITAR_PORT", script)
+        for name, sub in ci.smoke_wheel.STATE_VARIABLES.items():
+            want = f"{ci.SMOKE_DIR}/state" + ("" if sub == "." else f"/{sub}")
+            self.assertIn(f"export {name}={want}\n", script)
+        self.assertIn(f"{ci.VENV}/bin/python -P {ci.CHECK_MOUNT}/ci/smoke_wheel.py inside", script)
+        for n in range(1, 5):
+            self.assertIn(f'"${n}"', script, "values come in as the shell's arguments")
+        self.assertNotRegex(script, r"\{[a-z]+\}", "every field filled in")
+        self.assertTrue(script.startswith("set -eu\n"))
+
+
+class Recording(ci.Engine):
+    """An engine that runs nothing: it records each command and answers by the first ``answers`` key its arguments
+    start with."""
+
+    def __init__(self, answers: dict | None = None):
+        self.name, self.exe, self.calls, self.answers = "podman", "podman", [], answers or {}
+
+    def __call__(self, *args, what: str, timeout: float = ci.QUICK, stdin=None, ok=(0,)):
+        args = tuple(map(str, args))
+        self.calls.append((args, timeout))
+        for start, answer in self.answers.items():
+            if args[:len(start)] == start:
+                return 0, answer
+        return 0, ""
+
+
+class CheckImageEngineUse(unittest.TestCase):
+    """How check_image.py drives the engine: what it runs, how long it waits, and what it leaves."""
+
+    def setUp(self):
+        original = ci.say
+        ci.say = lambda line: None
+        self.addCleanup(setattr, ci, "say", original)
+
+    def test_every_wait_ends_well_inside_the_image_jobs_time(self):
+        # A wait as long as the job's would be cut short by the runner's cancel: no message naming the step, and no
+        # cleanup. So each is a quarter of the job's at most.
+        import yaml
+        package = yaml.safe_load((ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8"))
+        job = package["jobs"]["image"]["timeout-minutes"] * 60
+        waits = {"QUICK": ci.QUICK, "EXEC": ci.EXEC, "SMOKE": ci.SMOKE, "SAVE": ci.SAVE,
+                 "the health route": ci.HEALTH_SECONDS + ci.QUICK, "a stop": ci.STOP_SECONDS + 60,
+                 "the containers gone": ci.GONE_SECONDS}
+        for name, seconds in waits.items():
+            with self.subTest(name):
+                self.assertLessEqual(seconds, job / 4, f"{name}: {seconds} s of the job's {job} s")
+
+    def test_a_command_that_hangs_is_named_with_what_it_printed(self):
+        engine = ci.Engine.__new__(ci.Engine)       # the real one, with this Python standing in for the engine
+        engine.name, engine.exe = "docker", sys.executable
+        code = "import sys, time; print('line one'); print('line two', flush=True); time.sleep(60)"
+        with self.assertRaises(ci.Failed) as caught:
+            engine("-c", code, what="a step that hangs", timeout=3)
+        message = str(caught.exception)
+        self.assertIn("a step that hangs (docker -c) did not end within 3 s", message)
+        self.assertIn("line one\nline two", message.replace("\r\n", "\n"))
+        self.assertNotIn("b'", message, "the output as text, not a bytes literal")
+
+    def test_exec_adds_the_environment_before_the_container(self):
+        engine = Recording()
+        engine.exec("citar-check-ab12-a", "python", "-c", "pass", what="x", env=ci.DEAD_PROXY)
+        (argv, timeout), = engine.calls
+        self.assertEqual(timeout, ci.EXEC)
+        want = ["exec"]
+        for key, value in ci.DEAD_PROXY.items():
+            want += ["-e", f"{key}={value}"]
+        self.assertEqual(argv, (*want, "citar-check-ab12-a", "python", "-c", "pass"))
+        self.assertEqual(ci.DEAD_PROXY["http_proxy"], ci.DEAD_PROXY["HTTP_PROXY"])
+        self.assertEqual((ci.DEAD_PROXY["no_proxy"], ci.DEAD_PROXY["NO_PROXY"]), ("", ""))
+
+    def test_the_smoke_mounts_a_volume_of_the_run_at_the_state_path(self):
+        record = dict.fromkeys(ci.smoke_wheel.RECORD_KEYS, 1)
+        engine = Recording({("run",): f"smoke_wheel: ok\n{ci.SMOKE_MARK}{json.dumps(record)}\n"})
+        args = argparse.Namespace(image="citar:x", arch="arm64", label="ci+abc", wheel="/w/citar-0.1.6-x.whl")
+        with contextlib.redirect_stdout(io.StringIO()):     # the smoke's output, echoed
+            got = ci.smoke(engine, "citar-check-ab12", args, ci.smoke_wheel.release_version("0.1.6"))
+        self.assertEqual(got, record)
+        (argv, timeout), = engine.calls
+        self.assertEqual(timeout, ci.SMOKE)
+        self.assertEqual(argv[:4], ("run", "--rm", "--name", "citar-check-ab12-smoke"))
+        self.assertEqual(argv[argv.index("--network") + 1], "none")
+        mounts = [argv[i + 1] for i, word in enumerate(argv) if word == "-v"]
+        self.assertEqual(mounts, [f"{ci.SCRIPTS}:{ci.CHECK_MOUNT}:ro", f"citar-check-ab12-smoke-state:{ci.STATE_DIR}"])
+        self.assertEqual(argv[-4:], ("0.1.6", "ci+abc", "image-arm64", "citar-0.1.6-x.whl"))
+
+    def test_the_cleanup_removes_each_container_with_its_volumes_then_the_runs_volumes(self):
+        servers = [argparse.Namespace(name="citar-check-ab12-b")]
+        engine = Recording()
+        self.assertEqual(ci.cleanup(engine, "citar-check-ab12", servers), [])
+        removed = [argv for argv, _ in engine.calls if argv[0] == "rm" or argv[:2] == ("volume", "rm")]
+        self.assertEqual(removed, [("rm", "-f", "-v", "citar-check-ab12-b"), ("rm", "-f", "-v", "citar-check-ab12-smoke"),
+                                   ("volume", "rm", "-f", "citar-check-ab12-state"),
+                                   ("volume", "rm", "-f", "citar-check-ab12-smoke-state")])
+        # whatever the engine still lists under the run's names is named, another run's never; a container still
+        # there is waited for (a while) before its volume is removed
+        self.addCleanup(setattr, ci, "GONE_SECONDS", ci.GONE_SECONDS)
+        ci.GONE_SECONDS = 1.2
+        engine = Recording({("ps",): "citar-check-ab12-smoke\ncitar-check-ffff-a\n",
+                            ("volume", "ls"): "citar-check-ab12-smoke-state\n"})
+        t0 = time.perf_counter()
+        self.assertEqual(ci.cleanup(engine, "citar-check-ab12", []),
+                         ["citar-check-ab12-smoke", "citar-check-ab12-smoke-state"])
+        self.assertGreaterEqual(time.perf_counter() - t0, 1.2)
+        order = [argv[:2] for argv, _ in engine.calls]
+        self.assertGreater(order.index(("volume", "rm")), order.index(("ps", "-a")), "the wait comes first")
+
+
+class CheckImageLoad(unittest.TestCase):
+    """``load``, release.yml's side of ``save`` (package 5-09): publish-image pushes, and the dry run's summary
+    shows, only the file the report names and the image ``run`` tested."""
+
+    ID = "ab" * 32
+
+    def setUp(self):
+        original = ci.say
+        ci.say = lambda line: None
+        self.addCleanup(setattr, ci, "say", original)
+        self.dir = Path(tempfile.mkdtemp(prefix="citar-image-load-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.file = self.dir / "citar-image-0.1.6-arm64.tar.zst"
+        self.file.write_bytes(b"a saved image, compressed")
+        digest = hashlib.sha256(self.file.read_bytes()).hexdigest()
+        self.report = {"image": "ghcr.io/jprodgers/citar:0.1.6-arm64", "arch": "arm64", "version": "0.1.6",
+                       "id": self.ID, "saved": {"file": self.file.name, "sha256": digest, "id": self.ID,
+                                                "bytes": self.file.stat().st_size}}
+
+    def load(self, inspect: dict | None = None, version: str = "0.1.6",
+             image: str = "ghcr.io/jprodgers/citar:0.1.6-arm64"):
+        (self.dir / "report.json").write_text(json.dumps(self.report), encoding="utf-8")
+        found = {"Id": f"sha256:{self.ID}", "Os": "linux", "Architecture": "arm64", **(inspect or {})}
+        engine = Recording({("image", "inspect"): json.dumps([found])})
+        unpacked = []
+
+        def zstd(argv, what):
+            tar = Path(argv[argv.index("-o") + 1])
+            tar.write_bytes(b"tar")
+            unpacked.append(tar)
+
+        args = argparse.Namespace(engine="docker", file=self.file, report=self.dir / "report.json",
+                                  version=version, image=image, out=self.dir / "loaded.json")
+        with mock.patch.object(ci, "Engine", lambda name: engine), \
+                mock.patch.object(ci, "zstd", zstd), \
+                mock.patch.object(ci.shutil, "which", lambda name: f"/usr/bin/{name}"):
+            ci.load(args)
+        return engine, unpacked
+
+    def test_the_file_and_the_image_the_report_names_are_loaded(self):
+        engine, unpacked = self.load()
+        (tar,) = unpacked
+        self.assertFalse(tar.exists(), "the unpacked tarball is removed")
+        self.assertEqual([argv for argv, _ in engine.calls],
+                         [("load", "-i", str(tar)), ("image", "inspect", "ghcr.io/jprodgers/citar:0.1.6-arm64")])
+        loaded = json.loads((self.dir / "loaded.json").read_text(encoding="utf-8"))
+        self.assertEqual((loaded["arch"], loaded["os"], loaded["id"], loaded["file"]),
+                         ("arm64", "linux", self.ID, self.file.name))
+
+    def test_anything_else_is_refused(self):
+        pushed = "ghcr.io/jprodgers/citar:0.1.6-arm64"
+        plants = {
+            "a changed byte": (lambda: self.file.write_bytes(b"another image"), {}, "0.1.6", pushed, "SHA-256"),
+            "another id": (lambda: None, {"Id": "sha256:" + "cd" * 32}, "0.1.6", pushed, "and the report tested"),
+            "another architecture": (lambda: None, {"Architecture": "amd64"}, "0.1.6", pushed, "not linux/arm64"),
+            "another release": (lambda: None, {}, "0.1.7", pushed, "not 0.1.7's arm64 image"),
+            # release.yml's IMAGE_NAME and package.yml's image job's TAG apart: the push would go elsewhere
+            "another repository pushed": (lambda: None, {}, "0.1.6", "ghcr.io/jprodgers/citar-image:0.1.6-arm64",
+                                          "name different images"),
+            "another repository tested": (
+                lambda: self.report.update(image="ghcr.io/someone/citar:0.1.6-arm64"), {}, "0.1.6", pushed,
+                "the report's image is ghcr.io/someone/citar:0.1.6-arm64"),
+        }
+        for what, (plant, inspect, version, image, named) in plants.items():
+            with self.subTest(what):
+                self.setUp()
+                plant()
+                with self.assertRaises(ci.Failed) as caught:
+                    self.load(inspect, version, image)
+                self.assertIn(named, str(caught.exception))
+
+
+class CheckImageCommandLine(unittest.TestCase):
+    def run_script(self, *argv, env=None):
+        return subprocess.run([sys.executable, str(CHECK_IMAGE), *argv], capture_output=True, text=True,
+                              encoding="utf-8", env=env, timeout=60)
+
+    def test_usage_errors_exit_2_before_anything_runs(self):
+        common = ["--image", "citar:x", "--arch", "amd64", "--version", "0.1.6", "--label", "ci+abc",
+                  "--wheel", "x.whl", "--out", "report.json"]
+        done = self.run_script("run", "--engine", "nerdctl", *common)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("one of docker, podman", done.stderr)
+        bare = {k: v for k, v in os.environ.items() if k.upper() != "PATH"}
+        bare["PATH"] = str(Path(sys.executable).parent / "no-such-folder")
+        for engine in ("docker", "podman"):
+            with self.subTest(engine=engine):
+                done = self.run_script("run", "--engine", engine, *common, env=bare)
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertIn(f"no {engine} on PATH", done.stderr)
+                done = self.run_script("save", "--engine", engine, "--image", "citar:x", "--out", "x.tar.zst",
+                                       env=bare)
+                self.assertEqual(done.returncode, 2, done.stderr)
+        done = self.run_script("run", "--engine", "docker", "--arch", "s390x", *common[:2], *common[4:])
+        self.assertEqual(done.returncode, 2, done.stderr)
+
+    def test_the_command_contributing_gives_is_one_it_takes(self):
+        # CONTRIBUTING (and the wiki page made from it) tells a contributor how to check an image they built.
+        text = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        commands = re.findall(r"`(python3 scripts/ci/check_image\.py [^`]+)`", text)
+        self.assertEqual(len(commands), 1, commands)
+        argv = shlex.split(re.sub(r"<[^>]+>", "x", commands[0].replace("\n", " ")))
+        self.assertEqual(argv[:2], ["python3", "scripts/ci/check_image.py"])
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            try:
+                args = ci.parser().parse_args(argv[2:])
+            except SystemExit:
+                self.fail(f"check_image.py refuses CONTRIBUTING's command: {said.getvalue()}")
+        self.assertEqual((args.command, args.engine, args.arch), ("run", "podman", "amd64"))
+        self.assertIsNotNone(args.out)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,77 @@
+about = """
+The bot automates its workers. A work boat makes for the nearest sea resource its civilization owns
+and improves it; one with no such resource in reach is disbanded.
+"""
+from = "citar/bots/basic.py:1784-1788 (manage_units), 1927-1949 (handle_work_boat)"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "A>w" },
+  { op = "grant_tech", player = 0, tech = "Sailing" },
+  { op = "set_tile", at = "W", resource = "Fish" },
+  { op = "add_unit", player = 0, unit = "Work Boats", at = "W>nw>nw" },
+  { op = "found_city", player = 1, at = "B", capital = true },
+]
+as = "made"
+
+[[step]]
+op = "set_city"
+args = { city = "=made[0].city_id", claim_radius = 3 }
+
+[[step]]
+check = { what = "tile", at = "W" }
+subset = { owner = 0, resource = "Fish", improvement = "=null" }
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[type=Worker].id"
+absent = false
+as = "worker"
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+path = "activity"
+eq = "automate"
+
+[[step]]
+note = "The boat reached the fish and was spent on the fishing boats."
+check = { what = "tile", at = "W" }
+path = "improvement"
+eq = "Fishing Boats"
+
+[[step]]
+check = { what = "units", player = 0 }
+none = { path = "type", eq = "Work Boats" }
+
+[[step]]
+note = "A boat with nothing to improve is disbanded."
+op = "add_unit"
+args = { player = 0, unit = "Work Boats", at = "W>nw>nw" }
+
+[[step]]
+op = "end_turn"
+args = { player = 1 }
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "units", player = 0 }
+none = { path = "type", eq = "Work Boats" }
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+path = "activity"
+ne = "=null"

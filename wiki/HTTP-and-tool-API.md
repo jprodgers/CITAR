@@ -1,7 +1,7 @@
 # HTTP and tool API
 
-Everything a player can do is a **tool**. Tools are registered once, in `citar/engine/tools.py`,
-and reach three interfaces automatically: the browser client, MCP clients, and the LLM adapter.
+Everything a player can do is a **tool**. Tools are registered once, in the engine's tool registry
+(`crates/citar-engine/src/api/tools/`), and reach three interfaces automatically: the browser client, MCP clients, and the LLM adapter.
 There is no fourth set of actions hiding anywhere, and no interface can do something another
 cannot.
 
@@ -35,20 +35,285 @@ still work and still grant exactly one seat.
 |---|---|
 | `GET /api/tools` | Every tool with its JSON schema. The authoritative reference |
 | `POST /api/games/{id}/tool` | Call a tool: `{"tool": "...", "args": {...}}` |
-| `GET /api/games/{id}/wait` | Long-poll until it is your turn or a negotiation needs an answer |
-| `GET /api/games/{id}/view` | The game as this seat sees it, as JSON |
+| `GET /api/games/{id}/wait` | Long-poll until it is your turn or a negotiation needs an answer. Every answer while the game plays lists the chats your seat is in (`chats`: `negotiation_id`, `with`, `waiting_on` `you` or `them`, `deadline` in epoch seconds, `seconds_left`, `paused`) |
+| `GET /api/games/{id}/negotiations/{nid}` | One chat as a side of it sees it (its history, the proposal from that side, `your_move`), with where its clock stands (`clock`: `waiting_on`, `kind` of side, `deadline`, `left_s`, `paused`). A seat token reads the chats its seat is in; anyone who may watch the game reads any while no person plays (or it is over), from `as_player`'s side when that civilization is in it, else the side that opened it. 404 for anyone else, and for a chat the game does not have |
+| `GET /api/games/{id}/view` | The game as this seat sees it, as JSON. With no seat token, a spectator's view for an account (or a `link` key) the game's visibility lets see it, while no person is playing; `can_manage` says whether the caller may pause, slow down or save it. Every answer has an `ETag` (and `Cache-Control: private, no-cache`); send it back as `If-None-Match` and an unchanged view is `304 Not Modified`, with nothing built or sent. Its `diplomacy` lists the civilizations met without what could be traded with each (the next route). A seat's own view (a major civilization's) has `minimap`: `stage` (`early`, `renaissance` from the Renaissance era, `information` from the Information era), `capital` (`[x, y]` or null) and `home`, the box `{x0, y0, x1, y1}` (corners inclusive) of the tiles the seat has explored on its home continent joined to its capital (else its first city or settler; null with none) through tiles it has explored, so far land of the continent that only unexplored land joins to home is left out until that land is explored, which on a map that wraps may cross the seam (`x0 > x1`, or `y0 > y1`). A spectator's view has none ([Playing: the minimap](Playing-in-the-browser#the-minimap)) |
+| `GET /api/games/{id}/trade-options/{other}` | What this seat and civilization `other` could trade, as the deal builder suggests it: `{"player", "with", "trade_options": {"their_gold", "they_could_give", "you_could_give", "agreements_possible_now", "research_agreement_cost_each"}}`, each side's luxuries, strategic resources and technologies. A seat token reads its own seat's; a spectator of a game no person plays (or that is over) reads any civilization's through `as_player`. 404 unless `other` is a living major civilization that side has met, and for anyone else. The `get_diplomacy` tool still lists them for every civilization met |
 | `GET /api/games` | Games visible to the caller |
 | `GET /api/rules` | The whole ruleset |
+| `POST /api/games/{id}/debug/ops` | Debug servers only (`CITAR_DEBUG=1`, as `citar serve --debug` and `scripts/dev_server.py` run): applies scenario operations to the live game, the body their list (`[{"op": "grant_era", "player": 0, "era": "Renaissance era"}, ...]`; `GET /api/scenario-ops` lists them), all or nothing, and answers `{"ok": true, "results": [...]}`, each operation's result. For whoever manages the game; 404 on any other server, whoever calls and whatever JSON the body holds, and for anyone who may not see the game, 403 for one who may only watch it (and for a cookie without its CSRF token). The body is judged only after that: one that is not a list of objects is a 422, a refused list is a 400 naming the operation that failed, the game unchanged; at most 200 operations a call. Scripts move a game on with it: the QA script gives a seat each era's techs. `POST /api/games/{id}/debug/{action}` (`meet_all`, `reveal`, `gold`) is the same server's named shortcuts, for every major civilization |
 | `GET /api/games/{id}/metrics` | Per-seat, per-turn metrics |
 | `GET /api/games/{id}/metrics.csv` | The same, as CSV |
-| `GET /api/games/{id}/replay` | Every turn's state, for the recap |
-| `WS /ws/games/{id}` | Live updates |
+| `GET /api/games/{id}/replay` | Every turn's state, for the recap: once the game is over, or live for whoever may watch an AI-only game (its spectator token, or an account or key that may see it). `format` is `delta`: `frames` are the turns as the save's journal keeps them (`{turn, keyframe, bytes}`, the bytes in base64: a keyframe now and then, deltas between), which `citar/web/js/replaydecode.js` decodes; [ARCHITECTURE.md](Architecture#the-recaps-frames) describes them |
+| `WS /ws/games/{id}` | Live updates: `?token=` a seat or spectator token, or none for the account signed in (its cookie), and `&k=` a `link` game's key. Besides the game's events, a chat's `negotiation_status` (below) |
+| `GET /api/models/scores`, `GET /api/metrics/compare` | Per-model scores and metrics. A member's are made from their own games and the games other members pool, a model's pooled part only once enough accounts are behind it (`pooled_withheld`, or a row with `withheld` and the reason); other members' games are counted (`pooled_games`), never named. `scores` also says what the member's scope holds (`scope`). An administrator's cover every game. Hybrid benchmark jobs stay out: their turns are the bot's. A model seat that ran on a machine whose results do not count (a member's machine that was not `trusted` when it ran nor is since: design/phase4-helper.md P4.5.8 rule 11; a site machine's and an administrator's always count) is left out of every board but its owner's own figures, where its game is marked `unverified_machine`; each model's games left out are counted, never named (`unverified`: `{model, games, reason}`; `unverified_games` on its row). Trusting the machine brings its earlier games in |
+| `GET /api/models/diplomacy` | The diplomacy leaderboard ([Benchmarks](Benchmarks#the-diplomacy-leaderboard)), members only: `lines`, one per model and owners preset (`owners`: a preset's name, or `custom: <kinds>`), each with `pairs`, `mean_score_diff` and its 90% bootstrap interval `ci90`, `deals_per_game`, `mean_deal_value`, `acceptance_rate`, `wars_declared_per_game`, `captures_per_game`, `losses_per_game`, the control arm's `control_deals_per_game` and `control_mean_deal_value`, `fallbacks_per_game` (the model's: `timeout`, `failed`) and `other_fallbacks` by cause (`queued_behind_benchmark`, `refused`, and `not_started` for a chat whose time ran out or a diplomat call that waited past its start before its prompt began: not counted against it), `games` (the caller's own pairs, named: run, job, scenario, seed, score difference) and `pooled_pairs` (other members' pairs, counted). Only the pairs of runs the caller may see; a member's under the pooling rule, as the model scores (`withheld` names the lines whose pooled part was held back, `scope` what the member's scope holds). `bootstrap` gives the interval's resamples, seed and coverage. A pair whose model ran on a machine whose results do not count (as the model scores say) is left out but in its owner's own lines (marked `unverified_machine` in `games`), and counted per line in `unverified` (`{model, owners, pairs, reason}`) |
+| `GET /r/{slug}` | A report's page for people with no account: a `link` report by its key, a `global` one by its id or key; 404 for anything else |
 
 A tool call returns the tool's result, or an error describing what the rules refused and why. Rule
 refusals are 400 with a readable message — `"That tile is not adjacent"` — because the message is
 read by a model as often as by a person.
 
 Full schemas: `GET /api/tools`, or `/docs` for the generated OpenAPI browser.
+
+### A chat's status on the socket
+
+`{"type": "negotiation_status", "negotiation": 4, "players": [0, 2], "waiting_on": 2, "kind": "model",
+"state": "queued", "position": 1, "eta_s": 9.9, "deadline": 1791840929.6, "left_s": 583.0, "paused": false,
+"entries": 1}`
+
+- `state`: `waiting` (the chat waits on `waiting_on`, until `deadline`, in epoch seconds, `left_s` from now; no
+  deadline while the game is paused or for a bot, which is never timed), `queued` (the answering model's request
+  waits for its machine: `position` in its line and `eta_s`), `thinking` (the model is generating its answer), or
+  `closed` (with the chat's `status`: `accepted`, `rejected` or `expired`).
+- `kind` is the side it waits on: `model` (an LLM or MCP seat), `person`, `bot` (or `hybrid`).
+- `entries` (every state but `closed`) is how many entries the chat had when this was said. A chat's
+  history only grows, so a client that has read more entries than that knows the status came late,
+  and one that has read fewer knows to read the chat (`GET /api/games/{id}/negotiations/{nid}`).
+- It goes to the sockets of the two seats in `players` and to spectators while the god view is allowed (no person
+  plays, or the game is over); to nobody else.
+
+### Owning and sharing a game
+
+These take a signed-in account (a seat token is not one); see
+[the accounts design](Design-accounts-and-sharing#3-authorization) for who may do what.
+
+| Method and path | |
+|---|---|
+| `POST /api/games` | Create a game: `{"name", "config", "seats", "visibility", "data_sharing"}`. Counts against your game limit. A model seat (an LLM or a hybrid seat) names a machine (`{"llm": {"server_id", "model", ...}}`); a member's seat that describes one (a base URL, a key, a key variable) is refused with 400. A hybrid seat ([the seat](#a-hybrid-seat)) is admitted for pooled prompts on its machine, an LLM seat for games; hybrid settings that are not allowed are 400, with the reason. A seat's `bot` is `{"profile", "aggression"}` ([seat bots](#seat-bots)) |
+| `POST /api/games/{id}/seats/{player}` | Change a seat: `{"type", "llm", "bot", "name", "hybrid", "handicap"}`, each optional. A new model block, or a seat made an LLM or a hybrid seat, passes the same rule, and is admitted again by its kind (games for an LLM seat, pooled prompts for a hybrid one) at every such change; a machine you may not use is 403, and the seat stays as it was. A hybrid seat takes its settings and handicap as in [a hybrid seat](#a-hybrid-seat); a seat changed from hybrid to another type keeps none of them. Settings, a handicap, a bot or a type that are not allowed are 400, with the reason. A new name alone checks nothing |
+| `DELETE /api/games/{id}` | Close the game (the lobby's End game): it stops, its saves stay yours, and it no longer counts against your limit |
+| `GET /api/games/{id}/sharing` | Its visibility (`private`, `allowlist`, `link`, `server`, `global`), its share link, who it is shared with, and its last unpublish (`at`, `reason`, and `by`: "you", "its owner", "an administrator", "a moderator" or "someone who manages it", never a handle) |
+| `PUT /api/games/{id}/sharing` | `{"visibility", "data_sharing", "rotate_slug"}`; `global` needs the `publish_global` permission |
+| `POST /api/games/{id}/sharing/users`, `DELETE .../sharing/users/{handle}` | Share with one account (`view`, `play` or `manage`), or stop |
+| `POST /api/games/{id}/unpublish` | `{"reason"}`: make it private and kill its links, for a moderator on a published game or for whoever manages it. The owner sees the reason |
+| `POST /api/scenarios/{id}/launch` | Start a game from a scenario you may see: your game, under the same seat rule and game limit |
+
+### A hybrid seat
+
+A seat of `POST /api/games`, of `POST /api/games/{id}/seats/{player}`, of a scenario's seats, or (`type` aside)
+as `GET /api/games/{id}` lists it ([AI players](AI-players#hybrid-seats); [setting one up](Playing-in-the-browser#hybrid-seats)):
+
+```json
+{"type": "hybrid", "name": "", "handicap": "ai", "difficulty": "Prince",
+ "bot": {"profile": "standard", "aggression": 0.4},
+ "llm": {"server_id": "sv_...", "model": "..."},
+ "hybrid": {"owners": {"trades": "llm", "chat": "llm"}, "advisor": true, "prompt_every": 10, "phase_seconds": 180}}
+```
+
+- `owners`: who decides each of `trades`, `agreements`, `peace`, `war`, `denounce`, `un`, `city_states`,
+  `espionage`, `captured_cities` and `chat`, `"bot"` or `"llm"` (`"bot"` for any not named), or a preset,
+  `"trade_only"`, `"all_but_war"` or `"everything"`. At least one must be the model's. Listed back as the
+  whole map, with `preset` when it is one.
+- `prompt_every`: 1 to 50 (10); `advisor`: true or false (true; always off in a benchmark game);
+  `phase_seconds`: 10 to 600 (180).
+- `handicap`: `ai` (the default) or `human`, whose numbers the seat plays with; `difficulty`, its level,
+  as for any seat. `GET /api/games/{id}` gives each major's `difficulty` and `handicap` in `players`.
+- A scenario's hybrid seat (`/api/scenario-editor/{id}/meta` and `/save`) is checked as a game's when it
+  is set (400, naming the seat as the engine does: `Seat 1` is P1), and keeps its bot, settings and
+  handicap but no machine: its launch (`POST /api/scenarios/{id}/launch`, whose `seats` are laid over
+  the scenario's) names the model. A seat's `llm`, `bot` or a hybrid seat's `hybrid` that is not an
+  object is refused there as in a game, never saved as the defaults. A scenario made from a running game
+  (`"source": "game"`) keeps its hybrid seats' settings, a bot chosen as the best one as `"best"` again
+  (pinned when the scenario is launched).
+
+A game's summary (`GET /api/games/{id}/summary`) gives each seat a model plays its `model`, its task
+`class` (`full` for an LLM seat, `partial` for a hybrid seat) and a `label` ("Hybrid: standard +
+dry-run", the bot marked "(best)" while it is the one "Best bot" was pinned to, [seat bots](#seat-bots));
+its metrics (`GET /api/games/{id}/metrics`) give the diplomat's phases (`diplomat`: turn, triggers, steps, `gen_s`,
+`queue_s`, tokens, outcome, cause, tools) and, per seat, their totals (`diplomat_phases`,
+`diplomat_outcomes`, `diplomat_tools`, `diplomat_refused`), with a hybrid seat's `bot`, `bot_best` and
+`owners`.
+
+### Seat bots
+
+`{"profile": "standard", "aggression": 0.4}`: the profile that plays (`"best"` for the best-ranked one,
+[Bots](Scripted-bots)) and the seat's aggression, a number from 0 to 1 (held to that range) or empty for the
+default; anything else, or a `bot` that is not an object, is a 400. `"best"` is pinned when the seat is
+made or changed: the seat records the profile it stood for then, with `"chosen_as": "best"`. That mark
+is the server's: one sent is ignored, and a seat keeps it only while its bot stays on the profile it was
+pinned to (the Join/Seats dialog sends it back as it was); pick another and the seat is that profile.
+
+### Owned items
+
+Benchmark suites and runs, probes and probe runs, lab experiments, scenarios, maps, bot profiles and
+reports each have an owner and a visibility, like a game ([the rules](Design-accounts-and-sharing#owned-items)).
+Their own routes (`/api/benchmarks/...`, `/api/probes/...`, `/api/probe-runs/...`, `/api/maps/...`,
+`/api/scenarios/...`, `/api/scenario-editor/...`, `/api/bots/...`, `/api/lab/...`, `/api/reports/...`)
+answer 404 for an item the caller may not see and 403 for one they may see but not change; listings
+carry `can_view`, `can_manage` and `can_moderate` per item. A `link` item opens with its key as `?k=`
+(or the `x-citar-share-key` header), and a listing asked with a key shows the one item it opens to
+whoever holds it. A report's sharing block also gives `public_url`, its `/r/` page, when it is shared
+by `link` or published. (`/api/shared/reports...`, the old report sharing routes, are gone: a report
+is shared through the routes below like every other item.) What a report gathers follows its owner
+([Reports](Servers-costs-and-reports#what-a-report-contains)); its specification takes `"pooling": "own" | "both" |
+"pooled"`. `GET /api/reports/{id}` gives a report's managers its whole metadata and specification;
+anyone else it reaches gets neither its traceback nor its owner, and a specification cut to what they
+could have chosen (the scope's items and machines they may see; of the narrative only `enabled`).
+A body of the wrong shape (an item named by anything but its id, a report specification whose parts
+are not objects or lists) is a 400. A report's narrative that names a pooled machine the caller is not
+admitted to (a grant for `pooled` prompts, P3.3.7) is a 403, as a run's machine is. A probe run's subject
+(`POST /api/probes/{id}/run`) is admitted for what its chosen cases are: `probe` for a turn case,
+`pooled` (and `partial_llm`) for an offer or message case; one it is not admitted for is a 403 naming the
+purpose. `GET /api/probes` gives each probe's `purposes`, what a run of all its cases is admitted for. A run's body may
+say `"mode": "hybrid"` with `owners` (a preset or a map; `trade_only` by default) and `bot_profile`: its subject then
+plays a hybrid seat whose bot answers first, and the run is admitted for `pooled` prompts only, its turn cases
+included; bad settings, or the scripted bot as a hybrid run's subject, are a 400 with the reason. Each case's result
+says which side answered (`answered_by`: `bot`, `model`, or `none` when the model left the chat waiting or its prompt
+did not run, and `answers` round by round), and a hybrid turn
+case's `diplomat` lists its diplomat call. A benchmark suite's scenario takes `"mode": "full" | "hybrid"` and, for a
+hybrid one, `hybrid`: `{"owners", "bot_profile", "handicap", "prompt_every"}` (a bad one is a 400 naming the
+scenario); a run of a suite with a hybrid scenario is admitted for `pooled` prompts as well as `benchmark` on its
+machines. A benchmark job records its machine's standing when it started (`standing`: `{tier, vouched}`), and in
+`GET /api/benchmarks/runs` a job (and its run) whose machine's results do not count carries `unverified_machine`; a
+probe run in `GET /api/probe-runs` and `GET /api/probe-runs/{id}` the same (design/phase4-helper.md P4.5.8 rule 11).
+A hybrid job in `GET /api/benchmarks/runs` carries its `mode`, `owners` and `control` (`{"id", "status"}`:
+its control game), and once both games are over its result's `pair` (the pair line), `diplomacy.summary` (the seat's
+record) and `fallbacks` by cause; a record that stopped on an error says why in `diplomacy.incomplete`, and its job
+has no `pair`. A report's record carries `narrative_written` and `narrative_note` (who wrote its analysis, or
+why it was skipped or failed); `DELETE /api/reports/{id}` deletes a report being built too (its
+narrative's prompt leaves the machine's line). What queued work waits for (a benchmark job's `waiting` in
+`GET /api/benchmarks/runs`, a probe run's in `GET /api/probe-runs/{id}`, a report's `waiting` and
+`progress`, a Queue page entry's `waiting`) names only the games and runs the caller may see; the rest
+are "someone's game", "someone's benchmark run" and so on.
+An item is addressed here by its kind and its id on disk (`ref`), as its own routes name it:
+
+| Method and path | |
+|---|---|
+| `GET /api/items/{kind}/{ref}/sharing` | Its owner, visibility, share link, who it is shared with and its last unpublish (as a game's) |
+| `PUT /api/items/{kind}/{ref}/sharing` | `{"visibility"}`; `global` needs `publish_global` |
+| `POST /api/items/{kind}/{ref}/sharing/users`, `DELETE .../sharing/users/{handle}` | Share with one account (`view`, `play` or `manage`), or stop |
+| `POST /api/items/{kind}/{ref}/sharing/rotate` | A new share link; every copy of the old one stops working |
+| `POST /api/items/{kind}/{ref}/unpublish` | `{"reason"}`: make it private and kill its links, for a moderator on a published item or for whoever manages it |
+| `GET /api/queue` | The Queue page: the machines the caller may see (`others_busy` counts the rest that are in use, naming none), each with `capacity`, `in_flight`, `busy_with`, its `leases` (`kind`, `label`, `member`, `state`: `active`, `lending` or `held`), its jobs (`waiting`, `running`) and its pooled `prompts` (`running` and `waiting`: `class`, `label`, `member`, `model`, `priority`, `position`, `waited_s`, `eta_s`, `starts_within_s`, `can_manage` with the work's `ref`, `can_cancel` with the prompt's `id`); work the caller may not see is "someone's <kind>" with no member. Its `cpu` is the lab's CPU jobs: the dispatcher (`alive`, `paused`, `queued`), its `executors` the caller may see (this server's own job host, `name` "this server", for everyone: its `state`, `threads`, `cpu_percent`, `memory_mb`, why it takes nothing now as `available`, and its `games` playing, each `label` the experiment and game where the caller may see the experiment and "someone's lab game" otherwise, with its `turn` and `limit`) and the lab's `experiments` in the order they run |
+| `POST /api/queue/priority` | `{"kind", "id", "priority"}`: move your own work (a benchmark run, a probe run, a report, a lobby game, a lab experiment) up or down the queue; its pooled prompts follow it |
+| `POST /api/queue/tickets/{id}/cancel` | Cancel a pooled prompt: for its work's owner (for a prompt of no work, its member), the machine's owner and administrators; 403 to anyone else who may see it, 404 to the rest. A running prompt's request drains on a helper that keeps generating it |
+
+`kind` is one of `benchmark_suite`, `benchmark_run`, `probe`, `probe_run`, `lab_experiment`,
+`scenario`, `map`, `bot_profile` and `report`. These take a signed-in account.
+
+### The lab's CPU jobs
+
+The server plays the lab's experiments as CPU jobs ([Bots: the lab](Scripted-bots#the-lab); design/phase4-helper.md
+P4.5.5-P4.5.10).
+
+| Method and path | |
+|---|---|
+| `GET /api/lab` | The Lab page: `dispatcher` (`alive`, `paused` with who paused it and when, `queued`, `running`, `games_last_hour`, and its `executors`: each one's `machine`, `name`, `kind` (`local`, the server's own job host), `state` (`idle`, `starting`, `ready`, `draining`, `failed`, `off`), `threads`, `cpu_percent`, `memory_mb`, `running`, `paused` and why it takes nothing now as `available`; a member is told its `running` without its replays, and each executor's `name` as the games table names it ("this server" for the server's own job host) and neither its `machine` id nor why its job host stopped; an administrator also gets how each limit holds, `held`, its `memory_per_run_mb`, whether it is `verifiable` and its `notes`), the `experiments` the caller may see (each with `state`, `games`, `done` (a game whose result a replay checks counts as done to a member; an administrator sees it apart, `settling`, with the replays playing as `verifying`), `running`, `failing`, `crashed`, `refused`, why it waits as `waiting`, each executor in it named as the caller may be told it (helpers whose connection went counted rather than named, past one), its `kind` and `job_kind`, its accepted games by `verification` (`{reference, verified, unverified}`, from its results file) and the games whose result was `withdrawn` and played again), the games playing (`exp`, `i`, `executor`, `turn`, `limit`, `paused`, `minutes`, `attempt`; an administrator also sees the replays playing, each with its `role`); the lab's `log` and the side runs are an administrator's |
+| `GET /api/lab/jobs?exp=NAME` | An experiment's games as jobs, for whoever may see the experiment (404 for anyone else, a visitor included unless it is shared by `link` or published): each job's game `i`, `state` (`queued`, `running`, `done` once its result is in, `crashed` when its result is a crash, `failed` after three failures, with its `error`), `attempts`, `mem_mb`, and its accepted run's `executor` (`{name, kind}`: "this server" for the server's own job host; a helper machine by its name where the caller may see it, "a member's machine" otherwise), `verification` once it settled (`reference` for the server's own, `verified` when a replay reproduced it, `unverified` when it was accepted without one), times, `cpu_s`, `wall_s` and `peak_mb`, or a playing run's `round` and `of`; `counts` by state. A job whose result a replay is checking (`settling`) is `done` to everyone but administrators, with no verification yet, and its replay is never shown to them; a game whose result was withdrawn shows as the job that plays it again (design/phase4-helper.md P4.5.8 rules 2, 8). An administrator sees the job states themselves (`accepted`, `settling`, `withdrawn`), a settling job with no verification run playing as `waiting` ("waiting for a verifier"), and each job's `runs` with their `role` (`primary`, `replica`, `tiebreak`) and `verdict`; a settling job's `verification` is null to an administrator too |
+| `GET /api/admin/jobs` | Administrators (404 to anyone else signed in, 401 to a visitor): the dispatcher as above, `paused`, the `queued` jobs by experiment in the order they would run, each with why it waits (`waiting`: each executor's reason, such as "it needs 900 MB a run, and this server's job host leaves each run 170 MB"), the `running` games by machine (each with its `turn` and `limit`, `paused`, `deadline_s`, `paused_s` and `extended_s`, how far its pauses pushed the server's deadline on), the `verifiers` (this server's job host, with whether it is `on` and `verifiable`, and the `trusted` machines marked `verifier`, online or not, each with its `owner`, its verification runs playing as `in_flight` and its `latest` ten with their `verdict`, a replay its machine stopped verifying for marked `void`), the `caps` on new machines (design/phase4-helper.md P4.5.8 rule 3: `new_per_owner`, `new_verify_share`, each new helper machine with its `owner`, its work `in_hand`, its results waiting for replays as `waiting_replicas` and why it is `held`, and each verifier's `share` of new machines' replays) and the cost table (`costs`: per kind, map size, seats and bucket of 50 rounds, `cpu_s` and `peak_mb` with their `samples`). The caps' figures are the dispatcher's last tick's; the queued jobs wait at most 2 seconds for a tick in progress, then 503 "The job dispatcher is busy" |
+| `GET /api/admin/verification` | Administrators (404 to anyone else signed in, 401 to a visitor; the `#/admin/verification` page): the verification `settings` with their `defaults` and `bounds`, the helper machines by tier (`tiers`), the `quarantined` machines (each with its `owner`, `evidence`: the verdict, its words, the round where two chains parted, what it was checked `against` and the `withdrawn_jobs`) and owners (each with `why` and the run that caught them), the recent `mismatches` and `withdrawals`, the `verifiers` (as above), and the machines the credits' bounds or the class check `flagged` (their `flags` and measured `speed`) |
+| `PUT /api/admin/verification` | Administrators: any of the settings (design/phase4-helper.md P4.5.8): `new_streak`, `promote_verified`, `overreport_days` and `new_per_owner` whole numbers from 1 to 10,000; `provisional_rate`, `trusted_rate` and `new_verify_share` from 0 to 1. An unknown name, a value out of bounds or of the wrong type (infinity and not-a-number among them), or an empty body: 400, and nothing changes. In force at once; one audit row (`verification.settings`) naming what changed. Answers as the read |
+| `POST /api/admin/jobs/pause`, `POST /api/admin/jobs/resume` | Administrators: the Lab page's Stop and Resume, as `citar lab stop` and `resume`: paused, the games playing finish and nothing new starts. One audit row each (`lab.paused`, `lab.resumed`) |
+| `POST /api/admin/jobs/retry?exp=NAME` | Administrators: the Lab page's Retry. The experiment's failed games (every queued experiment's without `exp`) are played again, their attempts back to 0, at the dispatcher's next tick (a game fails after three retryable failures; the server's next start retries them too). `{requested, exp}`; 404 for an experiment not in the queue, 409 when no dispatcher runs; one audit row (`lab.retried`) |
+
+### Profiles, the directory and the admin users page
+
+An account's profile fields each show to the account and administrators (`private`), members (`server`) or
+anyone (`global`), and the profile page's own field gates the rest
+([the rules](Design-accounts-and-sharing#profiles-and-the-directory)). Wherever an account appears in any answer
+(`owner`, `shared_with`, a grant's `subject`), it is `{"id", "handle", "display_name", "avatar"}` as the caller
+may see it: a hidden display name is the handle, a hidden picture `null`.
+
+| Method and path | |
+|---|---|
+| `GET /api/auth/me` | The caller's own account, its profile included (`bio`, `links`, `field_visibility`, `listed`, `avatar`, `avatar_uploaded`, and `avatar_url`, the sign-in provider's picture) |
+| `PUT /api/auth/me` | Also `{"bio", "links": [{"label", "url"}], "field_visibility": {field: level}, "listed"}`: every part checked before any changes; a bio over 1,000 characters, a fourth link, a link that is not `http` or `https`, an unknown field or level is 400, a `global` field on probation 403 |
+| `POST /api/auth/me/avatar` | A multipart form with one file: PNG, JPEG or WebP, at most 256 KB and 1024x1024, checked by its header (400 with the rule otherwise, or for a body that is not a well-formed form; 413 when larger). Stored without its metadata: Exif, XMP, text chunks and comments are left out, the pixels untouched |
+| `DELETE /api/auth/me/avatar` | Remove the uploaded picture |
+| `GET /api/users` | Members only: the directory, listed accounts in good standing, newest first; `?q=` (a handle, or a display name the caller may see), `?offset=` (pages of 50, `next`; 0 to 1,000,000, 422 otherwise) |
+| `GET /api/users/{handle}` | A profile as the caller may see it (`fields` lists what shows; `bio`, `links` and `items` when they do); `?as=member` or `?as=visitor` narrows the view, never widens it. 404 when the page does not show to the caller, alike for an account that does not exist. Open to visitors |
+| `GET /api/users/{handle}/avatar` | The uploaded picture, to whoever its field shows to; 404 otherwise. Its address in `avatar` carries the file's hash |
+| `GET /api/admin/users` | Administrators: every account, newest first; `?q=` (handle, name or email), `?role=`, `?status=`, `?offset=` (pages of 50; 0 to 1,000,000, 422 otherwise) |
+| `GET /api/admin/users/{id}` | One account (its capabilities resolved, `capabilities`, beside its overrides, `caps`), the role's defaults and its audit rows |
+| `PATCH /api/admin/users/{id}` | Any of `role`, `status` (with `reason` for a suspension), `caps` (each capability `true`, `false` or `null`, null removing the override), `invite_quota` (0 to 1,000; 0 is none), `max_concurrent_games` (1 to 100), `max_seats_per_game` (0 to 64; 0 is the ruleset's most), `trust_tier`, `listed`: all checked before any changes, one audit row naming the fields; 409 for the last active administrator demoting or suspending themselves |
+| `GET /api/admin/audit` | The audit log, newest first: `?actor=` (handle or id, or `admin_cli` for the command line's changes), `?action=` (or a prefix ending in `*`), `?object_type=`, `?object_id=`, `?before=` (an entry's id, from `next_before`; 422 past a 64-bit integer), `?limit=` (at most 200) |
+
+The admin routes answer 404 to any account that is not an administrator, and 401 to a visitor.
+
+### The compute ledger
+
+What each account's machines gave other members and what its work used, in credits
+([the rules](Design-accounts-and-sharing#the-compute-ledger-and-the-ratio)). A side's figures are `{"credits", "gpu_s",
+"cpu_s", "tokens_in", "tokens_out", "events", "by_kind": {"gpu"|"cpu"|"api": {"seconds", "credits", "events"}}}`, and
+the ratio `{"value", "text"}` (`value` null when nothing was used: `text` "only given" or "nothing yet"). `range` is
+`24h`, `7d`, `30d` (the default) or `all`; another is a 400.
+
+| Method and path | |
+|---|---|
+| `GET /api/ledger/me?range=` | The caller's own: `given`, `used`, `ratio`, `by_machine` (`{"id", "name", "given", "used", "gpu_s", "cpu_s", "events"}`; a machine the caller may not see now has no `id` and is named only as whose it is), `by_activity` (by kind of work: `game`, `benchmark`, `probe`, `report`, `lab`, `test`) and `own_use` (the caller's work on the caller's own machines, counted on neither side). 401 to a visitor |
+| `GET /api/users/{handle}/ratio?range=` | `{"handle", "range", "since", "given", "used", "ratio"}` when the account's `ratio` profile field shows to the caller (private by default: the account and administrators); 404 otherwise, alike for no such account. Open to visitors for a `global` ratio. A profile (`GET /api/users/{handle}`) carries the same as `ratio` (30 days) under the same rule, and `GET /api/admin/users` each account's 30 days as `compute_30d` (`{"given", "used", "ratio"}`) |
+| `GET /api/admin/hardware-classes` | Administrators: every class (`{"id", "kind", "name", "rate", "match", "priority", "is_default", "updated_at", "updated_by", "machines"}`), each with the machines it prices now |
+| `POST /api/admin/hardware-classes` | A class: `{"kind": "gpu"|"cpu"|"api", "name", "rate", "match": {"gpu_name", "vram_gb_min", "cpu_name", "cores_min"}, "priority", "is_default"}` (a regular expression that does not compile, an unknown key, a rate outside 0 to 10⁹, a priority outside -1000 to 1000: 400). One marked the default replaces its kind's |
+| `PUT /api/admin/hardware-classes/{id}` | Change any field but its kind (400). A kind always keeps a default: unmarking the default is a 409. The new rate prices the events written after it ([reprice](Configuration#credits-and-hardware-classes) a period) |
+| `DELETE /api/admin/hardware-classes/{id}` | Remove a class that is not its kind's default (409 for the default) |
+
+The class routes answer 404 to any signed-in account that is not an administrator and 401 to a visitor; every change
+is an audit row, and every machine not pinned is classified again.
+
+### Machines
+
+Every machine is a row (the host, online APIs and LAN machines the server dials itself, `reach: "direct"`, and
+machines behind a CITAR helper, `reach: "worker"`); who may do what is in
+[Workers](Workers#who-may-do-what-to-a-machine). Another member's machine is a 404, a visitor gets 401.
+
+| Method and path | |
+|---|---|
+| `GET /api/servers` | The machines the caller manages (every one for an administrator), each with `reach`, `enabled`, `is_host`, `max_concurrent` (its slots) and its configuration; the electricity plans (a member sees only the names of those an administrator put in the member's machines, and no issue asking for a plan) and the key backends the caller may choose |
+| `GET /api/servers/new` | A blank machine to start from: `reach` is `worker` for a member unless the provider is `dryrun`. Needs `register_servers` |
+| `POST /api/servers` | Create a machine, or save one the caller manages (by its `id`). A machine the server dials (`reach: "direct"`, the default for a new one) is an administrator's unless its provider is `dryrun`, and so are the `env` key backend, `is_host` and an electricity plan in its costs: 403 with the reason. A member's new machine gets an id from the server (an `id` in the body names only a machine to save). A body of the wrong shape (a list where an object belongs) is a 400, here and on the pool's routes |
+| `DELETE /api/servers/{id}` | Remove it (its tokens, and the key its row stores) and disconnect its helper |
+| `POST /api/servers/{id}/hardware`, `GET .../rates` | Import a hardware file; what an hour on it costs (for a member, without the price of the site's electricity) |
+| `POST .../detect`, `GET .../state`, `POST .../load`, `.../unload`, `GET .../loading`, `POST .../loaded-config`, `.../estimate` | Model detection and LM Studio control: on a machine the server dials, or the host; for a member only a dry run. 404 for a helper machine, with nothing dialled or started |
+| `POST /api/servers/{id}/collect`, `GET /api/lmstudio/devices` | Administrators, on the host: they read the computer CITAR runs on |
+| `POST`, `DELETE /api/servers/{id}/key` | Store or remove the API key of a machine the server dials; the `env` backend is an administrator's (403). 404 on a helper machine: the server holds no key of one |
+| `PUT /api/servers-settings`, `POST /api/keys/unlock`, `POST /api/keys/lock`, `POST /api/electricity-plans`, `DELETE /api/electricity-plans/{id}` | Administrators (404 to anyone else signed in) |
+| `GET /api/servers/restricted` | The machines in their quiet hours that the caller may see; so is `restricted` in `GET /api/benchmarks/status` and in `GET /api/status`'s `benchmarks` |
+| `GET /api/pool/availability` | What the caller could run now, and when the rest opens: only machines the caller may see, usable or not |
+| `POST /api/llm/models` | List the models at a base URL ("Detect models"): an administrator's, the `dryrun` provider excepted (403 before anything is dialled) |
+| `PUT /api/pool/servers/{id}` | `{"enabled": false}` disconnects its helper at once; switching to `reach: "direct"` follows the rule above. New slots (`config.connection.max_parallel`) reach the prompt scheduler and the machine's connected helper at once, as from `POST /api/servers` |
+| `GET /api/pool/servers/{id}/workers` | Its owner's and administrators': whether its helper is connected (`worker`: hostname, `protocol`, `version`, `build`, `target`, `key_fingerprint`, models, slots, what it acknowledged and its `update`), its last hello's helper block kept while it is offline (`helper`), its registered machine key's `key` (`fingerprint`, `registered_at`), its `update` (`latest`: the signed helper this server relays, `{version, build, released_at}` or null; `available`: whether that is newer than the machine's helper; `status`: its helper's last `update_status`, `{state, version, message, at}`, kept across its reconnects, or null), its tokens (with each one's last address and time) and the `citar-helper` command to run |
+| `DELETE /api/pool/servers/{id}/workers/tokens/{token}` | Revoke a worker token: a helper connected with it is disconnected at once (`shutdown` `revoked`), and refused if it says hello again |
+| `WS /ws/worker` | Where a CITAR helper dials in: protocol 2 only (`crates/citar-helper/PROTOCOL.md`). A protocol 1 hello gets the one-line refusal to download the new helper and close 4426; an address past 20 refused tokens in five minutes is refused (`rate`, 4429) before any lookup; an unknown or revoked token `token` (4401); a machine key other than the one registered `key` (4401). A first frame over 2 MiB is closed with 4400 `too_large` unread; a database that fails while the hello is checked closes it with 1011, which the helper retries |
+| `GET /api/pool/groups` | The server groups the caller may see, with their machines; a group's manager gets every grant, anyone else their own terms. Its grants are what share it: no route takes a group's key, so a `link` group admits nobody by it yet and the listing hands out no share link |
+| `POST /api/pool/servers/{id}/test?model=&wait=` | The Servers page's test: one short completion through the machine's helper, as a `test` prompt of the [prompt scheduler](Workers#when-a-machine-is-busy) (it waits for a slot, on a model the helper has loaded unless its owner allows swaps). `wait` (1 to 120 seconds, default 120) is how long the caller waits for the reply: then the test is cancelled (`"cancelled": true`, `code` `cancelled`; `benchmark` when a benchmark game took the machine meanwhile), and the request the helper is still generating keeps its slot until it finishes. A reply carries `seconds`, the generation time `gen_s` and the time it waited for the machine, `queue_s`; a refusal names its `stage` (`admission`, `connection`, `model`, `queue`, `completion`), its reason and, from the queue, its `code` (`not_loaded`, `quiet_hours`, `benchmark`, ...). A caller has one test of a machine waiting at a time (another answers `code` `duplicate`) and two in all (`too_many`), at most 20 in ten minutes (429 past that, with `Retry-After`). The test is a compute-ledger activity of its own (`test:<id>`): used by the caller, given by the machine's owner, counted against the grant's budget; no cost report lists it. Anyone who may use the machine |
+| `GET /api/status` | A check-in for the phone site. An administrator's also lists the scheduler's `machines`: each one's slots, what is in flight and draining, what waits, its leases (each with its `kind`, `label`, the `game` session holding it and the work it serves as `ref`, `[kind, id]`) and pooled prompts, and its counters (`busy_refusals`, `late_frames`, `drain_timeouts`, `drains_dropped`, ...); a member's and a moderator's do not |
+
+The pool's routes that change something (a machine, its costs or quiet hours, a group, a grant, a worker token)
+commit before they answer, so a page that reads the change back at once (the Servers page redrawing a card after its
+dialog saves) sees it.
+
+`POST /api/pool/import-registry` is gone: a pre-0.1.6 `config/servers.json` is imported once by the server itself
+([Configuration](Configuration#the-machines-in-the-database-not-a-file)). The first-run setup wizard's
+`POST /api/setup/scan` and `POST /api/setup/apply` (they read this computer and register machines the server dials)
+are an administrator's, and so are `POST /api/setup/dismiss` and `POST /api/setup/reopen` (a site-wide setting); a
+member's `GET /api/setup/state` has no `paths`.
+
+### A machine's settings
+
+The machine settings dialog's routes ([Workers](Workers#machine-settings-and-what-a-helpers-report-changes)).
+All but the last two are the machine's owner's and administrators' (the site's machines, the host and its online APIs,
+administrators' alone): a member a group lends it to gets 403, any other member 404, a visitor 401. The last two are
+administrators': anyone else signed in gets 404. Every change writes one audit row (`server.settings`,
+`server.scan_applied`, `server.trust`, `server.class`) and is committed before the answer, which is the dialog's read
+again.
+
+| Method and path | |
+|---|---|
+| `GET /api/machines/{id}/settings` | The dialog's read: `slots` (its `max_concurrent`), `capabilities` (`llm`: `enabled`, `allow_swaps`; `cpu`: `enabled`, `threads`, `cpu_percent`, `memory_mb`, `work`, a list of `lab_game`, `ranking_game`, `reference_game`), `modes` (`hardware`, `models`, `power`: `auto` or `manual`), `in_effect` (what the prompt scheduler has in effect now: `capacity`, `slots`, `helper_slots`, `llm`, `allow_swaps`, `online`), `report` (its helper's last report: `at`, `helper`, the scan as `hardware` with `hardware_at` and `hardware_summary`, its suggested `power` figures, the `models` it reported with `models_at`), `configured` (its hardware summary and source, power figures and catalogue), `differences` (per section, `[{what, configured, detected}]`), `class` (its `gpu` and `cpu` classes, or its `api` class, and whether they are `pinned`) and `trust_tier`; for a helper machine `cpu_helper`, what its helper lends from its last hello and acknowledgement (`lent`: its owner's own switch; `verifiable`; `plays_jobs`; `effective`, the CPU work in effect; `limits`, `cpu` and `memory` each `hard` or `soft`; `memory_per_run_mb`; `capped`, the `cpu.` figures its ceiling capped; `ceiling`), null until a protocol 2 helper connected, and `lab_grants`, the live grants on its group that list `lab` (`{subject, group}`). An administrator also gets `classes` (every class, to pin) and `flags` (`overreports`: its helper reported more generation time than the server observed, with its `count` and `last` time) |
+| `PUT /api/machines/{id}/settings` | Change any of `slots` (1 to 16), `capabilities` (`llm` and `cpu`, each in part) and `modes`; the rest stay. A value of the wrong type or out of range, an unknown key, CPU sharing on an online API or a test machine: 400, and nothing changes. Slots, swaps and LLM on or off reach the prompt scheduler at once, and the machine's connected helper; when something changed, the answer waits up to 2 s for the helper's acknowledgement (one request a machine waits at a time) |
+| `POST /api/machines/{id}/key/reset` | Forget the machine key its CITAR helper registered: the next helper to connect with one of its tokens registers its own (design/phase4-helper.md P4.3.7). One audit row (`server.key_reset`, with the old key's fingerprint); the machine's trust tier is unchanged. A helper still connected is closed with 1012, so it reconnects and registers its key at once. A result it sent under the old key that had not been checked yet is no verdict: its game is played again. Answers the dialog's read |
+| `GET /api/machines/{id}/jobs?limit=N` | Its CPU runs, newest first (`limit` 1 to 200, 50 by default): each run's game, `kind`, `state`, `experiment` (named where the caller may see it, "a member's experiment" otherwise), times, `cpu_s`, `wall_s`, `paused_s`, `peak_mb`, and its `verdict` once its job settled; `online`; `lends`, what its connected helper lends now (`cpu` in effect, `limits`, `memory_per_run_mb`, `lent`, `verifiable`, `jobs_build`, the executor's `state` and `why` it takes nothing), null when no helper is connected; `trust`, its counters (`verified`, `streak`, `mismatches`, `abandons`, `claim_failures`, `helper_faults`: its helper's word against the server's own checks, a spec it refused or a run it said no machine could play). An administrator also sees each run's `role`, its job's state and its `error`, and the trust's last mismatch, claim failure and helper fault, its measured `speed`, the promotion it earned (`promoted`), the replays asked (`replicate`) and the `flags` the credits' bounds and the class check put on it (`overreported_cpu`, `capped_cpu`, `class_suspect`, each with its count and the last run's figures) |
+| `POST /api/machines/{id}/rescan` | Ask its connected helper to scan its hardware now; its `hardware` frame follows and is kept as the last report. `{"rescan": id}`; 409 when no helper is connected |
+| `POST /api/machines/{id}/hardware/apply` | `{"sections": ["hardware", "models", "power"]}` (any of them): copy its helper's last report into the configuration, whatever the modes. A section named with nothing to copy is a 409, and nothing changes. With none or an empty list, every section the report has something for is copied (a report of models alone, a scan that suggests no power figures) and the others are passed over; a 409 only when the report has nothing at all |
+| `PUT /api/admin/machines/{id}/trust` | Any of `{"trust_tier": "new"|"provisional"|"trusted"|"quarantined", "withdraw": bool, "verifier": bool}` (design/phase4-helper.md P4.5.8 rule 10): `quarantined` by hand (every result it gave unverified withdrawn only with `"withdraw": true`; its runs in flight stopped either way), `new` releases it (its counters reset, `trust.since` now), `provisional` or `trusted` sets it; `verifier` marks a trusted machine as one that replays others' results (true on any other tier: 400). Quarantining a machine re-opens every job it verified as a verifier, whether or not it is marked one now; a tier set here is never taken back by a quarantined verifier's re-opened matches. `withdraw` without `quarantined`, a non-boolean flag, an unknown key or an empty body: 400. Made by the job dispatcher; one audit row each (`server.trust`, `server.verifier`). Answers the dialog's read |
+| `POST /api/admin/machines/{id}/replicate` | `{"n": 1..100}`: its next N results are replayed on a verifier whatever its tier's rate (P4.5.8 rule 10), counted down as they come (`trust.replicate`). `{machine, replicate}`; one audit row (`server.replicate`) |
+| `PUT /api/admin/machines/{id}/class` | `{"pinned": true, "gpu_class_id", "cpu_class_id"}` pins the classes it is priced by (an online API: its `api` class as `gpu_class_id`, no CPU class; a class left out is the one it has now; a class of the wrong kind: 400); `{"pinned": false}` lets them follow its hardware again, at once. The ledger prices by them from the next event |
+
+The pool's listing (`GET /api/pool/servers`) gives an administrator each machine's `flags` and `trust_tier`, and a
+helper machine's manager its `trust` (`tier`, `verified`, `streak`, `mismatches`; to an administrator also its
+`last_mismatch`, measured `speed`, `cpu_class`, `verifier` mark, `since`, `promoted` and `replicate`); the dialog's read
+(`GET /api/machines/{id}/settings`) carries the same `trust`. `GET /api/servers` gives each machine its `modes`.
 
 ---
 
@@ -98,10 +363,16 @@ per turn, free. The TURN PROGRESS note reminds them.
 `send_message` · `open_negotiation` · `respond_negotiation` · `declare_war` · `denounce` ·
 `city_state_action` · `move_spy` · `stage_coup`
 
-A negotiation is a blocking exchange: `open_negotiation` proposes, and the other side answers —
-AIs in seconds, humans when they see the popup. `respond_negotiation` accepts, rejects, counters or
-replies. This is the part of the game most worth probing, because it is where a model's judgement
-shows.
+A negotiation is a chat with a deal on the table: `open_negotiation` proposes, and the other side
+answers in its own time — bots at once, models and humans within the game's chat times.
+`respond_negotiation` accepts, rejects, counters or replies, and every entry carries a message (its schema
+requires `message`). Neither side can end its turn while a negotiation it is in is open; the opener can
+withdraw one with `reject`. A negotiation closes by itself at its message cap (the game's `diplomacy.max_chat_messages`, else its
+ruleset's: 30 in the standard rules), and when
+the side it waits on runs out of time: a model seat (an LLM or MCP seat) past `chat_model_reply_seconds`
+(10 minutes by default) is taken to decline, "(no reply in time)", and a chat waiting on a person past
+`chat_person_reply_seconds` (5 minutes) closes as expired. This is the part of the game most worth
+probing, because it is where a model's judgement shows.
 
 ### Turn
 
@@ -122,14 +393,20 @@ The loop:
 3. Act. Read the result of each call; the guard rails refuse an identical successful action twice
    in one turn, and repeating a query that has not changed returns "unchanged".
 4. `end_turn`.
-5. Repeat.
+5. Repeat until `wait` says `game_over` or `eliminated`, or `crashed`: the engine stopped the game after an
+   internal error, and it takes no more moves.
 
 Worth knowing:
 
 - **Answer negotiations.** `wait` returns for a negotiation as well as for a turn. An agent that
-  ignores them stalls the game for everybody.
-- **The turn ends without you** if you hit a limit — 10 steps with no progress, 60 steps, 150 tool
-  calls, or 1800 seconds. All four are per-seat settings, and which one you hit is recorded.
+  ignores one is taken to decline it once the chat's time runs out (`chats`: `seconds_left`). On your
+  own turn, after you open one, `wait` waits for the other side's answer (`negotiation_update`, or
+  `waiting_for_reply` at the timeout): `end_turn` is refused until the negotiation is settled or
+  withdrawn, and the game's chat clock settles it when the other side's time runs out.
+- **Your turn waits for you.** An MCP or HTTP seat's turn ends when it calls `end_turn`, however long
+  that takes; the chats it is in are what the clock times. The built-in adapter, by contrast, ends a
+  model's turn when it hits a limit — 10 steps with no progress, 60 steps, 150 tool calls, or 1800
+  seconds; all four are per-seat settings, and which one it hit is recorded.
 - **Errors are information.** A refusal explains the rule. Retrying an identical call unchanged is
   the single most common failure of weak agents, and CITAR counts it.
 

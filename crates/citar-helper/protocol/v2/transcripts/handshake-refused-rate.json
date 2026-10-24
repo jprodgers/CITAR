@@ -1,0 +1,77 @@
+{
+  "name": "handshake-refused-rate",
+  "about": "An address over the worker_auth limit is refused before any lookup; the helper tries again after retry_after_s.",
+  "refs": ["P4.2.2", "P4.5.1"],
+  "plays": {"helper": "4-03", "hub": "4-05"},
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "retry": 120,
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {"helper": {"clock": "fake"}, "hub": {"rate": {"failures": 20}, "clock": "fake"}},
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {"t": "refused", "code": "rate", "message": "<string>", "retry_after_s": "<id:retry>"},
+      "within_s": 5
+    },
+    {"close": {"by": "server", "code": 4429}},
+    {"wait": {"s": 119, "quiet": true}},
+    {"connect": {}, "within_s": 5},
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    }
+  ]
+}

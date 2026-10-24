@@ -3,106 +3,604 @@
 What the pieces are, why they are separated the way they are, and where to change things.
 
 ```
+crates/       the engine, in Rust: the rules (no I/O, no network, no database), the bots, the
+              headless runner, saves, and citar._engine, the extension Python reaches it through
 citar/
-  engine/     the rules. No I/O, no network, no database
-  bots/       the scripted opponent
+  engine_api.py  the only door to the engine: everything goes through it
+  bots/       bookkeeping about the scripted opponent: its profiles and ratings
   agents/     adapters that let a model take a seat
   server/     FastAPI app, sessions, turn driver, benchmark scheduler
   auth/       accounts, sessions, permissions
-  pool/       shared hardware: groups, grants, budgets, availability
+  pool/       shared hardware: groups, grants, budgets, availability, the prompt scheduler
+  jobs/       the job dispatcher, the server's job host, helpers as executors, trust tiers
+  ledger.py   the compute ledger: who gave and who used compute, in credits; rollups, the ratio
+  usage.py, costing.py   what each activity held, and its price
   db/         SQLAlchemy models
   reports/    report building and rendering
-  worker/     the outbound agent that serves models from another machine
+  helper_pointer.py  what `citar worker` says since 0.1.6: where to download the CITAR helper
   web/        the browser client
   wizard/     first-time setup
-  data/       the ruleset, as JSON
+  data/       the hardware collectors the Servers page offers
 ```
 
 ---
 
 ## The one rule
 
-**`citar/engine/` does no I/O.** It does not read files at runtime, open sockets, touch the
-database or know what a request is. It takes a game state and an action and returns a new state or
-an error.
+**The engine does no I/O.** `crates/citar-engine` does not read files, open sockets, touch the
+database, read the clock or know what a request is. It takes a game state and an action and returns
+a new state or an error.
 
 Everything else follows from that:
 
 - The same engine runs a browser game, a benchmark, a headless simulation and a lab experiment.
-- A game is a value. Saving it is `json.dumps`; loading it is the reverse; the replay is a list of
-  them.
+- A game is a value. Saving it is writing its state; loading it is the reverse; the replay is its
+  history.
 - The bot, the LLM adapter and the HTTP API are all *callers*, none of them privileged. A model
   cannot do anything a human could not, because there is only one set of actions.
-- Tests are fast and deterministic. 272 of them run in ninety seconds with no fixtures.
+- Tests are fast and deterministic.
 
-The ruleset is loaded once at import, which is the one exception, and it is read-only.
+The ruleset is compiled into the engine and loaded once, read-only; a host may give it another
+(`CITAR_RULESET_DIR`, read by the extension when it loads, which does the reading).
+
+## The one door
+
+**Nothing imports the engine except `citar/engine_api.py`.** The server, the agents, probes,
+benchmarks, the lab, balance runs and `citar sim` hold an `EngineGame` and call its methods; they
+never touch the extension `citar._engine` or the module behind the facade, and they read a saved
+game's state only through `engine_api.state_summary` and `save_header`. The facade's `__all__` is its
+whole public surface. `tests/test_engine_boundary.py` reads every module and fails on a way round
+it, including a name taken from the facade that is not in `__all__`.
+
+The facade is shaped like the engine's coarse API — create, load and save a game; execute a tool;
+views, briefings and negotiations; drives of bot seats and whole headless games (`run_game`);
+scenario, map and debug operations; the tool schemas; bot versions, schemas and fingerprints — and
+returns plain data, never live engine objects. It was the seam the Rust engine replaced the Python
+engine of 0.1.5 through: the swap was a new backend behind `engine_api.py` rather than a change to
+two hundred call sites, and the Python engine was then removed (the tag `python-engine-0.1.6` keeps
+it).
+
+`citar/bots/profiles.py` and `ratings.py` are bookkeeping about bots and may be imported from
+anywhere.
 
 ---
 
-## Engine modules
+## The engine
 
-| Module | |
+`crates/` holds the engine. Its design is
+[crates/citar-engine/DESIGN.md](https://github.com/jprodgers/CITAR/blob/main/crates/citar-engine/DESIGN.md),
+and the crate's README lists the rules a reviewer checks. Building it needs a Rust toolchain
+(rustup reads `rust-toolchain.toml`); a wheel carries it compiled.
+
+| Crate | |
 |---|---|
-| `state.py` | The data. `GameState`, `Player`, `City`, `Unit`, `Tile` — plain dataclasses that serialise |
-| `game.py` | `Game`: the state plus the operations on it. `ActionError` is how a rule says no |
-| `rules.py` | Loads the ruleset JSON and answers questions about it |
-| `uniques.py`, `unique_types.py` | The rule interpreter. See below |
-| `hexmap.py`, `tiles.py`, `mapgen.py`, `maps.py` | Geometry, terrain, generation, saved maps |
-| `movement.py`, `combat.py`, `units.py`, `workers.py` | Units and fighting |
-| `cities.py`, `economy.py`, `research.py` | Cities, yields, growth, technology |
-| `policies.py`, `religion.py`, `great_people.py`, `espionage.py` | The social systems |
-| `diplomacy.py`, `city_states.py`, `conquest.py`, `victory.py` | Other players |
-| `visibility.py`, `views.py`, `briefing.py` | What a player can see, as data and as prose |
-| `tools.py` | The single registry of actions. Everything a player can do is here |
-| `turns.py`, `triggers.py`, `barbarians.py`, `ruins.py` | The turn cycle |
+| `citar-engine` | The game. A library with no I/O, no threads, no clock, no C code and no `unsafe` |
+| `citar-bot` | The bots as compiled versions (`basic-1`, the port of 0.1.5's Python bot, and `idle`) that play seats through the engine's `SeatDriver` |
+| `citar-sim` | The headless runner: whole games with a bot in every seat, `run_game`, the statistical baseline, the `citar-sim` CLI |
+| `citar-store` | Save files: the `.citar` v2 container and the append-only journal beside it |
+| `citar-py` | `citar._engine`, the Python extension the facade backs onto (PyO3, one abi3 build per OS) |
+| `citar-testkit` | Every integration test, the rule-script runner, `RandomAgent`, and the `golden`, `chaos` and `soak` tools |
+| `citar-refcheck` | Compares the engine's answers with the Python engine's, recorded on 262 game states |
+| `citar-bench` | Benchmarks: wall clock on the laptop against hard budgets, instruction counts on every pull request |
+| `xtask` | `cargo xtask check`: allowed dependencies, the crate graph, layering, generated files up to date, nothing left unported |
 
-### The unique interpreter
+Inside the engine each top-level module is a layer, which may use only the layers below it:
+`base` (ids, sets, the keyed RNG, maths, hex geometry), `rules` and `unique` (the compiled
+ruleset), `state` and `save` (the saved game and its format), `mapgen`, `game` (every rule
+system, the caches and the turn) and `api` (tools, views, the briefing, the scenario and map
+editors). `cargo xtask check` enforces it.
 
-UnCiv expresses rules as text on objects — `[+15]% Strength <when attacking>`,
-`[+2] [Food] from every [Lake]`. Rather than hard-coding each one, CITAR parses them into
-`Unique` objects with typed parameters and conditionals, and the systems that care ask
-`UniqueMap` what applies in a given context.
+### The compiled ruleset
+
+The ruleset is JSON, `crates/citar-engine/data/`, embedded in the binary. Loading it compiles every
+unique once: the text is matched to its UnCiv type, each parameter becomes a typed value (a stat,
+an amount, an id, a compiled filter), and each conditional a typed condition. While a game runs,
+no rule parses or compares a string; it asks an index for the uniques of a type and reads their
+typed values.
 
 This is why most content is data. A new building with a known unique is a JSON entry; only a new
 *kind* of rule needs code.
 
-`unique_types.py` is generated from UnCiv's `UniqueType` enum by `scripts/gen_unique_types.py`.
-`scripts/check_uniques.py` flags unique text matching no known type. Of the 402 unique types the
-ruleset uses, 19 are unreferenced in code, mostly map-generation region hints.
+Loading is all or nothing. A misspelt unique or field, a parameter that does not read, a name
+nothing has, or a unique type the engine does not support stops the load, with every error found,
+each naming its file, object and text. The Python engine's failure mode, a unique that silently
+does nothing, cannot happen. `citar ruleset check DIR` loads a modded copy the same way, and
+`CITAR_RULESET_DIR` plays one without a Rust toolchain ([MODDING.md](Modding#playing-a-modded-ruleset)).
+
+A ruleset has an id, a hash of the parsed files (so line endings and formatting do not change
+it), which every save, every digest of a game's state, the build id and every bot fingerprint
+include.
+
+The engine supports every unique type and conditional the Python engine handled: the 402 types
+the shipped ruleset uses and 125 more from other UnCiv rulesets, 527 of UnCiv's 637.
+[MODDING.md](Modding#what-the-engine-supports) lists what that means for a mod.
+
+### State, writes and caches
+
+A game is its `State`, which is saved, and its caches, which never are. Four rules hold them
+together:
+
+- **Reads take `&self`.** A query, a view, a briefing or a tool's own check cannot change the
+  game, so how often a host reads can never change how a game goes.
+- **Writes go through `game::mutate`.** A write either returns a `Change` (a tile, an owner, a
+  unit placed or removed: writes whose consequences need the new state) or takes a `Touch` naming
+  what it edits. Both move revision counters before anything can read the new state.
+- **Caches are self-validating memos.** Each remembers the revisions it was computed from and
+  checks them when it is read. Only if one moved does it compute again, and if the answer is the
+  same as before, bit for bit, what depends on it stays valid. So a tech that changes no tile's
+  yield recomputes no tile, and no cache can be stale, since no write can skip its revision. The
+  unique indexes are memos too, rebuilt from their sources (techs, policies, buildings, beliefs,
+  resources) instead of kept up to date by hooks.
+- **Two values are committed, not live**: a civilization's happiness as conditionals and citizens
+  see it (at the start and the end of its turn) and its gold rate (at the end). Citizens depend on
+  both and both depend on citizens; committing them breaks the cycle, so placing citizens twice
+  gives the same answer.
+
+The cache oracle rebuilds every cache cold and compares; a write with the wrong `Touch` fails it.
+It runs at every settle in the rule scripts and in the tests that turn every check on
+(`DebugOptions::ALL`), every 10 steps and after the last in the properties and chaos, and every
+50 rounds and at the end of each game in the soak.
+
+### Settle
+
+A write only records what it made stale: a city whose citizens must be placed again, a unit whose
+sight changed. The consequences, citizens placed, tiles revealed, civilizations meeting, happen in
+the **settle**, which runs at the end of every successful call and at fixed points of a turn, and
+never after a refusal or a read. It brings sight up to date and applies what that reveals, then
+places the citizens of the cities flagged, pass after pass, until none is flagged. A city whose
+best placement depends on the placement itself (a ruleset can say so) stops at the first one it
+comes back to. A settle takes at most `SETTLE_PASSES` (8) citizen passes: two cities whose
+placements keep changing each other's yields, with no placement that suits both, stop there as
+they stand, and a test build reports it as invariant SETTLE-1. Nothing is pending after a settle,
+so saves, digests and snapshots are taken only there, and pending work is never saved.
+
+So every action runs in three steps: it checks, on `&self`, and refuses before anything is
+written; it applies; it settles. A refused action changes nothing: no event, the same digest.
+
+### Determinism
+
+The same seed and the same actions give the same game, digest for digest, on Windows, Linux and
+macOS, on x64 and arm64. Each random draw is keyed by what it is for (the seed, a purpose, the
+turn, the unit) rather than taken from one stream, so a new draw in one place moves no other.
+Maths goes through `libm`, collections iterate in insertion or id order, and clippy bans the
+hash-ordered and platform-dependent alternatives. Golden files hold the digests, and CI compares
+them on all five targets.
+
+### How it is checked
+
+| | |
+|---|---|
+| Reference checks (`cargo refcheck`) | 262 game states recorded from the Python engine before it was removed, each with its answers, loaded into the engine and asked the same questions in 14 groups (yields, city stats, paths, combat odds, tool errors, views, briefings and more), every group enforced. A deliberate difference is listed in `refcheck/intended.toml` with its reason, and the code that makes it cites the entry |
+| Rule scripts (`tests/rules/`) | TOML scripts over scenario operations, run by a Rust runner and, through the bindings, a Python one. Differences only a script or test shows are in `tests/rules/intended.toml` |
+| Invariants and the cache oracle | The invariants at every settle in every test build. The oracle at every settle in the rule scripts and the tests that set `DebugOptions::ALL`, every 10 steps and after the last in the properties and chaos, every 50 rounds and at the end in the soak |
+| Properties P1-P8, chaos, fuzzing and the soak | Random actions and whole games, with `RandomAgent`s, bots or both in the seats, looking for panics, broken invariants, refusals that write, reads that change a game and bots that loop on a refusal |
+| Golden sets (`cargo golden`) | Digests on five targets, in two build profiles |
+| Benchmarks (`cargo xtask perf`) | Hard budgets on the laptop; instruction counts on every pull request |
+
+The two intended lists are the changelog's list of rule fixes (`cargo refcheck changelog
+--write`).
+
+### Where to change things in the engine
+
+| To change | Go to |
+|---|---|
+| A rule | Its system's module under `crates/citar-engine/src/game/`; each names the Python lines it replaced |
+| A new kind of unique | `unique_supported.toml`, `cargo xtask gen-uniques`, then the systems that read it ([MODDING.md](Modding#adding-a-new-kind-of-rule)) |
+| A player action | Its system's `Action` and rule, then `src/api/tools/` for the tool's schema and text |
+| A cache | `src/game/derive/`: a memo, the revisions it reads, and its check in the oracle |
+| Something that follows from a write | The settle (`src/game/turn/settle.rs`), never the write itself |
+| A rule that should answer otherwise than the Python engine's recorded answers | The fix, cited `// refcheck: <id>`, and its entry in one of the two intended lists |
+
+---
+
+## Bots and the bindings
+
+### A bot is a seat driver
+
+The engine plays seats through one trait, `SeatDriver`: `Game::drive` asks a seat's driver to play
+its turn, or to answer a negotiation that waits on it, and stops when a seat it has no driver for
+must act, a reply is awaited, or the game ends. A bot (`crates/citar-bot`) is such a driver, and so
+is the tests' `RandomAgent`; a model plays through tools instead, outside the drive.
+
+- **It reads, and acts only through tools.** A bot reads the game through `&Game`: its accessors,
+  the systems' read functions and the advisor (what a city would make with each building, the
+  sites worth settling, how a fight would go). It changes the game only through `Turn::act`, the
+  same tool calls a model makes, refused for the same reasons. `cargo xtask check` keeps
+  `&mut Game` to the bot's one driver file, so no bot code can reach a write any other way.
+- **It holds nothing between calls.** What it remembers (war plans, escorts, garrisons, sites given
+  up) is typed JSON in its seat's `DriverMemory`, at most 4 MiB, pruned every turn and saved with the
+  game. A bot built afresh for every call plays a loaded game as the one before the save would have.
+- **Its randomness is the game's.** Each kind of decision draws from its own stream, keyed by the
+  game's seed, the seat and the turn (`Purpose::BotBase`), so a bot game is as reproducible as any
+  other: the `bot` golden set holds four of them, round by round, on six targets.
+- **Its numbers are parameters.** Each version has one JSON schema (`params/basic-1.json`, 373
+  parameters for `basic-1`) generated into a struct; a profile overrides some of them, and its
+  fingerprint pins the build, the version, the overrides and the aggression, so a rating always
+  describes the bot that earned it ([BOTS.md](Scripted-bots)).
+- **It leaves room for a model.** Per-category diplomacy switches let a model own the seat's chats
+  while the bot plays the rest (the bot then answers `Deferred`), and `advice` tells that model
+  what the bot would do. Phase 3's hybrid seats build on both.
+
+### The extension
+
+`citar._engine` (`crates/citar-py`) is the engine as Python sees it: a PyO3 extension, one abi3
+build per OS for every Python from 3.11. `engine_api.py` is the only module that reaches it (the
+one door), through `citar/_facade_rust.py`.
+
+- **The GIL is released for every call that does work.** A game is a `Mutex` around the engine's
+  `Game`, and each heavy call (a tool, a drive, a view, a save) runs with the interpreter's lock
+  released, so two games play on two cores at once, and a slow turn never stops the server's other
+  requests. Cheap reads (the turn, whose move it is, the phase) come from heads the extension
+  updates after each call, without waiting for a drive under way.
+- **Data crosses as bytes.** Views, replays and saves come back as the engine's own JSON (or a save
+  file's bytes) and go to the client as they are: a gargantuan god view is never parsed and dumped
+  again in Python.
+- **A view is built only when it changed.** Every view answers with an `ETag` made from everything
+  its body is made of: the game object (`EngineGame.instance`, random, since another object, a loaded
+  game, counts again from 0), how many commands it has taken (`EngineGame.writes`, counted by the
+  extension under the game's lock on every call that may change the game or its history; a query
+  tool is a read and never counts, or the selected unit's details, which the browser asks for after
+  every refresh, would make the next refresh a full view), the
+  perspective, and the keys the server splices in (the seat, `info()` with its pause, agent
+  statuses and seats, the session's version, `can_manage`), hashed as they are written. The browser
+  sends it back on every refresh (`If-None-Match`), and an unchanged view is a 304 with nothing
+  built. The engine's own revision (`Game::rev`) is not enough: it moves on writes to the state, and
+  a message, a thought or a host's event is history. A view built while a command came in carries
+  no tag, since its body may already be the game after it.
+- **A panic is a crashed game, not a dead server.** An engine panic poisons that game: every call on
+  it raises `EngineCrash`; the session pauses, keeps its last good autosave, writes a `crash-NNN`
+  save and stays readable, and the other games play on. A refused action is an `ActionError` with
+  the text a model reads.
+- **Saves are written off the lock** (crates/citar-store): the session takes a snapshot under its
+  lock, and its writer thread writes the journal's new records and then the `.citar` container
+  that names them (see [The turn driver](#the-turn-driver)).
+
+### The recap's frames
+
+The recap gets the game's frames (the dynamic map at the end of each round: owners, improvements,
+routes, features, each major's explored tiles, the cities, the units and the round's events) as
+the journal stores them, never expanded on the server: a keyframe on the first round after a load
+and every 64 rounds, deltas between (the tiles that changed as 8-byte records, the land newly
+explored as LEB128 gaps), each record's bytes in base64. The layout is in `save::journal`'s
+module documentation. A keyframe carries the improvement, feature and unit names it numbers, so a
+frame recorded before a change of ruleset still names what it shows.
+
+`citar/web/js/replaydecode.js` decodes them with no DOM or network (Node tests it against a
+recorded game's frames in both formats, `citar/web/tests/fixtures/replay-delta.json.gz`).
+`ReplayFrames` walks the records once to find those that decode, then serves any round by walking at
+most 63 deltas from the nearest keyframe, updating one frame in place: memory stays at one frame
+however long the game. The server sends only the records that decode, in order (a round after a
+lost journal chunk is left out until the next keyframe): each delta names its base by a hash the
+browser does not compute. The same module reads the replay's negotiations as the threads a round
+shows, and leaves their words out of the round's messages (the engine records each chat entry as a
+message to the other side too).
+
+Until 0.1.6 the server expanded every frame into Python's shape, each layer of each round whole;
+that format (`replay_data("full")`) was retired once the browser decoded the deltas.
+
+### Bots in the server, and without one
+
+A bot seat's `BotAgent` asks its session for a drive of the bot seats on its turn
+(`GameSession.drive_bots`): one seat's turn at most, every bot seat passed so a chat one bot opens
+with another is answered inside the drive. After the drive the session does what it does after any
+tool call: bumps the version, records the turn's metrics (the bot's actions, taken and refused),
+wakes the seats a chat now waits on, broadcasts the turn and autosaves at a new round. Headless
+games (`citar sim`, `citar balance`) run whole games through `engine_api.run_game`, the runner of
+`crates/citar-sim`, with the GIL released, so a runner plays one game a core; the lab's games are
+jobs (below), played on the same runner by the server's job host.
+
+### CPU jobs and the jobs build
+
+A lab game, a ranking game and a reference game are **jobs** (`crates/citar-jobs`; design/phase4-helper.md
+P4.4): a closed vocabulary of bot-only work with typed, bounded specs, which the server's own executor and a
+helper lending its CPU play with the same Rust, so their results can be compared byte for byte.
+
+- **Specs** (`citar_jobs::spec`): a lab or ranking game's `LabSpec` is `lab.game_spec(exp, i)`'s dict typed; a
+  reference game's `ReferenceSpec` is one game of the statistical baseline with nothing of a run's (no budget,
+  path, workers, name, smoke or checks). `check_spec` refuses an unknown key anywhere, a value past its bound,
+  an unknown bot version or overrides the bot refuses, and has the engine read the game's settings; the spec hash
+  is blake3 over the kind and the typed spec written back.
+- **A job's game** (`citar_jobs::job`) is the engine's ordinary game on the runner, under a chain of round
+  digests from its first round (DESIGN.md 4.10), never under a wall-clock budget (a slow, capped or paused
+  machine computes what a fast one does; a deadline is a failure, never a result), without the engine's
+  invariant checks (they watch a game and never change it). A panic anywhere in playing or summing it up is the
+  job's crash outcome: a result like any other, which the same spec reproduces and a replica must match.
+- **The lab game's result** (`citar_jobs::lab`) is built in Rust from the game and its typed events, as
+  `lab.play` built it in Python from the events it heard (the seven games recorded from the Python building
+  before it went, `tests/data/lab_results_*.json`, are the parity check); a reference game's is the baseline's
+  line. Only what the game decides is in it: the times and a crash's trace are the writer's, outside the hash.
+- **Hashes** (`citar_jobs::hash`): `result_hash` reads a received result into the typed result, refusing unknown
+  keys, and hashes it written back; `chain_check` folds the digests to the head. **Whether a result answers its
+  spec** (`citar_jobs::fit`): `result_fits` holds a result to everything its spec decides before a turn is played
+  under this build (the experiment, the game, its seed and map; who sat in each seat and what played it,
+  fingerprints included; the build id) and its turns to the chain's rounds, so another game's result, or one
+  invented beside a chain folded from the right start, is refused; what only playing decides is replication's to
+  check. The server never hashes or checks JSON in Python: it calls the jobs crate through `citar._engine.jobs`
+  (`engine_api.run_job`, `check_job_spec`, `job_result_hash`, `job_result_fits`, `job_chain_check` and
+  `jobs_build`); bytes that are not JSON are refused like any spec, result or chain that does not read.
+  `engine_api.job_result_rebased` gives a result recorded under another build id this build's build-naming keys,
+  as the jobs golden set does; it exists for the test suite (a release bump moves the build id), and the server
+  never rebases a result: it holds each to its own build with `job_result_fits`.
+- **The jobs build** (`citar_jobs::build`), the compatibility key every job carries: 12 hex digits over the build
+  id, the content codes of the runner and the jobs crate (each crate's `build.rs`, the engine's
+  `content_code.rs` copied) and the build's flavour (debug assertions, overflow checks, the engine's checks), so a
+  `ci` and a `release` build are never compared, though they compute one result. Results are only ever compared
+  within one jobs build.
+- **The `jobs` golden set** (`crates/citar-jobs/golden/jobs.json`): four short jobs with their spec, result and
+  chain, held by citar-jobs' own test binary in the `ci` and `release` profiles here and on five targets in
+  `determinism.yml`; its shortest job is the self-check a job host plays before taking work, beside the canary
+  that refuses a machine flushing denormals. The keys of a result that name the build (`engine`, each seat's
+  `build` and `fingerprint`) are checked with this build's values (`citar_jobs::rebased`), so an edit that moves
+  the build id and changes no game passes, and only a change of what a game computes asks for a bless.
+- **The job host** (`citar_jobs::host`, P4.4.3): the one program that plays jobs, a child process of the helper
+  (`citar-helper job-host`) and of the server (`python -P -m citar.jobs host`, or `citar.exe jobs-host` in the
+  Windows bundle, started by `citar.jobs.host`; `-P` keeps the working directory off `sys.path`, so no file in it
+  can stand in for the package), so a crash, an out-of-memory death or a hung game stays away from the connection
+  or the server, and the OS has one process to hold to the limits (`citar_jobs::limits`: a Job Object on Windows, a
+  `systemd --user` scope or
+  `RLIMIT_DATA` on Linux, the background band and a watchdog on macOS). It speaks the job frames as JSON lines
+  on its standard input and output, refuses a parent of another jobs build, runs the canary and the self-check
+  before its `ready`, plays each run on a thread of its own with its memory counted apart (the program's
+  `#[global_allocator]` is `citar_jobs::Counting`), checks abort, pause and the deadline between seat steps, and
+  ends its runs when its input closes. Its `ready` gives `memory_per_run_mb`: the memory limit less what the host
+  measures of itself as that limit counts it (`citar_jobs::limits::footprint`), a tenth spare, shared by the
+  threads; offers above it are refused, and the dispatcher matches jobs to it. Each run reports its peak as it
+  grows. Its parent (`citar_jobs::host::parent`, and the same rules in `citar/jobs/host.py`) classifies its
+  death: the allocation-failure line, a `SIGKILL` of a scope's host while its parent cgroup's `oom_kill` rose, or
+  the watchdog's line make a `memory` death, which fails every run of it as `memory`.
+
+### The job dispatcher: the lab inside the server
+
+The lab's experiments (`citar/lab.py`'s queue of files) are played by the server itself (design/phase4-helper.md
+P4.5.5-P4.5.7): there is no separate runner process.
+
+- **The dispatcher** (`citar/jobs/dispatcher.py`): one thread per server process, started with the server's other
+  workers, waking every 2 s and whenever something happens (a run starting or ending: each executor is given the
+  dispatcher's `poke` through its `bind`; a host's start over, a benchmark lease, a pause, an administrator's retry),
+  surviving an exception in its loop and started again if it dies. It is the only writer of `cpu_jobs` and
+  `cpu_job_runs` and of the lab's results files; its view in memory changes only once the database has taken the
+  change, and is rebuilt from the database when the server starts (which also queues again the games that failed
+  three times). A run is timed by when its frames arrived (each stamped by its reader, `citar.jobs.host.RX`), never
+  by when a tick read them. Each tick reads the queue's folder again when it changed; makes jobs of the games next in
+  line (`lab.job_of`, checked and hashed through the binding; a window of four a thread, taken in the order they run,
+  so a 10,000-game experiment is not 10,000 rows and a new owner's work never waits behind another's window; only
+  jobs an executor would take hold a place, and a game none would take gets no row, its experiment saying why; a
+  member's experiment whose item is not committed yet waits up to 10 s for it, so no game is charged to nobody);
+  reads the executors' frames; expires
+  offers, runs past their deadline (paused time extending it, up to twice; a run held by a pause past its deadline,
+  which its job host ends itself, is no attempt) and silent runs; pauses an executor's
+  games while a benchmark lease holds its machine (the prompt scheduler's `benchmark_listeners` wake it); and,
+  unless the lab is paused (`saves/lab/PAUSED`: `citar lab stop`, the Lab page's Stop), offers each free thread the
+  best queued job it does not refuse (another jobs build, a kind its settings leave out, more memory a run than it
+  has), by priority and then round-robin across owners. A deadline is ten times the job's reference cost over the
+  executor's share of a core per game, 5 minutes to 6 hours. A tick with 2,000 queued jobs and ten executors takes
+  about 15 ms.
+- **The cost table** (`citar/jobs/store.py`, `job_costs`): per kind, map size, seats and 50 rounds of turn limit,
+  the median CPU seconds of the reference machines' runs and the 95th percentile of every run's counted peak, seeded
+  from `citar/jobs/costs.json` (measured by `scripts/measure_job_costs.py`) and learning from every run; a new job's
+  `mem_mb` is its cell's peak, raised to the peak a run reached when memory ended it.
+- **The local executor** (`citar/jobs/local.py`): the host machine's row, one job host child under its CPU settings
+  (on by default with the mode's figures; [Configuration](Configuration#the-machines-in-the-database-not-a-file)),
+  started when there is work, restarted when it dies or its settings change, closed with the server (whose death it
+  outlives by two seconds at most: its input closes). It is trusted by definition, so its runs' verdict is
+  `reference`, and its host is told it plays its parent's own work: a server whose self-check fails (a ruleset of its
+  own) still plays its lab, and is never used to verify another machine.
+- **The order of writing** (P4.5.7): a result is checked through the binding (its hash recomputed, its chain
+  folded, the result held to its spec), committed (the job `accepted`, or `crashed`: a crash is a final result),
+  then appended to the results file once per (experiment, game, run), then its stored copy pruned (each step after
+  the commit alone: a line the file refuses is tried again each tick, and the game settles once it is there); at
+  the start
+  every active experiment's file is reconciled with the database (an accepted job with no line gets one, a line
+  whose run's job is not accepted with it goes, a line cut short is dropped, a line from before jobs counts its game
+  as done). So a crash between the two writes leaves exactly one line, and a server stopped with games playing
+  plays exactly those again.
+- **The ledger:** each finished run writes one `cpu` event through the ledger's writer (`Ledger.events`): its
+  machine, the machine's owner as the provider (nobody for the host), the job's owner as the consumer (nobody for a
+  ranking or reference run, the server's own collection), its CPU the job host's report bounded by what the server
+  observed (a game is one thread). The usage ledger gets the game's activity and the time its machine held it.
+- **The routes** (`citar/server/jobs_api.py`): an experiment's jobs for whoever may see it, and the dispatcher, its
+  pause and its cost table for administrators; the Lab and Queue pages read them and `lab.overview()`, which takes
+  the dispatcher's published view.
+
+Helpers become executors too from package 4-10 (the hub relays the job frames to the dispatcher), and their results
+are verified as the next section says.
+
+### Proof of work: claims, replays and trust tiers
+
+A helper's result is believed only as far as it checks out (`design/phase4-helper.md` P4.4.4, P4.5.8;
+`citar/jobs/trust.py`, the dispatcher's verification half):
+
+- **The claim.** The helper signs each result's claim (job, run, machine, kind, spec hash, jobs build, bots, result
+  hash, chain head and rounds, its key) with its machine key, in its own process, never the job host's. The server
+  checks it with the same Rust (`citar_jobs::verify_claim`, through `engine_api.verify_claim`): the signature against
+  the key the machine registered, the claim against its own records, the result's hash (the claim's and the
+  outcome's, which the server keeps and compares, are both the result's own), the chain's head, rounds and fold, and
+  the result against its spec. A claim that does not hold is a tampering verdict: the run is rejected, its game played
+  elsewhere, its machine and its owner quarantined. A result its machine's key no longer vouches for (no key since a
+  reset, or a signature failing against a key registered after the offer) is no verdict: the run is `lost`, not
+  acknowledged, and its game offered again.
+- **Replication, decided after the result.** Once a primary's result is committed the dispatcher decides whether a
+  replica checks it: always for a `new` machine, at the machine's tier's rate otherwise (`blake3` keyed by the server's
+  secret over the job's id: `engine_api.sample_fraction`), and for the next N results an administrator asked for. A
+  checked job is `settling`: its result held, its ledger event `pending`, no results line; to everyone but
+  administrators it is `done`. Nothing about a primary's offer or run differs between checked and unchecked jobs.
+- **Verifiers** are this server's job host (when its canary and self-check pass) and trusted machines an administrator
+  marked `verifier`; a `new` machine's replicas, tiebreaks and re-opened jobs run on this server alone. A remote
+  replica is judged by its machine's standing when its result comes: one from a machine no longer a verifier is void
+  (`unchecked`, its event `unverified`) and the job waits for another. A replica equal
+  to its primary (result hash, chain head, rounds) settles the job `verified`; a remote verifier that disagrees asks
+  this server for a tiebreak; this server's disagreement is a verdict: `result` (the same chain, another result:
+  tampering or an incompatible build) or `chain` (the round where the chains parted: hardware or an incompatible
+  build). New machines are capped per owner, and their replicas take at most a share of this server's runs while other
+  work waits.
+- **Tiers and withdrawal.** Matches against a verifier promote a machine `new` → `provisional` → `trusted` (one step
+  a match, an audit row each); a mismatch quarantines it (its owner too on a tampering verdict) and withdraws every
+  result it gave unverified since `trust.since`: the job `withdrawn` and played again, its line taken from the results
+  file (the experiment back from `done/` if need be), its event rejected through the ledger's writer
+  (`Ledger.verdicts`: credits 0, the hour's rollups recomputed, its budget settlement reversed in the database and in
+  the keeper). A quarantined machine's matches as a verifier are re-opened (marked a verifier now or not), and the
+  promotions they made taken back: a promotion is recorded with the time of the match that made it
+  (`trust.promoted`), so only a machine whose present tier counted the lost matches can fall (`trust.lose_matches`); a
+  tier an administrator set never does. No event is left `pending`: a settling job deleted with its experiment, or a
+  replica waiting for a tiebreak whose job is withdrawn, is given `unverified`.
+- **The dispatcher is the only writer** of the machines' trust: an administrator's change (`PUT
+  /api/admin/machines/{id}/trust`, `POST .../replicate`) is made on its thread (`Dispatcher.call`), or, in a process
+  with none, by a dispatcher of no executors whose withdrawals the server's finds at its next start.
+
+### Hybrid seats: the bot's turn, the model's diplomacy
+
+A hybrid seat (`design/phase3-features.md` P3.6) is the engine's `hybrid` controller: its bot plays
+the turn with the model's kinds of diplomacy switched off (`citar_bot::Owners`, set on the handle
+from the seat's `hybrid.owners`), and the engine's drive stops at `hybrid_diplomat` once the bot has
+played. `HybridAgent` (`citar/agents/hybrid_agent.py`) is the seat's agent, on the driver thread:
+
+1. under the lock, `drive_bots` (every seat with a bot, bot and hybrid seats alike), which stops at
+   `hybrid_diplomat`;
+2. off the lock, when a trigger fired and no phase ran this turn, the **diplomat phase**: one
+   `diplomat` ticket on the model's machine (30 s to start, `phase_seconds` once started, eight steps),
+   the static diplomat prompt (`prompts.DIPLOMAT_SYSTEM`), and the tools of the model's kinds, each
+   call through `GameSession.diplomat_call`: a tool none of its kinds gives it is refused, and a deal
+   it offers, counters with or accepts that includes anything the bot decides goes through only when
+   `EngineGame.bot_evaluate_call` (`citar_bot::evaluate_call`) values it at zero or more from the
+   seat's side. That deal is the engine's own reading of the call (`Game::offer_of_call`: the
+   arguments coerced and checked as `execute` does), so nothing the model writes reaches the engine
+   as a deal the veto did not value. A pause from the game screen holds the phase before its next
+   model call or tool call, its ticket given back until the resume;
+3. under the lock, the drive again: the turn ends, or the drive stops at `awaiting_reply` for chats
+   that wait on another seat or on this seat's model, waited for as a bot seat waits.
+
+A chat that waits on a hybrid seat goes to its line twice: its bot's pass on the bot pool
+(`EngineGame.answer`, which answers what the bot owns and defers the rest), then, for what was
+deferred, its model on the model pool, in a `ChatThread` on a `chat` ticket whose start deadline is
+the chat clock's. When the ticket is refused or expires, or the model fails, the **fallback bot** (the
+same profile with every kind its own, on the seat's one memory) answers (`GameSession.fallback_answer`);
+the chat clock's deadline does the same (`chat_fallback`). While a phase runs the seat's model answers
+no chat on its own ticket: what comes to it is told to the phase, and the line is dispatched again
+when the phase ends. The seat holds no lease: its prompts are tickets, admitted for `pooled`, so it
+never occupies its machine and quiet hours or a make-way pause never pause its game. The phases are
+`metrics.data["diplomat"]`, the refused calls `metrics.data["diplomat_refusals"]`.
+
+### How the bots are checked
+
+`basic-1` is a port, so it was first checked decision by decision against what the Python bot
+decided on the 262 recorded states (`cargo refcheck bot-agreement`: every kind of decision, every
+item), its deal values by `cargo refcheck run --with-bot`, and its play by the bot rule scripts.
+Then as a player: one bot round on each of the 262 states with every check on (the fixture sweep),
+whole bot games against the Python bot's statistics (`scripts/refcheck/summarize.py`, gates G1 to
+G4), the long runs with bots in the seats (the soak and chaos take `--drivers bot` or `mixed`, and
+property P8 runs with bot drivers: no read may change what a bot decides), and the server soak
+(`scripts/server_soak.py`): a lobby game of bots and a model seat played to its end through a
+restart. The numbers of the last full run are in DESIGN.md ("As built in 2-13").
 
 ---
 
 ## Tools: one registry, three interfaces
 
-```python
-@tool("found_city", "Found a city with a settler", ...)
-def found_city(game, player, unit_id, name=None):
-    ...
-```
-
-Registering an action makes it available to:
+Every action a player can take is a tool in one registry, `crates/citar-engine/src/api/tools/`: its
+name, the description a model reads, its parameters and JSON schema, whether it is a query or an
+action, and when it may be used. A tool reaches:
 
 - **the browser**, over `POST /api/games/{id}/tool`
 - **MCP clients**, through the bridge
 - **the LLM adapter**, as a tool definition with its JSON schema
 
 There is no second place to add an action, and no interface can drift from another. `GET /api/tools`
-returns the whole registry with schemas.
+returns the whole registry with schemas (`engine_api.tool_list`).
 
 ---
+
+## Phase 3: people, machines and shared work
+
+0.1.6's server side (`design/phase3-features.md`) in one place; each part has its own section or page.
+
+- **Who may see and do what.** Every game and every kind of job (benchmark suites and runs, probes and probe runs,
+  lab experiments, scenarios, maps, bot profiles, reports) has an owner and a visibility, `private | allowlist | link
+  | server | global` (`citar/auth/access.py`, `citar/items.py`, `owned_items`); [Authorisation](#authorisation)
+  answers every question of it, a caller who may not see a thing gets 404, and a moderator may only unpublish.
+  Profiles have a visibility per field, a members-only directory and an avatar checked by its header; administrators
+  have a users page and an audit log ([ACCOUNTS.md](Design-accounts-and-sharing)). The schema is one fresh Alembic baseline:
+  a database of 0.1.5 is renamed aside at the first start, never changed. A request has one database session
+  (`citar/auth/deps.py`'s `get_db`, taken function-scoped), committed when its route returns and before its answer
+  is sent, so the caller's next request reads what this one changed.
+- **Machines are rows.** The old `config/servers.json` is imported once into the `servers` table under its own ids
+  and renamed; every machine, the server's own, one it dials directly or one a member's helper connects from, is a
+  row on one Servers page. A member's seat names a machine and never describes one (no base URL, key or key
+  variable from a member reaches a provider), the routes that touch the host (its hardware scan, LM Studio, its
+  environment) are an administrator's, and a revoked token, a disabled or a deleted machine drops its helper at once
+  ([WORKERS.md](Workers)). Each machine has its settings (slots, model swaps, LLM on or off, CPU limits for
+  the next helper; hardware, models and power each `auto` or `manual`, the helper's last report always kept), a
+  hardware class and a trust tier (`citar/machine_settings.py`).
+- **Every model call is scheduled.** [The prompt scheduler](#the-prompt-scheduler) gives each machine one queue:
+  leases for seats that play every turn, tickets for pooled prompts (chat answers, a hybrid seat's diplomat, probe
+  answers, report narratives, a machine's test), never more requests than slots, no busy-waiting, a benchmark kept
+  apart, and generation time measured apart from queue time. Admission decides who may use a machine, by task class
+  and purpose (`citar/pool/admission.py`); the scheduler decides when; the Queue page shows it.
+- **The compute ledger** (`citar/ledger.py`) records each model step and each unit of host CPU as an event with a
+  consumer and a provider, priced in credits by the machine's hardware class; a member's given and used, self-use on
+  neither side, roll up by the hour; budgets reserve and settle in credits; costing reads its work from it.
+- **Chat and hybrid seats.** A negotiation is a chat timed by [the chat clock](#chats-the-clock-and-the-responders) and
+  answered by the responders; a [hybrid seat](#hybrid-seats-the-bots-turn-the-models-diplomacy) is a bot that hands the
+  diplomacy categories its seat names to a model, with the bot's veto and fallback. The client docks a chat window
+  per civilization left of End Turn.
+- **The client's payloads.** The recap plays from the journal's `Delta` frames ([The recap's
+  frames](#the-recaps-frames)), a view answers with an ETag (304 when it has not moved), and trade options are fetched
+  when the deal builder opens; a seat's view carries the minimap's block (explored land only, by era).
+- **Checked end to end.** `scripts/qa_phase3.py` runs each feature on a dev server of its own, with real helpers in
+  front of a scripted endpoint, and its `exit` part plays all of it at once (one game of a person, a hybrid seat, an
+  LLM seat, an MCP seat and bots on a shared helper machine, with pooled work, a benchmark beside it and a server
+  killed mid-chat); its `real` part does the same against a real model in LM Studio
+  ([CONTRIBUTING.md](https://github.com/jprodgers/CITAR/blob/main/CONTRIBUTING.md)).
+
+## Phase 4: the helper, CPU sharing and proof of work
+
+0.1.6's helper and the lab's CPU work (`design/phase4-helper.md`) in one place; each part has its own section or
+page.
+
+- **One protocol, typed on both sides.** Helper protocol 2 (`crates/citar-helper/PROTOCOL.md`, normative) is a set
+  of JSON frames with serde types in the helper (`protocol.rs`) and checked builders and parsers in the server
+  (`citar/server/helper_protocol.py`); shared fixtures and transcripts (`crates/citar-helper/protocol/v2/`) are
+  played by both sides, so neither can drift alone. The hub speaks protocol 2 only ([The hub](#the-hub-protocol-2));
+  a 0.1.5 worker gets one line telling it to download the new helper, and the Python worker is gone.
+- **The CITAR helper** (`crates/citar-helper`, one Rust program for five targets) is what a member runs on a machine
+  to lend it: a streaming proxy in front of its model server whose cancel really stops the generation and which
+  returns completions raw for the server's one parser ([One parser](#one-parser-for-every-completion)); the hardware
+  scan and power samples; a machine key (owner-only on disk) that signs its results; signed self-update with a
+  supervisor that rolls back; service installation per OS. Its own `helper.json` is its owner's ceiling, and it
+  lends no CPU until its owner says so ([WORKERS.md](Workers)).
+- **CPU work is jobs** ([CPU jobs and the jobs build](#cpu-jobs-and-the-jobs-build)): lab, ranking and reference
+  games as closed, typed specs played by the same Rust everywhere (`crates/citar-jobs`), each with a chain of round
+  digests and a result hash, compared only within one jobs build. One job host program plays them under limits, hard
+  where the OS allows (a Job Object, a `systemd --user` scope), as the helper's child and as the server's.
+- **The lab runs inside the server** ([The job dispatcher](#the-job-dispatcher-the-lab-inside-the-server)): one
+  dispatcher thread offers queued games to executors (the server's own job host, and each connected helper whose
+  owner lends its CPU and whose grants list Lab), writes each accepted result once, feeds the ratings, and writes one
+  compute-ledger event a run with the machine's owner as the provider.
+- **Results are checked, not believed** ([Proof of work](#proof-of-work-claims-replays-and-trust-tiers)): a signed
+  claim per result; replays on a verifier (every result of a new machine, a keyed sample after); trust tiers that
+  promote on matches and quarantine on a mismatch, withdrawing everything a caught machine gave unverified, with its
+  credits and budget settlements, and the ratings recomputed. Model results from members' machines count on the
+  global boards only once the machine is trusted.
+- **Checked end to end.** `scripts/qa_phase4.py` runs each part on a dev server of its own with the real helper; its
+  `exit` part puts the server in WSL with helpers on Windows and in WSL lending to another member's experiment, checks
+  every accepted line's signature and chain, compares the Windows helper's replicated games with Linux byte for byte,
+  and catches two cheating helpers; its `real` part plays a game on a real model through a Windows helper
+  ([CONTRIBUTING.md](https://github.com/jprodgers/CITAR/blob/main/CONTRIBUTING.md)).
 
 ## The server
 
 | Module | |
 |---|---|
 | `app.py` | The FastAPI app: routes, WebSockets, static files |
-| `session.py` | `SessionManager` and `GameSession`: seats, the turn driver, negotiation interrupts, saving |
+| `session.py` | `SessionManager` and `GameSession`: seats, the turn driver, the chats' responders, saving |
+| `chat.py` | The chat clock: how long a chat waits on each side, and its status events (below) |
 | `benchmarks.py` | The benchmark scheduler: suites, runs, restricted hours, resuming after a restart |
 | `scoring.py` | Model scores |
 | `metrics.py` | Per-seat, per-turn measurement |
 | `auth_api.py`, `admin_api.py`, `pool_api.py`, `share_api.py`, `setup_api.py` | HTTP surfaces |
 | `boot.py` | Migrations at startup, and the configuration checks that refuse to start a broken server |
-| `workers.py` | The WebSocket endpoint worker agents connect to |
+| `workers.py` | The hub: the WebSocket CITAR helpers connect to, on protocol 2 only ([The hub](#the-hub-protocol-2)) |
+| `helper_protocol.py` | Protocol 2's frames, checked and built (`crates/citar-helper/PROTOCOL.md` is the protocol) |
+| `citar/pool/scheduler.py` | The prompt scheduler: one queue per machine for every model call (below) |
 | `admin_cli.py` | `citar admin` |
 
 ### The turn driver
@@ -111,8 +609,149 @@ A `GameSession` owns one game and drives it: when the current player is an AI, i
 agent to completion, applies the orders, records metrics, autosaves, and moves on. Human seats wait
 for HTTP. MCP seats are woken by `wait_for_turn`.
 
+A save takes a snapshot of the game under the session's lock (a copy of the state, and the history
+since the last save, which goes into the game's journal), and the session's writer thread writes it
+off the lock: the journal's new records first, synced, then the save that names them. Autosaves the
+writer has not begun when a newer one comes are passed over, and the turn that ends a round waits
+for the round's autosave to be written, so the autosave on the disk is never more than a round
+behind the game: a restart costs the round in progress and, while that round's own autosave is
+still being written, the one before it. A session writes one journal, its timeline; loading an older save of a game that went on forks a new one, so every save stays
+loadable (crates/citar-engine/DESIGN.md P2.5.3).
+
 Negotiations interrupt: an AI that proposes a deal blocks until the other side answers, which is
 why `wait_for_turn` returns for a negotiation as well as for a turn.
+
+### Chats: the clock and the responders
+
+A negotiation is a chat (`design/phase3-features.md` P3.5). Three pieces of the session play it:
+
+- **The chat clock** (`citar/server/chat.py`, `GameSession.chat`) times every open chat by the side it waits on,
+  from the game's `chat_model_reply_seconds` and `chat_person_reply_seconds`: past its time a model seat (LLM, MCP)
+  declines, "(no reply in time)" (`decline_late`), and a chat waiting on a person closes as expired (`expire_chat`); a
+  bot is never timed. It first cancels the answer still in progress for that chat (`cancel_chat_answer`). Each action
+  is an engine call that a chat which moved meanwhile refuses, so a late answer and the deadline leave one outcome. It
+  stands still while the game is paused (`settle` before a pause or a resume changes it), restarts a chat's time when
+  its entries or awaited seat change (the session's event hook, `note`), starts afresh in a loaded session, and, in a
+  benchmark game, holds a chat whose answer is a prompt queued behind a benchmark (`answer_status`: the ticket's or the
+  conversation's status says so) until that prompt starts. Its thread wakes on the session's condition and at least
+  once a second, records and survives every exception, and the driver starts it again if it dies (`ensure`); an
+  action that failed on a chat that has not moved is tried again after 1 s, doubling up to a minute (a chat between
+  two people has no agent's safety cap). Its time is the session's `clock`, which tests replace with a fake one
+  (`tests/chatfake.py`).
+- **The responders** (`citar/agents/responders.py`): a chat that comes to wait on a bot or a model seat is handed to that
+  seat's line, which answers one chat at a time in order, on a pool of `CITAR_RESPONDERS` (16) threads for model answers
+  and one of `CITAR_BOT_RESPONDERS` (2) for bot answers, so a bot is never behind models waiting for a busy GPU; each
+  answer names its pool, so a line whose next answer is the other kind's moves there. A machine's answers take no
+  more model threads than it has slots (and at most half the pool): a line whose machine has that many in flight is
+  parked, holding no thread, its chat told its place (`queued`, as the machine tells its own line), and takes the
+  place of the next of its answers to end, so a queue on one busy machine never starves another machine's seats. A
+  halt (`cancel_agent`: a suspension, a seat change, a crash, a stop) never declines: the chat waits for the seat's
+  next responder (a parked line leaves its machine's queue), dispatched again on resume, `restore_live` and a seat
+  change (`dispatch_waiting`); a loaded game's models answer nothing until it is first resumed (`held_from_load`),
+  its bots at once. Only an answer that ran and failed outright is declined, "(no response)".
+- **The model seat's conversations.** `LLMAgent` keeps one `ChatThread` per open chat: a slim fixed system prompt
+  (`prompts.chat_system_prompt`), the chat's history once, then only what changed, on the seat's lease, stopping when
+  the chat moves. On its own turn the agent's waits for the other side (`_await_answer`, the tool's own minute;
+  `_end_turn`, until every chat it opened is settled) end when the clock settles the chat, with a safety cap of twice
+  the game's longest timeout; an answer that comes later is put in front of the model before its next step
+  (`_chat_news`). `BotAgent.play_turn` waits the same way.
+
+**Status events.** `{"type": "negotiation_status", "negotiation", "players", "waiting_on", "kind", "state", "position",
+"eta_s", "deadline", "left_s", "paused", "entries"}` goes out on the game's socket: `waiting` (with the deadline) from
+the clock, `queued` (with the place and ETA) and `thinking` from the answering conversation's requests in the prompt
+scheduler (`ScheduledConversation.on_status`, delivered by the notifier thread), `closed` (with the chat's `status`)
+from the session. The clock tells a chat `waiting` when it begins to wait, never over an answer's `queued` or
+`thinking`, which stand until the answer ends. Since a `queued` stands, the notifier's late ones are dropped: a
+conversation passes its place on only while a step still waits for its slot, not once it started or its wait was
+cancelled (a halted answer, whose end already said `waiting`). A pause or a resume tells each chat again where it stands, with its
+new deadline: an answer that goes on through a person's pause keeps its `queued` or `thinking`, and a suspension,
+which halts the answers until the resume, says `waiting`. `entries` is the chat's
+length when it was said, so a client tells a late status from a current one. The socket gives it to the seats in
+`players` and to spectators while the god view is allowed, and to nobody else.
+
+### The prompt scheduler
+
+Every model call of a machine (a row of `servers`, whoever dials it) goes through `citar/pool/scheduler.py`
+(`design/phase3-features.md` P3.3), so that no machine is sent more than it has slots for and nobody waits by
+sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's conversation in a
+`ScheduledConversation`, whose every step takes a slot of its binding's machine first:
+
+- A **lease** is a model seat that plays every turn. It belongs to the session's seat (`GameSession.lease_for`), not to
+  its agent, so it outlives agents made again after a seat change or a resume. `GameSession.open_leases` makes one for
+  every living model seat with a machine when the session is registered (`start`: created, loaded paused, brought
+  back by `restore_live`, reloaded by a benchmark, launched from a scenario), so a game that will want a machine holds
+  it before its seat is asked anything; it is released when the seat changes machine, model or type (`update_seat`
+  makes the new one at once) or is eliminated (the engine's `eliminated` event), and for good when the game is over,
+  stopped or crashed. A make-way pause (`pause_reason.kind == "queue"`) releases the leases and the resume makes them
+  again; every other pause keeps them. While a game makes way the driver gets no agent for a model seat and
+  `lease_for` makes no lease, except for a chat's answer (`lease_for(answering=True)`), whose lease and agent go when
+  the seat's last answer ends (`_answered`). `get_agent` keeps a model seat's agent only if, under the game's lock,
+  the seat still plays the block the agent was made from and its lease is live (`suspend`, `update_seat` and
+  `_crashed` change, cancel and release in one hold of that lock), and makes again one whose lease was released. A
+  lease is capped by the owner's grant for the work its game was admitted for (`benchmark`, `probe`, else `game`). `pool.seats.occupied()` lists the leases live on a machine, which is what
+  benchmark jobs wait for and `usage.session_servers` counts as held. A probe's turn case holds a non-lending
+  `probe_case` lease for the case (`GameSession.lease_ref`/`lease_label` name it for its run), made once the
+  machine's leases leave a slot (`ProbeRunner._wait_machine`, the job rule). It is *active* while its
+  seat is
+  mid-turn (the driver calls `activate()` and `idle()` around `play_turn`) and *idle* otherwise; the agent also idles
+  it while it waits on a chat reply or a pause, so a seat waiting on its counterpart never keeps the slot the
+  counterpart needs. A lobby game's idle lease lends its slot; a benchmark's and a probe case's never do. A
+  benchmark lease's first request waits for the machine's pooled requests to drain; the session adds the wait to the
+  job's `drain_s` and a drain cut short to `contaminated` (`benchmark` in its saves), whose timings
+  `scoring.compare_models` leaves out of the speed score.
+- A **ticket** is one pooled prompt of a few steps (a chat answer, a diplomat phase, an answer of a probe's offer or
+  message case, a report's narrative, the Servers page's test), with a class, a priority (its class's base plus the
+  queue priority of the work it is part of, its `ref`, which it follows: `Scheduler.set_priority`) and a deadline to
+  start by. It is admitted when it is made (`pool.seats.ticket`: `partial_llm`, the work's own capability and a grant
+  for `pooled`, with `in_flight=None`, so a busy machine queues it; the grant's concurrency is the consumer's cap), and
+  a refusal is its `refused` with the admission's reason. Model seats are admitted by their task class
+  (`pool.seats.seat_class`: `llm` full, `hybrid` partial). `Machine.view` is what the Queue page lists
+  (`/api/queue`, told per viewer by `server/work_access.py`). A probe's answer is asked again when the machine cut it
+  off (`yielded`, `borrow_cap`, `benchmark`), and its ticket does not wait for benchmarks: the probe run waits for one
+  as a run (`ProbeRunner._wait_machine`, with its waiting note). The report runner builds each report on a thread of
+  its own; a build whose narrative waits for its machine is not counted against `MAX_BUILDS`, and each member has at
+  most `NARRATIVES_PER_OWNER` narratives under way.
+- **The rules**: in flight (draining included) never above capacity; lease requests first and in arrival order; a
+  ticket only on a slot no active or non-lending lease needs, on a loaded model, outside quiet hours, under its
+  consumer's cap and never beside a benchmark; tickets by priority, then round-robin across members, then first come.
+  `tests/test_scheduler.py` checks them as invariants at every grant over 500 random schedules.
+- **Threads.** One lock and one condition per machine. Only `acquire` blocks (in ticks of a second, noticing
+  cancellation and deadlines), never with a game's lock held: in test mode it asserts so. Cancelling, releasing,
+  `idle` and `activate` only change counters, so `suspend`, `update_seat` and a crash can cancel a waiting or running
+  call under the game's lock. Status callbacks run on the scheduler's notifier thread, after the machine's lock is let
+  go.
+- **Cancel, draining and metering.** A request abandoned on a helper keeps its slot until the hub hands the scheduler
+  the helper's acknowledgement (`cancelled`, or a `done` or `error` that crossed the cancel: `late_frame`), or the
+  connection it went out on goes (`helper_changed`: each connection has its own `serial`). With no acknowledgement
+  within `CANCEL_ACK_SECONDS` (5 s) the slot drains as protocol 1's did, and the machine is flagged `cancel_unacked`. After each step the listeners get a `StepEvent` with the generation time (bounded by what the server
+  observed), the queue time and the tokens; the compute ledger (`citar.ledger.listener`) is the listener, which
+  prices each step, settles its budget hold and queues its event for the ledger's writer. The agent adds queue
+  and chat waits to the turn's waited time, so they never count against `max_turn_seconds`, and shows its seat as
+  `queued` (with its place) while a step waits (`ScheduledConversation.on_wait`).
+
+### The hub (protocol 2)
+
+A machine behind a home router is served by the CITAR helper (`crates/citar-helper`), which dials out to the server's
+`/ws/worker` and serves completions down that connection. `citar/server/workers.py` is the hub, on protocol 2 only
+(`crates/citar-helper/PROTOCOL.md`; design/phase4-helper.md P4.5.1). A first frame over 2 MiB (more than any hello)
+is refused unread. Then its handshake checks, in order: the protocol (a protocol 1 hello gets the one-line "download
+the new helper" refusal and close 4426, at no cost), the address's limit of refused tokens (distinct token hashes per
+address, before any lookup; the check, the lookup and the count of a failure are one step per address, so hellos sent
+together cannot all get past it), the token (a database that fails is not a refusal: close 1011, and the helper tries
+again), then the machine key (registered by the first hello with a conditional write, trust on first use; another is
+refused until its owner resets it, which closes the machine's connection with 1012 so its helper registers at once).
+Then `welcome` with the machine's settings, which the helper acknowledges (`settings_ack`): the hub holds each
+acknowledgement to the settings frame it answers, and the prompt scheduler reads the newest held to what the site asks
+now, never the site's figures alone. A change of the machine's settings (its dialog, the machine editor) is pushed once
+it is committed (`push_settings`), and the keep-alive pushes any difference it finds (a change another process made).
+Frames from a helper are handled on the event loop without blocking it: a frame over 64 KiB is parsed on a thread (a
+first frame, which comes before any token is checked, on one thread of its own); completions resolve their waiting
+seat's request; a catalog, a hardware scan or the hello's report goes to a thread
+(`machine_settings.record_report`); `status` carries its own quiet hours to the scheduler. A helper returns each
+completion raw, and `WorkerConversation` parses it with `parse_completion`, as `OpenAIConversation` does
+([One parser](#one-parser-for-every-completion)). The conformance transcripts (`crates/citar-helper/protocol/v2/
+transcripts`) are played against the real hub by `tests/test_helper_conformance.py`, and against the real helper by
+its own tests, so both sides keep to one protocol.
 
 ### Authorisation
 
@@ -135,15 +774,35 @@ reason. Run it after adding a route; CI runs it with `--strict`.
 |---|---|
 | `llm_agent.py` | The loop: briefing, tool calls, guard rails, limits, metrics |
 | `prompts.py` | What the model is told |
-| `bot_agent.py` | Wraps the scripted bot in the same interface |
+| `bot_agent.py` | Plays a bot seat: a drive of the engine's bots on its turn, and their answers to chats ([Bots and the bindings](#bots-in-the-server-and-without-one)) |
+| `hybrid.py`, `hybrid_agent.py` | A hybrid seat's settings, and its agent: the bot's drive, the diplomat's phases, its chats and its fallback ([Hybrid seats](#hybrid-seats-the-bots-turn-the-models-diplomacy)) |
 | `mcp_server.py` | The MCP bridge |
 | `providers/anthropic_provider.py` | Thinking, prompt caching, refusal fallbacks |
 | `providers/openai_provider.py` | Native and JSON tool modes, for every OpenAI-compatible endpoint |
-| `providers/worker_provider.py` | Sends the request down a worker's WebSocket instead |
+| `providers/completion.py` | The one parser of a model's reply: tool calls native or written as text, repairs, the JSON protocol ([One parser](#one-parser-for-every-completion)) |
+| `providers/worker_provider.py` | Sends the request down a helper's WebSocket instead, and parses the raw completion it returns here |
 | `providers/dryrun.py` | Answers plausibly without a model, for testing everything else |
 
 A provider's only job is turning a request into a completion. The turn loop, the guard rails and
 the metrics are provider-independent, which is what makes a comparison across providers meaningful.
+
+### One parser for every completion
+
+Every OpenAI-format reply the server receives goes through one function, `parse_completion` in
+`providers/completion.py`: native tool calls, arguments that are not JSON, XML calls a local server
+merged into one call's arguments, calls a model wrote as text (Qwen/Hermes XML, GLM tags, plain tool
+names, Gemma 4's own syntax), and the JSON protocol of tool mode `json`. `OpenAIConversation` calls it
+on what an endpoint the server reaches itself returned; from protocol 2 on, a helper sends the
+completion exactly as its endpoint returned it and the server calls the same function, so a model's
+quirk fixed once is fixed for every machine, and nothing about parsing ever ships to a helper. The
+JSON protocol's prompt is built here too (`system_prompt`), so it reaches a model however the request
+goes out. `tests/data/completions/` holds raw completions with what the parser makes of each.
+
+Whoever runs a helper chooses what its completions say, so the parser treats a reply as hostile input:
+it takes time linear in the reply's length (no pattern rescans the rest of the text from each place it
+might start), never raises on a message protocol 2 accepts (JSON that Python will not decode is JSON
+that is not read), and yields at most 512 calls, protocol 2's own bound on native ones, with arguments
+that are always objects nested at most 64 levels deep.
 
 ---
 
@@ -157,8 +816,12 @@ a file and reloading is the whole development loop.
 | `app.js` | The router |
 | `api.js` | Every HTTP call, CSRF, share keys |
 | `game.js`, `render.js`, `hex.js`, `panels.js` | The game screen and the canvas renderer |
-| `lobby.js`, `benchmarks.js`, `models.js`, `lab.js`, `probes.js`, `scenario.js`, `editor.js` | The other screens |
-| `servers.js`, `pool.js`, `reports.js`, `console.js`, `setup.js` | Machines, sharing, reports, operator console, first-run wizard |
+| `replay.js`, `replaydecode.js` | The recap: `replaydecode.js` decodes the frames (see [The recap's frames](#the-recaps-frames)) and reads the chats as threads, with no DOM or network, and Node tests it |
+| `chat.js`, `chatmodel.js` | The chat windows docked left of End Turn: one per civilization, opened from the socket (a `negotiation` event reads `GET /api/games/{id}/negotiations/{nid}`; `negotiation_status` moves the status line), with the deal builder inside, which fetches its trade options (`GET /api/games/{id}/trade-options/{other}`) while it is open: when it opens, after each entry in its chats and at each turn. The view carries no chat clock, so an open chat the client holds no clock for is read once at each version. End Turn's click is decided in `ChatDock.endTurnClick` (`GameScreen.onEndTurn` only calls it); an armed End Turn ends the turn on a view fetched after the last chat closed (`GameScreen.syncView`; a 304 saying the view in hand still is counts, `GameScreen.viewSeq`), so a decision a deal brought stops it. `chatmodel.js` decides, with no DOM or network: entries merged by `seq`, each window's state and message count, End Turn's states (answer first, waiting, armed), the dock's layout (clear of End Turn and of the unit, city and side panels shown), and the drafts no update touches. Node tests both (`citar/web/tests/`, `chat.js` over stand-ins for the DOM) |
+| `seats.js` | What the pages say and send about seats, with no DOM or network: every seat's label ("Hybrid: standard + dry-run"), what an AI seat is doing (a hybrid seat's "bot playing", "diplomat thinking", "queued #n"), and a hybrid seat's kinds of diplomacy, presets and handicap with the payload the lobby, the Join/Seats dialog and the scenario seats send. Node tests it, against the payloads `tests/test_hybrid_lobby.py` creates games from (`citar/web/tests/fixtures/hybrid-seats.json`) |
+| `lobby.js`, `benchmarks.js`, `models.js`, `lab.js`, `probes.js`, `scenario.js`, `editor.js` | The other screens (the lobby's, the Join/Seats dialog's and the scenario seats' hybrid seat form is `lobby.js`'s `hybridForm`) |
+| `pool.js`, `servers.js`, `machines.js` | The Servers page (`#/pool`): every machine the viewer owns or may use and the groups that share them; the machines' editors as dialogs; the page's rules (its old `#/servers` addresses, and which routes a viewer may call for a machine), kept apart so Node tests them (`citar/web/tests/`) |
+| `reports.js`, `console.js`, `setup.js` | Reports, operator console, first-run wizard |
 | `auth.js`, `account.js` | Sign-in and account settings |
 
 Check a change with `node --check` on a **`.mjs` copy** of the file: on a `.js` file Node parses it
@@ -172,12 +835,13 @@ right way.
 
 | Kind | Where | Format |
 |---|---|---|
-| Ruleset | `citar/data/ruleset/` | UnCiv-derived JSON, generated |
-| CITAR additions | `citar/data/custom/` | Same format |
-| Game settings | `citar/data/game.json` | Map sizes, lobby defaults, AI limits |
-| Saved games | `saves/<id>/*.citar` | Gzipped JSON |
+| Ruleset | `crates/citar-engine/data/ruleset/`, compiled in | UnCiv-derived JSON, generated |
+| CITAR additions | `crates/citar-engine/data/custom/` | Same format |
+| Game settings | `crates/citar-engine/data/game.json` | Map sizes, lobby defaults, AI limits |
+| A modded ruleset | the folder `CITAR_RULESET_DIR` names | The same layout |
+| Saved games | `saves/<id>/*.citar`, beside the game's journals `saves/<id>/journal*.cjnl` | A small JSON header and the state, zstd; the journal holds the history, one record per save |
 | Maps, scenarios, probes | `saves/maps`, `saves/scenarios`, `saves/probes` | JSON |
-| Server registry | `config/servers.json` | JSON |
+| Machines (the server registry) | the database's `servers` table; a pre-0.1.6 `config/servers.json` is imported once and renamed | rows, each machine's configuration as JSON |
 | Usage ledger | `saves/usage/*.jsonl` | One line per activity, no prices |
 | Accounts | the database | SQLite or PostgreSQL |
 
@@ -189,12 +853,13 @@ right way.
 
 | To change | Go to |
 |---|---|
-| A number, a unit, a building | `citar/data/` — it is data |
-| A rule that has a unique | `citar/data/` — the interpreter handles it |
-| A new kind of rule | The engine module that owns the system, plus `unique_types.py` |
-| A new player action | `engine/tools.py` — it reaches all three interfaces at once |
-| How the bot plays | `bots/basic.py`, and A/B it ([BOTS.md](Scripted-bots)) |
-| What a model is told | `agents/prompts.py` and `engine/briefing.py` |
+| A number, a unit, a building | `crates/citar-engine/data/` — it is data (or a modded copy: [MODDING.md](Modding)) |
+| A rule that has a unique | `crates/citar-engine/data/` — the compiled ruleset handles it |
+| A new kind of rule | `unique_supported.toml` and the engine module that owns the system ([MODDING.md](Modding#adding-a-new-kind-of-rule)) |
+| A new player action | `crates/citar-engine/src/api/tools/` — it reaches all three interfaces at once |
+| Something the server needs from a game | `engine_api.py`, then the engine behind it (`crates/citar-py`, `crates/citar-engine/src/api/`) |
+| How the bot plays | `crates/citar-bot`, as a new version (`basic-N`) when existing results must not move, or a profile's parameters; A/B it ([BOTS.md](Scripted-bots)) |
+| What a model is told | `agents/prompts.py` and the briefing, `crates/citar-engine/src/api/briefing/` |
 | A screen in the browser | `web/js/`, no build step |
 | Who may do what | `auth/access.py`, and only there |
 

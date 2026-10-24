@@ -699,7 +699,9 @@ export async function openCityStates(game) {
 }
 
 // ============================================================================
-// Diplomacy
+// Diplomacy: relations, war and peace, denouncing, the United Nations vote and messages to everyone. Chats (the
+// negotiations and their deal builder) are the docked chat windows (chat.js): each civilization's "Open chat"
+// opens its window, where a chat is answered or, on your turn, started.
 // ============================================================================
 export async function openDiplomacy(game, focusPid = null) {
   if (game.isSpectator) return;
@@ -707,7 +709,9 @@ export async function openDiplomacy(game, focusPid = null) {
   const content = el("div");
   const m = modal({ title: "Diplomacy", content, onClose: () => { game._diploModal = null; } });
   game._diploModal = m;
-  const state = { selected: focusPid, give: [], receive: [] };
+  // what is being written to each civilization survives the redraws a message or a war brings
+  const state = { selected: focusPid, drafts: {} };
+  const openChat = (pid) => { m.close(); if (game.chat) game.chat.open(pid); };
 
   async function draw() {
     const r = await api.tool(game.gid, game.token, "get_diplomacy", { message_limit: 200 });
@@ -723,8 +727,10 @@ export async function openDiplomacy(game, focusPid = null) {
     const list = el("div", { class: "civ-list" });
     for (const p of d.players) {
       const neg = d.open_negotiations.find((n) => n.with === p.id);
-      list.appendChild(el("div", { class: `civ ${state.selected === p.id ? "active" : ""}`, onclick: () => { state.selected = p.id; state.give = []; state.receive = []; draw(); } },
-        el("div", {}, el("span", { class: "swatch", style: { background: p.color } }), el("b", {}, p.name)),
+      list.appendChild(el("div", { class: `civ ${state.selected === p.id ? "active" : ""}`, onclick: () => { state.selected = p.id; draw(); } },
+        el("div", { class: "row" }, el("span", { class: "swatch", style: { background: p.color } }), el("b", {}, p.name), el("span", { class: "grow" }),
+          el("button", { class: `small ${neg && neg.your_move ? "primary" : ""}`, title: "The chat window with them: answer a chat, or start one on your turn",
+            onclick: (e) => { e.stopPropagation(); openChat(p.id); } }, "Open chat")),
         el("div", { class: "row" },
           el("span", { class: `pill ${p.at_war ? "war" : "peace"}` }, p.at_war ? "War" : p.peace_treaty_until ? `Treaty → T${p.peace_treaty_until}` : "Peace"),
           el("span", { class: "muted" }, `score ${p.score} · ${p.cities} cities`)),
@@ -741,6 +747,8 @@ export async function openDiplomacy(game, focusPid = null) {
     right.appendChild(el("div", { class: "row" },
       el("h3", { style: { margin: 0 } }, p.name), p.leader ? el("span", { class: "muted" }, `led by ${p.leader}`) : null,
       p.difficulty ? el("span", { class: "muted", title: "This civilization's difficulty level" }, `· ${p.difficulty}`) : null, el("span", { class: "grow" }),
+      el("button", { class: "small primary", title: "Negotiate in the chat window: messages each in turn, proposals, the deal builder",
+        onclick: () => openChat(p.id) }, "Open chat"),
       !p.at_war && !p.you_denounced_them ? el("button", { class: "small", disabled: !game.myTurn, onclick: async () => {
         if (await confirmBox("Denounce", `Publicly denounce ${p.name}?`)) { await game.tool("denounce", { player_id: p.id }); draw(); }
       } }, "Denounce") : null,
@@ -753,149 +761,28 @@ export async function openDiplomacy(game, focusPid = null) {
       } }, "Declare war") : null));
     if (tags.length) right.appendChild(el("div", { class: "muted" }, tags.join(" · ")));
 
+    // messages: what was said to and by them outside a chat (a message gets no reply; a chat does)
     const chat = el("div", { class: "chat" });
-    const neg = d.open_negotiations.find((n) => n.with === p.id);
     const msgs = d.messages.filter((mm) => mm.from === p.id || (mm.from === game.you && mm.to.includes(p.name)));
     for (const mm of msgs) {
       chat.appendChild(el("div", { class: `msg ${mm.from === game.you ? "me" : "them"}` },
         el("div", { class: "meta" }, `T${mm.turn} ${mm.from_name}${mm.to.length > 1 ? " → " + mm.to.join(", ") : ""}`), mm.text));
     }
-    for (const n of [...d.recent_negotiations.filter((n) => n.with === p.id).slice(-3), ...(neg ? [neg] : [])]) {
-      chat.appendChild(el("div", { class: "muted", style: { textAlign: "center", margin: "6px 0" } },
-        `— negotiation #${n.id}: ${n.status}${n.current_proposal ? " · " + n.current_proposal.summary : ""} —`));
-    }
     right.appendChild(chat);
     setTimeout(() => { chat.scrollTop = chat.scrollHeight; }, 0);
-    const text = el("textarea", { rows: 2, placeholder: "Write a message…", style: { width: "100%" } });
+    const text = el("textarea", { rows: 2, placeholder: `A message to ${p.name} (no reply expected: to negotiate, open a chat)…`, style: { width: "100%" },
+      value: state.drafts[p.id] || "", oninput: () => { state.drafts[p.id] = text.value; } });
     right.appendChild(text);
-    if (neg) {
-      const box = el("div", { class: "card", style: { marginBottom: 0 } },
-        el("div", {}, el("b", {}, `Negotiation #${neg.id}`), ` (${neg.exchanges}/${neg.max_exchanges} exchanges) — `,
-          neg.your_move ? el("span", { class: "warn" }, "your move") : el("span", { class: "muted" }, `waiting for ${p.name}`)),
-        neg.current_proposal ? el("div", {}, `Proposal by ${neg.proposal_by_you ? "you" : p.name}: `, el("b", {}, neg.current_proposal.summary)) : el("div", { class: "muted" }, "No concrete proposal on the table."));
-      if (neg.your_move) {
-        const respond = async (action, extra = {}) => {
-          const res = await game.tool("respond_negotiation", { negotiation_id: neg.id, action, message: text.value || undefined, ...extra });
-          if (!res) return;
-          // answering settles the matter: close the window rather than leave it open while play goes on
-          if (action === "accept" || action === "reject") { toast(action === "accept" ? "Deal accepted" : "Proposal rejected"); m.close(); return; }
-          text.value = ""; state.give = []; state.receive = []; setTimeout(draw, 300);
-        };
-        box.appendChild(el("div", { class: "btn-grid" },
-          el("button", { class: "primary", disabled: !neg.current_proposal || neg.proposal_by_you, onclick: () => respond("accept") }, "Accept"),
-          el("button", { class: "danger", onclick: () => respond("reject") }, "Reject / end"),
-          el("button", { onclick: () => { if (!text.value) return toast("Write a reply first."); respond("reply"); } }, "Reply (message only)"),
-          el("button", { disabled: !state.give.length && !state.receive.length, onclick: () => respond("counter", { give: state.give, receive: state.receive }) }, "Counter with the deal below"),
-          neg.current_proposal ? el("button", { class: "small", onclick: () => {
-            state.give = JSON.parse(JSON.stringify(neg.current_proposal.you_give));
-            state.receive = JSON.parse(JSON.stringify(neg.current_proposal.you_receive));
-            draw();
-          } }, "Load current proposal into builder") : null));
-      }
-      right.appendChild(box);
-    } else {
-      right.appendChild(el("div", { class: "btn-grid" },
-        el("button", { onclick: async () => { if (!text.value.trim()) return; const r2 = await game.tool("send_message", { to: p.id, text: text.value }); if (r2) { text.value = ""; draw(); } } }, "Send message"),
-        el("button", { class: "primary", disabled: !game.myTurn, title: game.myTurn ? "" : "Negotiations can be opened on your turn",
-          onclick: async () => {
-            const hasDeal = state.give.length || state.receive.length;
-            if (!text.value.trim() && !hasDeal) return toast("Write an opening message, or add items to a deal below.");
-            const args = { to: p.id, message: text.value.trim() || "I propose this deal." };
-            if (hasDeal) { args.give = state.give; args.receive = state.receive; }
-            const r2 = await game.tool("open_negotiation", args);
-            if (r2) { text.value = ""; state.give = []; state.receive = []; toast("Negotiation opened — waiting for their reply."); setTimeout(draw, 500); }
-          } }, state.give.length || state.receive.length ? "Propose deal" : "Open negotiation")));
-    }
-    right.appendChild(dealBuilder(game, d, p, state, draw));
+    right.appendChild(el("div", { class: "btn-grid" },
+      el("button", { onclick: async () => {
+        if (!text.value.trim()) return;
+        const r2 = await game.tool("send_message", { to: p.id, text: text.value });
+        if (r2) { state.drafts[p.id] = ""; text.value = ""; draw(); }
+      } }, "Send message")));
     content.appendChild(el("div", { class: "diplo" }, list, right));
   }
   game._redrawDiplomacy = () => { if (document.body.contains(content)) draw(); };
   draw();
-}
-
-const MUTUAL = ["peace_treaty", "declaration_of_friendship", "research_agreement", "defensive_pact"];
-
-function dealBuilder(game, d, p, state, redraw) {
-  const R = game.rules;
-  const emp = game.view.empire;
-  const wrap = el("div", { class: "section" }, el("h4", {}, "Deal builder"));
-  const sideBox = (title, items) => el("div", { class: "deal-side" }, el("div", { class: "muted" }, title),
-    ...items.map((it, i) => el("div", { class: "deal-item" }, describe(d, it),
-      el("button", { class: "small", onclick: () => { items.splice(i, 1); redraw(); } }, "✕"))));
-  wrap.appendChild(el("div", { class: "deal-builder" }, sideBox("You give", state.give), sideBox(`${p.name} gives`, state.receive)));
-  const dd = game.rules.speeds[game.view.config.speed] ? game.rules.speeds[game.view.config.speed].dealDuration : 30;
-  const to = p.trade_options;
-  if (to) {
-    const chip = (label, side, item) => el("button", { class: "small chip", title: "Add to the deal", onclick: () => { side.push(item); redraw(); } }, label);
-    const offers = (opts, side) => [
-      ...(opts.luxuries || []).map((r) => chip(`+ ${r}`, side, { type: "resource", resource: r, amount: 1, turns: dd })),
-      ...Object.entries(opts.strategic || {}).map(([r, n]) => chip(`+ ${r} (${n} spare)`, side, { type: "resource", resource: r, amount: 1, turns: dd })),
-      ...(opts.techs || []).map((tid) => chip(`+ ${tid}`, side, { type: "tech", tech: tid })),
-    ];
-    const agreements = (to.agreements_possible_now || []).map((t) => chip(`⇄ ${t.replace(/_/g, " ")}`, state.give, { type: t }));
-    wrap.appendChild(el("div", { class: "trade-hints" },
-      el("div", {}, el("span", { class: "muted" }, `${p.name} could give (${to.their_gold} gold): `), offers(to.they_could_give, state.receive).length ? offers(to.they_could_give, state.receive) : el("span", { class: "muted" }, "nothing you lack")),
-      el("div", {}, el("span", { class: "muted" }, "You could give: "), offers(to.you_could_give, state.give).length ? offers(to.you_could_give, state.give) : el("span", { class: "muted" }, "nothing they lack")),
-      agreements.length ? el("div", {}, el("span", { class: "muted" }, "Agreements possible now: "), agreements,
-        to.research_agreement_cost_each ? el("span", { class: "muted" }, ` (research agreement costs each side ${to.research_agreement_cost_each} gold)`) : null) : null));
-  }
-  const type = el("select", {}, ...[["gold", "Gold"], ["gold_per_turn", "Gold per turn"], ["resource", "Resource"], ["open_borders", "Open borders"],
-    ["embassy", "Embassy"], ["peace_treaty", "Peace treaty"], ["declaration_of_friendship", "Declaration of friendship"],
-    ["research_agreement", "Research agreement"], ["defensive_pact", "Defensive pact"], ["declare_war", "Declare war on…"],
-    ["city", "City"], ["share_map", "World map"], ["tech", "Technology"]].map(([v, t]) => el("option", { value: v }, t)));
-  const params = el("span", { class: "row" });
-  const inputs = {};
-  const renderParams = () => {
-    clear(params);
-    const t = type.value;
-    const num = (k, v, ph) => (inputs[k] = el("input", { type: "number", value: v, placeholder: ph, style: { width: "80px" } }));
-    if (t === "gold") params.append(num("amount", 50, "amount"));
-    if (t === "gold_per_turn") params.append(num("amount", 3, "per turn"), num("turns", dd, "turns"));
-    if (t === "resource") {
-      inputs.resource = el("select", {}, ...Object.entries(R.resources).filter(([, r]) => r.resourceType !== "Bonus").map(([k, r]) => el("option", { value: k }, `${k} (${r.resourceType})`)));
-      params.append(inputs.resource, num("amount", 1, "qty"), num("turns", dd, "turns"));
-    }
-    if (t === "open_borders") params.append(num("turns", dd, "turns"));
-    if (t === "declare_war") { inputs.target = el("select", {}, ...d.players.filter((q) => q.id !== p.id).map((q) => el("option", { value: q.id }, q.name))); params.append(inputs.target); }
-    if (t === "city") { inputs.city = el("select", {}, ...game.view.cities.filter((c) => c.owner === game.you || c.owner === p.id).map((c) => el("option", { value: c.id }, `${c.name}${c.owner === game.you ? " (yours)" : ""}`))); params.append(inputs.city); }
-    if (t === "tech") { inputs.tech = el("select", {}, ...Object.keys(R.techs).map((k) => el("option", { value: k }, k))); params.append(inputs.tech); }
-  };
-  type.onchange = renderParams;
-  renderParams();
-  const build = () => {
-    const t = type.value;
-    const it = { type: t };
-    if (inputs.amount && ["gold", "gold_per_turn", "resource"].includes(t)) it.amount = +inputs.amount.value;
-    if (inputs.turns && ["gold_per_turn", "resource", "open_borders"].includes(t)) it.turns = +inputs.turns.value;
-    if (t === "resource") it.resource = inputs.resource.value;
-    if (t === "declare_war") it.target = +inputs.target.value;
-    if (t === "city") it.city_id = +inputs.city.value;
-    if (t === "tech") it.tech = inputs.tech.value;
-    return it;
-  };
-  wrap.appendChild(el("div", { class: "row", style: { marginTop: "6px" } }, type, params,
-    el("button", { class: "small", onclick: () => { state.give.push(build()); redraw(); } }, "+ You give"),
-    el("button", { class: "small", onclick: () => { state.receive.push(build()); redraw(); } }, `+ ${p.name} gives`)));
-  wrap.appendChild(el("div", { class: "muted", style: { fontSize: "12px" } }, `Mutual agreements (${MUTUAL.join(", ").replace(/_/g, " ")}) apply to both sides automatically.`));
-  if (emp) wrap.appendChild(el("div", { class: "muted", style: { marginTop: "4px" } },
-    `You have ${emp.gold} gold (${signed((emp.per_turn || {}).gold || 0)}/turn). ` +
-    `Spare: ${Object.entries(emp.strategic_resources || {}).filter(([, r]) => r.available > 0).map(([k, r]) => `${k} ${r.available}`).join(", ") || "no strategic resources"}; ` +
-    `luxuries: ${Object.entries(emp.luxuries || {}).filter(([, r]) => r.net > 0).map(([k, r]) => `${k} ×${r.net}`).join(", ") || "none"}.`));
-  return wrap;
-}
-
-function describe(d, it) {
-  switch (it.type) {
-    case "gold": return `${it.amount} gold`;
-    case "gold_per_turn": return `${it.amount} gold/turn × ${it.turns}`;
-    case "resource": return `${it.amount} ${it.resource} × ${it.turns}t`;
-    case "open_borders": return `Open borders ${it.turns}t`;
-    case "declare_war": { const q = d.players.find((x) => x.id === it.target); return `War on ${q ? q.name : it.target}`; }
-    case "city": return `City #${it.city_id}`;
-    case "share_map": return "World map";
-    case "tech": return it.tech;
-    default: return it.type.replace(/_/g, " ");
-  }
 }
 
 // ============================================================================

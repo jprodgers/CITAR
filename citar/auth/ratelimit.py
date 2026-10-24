@@ -56,6 +56,9 @@ RULES = {
     "oauth_start":     Rule(limit=30, window=900),
     "worker_auth":     Rule(limit=20, window=300, block=600),
     "api_write":       Rule(limit=300, window=60),
+    # the Servers page's test of a machine (POST /api/pool/servers/{id}/test): a person tries a few; each holds a
+    # request until its reply
+    "server_test":     Rule(limit=20, window=600),
 }
 
 

@@ -1,0 +1,69 @@
+# Homebrew formula for the CITAR helper: the packaged build, which never updates itself (Homebrew upgrades it).
+# Written by scripts/release_checksums.py from packaging/homebrew/citar-helper.rb.in; it belongs in the tap
+# repository jprodgers/homebrew-citar as Formula/citar-helper.rb (packaging/README.md).
+#
+#   brew install jprodgers/citar/citar-helper
+#   citar-helper setup
+#   brew services start citar-helper
+class CitarHelper < Formula
+  desc "Lend this machine's model endpoint and spare CPU to a CITAR server"
+  homepage "https://github.com/jprodgers/CITAR"
+  license "MPL-2.0"
+
+  on_macos do
+    on_arm do
+      url "{{url:citar-helper-{{version}}-macos-arm64.tar.gz}}"
+      sha256 "{{sha256:citar-helper-{{version}}-macos-arm64.tar.gz}}"
+    end
+    on_intel do
+      url "{{url:citar-helper-{{version}}-macos-x64.tar.gz}}"
+      sha256 "{{sha256:citar-helper-{{version}}-macos-x64.tar.gz}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "{{url:citar-helper-{{version}}-linux-arm64.tar.gz}}"
+      sha256 "{{sha256:citar-helper-{{version}}-linux-arm64.tar.gz}}"
+    end
+    on_intel do
+      url "{{url:citar-helper-{{version}}-linux-x64.tar.gz}}"
+      sha256 "{{sha256:citar-helper-{{version}}-linux-x64.tar.gz}}"
+    end
+  end
+
+  def install
+    bin.install "citar-helper"
+    doc.install "LICENSE", "NOTICE.md", "THIRD-PARTY-LICENSES.txt"
+  end
+
+  def caveats
+    <<~EOS
+      Connect the helper to a CITAR server, with a token from whoever runs it:
+        citar-helper setup
+
+      To keep it running in the background, and start it again at login:
+        brew services start citar-helper
+
+      That runs it through Homebrew's opt path, which survives upgrades. Use it rather than
+      `citar-helper service install`, which would record this version's Cellar path, and the
+      next `brew upgrade` removes that.
+
+      Homebrew updates this helper (brew upgrade citar-helper); it never updates itself.
+      Its settings and machine key are kept in ~/Library/Application Support/CITAR on macOS
+      and ~/.local/share/citar on Linux, and are not removed when you uninstall it.
+    EOS
+  end
+
+  service do
+    run [opt_bin/"citar-helper", "run", "--service"]
+    keep_alive true
+    log_path var/"log/citar-helper.log"
+    error_log_path var/"log/citar-helper.log"
+  end
+
+  test do
+    assert_match "citar-helper #{version}", shell_output("#{bin}/citar-helper --version --home #{testpath}/home")
+    system bin/"citar-helper", "--self-test", "--home", testpath/"home"
+  end
+end

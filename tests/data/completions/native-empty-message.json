@@ -1,0 +1,33 @@
+{
+ "name": "native-empty-message",
+ "note": "no content at all",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": null,
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": ""
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=Back up CITAR: the database, the state directory, the configuration and the release
+Documentation=https://github.com/jprodgers/CITAR/blob/main/docs/server/RUNBOOK.md
+
+[Service]
+Type=oneshot
+User=root
+# Root because the state directory is citar:citar 0750 and the env file is root:citar 0640.
+# citar-deploy starts this unit with the service stopped and waits for it (a oneshot), so its
+# snapshot is consistent and current; the script exits 2 when the backup is not trustworthy.
+ExecStart=/usr/local/bin/citar-backup
+Nice=10
+IOSchedulingClass=idle

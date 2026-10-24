@@ -1,0 +1,9 @@
+{
+  "frame": {
+    "t": "refused",
+    "ts": 1760000000.0,
+    "code": "rate",
+    "message": "Too many refused tokens from this address.",
+    "retry_after_s": 120
+  }
+}

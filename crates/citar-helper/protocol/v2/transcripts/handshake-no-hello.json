@@ -1,0 +1,14 @@
+{
+  "name": "handshake-no-hello",
+  "about": "A connection that sends no hello within 30 s is closed with 4408.",
+  "refs": ["P4.2.2"],
+  "plays": {"helper": null, "hub": "4-05"},
+  "one_side": "scripts a helper that says nothing",
+  "values": {},
+  "setup": {"helper": {}, "hub": {"clock": "fake"}},
+  "steps": [
+    {"connect": {}},
+    {"wait": {"s": 30, "quiet": true}},
+    {"close": {"by": "server", "code": 4408}, "within_s": 5}
+  ]
+}

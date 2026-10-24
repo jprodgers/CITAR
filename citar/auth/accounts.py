@@ -220,6 +220,7 @@ def create_user(session, *, handle: str, email: Optional[str] = None, password: 
             raise AccountError("That looks like a disposable email address. "
                                "Please use an address you will still have later.")
 
+    from .profiles import clean_text
     password_hash = None
     if password:
         passwords.check(password, handle=normalized_handle, email=normalized_email or "")
@@ -239,7 +240,8 @@ def create_user(session, *, handle: str, email: Optional[str] = None, password: 
     user = User(
         handle=handle.strip() if normalize_handle(handle) == normalized_handle else normalized_handle,
         handle_lower=normalized_handle,
-        display_name=(display_name or "").strip()[:80],
+        # control characters and bidirectional overrides out, as a profile edit takes them out (P3.2.6)
+        display_name=clean_text(display_name or "")[:80],
         email=normalized_email,
         email_lower=normalized_email,
         email_verified=bool(email_verified),
@@ -445,6 +447,7 @@ def ensure_local_owner(session) -> User:
                        status="active", is_local_owner=True, email_verified=True,
                        tz=_local_timezone())
     audit.record(session, "user.local_owner_created", actor=user, object_type="user", object_id=user.id)
+    on_first_admin(session, user)
     return user
 
 
@@ -474,4 +477,45 @@ def bootstrap_admin(session, *, handle: str, email: str, password: str) -> User:
     user = create_user(session, handle=handle, email=email, password=password, role="admin",
                        status="active", email_verified=True, display_name=handle)
     audit.record(session, "user.bootstrap_admin", actor=user, object_type="user", object_id=user.id)
+    on_first_admin(session, user)
     return user
+
+
+def on_first_admin(session, user: Optional[User]) -> None:
+    """Called by every path that makes an account an administrator (``admin_cli create-admin`` and ``set-role``, the
+    setup wizard, ``bootstrap_admin``, an invitation with the admin role, the local owner): the work that waits for
+    an administrator on a fresh server-mode database runs now, in ``session``'s transaction, rather than at the next
+    boot. That is importing the server registry (``citar.pool.registry_import``, design/phase3-features.md P3.2.8),
+    once, its file renamed when this transaction commits (with no file, the first run's registry, a scan of this
+    computer, is made once this transaction commits, in a transaction of its own), and adopting the item files nobody owns
+    (``items.adopt_orphans``, P3.2.4), which is idempotent, so a later administrator only adopts what has appeared
+    since. Nothing for an account that is not an active administrator."""
+    if user is None or user.role != "admin" or user.status != "active":
+        return
+    from .. import items
+    from ..pool import registry_import
+    from . import policy
+    session.flush()
+    owner = items.first_admin(session) or user
+    try:
+        if registry_import.from_first_run(session):
+            # no file to import: the first run's registry is a scan of this computer (hardware, LM Studio's lms),
+            # which waits for this transaction's commit rather than hold the write lock it took
+            registry_import.import_after_commit(session)
+        else:
+            # each in a savepoint of its own: whatever the import or the adoption meets (a registry that does not
+            # read, a file a producer is writing this moment, a row it cannot make) must not take the new
+            # administrator, or the other, with it; the next start tries again what this did not do
+            with session.begin_nested():
+                imported = registry_import.run_once(session, owner)
+            registry_import.rename_after_commit(session, imported)
+    except Exception:
+        policy.invalidate()                      # the marker it may have cached was rolled back
+        log.warning("importing the server registry failed; the next start tries again", exc_info=True)
+    try:
+        with session.begin_nested():
+            items.register_system(session)
+            items.adopt_orphans(session, owner)
+    except Exception:
+        policy.invalidate()
+        log.warning("adopting the item files nobody owns failed; the next start tries again", exc_info=True)

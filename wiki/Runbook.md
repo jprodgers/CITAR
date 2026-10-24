@@ -117,19 +117,34 @@ run on 2026-09-20 and CITAR opened the restored database and read its accounts.
 
 ```bash
 sudo citar-admin create-admin --handle NAME --email you@example.com   # first admin
+sudo citar-admin create-user --handle NAME --email them@example.com --role moderator   # active, verified
 sudo citar-admin list-users
 sudo citar-admin set-role NAME moderator
-sudo citar-admin set-status NAME suspended --reason "why"
+sudo citar-admin set-status NAME suspended --reason "why"     # the reason is required, and shown at sign-in
+sudo citar-admin set-caps NAME run_lab=on publish_global=default   # on, off, or back to the role's default
+sudo citar-admin set-limits NAME --games 4 --seats 8 --invites 2
+sudo citar-admin set-trust NAME trusted              # new | provisional | trusted | quarantined
+sudo citar-admin audit --actor NAME --action 'user.*' --limit 50   # --json for a script; --actor admin_cli: these commands' own
 sudo citar-admin reset-password NAME
 sudo citar-admin invite --role user --uses 1
 sudo citar-admin policy registration invite       # open | invite | closed
 ```
 
 Passwords are always prompted for, never passed as arguments — an argument ends up in the shell
-history and in the process list.
+history and in the process list. A script gives `create-user` its password on standard input instead
+(`--password-stdin`, the first line).
 
 **Locked out entirely?** The CLI does not need the web app or a session. `create-admin --force`
-adds another administrator.
+adds another administrator. The CLI changes accounts under the web page's rules (`set-role` will not demote
+the last active administrator) and each change is an audit row of `admin_cli`'s; the same changes are on the
+**Users** page (`#/admin/users`).
+
+**The first administrator imports the old server registry.** A server upgraded from before 0.1.6 still has
+`config/servers.json`; it is imported into the database once, the moment the first administrator exists (at a start
+that has one, or when `create-admin` makes one), under its own ids and owned by that administrator, then renamed
+`servers.json.imported-<date>-<time>` (never deleted). Until then the start's log says that no machine is usable yet.
+Suspending an account disconnects the helpers of its machines at once; so do revoking a worker token and disabling
+or removing a machine ([Workers](Workers#revocation)).
 
 ---
 
@@ -141,19 +156,22 @@ sudo citar-admin worker-token "Desktop"                            # another tok
 sudo citar-admin workers                                           # what is registered
 ```
 
-On the machine with the model:
+On the machine with the model, the CITAR helper (download it from the Servers page):
 
 ```bash
-python -m citar.worker --server https://citar.example.com --token TOKEN --name "Desktop"
+citar-helper --server https://citar.example.com --token TOKEN --name "Desktop"
 ```
 
-The worker dials out, so nothing at that end needs a port forward. Add `--quiet "22:00-06:00"` for
+The helper dials out, so nothing at that end needs a port forward. Add `--quiet "22:00-06:00"` for
 quiet hours **enforced on that machine**, which the server cannot override.
 
-A worker that will not connect:
+A helper that will not connect:
 
-- `That worker token was refused` — the token is wrong or revoked. Issue another.
-- `ssl=None is incompatible` — an old worker. Update it.
+- `The server refused this helper's token` — the token is wrong or revoked. Issue another.
+- `another helper's key` — the machine's key was registered by another helper: compare the fingerprint
+  with `citar-helper --version`, then Reset key… in the machine's Helper dialog.
+- a 0.1.5 worker gets "This server runs CITAR 0.1.6, which needs the new CITAR helper": replace it
+  ([Workers](Workers#moving-from-015); a 0.1.5 system unit needs `systemctl disable --now` first).
 - connects then drops — check `sudo journalctl -u citar -f` while it tries.
 
 ---

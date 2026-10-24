@@ -1,0 +1,314 @@
+"""The machine settings dialog's routes (design/phase3-features.md P3.8.4; ``citar.machine_settings``).
+
+    GET  /api/machines/{sid}/settings          the dialog's read: capabilities, slots (and what the prompt scheduler
+                                               has in effect), modes, the helper's last report and how the
+                                               configuration differs from it, class and trust tier
+    PUT  /api/machines/{sid}/settings          change any of ``slots``, ``capabilities`` (``llm``, ``cpu``) and
+                                               ``modes`` (``hardware``, ``models``, ``power``: ``auto`` | ``manual``)
+    POST /api/machines/{sid}/hardware/apply    copy the last report into the configuration: ``{"sections": [...]}``
+                                               (``hardware``, ``models``, ``power``; none or empty: each one the
+                                               report has something for)
+    POST /api/machines/{sid}/key/reset         forget the helper's registered machine key: the next hello registers its
+                                               own (design/phase4-helper.md P4.3.7), and a connected helper is made to
+                                               reconnect (close 1012) so that it does at once; the trust tier is
+                                               unchanged
+    POST /api/machines/{sid}/rescan            ask its connected helper to scan its hardware now; 409 when offline
+    PUT  /api/admin/machines/{sid}/trust       any of ``{"trust_tier": "new" | "provisional" | "trusted" |
+                                               "quarantined", "withdraw": bool, "verifier": bool}``
+                                               (design/phase4-helper.md P4.5.8 rule 10)
+    POST /api/admin/machines/{sid}/replicate   ``{"n": 1..100}``: its next N results checked by replicas
+    PUT  /api/admin/machines/{sid}/class       ``{"pinned": true, "gpu_class_id"?, "cpu_class_id"?}`` pins the
+                                               classes it is priced by; ``{"pinned": false}`` lets them follow its
+                                               hardware again
+
+The first five are the machine's owner's and administrators' (MANAGE on its row: the site's machines, the host and its
+online APIs, are administrators' whoever is named their owner): anyone a group lends it to gets 403, anyone else 404,
+a visitor 401. The last three are administrators' alone (``require_role("admin", hide=True)``: anyone else signed in gets
+404). Each change writes one audit row and commits before it answers (the dialog reads it back at once); a change of
+slots or capabilities reaches the prompt scheduler at once (``Scheduler.refresh``) and the machine's connected helper
+too (``WorkerHub.push_settings``: protocol 2's ``settings`` frame, which it acknowledges; the route waits up to
+``ACK_WAIT_SECONDS`` for it, one request a machine at a time), a pin the compute ledger from the next event on. The
+machine editor's routes (``admin_api``, ``pool_api``) change the slots too, and call ``settings_changed`` after their
+commit the same way, without waiting.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .. import ledger, machine_settings as M, servers
+from ..auth import access, audit, ratelimit
+from ..auth.deps import Principal, get_db, principal, require_role, require_user
+from ..db.models import TRUST_TIERS, HardwareClass, Server, User
+
+log = logging.getLogger("citar.machines_api")
+router = APIRouter()
+require_admin_hidden = require_role("admin", hide=True)
+
+
+def _server(s: Session, sid: str, me: User, permission: str) -> Server:
+    """A machine the caller has ``permission`` on: 404 when they may not see it at all (a 403 would confirm that it
+    exists), 403 when they may see it but not this (a member a group lends it to)."""
+    row = s.get(Server, sid) if isinstance(sid, str) else None
+    if row is None:
+        raise HTTPException(404, "No such server.")
+    access.on(s, me, row).require(permission)
+    return row
+
+
+def _in_effect(server_id: str) -> Optional[dict]:
+    """What the prompt scheduler has in effect for the machine now: its capacity, slots, the helper's own ceiling,
+    whether it takes model work and lets pooled prompts swap models (``Machine.settings_view``). None when it cannot
+    say."""
+    try:
+        from ..pool import scheduler
+        m = scheduler.get().machine(server_id)
+        return m.settings_view() if m is not None else None
+    except Exception:
+        log.warning("could not read machine %s's scheduler state", server_id, exc_info=True)
+        return None
+
+
+def _refresh(server_id: str) -> None:
+    """Have the prompt scheduler read the machine's row again now (its slots, its swaps, LLM on or off): the change
+    takes effect for the next request, not after the scheduler's own reread. Never raises."""
+    try:
+        from ..pool import scheduler
+        sched = scheduler.current()
+        if sched is not None:
+            sched.refresh(server_id)
+    except Exception:
+        log.warning("could not refresh machine %s in the scheduler", server_id, exc_info=True)
+
+
+#: How long the settings route waits for a connected helper to acknowledge its new settings, so its answer shows what
+#: is in effect (the helper's ceiling applied); a helper that does not answer in time is shown as it was.
+ACK_WAIT_SECONDS = 2.0
+
+
+def settings_changed(server_id: str, wait: float = 0.0) -> None:
+    """A machine's row changed and was committed (its slots, capabilities or switch, through this dialog or the
+    machine editor): the prompt scheduler reads it again, and its connected helper is sent the settings that differ
+    from what it was last sent (design/phase4-helper.md P4.5.1). With ``wait``, the helper's acknowledgement is waited
+    for that long (``WorkerHub.push_settings``: one waiter a machine). Never raises."""
+    _refresh(server_id)
+    try:
+        from .workers import hub
+        hub().push_settings(server_id, wait=wait)
+    except Exception:
+        log.warning("could not push machine %s's settings to its helper", server_id, exc_info=True)
+
+
+def reset_key(s: Session, row: Server, actor: Optional[User], ip: Optional[str] = None) -> bool:
+    """Forget the machine key its helper registered (P4.3.7), so the next hello registers its own: for a machine whose
+    helper was reinstalled, or whose token was stolen before the real helper's first hello. One audit row; its trust is
+    left as it is (a quarantined machine stays quarantined with a new key, P4.5.8). The caller commits. Returns whether
+    a key was registered."""
+    had = bool(row.public_key)
+    from .workers import fingerprint
+    audit.record(s, "server.key_reset", actor=actor, object_type="server", object_id=row.id, ip=ip,
+                 fingerprint=fingerprint(row.public_key or "") or None)
+    row.public_key, row.key_at = None, None
+    return had
+
+
+def _answer(s: Session, row: Server, me: User) -> dict:
+    return M.client(s, row, me, in_effect=_in_effect(row.id))
+
+
+def _fail(exc: M.SettingsError) -> HTTPException:
+    return HTTPException(exc.status, str(exc))
+
+
+@router.get("/api/machines/{sid}/settings")
+def settings_read(sid: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db, scope="function")):
+    """The machine settings dialog's read of a machine its caller manages."""
+    me = require_user(request, p)
+    row = _server(s, sid, me, access.MANAGE)
+    return _answer(s, row, me)
+
+
+@router.put("/api/machines/{sid}/settings")
+def settings_change(sid: str, request: Request, body: dict = Body(...), p: Principal = Depends(principal),
+                    s: Session = Depends(get_db, scope="function")):
+    """Change a machine's slots, capabilities or modes (any of them; the rest stay)."""
+    me = require_user(request, p)
+    row = _server(s, sid, me, access.MANAGE)
+    try:
+        changed = M.update(row, body)
+    except M.SettingsError as exc:
+        raise _fail(exc) from None
+    if changed:
+        audit.record(s, "server.settings", actor=me, object_type="server", object_id=row.id,
+                     ip=ratelimit.client_ip(request), changed=changed)
+    s.commit()
+    if changed:
+        settings_changed(row.id, wait=ACK_WAIT_SECONDS)
+    return _answer(s, row, me)
+
+
+@router.post("/api/machines/{sid}/hardware/apply")
+def settings_apply(sid: str, request: Request, body: Optional[dict] = Body(None), p: Principal = Depends(principal),
+                   s: Session = Depends(get_db, scope="function")):
+    """Copy the machine's last report (its helper's scan, its suggested power figures, its models), whole or by
+    section, into its configuration, whatever its modes."""
+    me = require_user(request, p)
+    row = _server(s, sid, me, access.MANAGE)
+    body = body or {}
+    if not isinstance(body, dict) or set(body) - {"sections"}:
+        raise HTTPException(400, "The body is {\"sections\": [...]}, or nothing for every section.")
+    try:
+        applied = M.apply_scan(row, body.get("sections"))
+    except M.SettingsError as exc:
+        raise _fail(exc) from None
+    audit.record(s, "server.scan_applied", actor=me, object_type="server", object_id=row.id,
+                 ip=ratelimit.client_ip(request), sections=applied)
+    s.commit()
+    return _answer(s, row, me)
+
+
+@router.post("/api/machines/{sid}/key/reset")
+def key_reset(sid: str, request: Request, p: Principal = Depends(principal),
+              s: Session = Depends(get_db, scope="function")):
+    """Forget the machine key its helper registered: the next hello registers its own (``reset_key``). A helper still
+    connected under the old key is closed so that it reconnects (``WorkerHub.disconnect``), and its hello registers
+    its key at once; a token used by someone else is revoked as well, or whichever helper connects first registers."""
+    from .workers import hub
+    me = require_user(request, p)
+    row = _server(s, sid, me, access.MANAGE)
+    reset_key(s, row, me, ip=ratelimit.client_ip(request))
+    s.commit()
+    hub().disconnect(row.id, "its machine key was reset")
+    return _answer(s, row, me)
+
+
+@router.post("/api/machines/{sid}/rescan")
+def rescan(sid: str, request: Request, p: Principal = Depends(principal),
+           s: Session = Depends(get_db, scope="function")):
+    """Ask the machine's connected helper to scan its hardware now (the dialog's "Rescan now"): its ``hardware`` frame
+    follows, kept as the last report. 409 when no helper is connected."""
+    from .workers import hub
+    me = require_user(request, p)
+    row = _server(s, sid, me, access.MANAGE)
+    s.commit()
+    if not hub().rescan(row.id):
+        raise HTTPException(409, "Its helper is not connected: start the CITAR helper on the machine first.")
+    return {"rescan": row.id}
+
+
+#: The most results ``replicate`` asks to be checked at once.
+REPLICATE_MAX = 100
+
+
+@router.put("/api/admin/machines/{sid}/trust")
+def machine_trust(sid: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
+                  s: Session = Depends(get_db, scope="function")):
+    """Change a machine's trust (administrators; P4.5.8 rule 10): ``trust_tier`` (any tier: ``quarantined`` by hand,
+    its unverified results withdrawn back to its ``since`` only with ``"withdraw": true``; ``new`` releases it, its
+    counters reset and ``since`` now; a quarantined verifier's matches are re-opened either way), and ``verifier`` (a
+    trusted machine's mark: it verifies others' results). The job dispatcher makes the change, as it makes every change
+    of a machine's trust; one audit row each."""
+    row = _server(s, sid, me, access.MANAGE)
+    if not isinstance(body, dict) or not body or set(body) - {"trust_tier", "withdraw", "verifier"}:
+        raise HTTPException(400, "The body is any of {\"trust_tier\", \"withdraw\", \"verifier\"}.")
+    tier = body.get("trust_tier")
+    if tier is not None and tier not in TRUST_TIERS:
+        raise HTTPException(400, f"trust_tier is one of {', '.join(TRUST_TIERS)}.")
+    for flag in ("withdraw", "verifier"):
+        if flag in body and not isinstance(body[flag], bool):
+            raise HTTPException(400, f"{flag} is true or false.")
+    if body.get("withdraw") and tier != "quarantined":
+        raise HTTPException(400, "withdraw goes with \"trust_tier\": \"quarantined\".")
+    if body.get("verifier") and (tier or row.trust_tier or "new") != "trusted":
+        raise HTTPException(400, "Only a trusted machine verifies others' results.")
+    s.commit()
+    from concurrent.futures import TimeoutError as Late
+
+    from ..jobs import dispatcher as jobs_dispatcher
+    try:
+        jobs_dispatcher.change_trust(sid, tier=tier, withdraw=bool(body.get("withdraw")),
+                                     verifier=body.get("verifier"), actor_id=me.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except LookupError:
+        raise HTTPException(404, "No such server.") from None
+    except Late:
+        raise HTTPException(503, "The job dispatcher did not make the change in time; it will at its next tick: "
+                                 "read the machine again shortly.") from None
+    s.expire_all()
+    return _answer(s, s.get(Server, sid), me)
+
+
+@router.post("/api/admin/machines/{sid}/replicate")
+def machine_replicate(sid: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
+                      s: Session = Depends(get_db, scope="function")):
+    """Have a machine's next N results checked by replicas whatever its tier's rate (administrators; P4.5.8 rule
+    10): ``{"n": 1..100}``. One audit row."""
+    _server(s, sid, me, access.MANAGE)
+    n = body.get("n") if isinstance(body, dict) and set(body) == {"n"} else None
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= REPLICATE_MAX:
+        raise HTTPException(400, f"The body is {{\"n\": 1 to {REPLICATE_MAX}}}.")
+    s.commit()
+    from concurrent.futures import TimeoutError as Late
+
+    from ..jobs import dispatcher as jobs_dispatcher
+    try:
+        out = jobs_dispatcher.replicate_next(sid, n, actor_id=me.id)
+    except LookupError:
+        raise HTTPException(404, "No such server.") from None
+    except Late:
+        raise HTTPException(503, "The job dispatcher did not ask for them in time; it will at its next tick.") from None
+    return {"machine": sid, **out}
+
+
+def _class(s: Session, class_id, kinds: tuple, what: str) -> str:
+    """A hardware class's id, checked: it exists and is of one of ``kinds``."""
+    row = s.get(HardwareClass, class_id) if isinstance(class_id, str) else None
+    if row is None or row.kind not in kinds:
+        raise HTTPException(400, f"{what} is the id of a {' or '.join(kinds)} class.")
+    return row.id
+
+
+@router.put("/api/admin/machines/{sid}/class")
+def machine_class(sid: str, request: Request, body: dict = Body(...), me: User = Depends(require_admin_hidden),
+                  s: Session = Depends(get_db, scope="function")):
+    """Pin the hardware classes a machine is priced by, or let them follow its hardware again (administrators). A
+    pin names a GPU class and a CPU class (an online API: its API class alone); a class it leaves out is the one the
+    machine has now. The compute ledger prices by them from the next event on (``citar admin reprice`` recomputes a
+    period)."""
+    row = _server(s, sid, me, access.MANAGE)
+    if not isinstance(body, dict) or not isinstance(body.get("pinned"), bool) \
+            or set(body) - {"pinned", "gpu_class_id", "cpu_class_id"}:
+        raise HTTPException(400, "The body is {\"pinned\": true or false, \"gpu_class_id\", \"cpu_class_id\"}.")
+    api = (row.kind or "owned") == "api"
+    before = {"pinned": bool(row.class_override), "gpu": row.gpu_class_id, "cpu": row.cpu_class_id}
+    if body["pinned"]:
+        if api and body.get("cpu_class_id") is not None:
+            raise HTTPException(400, "An online API is priced by its API class alone.")
+        classes = [ledger.class_dict(c) for c in s.scalars(select(HardwareClass))]
+        facts = {"hardware": (row.config or {}).get("hardware") or {}, "class_override": bool(row.class_override),
+                 "gpu_class_id": row.gpu_class_id, "cpu_class_id": row.cpu_class_id}
+        now_gpu = ledger.class_of(facts, "api" if api else "gpu", classes)
+        now_cpu = None if api else ledger.class_of(facts, "cpu", classes)
+        gpu = (_class(s, body["gpu_class_id"], ("api",) if api else ("gpu",), "gpu_class_id")
+               if body.get("gpu_class_id") is not None else (now_gpu["id"] if now_gpu else None))
+        cpu = None if api else (_class(s, body["cpu_class_id"], ("cpu",), "cpu_class_id")
+                                if body.get("cpu_class_id") is not None else (now_cpu["id"] if now_cpu else None))
+        row.gpu_class_id, row.cpu_class_id, row.class_override = gpu, cpu, True
+    else:
+        if body.get("gpu_class_id") is not None or body.get("cpu_class_id") is not None:
+            raise HTTPException(400, "Unpinned, the classes follow the hardware: name none.")
+        row.class_override = False
+        s.flush()
+        ledger.reclassify(s, [row])
+    after = {"pinned": bool(row.class_override), "gpu": row.gpu_class_id, "cpu": row.cpu_class_id}
+    if after != before:
+        audit.record(s, "server.class", actor=me, object_type="server", object_id=row.id,
+                     ip=ratelimit.client_ip(request), changed={"from": before, "to": after})
+    s.commit()
+    servers.invalidate()            # the ledger prices from the registry's facts of the machine (``machine_facts``)
+    return _answer(s, row, me)

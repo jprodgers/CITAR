@@ -250,7 +250,8 @@ def s_servers(x: Ctx) -> str:
     head = ["Server", "Kind", "Allocated to activities", "Time held", "Per hour held", "Fixed costs over the period", "Unallocated fixed",
             "In use", "kWh to activities", "Metered machine total"]
     return (x.f("servers") + '<p class="lead">Fixed costs accrue by the calendar; activities pay for the time they held a '
-            'server, and the rest is unallocated idle time. "Metered" covers minutes with live power samples.</p>'
+            'server, and the rest is unallocated idle time. "Metered" covers minutes with live power samples '
+            'that read the whole machine (a GPU whose draw cannot be read leaves its machine unmetered).</p>'
             + C.table(head, rows))
 
 
@@ -317,7 +318,8 @@ def s_models(x: Ctx) -> str:
         if m is not None and c.get("per_turn") is not None and not c.get("incomplete"):
             pts.append({"name": k, "x": c["per_turn"], "y": m})
     if not rows:
-        return '<p class="muted">No AI model activity in this scope.</p>'
+        none = "" if x.data.get("pooling") == "pooled" else '<p class="muted">No AI model activity in this scope.</p>'
+        return none + _pooled_html(x)
     head = ["Configuration", "Games", "Performance (0–100)", "Wins", "Avg turn", "Tool error rate", "Clean turn ends",
             "Prompt tokens / turn", "Output tokens / turn", "Cost / model turn"]
     out = [x.f("models"), '<p class="lead">Performance is the benchmark measure: 100 for a win, 0 if eliminated, otherwise the '
@@ -334,7 +336,34 @@ def s_models(x: Ctx) -> str:
     if len(perf) >= 2:
         out.append(C.hbar("Mean game performance", sorted(perf, key=lambda kv: -kv[1]), fmt=lambda v: f"{v:.0f}",
                           color_index=x.color_of))
+    out.append(_pooled_html(x))
     return "".join(out)
+
+
+def _pooled_html(x: Ctx) -> str:
+    """The pooled figures (a report whose ``pooling`` is ``pooled`` or ``both``): per model, the averages over the
+    games other accounts pool, never one account's alone; a model with too few accounts behind it is named with
+    the reason, not its numbers."""
+    d = x.data
+    if d.get("pooling") not in ("pooled", "both"):
+        return ""
+    if d.get("pooled_error"):
+        return f'<h3>Pooled figures</h3><p class="bad">The pooled figures could not be read: {esc(d["pooled_error"])}</p>'
+    rows = [r for r in d.get("pooled") or [] if r.get("controller") == "llm"]
+    lead = ('<h3>Pooled figures</h3><p class="lead">Averages over the games other accounts let feed the pooled '
+            'figures (not this report\'s own activities). A model is shown only once enough different accounts '
+            'have played it, so no average is one person\'s results.</p>')
+    if not rows:
+        return lead + '<p class="muted">No pooled results yet.</p>'
+    table = []
+    for r in rows:
+        if r.get("withheld"):
+            table.append([r["model"], "–", "–", "–", "–", "–", r.get("reason") or ""])
+            continue
+        turn = f"{r['avg_turn_s']:.0f}s" if r.get("avg_turn_s") is not None else "–"     # no cleanly timed turn
+        table.append([r["model"], r["games"], f"{r['turns']:,}", turn,
+                      f"{r['avg_errors']:.2f}", f"{100 * r['clean_turn_end_rate']:.0f}%", ""])
+    return lead + C.table(["Model", "Games", "Turns", "Avg turn", "Errors / turn", "Clean turn ends", ""], table)
 
 
 def s_benchmarks(x: Ctx) -> str:
@@ -349,18 +378,41 @@ def s_benchmarks(x: Ctx) -> str:
         for j in run["jobs"]:
             p = j.get("result") or j.get("progress") or {}
             a = cost_by_job.get(j["id"])
-            rows.append([j.get("label") or j["model"], j.get("server_name") or "", j.get("scenario_name"),
+            label, perf = j.get("label") or j["model"], (f"{p['performance']:.0f}" if p.get("performance") is not None
+                                                         else "–")
+            avg = f"{p['avg_turn_s']:.0f}s" if p.get("avg_turn_s") else "–"
+            if j.get("mode") == "hybrid":
+                # a hybrid job's game is its bot's play: the model is measured against its control game (P3.6.10)
+                label = f"{label} · hybrid: {str(j.get('owners') or 'custom').replace('_', ' ')}"
+                perf, avg = _pair_text(p.get("pair"), j), "–"
+            rows.append([label, j.get("server_name") or "", j.get("scenario_name"),
                          j["status"] + (f" · {p['outcome']}" if p.get("outcome") else ""),
                          f"{max(0, (p.get('turn') or 1) - 1)}" + (f" / {p['turn_limit']}" if p.get("turn_limit") else ""),
-                         f"{p['performance']:.0f}" if p.get("performance") is not None else "–",
-                         f"{p['avg_turn_s']:.0f}s" if p.get("avg_turn_s") else "–",
-                         x.money(a["total"]) if a else "–"])
+                         perf, avg, x.money(a["total"]) if a else "–"])
         sm = run["summary"]
         out.append(f'<h3>{esc(run["name"])} <span class="pill">{esc(run["status"])}</span></h3>'
                    f'<p class="lead">Started {_date(run.get("created"))} · {sm["turns_done"]:,} of {sm["turns_total"]:,} turns · '
                    f'{len(run["jobs"])} games</p>')
         out.append(C.table(["Model", "Server", "Scenario", "Status", "Turns", "Performance", "Avg turn", "Cost"], rows))
+    if any(j.get("mode") == "hybrid" for run in d["benchmark_runs"] for j in run["jobs"]):
+        out.append("<p class='muted small'>A hybrid job's bot plays every turn and its model decides the diplomacy named "
+                   "beside it: its Performance is its score against its control game (the same game with the bot deciding "
+                   "everything) and the deals it made, not the model's game performance.</p>")
     return "".join(out)
+
+
+def _pair_text(pair, job: dict) -> str:
+    """A hybrid job's measure in the Benchmarks table: its pair line's score difference with its control and its deals
+    ("+12 vs control · 9 deals"), or why there is none yet."""
+    if pair:
+        d = (pair.get("score_diff") or {}).get("end") or 0
+        n = pair.get("deals") or 0
+        return f"{d:+d} vs control · {n} deal{'' if n == 1 else 's'}"
+    if job.get("status") != "done":
+        return "–"
+    if ((job.get("result") or {}).get("diplomacy") or {}).get("incomplete"):
+        return "no pair (record incomplete)"
+    return "control pending" if (job.get("control") or {}).get("status") in ("queued", "running") else "no pair"
 
 
 def s_probes(x: Ctx) -> str:
@@ -422,7 +474,7 @@ def s_behavior(x: Ctx) -> str:
         cfg = next((a["config"] for a in d["acts"] if a["ref"].get("probe_run") == r["id"]), r["name"])
         for z in r["results"]:
             for c in z.get("tool_calls") or []:
-                tools[cfg][c["tool"]] += 1
+                tools[cfg][c["tool"]] += c.get("count", 1)      # a bot subject's calls are counted per tool
     out = [x.f("behavior")]
     if not tools and not reasons:
         return out[0] + '<p class="muted">No model behavior recorded in this scope.</p>'
@@ -645,21 +697,27 @@ def scope_text(data: dict) -> str:
         parts.append("types: " + ", ".join(sc["kinds"]))
     if sc.get("items"):
         parts.append(f"{len(sc['items'])} selected item(s)")
+    if data.get("reach") == "owner":
+        parts.append("what its owner may see, with costs on their own machines")
+    if data.get("pooling") in ("pooled", "both"):
+        parts.append("pooled figures only" if data["pooling"] == "pooled" else "with pooled figures")
     return " · ".join(parts)
 
 
 def render(data: dict, narrative: str = "", narrative_note: str = "") -> tuple[str, dict]:
-    """Returns (html, summary) - summary holds headline numbers for the Reports list."""
+    """Returns (html, summary) - summary holds headline numbers for the Reports list. The analysis section shows the
+    narrative and its note (who wrote it); a narrative that was skipped or failed shows its note alone, so the reader
+    is told why the report has no analysis."""
     x = Ctx(data)
     spec = data["spec"]
     sections = [s for s in spec.get("sections") or ["summary"] if s in SECTIONS or s == "narrative"]
-    if narrative and "narrative" not in sections:
+    if (narrative or narrative_note) and "narrative" not in sections:
         sections.insert(1 if sections and sections[0] == "summary" else 0, "narrative")
     body, toc = [], []
     for key in sections:
         title = SECTION_TITLES.get(key, key)
         if key == "narrative":
-            if not narrative:
+            if not narrative and not narrative_note:
                 continue
             inner = narrative_html(narrative) + (f'<p class="muted">{esc(narrative_note)}</p>' if narrative_note else "")
         else:

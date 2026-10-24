@@ -1,0 +1,31 @@
+citar-helper service install --user (a dry run: nothing is written, started or changed)
+1. make the folder /home/alice/.config/systemd/user
+2. write /home/alice/.config/systemd/user/citar-helper.service (mode 0644):
+    # The CITAR helper as a systemd service, written by `citar-helper service install --user` (design/phase4-helper.md P4.3.9).
+    # `citar-helper service uninstall` stops and removes it. Its log: helper/logs/helper.log in its home.
+    [Unit]
+    Description=CITAR helper (lends this machine to a CITAR server)
+    Documentation=https://github.com/jprodgers/CITAR/blob/main/docs/server/WORKERS.md
+
+    [Service]
+    Type=simple
+    ExecStart="/opt/citar/citar-helper" run --service --home "/home/alice/.local/share/citar"
+    # 75: restart for an update; 1 and 2: a start that failed (an update's new binary is rolled
+    # back at its fourth); 78: refused for good, which a service run never exits with (it idles).
+    Restart=on-failure
+    RestartSec=15
+    RestartPreventExitStatus=78
+    NoNewPrivileges=yes
+
+    [Install]
+    WantedBy=default.target
+3. run: systemctl --user daemon-reload
+4. run: systemctl --user enable citar-helper.service
+5. run: systemctl --user restart citar-helper.service
+6. note: a user service runs while alice is logged in; to keep it running after logging out, run once (not run here): loginctl enable-linger alice
+
+citar-helper service uninstall --user (a dry run: nothing is written, started or changed)
+1. run: systemctl --user disable --now citar-helper.service (a failure is noted)
+2. remove /home/alice/.config/systemd/user/citar-helper.service (if it is there)
+3. run: systemctl --user daemon-reload
+4. run: systemctl --user reset-failed citar-helper.service (a failure is noted)

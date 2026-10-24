@@ -1,0 +1,71 @@
+{
+ "name": "text-xml-coerced-values",
+ "note": "XML parameters coerced: integers, booleans, JSON lists, text, bad JSON kept as text",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "<function=city_build>\n<parameter=city_id>\n-2\n</parameter>\n<parameter=item>\nGranary\n</parameter>\n<parameter=repeat>\nTRUE\n</parameter>\n<parameter=queue>\n[\"Monument\", \"Shrine\"]\n</parameter>\n<parameter=bad>\n{not json\n</parameter>\n</function>\n<function=end_turn>\n</function>",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "<function=city_build>\n<parameter=city_id>\n-2\n</parameter>\n<parameter=item>\nGranary\n</parameter>\n<parameter=repeat>\nTRUE\n</parameter>\n<parameter=queue>\n[\"Monument\", \"Shrine\"]\n</parameter>\n<parameter=bad>\n{not json\n</parameter>\n</function>\n<function=end_turn>\n</function>",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "city_build",
+     "args": {
+      "city_id": -2,
+      "item": "Granary",
+      "repeat": true,
+      "queue": [
+       "Monument",
+       "Shrine"
+      ],
+      "bad": "{not json"
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 2
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "<function=city_build>\n<parameter=city_id>\n-2\n</parameter>\n<parameter=item>\nGranary\n</parameter>\n<parameter=repeat>\nTRUE\n</parameter>\n<parameter=queue>\n[\"Monument\", \"Shrine\"]\n</parameter>\n<parameter=bad>\n{not json\n</parameter>\n</function>\n<function=end_turn>\n</function>",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "city_build",
+      "arguments": "{\"city_id\": -2, \"item\": \"Granary\", \"repeat\": true, \"queue\": [\"Monument\", \"Shrine\"], \"bad\": \"{not json\"}"
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

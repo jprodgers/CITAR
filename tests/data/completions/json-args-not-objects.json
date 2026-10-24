@@ -1,0 +1,54 @@
+{
+ "name": "json-args-not-objects",
+ "note": "a call's args that are not an object are no arguments, as a native call's are (they were passed on as they were, and a number or true made the turn loop raise TypeError)",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "{\"thoughts\": \"\", \"calls\": [{\"tool\": \"set_research\", \"args\": \"pottery\"}, {\"tool\": \"get_tile\", \"args\": [3, 4]}, {\"tool\": \"end_turn\", \"args\": 5}, {\"tool\": \"end_turn\", \"args\": true}]}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "{\"thoughts\": \"\", \"calls\": [{\"tool\": \"set_research\", \"args\": \"pottery\"}, {\"tool\": \"get_tile\", \"args\": [3, 4]}, {\"tool\": \"end_turn\", \"args\": 5}, {\"tool\": \"end_turn\", \"args\": true}]}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "set_research",
+     "args": {}
+    },
+    {
+     "id": "<gen:2>",
+     "name": "get_tile",
+     "args": {}
+    },
+    {
+     "id": "<gen:3>",
+     "name": "end_turn",
+     "args": {}
+    },
+    {
+     "id": "<gen:4>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "{\"thoughts\": \"\", \"calls\": [{\"tool\": \"set_research\", \"args\": \"pottery\"}, {\"tool\": \"get_tile\", \"args\": [3, 4]}, {\"tool\": \"end_turn\", \"args\": 5}, {\"tool\": \"end_turn\", \"args\": true}]}"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

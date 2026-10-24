@@ -1,0 +1,91 @@
+about = """
+decline, withdraw and end mean reject, in any case, and the history records the canonical name: every
+reader of it has four actions to handle rather than seven. Either side may reject.
+"""
+from = "tests/test_negotiation_chat.py::MessageTests::test_aliases_are_stored_as_reject"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "decline", message = "Not today." }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { status = "rejected" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "rejected", awaiting = "=null" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[1]"
+subset = { seq = 2, by = 1, action = "reject", message = "Not today." }
+
+[[step]]
+note = "The other side opens the next, out of its turn, and the opener answers."
+op = "open_negotiation_as"
+args = { player = 1, to = 0, message = "And now?" }
+as = "opened"
+
+[[step]]
+check = "opened"
+eq = { negotiation_id = 2, status = "open", awaiting = "Civilization 1" }
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 2, action = "withdraw", message = "Not today." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 2 }
+path = "history[1].action"
+eq = "reject"
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Once more?" }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 3, action = "end", message = "Not today." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 3 }
+path = "status"
+eq = "rejected"
+
+[[step]]
+check = { what = "negotiation", negotiation = 3 }
+path = "history[1].action"
+eq = "reject"
+
+[[step]]
+op = "open_negotiation_as"
+args = { player = 1, to = 0, message = "Last try?" }
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 4, action = " Reject ", message = "Not today." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 4 }
+path = "status"
+eq = "rejected"
+
+[[step]]
+check = { what = "negotiation", negotiation = 4 }
+path = "history[1].action"
+eq = "reject"

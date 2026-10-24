@@ -1,0 +1,51 @@
+{
+ "name": "text-glm-key-without-value",
+ "note": "a GLM key with no value runs on to the next key that has one (unchanged by 4-02's fix round, which finds it in one pass)",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "<tool_call>found_city<arg_key>unit_id</arg_key> 4 <arg_key>name</arg_key>\n<arg_value>Roma</arg_value></tool_call>",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "<tool_call>found_city<arg_key>unit_id</arg_key> 4 <arg_key>name</arg_key>\n<arg_value>Roma</arg_value></tool_call>",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "found_city",
+     "args": {
+      "unit_id</arg_key> 4 <arg_key>name": "Roma"
+     }
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "<tool_call>found_city<arg_key>unit_id</arg_key> 4 <arg_key>name</arg_key>\n<arg_value>Roma</arg_value></tool_call>",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "found_city",
+      "arguments": "{\"unit_id</arg_key> 4 <arg_key>name\": \"Roma\"}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

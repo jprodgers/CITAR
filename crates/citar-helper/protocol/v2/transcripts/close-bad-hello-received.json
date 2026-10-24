@@ -1,0 +1,74 @@
+{
+  "name": "close-bad-hello-received",
+  "about": "A 4400 close after the hello names the protocol error in its reason: the helper logs it and reconnects with backoff, as it would after any 4400.",
+  "refs": ["P4.2.1", "P4.3.3"],
+  "plays": {"helper": "4-03", "hub": null},
+  "one_side": "a correct helper's hello passes the hub's checks; the hub's side of a bad hello is handshake-bad-hello",
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {"helper": {"clock": "fake"}, "hub": {}},
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {"close": {"by": "server", "code": 4400, "reason": "value llm.models"}},
+    {"state": {"side": "helper", "expect": {"logged": "value llm.models"}}},
+    {"wait": {"s": 1.9, "quiet": true}},
+    {"connect": {}, "within_s": 0.8},
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+about = """
+The bot researches toward the technology worth most for its cost over the whole path to it, starting
+with the path's first step. An unhappy empire with a luxury it cannot improve values the technology
+that improves it highly: with marble beside a large capital it starts on Mining, the way to Masonry
+and the quarry, where alone it would have started on Pottery.
+"""
+from = "citar/bots/basic.py:876-998 (choose_research, _tech_value)"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
+
+[[step]]
+note = "The control: a small capital with nothing to improve starts on Pottery."
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "research.queue"
+eq = []
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "research.queue"
+eq = ["Pottery"]
+
+[[step]]
+note = "A capital of eight, unhappy, with marble on a tile it owns."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 8 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "set_tile", at = "A>e", resource = "Marble" },
+]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "happiness"
+lt = 0
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "research.queue"
+eq = ["Mining"]

@@ -94,7 +94,7 @@ restart() {
   case "$reply" in
     [Nn]*) echo "Not restarted. Run: sudo systemctl restart $SERVICE" ;;
     *) systemctl restart "$SERVICE"; sleep 4
-       echo "  citar is $(systemctl is-active $SERVICE)"
+       echo "  citar is $(systemctl is-active "$SERVICE")"
        journalctl -u "$SERVICE" -n 12 --no-pager | grep -iE "warning|error" | head -5 ;;
   esac
 }
@@ -106,6 +106,8 @@ esac
 echo "CITAR secrets"
 echo
 PS3=$'\nWhat do you want to set? '
+# The answer is read from $REPLY, the number typed, so the menu's own variable goes unused.
+# shellcheck disable=SC2034
 select choice in \
   "Email (SMTP) — enables sign-up, password reset and emailed invites" \
   "hCaptcha secret — only needed for open registration" \
@@ -146,7 +148,7 @@ select choice in \
       esac
       echo
       echo "Redirect / callback URL to register with $N:"
-      echo "  $(get CITAR_PUBLIC_ORIGIN)/api/auth/oauth/$(echo "$P" | tr 'A-Z' 'a-z')/callback"
+      echo "  $(get CITAR_PUBLIC_ORIGIN)/api/auth/oauth/$(echo "$P" | tr '[:upper:]' '[:lower:]')/callback"
       echo
       ask_plain  "CITAR_OAUTH_${P}_CLIENT_ID" "$N client ID"
       ask_secret "CITAR_OAUTH_${P}_CLIENT_SECRET" "$N client secret"

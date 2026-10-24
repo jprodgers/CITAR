@@ -1,0 +1,9 @@
+citar-helper service install --user (a dry run: nothing is written, started or changed)
+1. stop the helper this home's Run supervisor keeps (its process ids in C:\Users\alice\AppData\Local\CITAR\helper\supervisor.json), if one runs
+2. run: reg.exe add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v "CITAR helper" /t REG_SZ /d "\"C:\Users\alice\Downloads\citar-helper-windows-x64.exe\" run --detach --home \"C:\Users\alice\AppData\Local\CITAR\"" /f
+3. start: C:\Users\alice\Downloads\citar-helper-windows-x64.exe run --detach --home C:\Users\alice\AppData\Local\CITAR
+4. note: the helper starts at each sign-in from the Run value "CITAR helper"; its log is helper\logs in C:\Users\alice\AppData\Local\CITAR
+
+citar-helper service uninstall --user (a dry run: nothing is written, started or changed)
+1. run: reg.exe delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v "CITAR helper" /f (a failure is noted)
+2. stop the helper this home's Run supervisor keeps (its process ids in C:\Users\alice\AppData\Local\CITAR\helper\supervisor.json), if one runs

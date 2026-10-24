@@ -1,0 +1,112 @@
+{
+  "name": "settings-llm-off",
+  "about": "A helper run with --no-llm acknowledges model work off, capped when the site asks for it.",
+  "refs": ["P4.2.3"],
+  "plays": {"helper": "4-03", "hub": "4-05"},
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "machine": "sv_0123456789abcdef",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {
+    "helper": {
+      "config": {
+        "no_llm": true,
+        "max_concurrent": 1,
+        "cpu": {
+          "enabled": true,
+          "threads": 4,
+          "cpu_percent": 50,
+          "memory_mb": 2048,
+          "work": ["lab_game", "reference_game"]
+        }
+      }
+    },
+    "hub": {
+      "machine": {
+        "settings": {
+          "llm": {"enabled": true, "slots": 4, "allow_swaps": false},
+          "cpu": {
+            "enabled": true,
+            "threads": 8,
+            "cpu_percent": 25,
+            "memory_mb": 0,
+            "work": ["lab_game", "ranking_game"],
+            "yield_to_llm": true
+          }
+        }
+      }
+    }
+  },
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": {"enabled": false, "provider": null, "slots": 0, "stream": "<bool>", "models": []},
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "welcome",
+        "protocol": 2,
+        "machine": {"id": "<id:machine>", "name": "<string>"},
+        "settings": {
+          "llm": {"enabled": true, "slots": 4, "allow_swaps": false},
+          "cpu": {
+            "enabled": true,
+            "threads": 8,
+            "cpu_percent": 25,
+            "memory_mb": 0,
+            "work": ["lab_game", "ranking_game"],
+            "yield_to_llm": true
+          }
+        },
+        "ping_s": "<int:5..300>",
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "update": null,
+        "jobs": {"keep": [], "drop": [], "resend": []}
+      },
+      "within_s": 5
+    },
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": false, "slots": 0},
+          "cpu": {
+            "enabled": true,
+            "threads": 4,
+            "cpu_percent": 25,
+            "memory_mb": 2048,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": ["llm.enabled", "llm.slots", "cpu.threads", "cpu.work"],
+        "limits": "<any>"
+      }
+    }
+  ]
+}

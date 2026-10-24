@@ -1,0 +1,81 @@
+{
+ "name": "native-arguments-nested-too-deep",
+ "note": "arguments nested deeper than MAX_DEPTH (64) are not read, kept as text for the tool's error: Python decodes far deeper than it encodes, and differently on each version",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "",
+   "reasoning": null,
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "unit_order",
+      "arguments": "{\"unit_id\": 2, \"path\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+     }
+    },
+    {
+     "id": "c2",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "name": "unit_order",
+     "args": {
+      "__invalid_json__": "{\"unit_id\": 2, \"path\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+     }
+    },
+    {
+     "id": "c2",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "unit_order",
+      "arguments": "{\"__invalid_json__\": \"{\\\"unit_id\\\": 2, \\\"path\\\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}\"}"
+     }
+    },
+    {
+     "id": "c2",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

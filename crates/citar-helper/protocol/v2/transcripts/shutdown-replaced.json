@@ -1,0 +1,110 @@
+{
+  "name": "shutdown-replaced",
+  "about": "shutdown replaced is a permanent refusal: from a console the helper exits 78 and does not reconnect.",
+  "refs": ["P4.2.7", "P4.3.9"],
+  "plays": {"helper": "4-03", "hub": "4-05"},
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "machine": "sv_0123456789abcdef",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {
+    "helper": {
+      "config": {
+        "max_concurrent": 1,
+        "cpu": {"enabled": false, "threads": 1, "cpu_percent": 10, "memory_mb": 512, "work": ["lab_game"]}
+      },
+      "clock": "fake"
+    },
+    "hub": {
+      "machine": {
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        }
+      }
+    }
+  },
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "welcome",
+        "protocol": 2,
+        "machine": {"id": "<id:machine>", "name": "<string>"},
+        "settings": {
+          "llm": {"enabled": false, "slots": 1, "allow_swaps": false},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "ping_s": "<int:5..300>",
+        "server": {"version": "<string>", "build": "<hex12>", "jobs_build": "<any>"},
+        "update": null,
+        "jobs": {"keep": [], "drop": [], "resend": []}
+      },
+      "within_s": 5
+    },
+    {
+      "h2s": {
+        "t": "settings_ack",
+        "effective": {
+          "llm": {"enabled": false, "slots": 1},
+          "cpu": {
+            "enabled": false,
+            "threads": 1,
+            "cpu_percent": 10,
+            "memory_mb": 512,
+            "work": ["lab_game"],
+            "yield_to_llm": true
+          }
+        },
+        "capped": [],
+        "limits": "<any>"
+      }
+    },
+    {"act": {"side": "hub", "do": "second_connection"}},
+    {"s2h": {"t": "shutdown", "reason": "<string>", "code": "replaced"}, "within_s": 2},
+    {"close": {"by": "server", "code": 4409}},
+    {"state": {"side": "helper", "expect": {"exit": 78}}}
+  ]
+}

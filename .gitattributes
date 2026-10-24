@@ -35,6 +35,14 @@ Dockerfile  text eol=lf
 *.mjs       text eol=lf
 *.css       text eol=lf
 *.html      text eol=lf
+*.rs        text eol=lf
+*.tsv       text eol=lf
+*.sha256    text eol=lf
+# The package managers' templates (scripts/release_checksums.py): the manifests they become are JSON, YAML and Ruby
+*.in        text eol=lf
+# The helper's service plans (crates/citar-helper/src/service), compared byte for byte on every OS
+crates/citar-helper/tests/data/service/*.txt text eol=lf
+Cargo.lock  text eol=lf
 env.example text eol=lf
 .env.docker.example text eol=lf
 
@@ -43,6 +51,10 @@ env.example text eol=lf
 *.iss       text eol=crlf
 *.bat       text eol=crlf
 *.cmd       text eol=crlf
+
+# The Python baselines (DESIGN.md P2.4.3), byte for byte as the laptop wrote them, CRLF and all:
+# nothing can write them again once the Python engine is gone.
+refcheck/baseline/python/*.jsonl -text
 
 # Never touched
 *.png  binary
@@ -53,9 +65,22 @@ env.example text eol=lf
 *.exe  binary
 *.citar binary
 *.citarscn binary
+*.db     binary
 
 # Generated: keep these out of diffs and language statistics.
-citar/data/ruleset/*.json linguist-generated=true
-citar/engine/unique_types.py linguist-generated=true
-citar/bots/frozen_*.py linguist-generated=true
+crates/citar-engine/data/ruleset/*.json linguist-generated=true
 wiki/* linguist-generated=true
+Cargo.lock linguist-generated=true
+crates/citar-engine/src/unique/gen.rs linguist-generated=true
+crates/citar-bot/src/params/gen.rs linguist-generated=true
+# The third-party notices (cargo xtask licenses, design/phase5-release.md P5.5): the bytes every wheel,
+# packaged helper archive and release carries, LF on every OS, as the generator writes them and its --check
+# compares them; and the standard licence texts it prints for a crate that ships none, apache.org's byte for byte.
+packaging/THIRD-PARTY-LICENSES.txt text eol=lf linguist-generated=true
+xtask/licenses/*.txt text eol=lf
+
+# The avatar corpus (tests/test_profiles.py): byte for byte, whatever its extension says it is.
+tests/data/avatars/* binary
+
+# A signed helper manifest (xtask's and scripts/ci/verify_manifest.py's tests): its signature covers its bytes.
+tests/data/helper_manifest/* -text

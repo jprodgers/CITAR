@@ -1,5 +1,7 @@
-"""One queue for work that waits for a model machine: benchmark jobs, probe runs and reports whose analysis
-is written by a model, in priority order.
+"""One queue for work that waits for a model machine as a whole: benchmark jobs and probe runs, in priority order.
+Report narratives are not in it: each is one pooled prompt, a ticket in its machine's line of the prompt scheduler
+(``citar.pool.scheduler``), as a probe's offer and message cases are. A report's priority is still kept here (kind
+``report``), and its ticket follows it, as every ticket follows its work's (``Scheduler.set_priority``).
 
 The benchmark scheduler and the probe runner each keep their own list of waiting work, and each decides
 when to start its own. What they share is this: every waiting item has a *rank* - its priority, then how

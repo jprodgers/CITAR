@@ -1,0 +1,33 @@
+{
+ "name": "text-prose-mentions-tool",
+ "note": "prose that only mentions a tool is not a call",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "I will call end_turn once the city has production set.",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "I will call end_turn once the city has production set.",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "I will call end_turn once the city has production set."
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

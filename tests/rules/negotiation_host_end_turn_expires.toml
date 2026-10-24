@@ -1,0 +1,54 @@
+about = """
+The host's end_turn, which headless runners call directly, keeps the old safety net rather than
+refusing: the negotiations the player opened that are still open expire at the end of its turn, with a
+close entry and a note, and play moves on.
+"""
+from = "tests/test_negotiation_chat.py::EndTurnTests::test_game_end_turn_still_expires_the_openers_chats"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+op = "end_turn"
+as = "clock"
+
+[[step]]
+check = "clock"
+eq = { turn = 1, current = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "expired", awaiting = "=null" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[1]"
+subset = { seq = 2, by = "=null", action = "close", note = "It was still open at the end of Civilization 1's turn." }
+
+[[step]]
+note = "One the other side opened stays open: it is theirs to settle."
+op = "open_negotiation_as"
+args = { player = 0, to = 1, message = "Once more?" }
+
+[[step]]
+op = "end_turn"
+as = "clock"
+
+[[step]]
+check = "clock"
+eq = { turn = 1, current = 2 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 2 }
+subset = { status = "open", awaiting = 1 }

@@ -1,0 +1,9 @@
+{
+  "Kitchen Sink": {
+    "name": "Kitchen Sink",
+    "friendBonusUniques": ["Provides military units every ≈[20] turns"],
+    "allyBonusUniques": ["Provides military units every ≈[15] turns"],
+    "uniques": ["Provides a unique luxury"],
+    "id": "kitchen_sink"
+  }
+}

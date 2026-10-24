@@ -1,0 +1,83 @@
+about = """
+Barbarians never take a city: a melee barbarian that brings one down sacks it. The city keeps its
+owner, loses a share of its owner's gold, and is left with some health; the owner is told.
+"""
+from = "tests/test_barbarians.py::SackTests::test_barbarians_sack_instead_of_capturing"
+
+[config]
+barbarians = "normal"
+
+[[step]]
+check = { what = "game" }
+path = "barbarians"
+eq = 2
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 4 },
+  { op = "set_player", player = 0, gold = 400 },
+]
+as = "made"
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "A>e" }
+as = "raider"
+
+[[step]]
+set = { roma = "=made[0].city_id", b = "=raider.unit_id" }
+
+[[step]]
+note = "Past the turn barbarians may enter a civilization's land."
+op = "set_turn"
+args = { turn = 200 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=b" }
+
+[[step]]
+op = "set_city"
+args = { city = "=roma", health = 1 }
+
+[[step]]
+op = "attack_as"
+args = { unit = "=b", at = "A" }
+as = "fight"
+
+[[step]]
+check = "fight"
+subset = { sacked_city = "Roma" }
+
+[[step]]
+check = "fight"
+path = "gold_stolen"
+gt = 0
+
+[[step]]
+check = "fight"
+absent = true
+path = "captured_city"
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { owner = 0, name = "Roma" }
+as = "after"
+
+[[step]]
+check = "after"
+path = "health"
+gt = 1
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = "=400 - fight.gold_stolen"
+
+[[step]]
+check = { what = "events", type = "city_sacked" }
+len = 1
+
+[[step]]
+check = { what = "units", at = "A" }
+len = 0

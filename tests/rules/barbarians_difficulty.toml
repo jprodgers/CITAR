@@ -1,0 +1,50 @@
+about = """
+The barbarians have a difficulty of their own, and a civilization fights them with that level's bonus
+against barbarians, which the attack's preview names: +50% on Chieftain, +33% on Prince.
+"""
+from = "tests/test_mechanics.py::DifficultyTests::test_barbarian_difficulty"
+
+[config]
+barbarians = "normal"
+barbarian_difficulty = "Chieftain"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "H" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[1].unit_ids[0]" }
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "H>e" }
+
+[[step]]
+check = { what = "preview", unit = "=w", at = "H>e" }
+path = "attacker_modifiers"
+contains = "Difficulty +50%"
+
+[[step]]
+note = "On Prince the bonus is smaller."
+new_game = { barbarians = "normal", barbarian_difficulty = "Prince" }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "H" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "H>e" }
+
+[[step]]
+check = { what = "preview", unit = "=made[1].unit_ids[0]", at = "H>e" }
+path = "attacker_modifiers"
+contains = "Difficulty +33%"

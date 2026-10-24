@@ -1,0 +1,6 @@
+# Relaxed: this is a host crate (design/phase4-helper.md P4.4). Its sys module calls the OS (file
+# permissions in 4-03, the job limits in 4-08) and its job host (4-08) reads and writes its pipes,
+# keeps time and runs threads, so it replaces the strict root clippy.toml (clippy uses the nearest
+# file and does not merge them). The workspace lints in Cargo.toml still apply, including
+# iter_over_hash_type. Nothing in this crate decides a game: the engine and the bot do, under the
+# strict rules, and the jobs build (P4.4.5) covers what the runner adds.

@@ -5,33 +5,44 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import os
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect)
+from fastapi import (Body, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect)
 from sqlalchemy.orm import Session as DbSession
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ..engine import tools as toolreg
-from ..engine.game import ActionError
-from ..engine.rules import get_rules
-from ..engine.views import client_view
-from .session import SessionManager, GameSession, SAVE_DIR
+from .. import engine_api
+from ..engine_api import ActionError, EngineCrash, EngineGame
+from .session import CRASHED, SessionManager, GameSession, SAVE_DIR, _clean_bot
 from .benchmarks import BenchmarkScheduler
 from .admin_api import router as admin_router
+from .items_api import router as items_router
+from .reports_api import router as reports_router
 from .setup_api import router as setup_router
 from .auth_api import router as auth_router
 from .pool_api import router as pool_router
 from .share_api import router as share_router
 from .bots_api import router as bots_router
+from .users_api import router as users_router
+from .admin_users_api import router as admin_users_router
+from .ledger_api import router as ledger_router
+from .machines_api import router as machines_router
+from .jobs_api import router as jobs_router
 from .. import settings as citar_settings
 from ..auth import access, audit
-from ..auth.deps import Principal, get_db, principal, require_cap, require_user
-from . import ownership
+from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
+from .. import items, pool
+from ..pool import seats as pool_seats
+from . import ownership, work_access
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -41,10 +52,35 @@ app.include_router(pool_router)
 app.include_router(share_router)
 app.include_router(bots_router)
 app.include_router(admin_router)
+app.include_router(reports_router)
+app.include_router(items_router)
 app.include_router(setup_router)
+app.include_router(users_router)
+app.include_router(admin_users_router)
+app.include_router(ledger_router)
+app.include_router(machines_router)
+app.include_router(jobs_router)
 manager = SessionManager()
 scheduler: Optional[BenchmarkScheduler] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+@app.exception_handler(EngineCrash)
+async def _engine_crash(request: Request, exc: EngineCrash):
+    """An internal error of the engine that no route turned into its session's crash (``_crash_guard`` does): a 500
+    that says what happened, never a refusal the caller could fix (DESIGN.md P2.6.3)."""
+    return JSONResponse({"detail": CRASHED}, status_code=500)
+
+
+@contextmanager
+def _crash_guard(s: "GameSession"):
+    """Runs a route's calls into session ``s``'s game: an ``EngineCrash`` crashes the session (GameSession._crashed:
+    paused, its driver and agents stopped, the crash saved) and is a 500 saying so."""
+    try:
+        yield
+    except EngineCrash as e:
+        s._crashed(str(e))
+        raise HTTPException(500, CRASHED) from None
 
 
 @app.on_event("startup")
@@ -58,9 +94,15 @@ async def _startup():
     _loop = asyncio.get_running_loop()
     from .boot import startup as boot_startup
     boot_startup()                                # database, migrations, configuration checks
+    from ..pool import registry_import
+    registry_import.on_boot()                     # config/servers.json into rows, once, before any seat needs one
     from .workers import hub
-    hub().attach_loop(_loop)                      # lets game threads reach connected workers
-    asyncio.create_task(hub().ping_loop(citar_settings.get().worker_ping_seconds))
+    hub().attach_loop(_loop)                      # lets game threads reach connected helpers
+    hub().ping_s = citar_settings.get().worker_ping_seconds
+    asyncio.create_task(hub().ping_loop())
+    from .helper_updates import relay
+    relay().start()                               # the signed helper manifest, fetched at most hourly off any request
+                                                  # path and relayed to the helpers (design/phase4-helper.md P4.5.9)
     # lobby games first, so queued benchmarks and probes see which machines they hold
     from .session import register_games_with_queue
     register_games_with_queue()
@@ -70,12 +112,28 @@ async def _startup():
     if scheduler is None:
         scheduler = BenchmarkScheduler(manager)   # reloads benchmark games that were in progress
     _probes()                                     # resumes probe runs that were queued or running
-    from .admin_api import reports_runner
+    from .reports_api import reports_runner
     reports_runner()                              # resumes queued reports (some wait for a model machine)
+    _close_orphan_rows()                          # now that everything that comes back is back
+    items.on_boot()                               # shipped items' rows; strays adopted when there is an admin
     asyncio.create_task(_close_finished_loop())   # finished lobby games leave the list after a while
     from .. import usage
-    usage.start_power_sampler()                   # live power samples of this machine for cost reports
+    usage.start_power_sampler(follow_host=True)   # live power samples of the host for cost reports (a host made
+                                                  # later, by the first administrator, from then on)
     usage.tracker().start()
+    from .. import ledger
+    ledger.get().ensure_threads()                 # the compute ledger's writer, and its rollups (a first pass now)
+    if not os.environ.get("CITAR_TEST_NO_DISPATCHER"):
+        from ..jobs import dispatcher as jobs_dispatcher
+        jobs_dispatcher.start()                   # the lab's games as CPU jobs, on this server's job host
+                                                  # (design/phase4-helper.md P4.5.5); the suite starts its own
+
+
+def _close_orphan_rows() -> list:
+    """Close every games-index row left `setup` or `playing` whose game has no live session (P3.2.5): run at boot
+    once the lobby games, the benchmarks and the probes are back. Returns the ids closed."""
+    from .session import all_sessions
+    return ownership.close_orphans(s.id for s in all_sessions())
 
 
 async def _close_finished_loop():
@@ -92,13 +150,34 @@ async def _close_finished_loop():
 
 @app.on_event("shutdown")
 def _shutdown():
-    """Flush the usage ledger and stop background work cleanly."""
+    """Flush the usage ledger, let every game's writer finish the saves it has taken, and stop background work
+    cleanly."""
     from .. import usage
+    for s in list(manager.sessions.values()):
+        try:
+            s.flush_saves(timeout=10.0)
+        except Exception:
+            pass
     try:
         for s in list(manager.sessions.values()):
             if s.usage_act:
                 usage.finish_session(s)
         usage.tracker().flush()
+    except Exception:
+        pass
+    try:
+        from ..jobs import dispatcher as jobs_dispatcher
+        jobs_dispatcher.stop()                    # the job host ends its games; the next start plays them again
+    except Exception:
+        traceback.print_exc()
+    try:
+        from .helper_updates import relay
+        relay().stop()
+    except Exception:
+        pass
+    try:
+        from .. import ledger
+        ledger.get().stop(timeout=10.0)           # the writer drains what it has (the tracker's last CPU included)
     except Exception:
         pass
 
@@ -152,10 +231,20 @@ def _gate(sdb: DbSession, gid: str, p: Principal, permission: str, request: Requ
 
     Every game route goes through here. A seat token still works on its own — LLM players and MCP
     clients hold one and have no account — and it grants play on that seat alone.
+
+    A write by a caller that a session cookie signed in carries the session's CSRF token, as every
+    ``require_user`` route's does (``deps._enforce_csrf``): the cookie is ambient, so without it another
+    site the person visits could pause, reseat or delete their games behind SameSite's back. A request
+    that holds a valid seat or spectator token for this game, or an Authorization header, is not riding
+    a cookie and needs none; a made-up token does not excuse one.
     """
     s = _session(gid)
+    tok = _token(request, token)
+    if p.auth_session is not None and not (tok and (s.seat_for_token(tok) is not None or s.is_spectator(tok))):
+        from ..auth.deps import _enforce_csrf
+        _enforce_csrf(request, p)
     row, perms = ownership.require(sdb, s, p.user, permission,
-                                   slug=_share_key(request), seat_token=_token(request, token))
+                                   slug=_share_key(request), seat_token=tok)
     return s, row, perms
 
 
@@ -163,20 +252,64 @@ def _game_limit(sdb: DbSession, user) -> None:
     """Stop one account filling the server with games.
 
     The VPS runs every game, so concurrency is a shared resource: without a cap, one person starting
-    twenty 24-civ games is a denial of service against everybody else on the box.
+    twenty 24-civ games is a denial of service against everybody else on the box. Only lobby games
+    count (P3.2.5): a member's benchmark and probe games belong to their runs, which the benchmark and
+    probe queues limit, and a finished or closed game counts for nothing.
     """
     if user is None or user.role == "admin":
         return
     from ..db.models import Game as _GameRow
     from sqlalchemy import func, select as _select
     live = sdb.scalar(_select(func.count()).select_from(_GameRow).where(
-        _GameRow.owner_id == user.id, _GameRow.deleted_at.is_(None),
-        _GameRow.status.in_(("setup", "playing"))))
+        _GameRow.owner_id == user.id, _GameRow.deleted_at.is_(None), _GameRow.kind == "game",
+        _GameRow.status.in_(ownership.LIVE_STATUSES)))
     cap = max(1, user.max_concurrent_games or 2)
     if (live or 0) >= cap:
         raise HTTPException(429,
                             f"You already have {live} games running and your limit is {cap}. "
                             "Finish or delete one first, or ask an administrator to raise the limit.")
+
+
+#: The seat types that play a model, and so must name a machine when a game is made or a seat changed: those
+#: ``pool.seats.seat_class`` gives a task class (P3.3.7).
+MODEL_SEATS = pool_seats.MODEL_SEAT_TYPES
+
+
+def _member_seat(seat: dict, user, *, playing: bool = True) -> dict:
+    """One seat from a person, its model block through ``servers.member_llm`` (P3.2.9): a member's seat names a
+    machine and never describes one. ``playing`` is for a seat of a game being made or changed, where a model seat
+    without a machine is refused too; a scenario's seats are defaults its launch may still fill in. Returns the seat
+    with its block cleaned; raises the refusal as HTTP.
+
+    A seat that plays no model (a bot, a person, an MCP client) is never refused for its block, which nothing plays:
+    the lobby sends the block a seat had while it was a model seat, and a scenario's bot seats keep theirs. Such a
+    block is kept as the gate cleans it (an administrator's as it is, a member's to the machine it names), or dropped
+    where the gate would refuse it; making the seat a model seat later checks the block it then has
+    (``update_seat``). Only a block that is not an object at all is refused, on any seat."""
+    from .. import servers
+    try:
+        llm = servers.llm_block(seat.get("llm"))
+        model_seat = seat.get("type") in MODEL_SEATS
+        required = playing and model_seat
+        if not llm and not required:
+            return seat
+        try:
+            return {**seat, "llm": servers.member_llm(llm, user, required=required)}
+        except servers.SeatBlockError:
+            if model_seat:
+                raise
+            return {**seat, "llm": {}}
+    except servers.SeatBlockError as e:
+        raise HTTPException(e.status, str(e)) from None
+
+
+def _authorize_seats(sdb: DbSession, user, seats: list) -> None:
+    """Whether ``user`` may seat these models on the machines they name (``pool.seats.authorize``: each model seat by
+    its task class, its capability and a grant for its purpose), as HTTP: a 403 with the reason."""
+    try:
+        pool_seats.authorize(sdb, user, seats)
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from None
 
 
 # ----------------------------------------------------------------------------
@@ -279,13 +412,13 @@ async def _security_headers(request: Request, call_next):
 @app.get("/api/rules")
 def rules():
     """The whole ruleset, as the client needs it. Public: it is the same for everybody."""
-    return get_rules().to_client()
+    return engine_api.rules_client()
 
 
 @app.get("/api/tools")
 def tool_list():
     """Every player tool with its JSON schema. The authoritative reference for an agent."""
-    return toolreg.tool_list()
+    return engine_api.tool_list()
 
 
 class ModelProbe(BaseModel):
@@ -295,17 +428,23 @@ class ModelProbe(BaseModel):
     api_key_env: Optional[str] = None
 
 
-# Fetches from a caller-supplied base_url, so this is an SSRF vector; never anonymous.
-@app.post("/api/llm/models", dependencies=[Depends(require_user)])
-def probe_models(body: ModelProbe):
-    """List the models an endpoint offers (used by the lobby's 'Detect models' button and to test connectivity)."""
+@app.post("/api/llm/models")
+def probe_models(body: ModelProbe, me=Depends(require_user)):
+    """List the models an endpoint offers (the lobby's 'Detect models' button, and a connectivity test). It fetches
+    a caller-supplied base URL with a key from one of the server's environment variables, so it is an
+    administrator's (P3.2.8), the dry run excepted, which dials nothing: a member's machine reports its models
+    through its helper. Refused before any address is dialled or any variable read."""
     import os
     import httpx
     provider = (body.provider or "").lower()
+    if provider != "dryrun" and not _is_admin(me):
+        raise HTTPException(403, "Only an administrator can have the server fetch an address. A machine you add "
+                                 "reports its models through its CITAR helper.")
+    if provider == "dryrun":
+        # answered before the key's variable is read: the dry run needs none, and it is anybody's to ask
+        return {"ok": True, "models": ["dry-run"], "loaded": ["dry-run"], "details": {}}
     key = os.environ.get(body.api_key_env) if body.api_key_env else None
     try:
-        if provider == "dryrun":
-            return {"ok": True, "models": ["dry-run"], "loaded": ["dry-run"], "details": {}}
         if provider == "anthropic":
             if not key and not os.environ.get("ANTHROPIC_API_KEY"):
                 return {"ok": False, "error": f"Environment variable {body.api_key_env or 'ANTHROPIC_API_KEY'} is not set on the server."}
@@ -339,13 +478,21 @@ def probe_models(body: ModelProbe):
         return {"ok": False, "error": f"Could not reach {body.base_url or provider}: {e}"}
 
 
+def meta_payload(server_mode: bool, server_url: str) -> dict:
+    """``/api/meta``'s answer: this server's version and build label, its mode, its URL as the request reached it, and
+    ``mcp_command``, the command that starts the MCP bridge for a seat (the lobby adds ``--server``, ``--game`` and
+    ``--token``; :func:`citar.paths.mcp_command`). The route is public, so in server mode nothing in it names a folder
+    of this machine: a remote player runs the bridge from their own install (design/phase5-release.md P5.6)."""
+    from .. import __version__, paths
+    return {"version": __version__, "label": engine_api.build_info()["label"],
+            "mode": "server" if server_mode else "local", "server_url": server_url,
+            "mcp_command": paths.mcp_command(server_mode)}
+
+
 @app.get("/api/meta")
 def meta(request: Request):
-    """Server version, mode and capabilities, for the client to adapt to."""
-    import sys
-    root = Path(__file__).resolve().parent.parent.parent
-    return {"project_root": str(root), "python": sys.executable, "server_url": str(request.base_url).rstrip("/"),
-            "mcp_script": str(root / "citar_mcp.py")}
+    """Server version, mode and capabilities, for the client to adapt to (:func:`meta_payload`)."""
+    return meta_payload(citar_settings.get().server_mode, str(request.base_url).rstrip("/"))
 
 
 # ----------------------------------------------------------------------------
@@ -361,7 +508,7 @@ class CreateGame(BaseModel):
 
 
 @app.get("/api/games")
-def list_games(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def list_games(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Only the games this caller may see.
 
     Filtered per session rather than by a single query because the live sessions are the source of
@@ -377,13 +524,13 @@ def list_games(request: Request, p: Principal = Depends(principal), sdb: DbSessi
         if access.VIEW not in perms:
             continue
         info = s.info()
-        info["sharing"] = ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
+        info["sharing"] = ownership.to_client(row, perms, p.user, base_url=citar_settings.get().public_origin)
         out.append(info)
     return out
 
 
 @app.get("/api/status")
-def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """A check-in on the whole server, for the phone site's overview.
 
     Everyone signed in sees the games they may see and what the benchmark queue is doing; an
@@ -402,17 +549,19 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
         _row, perms = ownership.resolve(sdb, s, p.user)
         if access.VIEW not in perms:
             continue
-        phase = s.game.s.phase
+        phase = s.game.phase
         games["over" if phase != "playing" else "paused" if s.paused else "playing"] += 1
         statuses = list(s.agent_status.values())
-        games["ai_thinking"] += statuses.count("thinking")
+        games["ai_thinking"] += statuses.count("thinking") + statuses.count("queued")   # queued: mid-turn too
         games["ai_reconnecting"] += statuses.count("reconnecting")
         if any(getattr(a, "last_error", None) for a in s.agents.values()) or (s.pause_reason or {}).get("kind") == "disconnect":
             games["problems"] += 1
     workers = hub().status()
     out = {"version": __version__, "uptime": round(time.time() - _STARTED), "user": p.user.handle, "admin": admin,
            "mode": "server" if citar_settings.get().server_mode else "local", "games": games,
-           "benchmarks": ({k: v for k, v in scheduler.status().items() if k != "log"} if scheduler else None),
+           "benchmarks": ({k: v for k, v in scheduler.status(items.listed(sdb, "benchmark_run", p.user),
+                                                             pool.visible_restrictions(sdb, p.user)).items()
+                           if k != "log"} if scheduler else None),
            "workers_online": len(workers) if admin else None}
     if admin:
         host = {"python": sys.version.split()[0], "platform": sys.platform}
@@ -432,89 +581,115 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
             pass
         out["host"] = host
         out["workers"] = [{"server_id": w["server_id"], "hostname": w["hostname"], "models": len(w["models"] or []),
-                           "in_flight": w["in_flight"], "max_concurrent": w["max_concurrent"], "alive": w["alive"]}
+                           "in_flight": w["in_flight"], "slots": w["slots"], "alive": w["alive"]}
                           for w in workers]
+        # the prompt scheduler's machines (design/phase3-features.md P3.3.2): slots, leases, pooled prompts, what drains
+        from ..pool import scheduler as prompt_scheduler
+        sched = prompt_scheduler.current()
+        out["machines"] = sched.status() if sched is not None else []
     return out
 
 
 @app.get("/api/games/{gid}/summary")
-def game_summary(gid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def game_summary(gid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """One game at a glance, for the phone site: standings, whose turn, what each AI is doing, recent news.
 
     Standings are shown to whoever manages the game, or to anyone once the game is over or has no
     human in it; a spectator of a game somebody is still playing gets names and the turn, nothing
     the fog of war would hide.
     """
-    from ..engine import research, victory
     s, _row, perms = _gate(sdb, gid, p, access.VIEW, request)
-    with s.lock:
+    with s.lock, _crash_guard(s):
         g = s.game
         full = access.MANAGE in perms or s.god_view_allowed()
         seats = {seat.player: seat for seat in s.seats}
+        summ = g.summary()
         players = []
-        for pl in g.s.players:
-            if pl.kind != "major":
+        for pl in summ["players"]:
+            if pl["kind"] != "major":
                 continue
-            seat = seats.get(pl.id)
-            d = {"id": pl.id, "name": pl.name, "color": pl.color, "alive": pl.alive,
+            seat = seats.get(pl["id"])
+            d = {"id": pl["id"], "name": pl["name"], "color": pl["color"], "alive": pl["alive"],
                  "seat": seat.type if seat else None,
-                 "model": (seat.llm.get("model") or seat.llm.get("model_id")) if seat and seat.type == "llm" else None,
-                 "status": s.agent_status.get(pl.id),
-                 "error": getattr(s.agents.get(pl.id), "last_error", None) if full else None}
+                 "model": (seat.llm.get("model") or seat.llm.get("model_id")) if seat and seat.model_seat else None,
+                 "status": s.agent_status.get(pl["id"]),
+                 "error": getattr(s.agents.get(pl["id"]), "last_error", None) if full else None}
+            if seat is not None and seat.model_seat:
+                # labelled (P3.6.7): its task class, and a hybrid seat as its bot and its model
+                d["class"] = seat.task_class
+                d["label"] = _seat_label(seat, d["model"])
             if full:
-                cities = g.player_cities(pl.id)
-                d.update({"score": victory.score(g, pl.id)["total"], "cities": len(cities),
-                          "pop": sum(c.pop for c in cities), "techs": len(pl.techs),
-                          "era": g.rules.era_list[research.player_era(g, pl.id)]})
+                st = g.standing(pl["id"])
+                d.update({"score": st["score"], "cities": st["cities"], "pop": st["population"], "techs": st["techs"],
+                          "era": st["era"]})
             players.append(d)
         if full:
             players.sort(key=lambda d: (not d["alive"], -d.get("score", 0)))
         events = [{"turn": e["turn"], "type": e["type"], "text": e["text"]}
-                  for e in g.s.events[-300:] if e.get("players") is None][-20:]
+                  for e in g.events(last=300) if e.get("players") is None][-20:]
         info = s.info()
-        current = g.player(g.s.current).name if g.s.phase == "playing" else None
+        current = g.player_name(summ["current"]) if summ["phase"] == "playing" else None
         return {**{k: info[k] for k in ("id", "name", "turn", "phase", "winner", "victory", "paused", "pause_reason",
-                                        "ai_delay", "created", "config")},
-                "turn_limit": g.total_turns(), "current": current, "players": players, "events": events,
+                                        "ai_delay", "created", "config", "crashed")},
+                "turn_limit": summ["turn_limit"], "current": current, "players": players, "events": events,
                 "full": full, "can_manage": access.MANAGE in perms}
+
+
+def _seat_label(seat, model: Optional[str]) -> str:
+    """How a seat a model plays is named where its game is summed up: its model, or, for a hybrid seat, "Hybrid: <the
+    bot's profile> + <the model>" (P3.6.7), the profile marked "(best)" when the seat asked for the best-ranked bot, as
+    the web client's ``seatLabel`` (``citar/web/js/seats.js``) names it."""
+    if seat.type == "hybrid":
+        bot = seat.bot or {}
+        best = " (best)" if bot.get("chosen_as") == "best" else ""
+        return f"Hybrid: {bot.get('profile') or 'standard'}{best} + {model or 'its model'}"
+    return model or "a model"
 
 
 @app.post("/api/games")
 def create_game(body: CreateGame, request: Request,
-                me=Depends(require_cap("create_games")), sdb: DbSession = Depends(get_db)):
+                me=Depends(require_cap("create_games")), sdb: DbSession = Depends(get_db, scope="function")):
     """Create a game and return it, with a seat token for each seat."""
-    top = get_rules().const["max_players"]
+    top = engine_api.max_players()
     if not 1 <= len(body.seats) <= top:
         raise HTTPException(400, f"A game needs 1 to {top} seats.")
     if len(body.seats) > max(1, me.max_seats_per_game or top):
         raise HTTPException(403, f"Your account is limited to {me.max_seats_per_game} seats per game.")
     _game_limit(sdb, me)
-    if body.visibility not in ("private", "allowlist", "link", "public"):
-        raise HTTPException(400, "Visibility is private, allowlist, link or public.")
-    from ..pool import seats as pool_seats
+    access.check_publish(me, body.visibility)
+    _may_use(sdb, me, "map", (body.config or {}).get("map"))     # a custom map, and bot profiles, the caller may see
+    _seat_profiles(sdb, me, body.seats)
+    seats = [_member_seat(seat, me) for seat in body.seats]
+    _authorize_seats(sdb, me, seats)
     try:
-        pool_seats.authorize(sdb, me, body.seats)
-    except ValueError as e:
-        raise HTTPException(403, str(e))
-    try:
-        s = manager.create(body.config, body.seats, body.name)
+        # not started until it has its row and its owner: the first AI turn reads both
+        s = manager.create(body.config, seats, body.name, start=False, owner_id=me.id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    row = ownership.register(sdb, s, me, visibility="private", data_sharing=body.data_sharing)
-    if body.visibility != "private":
-        # Routed through set_visibility so publishing checks the publish_public capability.
-        access.set_visibility(sdb, row, body.visibility, actor=me)
+    try:
+        row = ownership.register(sdb, s, me, visibility=access.PRIVATE, data_sharing=body.data_sharing)
+        if body.visibility != access.PRIVATE:
+            # through set_visibility, for its audit row (check_publish above has refused what it would)
+            access.set_visibility(sdb, row, body.visibility, actor=me)
+        sdb.flush()
+    except BaseException:
+        # a game the index could not take is not left running unowned; the request's write is undone first, or
+        # the stop's own write of the row would wait behind it
+        sdb.rollback()
+        manager.delete(s.id)
+        raise
+    s.start()
     audit.record(sdb, "game.created", actor=me, object_type="game", object_id=s.id,
                  seats=len(body.seats), visibility=row.visibility)
     info = s.info(include_tokens=True)
-    info["sharing"] = ownership.to_client(row, access.Access({access.VIEW, access.PLAY, access.MANAGE}),
+    info["sharing"] = ownership.to_client(row, access.Access({access.VIEW, access.PLAY, access.MANAGE}), me,
                                           base_url=citar_settings.get().public_origin)
     return info
 
 
 @app.get("/api/games/{gid}")
 def game_info(gid: str, request: Request, p: Principal = Depends(principal),
-              sdb: DbSession = Depends(get_db)):
+              sdb: DbSession = Depends(get_db, scope="function")):
     """Seat tokens go only to somebody who may manage the game.
 
     Handing them to every viewer — which is what this did when the server was a single-user LAN
@@ -522,49 +697,68 @@ def game_info(gid: str, request: Request, p: Principal = Depends(principal),
     """
     s, row, perms = _gate(sdb, gid, p, access.VIEW, request)
     info = s.info(include_tokens=access.MANAGE in perms)
-    info["sharing"] = ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
+    info["sharing"] = ownership.to_client(row, perms, p.user, base_url=citar_settings.get().public_origin)
     return info
 
 
 @app.delete("/api/games/{gid}")
 def delete_game(gid: str, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
-    """Delete a game and every save of it."""
+                sdb: DbSession = Depends(get_db, scope="function")):
+    """Close a game (the lobby's "End game"): its session stops and leaves the list, its saves stay on disk, and its
+    row in the games index is `closed` (P3.2.5), or `finished` if it was over, so it no longer counts against its
+    owner's game limit and its saves load again. Deleting the saves (``/api/saves/delete`` of the whole game) is what
+    deletes the game."""
     _gate(sdb, gid, p, access.MANAGE, request)
-    ownership.delete(sdb, gid, actor=p.user)
     manager.delete(gid)
+    if p.user is not None:
+        audit.record(sdb, "game.closed", actor=p.user, object_type="game", object_id=gid)
     return {"deleted": gid}
 
 
 class SeatUpdate(BaseModel):
-    """A change to one seat: its type, and the model configuration if it is an LLM seat."""
+    """A change to one seat: its type; the model configuration of a seat a model plays; the bot of a bot or hybrid seat;
+    a hybrid seat's settings (``hybrid``: owners, advisor, prompt_every, design/phase3-features.md P3.6.2); and its
+    ``handicap`` (``ai`` or ``human``: a hybrid seat's, or any other seat's own)."""
     type: Optional[str] = None
     llm: Optional[dict] = None
     bot: Optional[dict] = None
     name: Optional[str] = None
+    hybrid: Optional[dict] = None
+    handicap: Optional[str] = None
 
 
 @app.post("/api/games/{gid}/seats/{pid}")
 def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
-                p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """Change who controls a seat (e.g. hand a bot seat to an MCP client, or take over as human)."""
+                p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """Change who controls a seat (e.g. hand a bot seat to an MCP client, make it a hybrid seat, or take over as human).
+
+    A new model block, or a seat made a model seat (an LLM or a hybrid seat), goes through the same gates as a new
+    game's (P3.2.9): a member's block names a machine, and the caller must be admitted to it by the seat's task class
+    (P3.3.7: games for an LLM seat, pooled prompts for a hybrid one), at every such change. Hybrid settings, a
+    handicap or a bot that are not allowed are a 400 with the reason; a bot's "(best)" mark is the server's
+    (``GameSession.update_seat``). A refusal leaves the seat as it was."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     if not 0 <= pid < len(s.seats):
         raise HTTPException(404, "No such seat.")
-    with s.lock:
-        seat = s.seats[pid]
-        if body.type:
-            if body.type not in ("human", "mcp", "llm", "bot"):
-                raise HTTPException(400, "Invalid seat type.")
-            seat.type = body.type
-        if body.llm is not None:
-            seat.llm = body.llm
-        if body.bot is not None:
-            seat.bot = body.bot
-        if body.name is not None:
-            seat.name = body.name
-        s.cancel_agent(pid)  # aborts a turn in progress so the new controller takes over
-        s.cond.notify_all()
+    llm = body.llm
+    seat = s.seats[pid]
+    new_type = body.type or seat.type
+    if isinstance(body.bot, dict):
+        _may_use(sdb, p.user, "bot_profile", body.bot.get("profile"))
+    if llm is not None or (new_type in MODEL_SEATS and new_type != seat.type):
+        # the block the seat will play with: the new one, or the one it has when only its type makes it a model seat.
+        # A change that leaves a model seat's block as it is (a new name) checks nothing: that block was checked when
+        # it was set, and a machine's window or budget must not stop its seat being renamed.
+        checked = _member_seat({"type": new_type, "llm": llm if llm is not None else dict(seat.llm)}, p.user)
+        _authorize_seats(sdb, p.user, [checked])          # admitted again by its task class (P3.3.7)
+        if llm is not None:
+            llm = checked["llm"]
+    try:
+        # the session keeps the civilization's engine controller in step with the seat type
+        s.update_seat(pid, type=body.type, llm=llm, bot=body.bot, name=body.name, hybrid=body.hybrid,
+                      handicap=body.handicap)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
     s.autosave(force=True)
     return s.info(include_tokens=True)
 
@@ -577,7 +771,7 @@ class Control(BaseModel):
 
 @app.post("/api/games/{gid}/control")
 def control(gid: str, body: Control, request: Request, p: Principal = Depends(principal),
-            sdb: DbSession = Depends(get_db)):
+            sdb: DbSession = Depends(get_db, scope="function")):
     """Pause, resume or slow down a game. Chiefly for watching AI players."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     with s.lock:
@@ -591,36 +785,85 @@ def control(gid: str, body: Control, request: Request, p: Principal = Depends(pr
     return {"paused": s.paused, "ai_delay": s.ai_delay}
 
 
+#: How a view may be kept: by the browser that asked only (``private``), and checked again before every use
+#: (``no-cache``), which its ETag makes cheap (design/phase3-features.md P3.5.8).
+VIEW_CACHE = "private, no-cache"
+
+
+def view_etag(game: EngineGame, writes: int, pid: Optional[int], extra: dict) -> str:
+    """A view's ETag: a hash of everything its body is made of. The engine's part is the game object
+    (``EngineGame.instance``: another object, a loaded game, counts from 0 again), how many commands it had taken
+    (``writes``, which moves on every change to the game or its history, where the engine's revision moves on its
+    state alone, and never on a query tool, which the browser calls after every refresh for the selected unit or city)
+    and the perspective (``pid``); the server's part is the keys it splices in (``extra``: the seat or the
+    spectator flag, ``session``, which is ``info()`` with its pause, agent statuses and seats, ``version`` and
+    ``can_manage``), hashed as the view is written with them, so two answers with one tag have the same bytes."""
+    h = hashlib.blake2b(digest_size=12)
+    h.update(f"{game.instance}|{writes}|{pid}|".encode())
+    h.update(json.dumps(extra, separators=(",", ":")).encode())
+    return f'"v{h.hexdigest()}"'
+
+
+def etag_matches(header: Optional[str], tag: str) -> bool:
+    """Whether an ``If-None-Match`` header names ``tag`` (or is ``*``); a weak tag (``W/"..."``) matches its strong
+    form, as RFC 9110 has ``If-None-Match`` compare them."""
+    for part in (header or "").split(","):
+        t = part.strip()
+        if t.startswith("W/"):
+            t = t[2:]
+        if t == "*" or (t and t == tag):
+            return True
+    return False
+
+
 @app.get("/api/games/{gid}/view")
 def view(gid: str, request: Request, token: Optional[str] = None, as_player: Optional[int] = None,
-         p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+         p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """The game as one seat sees it, honouring fog of war.
 
     ``as_player`` is for spectators of AI-only games, who may look through any civilization's eyes -
     and is refused for anyone who is actually playing, since that would be seeing the whole map.
+
+    The engine writes the view as JSON with the server's keys (``seat`` or ``spectator``, ``session``,
+    ``version``) spliced in (``EngineGame.view_json``), and the route returns those bytes as they are: a
+    gargantuan god view would otherwise cost a parse and a re-dump of megabytes on every refresh.
+
+    Every answer carries an ``ETag`` (``view_etag``), and a request whose ``If-None-Match`` names the current one gets
+    ``304 Not Modified`` without the view being built: the client sends it on every refresh, most of which find
+    nothing changed (design/phase3-features.md P3.5.8). A view built while a command came in carries no tag, since
+    its body may already be the game after the command.
     """
     s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
     tok = _token(request, token)
-    with s.lock:
+    with s.lock, _crash_guard(s):
         seat = s.seat_for_token(tok)
         if seat is not None:
-            v = client_view(s.game, seat.player)
-            v["seat"] = seat.public()
+            pid, extra = seat.player, {"seat": seat.public()}
         elif s.is_spectator(tok) or access.VIEW in perms:
-            if as_player is not None:
-                if not 0 <= as_player < len(s.seats):
-                    raise HTTPException(404, "No such player.")
-                v = client_view(s.game, as_player)
-            elif s.god_view_allowed():
-                v = client_view(s.game, None)
-            else:
-                raise HTTPException(403, "God view is disabled while humans are playing.")
-            v["spectator"] = True
+            # Looking through one civilization's eyes is as revealing as the god view while a human is
+            # playing: it shows that civ's private cities, units and diplomacy, and for the AI seats it
+            # is a map of everything they have scouted. Both follow the same rule. A spectator keeps the
+            # whole-map minimap, so the seat's minimap block is left out (P3.7.4).
+            if not s.god_view_allowed():
+                raise HTTPException(403, "Spectator views are disabled while humans are playing.")
+            if as_player is not None and not 0 <= as_player < len(s.seats):
+                raise HTTPException(404, "No such player.")
+            pid, extra = as_player, {"spectator": True}
         else:
             raise HTTPException(403, "Invalid token.")  # unreachable: _gate already checked
-        v["session"] = s.info()
-        v["version"] = s.version
-        return JSONResponse(v)
+        extra["session"] = s.info()
+        extra["version"] = s.version
+        # which controls the game screen offers (pause, the AI delay, a named save): the routes check it again
+        extra["can_manage"] = access.MANAGE in perms
+        writes = s.game.writes
+        tag = view_etag(s.game, writes, pid, extra)
+        headers = {"ETag": tag, "Cache-Control": VIEW_CACHE}
+        if etag_matches(request.headers.get("if-none-match"), tag):
+            return Response(status_code=304, headers=headers)
+        body = s.game.view_json(pid, extra, minimap=seat is not None)
+        if s.game.writes != writes:
+            del headers["ETag"]        # a command came in meanwhile: the body may be the game after it
+    return Response(body, media_type="application/json", headers=headers)
 
 
 class ToolCallBody(BaseModel):
@@ -632,7 +875,7 @@ class ToolCallBody(BaseModel):
 
 @app.post("/api/games/{gid}/tool")
 def call_tool(gid: str, body: ToolCallBody, request: Request, token: Optional[str] = None,
-              p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+              p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Execute a player tool. The single entry point for every action in the game."""
     s, _row, _perms = _gate(sdb, gid, p, access.PLAY, request, token)
     pid = _seat_pid(s, _token(request, token))
@@ -642,31 +885,83 @@ def call_tool(gid: str, body: ToolCallBody, request: Request, token: Optional[st
     return s.call_tool(pid, body.tool, body.args, wait_negotiation=wait)
 
 
+@app.get("/api/games/{gid}/negotiations/{nid}")
+def negotiation_view(gid: str, nid: int, request: Request, token: Optional[str] = None,
+                     as_player: Optional[int] = None, p: Principal = Depends(principal),
+                     sdb: DbSession = Depends(get_db, scope="function")):
+    """One chat as a side of it sees it, with where its clock stands (``clock``: whose move, the kind of side,
+    ``deadline`` in epoch seconds, ``left_s``, ``paused``): what the chat window opens from the socket's event,
+    without waiting for a view refresh (design/phase3-features.md P3.5.6).
+
+    A seat token reads the chats its seat is in. A spectator of a game whose god view is allowed (no person plays,
+    or it is over) reads any, from ``as_player``'s side when that civilization is in it, else the side that opened
+    it. Anyone else, and a chat the caller may not read, gets 404, so a chat's existence is not told either."""
+    s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
+    if not 0 <= nid <= 2**31:
+        raise HTTPException(404, "No such negotiation.")
+    tok = _token(request, token)
+    with s.lock, _crash_guard(s):
+        seat = s.seat_for_token(tok)
+        if seat is not None:
+            side = seat.player
+        elif (s.is_spectator(tok) or access.VIEW in perms) and s.god_view_allowed():
+            side = as_player
+        else:
+            raise HTTPException(404, "No such negotiation.")
+        try:
+            if side is not None and as_player is not None and seat is None:
+                n = s.game.negotiation_head(nid)
+                if side not in (n["initiator"], n["responder"]):
+                    side = None
+            return s.chat_view(nid, side)
+        except ActionError:
+            raise HTTPException(404, "No such negotiation.") from None
+
+
+@app.get("/api/games/{gid}/trade-options/{other}")
+def trade_options(gid: str, other: int, request: Request, token: Optional[str] = None,
+                  as_player: Optional[int] = None, p: Principal = Depends(principal),
+                  sdb: DbSession = Depends(get_db, scope="function")):
+    """What a civilization and ``other`` could trade, as the chat window's deal builder offers it (one-click chips:
+    what each could give, ``other``'s gold, the agreements both could sign now): the view no longer carries them for
+    every civilization met, so the builder fetches them while it is open (design/phase3-features.md P3.5.8).
+
+    A seat token reads its own seat's. A spectator of a game whose god view is allowed (no person plays, or it is over)
+    reads any civilization's through ``as_player``. ``other`` must be a living major civilization that side has met, as
+    its diplomacy would list it; anything else, and anyone else, gets 404, so a civilization not met is not told of."""
+    s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
+    tok = _token(request, token)
+    with s.lock, _crash_guard(s):
+        seat = s.seat_for_token(tok)
+        if seat is not None:
+            side = seat.player
+        elif (s.is_spectator(tok) or access.VIEW in perms) and s.god_view_allowed() and as_player is not None:
+            side = as_player
+        else:
+            raise HTTPException(404, "No such trade.")
+        found = s.game.trade_options(side, other) if 0 <= side < len(s.seats) and 0 <= other < 256 else None
+    if found is None:
+        raise HTTPException(404, "No such trade.")
+    return {"player": side, "with": other, "trade_options": found}
+
+
 @app.get("/api/games/{gid}/path")
 def path_preview(gid: str, request: Request, unit_id: int, x: int, y: int,
                  token: Optional[str] = None, p: Principal = Depends(principal),
-                 sdb: DbSession = Depends(get_db)):
+                 sdb: DbSession = Depends(get_db, scope="function")):
     """Route preview for the browser: the path a move order would take and how many turns it needs.
     Read-only and not part of the AI tool set."""
-    from ..engine import movement
     s, _row, _perms = _gate(sdb, gid, p, access.PLAY, request, token)
     pid = _seat_pid(s, _token(request, token))
-    with s.lock:
-        g = s.game
-        u = g.unit(unit_id)
-        if u is None or u.owner != pid or not g.grid.in_bounds(x, y):
-            return {"path": None}
-        target = g.grid.idx(x, y)
-        path = movement.find_path(g, u, target)
-        if not path:
-            return {"path": None}
-        return {"path": [list(g.grid.xy(i)) for i in path], "turns": movement.path_turns(g, u, path)}
+    with s.lock, _crash_guard(s):
+        return s.game.path_preview(pid, unit_id, x, y)
 
 
 @app.get("/api/games/{gid}/wait")
 def wait_for_turn(gid: str, request: Request, token: Optional[str] = None, timeout: float = 50.0,
-                  p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """Long-poll until it is this seat's turn, or a negotiation needs an answer.
+                  p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """Long-poll until it is this seat's turn, or a negotiation needs an answer; on its own turn, until
+    the other side answers a negotiation it is in (see GameSession.wait_for_turn).
 
     Why an agent should use this rather than polling: it returns for a negotiation too, and an agent
     that only watched for its own turn would leave the other side of a deal waiting forever.
@@ -677,40 +972,76 @@ def wait_for_turn(gid: str, request: Request, token: Optional[str] = None, timeo
     return s.wait_for_turn(pid, max(1.0, min(timeout, 300.0)))
 
 
-@app.post("/api/games/{gid}/debug/{action}")
+#: The most scenario operations one call to the debug ops route applies: a script's step is a few, and the game's lock is
+#: held while they are applied.
+DEBUG_OPS_MAX = 200
+
+
+def _debug_enabled() -> None:
+    """The debug routes answer only on a server started with ``CITAR_DEBUG=1`` (``--debug``; the dev server sets it):
+    anywhere else they are not there, 404.
+
+    The routes take it as a route dependency, so it runs before anything else of theirs: before the caller is
+    resolved and before a body is judged, so every caller and every body (that is JSON at all) gets the same 404."""
+    import os
+    if os.environ.get("CITAR_DEBUG") != "1":
+        raise HTTPException(404, "Debug endpoints are disabled.")
+
+
+@app.post("/api/games/{gid}/debug/ops", dependencies=[Depends(_debug_enabled)])
+def debug_ops(gid: str, request: Request, ops: Any = Body(None), p: Principal = Depends(principal),
+              sdb: DbSession = Depends(get_db, scope="function")):
+    """Apply scenario operations to a live game, as the scenario editor applies them to a scenario
+    (``EngineGame.apply_ops``: all or nothing; ``GET /api/scenario-ops`` lists them): what a script that talks to a dev
+    server over HTTP moves a game on with, such as the QA script giving a seat each era's techs
+    (design/phase3-features.md P3.7.5). The body is the list of operations; the answer is each one's result.
+
+    Gated as ``/debug/{action}`` is: 404 unless the server runs with ``CITAR_DEBUG=1`` (``_debug_enabled``, a route
+    dependency), then MANAGE on the game (a stranger 404, a visitor 401 or 404, a cookie without its CSRF token 403).
+    The body is taken as anything and judged only after the gate, so a caller the gate refuses learns nothing from its
+    body: one that is not a list of objects is a 422 then. Text sent as JSON that does not parse is FastAPI's own 422
+    (``json_invalid``) before any of this runs, on every route that takes a body, so it says nothing of this route or
+    the game. A refused list is a 400 naming the operation that
+    failed, the game as it was; more than ``DEBUG_OPS_MAX`` operations are a 400 too. Applied under the game's lock,
+    then announced as any action is (``_after_action``: the version, the watchers, an autosave at a new turn)."""
+    s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
+    if not isinstance(ops, list) or not all(isinstance(o, dict) for o in ops):
+        raise HTTPException(422, "The body must be a list of operations, each an object.")
+    if len(ops) > DEBUG_OPS_MAX:
+        raise HTTPException(400, f"At most {DEBUG_OPS_MAX} operations at once.")
+    with s.lock, _crash_guard(s):
+        g = s.game
+        before_turn, before_current = g.turn, g.current
+        try:
+            results = g.apply_ops(ops)
+        except (ActionError, ValueError) as e:
+            raise HTTPException(400, str(e))
+        s._after_action(before_turn, before_current)
+    return {"ok": True, "results": results}
+
+
+@app.post("/api/games/{gid}/debug/{action}", dependencies=[Depends(_debug_enabled)])
 def debug_action(gid: str, action: str, request: Request, p: Principal = Depends(principal),
-                 sdb: DbSession = Depends(get_db)):
-    """Developer helpers, only available when the server runs with --debug.
+                 sdb: DbSession = Depends(get_db, scope="function")):
+    """Developer helpers, only available when the server runs with --debug (``_debug_enabled``, a route dependency).
 
     These hand out gold and reveal the map, so they are gated on managing the game as well as on
     the debug flag — otherwise a spectator on a public game could cheat in it.
     """
-    import os
-    if os.environ.get("CITAR_DEBUG") != "1":
-        raise HTTPException(404, "Debug endpoints are disabled.")
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
-    from ..engine import visibility
-    with s.lock:
+    with s.lock, _crash_guard(s):
         g = s.game
-        if action == "meet_all":
-            for a in g.majors():
-                for b in g.majors():
-                    g.meet(a.id, b.id)
-        elif action == "reveal":
-            for p in g.majors():
-                visibility.reveal_tiles(g, p.id, range(g.grid.size))
-        elif action == "gold":
-            for p in g.majors():
-                p.gold += 500
-        else:
+        try:
+            g.debug(action)
+        except ValueError:
             raise HTTPException(400, "Unknown debug action.")
-        s._after_action(g.turn, g.s.current)
+        s._after_action(g.turn, g.current)
     return {"ok": True}
 
 
 @app.get("/api/games/{gid}/metrics")
 def game_metrics(gid: str, request: Request, p: Principal = Depends(principal),
-                 sdb: DbSession = Depends(get_db)):
+                 sdb: DbSession = Depends(get_db, scope="function")):
     """Per-seat, per-turn metrics for a game."""
     s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request)
     with s.lock:
@@ -719,61 +1050,182 @@ def game_metrics(gid: str, request: Request, p: Principal = Depends(principal),
 
 @app.get("/api/games/{gid}/metrics.csv")
 def game_metrics_csv(gid: str, request: Request, p: Principal = Depends(principal),
-                     sdb: DbSession = Depends(get_db)):
+                     sdb: DbSession = Depends(get_db, scope="function")):
     """The same metrics as CSV, for analysis outside CITAR."""
     import csv
     import io
-    from fastapi.responses import Response
+    from .metrics import bot_actions_text
     s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request)
-    with s.lock:
+    with s.lock, _crash_guard(s):
         rows = s.metrics.turn_rows()
-        names = {p.id: p.name for p in s.game.s.players}
+        names = {p["id"]: p["name"] for p in s.game.summary()["players"]}
     cols = ["turn", "player", "civ", "controller", "model", "wall_s", "model_steps", "model_s", "input_tokens",
             "output_tokens", "reasoning_tokens", "tool_calls", "actions_ok", "queries", "errors", "repeats",
             "blocked_repeats", "malformed", "stall_nudges", "peak_prompt_tokens", "slowest_step_s", "context_length",
-            "model_loaded_at_start", "end_reason", "top_tools"]
+            "model_loaded_at_start", "end_reason", "top_tools", "bot_actions"]
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
     for r in rows:
-        w.writerow({**r, "civ": names.get(r["player"], "")})
+        w.writerow({**r, "civ": names.get(r["player"], ""), "bot_actions": bot_actions_text(r.get("bot_actions"))})
     return Response(buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="citar-{gid}-metrics.csv"'})
 
 
-@app.get("/api/metrics/compare", dependencies=[Depends(require_user)])
-def compare_models():
-    """Aggregate AI metrics per model across all running games and saved games (latest save per game)."""
-    from .scoring import compare_models as compare
-    return compare(manager)
+@app.get("/api/metrics/compare")
+def compare_models(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Aggregate AI metrics per model across running and saved games (latest save per game): an administrator's over
+    every game, a member's over their own and the pooled ones (``scoring.viewer_scope``, P3.2.4)."""
+    from .scoring import compare_models as compare, viewer_scope
+    return compare(manager, scope=viewer_scope(sdb, me))
 
 
 @app.get("/api/games/{gid}/debug/errors")
-def errors(gid: str):
-    """Recent errors from AI seats. The first place to look when a model does nothing."""
-    s = _session(gid)
+def errors(gid: str, request: Request, p: Principal = Depends(principal),
+           sdb: DbSession = Depends(get_db, scope="function")):
+    """Recent errors from AI seats. The first place to look when a model does nothing.
+
+    Gated on managing the game, not just viewing it: these are server tracebacks and the tool
+    arguments each seat sent, which show what a player was trying to do and are nobody else's
+    business. It used to answer anyone who knew the game id.
+
+    ``save_lock`` is how long this session's saves held the game's lock since it was opened (its
+    saves, their total, the longest and the last, in seconds): a save is taken under the lock and
+    written off it, and a slow one stalls every reader and the turn driver (budget 10 ms).
+    ``save_writer`` is the writing, off the lock (``SaveWriter.stats``): how many saves were written,
+    passed over or failed, what the writes took, and the turn of the autosave on the disk.
+    """
+    s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     return {"errors": s.errors[-50:], "agents": {pid: {"usage": getattr(a, "usage_total", None),
                                                        "last_error": getattr(a, "last_error", None)}
-                                                 for pid, a in s.agents.items()}}
+                                                 for pid, a in s.agents.items()},
+            "save_lock": dict(s.save_lock), "save_writer": s.save_writer_stats()}
 
 
 # ----------------------------------------------------------------------------
 # benchmarks & model scores
 # ----------------------------------------------------------------------------
-def _bench_call(fn, *args):
+def _bench_call(fn, *args, **kw):
     """Call a scheduler method, turning its errors into HTTP status codes."""
     try:
-        return fn(*args)
+        return fn(*args, **kw)
     except KeyError as e:
         raise HTTPException(404, f"Not found: {e}")
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.get("/api/benchmarks/status", dependencies=[Depends(require_user)])
-def bench_status():
-    """What the benchmark scheduler is doing: running jobs, queues, restricted servers."""
-    return _scheduler().status()
+def _is_admin(user) -> bool:
+    """Whether an account is an administrator in good standing, who sees and manages every item."""
+    return user is not None and user.role == "admin" and user.status == "active"
+
+
+#: What a member's suite or probe subject may not carry (P3.2.9): keys that describe a machine, the address the
+#: server would dial and the key it would send, instead of naming one.
+DESCRIBING_KEYS = ("base_url", "api_key", "api_key_env")
+
+
+def _may_use(sdb: DbSession, user, kind: str, ref) -> None:
+    """Whether ``user`` may use the item ``kind``/``ref`` in something they make (a map in a game, a scenario in a
+    probe, a bot profile in a seat): VIEW on it, a 404 otherwise. A file with no row is an administrator's to use
+    (it is reached by nobody else until adoption gives it an owner); a built-in bot profile and the "best" one are
+    everybody's. Anything but an id is a 400."""
+    if not ref:
+        return
+    if not isinstance(ref, str):
+        raise HTTPException(400, f"A {items.noun(kind)} is named by its id.")
+    if kind == "bot_profile":
+        from ..bots import profiles as _profiles
+        if ref == _profiles.BEST or ref in {b["id"] for b in _profiles.BUILTIN}:
+            return
+    row = items.get(sdb, kind, str(ref))
+    if row is None:
+        if _is_admin(user):
+            return
+        raise HTTPException(404, f"No such {items.noun(kind)}.")
+    access.on(sdb, user, row).require(access.VIEW)
+
+
+def _seat_profiles(sdb: DbSession, user, seats) -> None:
+    """Each bot seat's profile, which ``user`` must be able to see (``_may_use``)."""
+    for seat in seats or []:
+        if isinstance(seat, dict) and isinstance(seat.get("bot"), dict):
+            _may_use(sdb, user, "bot_profile", seat["bot"].get("profile"))
+
+
+def _suite_gate(sdb: DbSession, user, suite: dict) -> None:
+    """A suite's model entries through the members' gate (P3.2.9): a member's suite names the machines its models
+    play on and never describes one (a base URL, a key, a key variable: 400), and each machine passes
+    ``servers.member_llm`` (an unknown one: 400) and is one the member may see (403 otherwise, the site's own
+    included until they are shared; admission decides the rest when a run starts). Its scenarios' bot profiles must
+    be ones ``user`` may see. An administrator's suite is taken as it is."""
+    from .. import servers
+    from ..db.models import Server
+    if not isinstance(suite, dict):
+        raise HTTPException(400, "A suite is an object.")
+    for sc in suite.get("scenarios") or []:
+        if isinstance(sc, dict):
+            _may_use(sdb, user, "bot_profile", sc.get("bot_profile"))
+            if isinstance(sc.get("hybrid"), dict):
+                # a hybrid scenario's own seat plays a bot profile too (P3.6.9)
+                _may_use(sdb, user, "bot_profile", sc["hybrid"].get("bot_profile"))
+    if _is_admin(user):
+        return
+    for group in suite.get("servers") or []:
+        if not isinstance(group, dict):
+            raise HTTPException(400, "A suite's machines are objects naming a machine.")
+        for entry in [group] + [m for m in group.get("models") or [] if isinstance(m, dict)]:
+            bad = [k for k in DESCRIBING_KEYS if entry.get(k) not in (None, "")]
+            if bad:
+                raise HTTPException(400, "A suite names the machines its models play on; it does not describe "
+                                         f"them ({', '.join(bad)}). Pick one of the machines you may use.")
+        try:
+            servers.member_llm({"server_id": group.get("server_id")}, user, required=True)
+        except servers.SeatBlockError as e:
+            raise HTTPException(e.status, str(e)) from None
+        # a suite names machines its maker may see; whether they may run it there is decided when a run starts
+        # (``_admit``), so a machine nobody shared with them is refused now without being named
+        row = sdb.get(Server, group.get("server_id"))
+        if row is None or access.VIEW not in access.on(sdb, user, row):
+            raise HTTPException(403, "You may not use that machine. Pick one of the machines you may use.")
+
+
+def _admit(sdb: DbSession, user, server_ids, purpose: str) -> None:
+    """Admission for work that will queue for its machines (a run): may ``user`` use each pooled machine for
+    ``purpose`` at all (``pool.seats.authorize``, ``queued``: when is the runner's business). A 403 with the reason."""
+    from ..pool import seats as pool_seats
+    try:
+        pool_seats.admit(sdb, user, server_ids, purpose)
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from None
+
+
+def _run_games_follow(sdb: DbSession, row) -> None:
+    """A benchmark run's games are shown as the run is (P3.2.4): when the run's visibility changes, or it is taken
+    down, its games' rows follow it, and an unpublished run's games get new share links too."""
+    import secrets as _sec
+    from sqlalchemy import select as _select
+    from ..db.models import Game as _GameRow
+    # the scheduler the server made at its start, never one made here: making one reloads games, whose rows it writes
+    # from sessions of its own while this request holds its write
+    run = scheduler.runs.get(row.ref) if scheduler is not None else None
+    ids = [j["game_id"] for j in (run or {}).get("jobs", []) if j.get("game_id")]
+    if not ids:
+        return
+    for game in sdb.scalars(_select(_GameRow).where(_GameRow.id.in_(ids))):
+        if game.visibility != row.visibility and row.visibility == access.PRIVATE:
+            game.slug = _sec.token_urlsafe(16)
+        game.visibility = row.visibility
+
+
+items.VISIBILITY_HOOKS["benchmark_run"] = _run_games_follow
+
+
+@app.get("/api/benchmarks/status")
+def bench_status(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """What the benchmark scheduler is doing: running jobs, queues, restricted servers. A member's counts and log
+    cover the runs they may see, and the machines in their quiet hours those the member may see."""
+    return _scheduler().status(items.listed(sdb, "benchmark_run", me), pool.visible_restrictions(sdb, me))
 
 
 @app.get("/api/benchmarks/settings", dependencies=[Depends(require_user)])
@@ -782,44 +1234,72 @@ def bench_settings():
     return _scheduler().get_settings()
 
 
-@app.put("/api/benchmarks/settings", dependencies=[Depends(require_user)])
+@app.put("/api/benchmarks/settings", dependencies=[Depends(require_role("admin"))])
 def bench_update_settings(body: dict):
-    """Change the scoring weights."""
+    """Change the scoring weights: the server's own, so an administrator's."""
     return _bench_call(_scheduler().update_settings, body)
 
 
-@app.get("/api/benchmarks/suites", dependencies=[Depends(require_user)])
-def bench_suites():
-    """Every saved benchmark suite."""
-    return _scheduler().list_suites()
+@app.get("/api/benchmarks/suites")
+def bench_suites(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """The saved benchmark suites the caller may see (and the one a share key opens), each with what they may do to
+    it."""
+    key = _share_key(request)
+    seen = items.listed(sdb, "benchmark_suite", p.user, slug=key)
+    out = [s for s in _scheduler().list_suites() if seen is None or s["id"] in seen]
+    return _with_perms(sdb, "benchmark_suite", p.user, out, slug=key)
 
 
-@app.get("/api/benchmarks/suites/new", dependencies=[Depends(require_user)])
-def bench_new_suite():
-    """A blank suite with sensible defaults, for the editor to start from."""
+@app.get("/api/benchmarks/suites/new")
+def bench_new_suite(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """A blank suite with sensible defaults, for the editor to start from: on the host when its caller may use it,
+    else the first machine with models they may (every machine is a row, P3.2.8; a member's suite names only those)."""
     from .benchmarks import normalize_suite
     from .. import servers as REG
+    from ..db.models import Server
+
+    def usable(sv) -> bool:
+        row = sdb.get(Server, sv["id"])
+        return row is not None and access.VIEW in access.on(sdb, me, row)
     host = REG.host()
-    first = host if host and host["models"] else next((s for s in REG.list_servers() if s["models"] and s["kind"] != "test"), None)
+    first = host if host and host["models"] and usable(host) else next(
+        (s for s in REG.list_servers() if s["models"] and s["kind"] != "test" and usable(s)), None)
     return normalize_suite({"name": "New benchmark suite", "servers": [{"server_id": first["id"], "models": []}] if first else []})
 
 
-@app.get("/api/benchmarks/suites/{suite_id}", dependencies=[Depends(require_user)])
-def bench_suite(suite_id: str):
-    """One suite."""
+@app.get("/api/benchmarks/suites/{suite_id}")
+def bench_suite(suite_id: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """One suite, for whoever may see it."""
+    items.require(sdb, "benchmark_suite", suite_id, p.user, access.VIEW, slug=_share_key(request))
     return _bench_call(_scheduler().get_suite, suite_id)
 
 
-@app.post("/api/benchmarks/suites", dependencies=[Depends(require_user)])
-def bench_save_suite(body: dict):
-    """Create or update a suite."""
-    return _bench_call(_scheduler().save_suite, body)
+@app.post("/api/benchmarks/suites")
+def bench_save_suite(body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Create a suite (``run_benchmarks``; it is the caller's) or replace one they manage. Its model entries name
+    machines (P3.2.9)."""
+    from .benchmarks import normalize_suite
+    sch = _scheduler()
+    sid = body.get("id") if isinstance(body, dict) else None
+    if sid and not isinstance(sid, str):
+        raise HTTPException(400, "A suite's id is a string of letters, digits, - and _.")
+    exists = bool(sid) and _bench_call(sch._suite_path, sid).exists()
+    if sid:
+        items.writable(sdb, "benchmark_suite", sid, me, exists=exists)
+    else:
+        items.check_create(me, "benchmark_suite")
+    _suite_gate(sdb, me, body)
+    suite = _bench_call(normalize_suite, body)
+    items.register(sdb, "benchmark_suite", suite["id"], me, suite["name"], path=sch._suite_path(suite["id"]))
+    return _bench_call(sch.save_suite, suite)
 
 
-@app.delete("/api/benchmarks/suites/{suite_id}", dependencies=[Depends(require_user)])
-def bench_delete_suite(suite_id: str):
-    """Delete a suite. Its finished runs are kept."""
+@app.delete("/api/benchmarks/suites/{suite_id}")
+def bench_delete_suite(suite_id: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Delete a suite the caller manages. Its finished runs are kept."""
+    items.require(sdb, "benchmark_suite", suite_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().delete_suite, suite_id)
+    items.delete(sdb, "benchmark_suite", suite_id, actor=me)
     return {"deleted": suite_id}
 
 
@@ -830,21 +1310,68 @@ class RunBody(BaseModel):
     name: Optional[str] = None
 
 
-@app.post("/api/benchmarks/runs", dependencies=[Depends(require_user)])
-def bench_start_run(body: RunBody):
-    """Start a benchmark run."""
+@app.post("/api/benchmarks/runs")
+def bench_start_run(body: RunBody, request: Request, me=Depends(require_cap("run_benchmarks")),
+                    sdb: DbSession = Depends(get_db, scope="function")):
+    """Start a benchmark run, the caller's: of a suite they may see, or of one given inline. Every model entry
+    passes the members' gate for the caller (P3.2.9), whoever saved the suite, and the caller must be admitted to
+    each pooled machine for benchmarks."""
     sch = _scheduler()
-    suite = body.suite or (_bench_call(sch.get_suite, body.suite_id) if body.suite_id else None)
-    if not suite:
+    if body.suite_id:
+        items.require(sdb, "benchmark_suite", body.suite_id, me, access.VIEW, slug=_share_key(request))
+        suite = _bench_call(sch.get_suite, body.suite_id)
+    elif body.suite:
+        suite = body.suite
+    else:
         raise HTTPException(400, "Give a suite_id or a suite.")
-    run = _bench_call(sch.create_run, suite, body.name)
+    _suite_gate(sdb, me, suite)
+    machines = [g.get("server_id") for g in suite.get("servers") or [] if isinstance(g, dict)]
+    _admit(sdb, me, machines, "benchmark")
+    if any(isinstance(sc, dict) and sc.get("mode") == "hybrid" and sc.get("enabled", True)
+           for sc in suite.get("scenarios") or []):
+        # a hybrid job's model is asked pooled prompts (its diplomat phases and chat answers), as a hybrid seat's is
+        _admit(sdb, me, machines, "pooled")
+    run = _bench_call(sch.create_run, suite, body.name, owner_id=me.id, session=sdb)
     return {"id": run["id"], "jobs": len(run["jobs"])}
 
 
-@app.get("/api/benchmarks/runs", dependencies=[Depends(require_user)])
-def bench_runs():
-    """Every run, with per-game progress."""
-    return _scheduler().list_runs()
+@app.get("/api/benchmarks/runs")
+def bench_runs(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """The runs the caller may see (and the one a share key opens), with per-game progress and what they may do to
+    each."""
+    key = _share_key(request)
+    out = _scheduler().list_runs(items.listed(sdb, "benchmark_run", me, slug=key))
+    _badge_benchmark_runs(out)
+    admin = _is_admin(me)
+    # what a queued job waits for names only the work the caller may see (P3.9.1)
+    name = work_access.namer(sdb, me, admin=admin)
+    for r in out:
+        r["jobs"] = [work_access.with_waiting(j, name) for j in r.get("jobs", [])]
+        if not admin:
+            # a machine's address is its owner's and the administrators' (the registry's routes are theirs)
+            r["servers"] = [{k: v for k, v in sv.items() if k != "base_url"} for sv in r.get("servers", [])]
+    return _with_perms(sdb, "benchmark_run", me, out, slug=key)
+
+
+def _badge_benchmark_runs(runs: list) -> None:
+    """Each benchmark job that ran on a machine whose model results do not count (design/phase4-helper.md P4.5.8 rule
+    11: not trusted, a site machine or an administrator's when it ran, nor trusted since) gets the "unverified
+    machine" badge (``unverified_machine``), and so does its run: the boards leave its games out. It marks copies
+    (``list_runs`` gives copies already; these are made here too, so no caller's dict, the scheduler's own above all,
+    keeps a badge once its machine is trusted), each badge decided again at each listing."""
+    from ..jobs import trust
+    bad = trust.not_counted((j.get("server_id"), j.get("standing")) for r in runs for j in r.get("jobs") or [])
+    for r in runs:
+        r.pop("unverified_machine", None)
+        jobs = []
+        for j in r.get("jobs") or []:
+            j = {k: v for k, v in j.items() if k != "unverified_machine"}
+            if j.get("server_id") in bad and (j.get("standing") or {}).get("vouched") is False:
+                j["unverified_machine"] = True
+                r["unverified_machine"] = True
+            jobs.append(j)
+        if "jobs" in r:
+            r["jobs"] = jobs
 
 
 class RunControl(BaseModel):
@@ -852,25 +1379,34 @@ class RunControl(BaseModel):
     action: str
 
 
-@app.post("/api/benchmarks/runs/{run_id}/control", dependencies=[Depends(require_user)])
-def bench_run_control(run_id: str, body: RunControl):
-    """Pause, resume or cancel a whole run."""
+@app.post("/api/benchmarks/runs/{run_id}/control")
+def bench_run_control(run_id: str, body: RunControl, request: Request, me=Depends(require_user),
+                      sdb: DbSession = Depends(get_db, scope="function")):
+    """Pause, resume, cancel or remove a whole run the caller manages."""
+    items.require(sdb, "benchmark_run", run_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().control_run, run_id, body.action)
+    if body.action == "remove":
+        items.delete(sdb, "benchmark_run", run_id, actor=me)
     return {"ok": True}
 
 
-@app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/control", dependencies=[Depends(require_user)])
-def bench_job_control(run_id: str, job_id: str, body: RunControl):
-    """Pause, resume, skip or retry one game in a run."""
+@app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/control")
+def bench_job_control(run_id: str, job_id: str, body: RunControl, request: Request, me=Depends(require_user),
+                      sdb: DbSession = Depends(get_db, scope="function")):
+    """Pause, resume, skip or retry one game in a run the caller manages."""
+    items.require(sdb, "benchmark_run", run_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().control_job, run_id, job_id, body.action)
     return {"ok": True}
 
 
-@app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/watch", dependencies=[Depends(require_user)])
-def bench_job_watch(run_id: str, job_id: str):
-    """Open a running benchmark game so it can be watched live."""
+@app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/watch")
+def bench_job_watch(run_id: str, job_id: str, request: Request, me=Depends(require_user),
+                    sdb: DbSession = Depends(get_db, scope="function")):
+    """Open a benchmark game so it can be watched live, for whoever may see its run. Opening one that is not
+    running loads it on the server, which is why this needs an account as well as the run's VIEW."""
+    items.require(sdb, "benchmark_run", run_id, me, access.VIEW, slug=_share_key(request))
     s = _bench_call(_scheduler().open_job_game, run_id, job_id)
-    return {"game_id": s.id, "spectator_token": s.spectator_token, "phase": s.game.s.phase}
+    return {"game_id": s.id, "spectator_token": s.spectator_token, "phase": s.game.phase}
 
 
 # ----------------------------------------------------------------------------
@@ -878,51 +1414,64 @@ def bench_job_watch(run_id: str, job_id: str):
 # ----------------------------------------------------------------------------
 def _map_call(fn, *args, **kw):
     """Call a map function, turning its errors into HTTP status codes."""
-    from ..engine import maps
     try:
         return fn(*args, **kw)
-    except maps.MapError as e:
+    except engine_api.MapError as e:
         raise HTTPException(400, str(e))
 
 
-@app.get("/api/maps", dependencies=[Depends(require_user)])
-def maps_list():
-    """Saved maps."""
-    from ..engine import maps
-    return maps.list_maps()
+def _with_perms(sdb: DbSession, kind: str, user, entries: list, key: str = "id", *, slug: Optional[str] = None) -> list:
+    """A listing's entries, each with what ``user`` may do to it (``Access.client``, with the share key ``slug`` the
+    listing was asked with), for the page's buttons."""
+    perms = items.permissions_by_ref(sdb, kind, user, [e[key] for e in entries], slug=slug)
+    return [dict(e, **perms.get(e[key], {})) for e in entries]
 
 
-@app.get("/api/maps/{map_id}", dependencies=[Depends(require_user)])
-def maps_get(map_id: str):
-    """One saved map."""
-    from ..engine import maps
-    return _map_call(maps.load_map, map_id)
+@app.get("/api/maps")
+def maps_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """The saved maps the caller may see (and the one a share key opens)."""
+    key = _share_key(request)
+    seen = items.listed(sdb, "map", p.user, slug=key)
+    return _with_perms(sdb, "map", p.user, [m for m in engine_api.list_maps() if seen is None or m["id"] in seen],
+                       slug=key)
 
 
-@app.put("/api/maps/{map_id}", dependencies=[Depends(require_user)])
-def maps_put(map_id: str, body: dict):
-    """Create or replace a saved map."""
-    from ..engine import maps
+@app.get("/api/maps/{map_id}")
+def maps_get(map_id: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """One saved map, for whoever may see it."""
+    items.require(sdb, "map", map_id, p.user, access.VIEW, slug=_share_key(request))
+    return _map_call(engine_api.load_map, map_id)
+
+
+@app.put("/api/maps/{map_id}")
+def maps_put(map_id: str, body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Create a map (``create_games``; it is the caller's) or replace one the caller manages. The id it is saved under
+    is checked before anything is written."""
+    ref = engine_api.map_ref(map_id)
+    if not ref:
+        raise HTTPException(400, f"Invalid map id '{map_id}'.")
+    items.writable(sdb, "map", ref, me, exists=_map_call(engine_api.map_file, ref).exists())
     body = dict(body)
-    body["id"] = map_id
-    clean, warnings = _map_call(maps.save_map, get_rules(), body)
-    return {"map": maps.summary(clean), "warnings": warnings}
+    body["id"] = ref
+    items.register(sdb, "map", ref, me, str(body.get("name") or ref), path=engine_api.map_file(ref))
+    clean, warnings = _map_call(engine_api.save_map, body)
+    return {"map": engine_api.map_summary(clean), "warnings": warnings}
 
 
-@app.delete("/api/maps/{map_id}", dependencies=[Depends(require_user)])
-def maps_delete(map_id: str):
-    """Delete a saved map."""
-    from ..engine import maps
-    _map_call(maps.delete_map, map_id)
+@app.delete("/api/maps/{map_id}")
+def maps_delete(map_id: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Delete a saved map the caller manages."""
+    items.require(sdb, "map", map_id, me, access.MANAGE, slug=_share_key(request))
+    _map_call(engine_api.delete_map, map_id)
+    items.delete(sdb, "map", map_id, actor=me)
     return {"deleted": map_id}
 
 
-@app.post("/api/maps/validate", dependencies=[Depends(require_user)])
+@app.post("/api/maps/validate", dependencies=[Depends(require_cap("create_games"))])
 def maps_validate(body: dict):
     """Check a map for problems - unreachable starts, missing resources - without saving it."""
-    from ..engine import maps
-    clean, warnings = _map_call(maps.validate, get_rules(), body)
-    return {"map": maps.summary(clean), "warnings": warnings}
+    clean, warnings = _map_call(engine_api.validate_map, body)
+    return {"map": engine_api.map_summary(clean), "warnings": warnings}
 
 
 class MapGenBody(BaseModel):
@@ -942,54 +1491,50 @@ class MapGenBody(BaseModel):
     resources: Optional[dict] = None  # density and per-resource rules, as in a game's config
 
 
-@app.post("/api/maps/generate", dependencies=[Depends(require_user)])
+@app.post("/api/maps/generate", dependencies=[Depends(require_cap("create_games"))])
 def maps_generate(body: MapGenBody):
     """Generate a map, for the editor to start from."""
-    from ..engine import maps
-    R = get_rules()
-    size = R.const["map_sizes"].get(body.map_size or "small", R.const["map_sizes"]["small"])
+    sizes = engine_api.map_sizes()
+    size = sizes.get(body.map_size or "small", sizes["small"])
     w, h = body.width or size["width"], body.height or size["height"]
     if body.blank:
-        if body.blank not in R.terrains or R.terrains[body.blank]["type"] not in ("Land", "Water"):
-            raise HTTPException(400, f"Unknown base terrain '{body.blank}'.")
-        return _map_call(maps.blank_map, w, h, body.blank, body.name)
+        return _map_call(engine_api.blank_map, w, h, body.blank, body.name)
     players = body.players if body.players is not None else size["players"]
     cs = body.city_states if body.city_states is not None else size["city_states"]
     options = {"map_edges": body.map_edges, "river_density": body.river_density, "resources": body.resources}
-    return _map_call(maps.generated_map, R, w, h, body.map_type, max(1, players), max(0, cs), body.seed,
+    return _map_call(engine_api.generate_map, w, h, body.map_type, max(1, players), max(0, cs), body.seed,
                      body.ruins, body.name, options)
 
 
 @app.post("/api/games/{gid}/export_map")
 def maps_from_game(gid: str, request: Request, p: Principal = Depends(principal),
-                   sdb: DbSession = Depends(get_db)):
+                   sdb: DbSession = Depends(get_db, scope="function")):
     """Extract the terrain of a game as a reusable map.
 
     Gated on VIEW: the map is the shape of somebody's game world, and handing it to a stranger
     reveals the layout of a private game. Found by scripts/audit_routes.py, which exists because
     this is exactly the kind of route that gets added and forgotten.
     """
-    from ..engine import maps
     s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request)
-    with s.lock:
-        return maps.map_from_game(s.game, f"{s.name} terrain")
+    with s.lock, _crash_guard(s):
+        return s.game.export_map(f"{s.name} terrain")
 
 
 # ----------------------------------------------------------------------------
 # scenarios and the scenario editor
 # ----------------------------------------------------------------------------
-import copy as _copy
 import secrets as _secrets
 import threading as _threading
 
-EDITORS: dict[str, dict] = {}     # editor id -> {"game", "undo": [state dicts], "meta", "lock", "t"}
+EDITORS: dict[str, dict] = {}     # editor id -> {"game" (EngineGame), "undo", "meta", "lock", "t", "owner"}
 EDITOR_UNDO = 25
 
 
-def _editor(eid: str) -> dict:
-    """The open scenario editor with this id, or a 404."""
+def _editor(eid: str, user) -> dict:
+    """The open scenario editor with this id, for the account that opened it or an administrator; a 404 for anyone
+    else (P3.2.4: an editing session is its creator's), as for one that has expired."""
     ed = EDITORS.get(eid)
-    if ed is None:
+    if ed is None or (user is None or (ed.get("owner") != user.id and not _is_admin(user))):
         raise HTTPException(404, "This scenario editor session has expired; reopen the scenario.")
     ed["t"] = time.time()
     return ed
@@ -997,13 +1542,28 @@ def _editor(eid: str) -> dict:
 
 def _editor_payload(eid: str, ed: dict, results=None) -> dict:
     """The editor's current state, as the client needs it."""
-    from ..engine import scenario as S
     g = ed["game"]
-    view = client_view(g, None, event_limit=0)
+    view = g.view(None, event_limit=0)
     for k in ("events", "thoughts", "messages", "negotiations", "stats", "empires"):
         view.pop(k, None)
-    return {"editor_id": eid, "meta": ed["meta"], "view": view, "overview": S.overview(g),
+    return {"editor_id": eid, "meta": ed["meta"], "view": view, "overview": g.scenario_overview(),
             "can_undo": bool(ed["undo"]), "results": results}
+
+
+def _game_seat_default(g: EngineGame, seat) -> dict:
+    """A running game's seat as a scenario's default seat (``g`` the copy of its game the scenario starts from): its
+    type and name, and a hybrid seat's settings, its bot and its handicap, so a scenario made from a game with a hybrid
+    seat launches with it. A model block stays behind: the launch names the machine. A bot chosen as the best one is
+    "Best bot" again, pinned when the scenario is launched (the mark is the server's, never taken from a seat)."""
+    out = {"type": seat.type, "label": seat.name}
+    if seat.type == "hybrid":
+        out["hybrid"] = dict(seat.hybrid or {})
+        bot = dict(seat.bot or {})
+        if bot.pop("chosen_as", None) == "best":
+            bot["profile"] = "best"
+        out["bot"] = bot
+        out["handicap"] = g.player(seat.player).get("handicap") or "ai"
+    return out
 
 
 class EditorOpen(BaseModel):
@@ -1017,11 +1577,15 @@ class EditorOpen(BaseModel):
     players: list[dict] = []          # [{"nation", "difficulty", "type"}] for new games
 
 
-@app.post("/api/scenario-editor", dependencies=[Depends(require_user)])
-def editor_open(body: EditorOpen):
-    """Open a scenario editor and return its id."""
-    from ..engine import scenario as S
-    from ..engine.game import Game
+@app.post("/api/scenario-editor")
+def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(principal),
+                sdb: DbSession = Depends(get_db, scope="function")):
+    """Open a scenario editor and return its id: the caller's (``create_games``), on a map or a scenario they may
+    see. An editor opened on a live game or a save holds that game's whole state, every civilization's included, so
+    it needs what the game's god view does not: managing the game."""
+    me = require_user(request, p)
+    from ..auth.deps import check_cap
+    check_cap(me, "create_games")
     meta = {"id": "", "name": "", "description": "", "seats": None}
     try:
         if body.source in ("map", "generate"):
@@ -1029,53 +1593,58 @@ def editor_open(body: EditorOpen):
             if body.source == "map":
                 if not body.map:
                     raise HTTPException(400, "Choose a map.")
+                _may_use(sdb, me, "map", body.map)
                 cfg["map"] = body.map
+            elif cfg.get("map"):
+                _may_use(sdb, me, "map", cfg["map"])
             players = body.players or [{"type": "human"}, {"type": "llm"}]
-            if len(players) > get_rules().const["max_players"]:
+            if len(players) > engine_api.max_players():
                 raise HTTPException(400, "Too many players.")
-            cfg["players"] = [{"nation": p.get("nation") or None, "difficulty": p.get("difficulty") or None,
-                               "controller": (p.get("type") if p.get("type") in ("human", "llm", "mcp", "bot") else "human"),
-                               "name": p.get("civ_name") or None} for p in players]
-            g = Game.new(cfg)
-            meta["seats"] = [{"type": p.get("type") or "bot"} for p in players]
+            cfg["players"] = [{"nation": pl.get("nation") or None, "difficulty": pl.get("difficulty") or None,
+                               "controller": (pl.get("type") if pl.get("type") in ("human", "llm", "mcp", "bot", "hybrid")
+                                              else "human"),
+                               "name": pl.get("civ_name") or None} for pl in players]
+            g = EngineGame.new(cfg)
+            meta["seats"] = [{"type": pl.get("type") or "bot"} for pl in players]
             meta["name"] = f"Scenario on {cfg.get('map') or cfg.get('map_type', 'a new map')}"
         elif body.source == "scenario":
-            data = S.load_scenario(body.scenario or "")
-            g = S.game_from_state(data["state"])
+            _may_use(sdb, me, "scenario", body.scenario or "")
+            data = engine_api.load_scenario(body.scenario or "")
+            g = EngineGame.from_state(data["state"])
             meta.update({k: data.get(k) for k in ("id", "name", "description", "seats")})
         elif body.source == "save":
-            from .session import load_save_file
-            p = (SAVE_DIR / (body.save or "")).resolve()
-            if SAVE_DIR.resolve() not in p.parents or not p.exists():
+            _require_save_access(sdb, p, body.save or "", access.MANAGE)
+            path = (SAVE_DIR / (body.save or "")).resolve()
+            if SAVE_DIR.resolve() not in path.parents or not path.exists():
                 raise HTTPException(404, "Save not found.")
-            g = S.game_from_state(load_save_file(p)["state"])
+            # the state alone: a scenario starts with no history, so its journal is never read
+            g = EngineGame.from_save(engine_api.read_save(path), history=False)
             meta["name"] = f"Scenario from {body.save}"
         elif body.source == "game":
-            s = _session(body.game_id or "")
+            s, _row, _perms = _gate(sdb, body.game_id or "", p, access.MANAGE, request)
             with s.lock:
-                s.game.save_rng()
-                g = S.game_from_state(s.game.s.to_dict())
+                g = EngineGame.from_state(s.game.state_dict())
             meta["name"] = f"Scenario from {s.name} turn {g.turn}"
-            meta["seats"] = [{"type": seat.type if seat.type != "human" else "human", "label": seat.name} for seat in s.seats]
+            meta["seats"] = [_game_seat_default(g, seat) for seat in s.seats]
         else:
             raise HTTPException(400, f"Unknown source '{body.source}'.")
     except (ValueError, ActionError) as e:
         raise HTTPException(400, str(e))
     if meta["seats"] is None:
-        meta["seats"] = S.default_seats(g)
-    meta["seats"] = S.normalize_seats(g, meta["seats"])
+        meta["seats"] = g.default_seats()
+    meta["seats"] = g.normalize_seats(meta["seats"])
     # drop idle editor sessions (an hour without use)
     for k in [k for k, v in EDITORS.items() if time.time() - v["t"] > 3600]:
         EDITORS.pop(k, None)
     eid = _secrets.token_hex(4)
-    EDITORS[eid] = {"game": g, "undo": [], "meta": meta, "lock": _threading.Lock(), "t": time.time()}
+    EDITORS[eid] = {"game": g, "undo": [], "meta": meta, "lock": _threading.Lock(), "t": time.time(), "owner": me.id}
     return _editor_payload(eid, EDITORS[eid])
 
 
-@app.get("/api/scenario-editor/{eid}", dependencies=[Depends(require_user)])
-def editor_get(eid: str):
+@app.get("/api/scenario-editor/{eid}")
+def editor_get(eid: str, me=Depends(require_user)):
     """The current state of an open editor."""
-    return _editor_payload(eid, _editor(eid))
+    return _editor_payload(eid, _editor(eid, me))
 
 
 class EditorOps(BaseModel):
@@ -1083,34 +1652,31 @@ class EditorOps(BaseModel):
     ops: list[dict]
 
 
-@app.post("/api/scenario-editor/{eid}/ops", dependencies=[Depends(require_user)])
-def editor_ops(eid: str, body: EditorOps):
+@app.post("/api/scenario-editor/{eid}/ops")
+def editor_ops(eid: str, body: EditorOps, me=Depends(require_user)):
     """Apply edits to the scenario being edited, keeping an undo step."""
-    from ..engine import scenario as S
-    ed = _editor(eid)
+    ed = _editor(eid, me)
     with ed["lock"]:
         g = ed["game"]
-        g.save_rng()
-        before = _copy.deepcopy(g.s.to_dict())
+        before = g.state_dict()
         try:
-            results = S.apply_ops(g, body.ops)
+            results = g.apply_ops(body.ops)
         except ActionError as e:
-            ed["game"] = S.game_from_state(before)        # operations are all-or-nothing
+            ed["game"] = EngineGame.from_state(before)        # operations are all-or-nothing
             raise HTTPException(400, str(e))
         ed["undo"].append(before)
         del ed["undo"][:-EDITOR_UNDO]
         return _editor_payload(eid, ed, results)
 
 
-@app.post("/api/scenario-editor/{eid}/undo", dependencies=[Depends(require_user)])
-def editor_undo(eid: str):
+@app.post("/api/scenario-editor/{eid}/undo")
+def editor_undo(eid: str, me=Depends(require_user)):
     """Undo the last set of edits."""
-    from ..engine import scenario as S
-    ed = _editor(eid)
+    ed = _editor(eid, me)
     with ed["lock"]:
         if not ed["undo"]:
             raise HTTPException(400, "Nothing to undo.")
-        ed["game"] = S.game_from_state(ed["undo"].pop())
+        ed["game"] = EngineGame.from_state(ed["undo"].pop())
         return _editor_payload(eid, ed)
 
 
@@ -1122,41 +1688,97 @@ class EditorMeta(BaseModel):
     seats: Optional[list] = None
 
 
-@app.post("/api/scenario-editor/{eid}/meta", dependencies=[Depends(require_user)])
-def editor_meta(eid: str, body: EditorMeta):
-    """Rename the scenario being edited."""
-    from ..engine import scenario as S
-    ed = _editor(eid)
+@app.post("/api/scenario-editor/{eid}/meta")
+def editor_meta(eid: str, body: EditorMeta, me=Depends(require_user)):
+    """Rename the scenario being edited, or set its seats (a member's model blocks name machines, P3.2.9)."""
+    ed = _editor(eid, me)
+    seats = None
+    if body.seats is not None:
+        try:
+            normal = ed["game"].normalize_seats(body.seats)
+        except ActionError as e:            # a seat's handicap or automatic decisions the engine does not read
+            raise HTTPException(400, str(e)) from None
+        sent = body.seats
+        seats = [_scenario_seat(_member_seat(seat, me, playing=False), i, sent[i] if i < len(sent) else None)
+                 if isinstance(seat, dict) else seat for i, seat in enumerate(normal)]
     for k in ("id", "name", "description"):
         if getattr(body, k) is not None:
             ed["meta"][k] = getattr(body, k)
-    if body.seats is not None:
-        ed["meta"]["seats"] = S.normalize_seats(ed["game"], body.seats)
+    if seats is not None:
+        ed["meta"]["seats"] = seats
     return {"meta": ed["meta"]}
 
 
-@app.post("/api/scenario-editor/{eid}/save", dependencies=[Depends(require_user)])
-def editor_save(eid: str, body: EditorMeta):
-    """Save the scenario being edited."""
-    from ..engine import scenario as S
-    ed = _editor(eid)
-    editor_meta(eid, body)
+def _scenario_seat(seat: dict, i: int, sent=None) -> dict:
+    """A scenario's seat (``seat``, as ``normalize_seats`` made it of ``sent``, the entry the caller sent for it, if
+    any) checked as a game's seat is, so a scenario is never saved with a seat its launch would refuse: a 400 with the
+    reason, naming the seat as ``normalize_seats`` does ("Seat 1" for P1), when it is not allowed.
+
+    - A model block or a bot sent as anything but an object is refused, as a game's seat refuses it
+      (``servers.llm_block``, ``session._clean_bot``), and so are a hybrid seat's settings (``normalize_hybrid``):
+      ``normalize_seats`` keeps only objects, so the seat would otherwise be saved with defaults the caller never
+      sent. A non-hybrid seat's ``hybrid``, which nothing reads, is left to ``normalize_seats``, as a game's seat
+      ignores it.
+    - The bot is kept as the server keeps a seat's (``_clean_bot``: its aggression a number, no ``chosen_as``); "Best
+      bot" stays ``best``, pinned when the scenario is launched.
+    - A hybrid seat's settings are checked as a game's are (``normalize_hybrid``, P3.6.2) and kept as they read, the
+      owners as the whole map, and its handicap one there is."""
+    from .. import servers
+    from ..agents import hybrid
+    given = sent if isinstance(sent, dict) else {}
+    try:
+        servers.llm_block(given.get("llm"))
+        bot = given.get("bot") if given.get("bot") is not None else seat.get("bot")
+        if bot is not None:
+            seat = {**seat, "bot": _clean_bot(bot)}
+        if seat.get("type") != "hybrid":
+            return seat
+        settings = given.get("hybrid")
+        block = hybrid.normalize_hybrid(settings if settings is not None and not isinstance(settings, dict)
+                                        else seat.get("hybrid"))
+        handicap = hybrid.check_handicap(seat.get("handicap"))
+    except ValueError as e:
+        raise HTTPException(400, f"Seat {i}: {e}") from None
+    return {**seat, "hybrid": block, "handicap": handicap}
+
+
+@app.post("/api/scenario-editor/{eid}/save")
+def editor_save(eid: str, body: EditorMeta, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Save the scenario being edited: a new scenario is the caller's (``create_games``), and one already saved under
+    that id needs MANAGE on it, both checked before anything is written. Every seat's model block passes the members'
+    gate (P3.2.9), the ones it was opened with included: a scenario saved by an administrator with a seat that
+    describes its own provider is saved by a member only once that seat names a machine. Its bot seats' profiles
+    must be ones the caller may see."""
+    ed = _editor(eid, me)
+    editor_meta(eid, body, me)
     m = ed["meta"]
+    m["seats"] = [_scenario_seat(_member_seat(seat, me, playing=False), i) if isinstance(seat, dict) else seat
+                  for i, seat in enumerate(m.get("seats") or [])]
     if not (m.get("id") or m.get("name")):
         raise HTTPException(400, "Give the scenario a name.")
+    _seat_profiles(sdb, me, m["seats"])
+    ref = engine_api.scenario_ref(m.get("id") or m["name"])
+    if not ref:
+        raise HTTPException(400, "Give the scenario a name with a letter or a digit in it.")
+    try:
+        path = engine_api.scenario_file(ref)
+    except ActionError as e:
+        raise HTTPException(400, str(e))
+    items.writable(sdb, "scenario", ref, me, exists=path.exists())
+    items.register(sdb, "scenario", ref, me, m.get("name") or ref, path=path)
     with ed["lock"]:
         try:
-            summ = S.save_scenario(ed["game"], m.get("id") or m["name"], m.get("name") or m["id"],
-                                   m.get("description", ""), m.get("seats"))
+            summ = ed["game"].save_scenario(ref, m.get("name") or ref, m.get("description", ""), m.get("seats"))
         except ActionError as e:
             raise HTTPException(400, str(e))
     m["id"] = summ["id"]
     return summ
 
 
-@app.delete("/api/scenario-editor/{eid}", dependencies=[Depends(require_user)])
-def editor_close(eid: str):
+@app.delete("/api/scenario-editor/{eid}")
+def editor_close(eid: str, me=Depends(require_user)):
     """Close an editor and release its game."""
+    _editor(eid, me)
     EDITORS.pop(eid, None)
     return {"closed": eid}
 
@@ -1164,35 +1786,37 @@ def editor_close(eid: str):
 @app.get("/api/scenario-ops", dependencies=[Depends(require_user)])
 def scenario_ops_help():
     """The list of edit operations, with their parameters. The reference for the Operations tab."""
-    from ..engine import scenario as S
-    return S.ops_help()
+    return engine_api.scenario_ops_help()
 
 
-@app.get("/api/scenarios", dependencies=[Depends(require_user)])
-def scenarios_list():
-    """Saved scenarios."""
-    from ..engine import scenario as S
-    return S.list_scenarios()
+@app.get("/api/scenarios")
+def scenarios_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """The saved scenarios the caller may see (and the one a share key opens)."""
+    key = _share_key(request)
+    seen = items.listed(sdb, "scenario", p.user, slug=key)
+    return _with_perms(sdb, "scenario", p.user,
+                       [s for s in engine_api.list_scenarios() if seen is None or s["id"] in seen], slug=key)
 
 
-@app.get("/api/scenarios/{sid}", dependencies=[Depends(require_user)])
-def scenarios_get(sid: str):
-    """One scenario."""
-    from ..engine import scenario as S
+@app.get("/api/scenarios/{sid}")
+def scenarios_get(sid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """One scenario, for whoever may see it."""
+    items.require(sdb, "scenario", sid, p.user, access.VIEW, slug=_share_key(request))
     try:
-        return S.summary(S.load_scenario(sid))
+        return engine_api.scenario_summary(engine_api.load_scenario(sid))
     except ActionError as e:
         raise HTTPException(404, str(e))
 
 
-@app.delete("/api/scenarios/{sid}", dependencies=[Depends(require_user)])
-def scenarios_delete(sid: str):
-    """Delete a scenario."""
-    from ..engine import scenario as S
+@app.delete("/api/scenarios/{sid}")
+def scenarios_delete(sid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Delete a scenario the caller manages."""
+    items.require(sdb, "scenario", sid, me, access.MANAGE, slug=_share_key(request))
     try:
-        S.delete_scenario(sid)
+        engine_api.delete_scenario(sid)
     except ActionError as e:
         raise HTTPException(400, str(e))
+    items.delete(sdb, "scenario", sid, actor=me)
     return {"deleted": sid}
 
 
@@ -1202,15 +1826,44 @@ class LaunchBody(BaseModel):
     seats: list[dict] = []
 
 
-@app.post("/api/scenarios/{sid}/launch", dependencies=[Depends(require_user)])
-def scenarios_launch(sid: str, body: LaunchBody):
-    """Start a playable game from a saved scenario."""
-    from ..engine import scenario as S
+@app.post("/api/scenarios/{sid}/launch")
+def scenarios_launch(sid: str, body: LaunchBody, request: Request, me=Depends(require_cap("create_games")),
+                     sdb: DbSession = Depends(get_db, scope="function")):
+    """Start a playable game from a saved scenario the caller may see, as the caller's lobby game: it counts against
+    their game limit, it has its row in the games index with them as its owner, and every seat's model block, the
+    scenario's own included, passes the members' gate (P3.2.9) and admission before anything starts."""
+    items.require(sdb, "scenario", sid, me, access.VIEW, slug=_share_key(request))
+    _game_limit(sdb, me)
+    checked: list = []
+
+    def check(seat: dict) -> dict:
+        """One seat as the scenario and the request make it, through the members' gate: its bot profile one the
+        caller may see, whichever of the two named it."""
+        _seat_profiles(sdb, me, [seat])
+        seat = _member_seat(seat, me)
+        checked.append(seat)
+        return seat
+
     try:
-        scn = S.load_scenario(sid)
-        s = manager.create_from_scenario(scn, body.seats, body.name or scn["name"])
+        scn = engine_api.load_scenario(sid)
+        # made but not yet registered: a refusal below leaves nothing behind, on the disk or in the list
+        s = manager.create_from_scenario(scn, body.seats, body.name or scn["name"], register=False, start=False,
+                                         check_seat=check)
     except (ActionError, ValueError) as e:
         raise HTTPException(400, str(e))
+    _authorize_seats(sdb, me, checked)
+    s.owner_id = me.id
+    manager.register_new(s)
+    try:
+        ownership.register(sdb, s, me, visibility=access.PRIVATE)
+        sdb.flush()
+    except BaseException:
+        sdb.rollback()                # as create_game: the request's write undone before the stop writes the row
+        manager.delete(s.id)
+        raise
+    s.start()
+    audit.record(sdb, "game.created", actor=me, object_type="game", object_id=s.id, scenario=sid,
+                 seats=len(s.seats), visibility=access.PRIVATE)
     return s.info(include_tokens=True)
 
 
@@ -1238,11 +1891,21 @@ def _probe_call(fn, *a, **kw):
         raise HTTPException(400, str(e))
 
 
-@app.get("/api/probes", dependencies=[Depends(require_user)])
-def probes_list():
-    """Saved probes."""
+def _probe_scenario(sdb: DbSession, user, data) -> None:
+    """A probe plays on a scenario, which the caller must be able to see: checking a probe reads its scenario's
+    civilizations, so without this a probe would be a way to read somebody's private scenario."""
+    if isinstance(data, dict) and data.get("scenario"):
+        _may_use(sdb, user, "scenario", data["scenario"])
+
+
+@app.get("/api/probes")
+def probes_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """The saved probes the caller may see (and the one a share key opens)."""
     from .. import probes as P
-    return P.list_probes()
+    key = _share_key(request)
+    seen = items.listed(sdb, "probe", p.user, slug=key)
+    return _with_perms(sdb, "probe", p.user, [x for x in P.list_probes() if seen is None or x["id"] in seen],
+                       slug=key)
 
 
 @app.get("/api/probes/example", dependencies=[Depends(require_user)])
@@ -1252,223 +1915,538 @@ def probes_example(scenario: str, subject: int = 1, counterparty: int = 0):
     return P.example_probe(scenario, subject, counterparty)
 
 
-@app.get("/api/probes/{pid}", dependencies=[Depends(require_user)])
-def probes_get(pid: str):
-    """One probe."""
+@app.get("/api/probes/{pid}")
+def probes_get(pid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """One probe, for whoever may see it."""
     from .. import probes as P
+    items.require(sdb, "probe", pid, p.user, access.VIEW, slug=_share_key(request))
     return _probe_call(P.load_probe, pid)
 
 
-@app.put("/api/probes/{pid}", dependencies=[Depends(require_user)])
-def probes_put(pid: str, body: dict):
-    """Create or replace a probe."""
+@app.put("/api/probes/{pid}")
+def probes_put(pid: str, body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Create a probe (``run_probes``; it is the caller's) or replace one the caller manages, on a scenario they may
+    see. The id it is saved under is checked before anything is written."""
     from .. import probes as P
+    ref = P.slug(pid)
+    path = _probe_call(P._path, ref)
+    items.writable(sdb, "probe", ref, me, exists=path.exists())
+    _probe_scenario(sdb, me, body)
     body = dict(body)
-    body["id"] = pid
+    body["id"] = ref
+    items.register(sdb, "probe", ref, me, str(body.get("name") or ref)[:100], path=path)
     return _probe_call(P.save_probe, body)
 
 
-@app.post("/api/probes/validate", dependencies=[Depends(require_user)])
-def probes_validate(body: dict):
-    """Check a probe's cases against its scenario without running them."""
+@app.post("/api/probes/validate")
+def probes_validate(body: dict, me=Depends(require_cap("run_probes")), sdb: DbSession = Depends(get_db, scope="function")):
+    """Check a probe's cases against its scenario, one the caller may see, without running them."""
     from .. import probes as P
+    _probe_scenario(sdb, me, body)
     return _probe_call(P.validate, body)
 
 
-@app.delete("/api/probes/{pid}", dependencies=[Depends(require_user)])
-def probes_delete(pid: str):
-    """Delete a probe."""
+@app.delete("/api/probes/{pid}")
+def probes_delete(pid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Delete a probe the caller manages."""
     from .. import probes as P
+    items.require(sdb, "probe", pid, me, access.MANAGE, slug=_share_key(request))
     _probe_call(P.delete_probe, pid)
+    items.delete(sdb, "probe", pid, actor=me)
     return {"deleted": pid}
 
 
 class ProbeRunBody(BaseModel):
-    """Which model to run a probe against, and how many repeats."""
+    """Which model to run a probe against, and how many repeats; ``mode`` ``hybrid`` seats it as a hybrid seat whose
+    model decides ``owners`` (a preset or a map) beside ``bot_profile``'s bot (design/phase3-features.md P3.6.9)."""
     llm: dict
     repeats: Optional[int] = None
     name: str = ""
     cases: Optional[list[str]] = None
+    mode: str = "full"
+    owners: Optional[Any] = None
+    bot_profile: Optional[str] = None
 
 
-@app.post("/api/probes/{pid}/run", dependencies=[Depends(require_user)])
-def probes_run(pid: str, body: ProbeRunBody):
-    """Run a probe: every case, from the same starting state, against one model."""
-    return _probe_call(_probes().start, pid, body.llm, body.repeats, body.name, body.cases)
+def _probe_subject(sdb: DbSession, user, llm, purposes=("probe",)) -> dict:
+    """A probe run's subject through the members' gate (P3.2.9), as it will be played: the scripted bot (``provider:
+    bot``, a profile the caller may see), or a model on a machine the caller names, never describes, and is admitted
+    to for each of ``purposes`` (``probes.case_purposes``: ``probe`` for its turn cases, ``pooled`` for its offer and
+    message cases, P3.3.7)."""
+    from .. import servers
+    llm = servers.llm_block(llm) if not isinstance(llm, dict) else dict(llm)
+    if str(llm.get("provider") or "").lower() == "bot":
+        _may_use(sdb, user, "bot_profile", llm.get("profile"))
+        return {k: llm[k] for k in ("provider", "aggression", "profile") if k in llm}
+    if not _is_admin(user):
+        bad = [k for k in DESCRIBING_KEYS if llm.get(k) not in (None, "")]
+        if bad:
+            raise HTTPException(400, "A probe's subject names the machine its model plays on; it does not describe "
+                                     f"it ({', '.join(bad)}). Pick one of the machines you may use.")
+    try:
+        checked = servers.member_llm(llm, user, required=True)
+    except servers.SeatBlockError as e:
+        raise HTTPException(e.status, str(e)) from None
+    for purpose in purposes:
+        _admit(sdb, user, [checked.get("server_id")], purpose)
+    return checked
 
 
-@app.get("/api/probe-runs", dependencies=[Depends(require_user)])
-def probe_runs():
-    """Every probe run."""
+@app.post("/api/probes/{pid}/run")
+def probes_run(pid: str, body: ProbeRunBody, request: Request, me=Depends(require_cap("run_probes")),
+               sdb: DbSession = Depends(get_db, scope="function")):
+    """Run a probe the caller may see: every case, from the same starting state, against one model. The run is the
+    caller's, and its subject passes the members' gate."""
+    from .. import probes as P
+    items.require(sdb, "probe", pid, me, access.VIEW, slug=_share_key(request))
+    # the cases play on the probe's scenario, and an opened case is its state: a probe shared wider than its
+    # scenario runs only for those who may see the scenario too
+    probe = _probe_call(P.load_probe, pid)
+    _probe_scenario(sdb, me, probe)
+    # a hybrid run's settings are checked before its machine is: their refusal is the caller's to fix first
+    _probe_call(P.hybrid_settings, body.mode, body.llm if isinstance(body.llm, dict) else {}, body.owners,
+                body.bot_profile)
+    if body.mode == "hybrid":
+        _may_use(sdb, me, "bot_profile", body.bot_profile)
+    llm = _probe_subject(sdb, me, body.llm, _probe_call(P.case_purposes, probe, body.cases, body.mode))
+    return _probe_call(_probes().start, pid, llm, body.repeats, body.name, body.cases, owner_id=me.id, session=sdb,
+                       mode=body.mode, owners=body.owners, bot_profile=body.bot_profile)
+
+
+def _probe_status(sdb: DbSession, user, runner) -> dict:
+    """The probe runner's status as ``user`` may see it: the queue and the live cases of the runs they may see only
+    (a live case carries the subject's thoughts)."""
+    status = runner.status()
+    seen = items.listed(sdb, "probe_run", user)
+    if seen is None:
+        return status
+    live = status.get("live") or {}
+    return {"queue": [r for r in status.get("queue", []) if r in seen],
+            "live": live if live.get("run") in seen else {},
+            "running": [r for r in status.get("running", []) if r.get("run") in seen]}
+
+
+@app.get("/api/probe-runs")
+def probe_runs(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """The probe runs the caller may see (and the one a share key opens)."""
     runner = _probes()
+    key = _share_key(request)
+    seen = items.listed(sdb, "probe_run", p.user, slug=key)
     out = []
-    for r in runner.list_runs():
+    listed = [r for r in runner.list_runs() if seen is None or r.get("id") in seen]
+    # a run on a machine whose model results do not count (P4.5.8 rule 11) carries the "unverified machine" badge
+    from ..jobs import trust
+    bad = trust.not_counted(((r.get("llm") or {}).get("server_id"), r.get("standing")) for r in listed)
+    for r in listed:
         out.append({k: r.get(k) for k in ("id", "name", "status", "done", "created", "started", "finished",
-                                          "summary", "error", "repeats")} |
+                                          "summary", "error", "repeats", "mode", "hybrid")} |
                    {"total": len(r.get("jobs", [])), "probe_id": r["probe"].get("id"), "probe_name": r["probe"].get("name"),
-                    "model": r.get("llm", {}).get("model"), "provider": r.get("llm", {}).get("provider")})
-    return {"runs": out, "status": runner.status()}
+                    "model": r.get("llm", {}).get("model"), "provider": r.get("llm", {}).get("provider"),
+                    "unverified_machine": _probe_unverified(r, bad)})
+    return {"runs": _with_perms(sdb, "probe_run", p.user, out, slug=key), "status": _probe_status(sdb, p.user, runner)}
 
 
-@app.get("/api/probe-runs/{rid}", dependencies=[Depends(require_user)])
-def probe_run(rid: str):
-    """One probe run, with per-case results."""
+@app.get("/api/probe-runs/{rid}")
+def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """One probe run, with per-case results, for whoever may see it."""
     runner = _probes()
+    _row, perms = items.require(sdb, "probe_run", rid, p.user, access.VIEW, slug=_share_key(request))
     run = _probe_call(runner.get_run, rid)
-    return {"run": run, "results": runner.results(rid), "status": runner.status()}
+    from ..jobs import trust
+    run["unverified_machine"] = _probe_unverified(run, trust.not_counted(
+        [((run.get("llm") or {}).get("server_id"), run.get("standing"))]))
+    admin = _is_admin(p.user)
+    # what a queued run waits for names only the work the caller may see (P3.9.1)
+    run = work_access.with_waiting(run, work_access.namer(sdb, p.user, admin=admin))
+    if not admin:
+        # an administrator's subject may describe its machine (P3.2.9); its address and key variable stay theirs
+        run["llm"] = {k: v for k, v in (run.get("llm") or {}).items() if k not in DESCRIBING_KEYS}
+    return {"run": run, "results": runner.results(rid), "status": _probe_status(sdb, p.user, runner),
+            **perms.client()}
 
 
-@app.post("/api/probe-runs/{rid}/stop", dependencies=[Depends(require_user)])
-def probe_run_stop(rid: str):
-    """Stop a probe run in progress."""
+def _probe_unverified(run: dict, bad: set) -> bool:
+    """Whether a probe run's model ran on a machine whose results do not count (P4.5.8 rule 11)."""
+    st = run.get("standing")
+    return bool((run.get("llm") or {}).get("server_id") in bad and isinstance(st, dict) and st.get("vouched") is False)
+
+
+@app.post("/api/probe-runs/{rid}/stop")
+def probe_run_stop(rid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Stop a probe run in progress that the caller manages."""
+    items.require(sdb, "probe_run", rid, me, access.MANAGE, slug=_share_key(request))
     return _probe_call(_probes().stop, rid)
 
 
-@app.delete("/api/probe-runs/{rid}", dependencies=[Depends(require_user)])
-def probe_run_delete(rid: str):
-    """Delete a probe run."""
+@app.delete("/api/probe-runs/{rid}")
+def probe_run_delete(rid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Delete a probe run the caller manages."""
+    items.require(sdb, "probe_run", rid, me, access.MANAGE, slug=_share_key(request))
     _probe_call(_probes().delete, rid)
+    items.delete(sdb, "probe_run", rid, actor=me)
     return {"deleted": rid}
 
 
-@app.post("/api/probe-runs/{rid}/open/{case}/{rep}", dependencies=[Depends(require_user)])
-def probe_run_open(rid: str, case: str, rep: int):
-    """Opens the saved end state of one case as a (paused) game for inspection."""
+@app.post("/api/probe-runs/{rid}/open/{case}/{rep}")
+def probe_run_open(rid: str, case: str, rep: int, request: Request, me=Depends(require_user),
+                   sdb: DbSession = Depends(get_db, scope="function")):
+    """Opens the saved end state of one case as a (paused) game for inspection, for whoever may see the run: the
+    game is the run's owner's, at the run's visibility. Opening it loads it on the server, which is why this needs an
+    account as well as the run's VIEW."""
     runner = _probes()
+    row, _perms = items.require(sdb, "probe_run", rid, me, access.VIEW, slug=_share_key(request))
     path = _probe_call(runner._run_dir, rid) / f"{case}-{rep}.citar"
     if not path.exists():
         raise HTTPException(404, "No saved game for that case.")
-    s = manager.load(path)
+    owner_id = row.owner_id
+    # a probe's game, should the index not have it (never a lobby game), opened to be looked at: it holds no machine
+    # until its subject is asked something (P3.3.3)
+    s = manager.load(path, kind="probe", leases=False)
+    ownership.claim_quietly(s, owner_id, item=("probe_run", rid))
     return {"game_id": s.id, "spectator_token": s.spectator_token}
 
 
-@app.get("/api/lab", dependencies=[Depends(require_user)])
-def lab_overview():
-    """What the bot lab is doing: runner health, experiments, per-game progress and the log."""
+# ----------------------------------------------------------------------------
+# the lab and the work queue
+# ----------------------------------------------------------------------------
+@app.get("/api/lab")
+def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """What the bot lab is doing: the dispatcher's health and its executors, experiments, per-game progress and the
+    log. A member sees the experiments they may see and the games of those playing; the log, the side runs and the
+    job hosts' details (their machines' names and ids among them), which name every experiment and the server's own
+    jobs, are an administrator's."""
     from .. import lab
-    return lab.overview()
+    from ..jobs import store
+    from .jobs_api import _namer, told_executor, told_waiting
+    out = lab.overview()
+    withdrawn = store.withdrawn_games(sdb)
+    for e in out.get("experiments") or []:
+        e["withdrawn"] = withdrawn.get(e.get("name"), 0)
+    # a machine as the caller may be told it (the games table's words): "this server" for the server's own job host,
+    # a helper machine's name only where the caller may see that machine
+    name = _namer(sdb, me)
+    for r in out.get("running") or []:
+        r["executor"] = name(r.get("machine"), r.get("executor_kind"))["name"]
+    for e in out.get("experiments") or []:
+        e["waiting"] = told_waiting(e, name)
+        e.pop("waiting_on", None)
+    key = _share_key(request)
+    seen = items.listed(sdb, "lab_experiment", me, slug=key)
+    if seen is None:
+        return out
+    for e in out.get("experiments") or []:
+        # a game whose result waits for its replica is done to a member, and the replica unseen (P4.5.8 rule 2)
+        e["done"] = int(e.get("done") or 0) + int(e.pop("settling", 0) or 0)
+        e.pop("verifying", None)
+    out["experiments"] = _with_perms(sdb, "lab_experiment", me,
+                                     [e for e in out.get("experiments", []) if e.get("name") in seen], key="name",
+                                     slug=key)
+    out["running"] = [{k: v for k, v in r.items() if k not in ("machine", "role")} for r in out.get("running", [])
+                      if r.get("exp") in seen and r.get("role", "primary") == "primary"]
+    disp = dict(out.get("dispatcher") or {})
+    disp["executors"] = [told_executor(e, name) for e in disp.get("executors") or []]
+    out["dispatcher"] = disp
+    out["log"] = []
+    out["side_runs"] = []
+    return out
 
 
-@app.get("/api/queue", dependencies=[Depends(require_user)])
-def work_queue_view():
-    """Everything waiting to run, in the order it will run.
+#: The queue's kinds and the item each one's ``id`` (its run) names; a game is its row in the games index.
+_QUEUE_ITEMS = work_access.QUEUE_ITEMS
+#: How work the caller may not see is named on the Queue page (P3.2.4).
+_SOMEONES = work_access.SOMEONES
+_queue_access = work_access.access_to
 
-    Per model machine: what is using it now, and the benchmark jobs and probe runs waiting for it, best
-    first (see citar.pool.queue). Then this server's CPU: the lab's experiments, the lab runner, and the
-    load average, since the lab's bot games share the CPU with every game being played here.
+
+def _queue_entry(sdb: DbSession, user, it: dict, cache: dict, name=None) -> dict:
+    """One queued or running item as ``user`` may see it: work they cannot see is "someone's <kind>", with no name,
+    no run and no reason that would name other work; ``can_manage`` says whether its priority is theirs to change.
+    The reason of one they may see names only the work they may see too (``name``, ``work_access.namer``)."""
+    key = (it.get("kind"), it.get("group"))
+    if key not in cache:
+        cache[key] = _queue_access(sdb, user, *key)
+    perms = cache[key]
+    out = work_access.with_waiting(dict(it, can_manage=access.MANAGE in perms),
+                                   name or work_access.namer(sdb, user, cache=cache))
+    if access.VIEW not in perms:
+        out.update(label=_SOMEONES.get(it.get("kind"), "someone's work"), run=None, waiting=None, server=None,
+                   id=None, group=None)
+    return out
+
+
+@app.get("/api/queue")
+def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Everything waiting to run, in the order it will run (P3.3.8).
+
+    Only the machines the caller may view (their own, those their grants reach, every one for an administrator), each
+    with its capacity; the leases live on it (a model seat that plays every turn: active, lending its slot between its
+    turns, or holding it); its pooled prompts, running and waiting, in the order the prompt scheduler will serve them
+    (``scheduler.Machine.view``); what holds it (``busy_with``); and the benchmark jobs and probe runs the shared job
+    queue has for it, best first (``citar.pool.queue``). Work the caller may not see is "someone's <kind>" (or
+    "someone's <class>" for a prompt), with no name and no member (``work_access.binding_rights``); the other machines
+    in use are a count (``others_busy``), with no names or loads. Then the CPU jobs (P4.5.11):
+    each executor the caller may see (this server's own job host for everyone) with its games playing, each named
+    where the caller may see its experiment ("someone's lab game" otherwise), the lab's experiments in the order they
+    run, and the load average, since the lab's bot games share the CPU with every game being played here.
     """
     import os
     from .. import lab, servers as registry
-    from ..db.models import Server
-    from ..pool import queue as work_queue, seats as pool_seats
+    from ..db.models import Server, User
+    from ..pool import queue as work_queue, scheduler as prompt_scheduler
     from .workers import hub
     _scheduler()
     _probes()
-    from .admin_api import reports_runner
-    reports_runner()                  # registers queued reports with the shared queue
-    items = work_queue.waiting()
+    items_waiting = work_queue.waiting()
     active = work_queue.running()
+    sched = prompt_scheduler.current()
+    views = sched.views() if sched is not None else {}
+    ids = list(dict.fromkeys([i["server_id"] for i in active + items_waiting if i.get("server_id")] + list(views)))
+    admin = _is_admin(me)
+    cache: dict = {}
+    name = work_access.namer(sdb, me, admin=admin, cache=cache)
+    handles: dict = {}
+
+    def handle(user_id):
+        if not user_id:
+            return None
+        if user_id not in handles:
+            row = sdb.get(User, user_id)
+            handles[user_id] = row.handle if row is not None else None
+        return handles[user_id]
+
     names = {sv["id"]: sv["name"] for sv in registry.list_servers()}
-    from .. import db as _db
-    with _db.session() as s:
-        for sv in s.query(Server):
-            names[sv.id] = sv.name
-    ids = list(dict.fromkeys([i["server_id"] for i in active + items if i.get("server_id")] +
-                             [sid for sid in names if pool_seats.occupied(sid)]))
-    machines = []
+    machines, others = [], 0
     for sid in ids:
-        waiting = [dict(it, position=n + 1) for n, it in enumerate(i for i in items if i.get("server_id") == sid)]
-        machines.append({"server_id": sid, "name": names.get(sid, sid), "online": hub().is_online(sid) or None,
-                         "busy_with": pool_seats.occupied(sid), "waiting": waiting,
-                         "running": [i for i in active if i.get("server_id") == sid]})
+        row = sdb.get(Server, sid)
+        if not admin and (row is None or not pool.visible(sdb, me, row)):
+            others += 1             # in use, but not the caller's to see: counted, never named
+            continue
+        view = views.get(sid) or {}
+        waiting = [_queue_entry(sdb, me, dict(it, position=n + 1), cache, name)
+                   for n, it in enumerate(i for i in items_waiting if i.get("server_id") == sid)]
+        # one line per holder: a game with two model seats on the machine holds two leases
+        busy = list(dict.fromkeys(pool_seats.occupied(sid))) if admin else _occupants(sdb, me, sid, cache)
+
+        def told(entry, fn, row=row):
+            rights = work_access.binding_rights(sdb, me, entry, row, admin=admin, cache=cache)
+            return fn(entry, rights, handle(entry.get("consumer")))
+        machines.append({
+            "server_id": sid, "name": row.name if row is not None else names.get(sid, sid),
+            "online": hub().is_online(sid) or None, "capacity": view.get("capacity"),
+            "slots": view.get("slots"), "in_flight": view.get("in_flight", 0), "draining": view.get("draining", 0),
+            "busy_with": busy, "waiting": waiting,
+            "running": [_queue_entry(sdb, me, i, cache, name) for i in active if i.get("server_id") == sid],
+            "leases": [told(entry, work_access.told_lease) for entry in view.get("leases") or []],
+            "prompts": {"running": [told(entry, work_access.told_ticket) for entry in view.get("running") or []],
+                        "waiting": [told(entry, work_access.told_ticket) for entry in view.get("waiting") or []]}})
     try:
         overview = lab.overview()
     except Exception:
         overview = {"experiments": [], "runner": {}}
+    experiments = sorted([e for e in overview.get("experiments", []) if e.get("state") != "complete"],
+                         key=lambda e: (-(e.get("priority") or 0), e.get("submitted") or ""))
+    if not admin:
+        for e in experiments:
+            # a game whose result waits for its replica is done to a member (P4.5.8 rule 2)
+            e["done"] = int(e.get("done") or 0) + int(e.pop("settling", 0) or 0)
+            e.pop("verifying", None)
+    from .jobs_api import _namer, told_waiting
+    machine_name = _namer(sdb, me)
+    for e in experiments:
+        e["waiting"] = told_waiting(e, machine_name)
+        e.pop("waiting_on", None)
+    if not admin:
+        shown = []
+        for e in experiments:
+            perms = _queue_access(sdb, me, "lab", e.get("name"))
+            if access.VIEW in perms:
+                shown.append(dict(e, can_manage=access.MANAGE in perms))
+            else:
+                shown.append({"name": None, "label": _SOMEONES["lab"], "state": e.get("state"),
+                              "priority": e.get("priority"), "games": e.get("games"), "done": e.get("done"),
+                              "running": e.get("running"), "can_manage": False})
+        experiments = shown
     cpu = {"cpus": os.cpu_count(), "load": [round(x, 2) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None,
-           "lab_runner": overview.get("runner"), "lab_running": overview.get("running", []),
-           "experiments": sorted([e for e in overview.get("experiments", []) if e.get("state") != "complete"],
-                                 key=lambda e: (-(e.get("priority") or 0), e.get("submitted") or ""))}
-    return {"machines": machines, "cpu": cpu}
+           "dispatcher": {k: (overview.get("dispatcher") or {}).get(k) for k in ("alive", "paused", "queued")},
+           "executors": _cpu_executors(sdb, me, overview, admin, cache, machine_name),
+           "experiments": experiments}
+    return {"machines": machines, "others_busy": others, "cpu": cpu}
+
+
+#: How a CPU job of work the viewer may not see is named on the Queue page (P3.2.4).
+SOMEONES_CPU = "someone's lab game"
+
+
+def _cpu_executors(sdb: DbSession, user, overview: dict, admin: bool, cache: dict, name) -> list:
+    """The Queue page's CPU jobs per executor (P4.5.11): each executor the caller may see (the server's own job host
+    for everyone), its state and figures, and its games playing, each named where the caller may see its experiment
+    and "someone's lab game" otherwise. A member is told an executor as ``jobs_api.told_executor`` tells it: no
+    machine id, no host's details."""
+    from ..db.models import Server
+    from .jobs_api import HOST_STOPPED
+    out = []
+    for e in (overview.get("dispatcher") or {}).get("executors") or []:
+        if e.get("kind") != "local" and not admin:
+            row = sdb.get(Server, e.get("machine")) if e.get("machine") else None
+            if row is None or not pool.visible(sdb, user, row):
+                continue
+        games = []
+        for r in overview.get("running") or []:
+            if r.get("machine") != e.get("machine"):
+                continue
+            if not admin and r.get("role", "primary") != "primary":
+                continue            # a verification run: administrators' alone (P4.5.8 rule 2)
+            key = ("lab", r.get("exp"))
+            if key not in cache:
+                cache[key] = _queue_access(sdb, user, "lab", r.get("exp"))
+            seen = admin or access.VIEW in cache[key]
+            games.append({"label": f"{r['exp']} #{r['i']}" if seen else SOMEONES_CPU,
+                          "exp": r["exp"] if seen else None, "turn": r.get("turn"), "limit": r.get("limit"),
+                          "paused": r.get("paused"), "minutes": r.get("minutes"),
+                          "can_manage": bool(seen and (admin or access.MANAGE in cache[key]))})
+        available = e.get("available")
+        if not admin and e.get("state") == "failed" and available:
+            available = HOST_STOPPED
+        entry = {"name": name(e.get("machine"), e.get("kind"))["name"],
+                 "kind": e.get("kind"), "on": e.get("on"), "state": e.get("state"),
+                 "running": int(e.get("running") or 0) - (0 if admin else int(e.get("verifying") or 0)),
+                 "threads": e.get("threads"), "cpu_percent": e.get("cpu_percent"),
+                 "memory_mb": e.get("memory_mb"), "held": e.get("held") if admin else None,
+                 "available": available, "benchmark": e.get("benchmark"), "games": games}
+        if admin:
+            entry["machine"] = e.get("machine")
+        out.append(entry)
+    return out
+
+
+def _occupants(sdb: DbSession, user, server_id: str, cache: dict) -> list:
+    """What is using a machine, as a member may be told: the names of the games and runs they may see, and
+    "someone's <kind>" for the rest (``pool.seats.holders``: the leases live on it, each holder once)."""
+    name = work_access.namer(sdb, user, cache=cache)
+    return [name(h) for h in work_access.holders(server_id)]
 
 
 class PriorityBody(BaseModel):
-    """A new priority for a benchmark run, a probe run, a report or a lab experiment. Higher goes first."""
+    """A new priority for a benchmark run, a probe run, a report, a lobby game or a lab experiment. Higher goes
+    first."""
     kind: str
     id: str
     priority: int
 
 
-@app.post("/api/queue/priority", dependencies=[Depends(require_user)])
-def work_queue_priority(body: PriorityBody):
-    """Move work up or down the queue."""
-    import json as _json
-    from ..pool import queue as work_queue
+@app.post("/api/queue/priority")
+def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Move work up or down the queue: the caller's own work, or work they manage (P3.2.4). A game is managed
+    through its row in the games index. The work's pooled prompts follow it (P3.3.3: a ticket's priority is its
+    class's base plus its work's)."""
+    from ..pool import queue as work_queue, scheduler as prompt_scheduler
+    if body.kind not in work_queue.KINDS and body.kind != "lab":
+        raise HTTPException(400, "kind is benchmark, probe, report, game or lab.")
+    if body.kind == "game":
+        row = ownership.row_for(sdb, body.id)
+        if row is None:
+            raise HTTPException(404, "No such game.")
+        access.on(sdb, me, row).require(access.MANAGE)
+    else:
+        items.require(sdb, _QUEUE_ITEMS[body.kind], body.id, me, access.MANAGE)
     if body.kind in work_queue.KINDS:
-        return {"kind": body.kind, "id": body.id, "priority": work_queue.set_priority(body.kind, body.id, body.priority)}
-    if body.kind == "lab":
-        from .. import lab
-        import re as _re
-        if not _re.fullmatch(r"[A-Za-z0-9._-]{1,80}", body.id or ""):
-            raise HTTPException(400, "Invalid experiment name.")
-        path = lab.QUEUE / f"{body.id}.json"
-        if not path.exists():
-            raise HTTPException(404, "No queued experiment of that name.")
-        spec = _json.loads(path.read_text(encoding="utf-8"))
-        spec["priority"] = max(-100, min(100, body.priority))
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(_json.dumps(spec, indent=1), encoding="utf-8")
-        tmp.replace(path)
-        return {"kind": "lab", "id": body.id, "priority": spec["priority"]}
-    raise HTTPException(400, "kind is benchmark, probe, report, game or lab.")
-
-
-@app.get("/api/lab/report/{name}", dependencies=[Depends(require_user)])
-def lab_report(name: str):
-    """The results of one lab experiment."""
+        value = work_queue.set_priority(body.kind, body.id, body.priority)
+        sched = prompt_scheduler.current()
+        if sched is not None:
+            sched.set_priority((body.kind, body.id), value)
+        return {"kind": body.kind, "id": body.id, "priority": value}
     from .. import lab
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9._-]{1,80}", body.id or ""):
+        raise HTTPException(400, "Invalid experiment name.")
+    path = lab.QUEUE / f"{body.id}.json"
+    if not path.exists():
+        raise HTTPException(404, "No queued experiment of that name.")
+    return {"kind": "lab", "id": body.id, "priority": lab.set_priority(body.id, body.priority)}
+
+
+@app.post("/api/queue/tickets/{tid}/cancel")
+def work_queue_cancel(tid: str, me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Cancel a pooled prompt (P3.3.8): its work's owner (MANAGE on it; for a prompt of no work, the member it is
+    for), the machine's owner and administrators. Somebody who may see the prompt but none of those gets 403; anybody
+    else 404, as for a prompt that is not there. A queued prompt leaves the queue; a running one is abandoned, its
+    request draining on a helper that keeps generating it, and its caller falls back."""
+    from ..db.models import Server
+    from ..pool import scheduler as prompt_scheduler
+    sched = prompt_scheduler.current()
+    ticket = sched.find_ticket(tid) if sched is not None else None
+    if ticket is None:
+        raise HTTPException(404, "No such prompt.")
+    row = sdb.get(Server, ticket.server_id) if ticket.server_id else None
+    admin = _is_admin(me)
+    entry = {"ref": list(ticket.ref) if ticket.ref else None, "consumer": ticket.consumer}
+    view, _manage, cancel = work_access.binding_rights(sdb, me, entry, row, admin=admin, cache={})
+    if not cancel:
+        seen = admin or (row is not None and pool.visible(sdb, me, row) and view)
+        raise HTTPException(403 if seen else 404, "You may not cancel that prompt." if seen else "No such prompt.")
+    ticket.cancel("cancelled from the Queue page")
+    audit.record(sdb, "queue.prompt_cancelled", actor=me, object_type="server", object_id=ticket.server_id,
+                 cls=ticket.ticket_class, work=list(ticket.ref) if ticket.ref else None)
+    return {"cancelled": tid, "state": ticket.state}
+
+
+@app.get("/api/lab/report/{name}")
+def lab_report(name: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """The results of one lab experiment, for whoever may see it."""
+    from .. import lab
+    items.require(sdb, "lab_experiment", name, p.user, access.VIEW, slug=_share_key(request))
     if not (lab.QUEUE / f"{name}.json").exists() and not (lab.DONE / f"{name}.json").exists():
         raise HTTPException(404, f"No experiment '{name}'.")
     return {"name": name, "text": lab.report_text(name)}
 
 
-@app.get("/api/models/scores", dependencies=[Depends(require_user)])
-def models_scores():
-    """Every model's overall score and its components."""
-    from .scoring import model_scores
-    return model_scores(manager, _scheduler().get_settings()["score_weights"])
+@app.get("/api/models/scores")
+def models_scores(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """Every model's overall score and its components, over the games the caller's figures may use (as
+    ``/api/metrics/compare``)."""
+    from .scoring import model_scores, viewer_scope
+    return model_scores(manager, _scheduler().get_settings()["score_weights"], scope=viewer_scope(sdb, me))
+
+
+@app.get("/api/models/diplomacy")
+def models_diplomacy(me=Depends(require_user), sdb: DbSession = Depends(get_db, scope="function")):
+    """The diplomacy leaderboard (design/phase3-features.md P3.6.10): per model and owners preset, the pairs of hybrid
+    benchmark jobs and their control games, from the runs the caller may see, a member's under the pooling rules
+    (``diplomacy_stats.board``): their own pairs and the pooled ones, another member's part of a line only when enough
+    accounts are behind it, and only their own pairs named."""
+    from .. import diplomacy_stats
+    from .scoring import viewer_scope
+    pairs = _scheduler().pairs(items.listed(sdb, "benchmark_run", me))
+    return diplomacy_stats.board(pairs, viewer_scope(sdb, me))
 
 
 # ----------------------------------------------------------------------------
 # replay / recap
 # ----------------------------------------------------------------------------
 @app.get("/api/games/{gid}/replay")
-def replay(gid: str, request: Request, token: Optional[str] = None):
-    """The whole game, turn by turn, for the recap."""
-    s = _session(gid)
+def replay(gid: str, request: Request, token: Optional[str] = None,
+           p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
+    """The whole game, turn by turn, for the recap.
+
+    Gated on viewing the game, like everything else about it: a finished private game is still
+    private. Whoever may watch it (the spectator token, or an account or share key the ladder lets see it)
+    may replay an AI-only game live; a seat's own token sees it once it is over, as the view route says.
+    """
+    s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
     tok = _token(request, token)
-    if not (s.game.s.phase != "playing" or (s.is_spectator(tok) and s.god_view_allowed())):
+    watcher = s.is_spectator(tok) or (s.seat_for_token(tok) is None and access.VIEW in perms)
+    if not (s.game.phase != "playing" or (watcher and s.god_view_allowed())):
         raise HTTPException(403, "The recap is available when the game is over (or to spectators of AI-only games).")
-    return _replay_payload(s)
+    return Response(_replay_payload(s), media_type="application/json")
 
 
-def _replay_payload(s: GameSession) -> dict:
-    """Build the replay, under the session lock so it cannot catch a half-applied turn."""
-    with s.lock:
-        g = s.game
-        return {
-            "id": s.id, "name": s.name, "width": g.s.width, "height": g.s.height,
-            "wrap_x": g.grid.wrap_x, "wrap_y": g.grid.wrap_y,
-            "terrain": [[t.terrain, 1 if t.hills else 0, int(t.river or 0), t.resource, t.wonder] for t in g.s.tiles],
-            "improvement_ids": list(g.rules.improvements), "feature_ids": list(g.rules.terrains),
-            "players": [{"id": p.id, "name": p.name, "leader": p.leader, "color": p.color, "kind": p.kind, "alive": p.alive,
-                         "eliminated_turn": p.eliminated_turn, "seat": s.seats[p.id].public() if p.id < len(s.seats) else None}
-                        for p in g.s.players],
-            "frames": g.frames, "stats": g.s.stats, "events": g.s.events, "messages": g.s.messages,
-            "thoughts": g.s.thoughts, "negotiations": g.s.negotiations, "deals": g.s.deals,
-            "winner": g.s.winner, "victory": g.s.victory, "phase": g.s.phase, "turn": g.turn,
-            "config": g.s.config,
-        }
+def _replay_payload(s: GameSession) -> bytes:
+    """The replay as JSON bytes, built under the session lock so it cannot catch a half-applied turn: the engine
+    writes it with the game's ``id`` and ``name`` first and each player's ``seat`` (``EngineGame.replay_json``), and the
+    route returns those bytes as they are, as /view does."""
+    with s.lock, _crash_guard(s):
+        seats = [seat.public() for seat in s.seats]
+        return s.game.replay_json({"id": s.id, "name": s.name, "seats": seats})
 
 
 # ----------------------------------------------------------------------------
@@ -1481,7 +2459,7 @@ class SaveBody(BaseModel):
 
 @app.post("/api/games/{gid}/save")
 def save_game(gid: str, body: SaveBody, request: Request, p: Principal = Depends(principal),
-              sdb: DbSession = Depends(get_db)):
+              sdb: DbSession = Depends(get_db, scope="function")):
     """Write a named save beside the autosaves."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     path = s.save(body.name)
@@ -1489,17 +2467,22 @@ def save_game(gid: str, body: SaveBody, request: Request, p: Principal = Depends
 
 
 @app.get("/api/saves")
-def list_saves(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+def list_saves(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Saves belonging to games this caller may see.
 
     A save on disk has no owner of its own; it inherits the visibility of the game it came from.
-    A save whose game has no index row is shown only to administrators.
+    A save whose game has no index row is shown only to administrators. Each entry says whether the caller may load
+    or delete it (``can_manage``: both routes require ``MANAGE`` on its game, ``_require_save_access``), so the lobby
+    offers those buttons only on the caller's own games and those shared with them to manage.
     """
     allowed = ownership.visible_ids(sdb, p.user)
     saves = manager.list_saves()
     if allowed is None:
-        return saves
-    return [entry for entry in saves if (entry.get("game_id") or entry.get("id")) in allowed]
+        # an administrator, who manages every game, those without an index row included
+        return [{**entry, "can_manage": True} for entry in saves]
+    shown = [entry for entry in saves if (entry.get("game_id") or entry.get("id")) in allowed]
+    managed = ownership.manageable_ids(sdb, p.user, {entry.get("game_id") or entry.get("id") for entry in shown})
+    return [{**entry, "can_manage": (entry.get("game_id") or entry.get("id")) in managed} for entry in shown]
 
 
 class LoadBody(BaseModel):
@@ -1515,35 +2498,56 @@ class DeleteSaveBody(BaseModel):
 
 @app.post("/api/saves/delete")
 def delete_save(body: DeleteSaveBody, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
-    """Delete a save."""
+                sdb: DbSession = Depends(get_db, scope="function")):
+    """Delete a save, or every save of its game. A game none of whose saves are left, and that is not open, is
+    deleted from the games index too."""
+    _csrf(request, p)
     _require_save_access(sdb, p, body.path, access.MANAGE)
     try:
-        return {"deleted": manager.delete_save(body.path, body.whole_game)}
+        deleted = manager.delete_save(body.path, body.whole_game)
     except KeyError:
         raise HTTPException(404, "Save not found.")
+    gid = (body.path or "").replace("\\", "/").split("/")[0]
+    if gid and manager.get(gid) is None and not any((SAVE_DIR / gid).glob("*.citar")):
+        ownership.delete(sdb, gid, actor=p.user)
+    return {"deleted": deleted}
 
 
 @app.post("/api/saves/load")
 def load_save(body: LoadBody, request: Request, p: Principal = Depends(principal),
-              sdb: DbSession = Depends(get_db)):
+              sdb: DbSession = Depends(get_db, scope="function")):
     """Load a save into a live session.
 
     Games with AI seats start paused, so their model configuration can be checked before anything
     spends tokens against a stale endpoint.
     """
+    _csrf(request, p)
     _require_save_access(sdb, p, body.path, access.MANAGE)
     path = (SAVE_DIR / body.path).resolve()
     if SAVE_DIR.resolve() not in path.parents or not path.exists():
         raise HTTPException(404, "Save not found.")
-    s = manager.load(path)
-    # A save from before accounts existed has no owner; whoever loads it becomes one.
+    try:
+        s = manager.load(path)
+    except ValueError as e:        # a save that does not load (LoadError): its message says why
+        raise HTTPException(400, str(e))
+    # The load indexed the game (ownership.index_loaded). A save whose row has no owner (its row was made by
+    # the load, or by a database set aside for 0.1.6's) belongs to whoever loads it.
     row = ownership.row_for(sdb, s.id)
     if row is None:
-        row = ownership.register(sdb, s, p.user, visibility="private")
+        row = ownership.register(sdb, s, p.user, visibility=access.PRIVATE)
     elif row.owner_id is None and p.user is not None:
         row.owner_id = p.user.id
+        row.data_sharing = p.user.data_sharing      # its new owner's default, as for a game they create
+        s.owner_id = p.user.id
     return s.info(include_tokens=True)
+
+
+def _csrf(request: Request, p: Principal) -> None:
+    """A write by a caller a session cookie signed in carries the session's CSRF token (``_gate``'s rule, for the
+    save routes, which have no game token to excuse it)."""
+    if p.auth_session is not None:
+        from ..auth.deps import _enforce_csrf
+        _enforce_csrf(request, p)
 
 
 def _require_save_access(sdb: DbSession, p: Principal, rel_path: str, permission: str):
@@ -1571,18 +2575,41 @@ class ShareBody(BaseModel):
 
 @app.get("/api/games/{gid}/sharing")
 def get_sharing(gid: str, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
-    """Who can see this game, and by what link."""
+                sdb: DbSession = Depends(get_db, scope="function")):
+    """Who can see this game, and by what link; for whoever manages it, also who it is shared with and the last
+    unpublish (who took it down, when and why)."""
     s, row, perms = _gate(sdb, gid, p, access.VIEW, request)
-    out = ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
+    out = ownership.to_client(row, perms, p.user, base_url=citar_settings.get().public_origin)
     if row is not None and access.MANAGE in perms:
-        out["shared_with"] = access.shared_with(sdb, row)
+        out["shared_with"] = access.shared_with(sdb, row, p.user)
+        out["unpublished"] = access.last_unpublished(sdb, row, p.user.id if p.user else None)
     return out
+
+
+class UnpublishBody(BaseModel):
+    """Why a game is being taken down: the owner sees it."""
+    reason: str = ""
+
+
+@app.post("/api/games/{gid}/unpublish")
+def unpublish_game(gid: str, body: UnpublishBody, request: Request, p: Principal = Depends(principal),
+                   sdb: DbSession = Depends(get_db, scope="function")):
+    """Take a game down (P3.2.3): it becomes private, its share link is rotated so every copy of it dies, and the
+    audit log keeps who did it and why, which its owner sees. For a moderator on a game published to the internet
+    (or a link they were given), and for whoever manages it; nothing else of the game is a moderator's to touch."""
+    me = require_user(request, p)
+    s, row, perms = _gate(sdb, gid, p, access.VIEW, request)
+    if row is None:
+        raise HTTPException(404, "That game is not registered.")
+    if access.MODERATE not in perms and access.MANAGE not in perms:
+        perms.require(access.MODERATE)
+    access.unpublish(sdb, row, actor=me, reason=body.reason)
+    return ownership.to_client(row, access.on(sdb, me, row), me, base_url=citar_settings.get().public_origin)
 
 
 @app.put("/api/games/{gid}/sharing")
 def set_sharing(gid: str, body: ShareBody, request: Request, p: Principal = Depends(principal),
-                sdb: DbSession = Depends(get_db)):
+                sdb: DbSession = Depends(get_db, scope="function")):
     """Change a game's visibility."""
     s, row, perms = _gate(sdb, gid, p, access.MANAGE, request)
     if row is None:
@@ -1597,7 +2624,7 @@ def set_sharing(gid: str, body: ShareBody, request: Request, p: Principal = Depe
                      to=body.data_sharing)
     if body.rotate_slug:
         access.rotate_slug(sdb, row, actor=p.user)
-    return ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
+    return ownership.to_client(row, perms, p.user, base_url=citar_settings.get().public_origin)
 
 
 class ShareWithBody(BaseModel):
@@ -1608,7 +2635,7 @@ class ShareWithBody(BaseModel):
 
 @app.post("/api/games/{gid}/sharing/users")
 def share_with_user(gid: str, body: ShareWithBody, request: Request,
-                    p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+                    p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Share a game with one account."""
     from ..auth import accounts as _accounts
     s, row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
@@ -1618,12 +2645,12 @@ def share_with_user(gid: str, body: ShareWithBody, request: Request,
     if target is None or target.status in ("deleted", "suspended"):
         raise HTTPException(404, f"No account called '{body.handle}'.")
     access.grant(sdb, row, target, body.permission, actor=p.user)
-    return {"shared_with": access.shared_with(sdb, row)}
+    return {"shared_with": access.shared_with(sdb, row, p.user)}
 
 
 @app.delete("/api/games/{gid}/sharing/users/{handle}")
 def unshare_with_user(gid: str, handle: str, request: Request,
-                      p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+                      p: Principal = Depends(principal), sdb: DbSession = Depends(get_db, scope="function")):
     """Stop sharing a game with an account."""
     from ..auth import accounts as _accounts
     s, row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
@@ -1633,7 +2660,7 @@ def unshare_with_user(gid: str, handle: str, request: Request,
     if target is None:
         raise HTTPException(404, f"No account called '{handle}'.")
     access.revoke(sdb, row, target, actor=p.user)
-    return {"shared_with": access.shared_with(sdb, row)}
+    return {"shared_with": access.shared_with(sdb, row, p.user)}
 
 
 # ----------------------------------------------------------------------------
@@ -1675,106 +2702,14 @@ def _ws_viewer_may_watch(s: GameSession, websocket: WebSocket, share_key: str) -
 
 @app.websocket("/ws/worker")
 async def worker_socket(websocket: WebSocket):
-    """Where a citar-worker dials in.
+    """Where a CITAR helper dials in, on protocol 2 (``citar.server.workers.serve``; design/phase4-helper.md P4.5.1).
 
-    The worker connects OUT to here, which is what makes a GPU behind a home router usable without
-    exposing anything at that end. Authentication is the first frame; nothing else is accepted
-    until a valid token has been presented.
+    The helper connects OUT to here, which is what makes a GPU behind a home router usable without exposing anything
+    at that end. Its hello is the first frame; nothing else is accepted until a valid token and key have been
+    presented. A protocol 1 (0.1.5) helper is told to download the new one.
     """
-    from ..worker import protocol as P
-    from .workers import WorkerConnection, authenticate, hub, record_connection
-
-    await websocket.accept()
-    connection = None
-    try:
-        raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
-        hello = P.parse(raw)
-        if hello.get("t") != P.HELLO:
-            await websocket.send_text(P.error_frame(P.Failure(id="", message="Expected a hello frame.")))
-            await websocket.close(code=4400)
-            return
-        if int(hello.get("version") or 0) != P.PROTOCOL_VERSION:
-            await websocket.send_text(P.error_frame(P.Failure(
-                id="", message=f"This server speaks worker protocol v{P.PROTOCOL_VERSION}; "
-                               f"the worker speaks v{hello.get('version')}. Update citar-worker.")))
-            await websocket.close(code=4426)
-            return
-
-        ip = request_ip(websocket)
-        identity = await asyncio.to_thread(authenticate, hello.get("token") or "")
-        if identity is None:
-            # Deliberately vague, and rate limited: this endpoint is reachable by anyone.
-            await asyncio.to_thread(_worker_auth_fail, ip)
-            await websocket.send_text(P.error_frame(P.Failure(id="", message="That worker token was refused.")))
-            await websocket.close(code=4401)
-            return
-        server_id, server_name = identity
-
-        connection = WorkerConnection(websocket, server_id, hello, asyncio.get_running_loop())
-        previous = hub().register(connection)
-        if previous is not None:
-            try:
-                await previous.ws.close(code=4409)
-            except Exception:
-                pass
-        await websocket.send_text(P.welcome_frame(P.Welcome(
-            server_id=server_id, server_name=server_name,
-            ping_seconds=citar_settings.get().worker_ping_seconds)))
-        await asyncio.to_thread(record_connection, server_id, ip=ip,
-                                hardware=hello.get("hardware"), models=hello.get("models"))
-        print(f"worker connected: {server_name} ({hello.get('hostname')}, "
-              f"{len(hello.get('models') or [])} models)", flush=True)
-
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                data = P.parse(raw)
-            except P.ProtocolError:
-                continue
-            connection.touch()
-            kind = data.get("t")
-            if kind == P.DONE:
-                connection.resolve(data.get("id"), result=data)
-            elif kind == P.ERROR:
-                from .workers import WorkerError
-                connection.resolve(data.get("id"), error=WorkerError(
-                    data.get("message") or "The worker reported an error.",
-                    refusal=data.get("refusal") or "", retryable=bool(data.get("retryable"))))
-            elif kind == P.CATALOG:
-                connection.models = list(data.get("models") or [])
-                await asyncio.to_thread(record_connection, server_id, models=connection.models)
-            elif kind == P.PONG:
-                pass
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        import traceback
-        traceback.print_exc()
-    finally:
-        if connection is not None:
-            hub().unregister(connection)
-            print(f"worker disconnected: {connection.server_id}", flush=True)
-
-
-def request_ip(websocket) -> str:
-    """The client address for a WebSocket, honouring the trusted proxy count."""
-    return (websocket.headers.get("x-forwarded-for", "").split(",")[-1].strip()
-            or (websocket.client.host if websocket.client else "unknown"))
-
-
-def _worker_auth_fail(ip: str):
-    """Rate limit and record a bad worker token, so this endpoint cannot be brute forced."""
-    from ..auth import audit, ratelimit
-    from .. import db
-    try:
-        ratelimit.check("worker_auth", ip)
-    except ratelimit.RateLimited:
-        pass
-    try:
-        with db.session() as s:
-            audit.record(s, "worker.auth_failed", actor_label="worker", ip=ip)
-    except Exception:
-        pass
+    from .workers import serve
+    await serve(websocket)
 
 
 @app.websocket("/ws/games/{gid}")
@@ -1820,6 +2755,8 @@ async def ws(websocket: WebSocket, gid: str, token: str = "", k: str = ""):
                 msg = {**msg, "event": s.game.event_view(ev, pid)}
         if t == "thought" and not (spectator and s.god_view_allowed()):
             return
+        if t == "negotiation_status" and not _sees_chat_status(s, pid, msg):
+            return
         try:
             loop.call_soon_threadsafe(_safe_put, queue, msg)
         except RuntimeError:
@@ -1844,6 +2781,15 @@ async def ws(websocket: WebSocket, gid: str, token: str = "", k: str = ""):
         send_task.cancel()
         if push in s.subscribers:
             s.subscribers.remove(push)
+
+
+def _sees_chat_status(s: GameSession, pid: Optional[int], msg: dict) -> bool:
+    """Whether a game socket gets a chat's ``negotiation_status`` (design/phase3-features.md P3.5.5): a seat's socket
+    for the chats its seat is in, a spectator's while the game's god view is allowed (no person plays, or it is
+    over), nobody else's: a third seat, or a spectator of a game a person plays, learns nothing of who is talking."""
+    if pid is not None:
+        return pid in (msg.get("players") or [])
+    return s.god_view_allowed()
 
 
 def _safe_put(q: asyncio.Queue, msg: dict):

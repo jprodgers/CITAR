@@ -57,7 +57,6 @@ class PackageData(unittest.TestCase):
     def test_data_travels_with_the_package(self):
         # Resolved from the module's own location, never from the working directory: an installed
         # copy has no checkout to look in.
-        self.assertTrue((paths.package_data() / "ruleset").is_dir())
         self.assertTrue((paths.web_dir() / "index.html").is_file())
         self.assertTrue((paths.migrations_dir() / "env.py").is_file())
         self.assertTrue(paths.collectors_dir().is_dir())

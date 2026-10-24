@@ -1,0 +1,34 @@
+{
+  "name": "handshake-bad-hello",
+  "about": "A hello that fails its checks (here, no machine) closes the connection with 4400 and no frame, the protocol error's code and path as the close reason.",
+  "refs": ["P4.2.1"],
+  "plays": {"helper": null, "hub": "4-05"},
+  "one_side": "scripts a helper that sends a broken hello; the helper's side of a 4400 is close-bad-hello-received",
+  "values": {"token": "cwt_example_0123456789abcdef0123456789abcdef"},
+  "setup": {"helper": {}, "hub": {}},
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      },
+      "invalid": "missing"
+    },
+    {"close": {"by": "server", "code": 4400, "reason": "missing machine"}, "within_s": 5}
+  ]
+}

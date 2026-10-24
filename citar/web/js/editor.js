@@ -2,6 +2,7 @@
 // then save the map (saves/maps/<id>.json) and play or build scenarios on it. Editing happens in the browser; the
 // server validates on save. Controls: left-drag paints, right- or middle-drag pans, wheel zooms, Ctrl+Z undoes.
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { el, clear, toast, modal, prompt as askText, confirmBox } from "./util.js";
 import { MapRenderer } from "./render.js";
 import { mapOptionsForm } from "./mapoptions.js";
@@ -18,8 +19,9 @@ const T = { terrain: 0, features: 1, wonder: 2, river: 3, resource: 4, amount: 5
 
 export async function renderEditor(root, rules, mapId) {
   const ed = new MapEditor(root, rules);
-  if (mapId) await ed.open(decodeURIComponent(mapId));
-  else ed.load(blank(40, 26, "Ocean"), true);
+  if (!mapId) { ed.load(blank(40, 26, "Ocean"), true); return ed; }
+  try { await ed.open(decodeURIComponent(mapId), { address: true }); }
+  catch (e) { ed.destroy(); throw e; }
   return ed;
 }
 
@@ -84,8 +86,14 @@ class MapEditor {
       camp: row[T.improvement] === "Barbarian encampment", village: row[T.improvement] === "Ancient ruins" };
   }
 
-  async open(id) {
-    try { this.load(await api.map(id)); } catch (e) { toast(e.message, "error"); this.load(blank(40, 26, "Ocean"), true); }
+  // Open a map. One the address names (`address`) that this viewer may not see, or that is not there, is the
+  // router's "not found" page (the 404 is thrown to it); from the editor's own list, a toast over a blank map.
+  async open(id, { address = false } = {}) {
+    try { this.load(await api.map(id)); }
+    catch (e) {
+      if (address && e.status === 404) throw e;
+      toast(e.message, "error"); this.load(blank(40, 26, "Ocean"), true);
+    }
   }
 
   idx(x, y) { return y * this.map.width + x; }
@@ -534,10 +542,11 @@ class MapEditor {
       ...maps.map((mp) => el("tr", { class: "clickable" },
         el("td", { onclick: () => { close(); this.guard(() => this.open(mp.id)); } }, el("b", {}, mp.name), el("div", { class: "muted small" }, mp.description || mp.id)),
         el("td", {}, `${mp.width}×${mp.height}`), el("td", {}, `${mp.starts} + ${mp.cs_starts} cs`),
-        el("td", {}, el("button", { class: "small", onclick: async () => {
-          if (!(await confirmBox("Delete map", `Delete map "${mp.name}"? This can't be undone.`, "Delete"))) return;
-          try { await api.deleteMap(mp.id); close(); this.openDialog(); } catch (e) { toast(e.message, "error"); }
-        } }, "Delete")))));
+        el("td", {}, el("div", { class: "row" }, shareButton("map", mp.id, mp.name, mp, () => {}),
+          mp.can_manage === false ? null : el("button", { class: "small", onclick: async () => {
+            if (!(await confirmBox("Delete map", `Delete map "${mp.name}"? This can't be undone.`, "Delete"))) return;
+            try { await api.deleteMap(mp.id); close(); this.openDialog(); } catch (e) { toast(e.message, "error"); }
+          } }, "Delete"))))));
     close = modal({ title: "Open map", content: maps.length ? list : el("p", { class: "muted" }, "No saved maps yet.") }).close;
   }
 

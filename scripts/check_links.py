@@ -23,8 +23,9 @@ ROOT = Path(__file__).resolve().parent.parent
 #: anything in the ignored operator-notes directory.
 INCLUDE = ["README.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md", "CHANGELOG.md",
            "KNOWN_ISSUES.md", "NOTICE.md", "DESIGN.md"]
-INCLUDE_DIRS = ["docs", "packaging"]
-SKIP_DIRS = {"wiki", "site", "ops", "node_modules", ".git", "saves", "dist", "build"}
+INCLUDE_DIRS = ["docs", "packaging", "crates"]
+SKIP_DIRS = {"wiki", "site", "ops", "node_modules", ".git", "saves", "dist", "build", "target",
+             "fuzz"}
 
 LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 

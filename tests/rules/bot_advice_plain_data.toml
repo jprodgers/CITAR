@@ -1,0 +1,99 @@
+about = """
+The advice a bot gives its seat's language model is plain data and changes nothing: deal_value, its
+valuation of the proposal on the table of the negotiation it is asked about (null without one);
+war_readiness, for each civilization it is at war with or preparing a war on; spare_luxuries; and
+wants. Asked about a peace that costs it 50 gold in an even war, it values the deal at 190: the peace
+treaty, which the proposal lists on both sides, is worth deal_peace (120) on each, as Python's
+evaluate counts it, less the 50 gold.
+"""
+from = "tests/test_bot_diplomacy.py::AdviceTests::test_advice_is_plain_data_and_changes_nothing"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+]
+
+[[step]]
+tool = "declare_war"
+player = 0
+args = { player_id = 1 }
+
+[[step]]
+op = "open_negotiation_as"
+args = { player = 1, to = 0, message = "Peace?", give = [{ type = "peace_treaty" }], receive = [{ type = "gold", amount = 50 }] }
+as = "peace"
+
+[[step]]
+check = { what = "events" }
+absent = false
+as = "events_before"
+
+[[step]]
+bot = "advice"
+player = 0
+negotiation = "=peace.negotiation_id"
+as = "advice"
+
+[[step]]
+check = "advice"
+path = "deal_value"
+approx = 190
+
+[[step]]
+check = "advice"
+path = "war_readiness"
+len = 1
+
+[[step]]
+check = "advice"
+path = "war_readiness[0]"
+subset = { player = 1, name = "Civilization 2", at_war = true, preparing = false, army_gathered = false }
+
+[[step]]
+check = "advice"
+path = "war_readiness[0].power_ratio"
+approx = 1
+tol = 0.01
+
+[[step]]
+check = "advice"
+subset = { spare_luxuries = [], wants = [] }
+
+[[step]]
+check = "advice"
+len = 4
+
+[[step]]
+note = "Without a negotiation there is no deal to value."
+bot = "advice"
+player = 0
+as = "plain"
+
+[[step]]
+check = "plain"
+path = "deal_value"
+is_null = true
+
+[[step]]
+note = "Nothing moved: the negotiation waits as it did, and nothing was announced."
+check = { what = "negotiation", negotiation = "=peace.negotiation_id" }
+subset = { status = "open", awaiting = 0 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=peace.negotiation_id" }
+path = "history"
+len = 1
+
+[[step]]
+check = { what = "events" }
+eq = "=events_before"
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "war"
+eq = true

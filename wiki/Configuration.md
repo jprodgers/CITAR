@@ -5,8 +5,8 @@ CITAR is configured in three places, and which one you need depends on what you 
 | Where | What | Changes take effect |
 |---|---|---|
 | **Environment variables** | What the process needs to start: mode, port, keys, database, e-mail | On restart |
-| **The web client** | Servers, models, suites, scenarios, and on a server, policy | Immediately |
-| **Files** | The server registry, saved games, benchmark runs | Immediately, or on restart for the registry |
+| **The web client** | Machines, models, suites, scenarios, and on a server, policy | Immediately |
+| **Files** | Saved games, benchmark runs | Immediately |
 
 Running CITAR on your own machine needs none of it. With no environment at all, it starts in local
 mode, generates its own key, and signs you in.
@@ -22,7 +22,7 @@ citar where
 | | A git checkout | An installed copy |
 |---|---|---|
 | Saved games | `<checkout>/saves` | `<user data>/saves` |
-| Server registry | `<checkout>/config` | `<user data>/config` |
+| `config/` (a 0.1.5 worker's `worker.json`, which the helper reads with `--config`; once, the old registry) | `<checkout>/config` | `<user data>/config` |
 | Benchmarks | `<checkout>/benchmarks` | `<user data>/benchmarks` |
 | Database, secret key | `<user data>` | `<user data>` |
 
@@ -43,7 +43,7 @@ mid-write corrupts it. Password hashes do not belong in a synced folder either.
 |---|---|
 | `CITAR_STATE_DIR` | Everything below, in one go |
 | `CITAR_SAVE_DIR` | Saved games, and maps, scenarios, probes, lab, reports and the usage ledger with them |
-| `CITAR_CONFIG_DIR` | The server registry |
+| `CITAR_CONFIG_DIR` | The `config/` folder: a 0.1.5 worker's `worker.json`, and a pre-0.1.6 `servers.json` until it is imported |
 | `CITAR_BENCH_DIR` | Benchmark suites and runs |
 | `CITAR_DATA_DIR` | Database and secret key |
 
@@ -126,27 +126,153 @@ https://<your domain>/api/auth/oauth/<provider>/callback
 
 `CITAR_HCAPTCHA_SITE_KEY` and `CITAR_HCAPTCHA_SECRET`. Only needed with open registration.
 
+### The machines: in the database, not a file
+
+Since 0.1.6 every machine that can run a model is a row of the database's `servers` table: the computer CITAR
+runs on (the **host**), the online APIs and LAN machines the server dials itself, and the members' machines behind
+the CITAR helper ([Workers](Workers)). The electricity plans and the currency are kept there too. They are
+edited on the Servers page; there is no registry file to edit any more.
+
+**`config/servers.json`** was the registry before 0.1.6. It is imported **once**: at the first start that has an
+administrator, or else the moment the first administrator is made (`admin_cli create-admin`, the setup wizard, an
+invitation with the admin role; in local mode the owner, at the first start). Every machine keeps its id, so seats,
+suites, saved games, the usage ledger and stored API keys keep resolving; each becomes the first administrator's,
+in no server group (share one from the Servers page when members should use it), with its `max_parallel` as its
+slots. The file is then **renamed** `servers.json.imported-<date>-<time>` beside itself, never deleted, and never
+read again; a file that reappears later is left alone, with a warning at each start. A `servers.json` in another
+`config/` folder (a checkout and an installed copy can share one database) is **not** imported once one was: the
+warning says so, and its machines are added on the Servers page by hand if they are wanted. A fresh server-mode
+database with no administrator imports nothing and says so in its log. With no file at all, the first run makes the
+default machines the file used to start with (this computer as the host, the Anthropic API, the dry run), once the
+first administrator is saved. A database where the old Servers page's "import" was used keeps the copies it made
+under new ids, beside the machines imported under their own; the log and the audit row name them for removal.
+
+The host and the site's online APIs are the site's: an administrator manages them, whoever the import named as
+their owner. The power sampler follows whichever machine is the host, so a host that appears with the first
+administrator is sampled without a restart. A helper machine samples itself: its CITAR helper sends a minute of
+10-second readings (the GPUs' draw, the CPU's utilisation) at a time, which the server writes as the machine's power
+rows (`saves/usage/power-<machine>-YYYY-MM.jsonl`, the host sampler's format), so costing prices its energy from what
+it drew. Where a GPU's draw does not read (an AMD or Intel GPU, a Mac), the rows carry the CPU alone, and costing
+estimates the GPU's share from the machine's power figures while its model works, as for a machine without samples
+(such a minute counts as estimated, and the machine's metered total leaves those rows out). A machine whose **Live
+sampling** is `off` (its power settings' `sampling`) gets no rows, from the host's sampler or its helper; the helper's
+own `--no-power` sends none.
+`citar setup --local` writes its machines into the database when there is one, else into `servers.json` for the
+first start to import.
+
+A machine's **settings** live on its row too, edited in the Servers page's **Machine settings…** dialog
+([Workers](Workers#machine-settings-and-what-a-helpers-report-changes)): its LLM slots (`max_concurrent`,
+the site's one number for it), its capabilities (`capabilities`: whether it takes model work, whether pooled prompts
+may make it swap models, and its CPU sharing, all sent to its connected helper, which acknowledges what it will do),
+and what its helper's reports may change
+(`hardware_mode`, `models_mode`, `power_mode`, each `auto` or `manual`; by default the hardware and the models
+follow the helper and the power figures are yours). Its helper's last report is kept on the row
+(`hardware_detected`, `detected_at`) whatever those say. Its `trust_tier` and pinned hardware classes are an
+administrator's to set there.
+
+**The host's CPU** plays the lab's games (the server's own job host, [Bots: the lab](Scripted-bots#the-lab)): the host
+machine's CPU sharing is what that job host runs under, and it is on by default, unlike any other machine's. Its
+defaults: in local mode half the logical CPUs as threads (one game each) and that share of the machine, with a
+quarter of the memory up to 512 MB a thread (at least 256 MB); in server mode one thread, half the machine and
+min(1,024 MB, a quarter of the memory), about 240 MB on a one-vCPU box of 961 MB, below what the OOM killer would
+take from the server itself. A figure left at 0 there is the default's (the job host is always given concrete
+limits), and the kinds of work it takes default to all three (`lab_game`, `ranking_game`, `reference_game`). Turn
+CPU sharing off in its dialog to stop the server playing the lab at all; change the figures and the job host
+restarts with them once the games it is playing finish. The limits hold hard where the operating system allows (a
+Job Object on Windows; a `systemd --user` scope on Linux where the user's manager makes one, else `RLIMIT_DATA` and
+`nice`, the CPU soft; on macOS both soft), as the Lab page shows.
+
 ### API keys for models
 
 Not environment variables by default — they go to the OS credential store through the Servers page.
-The alternatives, chosen per server:
+The alternatives, chosen per machine:
 
 | Backend | How |
 |---|---|
 | `keyring` | The OS credential store. The default |
-| `env` | You name a variable; CITAR reads it. For containers and CI |
+| `env` | You name a variable; CITAR reads it. For containers and CI. An administrator's to choose: it names one of the server's own variables |
 | `file` | scrypt + Fernet, outside the project. `CITAR_KEYS_FILE` sets the path, `CITAR_KEYS_PASSPHRASE` unlocks it without a prompt |
+
+Keys are stored under the machine's id, which the import keeps.
+
+### Credits and hardware classes
+
+The compute ledger counts what each member's machines **gave** other members and what their work **used** of others'
+machines and the site's ([Accounts](Design-accounts-and-sharing#the-compute-ledger-and-the-ratio)), in **credits**. An event's
+credits are priced when it is written, from the machine's **hardware class** of its kind:
+
+| Kind | Credits | Default class and rate |
+|---|---|---|
+| `gpu` | a model step's generation seconds × the rate | GPU (unclassified): 1.0 |
+| `cpu` | the host's CPU core-seconds × the rate | CPU core (unclassified): 0.05 |
+| `api` | a step's token cost at the model's prices, in the registry's currency, × the rate | Online API: 1,000 |
+
+The compute rates are an energy proxy, one credit for roughly 300 W for a second (an unclassified GPU's
+generation-second; a CPU core is about 15 W); an online API's 1,000 credits per unit of currency is roughly the
+generation time a home GPU spends producing what that much buys from an API, so a member who uses the site's paid key is
+counted in the same unit as one who uses a member's GPU. An API step whose model has no price is credited 0 and flagged
+`unpriced`.
+
+A machine's class of a kind is the first class of that kind, by priority (highest first), whose **match** fits the
+machine's hardware, else the kind's default:
+
+| Match key | Fits when |
+|---|---|
+| `gpu_name` | a regular expression matches one of its GPUs' names (case ignored) |
+| `vram_gb_min` | its largest GPU has at least that much memory |
+| `cpu_name` | a regular expression matches its CPU's model |
+| `cores_min` | its CPU has at least that many cores (else threads) |
+
+The class follows the hardware: whatever changes a machine's hardware details (its helper's scan with the machine's
+hardware mode `auto`, the hardware dialog, an Apply of the last scan, Collect on the host) classifies it again, unless
+an administrator pinned its classes (`class_override`: Machine settings…, Class and trust, or
+`PUT /api/admin/machines/{id}/class`; [API](HTTP-and-tool-API#a-machines-settings)). Each kind keeps one default class, which
+cannot be removed.
+
+Administrators edit the classes over HTTP (`GET`/`POST /api/admin/hardware-classes`,
+`PUT`/`DELETE /api/admin/hardware-classes/{id}`; [API](HTTP-and-tool-API#the-compute-ledger)). A new rate applies to the events
+written after it; to recompute a period at today's classes, rates and token prices:
+
+```bash
+citar admin reprice --since 2026-10-01 [--until 2026-10-08]     # UTC dates; the hours' rollups follow
+```
+
+An item an administrator marks as the server's own data collection counts as given by whoever's machine served it and
+used by nobody:
+
+```bash
+citar admin set-collection benchmark_run <run id> on
+```
+
+Budgets on grants are counted in the same credits ([Accounts](Design-accounts-and-sharing#budgets)).
 
 ### Workers
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CITAR_WORKER_PING_SECONDS` | `20` | Keep-alive on the worker WebSocket |
+| `CITAR_WORKER_PING_SECONDS` | `20` | Keep-alive on a CITAR helper's WebSocket (`welcome.ping_s`, 5 to 300): a helper silent for 70 s is dropped |
+| `CITAR_HELPER_MANIFEST_URL` | GitHub's release download of this server's version in server mode (`https://github.com/jprodgers/CITAR/releases/download/v{version}/citar-helper-manifest.json`); none in local mode | Where the server fetches the signed manifest of the CITAR helper it relays to its helpers (`{version}` its own version; the signature at the same address with `.sig`), at most hourly and never on a request. `https` only (`http` to this machine for tests); `off` relays none. A server whose build trusts no update key (every build until the first signed release) fetches nothing, and a manifest of another engine build than the server's is never relayed |
+| `CITAR_HELPER_MANIFEST_FILE` | none | A manifest on disk instead (its signature beside it as `<file>.sig`): an offline server's, or a test's. It wins over the URL |
 
-On the worker side: `CITAR_WORKER_SERVER`, `CITAR_WORKER_TOKEN`, `CITAR_WORKER_BASE_URL`,
-`CITAR_WORKER_PROVIDER`, `CITAR_WORKER_MAX_CONCURRENT`, `CITAR_WORKER_NAME`. Prefer the config file
-that `citar setup --worker` writes: a token on a command line ends up in the shell history and the
-process list.
+Only a manifest that verifies against the update keys built into the server's extension (the helper's own,
+`crates/citar-jobs/update-keys.pub`, none until the owner's first signed release) is relayed; a failed fetch keeps the
+last good one. Every helper's welcome carries it, a new one goes at once to the connected helpers older than it, and
+each helper decides by its own `updates` setting ([Workers](Workers#updates)). The Servers page shows each
+helper machine's version beside the latest signed helper, and where its helper is with an update.
+
+The limit of refused worker tokens per address (`worker_auth`: 20 different tokens in five minutes) is counted before
+any token is looked up, from the address `CITAR_BEHIND_PROXY` and `CITAR_TRUSTED_PROXY_HOPS` give, as every other
+limit, one hello of an address at a time (so hellos sent together cannot all get past it); it holds in local mode
+too.
+
+On the helper's side (the CITAR helper, `citar-helper`): `CITAR_WORKER_SERVER`, `CITAR_WORKER_TOKEN`,
+`CITAR_WORKER_BASE_URL`, `CITAR_WORKER_PROVIDER`, `CITAR_WORKER_MAX_CONCURRENT`, `CITAR_WORKER_NAME`,
+`CITAR_WORKER_API_KEY_ENV` and `CITAR_WORKER_HARDWARE_FILE` (the hardware to report instead of a scan: a collector's
+file, as `--hardware`), each below the flag and the settings file ([Workers](Workers#the-helpers-settings-citar-016)).
+Its update policy is `updates` (`auto`, `notify` or `off`; `--updates`) in `helper.json` ([Updates](Workers#updates)).
+Prefer the settings file `citar-helper setup` writes (`helper.json`): a token on a command line ends up in the shell
+history and the process list. A helper run as a service (`citar-helper service install`) reads its home's `helper.json`
+alone: no flags and no variables reach it ([Workers](Workers#running-the-helper-as-a-service)).
 
 ---
 

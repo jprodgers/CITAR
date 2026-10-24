@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "refused", "ts": 1760000000.0, "code": "rate", "message": "slow down", "retry_after_s": null},
+  "code": "type",
+  "path": "retry_after_s",
+  "why": "an optional field is absent or a number, never null"
+}

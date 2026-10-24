@@ -1,0 +1,96 @@
+{
+ "_doc": "The key and type shape of engine_api.run_game's result on this duel (scripts/bots/run_game_keys.py); citar-sim's run_game must give the same shape.",
+ "bots": "basic",
+ "config": {
+  "map_size": "duel",
+  "map_type": "pangaea",
+  "players": [
+   {
+    "controller": "bot"
+   },
+   {
+    "controller": "bot"
+   }
+  ],
+  "seed": 11,
+  "speed": "Quick",
+  "turn_limit": 15
+ },
+ "shape": {
+  "object": {
+   "errors": {
+    "list": []
+   },
+   "phase": "string",
+   "players": {
+    "list": [
+     {
+      "object": {
+       "alive": "bool",
+       "cities": "number",
+       "difficulty": "string",
+       "future_techs": "number",
+       "great_people": "number",
+       "id": "number",
+       "kind": "string",
+       "name": "string",
+       "policies": "number",
+       "religion": "string",
+       "score": "number",
+       "spaceship": "null",
+       "techs": "number"
+      }
+     },
+     {
+      "object": {
+       "alive": "bool",
+       "id": "number",
+       "kind": "string",
+       "name": "string"
+      }
+     }
+    ]
+   },
+   "stats": {
+    "list": [
+     {
+      "object": {
+       "players": {
+        "by_id": [
+         {
+          "object": {
+           "alive": "bool",
+           "cities": "number",
+           "culture": "number",
+           "era": "number",
+           "faith": "number",
+           "gold": "number",
+           "gold_per_turn": "number",
+           "golden_age": "bool",
+           "happiness": "number",
+           "land": "number",
+           "military": "number",
+           "policies": "number",
+           "population": "number",
+           "production": "number",
+           "science": "number",
+           "score": "number",
+           "techs": "number",
+           "units": "number"
+          }
+         }
+        ]
+       },
+       "turn": "number"
+      }
+     }
+    ]
+   },
+   "turn": "number",
+   "turn_limit": "number",
+   "turns": "number",
+   "victory": "string",
+   "winner": "number"
+  }
+ }
+}

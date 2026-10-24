@@ -1,0 +1,39 @@
+{
+ "name": "json-thoughts-not-text",
+ "note": "thoughts that are not text are none, so the step's text is the reply (an object became the step's text)",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "{\"thoughts\": {\"plan\": \"expand\"}, \"calls\": [{\"tool\": \"end_turn\", \"args\": {}}]}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "{\"thoughts\": {\"plan\": \"expand\"}, \"calls\": [{\"tool\": \"end_turn\", \"args\": {}}]}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "{\"thoughts\": {\"plan\": \"expand\"}, \"calls\": [{\"tool\": \"end_turn\", \"args\": {}}]}"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

@@ -1,0 +1,849 @@
+{
+  "about": "The jobs golden set (design/phase4-helper.md P4.4.5): four short jobs, each with its canonical spec and spec hash, the bot versions it names, its result and result hash, and its chain (head, rounds and every round's digest). Checked by crates/citar-jobs/tests/golden.rs in the ci and release profiles, on five targets in determinism.yml; the self-check plays duel-a. A build whose id differs checks the results with their engine, builds, fingerprints and reference bot given its own values. Blessed with CITAR_BLESS_JOBS=1 cargo test -p citar-jobs --test golden -- bless, in a commit saying why, when what a game computes changes.",
+  "jobs": {
+    "duel-a": {
+      "kind": "lab_game",
+      "spec": {
+        "exp": "golden-duel-a",
+        "i": 0,
+        "seed": 7001,
+        "map_type": "continents",
+        "size": "duel",
+        "speed": "Quick",
+        "turns": 30,
+        "difficulty": "Prince",
+        "barbarians": "normal",
+        "barbarian_difficulty": null,
+        "nation": null,
+        "city_states": null,
+        "seats": [
+          {
+            "label": "a",
+            "bot": "basic-1",
+            "difficulty": null,
+            "params": null,
+            "aggression": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": null,
+            "nation": null
+          },
+          {
+            "label": "b",
+            "bot": "basic-1",
+            "difficulty": null,
+            "params": null,
+            "aggression": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": null,
+            "nation": null
+          }
+        ],
+        "ai_base_values": null
+      },
+      "spec_hash": "8abeb8623869feef28002d51d0cc66ff424c8799bfb8c29a675b9723f50221ce",
+      "bots": [
+        "basic-1"
+      ],
+      "result": {
+        "exp": "golden-duel-a",
+        "i": 0,
+        "seed": 7001,
+        "map": "continents",
+        "turns": 30,
+        "winner": 0,
+        "winner_label": "a",
+        "victory": "Time",
+        "players": {
+          "0": {
+            "label": "a",
+            "bot": "basic-1",
+            "difficulty": "Prince",
+            "alive": true,
+            "levels": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "build": "0b412a18fe95",
+            "version": "basic-1",
+            "fingerprint": "fd059869993b",
+            "params": {},
+            "fixed_aggression": null,
+            "aggression": 0.306,
+            "score": 76,
+            "score_share": 0.6032,
+            "rank": 0,
+            "techs": 6,
+            "cities": 2,
+            "policies": 3,
+            "religion": "none",
+            "great_people": 0,
+            "spaceship": 0,
+            "unhappy_share": 0.2,
+            "checkpoints": {},
+            "era_turn": {},
+            "events": {
+              "city_founded": 2
+            },
+            "built_top": {
+              "Granary": 1,
+              "Monument": 2,
+              "Scout": 1,
+              "Settler": 1,
+              "Warrior": 1
+            }
+          },
+          "1": {
+            "label": "b",
+            "bot": "basic-1",
+            "difficulty": "Prince",
+            "alive": true,
+            "levels": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "build": "0b412a18fe95",
+            "version": "basic-1",
+            "fingerprint": "fd059869993b",
+            "params": {},
+            "fixed_aggression": null,
+            "aggression": 0.694,
+            "score": 50,
+            "score_share": 0.3968,
+            "rank": 1,
+            "techs": 5,
+            "cities": 1,
+            "policies": 3,
+            "religion": "pantheon",
+            "great_people": 0,
+            "spaceship": 0,
+            "unhappy_share": 0.0,
+            "checkpoints": {},
+            "era_turn": {},
+            "events": {
+              "city_founded": 1
+            },
+            "built_top": {
+              "Granary": 1,
+              "Monument": 1,
+              "Scout": 1,
+              "Settler": 1,
+              "Warrior": 1
+            }
+          }
+        },
+        "errors": [],
+        "engine": "0b412a18fe95"
+      },
+      "result_hash": "16f1a8f0775bfdc77aaf0eef839115100d75cf136e7bcf33672ad5f61fb245aa",
+      "chain_head": "b6e594714903df3a789dc1e879b14dabc679eb3b6b9a6e349f7b2d2ba964a1e8",
+      "rounds": 30,
+      "digests": [
+        "16349fbb0e67095ac16fc2f8bfafc68c60e3f99f164d809e01ab092e6783ec12",
+        "071c7f0d544cbd228f634a947e1ff09356672cbbacbe0a47a9429c7d0f16652a",
+        "7d27ad326aa22a959df61366e4fd70b1558ebf3f4e3616198e6247c22e0fc578",
+        "4ce3596df554d299160584884316650cd7fa9112101019deaab1a43741feab29",
+        "c398ee38936a52df551172993087ffefbf28bc87bb25112a5df41e09c9e9ba1e",
+        "8c84042c7ebac0639a9e379ad09ac44e486e08cb05b2e225816d7dfc8cfc2314",
+        "603bc55612fc44e798055bc704f825feb310744a6fc7480a663e23cdd3271114",
+        "8eec5ea7cdb724c947451a869e61bb78a797e76bea2dcf1fb715e64c931f3d55",
+        "fe9939ae6f627cd28ed045d83c4e4f04aa2562f933cacd430dd8b02b90c4f021",
+        "5b56752f1354f708f56d6e372ac86b60759c6390e02063d700fd87c12e492be1",
+        "9989f1550f7330b3114d9b053655313d39df74a86804703351832ae30b714fb2",
+        "50ce375489c5e8e8d52c95879f0bfab76596d1dbf483a87e597edf2cb2d9e554",
+        "2310fb8790627f9b857acfb3b69e755c25231bb5add50e8005ad2cce11bfdc68",
+        "3077d750f5a169b37eb95b97f4ec7751055a927a853418487fe8304b6d9c9b5f",
+        "c249649c14a98162a72ad5fb03232c218989ae5b844257ced28aca0ce39c0228",
+        "a19817c9d3b0a1d4057fe91de4ec8d21f6a0fe46da5d2ddb6e229ca8c0a2432b",
+        "b538257c39ef20d9c56ff9acac3b73feb6303d6e7d122f8632ab8775647a1b50",
+        "8713f037a4310404499b2111dec3764d5226641aa7ada14f77e7abaae1d12d2b",
+        "cbe46523354e3fe718d0ce44b0fd0ca087be60510bdb9787ea440340dab4bc80",
+        "4585a2d10fc901af3087ecab4a084c3c2067e18dbc98edf362bddd4750819d0c",
+        "1c2d4a0cddac820d0d1150256a5ac7339cb56a4fa28ec4fe47812c36945e4af0",
+        "69051e8ec1de1d8c6506b417c0becb2f946b5f60fbc3769e251e934d307f9a76",
+        "7c79544f8fee20d4971caa440be25e830ff4853e274bd179f6dd6517fbb3df62",
+        "da8cdb44d85a71da6afc9a23cdeca829b1b91c7521f1dd6d00a47103a7c03b5f",
+        "1aa3946a3f1d0018872fd3502b473be7ba3420c0d0e9d95186d54adbb983ce46",
+        "485f5e350fb7ec2fb7ebbb02104d5c7f568879b59e4ccb4730d053b693f1c94d",
+        "f0bb9bf51f434e98f30a5f3e0c08bb742ed9bb219fbe4ba138543fa7b058c7c7",
+        "7c1219811dac9f8614ccf29d650717416795e7f2f00b83e56d9096650bd2437c",
+        "3c79af9f52337f639d667957769d7b78ea3e7d6b7df82710eb4e9447f6b6dc06",
+        "a673b8e17da2d8f0c4c4813bec1fceb3c178c2f24a55bc2f0fe77c328cfc87df"
+      ]
+    },
+    "duel-b": {
+      "kind": "ranking_game",
+      "spec": {
+        "exp": "golden-duel-b",
+        "i": 1,
+        "seed": 7002,
+        "map_type": "pangaea",
+        "size": "duel",
+        "speed": "Quick",
+        "turns": 30,
+        "difficulty": "King",
+        "barbarians": "raging",
+        "barbarian_difficulty": "Chieftain",
+        "nation": null,
+        "city_states": 1,
+        "seats": [
+          {
+            "label": "tuned",
+            "bot": "basic",
+            "difficulty": null,
+            "params": {
+              "policy_order_peaceful": [
+                "Liberty",
+                "Tradition",
+                "Honor"
+              ],
+              "prod_mode": "classic",
+              "promo_lines": [
+                "Drill",
+                "Shock",
+                "Accuracy"
+              ],
+              "tech_noise": 0.25
+            },
+            "aggression": 0.9,
+            "profile": "classic-production",
+            "profile_rev": 1,
+            "profile_name": "Classic production",
+            "levels": null,
+            "nation": null
+          },
+          {
+            "label": "idle",
+            "bot": "idle",
+            "difficulty": "Settler",
+            "params": null,
+            "aggression": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": null,
+            "nation": "Rome"
+          }
+        ],
+        "ai_base_values": "monotonic",
+        "map_edges": "wrap_x",
+        "river_density": 1.5
+      },
+      "spec_hash": "9efc2917293e36f16713c48369295773af922dfd2308fcef6e44fc66f546d099",
+      "bots": [
+        "basic-1",
+        "idle"
+      ],
+      "result": {
+        "exp": "golden-duel-b",
+        "i": 1,
+        "seed": 7002,
+        "map": "pangaea",
+        "turns": 30,
+        "winner": 0,
+        "winner_label": "tuned",
+        "victory": "Time",
+        "players": {
+          "0": {
+            "label": "tuned",
+            "bot": "basic",
+            "difficulty": "King",
+            "alive": true,
+            "levels": null,
+            "profile": "classic-production",
+            "profile_rev": 1,
+            "profile_name": "Classic production",
+            "build": "0b412a18fe95",
+            "version": "basic-1",
+            "fingerprint": "36c364dd1d92",
+            "params": {
+              "policy_order_peaceful": [
+                "Liberty",
+                "Tradition",
+                "Honor"
+              ],
+              "prod_mode": "classic",
+              "promo_lines": [
+                "Drill",
+                "Shock",
+                "Accuracy"
+              ],
+              "tech_noise": 0.25
+            },
+            "fixed_aggression": 0.9,
+            "aggression": 0.9,
+            "score": 59,
+            "score_share": 0.6484,
+            "rank": 0,
+            "techs": 7,
+            "cities": 1,
+            "policies": 2,
+            "religion": "none",
+            "great_people": 0,
+            "spaceship": 0,
+            "unhappy_share": 0.0,
+            "checkpoints": {},
+            "era_turn": {},
+            "events": {
+              "city_founded": 1,
+              "unit_captured": 23
+            },
+            "built_top": {
+              "Settler": 1,
+              "Warrior": 1,
+              "Worker": 1
+            }
+          },
+          "1": {
+            "label": "idle",
+            "bot": "idle",
+            "difficulty": "Settler",
+            "alive": true,
+            "levels": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "build": "0b412a18fe95",
+            "version": "idle",
+            "fingerprint": "9a4db41ad7f8",
+            "params": {},
+            "fixed_aggression": null,
+            "aggression": 0.75,
+            "score": 32,
+            "score_share": 0.3516,
+            "rank": 1,
+            "techs": 1,
+            "cities": 1,
+            "policies": 0,
+            "religion": "none",
+            "great_people": 0,
+            "spaceship": 0,
+            "unhappy_share": 0.0,
+            "checkpoints": {},
+            "era_turn": {},
+            "events": {
+              "city_founded": 1
+            },
+            "built_top": {}
+          }
+        },
+        "errors": [],
+        "engine": "0b412a18fe95"
+      },
+      "result_hash": "e478a22f70f76196224a45b8e0d462bfd751f801c75d763d6b802de77f6498f7",
+      "chain_head": "e8abd15be42246b35c91662b7eae6f92d115ef6f28e6843177981d2a8f2471d7",
+      "rounds": 30,
+      "digests": [
+        "57f702f562a05f8f2946b505416303e9f46976b57f6d3121de6c41195ca7225a",
+        "3eb30c06ea114079a20919eacb56536a6d0eb0a5f6d37a423ca4815d9b541198",
+        "581442093ccb4eb1f03f3f85baf639478bc50ce9814a3b06df4b65f287725798",
+        "012e39c34a2a53e01e41e850fac6cd65b26c8bf7030ce26f647524939928dae7",
+        "b08ce04586f018072a536ff4765a17a4b4cc43a7117923258b896ab487de16e5",
+        "b71f443640ecd7d9234e886a65bddeb1cc7a17e817dbd7e33b3a26a66c7ee440",
+        "2af3d82c974391089570c9adcc66a8795dda9529a0ce8973e3df42f482f0d688",
+        "69c12cda1706893b7e69ce9c1e1c97731205f386fdafcee5eb8c6f4e47cf90ad",
+        "ac30c692ab6f6523fb833df8f40af97935d45a388d9680bd46673394afe13e4b",
+        "076365ab857a2df1039c4887e1b068d9405bc74a5555a32de9f9c1f427dfc491",
+        "b16f111a9aadfe7741eb5e3b3b12372dddfa63112cb1ff2a43358ba0da50987d",
+        "b683c20544fe9b362fe69f25288878928815766c84fc240e1f1013bc4fcd7a93",
+        "0c6c49d42a707d39165f2aec6830db4b90db91d981c28fe02801d992af961859",
+        "f6d3b63b68d699108ef4fc0059798d6953d81edb65d8dee4d2ed3558cc830644",
+        "1cb7679a6b5c245b6c33d229e27a5b026159eca8ff5717418cf6a0a244c4d544",
+        "fdbd6dadf6032c46254bc43b0f52ef74d0d7712875b164b47037fafa092a6518",
+        "abec990c21ee41c6bb6dd59311b98155d63e85b2657e6184266f9c8f87271d6d",
+        "4e2e564b0eaacb2d0b853ba8cc6ceccf1851f37818f60b3fc61e7a9700653c07",
+        "46f5f6bebfb4bbb122ce93d24f2e2fe87f6c56de3474f6fb4cb4c8856e62e5bb",
+        "9fc942fee840c17ff3600cc46f6de0706869166d5f3320854ff6288a841da3b6",
+        "099b7cc2b0abe3c84b49be8feb4262101f45fcc96075ccf6ba380555f45d3684",
+        "01ff21369ff4c4aa60243b0fe5b2aa1f8de1daa3c6fc49b4c3d36dff8783ee07",
+        "0a5d0438ee73e7d88f65cfa9961d58e93eb0581746d2e007d2a566d9c2c91c4b",
+        "2801e073f64bb2aeb3d7e74309d3fb14b7fef36cfa14d252271ba6bf91d55687",
+        "9c254966c043515e207ba13adfdb50d384069a75f1da2a5653b6df017c0977a6",
+        "6e5a8f9d07b0e5d28a710a3a17d2f50e84624c80a5cc0951730816938426e26c",
+        "0d1be2ef0a9ac7e1eb29badd62ae34e906f3dc07ca36792a74f686ed01e879df",
+        "0f573d51947425f570efb1868533b2704aed1b56657eaf53706837e8799bdb08",
+        "2bd9c12b1d33475852d5c9bcabcf29f3c207194758bc9d2dee97cb6e61fbbe53",
+        "89362323afc0c8300821cbdad4127396897ab35aec538089a34d6471a9a9db8f"
+      ]
+    },
+    "reference-a": {
+      "kind": "reference_game",
+      "spec": {
+        "i": 0,
+        "seed": 5000,
+        "size": "duel",
+        "map_type": "continents",
+        "barbarians": "normal",
+        "speed": "Quick",
+        "turn_limit": 40,
+        "params": null
+      },
+      "spec_hash": "01be8f19f90385de1393cda0977bcb40377d2744bda1dfb488e90e58ee4ebd82",
+      "bots": [
+        "basic-1"
+      ],
+      "result": {
+        "i": 0,
+        "seed": 5000,
+        "size": "duel",
+        "map_type": "continents",
+        "barbarians": "normal",
+        "speed": "Quick",
+        "turn_limit": 40,
+        "players": 2,
+        "turns": 40,
+        "winner": 1,
+        "victory": "Time",
+        "civs": [
+          {
+            "pid": 0,
+            "nation": "Byzantium",
+            "aggression": 0.25,
+            "alive": true,
+            "eliminated_turn": null,
+            "final_score": 73,
+            "at": {
+              "end": {
+                "alive": true,
+                "cities": 1,
+                "population": 5,
+                "techs": 9,
+                "score": 73,
+                "military": 13,
+                "era": 0,
+                "policies": 4,
+                "land": 14,
+                "wars_declared": 0,
+                "wars_declared_on_majors": 0,
+                "wars_declared_on_others": 0,
+                "cities_captured": 0,
+                "cities_lost": 0,
+                "turn": 40
+              }
+            }
+          },
+          {
+            "pid": 1,
+            "nation": "Carthage",
+            "aggression": 0.639,
+            "alive": true,
+            "eliminated_turn": null,
+            "final_score": 90,
+            "at": {
+              "end": {
+                "alive": true,
+                "cities": 2,
+                "population": 5,
+                "techs": 9,
+                "score": 90,
+                "military": 22,
+                "era": 0,
+                "policies": 4,
+                "land": 20,
+                "wars_declared": 0,
+                "wars_declared_on_majors": 0,
+                "wars_declared_on_others": 0,
+                "cities_captured": 0,
+                "cities_lost": 0,
+                "turn": 40
+              }
+            }
+          }
+        ],
+        "bot_errors": 0,
+        "engine": "0b412a18fe95",
+        "bot": "basic-1"
+      },
+      "result_hash": "e57e7222109a976ba2c557215b4e8bcd764634e37cb9f7e7a378f02335b5ab8c",
+      "chain_head": "1851e84d890eac0e025e1bd74a1ee3b648a139484ca3e3826e5df3b61e6fa8c9",
+      "rounds": 40,
+      "digests": [
+        "101152d3f908a5de07d278c3b69a01b72e91e19408b3f55e5092eddb2d8e2622",
+        "bea18d807a99b6e16bd112e096829550701d4987ddec16ac667b74f5513eb87f",
+        "bebe4d16e7c7b3715d678167bfe326c0e85868814caafe7aded80b7489b160a0",
+        "51f6a6a0cd0fb45ec7c507b947e226e8b9e17dff37bed48116805fe6e617f3ee",
+        "577f8d85b4e6a9c025a1fa7486b7a8da0cc0259517b1932a6e7718c5d7de96e4",
+        "0fa51a5a6c01aac99f9950c1a9582044e247e68d86ff73daa75276fc29c1b651",
+        "0589ef8ab625dbd9d296904f24e574fbe165948de2aa507fa4ea62969d8c7bf9",
+        "96af12940b389a370e2d49581897fc0a50cd3b2d6755e8206710a8ffcc36f622",
+        "16122835bce092fc627b85436a96ae8ba97599e34ae0d74f0e08ac7b5c64bd13",
+        "845df453cea3b80bef65d92d17a4ef86aaf578e1c6746996d4f4cf0debf011a1",
+        "ffc2120ba243948d788aff766df81a32607c2edcf6a87108bd367c428416436f",
+        "a74d411581b71fe74feafee3044e10e406893c35fa5f963d8c5b567c849417d0",
+        "84fa7144472e299a84ffd170d8c5c443626d439796e82642094ef420cfbe4e5f",
+        "ba7a11e3022262d783814c789a6d350d754a03324063c358917c7d68d8367a1c",
+        "b131372fe3fcb67394c0538d905d9a1432065ce7b334dd6c2a8777719e6827ff",
+        "d7561fdb3661e8d5567cfd3dcb33b89fad986b5292171875d25384c0c684d155",
+        "9018ac5950f3ea43ab93f2cb947b5317f8121ac1d6de1d5bcc99b3ed7a62fadb",
+        "a2aae5ff3129e5e9a9e1c85ed3856c4a03f0e6efc198f53e2b61e6673c25b3ae",
+        "2bf9a5c2926ace0041a6c5bb81bed797a246ad5f67c01108778ee4b693c0b246",
+        "8286a45117465de0c6401584a947c30e884c335824c8f12df1cad4f1866caa25",
+        "62921f64f48f24cfe4b833c6e33f20ff7940f0ff7553bdc6b0708aa472de7f71",
+        "7f2f3b5861940082384ecfd9d3a78993fc95d3517d26a220e4925e677eba9c8c",
+        "0e91ff8f5c600e1524c9e57f80235bc08cab7d05af744ee7e4c4454210423850",
+        "86cb0d570c925c190eaab3bf8ea4f71a6dff4530497f7aa97c422ebb7bec738f",
+        "9f191bc516c3ff87f43f0faeb61ef021add8d03396c5b9504f02fd6828d42897",
+        "460b6503658156955cf463e7f1d84583a23c6546290df858bbfa111e3506484d",
+        "a545f2bef664b4b58fe25ba35d18f996102f08359ce977971f1677459652190b",
+        "b61f8b7b7fde3a1cdde43ce99f4f7a71e7ae48240c184444e5fbee15e287313f",
+        "09189433c8bacf0a17be01ec64223cd9b302bc18fcde0be63e22bd36ee9d7601",
+        "8a762a6b7ee52c852b3ba042bbfa8fde9a4d74bb5459f0230c31ddb126ea9ca3",
+        "0ea61511b05687bb2326b3128e889489942047db5caa74cc65fa25bbeaf734d1",
+        "03ca6afc9ad16e7a124e6333c54ba406467d7f3662955465de54818252c29c38",
+        "e488d699a78bcdc6b0da52ecf6176d6a9ca55d791dabbe5948c0cb64c10007ea",
+        "04f27cd2d836f02f38887ec1ef47b348dcdc2f2f8bcad47a844f553a6b102d5a",
+        "2f72d9ef7bfa4fe4c46c992488674cfeafecca04539a73e43618e0ee8bca1167",
+        "25de075e84f195780353340fc066a5b83c29223751bb141d068c38e71ffcb584",
+        "16f54e943038f119ddd3d0648ef2476329ed757b2e8f161d33dc8dc8a17e75d4",
+        "2c58b72da7c712043e4a80ded02c6700fe3b571317de1dc57e1181c02ec5f3c2",
+        "2b3c86e225b6e82eb500f99f34d5085a647d52686b44fb67f4b4a569648842ef",
+        "155c1a86dba24ec130385ce1c5bdc93151c15f6554af02117bdae84ae9d56538"
+      ]
+    },
+    "small-a": {
+      "kind": "lab_game",
+      "spec": {
+        "exp": "golden-small-a",
+        "i": 2,
+        "seed": 7003,
+        "map_type": "fractal",
+        "size": "small",
+        "speed": "Quick",
+        "turns": 40,
+        "difficulty": "Prince",
+        "barbarians": "normal",
+        "barbarian_difficulty": null,
+        "nation": "BenchmarkCiv",
+        "city_states": 2,
+        "seats": [
+          {
+            "label": "w=0.4",
+            "bot": "basic-1",
+            "difficulty": null,
+            "params": {
+              "aggressive_above": 0.4,
+              "promo_in_city": [
+                "Cover",
+                "Drill"
+              ]
+            },
+            "aggression": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": {
+              "aggressive_above": 0.4,
+              "promo_in_city": [
+                "Cover",
+                "Drill"
+              ]
+            },
+            "nation": null
+          },
+          {
+            "label": "w=0.7",
+            "bot": "basic-1",
+            "difficulty": null,
+            "params": {
+              "aggressive_above": 0.7,
+              "promo_in_city": [
+                "Shock"
+              ]
+            },
+            "aggression": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": {
+              "aggressive_above": 0.7,
+              "promo_in_city": [
+                "Shock"
+              ]
+            },
+            "nation": null
+          },
+          {
+            "label": "plain",
+            "bot": "basic-1",
+            "difficulty": null,
+            "params": null,
+            "aggression": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": null,
+            "nation": null
+          },
+          {
+            "label": "warlike",
+            "bot": "basic-1",
+            "difficulty": null,
+            "params": null,
+            "aggression": 1.0,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "levels": null,
+            "nation": null
+          }
+        ],
+        "ai_base_values": null,
+        "resources": {
+          "density": 1.5,
+          "strategic": {
+            "each": {
+              "Horses": {
+                "mode": "off"
+              },
+              "Iron": {
+                "mode": "cap",
+                "value": 2.0
+              }
+            }
+          }
+        }
+      },
+      "spec_hash": "a96f407b79a0ccde0e2e223ff0650ced2a5ce2f5488996c997964ddf6469ae19",
+      "bots": [
+        "basic-1"
+      ],
+      "result": {
+        "exp": "golden-small-a",
+        "i": 2,
+        "seed": 7003,
+        "map": "fractal",
+        "turns": 40,
+        "winner": 3,
+        "winner_label": "warlike",
+        "victory": "Time",
+        "players": {
+          "0": {
+            "label": "w=0.4",
+            "bot": "basic-1",
+            "difficulty": "Prince",
+            "alive": true,
+            "levels": {
+              "aggressive_above": 0.4,
+              "promo_in_city": [
+                "Cover",
+                "Drill"
+              ]
+            },
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "build": "0b412a18fe95",
+            "version": "basic-1",
+            "fingerprint": "5e038201c630",
+            "params": {
+              "aggressive_above": 0.4,
+              "promo_in_city": [
+                "Cover",
+                "Drill"
+              ]
+            },
+            "fixed_aggression": null,
+            "aggression": 0.417,
+            "score": 46,
+            "score_share": 0.2091,
+            "rank": 3,
+            "techs": 7,
+            "cities": 1,
+            "policies": 4,
+            "religion": "none",
+            "great_people": 0,
+            "spaceship": 0,
+            "unhappy_share": 0.0,
+            "checkpoints": {},
+            "era_turn": {},
+            "events": {
+              "city_founded": 1,
+              "unit_captured": 2
+            },
+            "built_top": {
+              "Monument": 1,
+              "Scout": 2,
+              "Settler": 2
+            }
+          },
+          "1": {
+            "label": "w=0.7",
+            "bot": "basic-1",
+            "difficulty": "Prince",
+            "alive": true,
+            "levels": {
+              "aggressive_above": 0.7,
+              "promo_in_city": [
+                "Shock"
+              ]
+            },
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "build": "0b412a18fe95",
+            "version": "basic-1",
+            "fingerprint": "57d18e354c36",
+            "params": {
+              "aggressive_above": 0.7,
+              "promo_in_city": [
+                "Shock"
+              ]
+            },
+            "fixed_aggression": null,
+            "aggression": 0.25,
+            "score": 60,
+            "score_share": 0.2727,
+            "rank": 1,
+            "techs": 7,
+            "cities": 2,
+            "policies": 4,
+            "religion": "none",
+            "great_people": 0,
+            "spaceship": 0,
+            "unhappy_share": 0.225,
+            "checkpoints": {},
+            "era_turn": {},
+            "events": {
+              "city_founded": 2
+            },
+            "built_top": {
+              "Granary": 1,
+              "Monument": 2,
+              "Scout": 1,
+              "Settler": 1,
+              "Spearman": 2,
+              "Warrior": 2
+            }
+          },
+          "2": {
+            "label": "plain",
+            "bot": "basic-1",
+            "difficulty": "Prince",
+            "alive": true,
+            "levels": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "build": "0b412a18fe95",
+            "version": "basic-1",
+            "fingerprint": "fd059869993b",
+            "params": {},
+            "fixed_aggression": null,
+            "aggression": 0.639,
+            "score": 48,
+            "score_share": 0.2182,
+            "rank": 2,
+            "techs": 7,
+            "cities": 1,
+            "policies": 4,
+            "religion": "none",
+            "great_people": 0,
+            "spaceship": 0,
+            "unhappy_share": 0.0,
+            "checkpoints": {},
+            "era_turn": {},
+            "events": {
+              "city_founded": 1,
+              "unit_captured": 1
+            },
+            "built_top": {
+              "Granary": 1,
+              "Monument": 1,
+              "Scout": 1,
+              "Settler": 2,
+              "Warrior": 1
+            }
+          },
+          "3": {
+            "label": "warlike",
+            "bot": "basic-1",
+            "difficulty": "Prince",
+            "alive": true,
+            "levels": null,
+            "profile": null,
+            "profile_rev": null,
+            "profile_name": null,
+            "build": "0b412a18fe95",
+            "version": "basic-1",
+            "fingerprint": "25f3ae4d2fd3",
+            "params": {},
+            "fixed_aggression": 1.0,
+            "aggression": 1.0,
+            "score": 66,
+            "score_share": 0.3,
+            "rank": 0,
+            "techs": 8,
+            "cities": 2,
+            "policies": 4,
+            "religion": "none",
+            "great_people": 0,
+            "spaceship": 0,
+            "unhappy_share": 0.2,
+            "checkpoints": {},
+            "era_turn": {},
+            "events": {
+              "city_founded": 2
+            },
+            "built_top": {
+              "Monument": 1,
+              "Scout": 2,
+              "Settler": 1,
+              "Warrior": 3,
+              "Worker": 1
+            }
+          }
+        },
+        "errors": [],
+        "engine": "0b412a18fe95"
+      },
+      "result_hash": "35234a2944b913a0247438e1d5fcc284ee7b01e705270c86244e8a47f96dcce9",
+      "chain_head": "0ffa47ef593feb8c9efd26bc55f2c196dcca4731a2374bacc9e4b229fad1dfd2",
+      "rounds": 40,
+      "digests": [
+        "ec2decbbe7c64d808327a4526ddb7e0b189c729e37081bf2165220b4121adcf3",
+        "45b2ed30d09996fdeb710def3f537de23a046970808f7106f0fbe89bc39f6260",
+        "a5cda56105d17de73e58923e30f0637068c177f160fc356ada1f497a54f71754",
+        "0b447fb79dbd32fdbf4783f58aab9f1b0f88942ad93787a4652ef9568c0950ee",
+        "ade4f144c08b157c39aa54ae840dcfdc415c3c17aa7a851d673d68c15cc7208b",
+        "4d6344c8f3364f61a9a20c62928323963d657a7b89c6e774873399a09a53ddbb",
+        "bb67f87df39ab63a15c2baf866de5aa1d32b1f8ae2b686674f3e6a2587ab1aca",
+        "4780276bf049386c75e1756f3eedb75d5132372ebc0d936269cc2f0d84516c40",
+        "3593f8e5f0a3af862e307c539988c0ce71fa339527f129f28930100aff95de2a",
+        "b3925e7f5be82f335e89307872b3cb0a181215ab30fe57c682321833f1d05e39",
+        "0314fa1f64e83a795ef7d34e9eb94625111edb164f6c8ab3a6d87811ff4697bc",
+        "b546740c9c913955380c610f2af1967025a863fbfa540c55398fbad344fc4a05",
+        "ee5cd226a73c689f95179b3372f6ef149413265cc520704902057fa7c838d077",
+        "1d37fde9d3331a20ba6d702ce7bca3d8fd4cf156285072b032e6eb5dadfa6a38",
+        "4c60e95c6f7d7b58c4323b09406a65192c3c6312c85e2d1fad4762b809bcff38",
+        "3ed880008ad045c511acf91e4db1c90ab6ac5678c154204f936cbcfc3e86baed",
+        "7f5cdf69e617f1d977562bfccd921f7945551eac0772eefca320bdbf70a0a50e",
+        "c42c78bf01ad3707590af0fba84aacd286292c1140a2f1fb11a9a2d0d007fd3e",
+        "7a9905fb45325b31af0f7aa91d93c0d4e19bac12c3af90cc4154dbdb58be9d4d",
+        "ef4c985d1f0c03b081b2cdd6d9d802bd2741c2c4ffcb4abb197653e7ce09f7cf",
+        "202849c767f6d71312aa1671fd8d787f0756a33f265312b165d9298ada2961c2",
+        "5963c708467c9f35509ca14450ab522e4fe64aa1aca835787cbe99ea1495c974",
+        "aa10c6413398335f1218be6ac27141f73c8ded2c3e19c05744c31765de28480a",
+        "eeadd31de9addba757d930548bd6904a0be53b735b445fe9cebe55c63a88c872",
+        "8be1d754f7be49d89f0f3a123479f5b9dbd75a0d3eb9811dbf7c2e4c6a8bda46",
+        "b00d1dc68b9b6fc67800f5517e9d0944fad4798d39ee186b4c4eb7e112ac1fb1",
+        "71644c605ef460bb66bae2f426e899fd6a8d1e6d21a01b1affc8fad9c81fdb67",
+        "6dbe6dde66fdced973273805114457a3faa5e806ecdebc88bcb1bbac4bce9090",
+        "59a898493ed238aa646496da166c4cada629bfcb198b86fe111f9433cd390465",
+        "7fe18cf04ce932737881957e29ea2221c4103884556b4efe9b74d20985d9e2bb",
+        "a313ad3ad09993900cdd8e1877c1ff7238d56ff68c14c86d68dfd1afa659308e",
+        "4da7195c93d3356b2cf0ff169c920112c6f089dd99c6de006387a6771013b845",
+        "1d1a1f7a257fc150987730c15de044ba0ef2ef32eb9c5db5389a0624362b895d",
+        "dae2287a17ca3d36506bb4086455c74517c7e8af42d4f36b311508a0d57c07e7",
+        "fcf2b41a27da6065d5a7d33b75d50e4d37e2a21c758636845fdb0a8446890113",
+        "01748ccf5887babac69eaebe02734a89a0a2110026bd7adf56204171100f4cdb",
+        "be9fcab21dc96bda517129551dd511903c1a9c7005e17e33d2d4d511d95013c0",
+        "1e3bf576ea0d12e65e8615cc8398feed62eabaf22fbffbaaca53a2c4662fed1a",
+        "2cc2df787d8f89d07e3a2e26b1527352c73303ea50f606d4534e2c5f05110c3b",
+        "da1c345a39536575d9e86a532e75464282c9614811cabd4b2a665bd4e9117780"
+      ]
+    }
+  }
+}

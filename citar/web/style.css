@@ -53,6 +53,22 @@ table.list th, table.list td { text-align: left; padding: 6px 8px; border-bottom
 table.list th { font-size: 12px; color: var(--muted); font-weight: 500; }
 .seat-row { display: grid; grid-template-columns: 30px 110px minmax(120px, 1fr) 120px minmax(110px, 1fr) 46px auto; gap: 8px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .seat-extra { grid-column: 3 / 8; display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px; }
+/* a hybrid seat's form (lobby.js hybridForm): the bot, its model, who decides each kind of diplomacy, the advisor */
+.seat-extra.hybrid-form { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.hybrid-form .hybrid-bot { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px; }
+.hybrid-form .hybrid-model > .seat-extra { margin-top: 4px; }
+.hybrid-owners { display: flex; flex-direction: column; gap: 6px; }
+.hybrid-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 12px; }
+.hybrid-cat { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 2px 0; border-bottom: 1px dotted var(--border); }
+/* a benchmark scenario's hybrid settings (benchmarks.js) and the Models page's Diplomacy tab (models.js) */
+.hybrid-scenario:not(:empty) { margin: 8px 0; padding: 8px; border: 1px dashed var(--border); border-radius: 6px; }
+.diplomacy-board td { vertical-align: top; }
+.owner-toggle { display: inline-flex; }
+.owner-toggle button { border-radius: 0; }
+.owner-toggle button:first-child { border-radius: 6px 0 0 6px; }
+.owner-toggle button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.seat-dialog-extra .hybrid-form, .seat-dialog-extra > .seat-extra { margin-top: 6px; }
+.seat-state { font-size: 12px; color: #cfe2ff; }
 code, pre { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 pre { background: #0b0e13; padding: 8px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
 
@@ -107,14 +123,74 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .end-turn.blocked:hover { color: #aab1c0; }
 .attention { box-shadow: 0 0 0 2px var(--gold), 0 4px 16px #0008; }
 .tooltip { position: absolute; pointer-events: none; background: rgba(10,12,18,.95); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; max-width: 280px; z-index: 20; }
-.turn-box { position: absolute; right: 10px; bottom: 10px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: center; z-index: 6; max-width: calc(100% - 360px); }
+.turn-box { position: absolute; right: 10px; bottom: 10px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: center; z-index: 9; max-width: calc(100% - 360px); }
 .turn-box .end-turn { font-size: 16px; padding: 9px 22px; box-shadow: 0 4px 16px #0008; }
 .turn-box .pill { font-size: 13px; padding: 6px 12px; background: rgba(20,24,32,.95); }
 .alert-btn { background: #4a1616; border-color: #a33; }
 .alert-item { display: flex; gap: 6px; }
 .alert-icon { width: 18px; text-align: center; flex: none; }
-.minimap { position: absolute; left: 10px; top: 10px; border: 1px solid var(--border); border-radius: 4px; background: #000; cursor: pointer; }
+.minimap { position: absolute; left: 10px; top: 10px; border: 1px solid var(--border); border-radius: 4px; background: #000; cursor: pointer; touch-action: none; }
 .banner { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: rgba(20,24,32,.92); border: 1px solid var(--border); font-weight: 600; z-index: 5; }
+/* End Turn while a chat holds the turn (chat.js): waiting with its countdown, armed to end when they answer */
+.end-turn.answer { background: #4a3b10; border-color: var(--warn); color: #ffe08a; }
+.end-turn.waiting { background: #2a2e38; border-color: var(--accent); }
+.end-turn.armed { background: #22324f; border-color: var(--good); }
+.end-turn .chat-cancel { opacity: .7; }
+.end-turn .chat-clock { font-variant-numeric: tabular-nums; }
+
+/* ---------- the docked chat windows (chat.js; placed by chatmodel.js's dockLayout) ---------- */
+/* wide: the dock lies over the map area without taking its clicks; each window sits on the bottom edge, left of the
+   End Turn box, which it never covers */
+.chat-dock { z-index: 7; }
+/* the windows keep clear of the panels when there is room (dockLayout's obstacles); when there is none (narrow), the
+   unit or city panel the person opened lies over them, and End Turn over everything */
+.unit-panel, .city-panel { z-index: 8; }
+.chat-dock.wide { position: absolute; inset: 0; pointer-events: none; }
+.chat-dock.wide .chat-win { position: absolute; pointer-events: auto; }
+.chat-dock.wide .chat-strip { display: none; }
+/* narrow (700 px or less): one window, full width above the End Turn box, under a strip with a tab per window */
+.chat-dock.narrow { position: absolute; display: flex; flex-direction: column; gap: 4px; pointer-events: auto; }
+.chat-dock.narrow .chat-win { position: relative; flex: 1 1 auto; min-height: 0; }
+.chat-strip { display: flex; gap: 4px; overflow-x: auto; flex: none; }
+.chat-tab { flex: none; padding: 4px 10px; font-size: 12px; background: rgba(20,24,32,.95); white-space: nowrap; }
+.chat-tab.active { border-color: var(--accent); background: #22324f; }
+.chat-tab.yours { color: var(--warn); }
+.chat-tab.unread, .chat-win.tab.unread { box-shadow: 0 0 0 2px var(--gold), 0 6px 24px #000a; }
+.chat-win { display: flex; flex-direction: column; background: rgba(20,24,32,.97); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 6px 24px #000a; overflow: hidden; }
+.chat-win.yours { border-color: var(--warn); }
+.chat-win.tab .chat-body { display: none; }
+.chat-win.tab .chat-head { cursor: pointer; border-bottom: none; }
+.chat-head { display: flex; align-items: center; gap: 4px; padding: 5px 6px 5px 10px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-weight: 600; white-space: nowrap; overflow: hidden; flex: none; }
+.chat-head .chat-name { overflow: hidden; text-overflow: ellipsis; }
+.chat-head button { padding: 0 7px; }
+.chat-dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--gold); flex: none; }
+.chat-win.unread .chat-dot { display: inline-block; }
+.chat-body { display: flex; flex-direction: column; gap: 6px; padding: 8px; overflow-y: auto; min-height: 0; }
+/* the log gives up a little height when the window is short (down to 120 px); then the body scrolls */
+.chat-body > * { flex: none; }
+.chat-body > .chat-log { flex: 0 1 auto; min-height: 120px; max-height: 240px; }
+.chat-log { overflow-y: auto; background: #0d1016; border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+.chat-log .msg { max-width: 92%; }
+.chat-divider { text-align: center; color: var(--muted); font-size: 11px; margin: 4px 0; }
+.chat-note { color: var(--muted); font-size: 12px; text-align: center; margin: 2px 0; font-style: italic; }
+.msg .chat-note { text-align: left; }
+.chat-card { margin-top: 4px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: #151b27; font-size: 12px; }
+.chat-proposal { font-size: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.chat-status { font-size: 12px; color: var(--muted); }
+.chat-status.you { color: var(--warn); }
+.chat-status.warn { color: var(--bad); }
+.chat-count { font-size: 11px; color: var(--muted); }
+.chat-count.warn { color: var(--warn); }
+.chat-text { width: 100%; }
+.chat-buttons { margin-top: 0; }
+.chat-deal { display: flex; flex-direction: column; gap: 6px; }
+.chat-deal-toggle { align-self: flex-start; }
+.chat-deal-adder select, .chat-deal-adder input { max-width: 150px; }
+.chat-deal-note { font-size: 11px; }
+@media (max-width: 700px) {
+  /* the End Turn box may take the width it needs: the chat windows sit above it */
+  .turn-box { max-width: calc(100% - 20px); }
+}
 
 /* ---------- modals ---------- */
 /* anchored near the top: a modal whose content grows (deal builder, tech tree) must not jump under the mouse */
@@ -187,6 +263,9 @@ body:has(#modal-root > *) #toasts { top: auto; bottom: 24px; }
 .replay .bottom { display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #12151c; border-top: 1px solid var(--border); }
 .replay .bottom input[type=range] { flex: 1; }
 .chart-box { background: #0d1016; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; }
+/* the recap's chats, each a thread as it stood at the end of the turn shown */
+.recap-thread { display: flex; flex-direction: column; margin: 8px 0; padding-top: 4px; border-top: 1px solid var(--border); }
+.recap-thread .msg .swatch { margin-right: 4px; }
 
 /* ---------- navigation ---------- */
 .page-header { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
@@ -285,6 +364,8 @@ button.active { border-color: var(--accent); background: #22324f; }
 
 /* ---------- servers ---------- */
 .server-card .issues { margin: 6px 0 0; padding-left: 18px; }
+/* the machine or group an address of the Servers page names (#/pool/<id>, #/pool/groups/<gid>) */
+.card.focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .server-card .model-chip.live { border-color: #2f7a45; background: #173a22; }
 .small { font-size: 12px; }
 .tabbar { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
@@ -524,6 +605,9 @@ dl.paths dd { margin: 0; }
 .q-table tr.q-next td { background: rgba(79, 140, 255, .08); }
 .q-prio-box { display: inline-flex; gap: 3px; align-items: center; white-space: nowrap; }
 .q-prio { width: 52px; }
+.q-leases { margin: 6px 0; }
+.q-list { margin: 4px 0 6px 18px; padding: 0; font-size: 13px; }
+.q-list li { margin: 2px 0; }
 .q-load { margin: 8px 0; }
 
 /* ---- Bots page -------------------------------------------------------------------------------------------------- */
@@ -573,3 +657,44 @@ dl.paths dd { margin: 0; }
 .color-sw.taken { cursor: not-allowed; opacity: 0.25; background-image: linear-gradient(45deg, transparent 45%, #fff 45%, #fff 55%, transparent 55%) !important; }
 .color-custom { gap: 6px; align-items: center; }
 .color-hex { width: 84px; font-family: monospace; }
+
+/* people: the directory, a profile, the account's profile card (P3.2.6) */
+.people-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin: 12px 0; }
+.person-card { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel-2); color: var(--text); text-decoration: none; min-width: 0; }
+a.person-card:hover { border-color: var(--accent); }
+.person-text { min-width: 0; }
+.person-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.person-bio { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.avatar { flex: 0 0 auto; }
+.profile-page { max-width: 760px; margin: 0 auto; }
+.profile-head { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.profile-name { margin: 0; }
+.profile-bio { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.profile-links, .profile-items { margin: 4px 0 10px; padding-left: 18px; }
+.profile-links a, .profile-items a { overflow-wrap: anywhere; }
+.card h3 { margin: 0 0 8px; font-size: 15px; }
+.card h4 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.card.notice { border-color: var(--accent); }
+.small-pill { font-size: 11px; margin-left: 6px; }
+a.plain { color: inherit; text-decoration: none; }
+.avatar-preview .avatar { width: 64px; height: 64px; font-size: 26px; }
+table.list.levels td { padding: 4px 8px; vertical-align: middle; }
+table.list.levels td:last-child { width: 1%; }
+table.list.levels select { min-width: 112px; }
+
+/* the admin users page (P3.2.7) */
+.table-wrap { overflow-x: auto; }
+table.admin-users td { vertical-align: middle; white-space: nowrap; }
+table.audit td:not(.audit-detail) { white-space: nowrap; }
+.audit-detail { min-width: 220px; }
+table.audit td { font-size: 12.5px; }
+td.nowrap { white-space: nowrap; }
+.audit-detail { overflow-wrap: anywhere; max-width: 460px; }
+.pill.status-suspended, .pill.status-deleted { border-color: #a33; }
+.pill.status-probation, .pill.status-pending { border-color: #a88a2a; }
+.admin-drawer h3 { margin: 6px 0 0; font-size: 14px; }
+
+/* A checkbox in a form field keeps its own size: `.field input` widens inputs to the field, which pushed a checkbox's
+   label to the far side of the dialog (the machine settings dialog, the grant dialog's purposes, the hardware editor). */
+.field input[type=checkbox], .field input[type=radio] { width: auto; }

@@ -1,0 +1,77 @@
+{
+ "name": "text-gemma4-string-spans-lines",
+ "note": "a Gemma 4 string may hold a line that is a tool name: the object is still read whole, since the scan stops only outside its strings, and that line is a call of its own as before (unchanged by 4-02's fix round)",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "log_thought{text:<|\"|>Plan:\nend_turn\nnext turn<|\"|>}\nend_turn{}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "log_thought{text:<|\"|>Plan:\nend_turn\nnext turn<|\"|>}\nend_turn{}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "log_thought",
+     "args": {
+      "text": "Plan:\nend_turn\nnext turn"
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "name": "end_turn",
+     "args": {}
+    },
+    {
+     "id": "<gen:3>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 3
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "log_thought{text:<|\"|>Plan:\nend_turn\nnext turn<|\"|>}\nend_turn{}",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "type": "function",
+     "function": {
+      "name": "log_thought",
+      "arguments": "{\"text\": \"Plan:\\nend_turn\\nnext turn\"}"
+     }
+    },
+    {
+     "id": "<gen:2>",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    },
+    {
+     "id": "<gen:3>",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

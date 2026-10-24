@@ -1,9 +1,17 @@
 # Bot tuning log
 
-The scripted bot (`citar/bots/basic.py`) is the yardstick that humans and AI models are measured against, so it
-has to play competently: expand, grow, research, fight, and win games in all the ways UnCiv allows. This file is
-the working log of that effort. It records the goal, the method, every experiment and what was decided. **Any
-session that continues this work starts here.**
+The scripted bot is the yardstick that humans and AI models are measured against, so it has to play competently:
+expand, grow, research, fight, and win games in all the ways UnCiv allows. This file is the working log of that
+effort. It records the goal, the method, every experiment and what was decided. **Any session that continues this
+work starts here.**
+
+**From 0.1.6 the bot is compiled into the Rust engine as versions** (`crates/citar-bot`; `basic-1` ports
+the Python bot, `basic.py`, as it stood at the swap, with its 373 parameters in 17 groups in
+`crates/citar-bot/params/basic-1.json`; the tag `python-engine-0.1.6` keeps `basic.py`). The experiment log below
+is the Python bot's and names its frozen copies by their hashes; those were archived with 0.1.5 along with the lab
+history, and the ladder of 0.1.6 starts empty.
+A parameter change is a profile; a code change that should not move existing results is a new version (copy
+`src/basic1/` and `params/basic-1.json` to `basic2` and `basic-2`, add its row to the version table).
 
 ## Goal and success criteria
 
@@ -25,32 +33,39 @@ Targets for four equal **Prince** bots on a Small map at Quick speed:
 
 ## How the lab works (`citar/lab.py`)
 
-- `python -m citar.lab run --workers 10 --night-workers 2` is a long-running runner, started detached with
-  PowerShell `Start-Process` (output in `saves/lab/runner.out`). It plays queued experiments in parallel. Each game
-  is an independent subprocess (`python -m citar.lab play SPEC OUT`, files in `saves/lab/jobs/`) at below-normal
-  priority. The first version used `ProcessPoolExecutor(max_tasks_per_child=1)`, which deadlocked on Windows with
-  Python 3.14 after about an hour (worker processes spawned but never ran). A game that outlives its runner still
-  writes its result, and the next runner collects it. During the quiet hours in `benchmarks/settings.json` (21:00–06:00, because of fan noise) it
-  drops to the night worker count. Override this in `saves/lab/config.json`, e.g. `{"workers": 10, "night_workers": 2}`;
-  the runner re-reads it continuously.
-- `python -m citar.lab submit saves/lab/specs/NNN-*.json` queues experiments. Bot code is **frozen at submit time**
-  into `citar/bots/frozen_<hash>.py`, so editing `basic.py` never contaminates a queued experiment.
+- **The CITAR server plays the lab** (since 0.1.6, design/phase4-helper.md P4.5.5): start the server (local or
+  server mode) and its job dispatcher plays whatever is queued, on the server's own job host, a child process under
+  the host machine's CPU settings (Servers page, the host's Machine settings: threads, CPU %, memory, the kinds of
+  work). For a long tuning run on this laptop, raise its threads there (the local-mode default is half the logical
+  CPUs). Its restricted hours (fan noise) start no new game; the games playing finish. There is no separate runner:
+  0.1.5's `python -m citar.lab run`, its subprocess per game and its orphan adoption are gone, and `citar lab run`
+  says so and exits 2. A game playing when the server stops is played again when it starts.
+- `python -m citar.lab submit saves/lab/specs/NNN-*.json` queues experiments. A seat names a bot version (`basic`,
+  `basic-N`, `idle`) or a profile, and **versions are pinned at submit time**: `basic` becomes the version it names
+  then, so a version added later never contaminates a queued experiment. (0.1.5 froze a copy of `basic.py` into
+  the package instead; seats naming such a copy are now refused as archived.) Every result records per seat the
+  build id, the version, the profile and revision, the overrides and the fingerprint, as they were when the game was
+  played; only such results are rated, so 0.1.5's results left in `saves/lab/results` are not.
 - `python -m citar.lab status` shows progress. `python -m citar.lab report NAME...` shows per-label win share,
   score share with a 95% CI, techs and cities at turns 100/200/300, and head-to-head score-share differences
   (`*` = significant).
-- Results are appended per game to `saves/lab/results/NAME.jsonl`, so nothing is lost if the runner or the session
-  stops. **To resume after a restart,** check `status` (it says whether the runner PID is alive) and start the
-  runner again if needed. Unfinished games are simply replayed.
-- `python -m citar.lab stop` stops the runner.
+- Results are appended per game to `saves/lab/results/NAME.jsonl`, each once (the dispatcher commits a game's
+  result to the server's database first, then writes its line, and reconciles the two when the server starts), so
+  nothing is lost if the server stops. **To resume after a restart,** start the server: unfinished games are played
+  again, and so are games that had failed three times (the Lab page's **Retry**, an administrator's, does that
+  without a restart).
+- `python -m citar.lab stop` pauses the lab (the games playing finish, nothing new starts) and `resume` ends the
+  pause; the Lab page's Stop and Resume do the same.
 - **Factorial experiments** (`"factors": {"knob": [level0, level1], ...}`, `"base_params"`, `"players": 4`): every
-  seat plays the frozen bot with its own mix of knob levels. Each factor's levels are spread evenly over the seats
+  seat plays the pinned version with its own mix of knob levels. Each factor's levels are spread evenly over the seats
   of every game, so the report measures each factor's effect *within games*, on score share, final techs, final
   cities and T200 techs. That screens many knobs with one batch of games; interactions are ignored. For named
   choices, use strings the bot understands (e.g. `policy_order_peaceful`: `default`, `rationalism_early`,
   `liberty_first`).
-- Throughput: a 330-turn, 4-bot Small game takes about 5 min on one core; with 10 in parallel, expect roughly
-  10–15 min per game.
-- The GPU is not useful here: the engine and bots are pure Python. LLM seats use the GPU, so an optional LLM-vs-bot
+- Throughput (0.1.5, the Python engine): a 330-turn, 4-bot Small game took about 5 min on one core; with 10 in
+  parallel, roughly 10–15 min per game. The Rust engine and bot are far faster (DESIGN.md P2.10's targets: a small
+  330-round 4-bot game in seconds).
+- The GPU is not useful here: the engine and bots run on the CPU. LLM seats use the GPU, so an optional LLM-vs-bot
   check game can run in the daytime.
 
 ## Method
@@ -58,8 +73,8 @@ Targets for four equal **Prince** bots on a Small map at Quick speed:
 1. Measure the baseline (`base-prince4`) and the difficulty ladder (`ladder-v0`).
 2. Diagnose the biggest weakness from reports plus single diagnostic games. Scratch scripts in the session
    scratchpad print per-civ state every 25 turns.
-3. Change `basic.py`, or expose a knob in `DEFAULT_PARAMS` and A/B the values.
-4. A/B test: two seats of the new bot against two seats of the previous frozen bot, rotated, for 20–24 games.
+3. Change the bot (from 0.1.6: a new version), or A/B the values of a parameter through profiles.
+4. A/B test: two seats of the new bot against two seats of the previous version, rotated, for 20–24 games.
    Accept if the score-share difference is significantly positive, or neutral while fixing a measured problem.
 5. Repeat. Rerun the ladder and baseline after big changes.
 
@@ -294,7 +309,7 @@ Reports: Lab page, or `python -m citar.lab report NAME` on the server.
 
 ## Next steps (keep current)
 
-Progress of everything queued is on the web GUI **Lab page** (http://localhost:8765/#/lab): runner health, per-experiment progress and ETA, each game's current turn, side runs and the runner log. Click an experiment to see its report.
+Progress of everything queued is on the web GUI **Lab page** (http://localhost:8765/#/lab): the dispatcher's health and its executors, per-experiment progress and ETA, each game's machine and current round, side runs and the lab's log. Click an experiment to see its report.
 
 1. **`v2-wars`** (queued 2026-09-22, 24 games, frozen_e744bbf8 = the 0.1.4 bot): the shipped defaults against
    themselves without `prep_gather`, with the war settings, and with both. The bots stopped fighting; find out

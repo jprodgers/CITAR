@@ -8,12 +8,19 @@ Method, per server and per minute:
   * Rented machines' hourly usage rate is charged the same way, but only for time in use.
   * Energy: the machine's power for the minute is measured (GPU watts sampled with nvidia-smi plus CPU utilisation
     times the server's CPU watts) or, where there are no samples, estimated from what CITAR had it doing (model
-    generation seconds for the GPU, CPU seconds for the CPU). Idle power is split like fixed costs (by time held);
+    generation seconds for the GPU, CPU seconds for the CPU). A part the samples did not read (the GPU's draw on a
+    machine whose driver does not report it) is estimated so, and the minute counts as measured only when no part of
+    it was estimated. Idle power is split like fixed costs (by time held);
     the extra "dynamic" power above idle goes to the activities that did work in that minute, by their share of it.
     The energy price comes from the electricity plan in force (flat, time-of-use or tiered) plus, if chosen, the
     plan's fixed fee spread over the household's monthly kWh.
   * API servers: tokens x the model's per-million prices (input, output, cache reads, cache writes).
 Everything is computed with the configuration in force at the time of use (effective-dated cost periods).
+
+What was held, and when, is the usage ledger's (``citar/usage.py``: activities, held time, power samples); the work
+done (generation seconds, tokens, the host's CPU seconds) is the compute ledger's (``compute_events``, read through
+``usage.read``'s ``work``; design/phase3-features.md P3.4.7). Generation seconds are bounded by what the server saw
+(P3.3.4), so a request's wait for its machine is never priced as busy energy.
 """
 from __future__ import annotations
 
@@ -27,6 +34,9 @@ from . import usage as U
 
 HOURS_PER_YEAR = 8766.0
 BUCKET = 60
+#: A compute event ending this close after an activity's last span with its own work is that span's work (a lab game's
+#: span ends when the game finished, rounded to a tenth of a second; its event at that moment).
+LEGACY_SLACK = 1.0
 
 
 def _dt(ts: float) -> datetime:
@@ -109,8 +119,12 @@ def fixed_rates(server: dict, reg: dict, when: datetime, lifespan_override: Opti
 
 
 def _threads(server: dict) -> int:
-    """How many threads a machine has, for dividing its cost between concurrent work."""
-    return int(((server.get("hardware") or {}).get("cpu") or {}).get("threads") or 8)
+    """How many threads a machine has, for dividing its cost between concurrent work: at least one (its hardware
+    details are typed in or reported, so a text, a fraction or a nonsense figure must not divide by zero), 8 when
+    they do not say."""
+    cpu = (server.get("hardware") or {}).get("cpu")
+    threads = S.hardware_figure(cpu.get("threads")) if isinstance(cpu, dict) else None
+    return max(1, int(threads)) if threads else 8
 
 
 def _new_cost() -> dict:
@@ -139,13 +153,22 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
     """Cost every activity in [since, until]. Returns {
         "acts": {act_id: {"info": act row, "servers": {srv: cost}, "models": {model: {...}}}},
         "servers": {srv: {"allocated": cost, "calendar": {...}, "power": {...}}},
-        "days": {date: {srv: cost}}, "notes": [...]}"""
+        "days": {date: {srv: cost}}, "notes": [...], "notes_by_server": {srv: [...]}}
+
+    ``notes_by_server`` keys each note by the machine it is about (``"unassigned"`` for usage with no machine), so
+    that a report that may show only some machines keeps only their notes (``reports.reach.Reach.cost``)."""
     reg = reg or S.with_pooled()
-    ledger = ledger or U.read(since, until)
+    ledger = ledger or U.read(since, until, work=True)
     servers = {s["id"]: s for s in reg["servers"]}
     aliases = reg.get("aliases") or {}           # a re-registered machine's old ids -> its current one
     acts_out: dict = {}
     notes: set = set()
+    notes_by_server: dict = defaultdict(set)
+
+    def note(srv: str, text: str) -> None:
+        """Record a note about one machine (``srv``)."""
+        notes.add(text)
+        notes_by_server[srv].add(text)
 
     def act_entry(act_id):
         """The cost entry for one activity, created on first use."""
@@ -154,11 +177,26 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
                                 "servers": defaultdict(_new_cost), "models": defaultdict(_new_cost)}
         return acts_out[act_id]
 
-    # ---- per server, per minute: who held it and what work they did
+    # ---- per server, per minute: who held it and what work they did. The time held comes from the usage ledger's
+    # spans; the work (generation seconds, tokens, the host's CPU seconds) from the compute ledger's events (``work``,
+    # design/phase3-features.md P3.4.7), so time a request waited for its machine is never charged as work. A span
+    # written before package 3-10 carries its own work, which counts as it did. Work of an activity the usage ledger
+    # does not know (a machine's test, a game with no model seat) is the compute ledger's alone: it has nothing held
+    # to price against.
     days: dict = defaultdict(lambda: defaultdict(float))     # date -> srv -> cost (full basis)
     hours: dict = defaultdict(lambda: defaultdict(float))    # "YYYY-MM-DD HH:00" -> srv -> cost
     buckets: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0])))   # srv -> m -> act -> [held, busy, cpu]
+    known = ledger["acts"]
+    # an activity whose spans carry their own work (written before 3-10: ``busy``, ``cpu``, tokens) is priced from them
+    # up to the last such span's end, and from the compute ledger only after it: a game played across the upgrade is
+    # counted once
+    legacy: dict = {}
     for sp in ledger["spans"]:
+        if "busy" in sp or "cpu" in sp or any(f in sp for f in U.TOKEN_FIELDS):
+            legacy[sp["act"]] = max(legacy.get(sp["act"], float("-inf")), float(sp["t1"]))
+    work = [w for w in ledger.get("work") or []
+            if w.get("act") in known and float(w["t1"]) > legacy.get(w["act"], float("-inf")) + LEGACY_SLACK]
+    for sp in list(ledger["spans"]) + work:
         srv = aliases.get(sp.get("srv"), sp.get("srv")) or "unassigned"
         t0, t1 = float(sp["t0"]), float(sp["t1"])
         if since:
@@ -196,12 +234,12 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
                 hours[_dt(t1).strftime("%Y-%m-%d %H:00")][srv] += c
             elif toks["in"] or toks["out"]:
                 sc["unpriced_tokens"] += toks["in"] + toks["out"]
-                notes.add(f"No token price for {model} on {sv['name']}; its tokens are uncosted.")
+                note(srv, f"No token price for {model} on {sv['name']}; its tokens are uncosted.")
         if sv is None:
             if srv == "unassigned":
-                notes.add("Some model usage has no server (a seat not chosen from the Servers list); it is uncosted.")
+                note(srv, "Some model usage has no server (a seat not chosen from the Servers list); it is uncosted.")
             else:
-                notes.add(f"Usage on a deleted server ({srv}) is uncosted.")
+                note(srv, f"Usage on a deleted server ({srv}) is uncosted.")
         # spread held/busy/cpu over the minutes of the span
         held, cpu = (sp.get("held") or 0.0), (sp.get("cpu") or 0.0)
         if not (held or busy or cpu):
@@ -269,16 +307,23 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
             measured = False
             if energy_ok:
                 row = meas["rows"].get(m) if meas else None
-                if row is not None:
-                    measured = True
-                    agg["measured_minutes"] += 1
-                    dyn_w = (row.get("cpu_util") or 0.0) * cpu_max
-                    if row.get("gpu_w") is not None:
-                        dyn_w += max(0.0, row["gpu_w"] - meas["gpu_idle"]) * oh
+                busy_total = sum(c[1] for c in cells.values())
+                cpu_total = sum(c[2] for c in cells.values())
+                gpu_est = min(1.0, busy_total / (BUCKET * parallel)) * gpu_max
+                cpu_est = min(1.0, cpu_total / (BUCKET * threads)) * cpu_max
+                if row is None:
+                    dyn_w = gpu_est + cpu_est
                 else:
-                    busy_total = sum(c[1] for c in cells.values())
-                    cpu_total = sum(c[2] for c in cells.values())
-                    dyn_w = min(1.0, busy_total / (BUCKET * parallel)) * gpu_max + min(1.0, cpu_total / (BUCKET * threads)) * cpu_max
+                    # each part as the samples measured it, else estimated as in a minute without samples: a machine
+                    # whose GPU draw its driver does not report (an AMD or Intel GPU, a Mac) samples its CPU alone,
+                    # and its model's work still draws on the GPU
+                    gpu_w, cpu_util = row.get("gpu_w"), row.get("cpu_util")
+                    dyn_w = (max(0.0, gpu_w - meas["gpu_idle"]) * oh if gpu_w is not None else gpu_est) \
+                        + (cpu_util * cpu_max if cpu_util is not None else cpu_est)
+                    # measured when no part of it was estimated: what the minute's work drew on was sampled
+                    measured = (gpu_w is not None or gpu_est == 0) and (cpu_util is not None or cpu_est == 0)
+                if measured:
+                    agg["measured_minutes"] += 1
             W = sum(c[1] + c[2] for c in cells.values())
             for act, (held, busy, cpu) in cells.items():
                 share = held * scale                   # seconds of the minute this activity is charged for
@@ -341,19 +386,31 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
             if meas and sv["power"].get("idle_w") is not None:
                 kwh = 0.0
                 cost = 0.0
+                kept = 0
+                cpu_max_w = sv["power"].get("cpu_max_w") or 0
+                gpu_max_w = sv["power"].get("gpu_max_w") or 0
                 for row in meas["raw"]:
+                    # a row that did not read a part the machine's power figures price (the GPUs' draw where it has
+                    # GPU watts, the CPU's utilisation where it has CPU watts) is no meter reading of the machine: left
+                    # out, rather than counted as that part drawing nothing
+                    if (row.get("gpu_w") is None and gpu_max_w) or (row.get("cpu_util") is None and cpu_max_w):
+                        continue
+                    kept += 1
                     m = int(row["t0"] // BUCKET)
-                    w = sv["power"]["idle_w"] + (row.get("cpu_util") or 0) * (sv["power"].get("cpu_max_w") or 0)
+                    w = sv["power"]["idle_w"] + (row.get("cpu_util") or 0) * cpu_max_w
                     if row.get("gpu_w") is not None:
                         w += max(0.0, row["gpu_w"] - meas["gpu_idle"]) * (1 + (sv["power"].get("measured_overhead_pct") or 0) / 100)
                     e = w * (row["t1"] - row["t0"]) / 3600 / 1000
                     kwh += e
                     price = rates(sv, m)["kwh"]
                     cost += e * (price or 0)
-                out["metered"] = {"kwh": kwh, "cost": cost, "minutes": len(meas["raw"]), "gpu_idle_w": meas["gpu_idle"]}
+                if kept:
+                    out["metered"] = {"kwh": kwh, "cost": cost, "minutes": kept, "gpu_idle_w": meas["gpu_idle"],
+                                      "left_out": len(meas["raw"]) - kept}
     return {"acts": acts_out, "servers": server_out, "days": {d: dict(v) for d, v in days.items()},
             "hours": {h: dict(v) for h, v in hours.items()},
-            "notes": sorted(notes), "currency": reg.get("currency", "USD"), "symbol": reg.get("currency_symbol", "$")}
+            "notes": sorted(notes), "notes_by_server": {srv: sorted(v) for srv, v in notes_by_server.items()},
+            "currency": reg.get("currency", "USD"), "symbol": reg.get("currency_symbol", "$")}
 
 
 def hourly_profile(server: dict, reg: dict, when: Optional[datetime] = None, busy_fraction: float = 1.0) -> dict:

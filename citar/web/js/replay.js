@@ -1,17 +1,18 @@
-// Post-game recap: scrub through recorded turns, charts, events, diplomacy transcripts and AI thoughts.
+// Post-game recap: scrub through recorded turns, charts, events, diplomacy (messages and chats as threads) and AI
+// thoughts. The frames come as the engine's journal stores them, keyframes and deltas, and replaydecode.js reads them
+// here, one frame at a time (design/phase3-features.md P3.5.8).
 import { api } from "./api.js";
 import { el, clear, toast } from "./util.js";
 import { MapRenderer } from "./render.js";
+import { ReplayFrames, chatThreads, describeTerms, named, plainMessages } from "./replaydecode.js";
+import { CLOSED_TEXT, describeItem } from "./chatmodel.js";
+import { seatLabel } from "./seats.js";
 
 const METRICS = [["score", "Score"], ["military", "Military strength"], ["techs", "Technologies"], ["cities", "Cities"],
   ["population", "Population"], ["land", "Land"], ["science", "Science / turn"], ["gold", "Gold"]];
 
-function b64(s) {
-  const bin = atob(s);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
+/** How a chat entry's action reads in the recap's threads. */
+const ACTION_TEXT = { open: "opened the chat", counter: "counter-offer", accept: "accepted", reject: "declined", reply: "" };
 
 export class ReplayScreen {
   constructor(root, rules, gid, token) {
@@ -23,11 +24,13 @@ export class ReplayScreen {
   destroy() { this.playing = false; clearTimeout(this.timer); }
 
   async load() {
-    try { this.data = await api.replay(this.gid, this.token); }
-    catch (e) { toast(e.message, "error"); this.root.appendChild(el("p", { style: { padding: "20px" } }, e.message)); return; }
-    if (!this.data.frames.length) { this.root.appendChild(el("p", { style: { padding: "20px" } }, "No turns recorded yet.")); return; }
+    try {
+      this.data = await api.replay(this.gid, this.token);
+      this.frames = new ReplayFrames(this.data.frames);
+    } catch (e) { toast(e.message, "error"); this.root.appendChild(el("p", { style: { padding: "20px" } }, e.message)); return; }
+    if (!this.frames.length) { this.root.appendChild(el("p", { style: { padding: "20px" } }, "No turns recorded yet.")); return; }
     this.build();
-    this.idx = this.data.frames.length - 1;
+    this.idx = this.frames.length - 1;
     this.show();
     this.renderer.centerOn(Math.floor(this.data.width / 2), Math.floor(this.data.height / 2));
     this.renderer.cam.zoom = Math.max(0.3, Math.min(1, (this.canvas.clientWidth / (this.data.width * 30 * 1.75))));
@@ -36,6 +39,7 @@ export class ReplayScreen {
 
   build() {
     const d = this.data;
+    const last = this.frames.length - 1;
     const winner = d.players.find((p) => p.id === d.winner);
     const header = el("div", { class: "topbar" },
       el("button", { class: "small", onclick: () => { location.hash = "#/"; } }, "☰ Lobby"),
@@ -43,11 +47,11 @@ export class ReplayScreen {
       el("span", { class: "muted" }, d.phase === "over" ? `Winner: ${winner ? winner.name : "none"} (${d.victory})` : `In progress, turn ${d.turn}`),
       el("span", { class: "spacer" }),
       ...d.players.filter((p) => p.kind === "major").map((p) => el("span", { class: "stat" }, el("span", { class: "swatch", style: { background: p.color } }),
-        p.name, p.seat ? el("span", { class: "muted" }, ` (${p.seat.type === "llm" ? p.seat.llm.model || "LLM" : p.seat.type})`) : null)));
+        p.name, p.seat ? el("span", { class: "muted" }, ` (${seatLabel(p.seat)})`) : null)));
     this.canvas = el("canvas", { class: "map" });
     this.side = el("div", { class: "overlay-panel", style: { right: "10px", top: "10px", bottom: "10px", width: "400px", overflowY: "auto", padding: "10px" } });
     this.turnLabel = el("b", { style: { minWidth: "90px" } });
-    this.slider = el("input", { type: "range", min: 0, max: d.frames.length - 1, value: 0, oninput: (e) => { this.idx = +e.target.value; this.show(); } });
+    this.slider = el("input", { type: "range", min: 0, max: last, value: 0, oninput: (e) => { this.idx = +e.target.value; this.show(); } });
     this.playBtn = el("button", { onclick: () => this.toggle() }, "▶ Play");
     const speed = el("select", { onchange: (e) => { this.speed = +e.target.value; } },
       ...[[1, "1 turn/s"], [2, "2 turns/s"], [5, "5 turns/s"], [10, "10 turns/s"]].map(([v, t]) => el("option", { value: v, selected: v === this.speed }, t)));
@@ -55,7 +59,7 @@ export class ReplayScreen {
       ...d.players.filter((p) => p.kind === "major").map((p) => el("option", { value: p.id }, `What ${p.name} knew`)));
     const bottom = el("div", { class: "bottom" },
       el("button", { onclick: () => { this.idx = Math.max(0, this.idx - 1); this.show(); } }, "◀"), this.playBtn,
-      el("button", { onclick: () => { this.idx = Math.min(d.frames.length - 1, this.idx + 1); this.show(); } }, "▶"),
+      el("button", { onclick: () => { this.idx = Math.min(last, this.idx + 1); this.show(); } }, "▶"),
       this.turnLabel, this.slider, speed, fog);
     const main = el("div", { class: "main" }, this.canvas, this.side);
     this.root.appendChild(el("div", { class: "replay" }, header, main, bottom));
@@ -75,7 +79,7 @@ export class ReplayScreen {
     this.playing = !this.playing;
     this.playBtn.textContent = this.playing ? "⏸ Pause" : "▶ Play";
     if (this.playing) {
-      if (this.idx >= this.data.frames.length - 1) this.idx = 0;
+      if (this.idx >= this.frames.length - 1) this.idx = 0;
       this.tick();
     }
   }
@@ -83,30 +87,31 @@ export class ReplayScreen {
   tick() {
     if (!this.playing) return;
     this.show();
-    if (this.idx >= this.data.frames.length - 1) { this.toggle(); return; }
+    if (this.idx >= this.frames.length - 1) { this.toggle(); return; }
     this.idx++;
     this.timer = setTimeout(() => this.tick(), 1000 / this.speed);
   }
 
-  modelFor(frame) {
+  /** The renderer's model of frame `f` (replaydecode.js's: its layers a byte per tile, named by its own palettes). */
+  modelFor(f) {
     const d = this.data;
-    const owner = b64(frame.owner), imp = b64(frame.improvement), route = b64(frame.route), feat = b64(frame.feature);
-    const explored = this.fog !== "" && frame.explored[this.fog] ? b64(frame.explored[this.fog]) : null;
+    const explored = this.fog !== "" ? f.explored.get(Number(this.fog)) || null : null;
     const tiles = d.terrain.map((t, i) => {
       if (explored && !explored[i]) return null;
-      const r = route[i];
-      const feature = feat[i] ? d.feature_ids[feat[i] - 1] : null;
-      const improvement = imp[i] ? d.improvement_ids[imp[i] - 1] : null;
+      const r = f.route[i];
+      const feature = named(f.palette.feature, f.feature[i]);
+      const improvement = named(f.palette.improvement, f.improvement[i]);
       const features = [...(t[1] ? ["Hill"] : []), ...(feature ? [feature] : [])];
       return {
         terrain: t[0], features, hills: !!t[1], feature, wonder: t[4] || null, river: t[2], resource: t[3], improvement,
         route: (r & 3) === 1 ? "Road" : (r & 3) === 2 ? "Railroad" : null, routePillaged: !!(r & 4), pillaged: false,
-        owner: owner[i] === 255 ? null : owner[i], camp: improvement === "Barbarian encampment",
+        owner: f.owner[i] === 255 ? null : f.owner[i], camp: improvement === "Barbarian encampment",
         village: improvement === "Ancient ruins", visible: true,
       };
     });
     const W = d.width;
-    const units = frame.units.map(([type, o, idx, hp], k) => {
+    const units = f.units.map(([typeIndex, o, idx, hp], k) => {
+      const type = f.palette.unit[typeIndex];
       const ud = this.rules.units[type] || {};
       const cls = ud.unitType === "Civilian" || ud.unitType === "Civilian Water" || !(ud.strength || ud.rangedStrength) ? "civilian"
         : { Archery: "ranged", "Ranged Gunpowder": "ranged", Mounted: "mounted", Armored: "armor", Siege: "siege", Scout: "recon",
@@ -114,30 +119,30 @@ export class ReplayScreen {
       const domain = /Water|Submarine|Carrier/.test(ud.unitType || "") ? "sea" : /Fighter|Bomber|Missile/.test(ud.unitType || "") ? "air" : "land";
       return { id: k, type, owner: o, x: idx % W, y: Math.floor(idx / W), hp, class: cls, domain, unit_type: ud.unitType };
     }).filter((u) => !explored || explored[u.y * W + u.x]);
-    const cities = frame.cities.map(([id, name, o, idx, pop, capital]) => ({ id, name, owner: o, x: idx % W, y: Math.floor(idx / W), pop, capital }))
+    const cities = f.cities.map(([id, name, o, idx, pop, capital]) => ({ id, name, owner: o, x: idx % W, y: Math.floor(idx / W), pop, capital }))
       .filter((c) => !explored || explored[c.y * W + c.x]);
     const players = Object.fromEntries(d.players.map((p) => [p.id, p]));
     return { width: d.width, height: d.height, wrapX: !!d.wrap_x, wrapY: !!d.wrap_y, tiles, units, cities, players, you: null };
   }
 
   show() {
-    const d = this.data;
-    const frame = d.frames[this.idx];
+    const f = this.frames.at(this.idx);
+    if (!f) return;
     this.slider.value = this.idx;
-    this.turnLabel.textContent = `Turn ${frame.turn}`;
-    this.renderer.setModel(this.modelFor(frame));
-    this.renderSide(frame);
+    this.turnLabel.textContent = `Turn ${f.turn}`;
+    this.renderer.setModel(this.modelFor(f));
+    this.renderSide(f.turn);
   }
 
-  renderSide(frame) {
+  renderSide(turn) {
     const d = this.data;
     const s = clear(this.side);
-    const metricSel = el("select", { onchange: (e) => { this.metric = e.target.value; this.renderSide(frame); } },
+    const metricSel = el("select", { onchange: (e) => { this.metric = e.target.value; this.renderSide(turn); } },
       ...METRICS.map(([k, t]) => el("option", { value: k, selected: k === this.metric }, t)));
     const chart = el("canvas", { width: 380, height: 170, class: "chart-box" });
     s.append(el("div", { class: "row" }, el("b", {}, "Chart"), metricSel), chart);
-    this.drawChart(chart, frame.turn);
-    const st = d.stats.find((x) => x.turn === frame.turn);
+    this.drawChart(chart, turn);
+    const st = d.stats.find((x) => x.turn === turn);
     if (st) {
       const rows = d.players.filter((p) => p.kind === "major").map((p) => {
         const v = st.players[p.id] || {};
@@ -147,11 +152,10 @@ export class ReplayScreen {
       s.appendChild(el("table", { class: "list" }, el("tr", {}, ...["Civ", "Score", "Cities", "Techs", "Military"].map((h) => el("th", {}, h))), ...rows));
     }
     const tabs = el("div", { class: "row section" }, ...[["events", "Events"], ["diplomacy", "Diplomacy"], ["thoughts", "AI thoughts"]].map(([k, t]) =>
-      el("button", { class: `small ${this.feedTab === k ? "primary" : ""}`, onclick: () => { this.feedTab = k; this.renderSide(frame); } }, t)));
+      el("button", { class: `small ${this.feedTab === k ? "primary" : ""}`, onclick: () => { this.feedTab = k; this.renderSide(turn); } }, t)));
     s.appendChild(tabs);
     const pname = (id) => (d.players.find((p) => p.id === id) || {}).name || "?";
     const pcolor = (id) => (d.players.find((p) => p.id === id) || {}).color || "#999";
-    const turn = frame.turn;
     const body = el("div");
     s.appendChild(body);
     if (this.feedTab === "events") {
@@ -162,23 +166,46 @@ export class ReplayScreen {
       body.appendChild(el("h4", { class: "section" }, "Timeline highlights"));
       for (const e of big.slice(0, 300)) {
         body.appendChild(el("div", { class: "event clickable", onclick: () => {
-          const fi = d.frames.findIndex((f) => f.turn === e.turn);
+          const fi = this.frames.indexOfTurn(e.turn);
           if (fi >= 0) { this.idx = fi; this.show(); }
         } }, el("span", { class: "t" }, `T${e.turn}`), e.text));
       }
     } else if (this.feedTab === "diplomacy") {
-      const msgs = d.messages.filter((m) => m.turn === turn);
-      if (!msgs.length) body.appendChild(el("div", { class: "muted" }, "No messages this turn."));
+      // the chats' own words are in their threads, not twice
+      const msgs = plainMessages(d.messages, d.negotiations, turn);
+      const threads = chatThreads(d.negotiations, turn);
+      if (!msgs.length && !threads.length) body.appendChild(el("div", { class: "muted" }, "No messages or chats this turn."));
       for (const m of msgs) body.appendChild(el("div", { class: "event" }, el("span", { class: "swatch", style: { background: pcolor(m.from) } }),
         el("b", {}, pname(m.from)), " → ", m.to.map(pname).join(", "), el("div", { style: { whiteSpace: "pre-wrap" } }, m.text)));
-      const negs = d.negotiations.filter((n) => n.turn === turn);
-      for (const n of negs) body.appendChild(el("div", { class: "muted section" }, `Negotiation #${n.id} ${pname(n.initiator)} ↔ ${pname(n.responder)}: ${n.status}`));
+      for (const t of threads) body.appendChild(this.thread(t, turn, pname, pcolor));
     } else {
       const ths = d.thoughts.filter((t) => t.turn === turn);
       if (!ths.length) body.appendChild(el("div", { class: "muted" }, "No recorded AI reasoning this turn."));
       for (const t of ths) body.appendChild(el("div", { class: "thought", style: { borderLeftColor: pcolor(t.player) } },
         el("div", { class: "muted" }, `${pname(t.player)}${t.kind ? " · " + t.kind : ""}`), t.text));
     }
+  }
+
+  /** One chat as it stood at the end of `turn` (replaydecode's `chatThreads`): who and when, its status, and its entries
+   * in order as bubbles (the opener's on the right), proposals in words, the game's close notes in grey; the entries of
+   * earlier turns dimmed. */
+  thread(t, turn, pname, pcolor) {
+    const status = t.status === "open" ? "open" : (CLOSED_TEXT[t.status] || t.status);
+    const head = el("div", { class: "chat-divider" },
+      `Chat #${t.nid} · ${pname(t.initiator)} ↔ ${pname(t.responder)} · opened turn ${t.opened} · ${status}`);
+    const entries = t.entries.map((e, i) => {
+      if (e.action === "close") return el("div", { class: "chat-note" }, e.note || e.message || "closed");
+      const prev = i ? t.entries[i - 1] : null;
+      const what = e.action === "reject" && prev && prev.by === e.by && prev.action !== "close" ? "withdrew" : ACTION_TEXT[e.action];
+      const terms = describeTerms(e.proposal, (it) => describeItem(it, pname), pname);
+      return el("div", { class: `msg ${e.by === t.initiator ? "me" : "them"}`, style: { opacity: e.turn != null && e.turn < turn ? 0.7 : 1 } },
+        el("div", { class: "meta" }, el("span", { class: "swatch", style: { background: pcolor(e.by) } }),
+          `${e.by == null ? "The game" : pname(e.by)}${what ? ` · ${what}` : ""}${e.turn != null ? ` · T${e.turn}` : ""}`),
+        e.message ? el("div", {}, e.message) : null,
+        terms ? el("div", { class: "chat-card" }, terms) : null,
+        e.note ? el("div", { class: "chat-note" }, e.note) : null);
+    });
+    return el("div", { class: "recap-thread", "data-nid": t.nid }, head, ...entries);
   }
 
   drawChart(canvas, turn) {
