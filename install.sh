@@ -768,7 +768,7 @@ takes a server back: the running release has migrated the database, which $p can
 		$SUDO cp "$wheel" "$staged"
 		step "Downloading CITAR's dependencies"
 		$SUDO "$release/venv/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir --only-binary=citar \
-			--prefer-binary "$staged[$EXTRAS]" \
+			--prefer-binary "${staged}[$EXTRAS]" \
 			|| die "pip could not install $(basename "$wheel")[$EXTRAS] into $release/venv."
 		$SUDO "$release/venv/bin/pip" freeze --disable-pip-version-check | $SUDO tee "$release/freeze.txt" >/dev/null
 		digest="$(sha256_of "$staged")"

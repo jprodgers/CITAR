@@ -712,7 +712,7 @@ class InstallShText(unittest.TestCase):
         self.assertIn('$SUDO "$PYTHON" -m venv "$release/venv"', server)
         self.assertIn('switch_current "$p"', server)
         self.assertIn('run_setup "$CURRENT/venv/bin/citar"', server)
-        self.assertIn('--only-binary=citar \\\n\t\t\t--prefer-binary "$staged[$EXTRAS]"', server)
+        self.assertIn('--only-binary=citar \\\n\t\t\t--prefer-binary "${staged}[$EXTRAS]"', server)
         self.assertIn("--no-cache-dir", server)
         self.assertIn('RELEASES="$PREFIX/releases"\nCURRENT="$PREFIX/current"\n', text)
         self.assertIn('os.replace(staged, link)', text)
