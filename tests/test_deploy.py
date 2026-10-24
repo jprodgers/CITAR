@@ -86,8 +86,11 @@ def msys(path: Path | str) -> str:
 
 
 def bash_env(**extra: str) -> dict[str, str]:
-    """The environment for a script under test: no CITAR_* variable from outside, no colour."""
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("CITAR_")}
+    """The environment for a script under test: no CITAR_* variable from outside, no colour, and no shell options
+    from the caller. An exported SHELLOPTS hands every bash below it the options the script sets: citar-admin.sh's
+    `set -u` then reached the stand-in systemd-run, which stopped on its unset variable."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.upper().startswith("CITAR_") and k.upper() not in ("SHELLOPTS", "BASHOPTS")}
     env["NO_COLOR"] = "1"
     env.update(extra)
     return env
