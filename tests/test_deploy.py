@@ -205,6 +205,17 @@ class OneDefinition(unittest.TestCase):
         self.assertIsNone(found.citar_admin)
 
 
+    def test_env_example_holds_no_comment_after_a_value(self):
+        """systemd reads everything after the = as the value (inline comments are not its), so a copy of env.example
+        loaded by the unit's EnvironmentFile= must have none: `CITAR_SESSION_DAYS=30   # note` stops the server."""
+        for number, line in enumerate((ROOT / "env.example").read_text(encoding="utf-8").splitlines(), 1):
+            if re.match(r"^[A-Z][A-Z0-9_]*=", line):
+                value = line.split("=", 1)[1]
+                with self.subTest(line=number):
+                    self.assertNotIn("#", value, f"env.example:{number}: {line}")
+                    self.assertEqual(value, value.strip(), f"env.example:{number}: whitespace around the value")
+
+
 # ------------------------------------------------------------------------------------------------ the wizard
 
 
