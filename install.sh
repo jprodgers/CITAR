@@ -23,9 +23,18 @@
 # packages, and never needs root for a personal install. A server install (--server) does use sudo, for the service
 # account and the systemd unit, and says so before it does.
 #
+# A server is installed in the release layout (design/phase5-release.md P5.13.1): each release is a venv of its own,
+# root's and read-only to the service, in /opt/citar/releases/<version>/venv beside the wheel it came from, its
+# pip freeze and its SHA256SUMS line; /opt/citar/current links to the release that runs and is switched atomically.
+# `citar setup --server` then writes /etc/citar/citar.env and, if asked, the service (which runs
+# /opt/citar/current/venv/bin/citar with /var/lib/citar as its state and working directory), citar-admin and the
+# nightly backup. Run again with a newer --version, it installs that release beside the running one and switches to
+# it, keeping the configuration.
+#
 # Flags:
 #   --server            install for a public server (implies a system-wide prefix)
 #   --worker            install the CITAR helper (citar-helper) instead of the game
+#   --plan              print each step this install would take, with every path, and change nothing
 #   --prefix DIR        where to install the game (default: ~/.local/share/citar-app, or /opt/citar)
 #   --bin-dir DIR       where the commands go (default: ~/.local/bin, or /usr/local/bin)
 #   --no-profile        never add the bin folder to a shell profile
@@ -52,6 +61,7 @@ VERSION=""
 SOURCE=""
 RUN_SETUP=1
 UNINSTALL=0
+PLAN=0
 
 # ----------------------------------------------------------------------------- output
 # Colour only when writing to a terminal: piped into a file or a log, escape codes are noise.
@@ -71,7 +81,7 @@ usage() {
 	if [ -f "$0" ]; then
 		sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; s/^set -euo.*//'
 	else
-		say "Usage: install.sh [--server | --worker] [--prefix DIR] [--bin-dir DIR] [--no-profile] [--python PATH]"
+		say "Usage: install.sh [--server | --worker] [--plan] [--prefix DIR] [--bin-dir DIR] [--no-profile] [--python PATH]"
 		say "                  [--version X.Y.Z] [--from PATH] [--no-setup] [--uninstall]"
 		say "Every flag is described at the top of https://github.com/jprodgers/CITAR/blob/main/install.sh"
 	fi
@@ -91,6 +101,7 @@ while [ $# -gt 0 ]; do
 		--version)    VERSION="${2:?--version needs a version}"; shift ;;
 		--from)       SOURCE="${2:?--from needs a path}"; shift ;;
 		--no-setup)   RUN_SETUP=0 ;;
+		--plan)       PLAN=1 ;;
 		--uninstall)  UNINSTALL=1 ;;
 		-h|--help)    usage ;;
 		*)            die "Unknown option: $1 (try --help)" ;;
@@ -102,6 +113,10 @@ VERSION="${VERSION#v}"
 if [ -n "$VERSION" ]; then
 	semver='^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
 	[[ "$VERSION" =~ $semver ]] || die "--version $VERSION is not a CITAR release (X.Y.Z, or X.Y.Z-rc.N)"
+fi
+if [ "$PLAN" -eq 1 ]; then
+	[ "$WORKER" -eq 0 ] || die "--plan is for the game's install, not --worker's download"
+	[ "$UNINSTALL" -eq 0 ] || die "--plan is for an install, not --uninstall"
 fi
 if [ "$WORKER" -eq 1 ]; then
 	[ "$MODE" = "server" ] && die "--worker installs the helper and --server a server: choose one"
@@ -121,10 +136,12 @@ on_path() { case ":$PATH:" in *":$1:"*) return 0 ;; esac; return 1; }
 # Temporary folders, removed however the script ends (and before it hands over to the setup wizard).
 HELPER_TMP=""
 PICKED=""
+BOOT=""
 cleanup() {
 	[ -z "$HELPER_TMP" ] || rm -rf "$HELPER_TMP"
 	[ -z "$PICKED" ] || rm -rf "$PICKED"
-	HELPER_TMP=""; PICKED=""
+	[ -z "$BOOT" ] || rm -rf "$BOOT"
+	HELPER_TMP=""; PICKED=""; BOOT=""
 }
 trap cleanup EXIT
 
@@ -147,7 +164,7 @@ esac
 
 # `sudo` only where it is genuinely needed, and only if we are not already root.
 SUDO=""
-if [ "$MODE" = "server" ] && [ "$(id -u)" -ne 0 ]; then
+if [ "$MODE" = "server" ] && [ "$(id -u)" -ne 0 ] && [ "$PLAN" -eq 0 ]; then
 	command -v sudo >/dev/null 2>&1 || die "A server install needs root. Re-run as root, or install sudo."
 	SUDO="sudo"
 fi
@@ -297,8 +314,14 @@ helper_service() {
 	return 1
 }
 
-# A prefix this script (or 0.1.5's) installed: its marker, or the game's venv. Nothing else is ever deleted.
-is_citar_prefix() { [ -f "$1/.citar-installer" ] || [ -x "$1/venv/bin/citar" ]; }
+# A prefix this script (or 0.1.5's) installed: its marker, the game's venv, or a server's current release. Nothing else
+# is ever deleted.
+is_citar_prefix() { [ -f "$1/.citar-installer" ] || [ -x "$1/venv/bin/citar" ] || [ -x "$1/current/venv/bin/citar" ]; }
+
+# What `citar setup --server` writes beside the unit, recognised by a line of its own so that a file of the same name
+# that is not CITAR's is never removed.
+SERVER_FILES="/usr/local/bin/citar-admin|citar-admin: CITAR's administration commands
+/usr/local/bin/citar-backup|Back up CITAR: the database, the whole state directory"
 
 if [ "$UNINSTALL" -eq 1 ]; then
 	step "Removing CITAR"
@@ -309,9 +332,19 @@ then run this again. Nothing was removed."
 	fi
 	if [ "$WORKER" -eq 0 ]; then
 		if [ "$MODE" = "server" ] && command -v systemctl >/dev/null 2>&1; then
+			$SUDO systemctl disable --now citar-backup.timer 2>/dev/null || true
 			$SUDO systemctl disable --now citar 2>/dev/null || true
-			$SUDO rm -f /etc/systemd/system/citar.service
+			$SUDO rm -f /etc/systemd/system/citar.service /etc/systemd/system/citar-backup.service \
+				/etc/systemd/system/citar-backup.timer
 			$SUDO systemctl daemon-reload 2>/dev/null || true
+		fi
+		if [ "$MODE" = "server" ]; then
+			while IFS='|' read -r file mark; do
+				if [ -f "$file" ] && grep -qF "$mark" "$file" 2>/dev/null; then
+					$SUDO rm -f "$file"
+					ok "Removed $file."
+				fi
+			done <<< "$SERVER_FILES"
 		fi
 		if [ -d "$PREFIX" ] && [ -z "$(ls -A "$PREFIX" 2>/dev/null)" ]; then
 			$SUDO rmdir "$PREFIX"
@@ -346,7 +379,7 @@ then run this again. Nothing was removed."
 	[ "$removed" -eq 0 ] || ok "Removed citar-helper and what its updates left from $BIN_DIR."
 	say ""
 	say "Your games, settings and results were NOT deleted. They are in:"
-	say "  ${XDG_DATA_HOME:-$HOME/.local/share}/citar   (or /var/lib/citar for a server)"
+	say "  ${XDG_DATA_HOME:-$HOME/.local/share}/citar   (or /var/lib/citar for a server, its configuration in /etc/citar)"
 	say "Delete that directory too if you want CITAR gone completely."
 	exit 0
 fi
@@ -578,15 +611,6 @@ fi
 if [ -e "$PREFIX" ] && ! is_citar_prefix "$PREFIX" && [ -n "$(ls -A "$PREFIX" 2>/dev/null)" ]; then
 	die "$PREFIX is not empty and holds no CITAR install: name a new or empty folder with --prefix."
 fi
-step "Installing CITAR into $PREFIX"
-$SUDO mkdir -p "$PREFIX"
-# The marker first, so an install that fails half way can be run again (or removed with --uninstall).
-printf 'installing with install.sh\n' | $SUDO tee "$PREFIX/.citar-installer" >/dev/null
-
-$SUDO "$PYTHON" -m venv "$PREFIX/venv"
-VENV_PIP="$PREFIX/venv/bin/pip"
-# A new pip first: the ensurepip of an older distribution (Ubuntu 20.04's pip 20.0) knows no manylinux_2_28 wheel.
-$SUDO "$VENV_PIP" install --quiet --disable-pip-version-check --upgrade pip
 
 # Extras by role: a home machine wants every provider client, a server does not need the local
 # model libraries.
@@ -594,10 +618,270 @@ case "$MODE" in
 	server) EXTRAS="server" ;;
 	*)      EXTRAS="all" ;;
 esac
+case "$MODE" in
+	server) SETUP_FLAG="--server" ;;
+	*)      SETUP_FLAG="--local" ;;
+esac
+
+# What will be installed, as far as it is known before pip has looked: the wheel named, the release asked for, or the
+# newest on PyPI.
+if [ -n "$SOURCE" ]; then
+	WHEEL_DESC="$SOURCE"
+	PLAN_VERSION="$(basename "$SOURCE" | cut -d- -f2)"
+elif [ -n "$WHEEL_DIR" ]; then
+	WHEEL_DESC="this machine's CITAR $VERSION wheel from $WHEEL_DIR (its dependencies from PyPI)"
+	PLAN_VERSION="$(pep440 "$VERSION")"
+elif [ -n "$VERSION" ]; then
+	WHEEL_DESC="citar[$EXTRAS]==$VERSION from PyPI, a prebuilt wheel only"
+	PLAN_VERSION="$(pep440 "$VERSION")"
+else
+	WHEEL_DESC="citar[$EXTRAS], the newest release on PyPI, a prebuilt wheel only"
+	PLAN_VERSION="<version>"
+fi
+PYTHON_DESC="$("$PYTHON" -V 2>&1) at $(command -v "$PYTHON")"
+
+# ----------------------------------------------------------------------------- a server: the release layout
+RELEASES="$PREFIX/releases"
+CURRENT="$PREFIX/current"
+# The release that runs now: the folder $CURRENT links to, or nothing.
+CURRENT_VERSION=""
+if [ -L "$CURRENT" ]; then
+	CURRENT_VERSION="$(readlink "$CURRENT")"
+	CURRENT_VERSION="${CURRENT_VERSION%/}"
+	CURRENT_VERSION="${CURRENT_VERSION##*/}"
+fi
+
+# Whether PEP 440 version $1 is older than $2 (CITAR's own: X.Y.Z with an optional aN, bN or rcN); exit 2 when either
+# is not such a version.
+older_than() {
+	"$PYTHON" - "$1" "$2" <<'PY'
+import re
+import sys
+
+
+def key(version):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?", version)
+    if not m:
+        sys.exit(2)
+    return (int(m[1]), int(m[2]), int(m[3]), {"a": 0, "b": 1, "rc": 2}.get(m[4], 3), int(m[5] or 0))
+
+
+sys.exit(0 if key(sys.argv[1]) < key(sys.argv[2]) else 1)
+PY
+}
+
+# Points $CURRENT at releases/$1 in one rename, so there is no moment without a current release (ln -sfn removes the
+# old link first).
+switch_current() {
+	$SUDO "$PYTHON" -c 'import os, sys
+link, target = sys.argv[1], sys.argv[2]
+staged = link + ".switching"
+if os.path.lexists(staged):
+    os.remove(staged)
+os.symlink(target, staged)
+os.replace(staged, link)' "$CURRENT" "releases/$1"
+}
+
+plan_server() {
+	local p="$PLAN_VERSION" release
+	release="$RELEASES/$p"
+	say "The plan (nothing is changed; run it without --plan to do it):"
+	say "  python      $PYTHON_DESC"
+	say "  wheel       $WHEEL_DESC"
+	say "  as          root$( [ "$(id -u)" -eq 0 ] || printf ' (through sudo)')"
+	say "This script makes the release layout:"
+	say "  prefix      $PREFIX, marked by $PREFIX/.citar-installer"
+	say "  release     $release/venv: a venv of its own, root's, read-only to the service"
+	say "              $release/: the wheel, freeze.txt and SHA256SUMS beside it"
+	if [ -n "$CURRENT_VERSION" ]; then
+		say "  running     $CURRENT -> releases/$CURRENT_VERSION, kept beside the new release"
+	fi
+	say "  current     $CURRENT -> releases/$p, switched atomically once it is installed"
+	say "  commands    $BIN_DIR/citar and $BIN_DIR/citar-mcp -> $CURRENT/venv/bin/"
+	if [ -n "$CURRENT_VERSION" ]; then
+		say "and then nothing more: the configuration and the service stay as they are; restart it to run $p."
+		exit 0
+	fi
+	if [ "$RUN_SETUP" -eq 1 ]; then
+		say "Then $CURRENT/venv/bin/citar setup --server writes, after showing them and asking (its defaults):"
+	else
+		say "Then nothing (--no-setup). '$CURRENT/venv/bin/citar setup --server' writes, after asking (its defaults):"
+	fi
+	say "  state       /var/lib/citar: citar:citar 0750, the service's state and working directory"
+	say "  config      /etc/citar/citar.env: root:citar 0640"
+	say "  service     /etc/systemd/system/citar.service: ExecStart=$CURRENT/venv/bin/citar serve"
+	say "  admin       /usr/local/bin/citar-admin: each command run as the service runs"
+	say "  backup      /usr/local/bin/citar-backup, with citar-backup.service and citar-backup.timer (nightly)"
+	exit 0
+}
+
+install_server() {
+	local wheel p release staged digest order
+	BOOT="$(mktemp -d "${TMPDIR:-/tmp}/citar-server.XXXXXX")"
+	# The release's folder is named by the version pip chooses, and a venv cannot be moved once it is made: so the
+	# wheel is chosen first, by pip in a venv of its own here, then installed as a file.
+	step "Choosing the wheel"
+	"$PYTHON" -m venv "$BOOT/venv"
+	"$BOOT/venv/bin/pip" install --quiet --disable-pip-version-check --upgrade pip
+	mkdir "$BOOT/wheel"
+	if [ -n "$SOURCE" ]; then
+		cp "$SOURCE" "$BOOT/wheel/"
+	elif [ -n "$WHEEL_DIR" ]; then
+		"$BOOT/venv/bin/pip" download --quiet --disable-pip-version-check --no-deps --no-index --only-binary=:all: \
+			--find-links "$WHEEL_DIR" --dest "$BOOT/wheel" "citar==$VERSION" \
+			|| no_wheel "$WHEEL_DIR holds no CITAR $VERSION wheel for this machine"
+	else
+		"$BOOT/venv/bin/pip" download --quiet --disable-pip-version-check --no-deps --only-binary=:all: \
+			--dest "$BOOT/wheel" "citar${VERSION:+==$VERSION}" \
+			|| die "pip found no prebuilt CITAR${VERSION:+ $VERSION} for this machine: 'pip install citar' builds it from source,
+with a Rust toolchain (https://rustup.rs)."
+	fi
+	wheel="$(ls "$BOOT"/wheel/citar-*.whl)"
+	p="$(basename "$wheel" | cut -d- -f2)"
+	release="$RELEASES/$p"
+	ok "CITAR $p: $(basename "$wheel")"
+
+	if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$p" ]; then
+		order=0
+		older_than "$p" "$CURRENT_VERSION" || order=$?
+		case "$order" in
+			0) die "CITAR $p is older than the release that runs ($CURRENT -> releases/$CURRENT_VERSION). This script never
+takes a server back: the running release has migrated the database, which $p cannot open. Nothing was changed." ;;
+			2) die "Cannot compare $p with the release that runs ($CURRENT -> releases/$CURRENT_VERSION). Nothing was changed." ;;
+		esac
+	fi
+
+	$SUDO mkdir -p "$RELEASES"
+	# The marker first, so an install that fails half way can be run again (or removed with --uninstall).
+	[ -f "$PREFIX/.citar-installer" ] || printf 'installing with install.sh\n' | $SUDO tee "$PREFIX/.citar-installer" >/dev/null
+	if [ -f "$release/.complete" ]; then
+		ok "CITAR $p is already installed in $release"
+	else
+		# A release folder without its .complete is what an install that failed half way left: made again whole.
+		[ ! -e "$release" ] || $SUDO rm -rf "$release"
+		step "Installing CITAR $p into $release"
+		$SUDO mkdir -p "$release"
+		$SUDO "$PYTHON" -m venv "$release/venv"
+		# A new pip first: the ensurepip of an older distribution (Ubuntu 20.04's pip 20.0) knows no manylinux_2_28 wheel.
+		$SUDO "$release/venv/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir --upgrade pip
+		staged="$release/$(basename "$wheel")"
+		$SUDO cp "$wheel" "$staged"
+		step "Downloading CITAR's dependencies"
+		$SUDO "$release/venv/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir --only-binary=citar \
+			--prefer-binary "$staged[$EXTRAS]" \
+			|| die "pip could not install $(basename "$wheel")[$EXTRAS] into $release/venv."
+		$SUDO "$release/venv/bin/pip" freeze --disable-pip-version-check | $SUDO tee "$release/freeze.txt" >/dev/null
+		digest="$(sha256_of "$staged")"
+		printf '%s  %s\n' "$digest" "$(basename "$wheel")" | $SUDO tee "$release/SHA256SUMS" >/dev/null
+		printf 'installed by install.sh: %s\n' "$("$release/venv/bin/citar" --version 2>/dev/null || echo "CITAR $p")" \
+			| $SUDO tee "$release/.complete" >/dev/null
+		ok "$("$release/venv/bin/citar" --version 2>/dev/null || echo "CITAR $p") installed in $release"
+	fi
+	switch_current "$p"
+	ok "$CURRENT -> releases/$p"
+	printf 'installed by install.sh: CITAR %s (%s)\nbin: %s\n' "$p" "$CURRENT" "$BIN_DIR" \
+		| $SUDO tee "$PREFIX/.citar-installer" >/dev/null
+
+	step "Putting citar on the PATH"
+	$SUDO mkdir -p "$BIN_DIR"
+	# Through current, so they follow a switch. citar-admin is not linked: the venv's own command would run as root
+	# with no configuration (so on a database of its own); `citar setup --server` installs the wrapper that runs it
+	# as the service runs.
+	for command_name in citar citar-mcp; do
+		$SUDO ln -sfn "$CURRENT/venv/bin/$command_name" "$BIN_DIR/$command_name"
+	done
+	ok "Linked into $BIN_DIR"
+	put_on_path
+	cleanup
+
+	if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$p" ]; then
+		say ""
+		ok "CITAR $p is the current release; $CURRENT_VERSION stays in $RELEASES/$CURRENT_VERSION."
+		say "The configuration and the service are as they were, and the server runs $CURRENT_VERSION until it restarts."
+		say "It migrates the database when it starts, after which $CURRENT_VERSION cannot open it, so back up first:"
+		say "    sudo systemctl start citar-backup && sudo systemctl restart citar"
+		exit 0
+	fi
+	run_setup "$CURRENT/venv/bin/citar"
+}
+
+# Hands over to `citar setup`, or says how to run it.
+run_setup() {
+	say ""
+	if [ "$RUN_SETUP" -eq 0 ]; then
+		if [ "$MODE" = "server" ]; then
+			ok "Installed. Run 'sudo $1 setup --server' when you are ready."
+		else
+			ok "Installed. Run 'citar setup' when you are ready."
+		fi
+		exit 0
+	fi
+	# `curl … | bash` leaves standard input attached to the pipe the script itself came down, which is
+	# already at end of file. An interactive wizard reading that gets EOF on its first question and
+	# exits looking cancelled. Re-attaching to the terminal is what makes the one-line install work;
+	# where there is no terminal at all — CI, a Dockerfile, a provisioning script — the wizard is not
+	# run and the command to run later is printed instead.
+	if [ -t 0 ]; then
+		step "Setting up"
+		exec $SUDO "$1" setup "$SETUP_FLAG"
+	elif [ -r /dev/tty ]; then
+		step "Setting up"
+		exec $SUDO "$1" setup "$SETUP_FLAG" < /dev/tty
+	else
+		ok "Installed."
+		say ""
+		say "There is no terminal here, so setup was not run. When you are ready:"
+		say "    $SUDO${SUDO:+ }$1 setup $SETUP_FLAG"
+		say "or, to configure it without any questions:"
+		say "    $SUDO${SUDO:+ }$1 setup $SETUP_FLAG --non-interactive"
+	fi
+	exit 0
+}
+
+plan_local() {
+	say "The plan (nothing is changed; run it without --plan to do it):"
+	say "  python      $PYTHON_DESC"
+	say "  wheel       $WHEEL_DESC"
+	say "  prefix      $PREFIX              marked by $PREFIX/.citar-installer"
+	say "  venv        $PREFIX/venv"
+	say "  commands    $BIN_DIR/citar, $BIN_DIR/citar-admin, $BIN_DIR/citar-mcp -> $PREFIX/venv/bin/"
+	if on_path "$BIN_DIR"; then
+		say "  PATH        $BIN_DIR is on it already"
+	elif [ "$NO_PROFILE" -eq 1 ]; then
+		say "  PATH        unchanged (--no-profile)"
+	else
+		say "  PATH        a line in your shell's profile adds $BIN_DIR"
+	fi
+	if [ "$RUN_SETUP" -eq 1 ]; then
+		say "  then        $PREFIX/venv/bin/citar setup --local"
+	else
+		say "  then        nothing (--no-setup)"
+	fi
+	exit 0
+}
+
+if [ "$PLAN" -eq 1 ]; then
+	[ "$MODE" = "server" ] && plan_server
+	plan_local
+fi
+if [ "$MODE" = "server" ]; then
+	install_server
+fi
+# ----------------------------------------------------------------------------- a personal install
+step "Installing CITAR into $PREFIX"
+mkdir -p "$PREFIX"
+# The marker first, so an install that fails half way can be run again (or removed with --uninstall).
+printf 'installing with install.sh\n' > "$PREFIX/.citar-installer"
+
+"$PYTHON" -m venv "$PREFIX/venv"
+VENV_PIP="$PREFIX/venv/bin/pip"
+# A new pip first: the ensurepip of an older distribution (Ubuntu 20.04's pip 20.0) knows no manylinux_2_28 wheel.
+"$VENV_PIP" install --quiet --disable-pip-version-check --upgrade pip
+
 if [ -n "$WHEEL_DIR" ]; then
 	# pip picks the wheel for this machine from the folder alone (no index), then installs it as a file below.
 	PICKED="$(mktemp -d "${TMPDIR:-/tmp}/citar-wheel.XXXXXX")"
-	$SUDO "$VENV_PIP" download --quiet --disable-pip-version-check --no-deps --no-index --only-binary=:all: \
+	"$VENV_PIP" download --quiet --disable-pip-version-check --no-deps --no-index --only-binary=:all: \
 		--find-links "$WHEEL_DIR" --dest "$PICKED" "citar==$VERSION" \
 		|| no_wheel "$WHEEL_DIR holds no CITAR $VERSION wheel for this machine"
 	SOURCE="$(ls "$PICKED"/citar-*.whl)"
@@ -614,52 +898,23 @@ fi
 # with a wheel for this machine, not a newer source distribution (cryptography has shipped no macOS x86_64 wheel
 # since 49.0, and its source needs Rust too).
 step "Downloading CITAR and its dependencies"
-$SUDO "$VENV_PIP" install --quiet --disable-pip-version-check --only-binary=citar --prefer-binary "$SPEC" \
+"$VENV_PIP" install --quiet --disable-pip-version-check --only-binary=citar --prefer-binary "$SPEC" \
 	|| die "pip could not install $SPEC. If pip found no matching distribution, there is no prebuilt CITAR${VERSION:+ $VERSION}
 for this machine: 'pip install citar' builds it from source, with a Rust toolchain (https://rustup.rs)."
 INSTALLED="$("$PREFIX/venv/bin/citar" --version 2>/dev/null || echo "CITAR")"
-printf 'installed by install.sh: %s\nbin: %s\n' "$INSTALLED" "$BIN_DIR" | $SUDO tee "$PREFIX/.citar-installer" >/dev/null
+printf 'installed by install.sh: %s\nbin: %s\n' "$INSTALLED" "$BIN_DIR" > "$PREFIX/.citar-installer"
 ok "$INSTALLED installed"
 
 # ----------------------------------------------------------------------------- the commands
 step "Putting citar on your PATH"
-$SUDO mkdir -p "$BIN_DIR"
+mkdir -p "$BIN_DIR"
 for command_name in citar citar-admin citar-mcp; do
 	[ -x "$PREFIX/venv/bin/$command_name" ] || continue
-	$SUDO ln -sf "$PREFIX/venv/bin/$command_name" "$BIN_DIR/$command_name"
+	ln -sf "$PREFIX/venv/bin/$command_name" "$BIN_DIR/$command_name"
 done
 ok "Linked into $BIN_DIR"
 put_on_path
 
 # ----------------------------------------------------------------------------- setup
 cleanup
-say ""
-if [ "$RUN_SETUP" -eq 0 ]; then
-	ok "Installed. Run 'citar setup' when you are ready."
-	exit 0
-fi
-
-case "$MODE" in
-	server) SETUP_FLAG="--server" ;;
-	*)      SETUP_FLAG="--local" ;;
-esac
-
-# `curl … | bash` leaves standard input attached to the pipe the script itself came down, which is
-# already at end of file. An interactive wizard reading that gets EOF on its first question and
-# exits looking cancelled. Re-attaching to the terminal is what makes the one-line install work;
-# where there is no terminal at all — CI, a Dockerfile, a provisioning script — the wizard is not
-# run and the command to run later is printed instead.
-if [ -t 0 ]; then
-	step "Setting up"
-	exec "$PREFIX/venv/bin/citar" setup "$SETUP_FLAG"
-elif [ -r /dev/tty ]; then
-	step "Setting up"
-	exec "$PREFIX/venv/bin/citar" setup "$SETUP_FLAG" < /dev/tty
-else
-	ok "Installed."
-	say ""
-	say "There is no terminal here, so setup was not run. When you are ready:"
-	say "    citar setup $SETUP_FLAG"
-	say "or, to configure it without any questions:"
-	say "    citar setup $SETUP_FLAG --non-interactive"
-fi
+run_setup "$PREFIX/venv/bin/citar"
