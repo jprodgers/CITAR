@@ -1019,6 +1019,22 @@ class Refusals(unittest.TestCase):
                       out)
         self.assertIn(f"ok  wheel: citar-0.1.7-cp311-abi3-manylinux_2_28_{ARCH}.whl, for this machine", out)
 
+    def test_usage_errors_are_exit_2(self):
+        for args, says in ((("install",), "install needs --bundle DIR"),
+                           (("prune", "--keep", "1"), "--keep: at least 2"),
+                           (("rollback", "--slice", "staging"), "'staging' is not a slice's name"),
+                           (("rollback", "--reinstall"), "--reinstall is for install"),
+                           (("status", "--bundle", "x"), "--bundle is for install and cutover"),
+                           (("install", "cutover", "--bundle", "x"), "one command at a time"),
+                           (("--frobnicate",), "unknown argument: --frobnicate")):
+            with self.subTest(args):
+                code, out, err = self.box.deploy(*args)
+                self.assertEqual(code, 2, out + err)
+                self.assertIn(says, err)
+        code, out, err = self.box.deploy("--help")
+        self.assertEqual(code, 0, err)
+        self.assertIn("sudo citar-deploy install --bundle DIR [--reinstall]", out)
+
     def test_real_system_tools_under_the_test_root(self):
         code, out, err = self.box.deploy("install", "--bundle", "/nowhere", "--plan", PATH=os.environ["PATH"])
         self.assertEqual(code, 1, out + err)
@@ -1247,6 +1263,9 @@ class Install(unittest.TestCase):
         self.assertIn("release     0.1.6 (complete, runs)", out)
         self.assertIn("release     0.1.7 (complete)", out)
         self.assertIn("rollback version=0.1.6 previous=0.1.7", out)
+        code, planned, err = self.box.deploy("status", "--plan")
+        self.assertEqual(code, 0, planned + err)
+        self.assertTrue(planned.startswith("status changes nothing: its plan is what it reads.\n"), planned)
         for version in ("0.1.3", "0.1.4"):
             self.box.release(version, ["r1"])
         code, out, err = self.box.deploy("prune", "--keep", "2")
