@@ -40,7 +40,7 @@ Before anything changes:
    sha256sum citar-0.1.6-cp311-abi3-manylinux_2_28_@ARCH@.whl > /opt/citar/releases/0.1.6/SHA256SUMS
 
 5. Verify CITAR 0.1.6 as citar, its state in a temporary folder:
-   mkdir /var/lib/citar-deploy/verify.<random> (citar's, 0700) and /var/lib/citar-deploy/verify.<random>/state; /var/lib/citar-deploy/verify.<random>/citar.env: /etc/citar/citar.env without CITAR_STATE_DIR CITAR_DATA_DIR CITAR_DB_URL CITAR_SAVE_DIR CITAR_CONFIG_DIR CITAR_BENCH_DIR CITAR_KEYS_FILE, each set inside /var/lib/citar-deploy/verify.<random>
+   mkdir /var/lib/citar-deploy/verify.<random> (citar's, 0700) and /var/lib/citar-deploy/verify.<random>/state; /var/lib/citar-deploy/verify.<random>/citar.env: /etc/citar/citar.env without CITAR_STATE_DIR CITAR_DATA_DIR CITAR_DB_URL CITAR_SAVE_DIR CITAR_CONFIG_DIR CITAR_BENCH_DIR CITAR_KEYS_FILE (each set inside /var/lib/citar-deploy/verify.<random>) or any other setting naming a live state path
    each command below runs as: systemd-run --quiet --wait --collect --pipe --service-type=exec --slice=citar-staging.slice -p User=citar -p Group=citar -p WorkingDirectory=/var/lib/citar-deploy/verify.<random> -p Environment=CITAR_STATE_DIR=/var/lib/citar-deploy/verify.<random>/state -p EnvironmentFile=/var/lib/citar-deploy/verify.<random>/citar.env -p ReadWritePaths=/var/lib/citar-deploy/verify.<random>, and citar.service's sandbox (38 more arguments: ProtectSystem=strict ... SystemCallErrorNumber=EPERM)
    /opt/citar/releases/0.1.6/venv/bin/citar --version: CITAR 0.1.6
    /opt/citar/releases/0.1.6/venv/bin/python -P -c 'import json, citar._engine as E; print(json.dumps([E.__file__, E.HAS_TEST_OPS]))': the engine from /opt/citar/releases/0.1.6/venv, without the test operations

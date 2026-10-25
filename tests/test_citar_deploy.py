@@ -1151,9 +1151,12 @@ class Install(unittest.TestCase):
         bundle = self.box.bundle("0.1.7", ["r1", "r2", "r3"])
         with open(self.box.root / "etc" / "citar" / "citar.env", "a", encoding="utf-8") as env:
             env.write("CITAR_DATA_DIR=/var/lib/citar\nCITAR_DB_URL=sqlite:////var/lib/citar/citar.db\n"
-                      "CITAR_SAVE_DIR=/var/lib/citar/saves\nCITAR_KEYS_FILE=/var/lib/citar/keys.enc\n")
+                      "CITAR_SAVE_DIR=/var/lib/citar/saves\nCITAR_KEYS_FILE=/var/lib/citar/keys.enc\n"
+                      "CITAR_HELPER_MANIFEST_FILE=/var/lib/citar/saves/manifest.json\n"
+                      "CITAR_RULESET_DIR = '/var/lib/citar'\nCITAR_REGISTRATION=invite\n")
         code, out, err = self.box.deploy("install", "--bundle", str(bundle))
         self.assertEqual(code, 0, out + err)
+        self.assertIn("left out, as they name a live state path: CITAR_HELPER_MANIFEST_FILE CITAR_RULESET_DIR", out)
         live = [str(self.box.root / "var" / "lib" / "citar"), "/var/lib/citar"]
         verify = [json.loads(line) for line in self.box.runs.read_text(encoding="utf-8").splitlines()][1:]
         self.assertEqual(len(verify), 3)
@@ -1170,8 +1173,10 @@ class Install(unittest.TestCase):
             self.assertEqual(env["CITAR_DB_URL"], f"sqlite:///{folder}/state/citar.db")
             for key in ("CITAR_SAVE_DIR", "CITAR_CONFIG_DIR", "CITAR_BENCH_DIR", "CITAR_KEYS_FILE"):
                 self.assertTrue(env[key].startswith(f"{folder}/state/"), key)
-            self.assertEqual((env["CITAR_MODE"], env["CITAR_SECRET_KEY"]), ("server", "not-a-real-one"),
-                             "the env file's other settings are kept")
+            self.assertEqual((env["CITAR_MODE"], env["CITAR_SECRET_KEY"], env["CITAR_REGISTRATION"]),
+                             ("server", "not-a-real-one", "invite"), "the env file's other settings are kept")
+            self.assertNotIn("CITAR_HELPER_MANIFEST_FILE", env)
+            self.assertNotIn("CITAR_RULESET_DIR", env)
             self.assertIn(f"ReadWritePaths={folder}", run["properties"])
         doctor = [line for line in self.box.fake_log.read_text(encoding="utf-8").splitlines()
                   if line.startswith("doctor 0.1.7 ")]

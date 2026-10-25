@@ -503,6 +503,22 @@ live_db() {
   esac
 }
 
+# Every live state path as the service finds it (citar-backup's rules), as the server names it: the state, data, saves,
+# configuration and benchmarks directories, and the database's folder.
+live_paths() {
+  local state data saves bench db
+  state="$(at "$(env_get CITAR_STATE_DIR)")"
+  state="${state:-$(at "$STATE_DIR")}"
+  data="$(at "$(env_get CITAR_DATA_DIR)")"
+  saves="$(at "$(env_get CITAR_SAVE_DIR)")"
+  bench="$(at "$(env_get CITAR_BENCH_DIR)")"
+  if [ -z "$bench" ] && [ -n "$saves" ]; then bench="$(dirname "$saves")/benchmarks"; fi
+  db="$(live_db)"
+  show "$(printf '%s\n' "$state" "${data:-$state}" "${saves:-$state/saves}" \
+    "$(at "$(env_get CITAR_CONFIG_DIR)")" "${bench:-$state/benchmarks}" "${db:+$(dirname "$db")}" | sed '/^$/d')"
+  printf '\n'
+}
+
 # The env file's keys, one a line (comments and `export` lines left out).
 env_keys() {
   [ -f "$ROOT$ENV_FILE" ] || return 0
@@ -875,7 +891,7 @@ as_service() {
 # verifiable. Returns 1 (having said why) when it does not.
 verify() {
   local rel="$RELEASES/$P" v="$WORK/verify.<random>" out status facts line
-  if act "mkdir $v ($SERVICE_USER's, 0700) and $v/state; $v/citar.env: $ENV_FILE without ${STATE_KEYS[*]}, each set inside $v"; then
+  if act "mkdir $v ($SERVICE_USER's, 0700) and $v/state; $v/citar.env: $ENV_FILE without ${STATE_KEYS[*]} (each set inside $v) or any other setting naming a live state path"; then
     mkdir -p "$ROOT$WORK" && chmod 0700 "$ROOT$WORK" || return 1
     VERIFY_DIR="$(mktemp -d "$ROOT$WORK/verify.XXXXXX")" || return 1
     v="$VERIFY_DIR"
@@ -883,11 +899,24 @@ verify() {
     # A folder citar can enter, under one only root may list.
     chmod 0711 "$ROOT$WORK" || return 1
     {
-      awk -v keys=" ${STATE_KEYS[*]} " '
+      # Every state setting goes, and so does any other whose value names a live state path (a file kept in the
+      # state directory, say): the new code sees none of them.
+      awk -v keys=" ${STATE_KEYS[*]} " -v live="$(live_paths)" -v dropped="$v/dropped" '
+        BEGIN { n = split(live, dirs, "\n") }
         { line = $0; sub(/^[ \t\r]+/, "", line) }
         line != "" && line !~ /^[#;]/ && index(line, "=") > 0 {
           name = substr(line, 1, index(line, "=") - 1); sub(/[ \t]+$/, "", name)
           if (index(keys, " " name " ") > 0) next
+          value = substr(line, index(line, "=") + 1)
+          for (i = 1; i <= n; i++) {
+            if (dirs[i] == "" || dirs[i] == "/") continue
+            at = index(value, dirs[i])
+            after = substr(value, at + length(dirs[i]), 1)
+            if (at > 0 && (after == "" || after == "/" || after ~ /["\047 \t\r]/)) {
+              print name >> dropped
+              next
+            }
+          }
         }
         { print }' "$ROOT$ENV_FILE"
       printf '\n# citar-deploy: the verification'"'"'s own state\n'
@@ -895,6 +924,10 @@ verify() {
       printf 'CITAR_SAVE_DIR=%s\nCITAR_CONFIG_DIR=%s\nCITAR_BENCH_DIR=%s\nCITAR_KEYS_FILE=%s\n' \
         "$v/state/saves" "$v/state/config" "$v/state/benchmarks" "$v/state/config/keys.enc"
     } > "$v/citar.env" && chmod 0600 "$v/citar.env" || return 1
+    if [ -f "$v/dropped" ]; then
+      say "      left out, as they name a live state path: $(sort -u "$v/dropped" | tr '\n' ' ' | sed 's/ $//')"
+      rm -f "$v/dropped"
+    fi
   fi
   say "   each command below runs as: systemd-run --quiet --wait --collect --pipe --service-type=exec${SLICE:+ --slice=$SLICE} -p User=$SERVICE_USER -p Group=$SERVICE_USER -p WorkingDirectory=$(show "$v") -p Environment=CITAR_STATE_DIR=$(show "$v")/state -p EnvironmentFile=$(show "$v")/citar.env -p ReadWritePaths=$(show "$v"), and citar.service's sandbox (${#SANDBOX[@]} more arguments: ProtectSystem=strict ... SystemCallErrorNumber=EPERM)"
   if act "$rel/venv/bin/citar --version: CITAR $V"; then
@@ -1090,7 +1123,11 @@ for a look; run again with --reinstall once it is fixed."
     say "      $before_rev"
   fi
   t0="$(date +%s)"
-  run systemctl stop citar || warn "systemctl stop citar failed"
+  if ! run systemctl stop citar; then
+    systemctl start citar || true
+    die "systemctl stop citar failed, so nothing was switched (citar was started again on $p0). $rel is staged and
+verified: run this again once the service stops."
+  fi
   if act "systemctl start citar-backup: a new backup in $BACKUPS without UNTRUSTWORTHY (else citar starts again on $p0 and nothing is switched)"; then
     if ! take_backup release; then
       systemctl start citar || true
@@ -1294,7 +1331,10 @@ to start on it. Roll back with the backup taken before that migration:
   fi
   lock
   step "Stop CITAR $p0:"
-  run systemctl stop citar || warn "systemctl stop citar failed"
+  if ! run systemctl stop citar; then
+    systemctl start citar || true
+    die "systemctl stop citar failed, so nothing was rolled back."
+  fi
   if [ -n "$RESTORE" ]; then
     step "Restore the state and the database from $RESTORE (each folder it names moved aside first, kept):"
     info="$(cat "$ROOT$RESTORE/RELEASE")"
@@ -1390,8 +1430,11 @@ cmd_cutover() {
   archive="/var/lib/citar-archive-$stamp"
   [ "$PLAN" -eq 1 ] || RUN_DIR="$(mktemp -d)" || die "cannot make a temporary folder"
   step "Stop CITAR $OLD:"
-  run systemctl stop citar || warn "systemctl stop citar failed"
-  [ "$LAB" -eq 0 ] || run systemctl stop citar-lab || warn "systemctl stop citar-lab failed"
+  if ! run systemctl stop citar || { [ "$LAB" -eq 1 ] && ! run systemctl stop citar-lab; }; then
+    systemctl start citar || true
+    [ "$LAB" -eq 0 ] || systemctl start citar-lab || true
+    die "CITAR $OLD's services did not stop, so nothing was changed (both were started again)."
+  fi
   step "CITAR $OLD's own backup:"
   if act "systemctl start citar-backup: a new backup in $BACKUPS without UNTRUSTWORTHY (else CITAR $OLD starts again and nothing changes)"; then
     if ! take_backup any; then
