@@ -4,8 +4,9 @@
   ``env.example`` from ``git archive``, ``BUNDLE``; the same inputs give the same bytes; a wheel whose hash differs
   from the folder's ``SHA256SUMS`` (or its ``.sha256``) is refused and nothing is written.
 - The published path runs against a stand-in ``gh`` (``CITAR_BUNDLE_GH``): the arguments of ``release download`` and
-  ``attestation verify`` are exactly the ones it must pass, a download that does not match the release's sums is
-  refused, and so is an attestation ``gh`` does not verify.
+  ``attestation verify`` are exactly the ones it must pass (the attestation held to release.yml, GitHub's runners, the
+  tag and the commit ``deploy/`` comes from), a download that does not match the release's sums is refused, and so
+  are an attestation ``gh`` does not verify and a commit that is not in the checkout.
 - A bundle is never written into a git working tree.
 
 Standard library only; the git archive is of this checkout's HEAD (``--ref``), so it runs wherever the suite does.
@@ -210,14 +211,18 @@ class Bundle(unittest.TestCase):
     def test_the_published_path_passes_gh_exactly_these_arguments(self):
         code, out = self.run_bundle("0.1.6", "--ref", "HEAD")
         self.assertEqual(code, 0, out)
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
         calls = [json.loads(line) for line in self.gh_log.read_text(encoding="utf-8").splitlines()]
         download, *verify = calls
         folder = download[download.index("--dir") + 1]
         self.assertEqual(download, ["release", "download", "v0.1.6", "--repo", "jprodgers/CITAR", "--dir", folder,
                                     "--pattern", WHEEL, "--pattern", CONSTRAINTS, "--pattern", "SHA256SUMS"])
-        self.assertEqual(verify, [["attestation", "verify", str(Path(folder) / WHEEL), "--repo", "jprodgers/CITAR"],
-                                  ["attestation", "verify", str(Path(folder) / CONSTRAINTS), "--repo",
-                                   "jprodgers/CITAR"]])
+        # Only release.yml's attestation, made on GitHub's runners for the tag at the commit deploy/ comes from.
+        held = ["--repo", "jprodgers/CITAR", "--signer-workflow", "jprodgers/CITAR/.github/workflows/release.yml",
+                "--source-ref", "refs/tags/v0.1.6", "--source-digest", head, "--deny-self-hosted-runners"]
+        self.assertEqual(verify, [["attestation", "verify", str(Path(folder) / WHEEL), *held],
+                                  ["attestation", "verify", str(Path(folder) / CONSTRAINTS), *held]])
         self.assertTrue(Path(folder).is_relative_to(self.out), "the download went outside --out")
         self.assertFalse(Path(folder).exists(), "the download folder was left")
         _, files = self.unpacked()
@@ -225,8 +230,9 @@ class Bundle(unittest.TestCase):
         info = dict(line.split("=", 1) for line in files["BUNDLE"].decode().splitlines())
         self.assertEqual(info["source"], "release v0.1.6 of jprodgers/CITAR (gh release download), each as SHA256SUMS "
                                          "says in the release's SHA256SUMS")
-        self.assertEqual(info["attestation"], f"verified (gh attestation verify --repo jprodgers/CITAR) for {WHEEL} "
+        self.assertEqual(info["attestation"], f"verified (gh attestation verify {' '.join(held)}) for {WHEEL} "
                                               f"and {CONSTRAINTS}")
+        self.assertEqual(info["deploy"], f"git archive HEAD ({head})", "deploy/ is the commit the attestation names")
 
     def test_the_published_path_refuses_a_bad_download_and_an_unverified_attestation(self):
         code, out = self.run_bundle("0.1.6", "--ref", "HEAD", STUB_GH_ATTEST_FAIL=CONSTRAINTS)
@@ -244,6 +250,13 @@ class Bundle(unittest.TestCase):
         code, out = self.run_bundle("0.1.6", "--ref", "HEAD")
         self.assertEqual(code, 1, out)
         self.assertIn(f"gh release download v0.1.6 did not write {WHEEL}", out)
+        # The commit the attestation is held to must be here (a release's tag fetched) before anything is downloaded.
+        calls = self.gh_log.read_text(encoding="utf-8")
+        code, out = self.run_bundle("0.1.6", "--ref", "no-such-ref-here")
+        self.assertEqual(code, 1, out)
+        self.assertIn("refused: no-such-ref-here is not a commit in", out)
+        self.assertIn("(a release's tag needs git fetch --tags)", out)
+        self.assertEqual(self.gh_log.read_text(encoding="utf-8"), calls, "gh was run without the commit to hold it to")
 
     def test_never_into_a_git_working_tree_and_a_version_checked(self):
         environ = {k: v for k, v in os.environ.items() if not k.startswith("CITAR_")}

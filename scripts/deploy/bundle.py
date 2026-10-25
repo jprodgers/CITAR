@@ -7,7 +7,9 @@ fetches the release's Linux wheel and checks it, and the bundle carries everythi
 From the published release (the first form): ``gh release download vV`` fetches the wheel
 (``citar-P-cp311-abi3-manylinux_2_28_<arch>.whl``), ``citar-P-server-constraints.txt`` and the release's ``SHA256SUMS``;
 both files must be listed there with their hashes; ``gh attestation verify`` must accept both (the release's provenance,
-P5.12). With ``--from-dir`` the two files come from a folder instead: a dry run's ``pkg-release-assets`` (whose
+P5.12), made by release.yml on GitHub's runners for the tag ``vV`` at the very commit ``deploy/`` comes from (so the
+wheel and the scripts that deploy it are one commit's, and no other workflow or ref of the repository can vouch for
+either). With ``--from-dir`` the two files come from a folder instead: a dry run's ``pkg-release-assets`` (whose
 ``SHA256SUMS`` or ``.sha256`` files are checked the same way) or a local build (nothing to check against, and it says
 so); no attestation exists for either, and the bundle says that too.
 
@@ -42,6 +44,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve()
 CHECKOUT = HERE.parents[2]
 REPO = "jprodgers/CITAR"
+#: The only workflow whose attestations a deploy accepts: release.yml's attest-files job, on a tag push (P5.12).
+SIGNER = f"{REPO}/.github/workflows/release.yml"
 ARCHES = ("x86_64", "aarch64")
 #: What git archive puts in the bundle beside the wheel: the deploy folder and the settings' example.
 ARCHIVED = ("deploy", "env.example")
@@ -172,8 +176,16 @@ def default_out() -> Path:
     return Path("C:/dev/target") if os.name == "nt" else Path.home() / "citar-deploy"
 
 
-def fetch_published(version: str, wheel: str, constraints: str, into: Path) -> tuple[str, str]:
-    """The release's wheel, constraints and SHA256SUMS downloaded by gh, checked, and their attestations verified."""
+def attestation_args(version: str, commit: str) -> list[str]:
+    """What ``gh attestation verify`` holds each file to: this repository's release.yml, on GitHub's runners, for the
+    tag ``vV`` at ``commit`` (the one ``deploy/`` comes from)."""
+    return ["--repo", REPO, "--signer-workflow", SIGNER, "--source-ref", f"refs/tags/v{version}",
+            "--source-digest", commit, "--deny-self-hosted-runners"]
+
+
+def fetch_published(version: str, wheel: str, constraints: str, into: Path, commit: str) -> tuple[str, str]:
+    """The release's wheel, constraints and SHA256SUMS downloaded by gh, checked, and their attestations verified
+    (made by release.yml for the tag at ``commit``)."""
     tag = f"v{version}"
     gh("release", "download", tag, "--repo", REPO, "--dir", str(into), "--pattern", wheel, "--pattern", constraints,
        "--pattern", "SHA256SUMS")
@@ -181,10 +193,11 @@ def fetch_published(version: str, wheel: str, constraints: str, into: Path) -> t
         if not (into / name).is_file():
             raise Refused(f"gh release download {tag} did not write {name}")
     checked = check_against(into, (wheel, constraints))
+    held = attestation_args(version, commit)
     for name in (wheel, constraints):
-        gh("attestation", "verify", str(into / name), "--repo", REPO)
+        gh("attestation", "verify", str(into / name), *held)
     return (f"release {tag} of {REPO} (gh release download), {checked} in the release's SHA256SUMS",
-            f"verified (gh attestation verify --repo {REPO}) for {wheel} and {constraints}")
+            f"verified (gh attestation verify {' '.join(held)}) for {wheel} and {constraints}")
 
 
 def fetch_from_dir(source: Path, wheel: str, constraints: str, into: Path) -> tuple[str, str]:
@@ -198,9 +211,16 @@ def fetch_from_dir(source: Path, wheel: str, constraints: str, into: Path) -> tu
             "none: a dry run's artifacts and a local build have no attestation (only a tagged release does, P5.12)")
 
 
-def archive_deploy(ref: str, repo: Path, into: Path) -> str:
-    """deploy/ and env.example from ``git archive`` at ``ref`` (the commit ``deploy/`` came from, returned)."""
-    commit = git("rev-parse", "--verify", f"{ref}^{{commit}}", repo=repo)
+def resolve(ref: str, repo: Path) -> str:
+    """The commit ``ref`` names (a tag must have been fetched: git fetch --tags)."""
+    try:
+        return git("rev-parse", "--verify", f"{ref}^{{commit}}", repo=repo)
+    except Refused as exc:
+        raise Refused(f"{ref} is not a commit in {repo} (a release's tag needs git fetch --tags): {exc}") from None
+
+
+def archive_deploy(ref: str, commit: str, repo: Path, into: Path) -> None:
+    """deploy/ and env.example from ``git archive`` at ``commit`` (what ``ref`` names)."""
     data = git("archive", "--format=tar", commit, *ARCHIVED, repo=repo, binary=True)
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         for member in tar.getmembers():
@@ -213,7 +233,6 @@ def archive_deploy(ref: str, repo: Path, into: Path) -> str:
     for name in NEEDED:
         if not (into / name).is_file():
             raise Refused(f"{ref} has no {name}: that commit cannot deploy (citar-deploy came in 0.1.6)")
-    return commit
 
 
 def tree(folder: Path) -> list[Path]:
@@ -254,6 +273,8 @@ def make(version: str, arch: str, out: Path, ref: str | None, from_dir: Path | N
     p = release.Version.parse(version).pep440
     if in_git_tree(out):
         raise Refused(f"{out} is inside a git working tree: a bundle is never written into a checkout (--out)")
+    ref = ref or (f"v{version}" if from_dir is None else "HEAD")
+    commit = resolve(ref, repo)
     out.mkdir(parents=True, exist_ok=True)
     name = f"citar-deploy-{version}"
     target = out / f"{name}.tar.gz"
@@ -263,16 +284,14 @@ def make(version: str, arch: str, out: Path, ref: str | None, from_dir: Path | N
         if from_dir is None:
             downloads = Path(work) / "downloads"
             downloads.mkdir()
-            source, attestation = fetch_published(version, wheel, constraints, downloads)
+            source, attestation = fetch_published(version, wheel, constraints, downloads, commit)
             for file in (wheel, constraints):
                 shutil.copy2(downloads / file, folder / file)
-            ref = ref or f"v{version}"
         else:
             source, attestation = fetch_from_dir(from_dir, wheel, constraints, folder)
-            ref = ref or "HEAD"
         say(f"ok  {wheel} and {constraints}: from {source}")
         say(f"ok  attestation: {attestation}")
-        commit = archive_deploy(ref, repo, folder)
+        archive_deploy(ref, commit, repo, folder)
         say(f"ok  deploy/ and env.example: git archive {ref} ({commit[:12]})")
         (folder / "BUNDLE").write_text(
             f"version={version}\npep440={p}\nwheel={wheel}\nsource={source}\nattestation={attestation}\n"
@@ -300,7 +319,7 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--out", type=Path, help="where the bundle goes (default C:/dev/target on Windows, "
                                              "~/citar-deploy elsewhere)")
     ap.add_argument("--ref", help="the commit deploy/ and env.example come from (default the tag vV; with "
-                                  "--from-dir, HEAD)")
+                                  "--from-dir, HEAD); from a release, the attestation must name it")
     ap.add_argument("--repo-dir", type=Path, default=CHECKOUT, help=argparse.SUPPRESS)
     return ap
 
