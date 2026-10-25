@@ -1,0 +1,27 @@
+citar-deploy rollback: the plan. Every check runs; nothing is changed (run it without --plan to do it).
+
+Before anything changes:
+  ok  root: not needed under CITAR_DEPLOY_ROOT (tests)
+  ok  tools: systemctl, systemd-run, sqlite3, sha256sum, flock, and python3.12 with venv
+  ok  configuration: /etc/citar/citar.env; CITAR answers at http://127.0.0.1:@PORT@, and through http://citar.test:@PORT@
+  ok  releases: /opt/citar/current -> releases/0.1.7 runs; back to 0.1.6
+  ok  database: /var/lib/citar/citar.db, at revision r2
+  ok  revision: r2, which CITAR 0.1.6 knows
+
+1. Stop CITAR 0.1.7:
+   systemctl stop citar
+
+2. Switch to CITAR 0.1.6 and start it (its units are the installed ones):
+   ln -sfn releases/0.1.6 /opt/citar/current.switching
+   mv -T /opt/citar/current.switching /opt/citar/current
+   systemctl start citar
+   within 60 s: http://127.0.0.1:@PORT@/api/auth/config answers 200 and /api/meta CITAR 0.1.6;
+   http://citar.test:@PORT@ at 127.0.0.1 (the site's own Host): /api/auth/config answers 200, and a WebSocket handshake on /ws/worker is answered by CITAR (101)
+
+3. The other sites again:
+   each URL in /etc/citar/deploy-checks.conf answers 200
+
+4. Record:
+   append to /var/log/citar-deploy.log: <time> rollback version=0.1.6 previous=0.1.7 result=ok revision_before=r2 restored=no
+
+End of the plan: nothing was changed.

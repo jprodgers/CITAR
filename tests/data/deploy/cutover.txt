@@ -1,0 +1,76 @@
+citar-deploy cutover: the plan. Every check runs; nothing is changed (run it without --plan to do it).
+
+Before anything changes:
+  ok  root: not needed under CITAR_DEPLOY_ROOT (tests)
+  ok  tools: systemctl, systemd-run, sqlite3, sha256sum, flock, and python3.12 with venv
+  ok  account: citar
+  ok  configuration: /etc/citar/citar.env; CITAR answers at http://127.0.0.1:@PORT@, and through http://citar.test:@PORT@
+  ok  bundle: /home/deploy/citar-deploy-0.1.6, CITAR 0.1.6: every file as its SHA256SUMS says
+  ok  wheel: citar-0.1.6-cp311-abi3-manylinux_2_28_@ARCH@.whl, for this machine
+  ok  0.1.5's layout: CITAR 0.1.5 from /opt/citar (/opt/citar/.venv), with citar-lab.service
+  ok  disk: at least 1536 MB free under /opt/citar and /var
+  ok  settings: /etc/citar/citar.env sets CITAR_LAB_WORKERS, which neither env.example
+      nor CITAR 0.1.6's code names: left as they are (CITAR 0.1.6 ignores them)
+  ok  other sites: 2 URL(s) in /etc/citar/deploy-checks.conf, each answering 200
+  ok  CITAR 0.1.5 answers: http://127.0.0.1:@PORT@: /api/auth/config 200; http://citar.test:@PORT@ at 127.0.0.1: /api/auth/config 200
+
+1. Stop CITAR 0.1.5:
+   systemctl stop citar
+   systemctl stop citar-lab
+
+2. CITAR 0.1.5's own backup:
+   systemctl start citar-backup: a new backup in /var/backups/citar without UNTRUSTWORTHY (else CITAR 0.1.5 starts again and nothing changes)
+
+3. Archive CITAR 0.1.5 (uncutover puts all of it back):
+   mkdir -p /var/lib/citar-deploy/cutover/files; each of these saved there if it is here: /etc/systemd/system/citar.service /etc/systemd/system/citar-backup.service /etc/systemd/system/citar-backup.timer /usr/local/bin/citar-admin /usr/local/bin/citar-backup /usr/local/bin/citar-secrets /usr/local/sbin/citar-deploy /etc/systemd/system/citar-lab.service
+   systemctl disable citar-lab
+   rm -f /etc/systemd/system/citar-lab.service
+   mv -T /opt/citar /opt/citar-0.1.5
+   mv -T /var/lib/citar '/var/lib/citar-archive-<stamp>'
+   mkdir /var/lib/citar (citar:citar 0750): CITAR 0.1.6 makes its database there on its first start
+   mkdir -p /opt/citar/releases
+   From here on, a failure undoes the cutover (citar-deploy uncutover) and exits 1.
+
+4. Stage CITAR 0.1.6 in /opt/citar/releases/0.1.6:
+   mkdir -p /opt/citar/releases/0.1.6
+   cp /home/deploy/citar-deploy-0.1.6/citar-0.1.6-cp311-abi3-manylinux_2_28_@ARCH@.whl /home/deploy/citar-deploy-0.1.6/citar-0.1.6-server-constraints.txt /opt/citar/releases/0.1.6/
+   python3.12 -m venv /opt/citar/releases/0.1.6/venv
+   systemd-run --scope --quiet -p MemoryMax=500M -p CPUWeight=20 -- /opt/citar/releases/0.1.6/venv/bin/pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --constraint /opt/citar/releases/0.1.6/citar-0.1.6-server-constraints.txt '/opt/citar/releases/0.1.6/citar-0.1.6-cp311-abi3-manylinux_2_28_@ARCH@.whl[server]'
+   /opt/citar/releases/0.1.6/venv/bin/pip freeze > /opt/citar/releases/0.1.6/freeze.txt
+   sha256sum citar-0.1.6-cp311-abi3-manylinux_2_28_@ARCH@.whl > /opt/citar/releases/0.1.6/SHA256SUMS
+
+5. Verify CITAR 0.1.6 as citar, its state in a temporary folder:
+   mkdir /var/lib/citar-deploy/verify.<random> (citar's, 0700) and /var/lib/citar-deploy/verify.<random>/state; /var/lib/citar-deploy/verify.<random>/citar.env: /etc/citar/citar.env without CITAR_STATE_DIR CITAR_DATA_DIR CITAR_DB_URL CITAR_SAVE_DIR CITAR_CONFIG_DIR CITAR_BENCH_DIR CITAR_KEYS_FILE, each set inside /var/lib/citar-deploy/verify.<random>
+   each command below runs as: systemd-run --quiet --wait --collect --pipe --service-type=exec -p User=citar -p Group=citar -p WorkingDirectory=/var/lib/citar-deploy/verify.<random> -p Environment=CITAR_STATE_DIR=/var/lib/citar-deploy/verify.<random>/state -p EnvironmentFile=/var/lib/citar-deploy/verify.<random>/citar.env -p ReadWritePaths=/var/lib/citar-deploy/verify.<random>, and citar.service's sandbox (38 more arguments: ProtectSystem=strict ... SystemCallErrorNumber=EPERM)
+   /opt/citar/releases/0.1.6/venv/bin/citar --version: CITAR 0.1.6
+   /opt/citar/releases/0.1.6/venv/bin/python -P -c 'import json, citar._engine as E; print(json.dumps([E.__file__, E.HAS_TEST_OPS]))': the engine from /opt/citar/releases/0.1.6/venv, without the test operations
+   /opt/citar/releases/0.1.6/venv/bin/citar doctor: exits 0 (no FAIL line), and its jobs line says verifiable
+   rm -rf /var/lib/citar-deploy/verify.<random>
+   /opt/citar/releases/0.1.6/.complete: verified by citar-deploy: CITAR 0.1.6
+
+6. Switch (no snapshot: the archived state is the backup):
+   ln -sfn releases/0.1.6 /opt/citar/current.switching
+   mv -T /opt/citar/current.switching /opt/citar/current
+   /etc/systemd/system/citar.service <- the bundle's deploy/citar.service (0644): it differs (the difference is shown as it is replaced)
+   /etc/systemd/system/citar-backup.service <- the bundle's deploy/citar-backup.service (0644): it differs (the difference is shown as it is replaced)
+   /etc/systemd/system/citar-backup.timer: the same as the bundle's deploy/citar-backup.timer
+   /usr/local/bin/citar-admin <- the bundle's deploy/citar-admin.sh (0755): it differs (the difference is shown as it is replaced)
+   /usr/local/bin/citar-backup <- the bundle's deploy/citar-backup.sh (0755): it differs (the difference is shown as it is replaced)
+   /usr/local/bin/citar-secrets <- the bundle's deploy/citar-secrets.sh (0755): new
+   /usr/local/sbin/citar-deploy <- the bundle's deploy/citar-deploy.sh (0755): new
+   /etc/nginx/sites-available/citar: none here (citar-deploy never writes an nginx site; docs/server/DEPLOY.md)
+   systemctl daemon-reload
+   systemctl enable citar citar-backup.timer
+   systemctl start citar
+
+7. Health of CITAR 0.1.6 (else the cutover is undone):
+   within 60 s: http://127.0.0.1:@PORT@/api/auth/config answers 200 and /api/meta CITAR 0.1.6;
+   http://citar.test:@PORT@ at 127.0.0.1 (the site's own Host): /api/auth/config answers 200, and a WebSocket handshake on /ws/worker is answered by CITAR (101)
+
+8. The other sites again:
+   each URL in /etc/citar/deploy-checks.conf answers 200
+
+9. Record:
+   append to /var/log/citar-deploy.log: <time> cutover version=0.1.6 previous=0.1.5 result=ok archive=/opt/citar-0.1.5 state_archive=/var/lib/citar-archive-<stamp> backup=<backup>
+
+End of the plan: nothing was changed.
