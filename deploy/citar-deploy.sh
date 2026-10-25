@@ -10,8 +10,8 @@
 #     sudo citar-deploy status
 #     sudo citar-deploy prune [--keep N]                      releases beyond N (default 3) removed
 #
-# Every command but status takes --plan: every check runs, then each step is printed with its paths and commands, and
-# nothing is changed. Read the plan, then run the same command without it.
+# Every command takes --plan: every check runs, then each step is printed with its paths and commands, and nothing is
+# changed (status changes nothing anyway). Read the plan, then run the same command without it.
 #
 #     --slice NAME      every systemd-run this starts, the pip install's scope included, runs in that slice (also
 #                       CITAR_DEPLOY_SLICE; the staging run sets it, design/phase5-release.md P5.14; unset on a server)
@@ -201,7 +201,6 @@ esac
 [ "$REINSTALL" -eq 0 ] || [ "$COMMAND" = install ] || usage_die "--reinstall is for install"
 [ -z "$TO$RESTORE" ] || [ "$COMMAND" = rollback ] || usage_die "--to and --restore-backup are for rollback"
 [ -z "$KEEP" ] || [ "$COMMAND" = prune ] || usage_die "--keep is for prune"
-[ "$PLAN" -eq 0 ] || [ "$COMMAND" != status ] || usage_die "status changes nothing; it takes no --plan"
 if [ -n "$SLICE" ]; then
   [[ "$SLICE" =~ ^[A-Za-z0-9_.:@-]+\.slice$ ]] || usage_die "--slice: '$SLICE' is not a slice's name (NAME.slice)"
 fi
@@ -1606,6 +1605,7 @@ cmd_uncutover() {
 
 cmd_status() {
   local p0 version state said
+  [ "$PLAN" -eq 0 ] || say "status changes nothing: its plan is what it reads."
   p0="$(running_release)"
   say "current     ${p0:+$CURRENT -> releases/$p0}${p0:-none ($CURRENT)}"
   while IFS= read -r version; do
