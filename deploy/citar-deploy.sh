@@ -30,8 +30,13 @@
 # put back from that backup when the revision moved, and the previous release is started again. `rollback` refuses a
 # database at a revision the release it goes back to does not know, unless it is given a backup to restore.
 #
-# Exit status: 0 done; 1 refused or failed (a failed install or cutover is undone first, and says so); 2 a usage
-# error; 3 deployed, but another site on this box does not answer since (nothing is done about it automatically).
+# Run it inside tmux (or screen), so that a dropped SSH session does not end it. From the moment it stops the service
+# until the deploy is recorded, a hang-up is ignored (the command runs to its end); Ctrl-C or a TERM undoes an install
+# or a cutover as a failed release is undone, and a rollback or an uncutover, once begun, runs to its end.
+#
+# Exit status: 0 done; 1 refused or failed (a failed or interrupted install or cutover is undone first, and says so);
+# 2 a usage error; 3 deployed, but another site on this box does not answer since (nothing is done about it
+# automatically).
 #
 # Tests only (tests/test_citar_deploy.py): CITAR_DEPLOY_ROOT prefixes every path, lifts the root check, skips the
 # changes of owner, and requires stand-ins for systemctl and systemd-run first on PATH, so the logic runs without root;
@@ -79,6 +84,12 @@ BUNDLE_NEEDS=(deploy/citar.service deploy/citar-backup.service deploy/citar-back
   deploy/citar-backup.sh deploy/citar-secrets.sh deploy/citar-deploy.sh deploy/nginx-citar.conf env.example)
 # The settings that name state: the staged release's verification points every one of them at a temporary folder.
 STATE_KEYS=(CITAR_STATE_DIR CITAR_DATA_DIR CITAR_DB_URL CITAR_SAVE_DIR CITAR_CONFIG_DIR CITAR_BENCH_DIR CITAR_KEYS_FILE)
+# And the home: systemd gives a unit with User= that account's home, which `citar setup --server` makes the state
+# directory (useradd --home), and CITAR's fallbacks read it (citar/paths.py, citar/keystore.py, keyring's folders).
+HOME_KEYS=(HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME)
+# The verification's share of the box (P5.13.4): the pip scope's limits, and an OOM score above citar.service's 500,
+# so under memory pressure the verification dies first, never CITAR or another site (0.1.5's lab unit had 800).
+VERIFY_LIMITS=(-p "CPUWeight=20" -p "MemoryMax=500M" -p "OOMScoreAdjust=800")
 
 # citar.service's account and sandbox (deploy/citar.service; citar-admin's list, tests/test_citar_deploy.py holds the
 # two equal), for the staged release's verification. WorkingDirectory, the environment and ReadWritePaths are its own.
@@ -565,12 +576,12 @@ knows() {
     "$ROOT$RELEASES/$1"/venv/lib/python3*/site-packages/citar/migrations/versions/*.py
 }
 
-# Puts snapshot $2 back as database $1 (with the root) in one rename, with the owner and mode $1 had; its write-ahead
-# log and journal go (they belong to the database being replaced). Without a database there, the snapshot's owner is
-# the state directory's.
+# Puts snapshot $2 back as database $1 (with the root) in one rename, with the owner and mode $1 had (or $3's, the
+# database moved aside before it); its write-ahead log and journal go (they belong to the database being replaced).
+# Without either, the snapshot's owner is its folder's.
 restore_db() {
-  local db="$1" snapshot="$2" staged="$1.citar-restore" reference="$1"
-  [ -e "$db" ] || reference="$(dirname "$db")"
+  local db="$1" snapshot="$2" staged="$1.citar-restore" reference="${3:-$1}"
+  [ -e "$reference" ] || reference="$(dirname "$db")"
   cp "$snapshot" "$staged" || return 1
   if [ -z "$ROOT" ]; then
     chown --reference="$reference" "$staged" || return 1
@@ -818,11 +829,48 @@ pf_database() {
   fi
 }
 
+# One citar-deploy at a time. The folder's mode is set only once the lock is held, so a second run that stops at the
+# lock changes nothing under a first one's verification (0711: root lists it, citar only passes through to the
+# verification's own folder).
 lock() {
   [ "$PLAN" -eq 0 ] || return 0
-  { mkdir -p "$ROOT$WORK" && chmod 0700 "$ROOT$WORK"; } || die "cannot make $WORK"
-  exec 9>>"$ROOT$WORK/lock"
+  mkdir -p "$ROOT$WORK" || die "cannot make $WORK"
+  exec 9>>"$ROOT$WORK/lock" || die "cannot open $WORK/lock"
   flock -n 9 || die "another citar-deploy is running (it holds $WORK/lock)."
+  chmod 0711 "$ROOT$WORK" || die "cannot set $WORK's mode"
+}
+
+# Signals once something that runs is changed. A hang-up (a dropped SSH session) and a closed output are ignored to the
+# end of the command, so it finishes or undoes itself instead of stopping half way; Ctrl-C or a TERM undoes an install
+# or a cutover (UNDO says how far it has gone) as a failed release is undone; a rollback or an uncutover, once begun,
+# runs to its end. A signal is acted on once the command it arrives during has ended (Ctrl-C ends that one too).
+UNDO=""
+SWITCH_FROM=""
+SWITCH_REV=""
+on_signal() {   # $1 the signal's name
+  trap '' INT TERM HUP PIPE
+  case "$UNDO" in
+    install) undo_install "$SWITCH_FROM" "$SWITCH_REV" "interrupted (SIG$1)" ;;
+    cutover-stopped) cutover_abort "interrupted (SIG$1)" ;;
+    cutover) cutover_failed "interrupted (SIG$1)" ;;
+  esac
+  die "interrupted (SIG$1)"
+}
+guard() {   # $1 what an INT or TERM undoes from here: install, cutover-stopped, cutover; or "" for nothing (runs on)
+  [ "$PLAN" -eq 0 ] || return 0
+  UNDO="$1"
+  trap '' HUP PIPE
+  if [ -n "$1" ]; then
+    trap 'on_signal INT' INT
+    trap 'on_signal TERM' TERM
+  else
+    trap '' INT TERM
+  fi
+}
+unguard() {   # the switch is recorded: Ctrl-C and TERM act as usual again (a hang-up stays ignored to the end)
+  [ "$PLAN" -eq 0 ] || return 0
+  UNDO=""
+  trap - INT TERM
 }
 
 STEP=0
@@ -844,11 +892,13 @@ header() {
 
 # ----------------------------------------------------------------------------------------------------- the steps
 
+# RUN_DIR holds the copies of the units and scripts a switch replaces, the only ones an undo can put back: it is
+# /var/lib/citar-deploy/run.<stamp> (root's, 0700), made when the first file is replaced and removed only once the
+# deploy is recorded or its undo has put every file back, never on another exit (it is what a hand undo starts from).
 RUN_DIR=""
 VERIFY_DIR=""
 cleanup() {
   [ -z "$VERIFY_DIR" ] || rm -rf "$VERIFY_DIR"
-  [ -z "$RUN_DIR" ] || rm -rf "$RUN_DIR"
 }
 trap cleanup EXIT
 
@@ -873,15 +923,39 @@ stage() {
   fi
 }
 
+# The live state paths a verification must not reach (with the root), for InaccessiblePaths=: each of live_paths but
+# "/", any that holds citar-deploy's own folder or the releases (hiding those would hide the verification itself), and
+# any inside another (hidden with it).
+hidden_paths() {
+  local path above hidden=()
+  while IFS= read -r path; do
+    case "$path" in ""|/) continue ;; esac
+    case "$WORK/" in "$path"/*) continue ;; esac
+    case "$OPT/" in "$path"/*) continue ;; esac
+    for above in ${hidden[@]+"${hidden[@]}"}; do
+      case "$path" in "$above"/*) continue 2 ;; esac
+    done
+    hidden+=("$path")
+    printf '%s\n' "$ROOT$path"
+  done < <(live_paths | LC_ALL=C sort -u)
+}
+
+# The verification's own properties (VPROPS), for folder $1: as citar, there, its state and home inside it, the live
+# state out of its reach, held to the deploy's share of the box. citar.service's sandbox comes after them.
+verify_props() {
+  local v="$1" path
+  VPROPS=(-p "User=$SERVICE_USER" -p "Group=$SERVICE_USER" -p "WorkingDirectory=$v"
+    -p "Environment=CITAR_STATE_DIR=$v/state" -p "Environment=HOME=$v/state" -p "EnvironmentFile=$v/citar.env"
+    -p "ReadWritePaths=$v")
+  while IFS= read -r path; do VPROPS+=(-p "InaccessiblePaths=-$path"); done < <(hidden_paths)
+  VPROPS+=("${VERIFY_LIMITS[@]}")
+}
+
 # The staged release's commands as the service runs them (systemd-run as citar, with citar.service's sandbox), with
-# every state setting in the verification's own folder.
+# every state setting and the home in the verification's own folder.
 as_service() {
-  local verify="$1"
-  shift
   systemd-run --quiet --wait --collect --pipe --service-type=exec ${SLICE_FLAG[@]+"${SLICE_FLAG[@]}"} \
-    -p "User=$SERVICE_USER" -p "Group=$SERVICE_USER" -p "WorkingDirectory=$verify" \
-    -p "Environment=CITAR_STATE_DIR=$verify/state" -p "EnvironmentFile=$verify/citar.env" \
-    -p "ReadWritePaths=$verify" "${SANDBOX[@]}" -- "$@" < /dev/null
+    "${VPROPS[@]}" "${SANDBOX[@]}" -- "$@" < /dev/null
 }
 
 # Verify the staged release before anything that runs changes: as citar, with the env file's settings but every state
@@ -889,18 +963,16 @@ as_service() {
 # --version is V; its engine loads from its venv without the test operations; citar doctor passes, its job host
 # verifiable. Returns 1 (having said why) when it does not.
 verify() {
-  local rel="$RELEASES/$P" v="$WORK/verify.<random>" out status facts line
-  if act "mkdir $v ($SERVICE_USER's, 0700) and $v/state; $v/citar.env: $ENV_FILE without ${STATE_KEYS[*]} (each set inside $v) or any other setting naming a live state path"; then
-    mkdir -p "$ROOT$WORK" && chmod 0700 "$ROOT$WORK" || return 1
+  local rel="$RELEASES/$P" v="$WORK/verify.<random>" out status facts line word shown=""
+  if act "mkdir $v ($SERVICE_USER's, 0700) and $v/state; $v/citar.env: $ENV_FILE without ${STATE_KEYS[*]} ${HOME_KEYS[*]} (each set inside $v) or any other setting naming a live state path"; then
+    # In the lock's folder (0711, lock): a folder citar can enter, under one only root may list.
     VERIFY_DIR="$(mktemp -d "$ROOT$WORK/verify.XXXXXX")" || return 1
     v="$VERIFY_DIR"
     mkdir "$v/state" && own "$v" && own "$v/state" && chmod 0700 "$v" "$v/state" || return 1
-    # A folder citar can enter, under one only root may list.
-    chmod 0711 "$ROOT$WORK" || return 1
     {
-      # Every state setting goes, and so does any other whose value names a live state path (a file kept in the
-      # state directory, say): the new code sees none of them.
-      awk -v keys=" ${STATE_KEYS[*]} " -v live="$(live_paths)" -v dropped="$v/dropped" '
+      # Every state setting and the home go, and so does any other setting whose value names a live state path (a
+      # file kept in the state directory, say): the new code sees none of them.
+      awk -v keys=" ${STATE_KEYS[*]} ${HOME_KEYS[*]} " -v live="$(live_paths)" -v dropped="$v/dropped" '
         BEGIN { n = split(live, dirs, "\n") }
         { line = $0; sub(/^[ \t\r]+/, "", line) }
         line != "" && line !~ /^[#;]/ && index(line, "=") > 0 {
@@ -922,15 +994,20 @@ verify() {
       printf 'CITAR_STATE_DIR=%s\nCITAR_DATA_DIR=%s\nCITAR_DB_URL=sqlite:///%s\n' "$v/state" "$v/state" "$v/state/citar.db"
       printf 'CITAR_SAVE_DIR=%s\nCITAR_CONFIG_DIR=%s\nCITAR_BENCH_DIR=%s\nCITAR_KEYS_FILE=%s\n' \
         "$v/state/saves" "$v/state/config" "$v/state/benchmarks" "$v/state/config/keys.enc"
+      # The home last: an environment file's settings win over the home systemd gives citar (systemd.exec(5)).
+      printf 'HOME=%s\nXDG_CONFIG_HOME=%s\nXDG_DATA_HOME=%s\nXDG_CACHE_HOME=%s\nXDG_STATE_HOME=%s\n' \
+        "$v/state" "$v/state/.config" "$v/state/.local/share" "$v/state/.cache" "$v/state/.local/state"
     } > "$v/citar.env" && chmod 0600 "$v/citar.env" || return 1
     if [ -f "$v/dropped" ]; then
       say "      left out, as they name a live state path: $(sort -u "$v/dropped" | tr '\n' ' ' | sed 's/ $//')"
       rm -f "$v/dropped"
     fi
   fi
-  say "   each command below runs as: systemd-run --quiet --wait --collect --pipe --service-type=exec${SLICE:+ --slice=$SLICE} -p User=$SERVICE_USER -p Group=$SERVICE_USER -p WorkingDirectory=$(show "$v") -p Environment=CITAR_STATE_DIR=$(show "$v")/state -p EnvironmentFile=$(show "$v")/citar.env -p ReadWritePaths=$(show "$v"), and citar.service's sandbox (${#SANDBOX[@]} more arguments: ProtectSystem=strict ... SystemCallErrorNumber=EPERM)"
+  verify_props "$v"
+  for word in "${VPROPS[@]}"; do shown+=" $(show "$word")"; done
+  say "   each command below runs as: systemd-run --quiet --wait --collect --pipe --service-type=exec${SLICE:+ --slice=$SLICE}$shown, and citar.service's sandbox (${#SANDBOX[@]} more arguments: ProtectSystem=strict ... SystemCallErrorNumber=EPERM)"
   if act "$rel/venv/bin/citar --version: CITAR $V"; then
-    out="$(as_service "$v" "$ROOT$rel/venv/bin/citar" --version 2>&1)"
+    out="$(as_service "$ROOT$rel/venv/bin/citar" --version 2>&1)"
     status=$?
     line="$(printf '%s\n' "$out" | tail -n 1)"
     { [ "$status" -eq 0 ] && [ "$(probe_pep440 "${line#CITAR }")" = "$P" ]; } \
@@ -938,7 +1015,7 @@ verify() {
     ok "$line"
   fi
   if act "$rel/venv/bin/python -P -c '$ENGINE_FACTS': the engine from $rel/venv, without the test operations"; then
-    out="$(as_service "$v" "$ROOT$rel/venv/bin/python" -P -c "$ENGINE_FACTS" 2>&1)"
+    out="$(as_service "$ROOT$rel/venv/bin/python" -P -c "$ENGINE_FACTS" 2>&1)"
     status=$?
     facts="$(printf '%s\n' "$out" | tail -n 1)"
     case "$status:$facts" in
@@ -948,7 +1025,7 @@ verify() {
     esac
   fi
   if act "$rel/venv/bin/citar doctor: exits 0 (no FAIL line), and its jobs line says verifiable"; then
-    out="$(as_service "$v" "$ROOT$rel/venv/bin/citar" doctor 2>&1)"
+    out="$(as_service "$ROOT$rel/venv/bin/citar" doctor 2>&1)"
     status=$?
     line="$(printf '%s\n' "$out" | grep -E '^\[.{6}\] jobs: ' | head -n 1)"
     if [ "$status" -ne 0 ] || [[ "$line" != "[  ok  ] jobs: verifiable"* ]]; then
@@ -971,26 +1048,30 @@ probe_pep440() {
   printf '%s' "$1" | sed -e 's/-alpha\./a/' -e 's/-beta\./b/' -e 's/-rc\./rc/'
 }
 
+# The backup folders' names (citar-backup's <UTC stamp>[-N]), one a line.
+backup_names() {
+  local dir
+  for dir in "$ROOT$BACKUPS"/*/; do
+    dir="${dir%/}"
+    dir="${dir##*/}"
+    [[ ! "$dir" =~ ^[0-9]{8}-[0-9]{6}(-[0-9]+)?$ ]] || printf '%s\n' "$dir"
+  done
+}
+
 # The citar-backup a switch takes with the service stopped (a oneshot, so starting it waits for it). Sets BACKUP to its
-# folder, or returns 1 when there is no trustworthy new one. Exit 3 is a whole backup whose offsite copy failed.
+# folder (the one that was not there before it ran: a folder dated ahead, or a clock set back, cannot pass for it), or
+# returns 1 when there is no trustworthy new one. Exit 3 is a whole backup whose offsite copy failed.
 BACKUP=""
 take_backup() {   # $1 "release" to require a RELEASE file (0.1.6's backup), "any" for 0.1.5's
-  local before status=0 newest dir
-  before="$(date -u +%Y%m%d-%H%M%S)"
+  local before status=0 newest
+  before="$(backup_names)"
   systemctl start citar-backup || status=$?
   if [ "$status" -ne 0 ]; then
     [ "$(systemctl show -p ExecMainStatus --value citar-backup 2>/dev/null)" = 3 ] || return 1
     warn "the backup's offsite copy failed (journalctl -u citar-backup); the backup on this disk is whole"
   fi
-  newest=""
-  for dir in "$ROOT$BACKUPS"/*/; do
-    dir="${dir%/}"
-    dir="${dir##*/}"
-    [[ "$dir" =~ ^[0-9]{8}-[0-9]{6}(-[0-9]+)?$ ]] || continue
-    [[ "$dir" < "$newest" ]] || newest="$dir"
-  done
+  newest="$(backup_names | grep -vxF -f <(printf '%s\n' "$before") | sort | tail -n 1)"
   [ -n "$newest" ] || return 1
-  [[ ! "$newest" < "$before" ]] || return 1
   BACKUP="$BACKUPS/$newest"
   [ ! -e "$ROOT$BACKUP/UNTRUSTWORTHY" ] || return 1
   [ "$1" != release ] || [ -f "$ROOT$BACKUP/RELEASE" ]
@@ -1014,6 +1095,10 @@ install_files() {
     if [ -f "$ROOT$dest" ]; then
       if act "$dest <- the bundle's $src ($mode): it differs (the difference is shown as it is replaced)"; then
         diff -u "$ROOT$dest" "$BUNDLE/$src" | unroot | sed 's/^/      /'
+        if [ -z "$RUN_DIR" ]; then
+          RUN_DIR="$(mktemp -d "$ROOT$WORK/run.$(date -u +%Y%m%d-%H%M%S).XXXXXX")" || return 1
+          say "      (each file replaced is kept in $(show "$RUN_DIR") until the deploy is recorded or undone)"
+        fi
         mkdir -p "$RUN_DIR/replaced$(dirname "$dest")" && cp -p "$ROOT$dest" "$RUN_DIR/replaced$dest" || return 1
         REPLACED+=("$dest|$mode")
       fi
@@ -1033,16 +1118,27 @@ install_files() {
   fi
 }
 
-# The files install_files replaced put back, and the ones it added removed.
+# The files install_files replaced put back, and the ones it added removed; RUN_DIR removed once all are back (else
+# kept, and said).
 undo_files() {
-  local entry dest
+  local entry dest failed=0
   for entry in ${REPLACED[@]+"${REPLACED[@]}"}; do
     dest="${entry%%|*}"
-    put "$RUN_DIR/replaced$dest" "$ROOT$dest" "${entry#*|}" || warn "could not put $dest back"
+    put "$RUN_DIR/replaced$dest" "$ROOT$dest" "${entry#*|}" || { warn "could not put $dest back"; failed=1; }
   done
   for dest in ${ADDED[@]+"${ADDED[@]}"}; do
-    rm -f "$ROOT$dest" || warn "could not remove $dest"
+    rm -f "$ROOT$dest" || { warn "could not remove $dest"; failed=1; }
   done
+  if [ "$failed" -eq 0 ]; then
+    drop_run_dir
+  else
+    warn "the files the switch replaced are kept in $(show "$RUN_DIR")"
+  fi
+}
+
+drop_run_dir() {
+  [ -z "$RUN_DIR" ] || rm -rf "$RUN_DIR"
+  RUN_DIR=""
 }
 
 # /api/auth/config, /api/meta's version and the WebSocket handshake, directly and through the site, within 60 s.
@@ -1072,7 +1168,7 @@ sites_after() {   # the other sites once more; a failure is loud, and left to th
 # ----------------------------------------------------------------------------------------------------- install
 
 cmd_install() {
-  local p0 before_rev after_rev t0 downtime rel
+  local p0 before_rev after_rev t0 downtime rel mark
   header
   pf_root
   pf_tools
@@ -1087,10 +1183,19 @@ cmd_install() {
     fi
     refuse "No release runs here ($CURRENT): a new server is installed with install.sh --server."
   fi
-  [ -f "$ROOT$RELEASES/$p0/.complete" ] || warn "the release that runs, $p0, has no .complete"
   [ "$P" != "$p0" ] || refuse "CITAR $P is the release that runs: there is nothing to install."
   if [ "$(probe older "$P" "$p0"; echo $?)" = 0 ]; then
     refuse "CITAR $P is older than the release that runs ($p0): going back is citar-deploy rollback --to $P."
+  fi
+  # The release that runs is what a rollback goes back to, so it must be whole: without its .complete (a release made
+  # by hand, or before 0.1.6), its own citar --version must name it, as install.sh asks, and it is marked below.
+  mark=""
+  if [ ! -f "$ROOT$RELEASES/$p0/.complete" ]; then
+    mark="$("$ROOT$RELEASES/$p0/venv/bin/citar" --version 2>/dev/null | tail -n 1)"
+    [ "$(probe_pep440 "${mark#CITAR }")" = "$p0" ] || refuse "$RELEASES/$p0 is the release that runs, but it has no
+.complete and its citar --version says '${mark:-nothing}', not CITAR $p0: it may not be whole, and a rollback goes
+back to it. Point current at a whole release first (citar-deploy rollback --to VERSION)."
+    ok "the release that runs: $RELEASES/$p0 has no .complete, and its citar --version says $mark (marked below)"
   fi
   rel="$RELEASES/$P"
   if [ -e "$ROOT$rel" ] && [ "$REINSTALL" -eq 0 ]; then
@@ -1104,8 +1209,11 @@ again."
   pf_sites
   pf_citar "$p0"
   lock
-  [ "$PLAN" -eq 1 ] || RUN_DIR="$(mktemp -d)" || die "cannot make a temporary folder"
   step "Stage CITAR $V in $rel (nothing that runs changes):"
+  if [ -n "$mark" ] && act "$RELEASES/$p0/.complete: marked by citar-deploy: $mark, the release that runs"; then
+    printf 'marked by citar-deploy: %s, the release that runs\n' "$mark" > "$ROOT$RELEASES/$p0/.complete" \
+      || die "could not mark $RELEASES/$p0 complete; nothing that runs was changed."
+  fi
   if ! stage; then
     die "pip could not stage CITAR $P (above). $rel is left without .complete for a look; nothing that runs was
 changed. Run again with --reinstall."
@@ -1122,6 +1230,10 @@ for a look; run again with --reinstall once it is fixed."
     say "      $before_rev"
   fi
   t0="$(date +%s)"
+  # From here until the record, an interruption undoes the switch (guard) and a hang-up is ignored.
+  SWITCH_FROM="$p0"
+  SWITCH_REV="$before_rev"
+  guard install
   if ! run systemctl stop citar; then
     systemctl start citar || true
     die "systemctl stop citar failed, so nothing was switched (citar was started again on $p0). $rel is staged and
@@ -1158,7 +1270,9 @@ switched and citar was started again on $p0. $rel is staged and verified: run th
   sites_after "$P" "sudo citar-deploy rollback --to $p0$( [ "$after_rev" = "$before_rev" ] || printf ' (the database moved from %s to %s: add --restore-backup %s)' "$before_rev" "$after_rev" "${BACKUP:-<backup>}")" || true
   step "Record and prune:"
   record "install version=$P previous=$p0 result=ok revision_before=$before_rev revision_after=$after_rev backup=${BACKUP:-<backup>} downtime=${downtime}s"
-  prune_releases "$KEEP"
+  unguard
+  drop_run_dir
+  prune_releases "$KEEP" "$p0"
   say ""
   if [ "$PLAN" -eq 1 ]; then
     say "End of the plan: nothing was changed."
@@ -1172,6 +1286,8 @@ switched and citar was started again on $p0. $rel is staged and verified: run th
 # previous release with its units and scripts, started, checked; then exit 1, saying what happened.
 undo_install() {   # $1 the previous release, $2 the revision before, $3 what failed
   local p0="$1" before_rev="$2" after_rev restored="no" back moved word
+  # The undo runs to its end: a second Ctrl-C, a TERM or a hang-up does not cut it short.
+  trap '' INT TERM HUP PIPE
   warn "$3: undoing the switch"
   systemctl stop citar || true
   after_rev="$(revision "$DB")"
@@ -1213,14 +1329,12 @@ The backup is ${BACKUP:-none}; CITAR $P stays in $RELEASES/$P."
 
 # ----------------------------------------------------------------------------------------------------- prune
 
-prune_releases() {   # $1 how many to keep
-  local p0 before version kept=0 all=() keep=() name i
+# Releases beyond $1 removed, never the one that runs or $2, the one before it (a rollback's target: after an install,
+# the release that ran until the switch, whatever its mark), so the plan and the run keep the same ones.
+prune_releases() {   # $1 how many to keep, $2 the release before the one that runs
+  local p0 before="$2" version kept=0 all=() keep=() name i
   if [ "$COMMAND" = install ]; then p0="$P"; else p0="$(running_release)"; fi
   [ -n "$p0" ] || { say "   no release runs: nothing to prune"; return 0; }
-  before="$(release_before "$p0")"
-  if [ "$PLAN" -eq 1 ] && [ "$COMMAND" = install ]; then
-    before="$(running_release)"
-  fi
   while IFS= read -r version; do all+=("$version"); done < <(release_versions)
   if [ "$PLAN" -eq 1 ] && [ "$COMMAND" = install ]; then
     case " ${all[*]-} " in *" $P "*) ;; *) all+=("$P") ;; esac
@@ -1253,45 +1367,60 @@ cmd_prune() {
   [ -n "$p0" ] || refuse "No release runs here ($CURRENT)."
   ok "releases: $(release_versions | tr '\n' ' ' | sed 's/ $//'); $CURRENT -> releases/$p0"
   lock
+  guard ""
   step "Prune the releases beyond $KEEP:"
-  prune_releases "$KEEP"
+  prune_releases "$KEEP" "$(release_before "$p0")"
   [ "$PLAN" -eq 0 ] || { say ""; say "End of the plan: nothing was changed."; }
 }
 
 # ----------------------------------------------------------------------------------------------------- rollback
 
-# The backup a migrating deploy took before it moved the database to revision $1: from the deploy log, else the newest
-# trustworthy backup whose database release $2 knows.
+# Whether backup folder $1 (as the server names it) is one release $2 can be restored from: a citar-backup folder,
+# trustworthy, its database at a revision $2 knows.
+usable_backup() {
+  local rev
+  { [ -f "$ROOT$1/RELEASE" ] && [ -f "$ROOT$1/citar.db" ] && [ ! -e "$ROOT$1/UNTRUSTWORTHY" ]; } || return 1
+  rev="$(sed -n 's/^revision=//p' "$ROOT$1/RELEASE" | head -n 1)"
+  knows "$2" "$rev"
+}
+
+# The backup to go back to release $1 with, from a database at a revision it does not know: the one the migrating
+# deploy took (P5.13.3), from the deploy log: the last install recorded as ok that moved the revision, whose backup is
+# one $1 can be restored from (so over two migrating deploys, the first one's, taken at a revision $1 knows); else the
+# newest backup folder $1 can be restored from.
 backup_for() {
-  local line found=""
+  local line word words found="" result before after backup dir i folders=()
   if [ -f "$ROOT$LOG_FILE" ]; then
     while IFS= read -r line; do
-      case " $line " in
-        *" revision_after=$1 "*" backup="*)
-          case " $line " in *" result=ok "*) ;; *) continue ;; esac
-          case " $line " in *" revision_before=$1 "*) continue ;; esac
-          found="$(printf '%s\n' "$line" | sed -n 's/.* backup=\([^ ]*\).*/\1/p')" ;;
-      esac
+      read -r -a words <<< "$line"
+      [ "${words[1]-}" = install ] || continue
+      result="" before="" after="" backup=""
+      for word in "${words[@]}"; do
+        case "$word" in
+          result=*) result="${word#result=}" ;;
+          revision_before=*) before="${word#revision_before=}" ;;
+          revision_after=*) after="${word#revision_after=}" ;;
+          backup=*) backup="${word#backup=}" ;;
+        esac
+      done
+      { [ "$result" = ok ] && [ -n "$before" ] && [ "$before" != "$after" ]; } || continue
+      case "$backup" in /*) ;; *) continue ;; esac
+      if usable_backup "$backup" "$1"; then found="$backup"; fi
     done < "$ROOT$LOG_FILE"
   fi
   if [ -z "$found" ]; then
-    local dir rev
-    local folders=() i
     for dir in "$ROOT$BACKUPS"/*/; do
-      [ -f "${dir}RELEASE" ] && folders+=("${dir%/}")
+      [ -d "$dir" ] && folders+=("$(show "${dir%/}")")
     done
     for (( i = ${#folders[@]} - 1; i >= 0; i-- )); do
-      dir="${folders[$i]}"
-      [ ! -e "$dir/UNTRUSTWORTHY" ] || continue
-      rev="$(sed -n 's/^revision=//p' "$dir/RELEASE" | head -n 1)"
-      if knows "$2" "$rev"; then found="$(show "$dir")"; break; fi
+      if usable_backup "${folders[$i]}" "$1"; then found="${folders[$i]}"; break; fi
     done
   fi
   printf '%s' "$found"
 }
 
 cmd_rollback() {
-  local p0 t rev backup_rev info archive name dir stamp target folder
+  local p0 t rev backup_rev info archive name dir stamp target folder aside inside suffix moved=()
   header
   pf_root
   pf_tools
@@ -1321,7 +1450,7 @@ not know either."
       refuse "The database's revision cannot be read ($rev), so whether CITAR $t can open it is not known. Roll back
 with --restore-backup DIR (a citar-backup folder), or look at the database first."
     fi
-    backup="$(backup_for "$rev" "$t")"
+    backup="$(backup_for "$t")"
     refuse "The database is at revision $rev, which CITAR $t does not know: CITAR $p0 migrated it, and $t would refuse
 to start on it. Roll back with the backup taken before that migration:
     sudo citar-deploy rollback --to $t --restore-backup ${backup:-<a backup folder in $BACKUPS whose RELEASE names a revision $t knows>}"
@@ -1329,6 +1458,8 @@ to start on it. Roll back with the backup taken before that migration:
     ok "revision: $rev, which CITAR $t knows"
   fi
   lock
+  # Once the service is stopped, the rollback runs to its end (the way back is itself the recovery).
+  guard ""
   step "Stop CITAR $p0:"
   if ! run systemctl stop citar; then
     systemctl start citar || true
@@ -1338,12 +1469,14 @@ to start on it. Roll back with the backup taken before that migration:
     step "Restore the state and the database from $RESTORE (each folder it names moved aside first, kept):"
     info="$(cat "$ROOT$RESTORE/RELEASE")"
     stamp="$(stamp)"
+    moved=()
     for archive in $(printf '%s\n' "$info" | sed -n 's/^archives=//p' | head -n 1); do
       name="${archive%.tar.gz}"
       dir="$(printf '%s\n' "$info" | sed -n "s/^$name=//p" | head -n 1)"
       { [ -n "$dir" ] && [ -f "$ROOT$RESTORE/$archive" ]; } || { warn "$archive: no folder named for it; not restored"; continue; }
       if [ -e "$ROOT$dir" ]; then
         run mv -T "$ROOT$dir" "$ROOT$dir.before-restore-$stamp" || die "could not move $dir aside; nothing restored"
+        moved+=("$dir")
       fi
       if act "mkdir $dir, with the owner and mode it had; tar -xzpf $RESTORE/$archive -C $dir"; then
         mkdir -p "$ROOT$dir" || die "could not make $dir"
@@ -1355,10 +1488,30 @@ to start on it. Roll back with the backup taken before that migration:
       fi
     done
     target="$DB"
+    # A database outside every folder moved aside (CITAR_DB_URL elsewhere) is moved aside itself, so what was written
+    # since the backup is kept there too, never overwritten.
+    aside=""
+    inside=0
+    for dir in ${moved[@]+"${moved[@]}"}; do
+      case "$(show "$target")" in "$dir"/*) inside=1 ;; esac
+    done
+    if [ "$inside" -eq 0 ] && [ -e "$target" ]; then
+      aside="$target.before-restore-$stamp"
+      if act "mv -T $(show "$target") $(show "$aside") (with its -wal, -shm and -journal, where there)"; then
+        mv -T "$target" "$aside" || die "could not move $(show "$target") aside; the database was not restored"
+        for suffix in -wal -shm -journal; do
+          if [ -e "$target$suffix" ]; then
+            mv -T "$target$suffix" "$aside$suffix" \
+              || die "could not move $(show "$target")$suffix aside; the database was not restored"
+          fi
+        done
+      fi
+    fi
     if act "$(show "$target") <- $RESTORE/citar.db (its write-ahead log and journal removed)"; then
       folder="$(dirname "$target")"
       mkdir -p "$folder"
-      restore_db "$target" "$ROOT$RESTORE/citar.db" || die "could not put $RESTORE/citar.db back as $(show "$target")"
+      restore_db "$target" "$ROOT$RESTORE/citar.db" "$aside" \
+        || die "could not put $RESTORE/citar.db back as $(show "$target")"
     fi
   fi
   step "Switch to CITAR $t and start it (its units are the installed ones):"
@@ -1427,41 +1580,41 @@ cmd_cutover() {
   lock
   stamp="$(stamp)"
   archive="/var/lib/citar-archive-$stamp"
-  [ "$PLAN" -eq 1 ] || RUN_DIR="$(mktemp -d)" || die "cannot make a temporary folder"
+  # From the stop until the record is written, an interruption or a failure starts CITAR 0.1.5 again (nothing else
+  # has changed); from the record on, it undoes the cutover. A hang-up is ignored throughout.
+  guard cutover-stopped
   step "Stop CITAR $OLD:"
   if ! run systemctl stop citar || { [ "$LAB" -eq 1 ] && ! run systemctl stop citar-lab; }; then
-    systemctl start citar || true
-    [ "$LAB" -eq 0 ] || systemctl start citar-lab || true
-    die "CITAR $OLD's services did not stop, so nothing was changed (both were started again)."
+    cutover_abort "CITAR $OLD's services did not stop"
   fi
   step "CITAR $OLD's own backup:"
   if act "systemctl start citar-backup: a new backup in $BACKUPS without UNTRUSTWORTHY (else CITAR $OLD starts again and nothing changes)"; then
-    if ! take_backup any; then
-      systemctl start citar || true
-      [ "$LAB" -eq 0 ] || systemctl start citar-lab || true
-      die "CITAR $OLD's backup failed or is not trustworthy (journalctl -u citar-backup), so nothing was changed and
-it was started again."
-    fi
+    take_backup any || cutover_abort "CITAR $OLD's backup failed or is not trustworthy (journalctl -u citar-backup)"
     ok "backup: $BACKUP"
   fi
   step "Archive CITAR $OLD (uncutover puts all of it back):"
-  if act "mkdir -p $CUTOVER/files; each of these saved there if it is here: $(cutover_targets | tr '\n' ' ' | sed 's/ $//')"; then
-    { mkdir -p "$ROOT$CUTOVER/files" && chmod 0700 "$ROOT$WORK"; } || die "cannot make $CUTOVER"
+  if act "mkdir -p $CUTOVER/files (root's, 0700); each of these saved there if it is here: $(cutover_targets | tr '\n' ' ' | sed 's/ $//')"; then
+    { mkdir -p "$ROOT$CUTOVER/files" && chmod 0700 "$ROOT$CUTOVER"; } || cutover_abort "cannot make $CUTOVER"
     while IFS= read -r path; do
       if [ -e "$ROOT$path" ]; then
         { mkdir -p "$ROOT$CUTOVER/files$(dirname "$path")" && cp -p "$ROOT$path" "$ROOT$CUTOVER/files$path"; } \
-          || die "could not save $path; nothing else was changed (CITAR $OLD is stopped: systemctl start citar)"
+          || cutover_abort "could not save $path"
         saved+=("$path")
       else
         absent+=("$path")
       fi
     done < <(cutover_targets)
-    {
+    # Written whole, then renamed: uncutover never reads half a record.
+    if ! {
       printf 'made=%s\nold_version=%s\nold_tree=%s\nstate_archive=%s\nbackup=%s\nlab=%s\nrelease=%s\n' \
         "$stamp" "$OLD" "$OLD_TREE" "$archive" "$BACKUP" "$LAB" "$P"
       printf 'saved=%s\nabsent=%s\n' "${saved[*]-}" "${absent[*]-}"
-    } > "$ROOT$CUTOVER/CUTOVER" || die "could not write $CUTOVER/CUTOVER"
+    } > "$ROOT$CUTOVER/CUTOVER.new"; then
+      cutover_abort "could not write $CUTOVER/CUTOVER"
+    fi
+    mv -T "$ROOT$CUTOVER/CUTOVER.new" "$ROOT$CUTOVER/CUTOVER" || cutover_abort "could not write $CUTOVER/CUTOVER"
   fi
+  guard cutover
   if [ "$LAB" -eq 1 ]; then
     run systemctl disable citar-lab || cutover_failed "systemctl disable citar-lab failed"
     run rm -f "$ROOT$LAB_UNIT" || cutover_failed "could not remove $LAB_UNIT"
@@ -1494,6 +1647,8 @@ it was started again."
   sites_after "$P" "sudo citar-deploy uncutover" || true
   step "Record:"
   record "cutover version=$P previous=$OLD result=ok archive=$OLD_TREE state_archive=$archive backup=${BACKUP:-<backup>}"
+  unguard
+  drop_run_dir
   say ""
   if [ "$PLAN" -eq 1 ]; then
     say "End of the plan: nothing was changed."
@@ -1505,8 +1660,22 @@ it was started again."
   [ "$SITES_FAILED" -eq 0 ] || exit 3
 }
 
+# A cutover stopped before its record, so before anything but the stop: CITAR 0.1.5 started again, and the partial
+# record removed (an earlier cutover's record would refuse the next one). Exits 1.
+cutover_abort() {
+  trap '' INT TERM HUP PIPE
+  warn "$1: starting CITAR $OLD again"
+  systemctl start citar || warn "systemctl start citar failed"
+  [ "$LAB" -eq 0 ] || systemctl start citar-lab || warn "systemctl start citar-lab failed"
+  [ ! -e "$ROOT$CUTOVER" ] || rm -rf "$ROOT$CUTOVER"
+  die "The cutover to CITAR $P stopped before it changed anything ($1): CITAR $OLD was started again."
+}
+
+# A cutover that failed (or was interrupted) once its record was written: undone by itself (uncutover's steps). Exits 1.
 cutover_failed() {
+  trap '' INT TERM HUP PIPE
   warn "$1: undoing the cutover"
+  drop_run_dir
   if undo_cutover "$P"; then
     record "cutover version=$P previous=$OLD result=undone reason=$(printf '%s' "$1" | tr ' ' '_' | cut -c1-80)"
     die "The cutover to CITAR $P failed ($1), and was undone: CITAR $OLD runs again from $OPT."
@@ -1586,6 +1755,8 @@ cmd_uncutover() {
   rel="$(running_release)"
   ok "cutover: from CITAR $old, made $(printf '%s\n' "$info" | sed -n 's/^made=//p'); CITAR ${rel:-none} runs now"
   lock
+  # Once begun, the uncutover runs to its end (it is itself the way back).
+  guard ""
   step "Put CITAR $old back (the new layout and state moved aside and kept):"
   undo_cutover "${rel:-none}" || die "Undoing the cutover did not complete (above)."
   SITES_FAILED=0

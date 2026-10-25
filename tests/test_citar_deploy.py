@@ -16,8 +16,15 @@ one it does not know, as the server does, P5.0.9), installed by the script into 
   another site failing are each refused before any change, naming why.
 - **The revision logic** (gate 3): a failed health check after the revision moved restores the snapshot before the
   previous release starts, and with the revision unchanged does not; rollback across a revision the target does not
-  know is refused without ``--restore-backup`` and names the deploy's backup, and with it restores; the staged
-  verification's environment holds no live state path.
+  know is refused without ``--restore-backup`` and names the deploy's backup (from the deploy log, over two migrating
+  installs too), and with it restores (a database outside the state moved aside first, never overwritten); the staged
+  verification's environment holds no live state path (its home included, as systemd gives citar the state
+  directory), the live state is out of its reach and it is held to the deploy's share of the box.
+- **Interruptions** (the review's finding 1): a TERM or Ctrl-C during the switch undoes an install or a cutover as a
+  failed release is undone, and a hang-up is ignored; the copies of the replaced files live in citar-deploy's own
+  folder until the deploy is recorded or undone.
+- The release that ran until an install's switch is never pruned (marked complete when its own ``citar --version``
+  names it), and a second citar-deploy stops at the lock without touching the first one's folders.
 - One definition: the script's helpers and sandbox are citar-backup's, citar-admin's and the unit's.
 
 Linux only, with bash, the sqlite3 command, GNU tar, flock and a Python that makes venvs, as the server has them (CI's
@@ -240,7 +247,7 @@ def main():
         return 0
     if args[:1] == ["doctor"]:
         log("doctor " + VERSION + " " + json.dumps({k: v for k, v in sorted(os.environ.items())
-                                                     if k.startswith("CITAR_")}))
+                                                     if k.startswith(("CITAR_", "XDG_")) or k == "HOME"}))
         print("CITAR " + VERSION + " - checking this installation")
         if DOCTOR == "fail":
             print("[ FAIL ] connection: planted")
@@ -269,6 +276,11 @@ def main():
         db.execute("INSERT INTO alembic_version VALUES (?)", (REVISIONS[-1],))
         db.commit()
     db.close()
+    if BROKEN == "hang":
+        log("citar " + VERSION + ": at " + REVISIONS[-1] + ", not answering")
+        import time
+        time.sleep(3600)
+        return 1
     log("citar " + VERSION + ": at " + REVISIONS[-1] + ", " + ("exits after migrating" if BROKEN else "serving"))
     if BROKEN == "after":
         return 1
@@ -494,8 +506,9 @@ sys.exit(main(sys.argv[1:]))
 '''
 
 #: systemd-run's stand-in: every call logged as a JSON line; a scope runs its command as it is; a service runs it with
-#: only what its properties give (its environment file and Environment=, the working directory), plus the tests'
-#: FAKE_* variables, as systemd would start it.
+#: only the environment systemd would give it (systemd.exec(5), later wins: the User= account's HOME, USER, LOGNAME
+#: and SHELL, its home from STUB_HOME_<user> as the server's useradd made it; then Environment=; then the environment
+#: file), its working directory, plus the tests' FAKE_* variables.
 STUB_SYSTEMD_RUN = r'''
 import json
 import os
@@ -520,6 +533,16 @@ if "--scope" in flags:
 given = {}
 for prop in props:
     key, _, value = prop.partition("=")
+    if key == "User":
+        given.update({"HOME": os.environ.get("STUB_HOME_" + value, "/"), "USER": value, "LOGNAME": value,
+                      "SHELL": "/usr/sbin/nologin"})
+for prop in props:
+    key, _, value = prop.partition("=")
+    if key == "Environment":
+        k, _, v = value.partition("=")
+        given[k] = v
+for prop in props:
+    key, _, value = prop.partition("=")
     if key == "EnvironmentFile":
         with open(value.lstrip("-"), encoding="utf-8") as handle:
             for line in handle:
@@ -527,11 +550,6 @@ for prop in props:
                 if line and not line.startswith(("#", ";")) and "=" in line:
                     k, _, v = line.partition("=")
                     given[k.strip()] = v.strip()
-for prop in props:
-    key, _, value = prop.partition("=")
-    if key == "Environment":
-        k, _, v = value.partition("=")
-        given[k] = v
 entry["environment"] = given
 entry["directory"] = dict(p.split("=", 1) for p in props).get("WorkingDirectory")
 with open(os.environ["STUB_RUNS"], "a", encoding="utf-8") as handle:
@@ -758,6 +776,8 @@ class Box:
         env = bash_env(PATH=f"{self.stub}{os.pathsep}{os.environ.get('PATH', '')}", CITAR_DEPLOY_ROOT=str(self.root),
                        STUB_ROOT=str(self.root), STUB_STATE=str(self.state),
                        STUB_LOG=str(self.log), STUB_RUNS=str(self.runs), FAKE_LOG=str(self.fake_log),
+                       # citar's home is the state directory, as `citar setup --server`'s useradd --home makes it.
+                       STUB_HOME_citar=str(self.root / "var" / "lib" / "citar"),
                        PIP_NO_INDEX="1", PIP_DISABLE_PIP_VERSION_CHECK="1", TMPDIR=str(self.tmp))
         if slice_:
             env["CITAR_DEPLOY_SLICE"] = slice_
@@ -770,13 +790,34 @@ class Box:
                               text=True, timeout=900, stdin=subprocess.DEVNULL)
         return done.returncode, done.stdout, done.stderr
 
+    def start_deploy(self, *args: str) -> subprocess.Popen:
+        """citar-deploy started in a process group of its own (as a terminal's foreground job is), to be signalled."""
+        out = open(self.tmp / "deploy.out", "w+", encoding="utf-8")
+        err = open(self.tmp / "deploy.err", "w+", encoding="utf-8")
+        self.case.addCleanup(out.close)
+        self.case.addCleanup(err.close)
+        return subprocess.Popen(["bash", str(SCRIPT), *args], env=self.env(), stdout=out, stderr=err,
+                                stdin=subprocess.DEVNULL, start_new_session=True, text=True)
+
+    def finished(self, process: subprocess.Popen) -> tuple[int, str, str]:
+        code = process.wait(timeout=300)
+        return (code, (self.tmp / "deploy.out").read_text(encoding="utf-8"),
+                (self.tmp / "deploy.err").read_text(encoding="utf-8"))
+
+    def work(self) -> Path:
+        return self.root / "var" / "lib" / "citar-deploy"
+
     def systemctl(self, *args: str):
         subprocess.run([str(self.stub / "systemctl"), *args], env=self.env(), timeout=60, check=True)
 
-    def wait_serving(self, says: str, seconds: float = 20):
+    def wait_serving(self, says: str, seconds: float = 20, process: subprocess.Popen | None = None):
+        """Until the stand-in releases' log says ``says`` (and, given ``process``, while that citar-deploy runs)."""
         deadline = time.monotonic() + seconds
         while says not in self.fake_log.read_text(encoding="utf-8"):
             self.case.assertLess(time.monotonic(), deadline, f"no '{says}' in the stand-in's log")
+            if process is not None and process.poll() is not None:
+                code, out, err = self.finished(process)
+                self.case.fail(f"citar-deploy ended (exit {code}) before '{says}':\n{out}{err}")
             time.sleep(0.1)
 
     def calls(self) -> list[str]:
@@ -1035,6 +1076,26 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("sudo citar-deploy install --bundle DIR [--reinstall]", out)
 
+    def test_a_second_deploy_stops_at_the_lock_and_changes_nothing(self):
+        """While one citar-deploy verifies (its folder citar's, under a 0711 folder), a second one stops at the lock
+        without touching the folder's mode, so citar can still reach the first one's verification."""
+        import fcntl
+
+        work = self.box.work()
+        (work / "verify.first").mkdir(parents=True)
+        (work / "lock").touch()
+        work.chmod(0o711)
+        bundle = self.box.bundle("0.1.7", ["r1", "r2", "r3"])
+        before = self.box.tree()
+        with open(work / "lock", "a", encoding="utf-8") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, out, err = self.box.deploy("install", "--bundle", str(bundle))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("another citar-deploy is running (it holds /var/lib/citar-deploy/lock)", err)
+        self.assertEqual(work.stat().st_mode & 0o777, 0o711, "the second run changed the folder's mode")
+        self.assertEqual(self.box.tree(), before)
+        self.assertEqual(self.box.runs.read_text(encoding="utf-8"), "")
+
     def test_real_system_tools_under_the_test_root(self):
         code, out, err = self.box.deploy("install", "--bundle", "/nowhere", "--plan", PATH=os.environ["PATH"])
         self.assertEqual(code, 1, out + err)
@@ -1047,8 +1108,8 @@ class Refusals(unittest.TestCase):
 @unittest.skipUnless(RUNS, "Linux with bash, the sqlite3 command, flock, sha256sum, GNU tar and a Python that makes "
                            "venvs")
 class Install(unittest.TestCase):
-    """Gate 3, under CITAR_DEPLOY_ROOT with the stand-ins and a real SQLite database: the install's switch, and what a
-    failed release's undo does with the database."""
+    """Gate 3, under CITAR_DEPLOY_ROOT with the stand-ins and a real SQLite database: the install's switch, what a
+    failed or interrupted release's undo does with the database, the rollback's backup, and the prune."""
 
     def setUp(self):
         self.box = Box(self)
@@ -1102,6 +1163,14 @@ class Install(unittest.TestCase):
             self.assertIn("--slice=citar-staging.slice", run["flags"])
             self.assertIn("User=citar", run["properties"])
             self.assertIn("ProtectSystem=strict", run["properties"])
+            # Held as the pip scope is (P5.13.4), dying before CITAR (500) or another site under memory pressure; the
+            # live state out of reach.
+            for prop in ("CPUWeight=20", "MemoryMax=500M", "OOMScoreAdjust=800",
+                         f"InaccessiblePaths=-{self.box.root}/var/lib/citar"):
+                self.assertIn(prop, run["properties"])
+        self.assertEqual(sorted(p.name for p in self.box.work().iterdir()), ["lock"],
+                         "a verification's folder or the switch's copies were left")
+        self.assertEqual(self.box.work().stat().st_mode & 0o777, 0o711)
         # The units and scripts from the bundle: the changed backup script replaced, citar-deploy itself added.
         self.assertEqual((self.box.root / "usr" / "local" / "bin" / "citar-backup").read_bytes(),
                          (DEPLOY / "citar-backup.sh").read_bytes())
@@ -1145,6 +1214,7 @@ class Install(unittest.TestCase):
         log = (self.box.root / "var" / "log" / "citar-deploy.log").read_text()
         self.assertIn("install version=0.1.7 previous=0.1.6 result=undone revision_before=r2 revision_after=r3", log)
         self.assertIn("restored=yes", log)
+        self.assertFalse(list(self.box.work().glob("run.*")), "the switch's copies were kept after a whole undo")
 
     def test_a_failed_release_that_did_not_migrate_is_undone_without_a_restore(self):
         bundle = self.box.bundle("0.1.7", ["r1", "r2"], broken="before")
@@ -1194,10 +1264,18 @@ class Install(unittest.TestCase):
             self.assertNotIn("CITAR_HELPER_MANIFEST_FILE", env)
             self.assertNotIn("CITAR_RULESET_DIR", env)
             self.assertIn(f"ReadWritePaths={folder}", run["properties"])
+            # The home systemd gives citar is the live state directory (useradd --home): replaced, with XDG's folders.
+            self.assertEqual(env["HOME"], f"{folder}/state")
+            for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+                self.assertTrue(env[key].startswith(f"{folder}/state/"), key)
+            # And the live state is out of its reach: the state directory hidden (its saves and benchmarks with it).
+            hidden = [p for p in run["properties"] if p.startswith("InaccessiblePaths=")]
+            self.assertEqual(hidden, [f"InaccessiblePaths=-{self.box.root}/var/lib/citar"])
         doctor = [line for line in self.box.fake_log.read_text(encoding="utf-8").splitlines()
                   if line.startswith("doctor 0.1.7 ")]
         self.assertEqual(len(doctor), 1)
         seen = json.loads(doctor[0].split(" ", 2)[2])
+        self.assertIn("HOME", seen)
         self.assertTrue(all("/var/lib/citar/" not in v and not v.endswith("/var/lib/citar") for v in seen.values()),
                         seen)
 
@@ -1273,6 +1351,166 @@ class Install(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (self.box.root / "opt" / "citar" / "releases").iterdir()),
                          ["0.1.4", "0.1.6"], "the release that runs and the one before it are kept, and no more")
 
+    def test_an_interrupted_install_is_undone(self):
+        """During the health wait of a release that never answers: Ctrl-C (an INT to the whole job), a TERM to the
+        whole job or to citar-deploy alone (as sudo passes one on) undo the switch as a failed release is undone; a
+        hang-up (a dropped SSH session) is ignored, so the deploy runs on to its own end (here, the same undo once the
+        release has not answered). Each leaves 0.1.6 serving, its database, units and scripts as they were."""
+        import signal
+
+        bundle = self.box.bundle("0.1.7", ["r1", "r2", "r3"], broken="hang")
+        root = self.box.root
+        for number, (name, whole_job) in enumerate((("TERM", False), ("INT", True), ("TERM", True), ("HUP", True))):
+            with self.subTest(signal=name, whole_job=whole_job):
+                self.box.fake_log.write_text("", encoding="utf-8")
+                self.box.log.write_text("", encoding="utf-8")
+                process = self.box.start_deploy("install", "--bundle", str(bundle), *(["--reinstall"] if number else []))
+                self.box.wait_serving("citar 0.1.7: at r3, not answering", seconds=240, process=process)
+                if whole_job:
+                    os.killpg(process.pid, getattr(signal, f"SIG{name}"))
+                else:
+                    os.kill(process.pid, getattr(signal, f"SIG{name}"))
+                code, out, err = self.box.finished(process)
+                self.assertEqual(code, 1, out + err)
+                if name == "HUP":
+                    self.assertIn("CITAR 0.1.7 was not switched to: CITAR 0.1.7 did not answer as it should", err)
+                else:
+                    self.assertIn(f"CITAR 0.1.7 was not switched to: interrupted (SIG{name})", err)
+                self.assertIn("The database was restored: yes, from /var/backups/citar/", err)
+                self.assertIn("citar runs 0.1.6 again", err)
+                self.assertEqual(os.readlink(root / "opt" / "citar" / "current"), "releases/0.1.6")
+                self.assertEqual(self.box.revision(), "r2")
+                self.assertIn("KEEP_DAYS:-7", (root / "usr" / "local" / "bin" / "citar-backup").read_text(),
+                              "the script the switch replaced was not put back")
+                self.assertFalse((root / "usr" / "local" / "sbin" / "citar-deploy").exists(),
+                                 "the script the switch added was not removed")
+                self.assertEqual(self.box.calls()[-3:], ["systemctl stop citar [current -> releases/0.1.7]",
+                                                         "systemctl daemon-reload [current -> releases/0.1.6]",
+                                                         "systemctl start citar [current -> releases/0.1.6]"])
+                self.assertTrue(self.box.fake_log.read_text(encoding="utf-8").rstrip()
+                                .endswith("citar 0.1.6: at r2, serving"))
+                self.assertFalse(list(self.box.work().glob("run.*")), "the switch's copies were kept")
+                self.assertIn("result=undone", (root / "var" / "log" / "citar-deploy.log").read_text().splitlines()[-1])
+
+    def test_the_release_that_ran_is_kept_by_the_prune_whatever_its_mark(self):
+        """The release that ran until the switch is a rollback's target: kept by the prune in the plan and the run
+        alike, without its .complete too (marked when its own citar --version names it; refused otherwise)."""
+        releases = self.box.root / "opt" / "citar" / "releases"
+        for version in ("0.1.4", "0.1.5"):
+            self.box.release(version, ["r1"])
+        (releases / "0.1.6" / ".complete").unlink()
+        bundle = self.box.bundle("0.1.7", ["r1", "r2"])
+        citar = releases / "0.1.6" / "venv" / "bin" / "citar"
+        citar.rename(citar.with_name("citar.away"))
+        before = self.box.tree()
+        code, out, err = self.box.deploy("install", "--bundle", str(bundle))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("/opt/citar/releases/0.1.6 is the release that runs, but it has no\n.complete and its citar "
+                      "--version says 'nothing', not CITAR 0.1.6", err)
+        self.assertIn("Nothing was changed.", err)
+        self.assertEqual(self.box.tree(), before)
+        citar.with_name("citar.away").rename(citar)
+        code, planned, err = self.box.deploy("install", "--bundle", str(bundle), "--plan")
+        self.assertEqual(code, 0, planned + err)
+        self.assertIn("   /opt/citar/releases/0.1.6/.complete: marked by citar-deploy: CITAR 0.1.6, the release that "
+                      "runs", planned)
+        code, out, err = self.box.deploy("install", "--bundle", str(bundle))
+        self.assertEqual(code, 0, out + err)
+
+        def pruned(text: str) -> list[str]:
+            return [line for line in text.splitlines() if line.startswith(("   rm -rf /opt/citar/releases/", "   kept:"))]
+
+        self.assertEqual(pruned(out), ["   rm -rf /opt/citar/releases/0.1.4",
+                                       "   kept: 0.1.7 0.1.6 0.1.5 (the release that runs, the one before it, and the "
+                                       "newest up to 3)"])
+        self.assertEqual(pruned(out), pruned(planned), "the run pruned other releases than its plan said")
+        self.assertEqual(sorted(p.name for p in releases.iterdir()), ["0.1.5", "0.1.6", "0.1.7"])
+        self.assertEqual((releases / "0.1.6" / ".complete").read_text(),
+                         "marked by citar-deploy: CITAR 0.1.6, the release that runs\n")
+        code, out, err = self.box.deploy("rollback")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(os.readlink(self.box.root / "opt" / "citar" / "current"), "releases/0.1.6")
+
+    def test_rollback_names_the_backup_the_migrating_deploy_took(self):
+        """The deploy log's backup, not merely the newest one the target could open: a newer trustworthy backup at a
+        revision the target knows is passed over; over two migrating installs, going back two releases names the
+        first install's backup (the second's is at a revision the oldest does not know), going back one the second's."""
+        backups = self.box.root / "var" / "backups" / "citar"
+        code, out, err = self.box.deploy("install", "--bundle", str(self.box.bundle("0.1.7", ["r1", "r2", "r3"])))
+        self.assertEqual(code, 0, out + err)
+        [first] = self.backups()
+
+        def plant(name: str, revision: str) -> Path:
+            folder = backups / name
+            shutil.copytree(first, folder)
+            text = (folder / "RELEASE").read_text(encoding="utf-8")
+            (folder / "RELEASE").write_text(re.sub(r"(?m)^revision=.*$", f"revision={revision}", text),
+                                            encoding="utf-8")
+            return folder
+
+        def names(args: tuple[str, ...], backup: Path):
+            code, out, err = self.box.deploy("rollback", *args)
+            self.assertEqual(code, 1, out + err)
+            self.assertIn(f"--restore-backup /var/backups/citar/{backup.name} Nothing was changed.", err)
+
+        planted = plant(f"{first.name}-1", "r2")
+        names((), first)
+        shutil.rmtree(planted)
+        code, out, err = self.box.deploy("install", "--bundle", str(self.box.bundle("0.1.8", ["r1", "r2", "r3", "r4"])))
+        self.assertEqual(code, 0, out + err)
+        second = self.backups()[-1]
+        self.assertIn("revision=r3\n", (second / "RELEASE").read_text(encoding="utf-8"))
+        plant(f"{second.name}-1", "r2")
+        names(("--to", "0.1.6"), first)
+        names(("--to", "0.1.7"), second)
+
+    def test_a_restore_keeps_a_database_outside_the_state(self):
+        """CITAR_DB_URL names a database outside every folder the backup's RELEASE names: rollback --restore-backup
+        moves it aside (with what was written since the backup), in the plan and the run, before it puts the backup's
+        database in its place."""
+        root = self.box.root
+        self.box.systemctl("stop", "citar")
+        srv = root / "srv" / "citar"
+        srv.mkdir(parents=True)
+        shutil.move(root / "var" / "lib" / "citar" / "citar.db", srv / "citar.db")
+        with open(root / "etc" / "citar" / "citar.env", "a", encoding="utf-8") as env:
+            env.write("CITAR_DB_URL=sqlite:////srv/citar/citar.db\n")
+        self.box.fake_log.write_text("", encoding="utf-8")
+        self.box.systemctl("start", "citar")
+        self.box.wait_serving("citar 0.1.6: at r2, serving")
+        code, out, err = self.box.deploy("install", "--bundle", str(self.box.bundle("0.1.7", ["r1", "r2", "r3"])))
+        self.assertEqual(code, 0, out + err)
+        [backup] = self.backups()
+        self.assertIn("database=/srv/citar/citar.db\n", (backup / "RELEASE").read_text(encoding="utf-8"))
+
+        def query(path: Path, sql: str):
+            db = sqlite3.connect(path)
+            try:
+                return db.execute(sql).fetchall()
+            finally:
+                db.close()
+
+        db = sqlite3.connect(srv / "citar.db")
+        db.execute("INSERT INTO users VALUES ('written by 0.1.7 after the backup')")
+        db.commit()
+        db.close()
+        args = ("rollback", "--restore-backup", f"/var/backups/citar/{backup.name}")
+        code, planned, err = self.box.deploy(*args, "--plan")
+        self.assertEqual(code, 0, planned + err)
+        moved = ("   mv -T /srv/citar/citar.db /srv/citar/citar.db.before-restore-<stamp> (with its -wal, -shm and "
+                 "-journal, where there)")
+        self.assertIn(moved, planned)
+        code, out, err = self.box.deploy(*args)
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, re.escape(moved).replace(re.escape("<stamp>"), r"\d{8}-\d{6}"))
+        self.assertEqual(query(srv / "citar.db", "SELECT version_num FROM alembic_version"), [("r2",)])
+        self.assertEqual(query(srv / "citar.db", "SELECT count(*) FROM users"), [(0,)])
+        [aside] = [p for p in srv.iterdir() if re.fullmatch(r"citar\.db\.before-restore-\d{8}-\d{6}", p.name)]
+        self.assertEqual(query(aside, "SELECT version_num FROM alembic_version"), [("r3",)])
+        self.assertEqual(query(aside, "SELECT handle FROM users"), [("written by 0.1.7 after the backup",)],
+                         "what was written since the backup was not kept")
+        self.assertTrue(self.box.fake_log.read_text(encoding="utf-8").rstrip().endswith("citar 0.1.6: at r2, serving"))
+
 
 @unittest.skipUnless(RUNS, "Linux with bash, the sqlite3 command, flock, sha256sum, GNU tar and a Python that makes "
                            "venvs")
@@ -1337,6 +1575,10 @@ class Cutover(unittest.TestCase):
         self.assertEqual(record["absent"], "/usr/local/bin/citar-secrets /usr/local/sbin/citar-deploy")
         self.assertIn("cutover version=0.1.6 previous=0.1.5 result=ok",
                       (root / "var" / "log" / "citar-deploy.log").read_text())
+        # citar-deploy's folder lets citar through to a verification (0711); the cutover's record is root's alone.
+        work = self.box.work()
+        self.assertEqual(sorted(p.name for p in work.iterdir()), ["cutover", "lock"])
+        self.assertEqual((work.stat().st_mode & 0o777, (work / "cutover").stat().st_mode & 0o777), (0o711, 0o700))
 
         self.box.log.write_text("", encoding="utf-8")
         code, out, err = self.box.deploy("uncutover")
@@ -1357,6 +1599,41 @@ class Cutover(unittest.TestCase):
         self.assertBackAsBefore()
         self.assertEqual(self.box.calls()[-2:], ["systemctl start citar [current -> none]",
                                                  "systemctl start citar-lab [current -> none]"])
+
+    def test_an_interrupted_cutover_undoes_itself(self):
+        """A TERM to the whole job during the health wait of a release that never answers: the cutover is undone by
+        itself, as a failed one is, to 0.1.5's tree exactly."""
+        import signal
+
+        bundle = self.box.bundle("0.1.6", ["r1", "r2"], broken="hang")
+        process = self.box.start_deploy("cutover", "--bundle", str(bundle))
+        self.box.wait_serving("citar 0.1.6: at r2, not answering", seconds=240, process=process)
+        os.killpg(process.pid, signal.SIGTERM)
+        code, out, err = self.box.finished(process)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("The cutover to CITAR 0.1.6 failed (interrupted (SIGTERM)), and was undone: CITAR 0.1.5 runs "
+                      "again from /opt/citar", err)
+        self.assertBackAsBefore()
+        self.assertEqual(self.box.calls()[-2:], ["systemctl start citar [current -> none]",
+                                                 "systemctl start citar-lab [current -> none]"])
+
+    def test_a_cutover_whose_backup_fails_changes_nothing_but_the_stop(self):
+        """Before its record, a cutover has only stopped 0.1.5: it is started again, and no partial record is left to
+        refuse the next cutover."""
+        bundle = self.box.bundle("0.1.6", ["r1", "r2"])
+        code, out, err = self.box.deploy("cutover", "--bundle", str(bundle), STUB_BACKUP_FAIL="1")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("The cutover to CITAR 0.1.6 stopped before it changed anything (CITAR 0.1.5's backup failed or "
+                      "is not trustworthy", err)
+        self.assertEqual(self.box.calls(), ["systemctl stop citar [current -> none]",
+                                            "systemctl stop citar-lab [current -> none]",
+                                            "systemctl start citar-backup [current -> none]",
+                                            "systemctl start citar [current -> none]",
+                                            "systemctl start citar-lab [current -> none]"])
+        self.assertBackAsBefore()
+        self.assertFalse((self.box.work() / "cutover").exists(), "a partial record was left")
+        code, out, err = self.box.deploy("cutover", "--bundle", str(bundle), "--plan")
+        self.assertEqual(code, 0, out + err)
 
     def test_a_cutover_whose_verification_fails_undoes_itself(self):
         bundle = self.box.bundle("0.1.6", ["r1", "r2"], doctor="fail")

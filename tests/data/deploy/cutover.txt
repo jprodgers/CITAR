@@ -22,7 +22,7 @@ Before anything changes:
    systemctl start citar-backup: a new backup in /var/backups/citar without UNTRUSTWORTHY (else CITAR 0.1.5 starts again and nothing changes)
 
 3. Archive CITAR 0.1.5 (uncutover puts all of it back):
-   mkdir -p /var/lib/citar-deploy/cutover/files; each of these saved there if it is here: /etc/systemd/system/citar.service /etc/systemd/system/citar-backup.service /etc/systemd/system/citar-backup.timer /usr/local/bin/citar-admin /usr/local/bin/citar-backup /usr/local/bin/citar-secrets /usr/local/sbin/citar-deploy /etc/systemd/system/citar-lab.service
+   mkdir -p /var/lib/citar-deploy/cutover/files (root's, 0700); each of these saved there if it is here: /etc/systemd/system/citar.service /etc/systemd/system/citar-backup.service /etc/systemd/system/citar-backup.timer /usr/local/bin/citar-admin /usr/local/bin/citar-backup /usr/local/bin/citar-secrets /usr/local/sbin/citar-deploy /etc/systemd/system/citar-lab.service
    systemctl disable citar-lab
    rm -f /etc/systemd/system/citar-lab.service
    mv -T /opt/citar /opt/citar-0.1.5
@@ -40,8 +40,8 @@ Before anything changes:
    sha256sum citar-0.1.6-cp311-abi3-manylinux_2_28_@ARCH@.whl > /opt/citar/releases/0.1.6/SHA256SUMS
 
 5. Verify CITAR 0.1.6 as citar, its state in a temporary folder:
-   mkdir /var/lib/citar-deploy/verify.<random> (citar's, 0700) and /var/lib/citar-deploy/verify.<random>/state; /var/lib/citar-deploy/verify.<random>/citar.env: /etc/citar/citar.env without CITAR_STATE_DIR CITAR_DATA_DIR CITAR_DB_URL CITAR_SAVE_DIR CITAR_CONFIG_DIR CITAR_BENCH_DIR CITAR_KEYS_FILE (each set inside /var/lib/citar-deploy/verify.<random>) or any other setting naming a live state path
-   each command below runs as: systemd-run --quiet --wait --collect --pipe --service-type=exec -p User=citar -p Group=citar -p WorkingDirectory=/var/lib/citar-deploy/verify.<random> -p Environment=CITAR_STATE_DIR=/var/lib/citar-deploy/verify.<random>/state -p EnvironmentFile=/var/lib/citar-deploy/verify.<random>/citar.env -p ReadWritePaths=/var/lib/citar-deploy/verify.<random>, and citar.service's sandbox (38 more arguments: ProtectSystem=strict ... SystemCallErrorNumber=EPERM)
+   mkdir /var/lib/citar-deploy/verify.<random> (citar's, 0700) and /var/lib/citar-deploy/verify.<random>/state; /var/lib/citar-deploy/verify.<random>/citar.env: /etc/citar/citar.env without CITAR_STATE_DIR CITAR_DATA_DIR CITAR_DB_URL CITAR_SAVE_DIR CITAR_CONFIG_DIR CITAR_BENCH_DIR CITAR_KEYS_FILE HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME (each set inside /var/lib/citar-deploy/verify.<random>) or any other setting naming a live state path
+   each command below runs as: systemd-run --quiet --wait --collect --pipe --service-type=exec -p User=citar -p Group=citar -p WorkingDirectory=/var/lib/citar-deploy/verify.<random> -p Environment=CITAR_STATE_DIR=/var/lib/citar-deploy/verify.<random>/state -p Environment=HOME=/var/lib/citar-deploy/verify.<random>/state -p EnvironmentFile=/var/lib/citar-deploy/verify.<random>/citar.env -p ReadWritePaths=/var/lib/citar-deploy/verify.<random> -p InaccessiblePaths=-/var/lib/citar -p CPUWeight=20 -p MemoryMax=500M -p OOMScoreAdjust=800, and citar.service's sandbox (38 more arguments: ProtectSystem=strict ... SystemCallErrorNumber=EPERM)
    /opt/citar/releases/0.1.6/venv/bin/citar --version: CITAR 0.1.6
    /opt/citar/releases/0.1.6/venv/bin/python -P -c 'import json, citar._engine as E; print(json.dumps([E.__file__, E.HAS_TEST_OPS]))': the engine from /opt/citar/releases/0.1.6/venv, without the test operations
    /opt/citar/releases/0.1.6/venv/bin/citar doctor: exits 0 (no FAIL line), and its jobs line says verifiable
