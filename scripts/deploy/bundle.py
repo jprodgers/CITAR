@@ -216,8 +216,13 @@ def archive_deploy(ref: str, repo: Path, into: Path) -> str:
     return commit
 
 
+def tree(folder: Path) -> list[Path]:
+    """Everything under ``folder``, in the order of its names as a server writes them (byte order, on every OS)."""
+    return sorted(folder.rglob("*"), key=lambda p: p.relative_to(folder).as_posix().encode("utf-8"))
+
+
 def write_sums(folder: Path) -> None:
-    lines = [f"{sha256(p)}  {p.relative_to(folder).as_posix()}" for p in sorted(folder.rglob("*"))
+    lines = [f"{sha256(p)}  {p.relative_to(folder).as_posix()}" for p in tree(folder)
              if p.is_file() and p.relative_to(folder).as_posix() != "SHA256SUMS"]
     (folder / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
@@ -227,7 +232,7 @@ def pack(folder: Path, target: Path, mtime: int) -> None:
     inputs give the same bytes."""
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as tar:
-        for path in [folder, *sorted(folder.rglob("*"))]:
+        for path in [folder, *tree(folder)]:
             arcname = folder.name if path == folder else f"{folder.name}/{path.relative_to(folder).as_posix()}"
             info = tar.gettarinfo(str(path), arcname)
             info.uid = info.gid = 0

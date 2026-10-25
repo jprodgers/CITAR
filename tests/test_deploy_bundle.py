@@ -155,7 +155,13 @@ class Bundle(unittest.TestCase):
         self.assertTrue(info["attestation"].startswith("none:"), info["attestation"])
         self.assertNotIn("citar-0.1.6.tar.gz", files, "only the wheel and constraints come from the release")
         self.assertEqual(self.gh_log.exists(), False, "gh was run for a --from-dir bundle")
-        # The same inputs, the same bytes.
+        # The same inputs, the same bytes, on any OS: the members and the sums in byte order of their names.
+        with tarfile.open(target) as tar:
+            order = tar.getnames()
+        self.assertEqual(order, sorted(order, key=str.encode))
+        listed = [line.split("  ", 1)[1] for line in files["SHA256SUMS"].decode().splitlines()]
+        self.assertEqual(listed, sorted(listed, key=str.encode))
+        self.assertEqual(listed[:2], ["BUNDLE", WHEEL])
         first = target.read_bytes()
         code, out = self.run_bundle("0.1.6", "--from-dir", str(self.assets), "--ref", "HEAD")
         self.assertEqual(code, 0, out)
