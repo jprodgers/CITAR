@@ -158,6 +158,18 @@ class OneDefinition(unittest.TestCase):
         self.assertEqual(table["citar-deploy.sh"], ("/usr/local/sbin/citar-deploy", "0755"))
         self.assertEqual(table["citar-secrets.sh"], ("/usr/local/bin/citar-secrets", "0755"))
 
+    def test_the_verification_s_limits_are_the_pip_scope_s_and_it_dies_before_citar(self):
+        """P5.13.4: the deploy's transient work is held to one share of the box, and under memory pressure the
+        verification is killed before citar.service (and so before the other sites)."""
+        limits = dict(p.split("=", 1) for p in re.findall(r'-p "([^"]+)"', re.search(r"\nVERIFY_LIMITS=\(([^)]*)\)\n",
+                                                                                    self.text).group(1)))
+        scope = re.search(r"run systemd-run --scope --quiet \$\{SLICE_FLAG\[@\]\+\"\$\{SLICE_FLAG\[@\]\}\"\} "
+                          r"-p MemoryMax=(\S+) -p CPUWeight=(\S+) --", self.text)
+        self.assertEqual((limits["MemoryMax"], limits["CPUWeight"]), scope.groups())
+        unit = (DEPLOY / "citar.service").read_text(encoding="utf-8")
+        self.assertGreater(int(limits["OOMScoreAdjust"]), int(re.search(r"^OOMScoreAdjust=(\d+)$", unit, re.M).group(1)))
+        self.assertIn('"${VPROPS[@]}" "${SANDBOX[@]}"', _function(self.text, "as_service"))
+
     def test_the_engine_check_is_the_wheels_smoke_s(self):
         smoke = (ROOT / "scripts" / "ci" / "smoke_wheel.py").read_text(encoding="utf-8")
         facts = re.search(r'^EXTENSION_FACTS = "([^"]+)"', smoke, re.M).group(1)
