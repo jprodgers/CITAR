@@ -1,0 +1,63 @@
+citar-deploy install: the plan. Every check runs; nothing is changed (run it without --plan to do it).
+
+Before anything changes:
+  ok  root: not needed under CITAR_DEPLOY_ROOT (tests)
+  ok  tools: systemctl, systemd-run, sqlite3, sha256sum, flock, and python3.12 with venv
+  ok  account: citar
+  ok  configuration: /etc/citar/citar.env; CITAR answers at http://127.0.0.1:@PORT@, and through http://citar.test:@PORT@
+  ok  bundle: /home/deploy/citar-deploy-0.1.7, CITAR 0.1.7: every file as its SHA256SUMS says
+  ok  wheel: citar-0.1.7-cp311-abi3-manylinux_2_28_@ARCH@.whl, for this machine
+  ok  releases: /opt/citar/current -> releases/0.1.6 runs; CITAR 0.1.7 goes beside it
+  ok  service: /etc/systemd/system/citar.service runs /opt/citar/current, with /var/lib/citar and /etc/citar/citar.env
+  ok  disk: at least 1536 MB free under /opt/citar and /var
+  ok  database: /var/lib/citar/citar.db, at revision r2
+  ok  other sites: 2 URL(s) in /etc/citar/deploy-checks.conf, each answering 200
+  ok  CITAR 0.1.6 answers: http://127.0.0.1:@PORT@: /api/auth/config 200, /api/meta CITAR 0.1.6; http://citar.test:@PORT@ at 127.0.0.1: /api/auth/config 200, the WebSocket handshake answered
+
+1. Stage CITAR 0.1.7 in /opt/citar/releases/0.1.7 (nothing that runs changes):
+   mkdir -p /opt/citar/releases/0.1.7
+   cp /home/deploy/citar-deploy-0.1.7/citar-0.1.7-cp311-abi3-manylinux_2_28_@ARCH@.whl /home/deploy/citar-deploy-0.1.7/citar-0.1.7-server-constraints.txt /opt/citar/releases/0.1.7/
+   python3.12 -m venv /opt/citar/releases/0.1.7/venv
+   systemd-run --scope --quiet -p MemoryMax=500M -p CPUWeight=20 -- /opt/citar/releases/0.1.7/venv/bin/pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --constraint /opt/citar/releases/0.1.7/citar-0.1.7-server-constraints.txt '/opt/citar/releases/0.1.7/citar-0.1.7-cp311-abi3-manylinux_2_28_@ARCH@.whl[server]'
+   /opt/citar/releases/0.1.7/venv/bin/pip freeze > /opt/citar/releases/0.1.7/freeze.txt
+   sha256sum citar-0.1.7-cp311-abi3-manylinux_2_28_@ARCH@.whl > /opt/citar/releases/0.1.7/SHA256SUMS
+
+2. Verify CITAR 0.1.7 as citar, its state in a temporary folder (the live state untouched):
+   mkdir /var/lib/citar-deploy/verify.<random> (citar's, 0700) and /var/lib/citar-deploy/verify.<random>/state; /var/lib/citar-deploy/verify.<random>/citar.env: /etc/citar/citar.env without CITAR_STATE_DIR CITAR_DATA_DIR CITAR_DB_URL CITAR_SAVE_DIR CITAR_CONFIG_DIR CITAR_BENCH_DIR CITAR_KEYS_FILE HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME (each set inside /var/lib/citar-deploy/verify.<random>) or any other setting naming a live state path
+   each command below runs as: systemd-run --quiet --wait --collect --pipe --service-type=exec -p User=citar -p Group=citar -p WorkingDirectory=/var/lib/citar-deploy/verify.<random> -p Environment=CITAR_STATE_DIR=/var/lib/citar-deploy/verify.<random>/state -p Environment=HOME=/var/lib/citar-deploy/verify.<random>/state -p EnvironmentFile=/var/lib/citar-deploy/verify.<random>/citar.env -p ReadWritePaths=/var/lib/citar-deploy/verify.<random> -p InaccessiblePaths=-/var/lib/citar -p CPUWeight=20 -p MemoryMax=500M -p OOMScoreAdjust=800, and citar.service's sandbox (38 more arguments: ProtectSystem=strict ... SystemCallErrorNumber=EPERM)
+   /opt/citar/releases/0.1.7/venv/bin/citar --version: CITAR 0.1.7
+   /opt/citar/releases/0.1.7/venv/bin/python -P -c 'import json, citar._engine as E; print(json.dumps([E.__file__, E.HAS_TEST_OPS]))': the engine from /opt/citar/releases/0.1.7/venv, without the test operations
+   /opt/citar/releases/0.1.7/venv/bin/citar doctor: exits 0 (no FAIL line), and its jobs line says verifiable
+   rm -rf /var/lib/citar-deploy/verify.<random>
+   /opt/citar/releases/0.1.7/.complete: verified by citar-deploy: CITAR 0.1.7
+
+3. Switch, with the service stopped (the downtime starts):
+   the database's revision, read now (sqlite3, read only): r2
+   systemctl stop citar
+   systemctl start citar-backup: a new backup in /var/backups/citar without UNTRUSTWORTHY (else citar starts again on 0.1.6 and nothing is switched)
+   ln -sfn releases/0.1.7 /opt/citar/current.switching
+   mv -T /opt/citar/current.switching /opt/citar/current
+   /etc/systemd/system/citar.service: the same as the bundle's deploy/citar.service
+   /etc/systemd/system/citar-backup.service: the same as the bundle's deploy/citar-backup.service
+   /etc/systemd/system/citar-backup.timer: the same as the bundle's deploy/citar-backup.timer
+   /usr/local/bin/citar-admin: the same as the bundle's deploy/citar-admin.sh
+   /usr/local/bin/citar-backup <- the bundle's deploy/citar-backup.sh (0755): it differs (the difference is shown as it is replaced)
+   /usr/local/bin/citar-secrets: the same as the bundle's deploy/citar-secrets.sh
+   /usr/local/sbin/citar-deploy <- the bundle's deploy/citar-deploy.sh (0755): new
+   /etc/nginx/sites-available/citar: none here (citar-deploy never writes an nginx site; docs/server/DEPLOY.md)
+   systemctl daemon-reload
+   systemctl start citar
+
+4. Health of CITAR 0.1.7 (else it is undone: stopped, the database put back from step 3's backup if its revision
+   moved, current back to 0.1.6 with its units and scripts, started, and checked):
+   within 60 s: http://127.0.0.1:@PORT@/api/auth/config answers 200 and /api/meta CITAR 0.1.7;
+   http://citar.test:@PORT@ at 127.0.0.1 (the site's own Host): /api/auth/config answers 200, and a WebSocket handshake on /ws/worker is answered by CITAR (101)
+
+5. The other sites again:
+   each URL in /etc/citar/deploy-checks.conf answers 200
+
+6. Record and prune:
+   append to /var/log/citar-deploy.log: <time> install version=0.1.7 previous=0.1.6 result=ok revision_before=r2 revision_after=<revision> backup=<backup> downtime=<n>s
+   kept: 0.1.7 0.1.6 0.1.5 (the release that runs, the one before it, and the newest up to 3)
+
+End of the plan: nothing was changed.
