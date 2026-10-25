@@ -999,6 +999,26 @@ class Refusals(unittest.TestCase):
         self.refused(self.box.bundle("0.1.7", ["r1", "r2", "r3"]), "CITAR does not answer as it should before the "
                                                                    "deploy")
 
+    @unittest.skipUnless(shutil.which("git") and (ROOT / ".git").exists(), "a git checkout (bundle.py's git archive)")
+    def test_a_bundle_bundle_py_made_passes_the_checks(self):
+        """scripts/deploy/bundle.py --from-dir's bundle, unpacked on the box, is one citar-deploy accepts."""
+        assets = self.box.tmp / "assets"
+        assets.mkdir()
+        fake_wheel(assets, "0.1.7", ["r1", "r2", "r3"])
+        (assets / "citar-0.1.7-server-constraints.txt").write_text("# stand-in\n", encoding="utf-8")
+        made = subprocess.run([sys.executable, str(ROOT / "scripts" / "deploy" / "bundle.py"), "0.1.7", "--arch", ARCH,
+                               "--from-dir", str(assets), "--ref", "HEAD", "--out", str(self.box.tmp / "out")],
+                              capture_output=True, text=True, timeout=300)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        home = self.box.root / "home" / "deploy"
+        subprocess.run(["tar", "-xzf", str(self.box.tmp / "out" / "citar-deploy-0.1.7.tar.gz"), "-C", str(home)],
+                       check=True)
+        code, out, err = self.box.deploy("install", "--bundle", str(home / "citar-deploy-0.1.7"), "--plan")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("ok  bundle: /home/deploy/citar-deploy-0.1.7, CITAR 0.1.7: every file as its SHA256SUMS says",
+                      out)
+        self.assertIn(f"ok  wheel: citar-0.1.7-cp311-abi3-manylinux_2_28_{ARCH}.whl, for this machine", out)
+
     def test_real_system_tools_under_the_test_root(self):
         code, out, err = self.box.deploy("install", "--bundle", "/nowhere", "--plan", PATH=os.environ["PATH"])
         self.assertEqual(code, 1, out + err)
