@@ -453,13 +453,28 @@ class NoStaleHost(_Update):
         return sid, token, manifest, signature
 
     def queue(self, name: str, games: int, turns: int, *, size: str = "duel", seats: int = 2) -> str:
+        """An experiment of alice's queued for the dispatcher. Its games left are deleted from the queue when the test
+        ends, passed or failed, as the Lab page's Delete does: the next test's machine must be offered only that
+        test's own games (a failed drain test once left two long games queued, and the next test's lines missed)."""
         exp = lab.submit({"name": name, "games": games, "seed": 9500, "size": size, "maps": ["pangaea"],
                           "turns": turns, "seats": [{"label": f"s{i}", "bot": "basic"} for i in range(seats)]})
         with db.session() as s:
             items.register(s, "lab_experiment", exp["name"], s.get(User, self.alice), exp["name"],
                            path=lab.QUEUE / f"{exp['name']}.json", collection=False)
+        self.addCleanup(self.unqueue, exp["name"])
         D.poke()
         return exp["name"]
+
+    def unqueue(self, name: str) -> None:
+        (lab.QUEUE / f"{name}.json").unlink(missing_ok=True)
+        D.poke()
+
+    @staticmethod
+    def first(seen: list, t: str, state: str) -> int:
+        """Where the first frame of type t in that state is in the hub's order of taking them. Frames are ordered by
+        that order, not by their times: Python 3.12's time.monotonic() on Windows ticks every 15.6 ms, so a result
+        and the restarting status sent right after it often share a time (CI, windows-latest / Python 3.12)."""
+        return next(i for i, frame in enumerate(seen) if frame[1] == t and frame[2] == state)
 
     def test_a_game_playing_at_the_update_ends_before_the_hand_off(self):
         """The wait, then no new work: the game playing when the update is verified ends, its result goes, and only
@@ -474,7 +489,7 @@ class NoStaleHost(_Update):
                     data = json.loads(raw)
                 except ValueError:
                     data = {}
-                seen.append((time.monotonic(), data.get("t"), data.get("state") or data.get("reason")))
+                seen.append((time.perf_counter(), data.get("t"), data.get("state") or data.get("reason")))
             return await real_frame(the_hub, connection, raw)
 
         patcher = mock.patch.object(W, "_frame", recording)
@@ -490,22 +505,20 @@ class NoStaleHost(_Update):
         self.wait_state(sid, "applied", 240, helper)
         log = helper.text()
         self.assertIn("no new work until what runs ends", log)
-        restart_at = next(at for at, t, state in seen if t == "update_status" and state == "restarting")
-        verified_at = next(at for at, t, state in seen if t == "update_status" and state == "verified")
-        results = [at for at, t, _ in seen if t == "job_result"]
-        self.assertTrue(results and all(at < restart_at for at in results), (results, restart_at))
-        self.assertTrue(any(verified_at < at < restart_at for at in results),
+        restart = self.first(seen, "update_status", "restarting")
+        verified = self.first(seen, "update_status", "verified")
+        results = [i for i, (_, t, _) in enumerate(seen) if t == "job_result"]
+        self.assertTrue(results and all(i < restart for i in results), (results, restart, seen))
+        self.assertTrue(any(verified < i < restart for i in results),
                         "the game playing at the update ended, and its result went, before the hand-off")
         self.assertTrue(H.until(lambda: lab.load_results(name), 30 * SLACK), "the game's line")
         self.assertEqual(lab.load_results(name)[0]["executor"]["machine"], sid)
-        print(f"\n[update e2e] gate 4, the drain: verified at {verified_at:.2f}, the game's result at "
-              f"{[round(r, 2) for r in results]}, restarting at {restart_at:.2f}; rejects "
+        print(f"\n[update e2e] gate 4, the drain: verified at {seen[verified][0]:.4f}, the game's result at "
+              f"{[round(seen[i][0], 4) for i in results]}, restarting at {seen[restart][0]:.4f}; rejects "
               f"{[x for x in seen if x[1] == 'job_reject']}", file=sys.stderr)
         W.hub().drop(sid, "its worker token was revoked", code="revoked")
         self.assertEqual(helper.exited(30), 78, helper.text()[-3000:])
-        # its other games are no other test's: deleted from the queue, as the Lab page's Delete does
-        (lab.QUEUE / f"{name}.json").unlink()
-        D.poke()
+        # its other games are no other test's: queue()'s cleanup deletes them
 
     def test_no_result_of_the_old_build_after_the_swap_and_the_stale_host_refused(self):
         sid, token, manifest, signature = self.lending("lending")
@@ -519,7 +532,7 @@ class NoStaleHost(_Update):
                     data = json.loads(raw)
                 except ValueError:
                     data = {}
-                seen.append((time.monotonic(), data.get("t"), data.get("state"), connection.helper_version))
+                seen.append((time.perf_counter(), data.get("t"), data.get("state"), connection.helper_version))
             return await real_frame(the_hub, connection, raw)
 
         patcher = mock.patch.object(W, "_frame", recording)
@@ -538,11 +551,11 @@ class NoStaleHost(_Update):
         conn = W.hub().get(sid)
         self.assertEqual(conn.helper_version, NEW)
         self.assertNotEqual(conn.jobs_build, engine_api.jobs_build(), "the newer helper is another jobs build")
-        restart_at = next(at for at, t, state, v in seen if t == "update_status" and state == "restarting")
-        results = [(at, v) for at, t, _, v in seen if t == "job_result"]
+        restart = self.first(seen, "update_status", "restarting")
+        results = [(i, v) for i, (_, t, _, v) in enumerate(seen) if t == "job_result"]
         self.assertTrue(results, "the older helper relayed results")
-        self.assertTrue(all(at < restart_at and v == OLD for at, v in results),
-                        f"every result came from the older helper before its restarting: {results}, {restart_at}")
+        self.assertTrue(all(i < restart and v == OLD for i, v in results),
+                        f"every result came from the older helper before its restarting: {results}, {restart}")
         # the dispatcher appends a result's line once it has committed it: a moment after the frame came
         self.assertTrue(H.until(lambda: lab.load_results(exp["name"]), 30 * SLACK), "its games are the experiment's lines")
         # the new binary refused the job host of the build it replaced, and started its own
@@ -559,7 +572,7 @@ class NoStaleHost(_Update):
             open_runs = [r for r in s.query(CpuJobRun).filter(CpuJobRun.machine_id == sid)
                          if r.state in ("offered", "running")]
         self.assertEqual(open_runs, [], "the hand-off left no run playing")
-        after = [x for x in seen if x[1] == "job_result" and x[0] > restart_at]
+        after = [x for x in seen[restart + 1:] if x[1] == "job_result"]
         self.assertEqual(after, [], "no result reached the hub after the swap")
         W.hub().drop(sid, "its worker token was revoked", code="revoked")
         self.assertEqual(helper.exited(30), 78, helper.text()[-3000:])
