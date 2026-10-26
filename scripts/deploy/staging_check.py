@@ -636,14 +636,13 @@ class Measure:
         self.data["host_defaults"] = want
         check(want.get("memory_mb") == 240 and want.get("threads") == 1 and want.get("cpu_percent") == 50,
               "host_cpu_defaults(mode='server', cpus=1, ram_mb=961), from the release's own code", json.dumps(want))
-        status, view = self.admin.call("GET", "/api/admin/jobs")
-        machine = executor_of(view if status == 200 else {}).get("machine")
-        if not machine or machine == "host":
-            status, servers = self.admin.call("GET", "/api/pool/servers")
-            hosts = [s.get("id") for s in (servers or {}).get("servers", []) if s.get("is_host")]
-            machine = hosts[0] if hosts else machine
+        # The Servers page's read (GET /api/servers) names the host machine; reading the registry makes its row on a
+        # new server, which has none until something reads it.
+        status, servers = self.admin.call("GET", "/api/servers")
+        machine = (servers or {}).get("host_server_id") if status == 200 else None
         self.data["host_machine"] = machine
-        if not check(bool(machine) and machine != "host", "the host machine's row is found", str(machine)):
+        if not check(bool(machine), "the host machine's row is found (GET /api/servers: host_server_id)",
+                     f"{status} {str(machine)}"):
             return None
         status, got = self.admin.call("PUT", f"/api/machines/{machine}/settings", {"capabilities": {"cpu": want}})
         status2, read = self.admin.call("GET", f"/api/machines/{machine}/settings")
@@ -704,64 +703,88 @@ class Measure:
         self.admin.call("POST", f"/api/games/{gid}/control", {"paused": True})
         return {"game": gid, "rounds": turn, "seconds_per_round": round(took / max(1, turn or 1), 3)}
 
-    def lab(self, mem, weight: int) -> dict:
-        name = f"staging-lab-w{weight}-{secrets.token_hex(3)}"
+    def experiment(self, mem, name: str, games: int, seed: int) -> dict:
+        """Queues a lab experiment of ``games`` duels (the Bots page's A/B route) and follows it to its end: the spans
+        its runs were in flight (from the administrators' view of the dispatcher), the job host as that view shows it
+        once ready, and the runs' own figures from the database (each run's peak, as its frames reported it)."""
         status, queued = self.admin.call("POST", "/api/bots/experiments", {
-            "profiles": ["standard", "classic-production"], "name": name, "players": 2, "games": self.args.lab_games,
-            "seed": 7100 + weight, "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": self.args.lab_turns})
-        if not check(status == 200, f"a lab experiment of {self.args.lab_games} duel games is queued (CPUWeight="
-                                    f"{weight})", str(queued)[:300]):
-            return {"error": queued}
+            "profiles": ["standard", "classic-production"], "name": name, "players": 2, "games": games,
+            "seed": seed, "size": "duel", "maps": ["pangaea"], "speed": "Quick", "turns": self.args.lab_turns})
+        if not check(status == 200, f"{name}: a lab experiment of {games} duel games is queued", str(queued)[:300]):
+            return {"error": queued, "experiment": name}
         spans: list[tuple[float, float]] = []
         running_since = None
-        peak_runs = 0.0
-        executor = {}
-        cgroup_ok = None
-        state = {}
+        executor: dict = {}
+        cgroup = None
+        state = None
         t0 = time.monotonic()
         while time.monotonic() - t0 < self.args.lab_timeout:
             st, view = self.admin.call("GET", "/api/admin/jobs")
-            if st != 200:
-                time.sleep(0.5)
-                continue
-            ex = executor_of(view)
-            if ex.get("state") == "ready" and not executor:
-                executor = ex
-            if ex.get("pid") and mem.host_pid != ex.get("pid"):
-                mem.host_pid = ex.get("pid")
-                cgroup_ok = Path(f"/proc/{ex['pid']}/cgroup").read_text().strip() if Path(
-                    f"/proc/{ex['pid']}/cgroup").exists() else None
-            runs = [r for rs in (view.get("running") or {}).values() for r in rs if r.get("exp") == name]
-            for r in runs:
-                peak_runs = max(peak_runs, float(r.get("peak_mb") or 0.0))
-            now = time.monotonic()
-            if runs and running_since is None:
-                running_since = now
-            elif not runs and running_since is not None:
-                spans.append((running_since, now))
-                running_since = None
-            state = (view.get("experiments") or {}).get(name) or {}
-            st2, labv = self.admin.call("GET", "/api/lab")
-            exp = next((e for e in (labv or {}).get("experiments", []) if e.get("name") == name), {}) if st2 == 200 else {}
-            if exp.get("state") == "complete":
+            if st == 200:
+                ex = executor_of(view)
+                if ex.get("state") == "ready" and ex.get("pid") and not executor:
+                    executor = ex
+                    mem.host_pid = ex["pid"]
+                    try:
+                        cgroup = Path(f"/proc/{ex['pid']}/cgroup").read_text().strip()
+                    except OSError:
+                        cgroup = None
+                running = any(r.get("exp") == name for rs in (view.get("running") or {}).values() for r in rs)
+                now = time.monotonic()
+                if running and running_since is None:
+                    running_since = now
+                elif not running and running_since is not None:
+                    spans.append((running_since, now))
+                    running_since = None
+            st, lab = self.admin.call("GET", "/api/lab")
+            exp = next((e for e in (lab or {}).get("experiments", []) if e.get("name") == name), {}) \
+                if st == 200 else {}
+            state = exp.get("state")
+            if state == "complete":
                 break
-            time.sleep(0.5)
+            time.sleep(0.25)
         if running_since is not None:
             spans.append((running_since, time.monotonic()))
         took = time.monotonic() - t0
-        completed = check(state.get("settled") == self.args.lab_games and not state.get("failed"),
-                          f"the lab's {self.args.lab_games} games are played by the job host", json.dumps(
-                              {k: state.get(k) for k in ("settled", "failed", "running", "queued")}))
+        runs = db_runs(self.args.db, name)
         lines = lab_lines(self.args.saves, name)
-        rounds = [x.get("turns") or x.get("turn") or (x.get("result") or {}).get("turns") for x in lines]
-        seconds = [x.get("seconds") for x in lines]
-        per_round = [s / r for s, r in zip(seconds, rounds) if isinstance(s, (int, float)) and r]
-        return {"_spans": spans, "experiment": name, "complete": completed, "wall_seconds": round(took, 1),
+        done_runs = [r for r in runs if r["state"] == "done"]
+        rounds = sum(r["rounds"] or 0 for r in done_runs)
+        return {"_spans": spans, "experiment": name, "state": state, "wall_seconds": round(took, 1),
+                "in_flight_seconds": round(sum(b - a for a, b in spans), 1),
                 "executor": {k: executor.get(k) for k in ("machine", "state", "threads", "cpu_percent", "memory_mb",
                                                           "held", "memory_per_run_mb", "verifiable", "notes", "pid")},
-                "job_host_cgroup": cgroup_ok, "runs_peak_mb": round(peak_runs, 1),
-                "games": [{k: x.get(k) for k in ("i", "seconds", "turns", "winner")} for x in lines],
-                "seconds_per_round": round(sum(per_round) / len(per_round), 3) if per_round else None}
+                "job_host_cgroup": cgroup, "runs": len(runs), "runs_done": len(done_runs), "lines": len(lines),
+                "machines": sorted({r["machine_id"] for r in runs}),
+                "job_mem_mb": max((r["mem_mb"] for r in runs), default=None),
+                "runs_peak_mb": max((r["peak_mb"] for r in runs), default=None),
+                "runs_cpu_s": round(sum(r["cpu_s"] for r in done_runs), 2),
+                "runs_wall_s": round(sum(r["wall_s"] for r in done_runs), 2), "rounds": rounds,
+                "seconds_per_round": round(sum(r["wall_s"] for r in done_runs) / rounds, 4) if rounds else None,
+                "cpu_seconds_per_round": round(sum(r["cpu_s"] for r in done_runs) / rounds, 4) if rounds else None}
+
+    def lab(self, mem) -> dict:
+        """The three duels gate 2 names: played by the job host under citar.service, at the host's settings."""
+        games = self.args.lab_games
+        result = self.experiment(mem, f"staging-lab-{secrets.token_hex(3)}", games, 7100)
+        ex = result.get("executor") or {}
+        check(result.get("state") == "complete" and result.get("runs_done") == games and result.get("lines") == games,
+              f"the lab's {games} games are played to their end by the job host",
+              json.dumps({k: result.get(k) for k in ("state", "runs", "runs_done", "lines", "machines")}))
+        check(ex.get("memory_mb") == 240 and ex.get("threads") == 1,
+              "the job host's ready reports the host's settings: 240 MB, one thread",
+              json.dumps({k: ex.get(k) for k in ("memory_mb", "memory_per_run_mb", "threads", "cpu_percent", "held")}))
+        notes = "; ".join(ex.get("notes") or [])
+        check("RLIMIT_DATA 240 MB" in notes, "its memory is held by RLIMIT_DATA (a system service has no user manager "
+                                              "for a scope), as it logs", notes[:400])
+        check("citar.service" in str(result.get("job_host_cgroup")), "the job host runs inside citar.service's cgroup",
+              str(result.get("job_host_cgroup")))
+        return result
+
+    def load_at(self, mem, weight: int) -> dict:
+        """The response-time bound at one CPUWeight=: the stand-in's times while a longer lab keeps the job host busy."""
+        return self.experiment(mem, f"staging-load-w{weight}-{secrets.token_hex(3)}", self.args.load_games,
+                               7200 + weight)
 
     def run(self) -> int:
         self.load.start()
@@ -769,41 +792,30 @@ class Measure:
         try:
             if not self.first_admin():
                 return done()
-            machine = self.host_settings()
+            self.host_settings()
             idle = self.span("idle", self.idle)
-            self.span("game", self.game)
-            idle_p95 = (idle["standin"].get("p95_ms") or 0.0)
+            idle_p95 = idle["standin"].get("p95_ms") or 0.0
             check(idle["standin"]["n"] >= 30, "the stand-in's idle response times are sampled",
                   json.dumps(idle["standin"]))
-            labs = []
+            self.span("game", self.game)
+            self.span("lab", self.lab)
+            loads = []
             for weight in self.args.weights:
-                result = self.span(f"lab_w{weight}", lambda mem, w=weight: self.lab(mem, w), weight=weight)
-                labs.append((weight, result))
-                ex = result.get("executor") or {}
-                if machine:
-                    check(ex.get("memory_mb") == 240 and ex.get("threads") == 1,
-                          f"CPUWeight={weight}: the job host's ready reports the host's settings: about 240 MB, one "
-                          f"thread", json.dumps({k: ex.get(k) for k in ("memory_mb", "memory_per_run_mb", "threads",
-                                                                         "cpu_percent", "held")}))
-                notes = " ".join(ex.get("notes") or [])
-                check("RLIMIT_DATA" in notes or "rlimit" in notes.lower(),
-                      f"CPUWeight={weight}: its memory is held by RLIMIT_DATA (no user manager for a scope), as it "
-                      f"logs", notes[:300])
-                check("citar.service" in str(result.get("job_host_cgroup")),
-                      f"CPUWeight={weight}: the job host runs inside citar.service's cgroup",
-                      str(result.get("job_host_cgroup")))
+                result = self.span(f"load_w{weight}", lambda mem, w=weight: self.load_at(mem, w), weight=weight)
+                loads.append((weight, result))
                 p95 = result["standin"].get("p95_ms")
                 bound = 2 * idle_p95 + 50
                 result["bound_ms"] = round(bound, 1)
                 result["within_bound"] = p95 is not None and p95 <= bound
                 check(result["standin"]["n"] >= 30 and p95 is not None and p95 <= bound,
                       f"CPUWeight={weight}: the stand-in's p95 with a lab game running is within twice its idle p95 "
-                      f"plus 50 ms", f"{p95} ms against {bound:.1f} ms ({result['standin']['n']} requests; idle p95 "
-                      f"{idle_p95} ms)")
+                      f"plus 50 ms", f"{p95} ms against {bound:.1f} ms ({result['standin']['n']} requests in "
+                      f"{result.get('in_flight_seconds')} s of lab; idle p95 {idle_p95} ms)")
+                self.save()
             self.data["weights"] = {str(w): {"p95_ms": r["standin"].get("p95_ms"), "bound_ms": r.get("bound_ms"),
-                                             "within": r.get("within_bound"),
+                                             "within": r.get("within_bound"), "n": r["standin"].get("n"),
                                              "citar_p95_ms": r["citar_via_site"].get("p95_ms"),
-                                             "seconds_per_round": r.get("seconds_per_round")} for w, r in labs}
+                                             "seconds_per_round": r.get("seconds_per_round")} for w, r in loads}
         finally:
             set_weight(None)
             self.load.stop()
@@ -811,6 +823,26 @@ class Measure:
             self.data["failures"] = list(FAILURES)
             self.save()
         return done()
+
+
+def db_runs(db: str, name: str) -> list:
+    """The runs of experiment ``name`` in the server's database (read only): each with its job's memory estimate and
+    its own peak, CPU and wall seconds and rounds, as its frames reported them."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT j.ref, j.mem_mb, r.state, r.peak_mb, r.cpu_s, r.wall_s, r.rounds, r.machine_id "
+            "FROM cpu_job_runs r JOIN cpu_jobs j ON j.id = r.job_id WHERE j.ref LIKE ?", (f"lab:{name}:%",)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    keys = ("ref", "mem_mb", "state", "peak_mb", "cpu_s", "wall_s", "rounds", "machine_id")
+    return [dict(zip(keys, row)) for row in rows]
 
 
 def lab_lines(saves: str, name: str) -> list:
@@ -957,8 +989,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--idle-seconds", type=float, default=60.0)
     p.add_argument("--game-rounds", type=int, default=40)
     p.add_argument("--game-timeout", type=float, default=900.0)
+    p.add_argument("--db", default="/var/lib/citar/citar.db")
     p.add_argument("--lab-games", type=int, default=3)
-    p.add_argument("--lab-turns", type=int, default=150)
+    p.add_argument("--load-games", type=int, default=40, help="the duels of each CPUWeight's response-time span")
+    p.add_argument("--lab-turns", type=int, default=0, help="each duel's rounds (0: to the speed's last turn)")
     p.add_argument("--lab-timeout", type=float, default=1800.0)
     p.add_argument("--weights", type=lambda s: [int(x) for x in re.split(r"[ ,]+", s.strip()) if x], default=[50])
     p.set_defaults(func=cmd_measure)
