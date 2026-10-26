@@ -46,7 +46,9 @@ def documentable(tree: ast.Module):
 
 def files(base: Path):
     for path in sorted(base.rglob("*.py")):
-        if any(part in SKIP for part in path.parts):
+        # Only the folders below the one walked: the whole path would skip everything in a checkout that sits
+        # under a folder named build, dist, site, wiki or ops (5-13's fix round; check_links.py had the same).
+        if any(part in SKIP for part in path.relative_to(base).parts):
             continue
         yield path
 
