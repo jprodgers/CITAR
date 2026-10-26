@@ -786,6 +786,20 @@ class Assets(unittest.TestCase):
         self.assertEqual(printed.split(), release.asset_files("0.1.6"))
         self.assertEqual(run_main("assets", "0.1.6;rm")[0], 1)
 
+    def test_what_it_prints_ends_its_lines_in_lf_on_every_platform(self):
+        """RELEASING.md step 3: `release.py assets V > assets.txt && diff assets.txt preview/subjects.txt`, in Git
+        Bash on Windows too, where Python's standard output writes "\\r\\n" unless told otherwise (found by 5-13's
+        walk of the checklist over the dry run's preview). meta's values are read by shells the same way."""
+        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "assets", "0.1.6"], capture_output=True, check=True)
+        self.assertEqual(done.stdout, "".join(f"{n}\n" for n in release.asset_files("0.1.6")).encode("ascii"))
+        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "meta", "--mode", "dry-run", "--version", "0.1.6",
+                               "--sha", "5c4bdd7f", "--date", "2026-11-01"], capture_output=True, check=True)
+        self.assertNotIn(b"\r", done.stdout)
+        self.assertTrue(done.stdout.startswith(b"version=0.1.6\npep440=0.1.6\n"), done.stdout)
+        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "label", "--mode", "tag", "--version", "0.1.6"],
+                              capture_output=True, check=True)
+        self.assertEqual(done.stdout, b"v0.1.6\n")
+
 
 class Standalone(unittest.TestCase):
     def test_it_runs_with_the_standard_library_alone(self):
