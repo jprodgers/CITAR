@@ -874,7 +874,6 @@ def plan_text(name: str, out: str, port: int) -> None:
 # ------------------------------------------------------------------------------------------------ the plans
 
 
-@unittest.skipUnless(LINUX_TOOLS, "Linux with bash, the sqlite3 command, flock, sha256sum and GNU tar")
 def certbot_site(root: Path) -> str:
     """Plants /etc/nginx/sites-available/citar as certbot leaves it (deploy/nginx-citar.conf with its own lines):
     citar-deploy shows how it differs from the bundle's and never writes it. Returns its text."""
@@ -885,6 +884,7 @@ def certbot_site(root: Path) -> str:
     return text
 
 
+@unittest.skipUnless(LINUX_TOOLS, "Linux with bash, the sqlite3 command, flock, sha256sum and GNU tar")
 class Plans(unittest.TestCase):
     """Gate 2: each command's --plan against its committed text, with and without a slice; nothing changes."""
 
