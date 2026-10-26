@@ -93,6 +93,9 @@ smoke_wheel = _load("citar_ci_smoke_wheel", HERE.parent / "smoke_wheel.py")
 SUMS = "SHA256SUMS"
 #: The manifest's signature, which joins the release on a signed tag (release.yml's sign-helper-manifest).
 SIGNATURE = "citar-helper-manifest.json.sig"
+#: The workflow every release file's provenance must name: the notes' `gh attestation verify` holds a file to it, on
+#: GitHub's runners, for the release's tag (as scripts/deploy/bundle.py and docs/INSTALL.md do).
+SIGNER = "jprodgers/CITAR/.github/workflows/release.yml"
 #: The interpreters every wheel is smoke-tested on (P5.3.4: the floor and the newest).
 SMOKE_PYTHONS = ("3.11", "3.14")
 #: The image's architectures and the wheel platform each is built from (P5.7).
@@ -427,11 +430,13 @@ def notes(root: Path, version: str, sums: str) -> str:
         "",
         "## Where each file was built",
         "",
-        "Every file of this release was built and attested by this repository's release workflow. Check one with "
-        "the GitHub CLI:",
+        "Every file of this release was built and attested by this repository's release workflow, on GitHub's own "
+        f"runners, for the tag v{version}. Check one with the GitHub CLI (`--repo` alone would accept any workflow "
+        "of the repository):",
         "",
         "```",
-        "gh attestation verify <file> --repo jprodgers/CITAR",
+        f"gh attestation verify <file> --repo jprodgers/CITAR --signer-workflow {SIGNER} "
+        f"--source-ref refs/tags/v{version} --deny-self-hosted-runners",
         "```",
         "",
         install_routes(version),

@@ -195,7 +195,10 @@ class Assemble(unittest.TestCase):
         notes = (preview / "notes.md").read_text(encoding="utf-8")
         self.assertTrue(notes.startswith(release.notes(ROOT, VERSION).rstrip("\n")), "the CHANGELOG section first")
         self.assertIn((self.fake.release / "SHA256SUMS").read_text(encoding="ascii").strip(), notes)
-        self.assertIn("gh attestation verify <file> --repo jprodgers/CITAR", notes)
+        # the strong form (docs/INSTALL.md, scripts/deploy/bundle.py): --repo alone accepts any workflow of the repository
+        self.assertIn("gh attestation verify <file> --repo jprodgers/CITAR --signer-workflow "
+                      f"jprodgers/CITAR/.github/workflows/release.yml --source-ref refs/tags/v{VERSION} "
+                      "--deny-self-hosted-runners", notes)
         for route in ("pipx install", "install.sh", "install.ps1", "scoop install citar", "winget install",
                       f"ghcr.io/jprodgers/citar:{VERSION}", "brew install jprodgers/citar/citar-helper"):
             self.assertIn(route, notes)
