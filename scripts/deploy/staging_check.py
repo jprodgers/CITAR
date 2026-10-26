@@ -112,9 +112,13 @@ def events(path: Path) -> dict:
 
 def cgroup_of(unit: str) -> Path:
     """A unit's cgroup, as systemd names it (``ControlGroup``). A dash in a slice's name nests it (systemd.slice(5)):
-    citar-staging.slice is /citar.slice/citar-staging.slice, and a unit in it is below that."""
-    got = subprocess.run(["systemctl", "show", "-p", "ControlGroup", "--value", unit], capture_output=True, text=True,
-                         check=False).stdout.strip()
+    citar-staging.slice is /citar.slice/citar-staging.slice, and a unit in it is below that. Without systemctl (the
+    report read on another machine, the tests) the path is the one systemd would give it."""
+    try:
+        got = subprocess.run(["systemctl", "show", "-p", "ControlGroup", "--value", unit], capture_output=True,
+                             text=True, check=False).stdout.strip()
+    except OSError:
+        got = ""
     if got:
         return CGROUP / got.lstrip("/")
     if unit.endswith(".slice"):
@@ -937,13 +941,11 @@ def cmd_drill(args) -> int:
 
 # ----------------------------------------------------------------------------------------------------- the report
 
-def cmd_report(args) -> int:
-    """The run's figures from its logs: each transient unit's life and peak (the pip install's scope among them), the
-    times CITAR did not answer (the switches' downtime), the slice's OOM kills and highest memory and swap."""
-    logs = Path(args.logs)
-    rows = [json.loads(x) for x in (logs / "watch.jsonl").read_text().splitlines() if x.strip()]
-    phases = [json.loads(x) for x in (logs / "phases.jsonl").read_text().splitlines() if x.strip()] \
-        if (logs / "phases.jsonl").exists() else []
+def summarize(rows: list[dict], phases: list[dict], slice_events: dict) -> dict:
+    """The report of a run's timeline (``watch``'s rows) and its steps (``phases.jsonl``, each step's start): each
+    transient unit's life and peak, each span CITAR did not answer named by the step it began in (one still open at the
+    last sample runs to it, marked so), the slice's highest memory and what held it, its swap, and its oom_kill count
+    at the first and last sample."""
     units: dict = {}
     for row in rows:
         for name, u in (row.get("units") or {}).items():
@@ -959,8 +961,10 @@ def cmd_report(args) -> int:
         if not row["up"] and start is None:
             start = row["t"]
         elif row["up"] and start is not None:
-            downs.append((start, row["t"]))
+            downs.append((start, row["t"], True))
             start = None
+    if start is not None:
+        downs.append((start, rows[-1]["t"], False))
 
     def phase_at(t):
         name = None
@@ -977,15 +981,27 @@ def cmd_report(args) -> int:
         "slice_peak_units_mb": {n: round((u.get("mem") or 0) / MIB, 1) for n, u in (top or {}).get("units", {}).items()},
         # memory.events now: "high" and "max" count the times the slice was held at its limit (reclaimed), "oom_kill"
         # the processes killed (the setup's probe is the one expected).
-        "slice_memory_events": events(cgroup_of(SLICE) / "memory.events"),
+        "slice_memory_events": slice_events,
         "slice_swap_peak_mb": round(max((r["slice"].get("swap") or 0) for r in rows) / MIB, 1) if rows else None,
         "oom_kill_first": rows[0]["slice"].get("oom_kill") if rows else None,
         "oom_kill_last": rows[-1]["slice"].get("oom_kill") if rows else None,
         "transient_units": transient,
         "pip_scopes": {n: e for n, e in transient.items() if n.endswith(".scope")},
-        "downtime": [{"phase": phase_at(a), "seconds": round(b - a, 1)} for a, b in downs],
+        "downtime": [{"phase": phase_at(a), "seconds": round(b - a, 1), **({} if ended else {"to_the_end": True})}
+                     for a, b, ended in downs],
         "citar_service_peak_mb": units.get("citar.service", {}).get("peak_mb"),
     }
+    return report
+
+
+def cmd_report(args) -> int:
+    """The run's figures from its logs (``summarize``), written to ``report.json`` beside them; the check is that the
+    slice's oom_kill count did not rise during the run."""
+    logs = Path(args.logs)
+    rows = [json.loads(x) for x in (logs / "watch.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    phases = [json.loads(x) for x in (logs / "phases.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()] \
+        if (logs / "phases.jsonl").exists() else []
+    report = summarize(rows, phases, events(cgroup_of(SLICE) / "memory.events"))
     (logs / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
     if report["oom_kill_first"] is not None:
