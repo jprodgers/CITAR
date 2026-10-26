@@ -263,7 +263,8 @@ rule.
 The [lab](Scripted-bots) (bot-vs-bot experiments) runs inside the server: its job dispatcher plays queued experiments
 on a job host, a child process of the server (`python -P -m citar.jobs host`, so inside `citar.service`'s cgroup and
 `MemoryMax`), under the host machine's CPU settings. In server mode they default to one game at a time, half the
-machine and the memory figure above, held by `RLIMIT_DATA` (a system service has no user manager to make a cgroup
+machine and min(1,024 MB, a quarter of the memory), which on a small box you lower to the figure above; the memory is
+held by `RLIMIT_DATA` (a system service has no user manager to make a cgroup
 scope, so the CPU share is soft: `nice` and the one thread, and the unit's `CPUWeight` against the other sites). An
 administrator changes them in the host's machine settings. Queue experiments from the Lab page (the A/B form), or
 with `citar lab submit SPEC.json` run as the service runs (below); they show on the Queue and Lab pages.

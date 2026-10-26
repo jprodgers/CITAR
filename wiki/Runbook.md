@@ -191,7 +191,8 @@ sudo citar-admin worker-token "Desktop"                            # another tok
 sudo citar-admin workers                                           # what is registered
 ```
 
-On the machine with the model, the CITAR helper (download it from the Servers page, or [INSTALL.md](Installing#the-citar-helper)'s other routes):
+On the machine with the model, the CITAR helper (download it from the Servers page, or
+[INSTALL.md](Installing#the-citar-helper)'s other routes):
 
 ```bash
 citar-helper --server https://citar.example.com --token TOKEN --name "Desktop"
