@@ -275,17 +275,21 @@ sites, an nginx server block and a small Python site doing 25 ms of CPU a reques
 stand-in), listed in `/etc/citar/deploy-checks.conf`. Before anything is measured, probes prove each
 limit binds: the slice's files read back as asked, a process in it may run on its one CPU alone, a
 unit with a small `MemoryMax` and no swap is killed by the kernel (the slice's `oom_kill` rises), and
-a busy loop gets the quota's share of the CPU and no more (and all of it once the quota is taken
-away: `probes --without-cpu-quota` must fail). `IOWeight=` cannot be proven in WSL (its virtual disk
-weighs no one's IO); it is the box's alone.
+a busy loop gets the quota's share of the CPU and no more. `probes --without-cpu-quota` is the probe
+that must fail: it takes the quota away, checks the busy loop then gets more than the quota's share,
+puts the quota back and reads the slice's files again, and exits 0 only when all of that held.
+`IOWeight=` cannot be proven in WSL (its virtual disk weighs no one's IO); it is the box's alone.
 
 **The releases.** As your own account in WSL (podman, rootless), from a clone of the commit being
-deployed: the release's wheel and three planted ones, each made into a deploy bundle.
+deployed (never under `/mnt`, nor its output): the release's wheel and three planted ones, each made
+into a deploy bundle.
 
 ```bash
 bash scripts/deploy/staging_wheels.sh --clone ~/citar --out ~/citar-staging
-#   the cutover's release: the clone's own wheel, built as the release builds it; or, for a real
-#   release, its published linux-x64 wheel and constraints: --cutover-from <folder>
+#   the cutover's release: the clone's own wheel, built in maturin's container (pinned by digest)
+#   with the release's flags, though CI builds the release's own in the manylinux_2_28 image; so
+#   for a real release or a dry run, its linux-x64 wheel and constraints: --cutover-from <folder>
+#   (an unpacked bundle.py bundle holds both)
 #   X.Y.Z-rc.1 (the next patch release): one empty migration, an upgrade that migrates
 #   X.Y.Z-rc.2: a second migration, and its server exits right after migrating
 #   X.Y.Z-rc.3: the same, but its server exits before migrating
@@ -296,7 +300,7 @@ bash scripts/deploy/staging_wheels.sh --clone ~/citar --out ~/citar-staging
 
 ```bash
 sudo bash staging.sh setup --ballast-mb N --repo ~/citar      # the limits, their probes, 0.1.5
-sudo bash staging.sh probes --without-cpu-quota                # must FAIL: the quota is what holds the CPU
+sudo bash staging.sh probes --without-cpu-quota                # the probe fails without the quota (exit 0)
 sudo bash staging.sh run --bundle ~/citar-staging/bundles/citar-deploy-V \
     --rc1 .../citar-deploy-X.Y.Z-rc.1 --rc2 .../citar-deploy-X.Y.Z-rc.2 --rc3 .../citar-deploy-X.Y.Z-rc.3 \
     --host-mb 128
@@ -307,6 +311,7 @@ sudo bash staging.sh cleanup --keep-logs /mnt/c/<somewhere>    # everything undo
 
 | Step | What must hold |
 |---|---|
+| before anything | the slice as setup left it: its files read back (memory, swap, the quota, the one CPU), the ballast held, the stand-in running, `vm.swappiness` 10; otherwise `run` stops there |
 | `cutover` | 0.1.5 archived, the release staged, verified as `citar` in the slice, switched and healthy within 60 s, its WebSocket upgrade through nginx |
 | the measurements | the first administrator made with `citar-admin create-user --password-stdin`; the host machine's settings set to what server mode computes for one CPU and 961 MB (`GET /api/servers` names the host machine; `PUT /api/machines/{id}/settings`); a 4-bot game of 40 rounds; three lab duels played by the job host inside `citar.service`, its `ready` at 240 MB held by `RLIMIT_DATA`; no OOM kill; with the lab running, the stand-in's p95 within twice its idle p95 plus 50 ms at the unit's own `CPUWeight=` (other weights are measured beside it); with `--host-mb`, the duels again at that memory figure |
 | `install` of rc.1 | it migrates, answers as rc.1 |
