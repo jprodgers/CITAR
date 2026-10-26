@@ -201,8 +201,8 @@ glibc 2.28 at most, as the game does):
   never fights its package manager over its own binary.
 - `citar/web/tests/helper.test.mjs` holds the five names equal in the download card, `package.yml`'s `helpers`
   matrix, `helper.yml`'s artifact matrix and `cargo xtask helper-manifest`'s table.
-- The macOS binaries are not notarised, so a download needs `xattr -d com.apple.quarantine`; Homebrew's install does
-  not.
+- The macOS binaries are not notarised, so a browser's download needs `xattr -d com.apple.quarantine`; Homebrew's
+  install and `install.sh --worker` (curl leaves no quarantine attribute) do not.
 
 ## Code signing
 
@@ -213,6 +213,8 @@ hardware token. What that means in practice:
 - Some antivirus products flag PyInstaller output on sight, regardless of contents.
 
 The honest mitigations, all of which a release does: the SHA-256 of every file (`SHA256SUMS`, and a `.sha256` beside
-each), build provenance for every file (`gh attestation verify <file> --repo jprodgers/CITAR`), every file built in
-a public CI run whose log anyone can read, and the README telling people plainly what they will see. If CITAR ever
-gets a certificate, the signing step goes in `package.yml`'s `windows` job, between the bundle and the installer.
+each), build provenance for every file (`gh attestation verify <file> --repo jprodgers/CITAR --signer-workflow
+jprodgers/CITAR/.github/workflows/release.yml --source-ref refs/tags/vV --deny-self-hosted-runners`,
+[docs/INSTALL.md](../docs/INSTALL.md#checking-a-download)), every file built in a public CI run whose log anyone can
+read, and the README telling people plainly what they will see. If CITAR ever gets a certificate, the signing step
+goes in `package.yml`'s `windows` job, between the bundle and the installer.

@@ -225,7 +225,7 @@ takes 0.1.5's own backup, saves every unit and script it will replace, disables 
 directory (0.1.6 starts its database afresh), lists the env file's settings 0.1.6 no longer reads, and then installs
 the release as above. Any failure undoes it by itself; `sudo citar-deploy uncutover` undoes it later. After it:
 `sudo citar-admin create-user` for the first administrator, and the host machine's memory figure set to 128 MB
-([below](#limits-on-a-small-box)).
+([below](#the-unit-and-limits-on-a-small-box)).
 
 A 0.1.5 box upgraded any other way keeps `citar-lab.service`, which 0.1.6 retires (`citar lab run` exits 2, so the
 unit would restart into that every 30 s): `sudo systemctl disable --now citar-lab && sudo rm
