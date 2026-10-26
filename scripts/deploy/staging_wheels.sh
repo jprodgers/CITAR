@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# staging_wheels.sh: the releases a staging run deploys (design/phase5-release.md P5.14), built as the release builds
-# its Linux x64 wheel (maturin in a manylinux container under rootless podman), each made into a deploy bundle by
-# scripts/deploy/bundle.py --from-dir. Run inside WSL as an ordinary user, never as root and never under /mnt/c:
+# staging_wheels.sh: the releases a staging run deploys (design/phase5-release.md P5.14), each made into a deploy
+# bundle by scripts/deploy/bundle.py --from-dir. The wheels are built under rootless podman in maturin's own container
+# (ghcr.io/pyo3/maturin at package.yml's MATURIN_VERSION, pinned by digest), as the earlier packages' WSL gates build
+# the Linux x64 wheel, with the release's flags (--release --locked --compatibility manylinux_2_28). That is not the
+# release's own build: CI builds it through maturin-action in the digest-pinned quay.io manylinux_2_28 image, so a
+# rehearsal of a real release (or of a dry run's) cuts over to CI's wheel with --cutover-from, and only the planted
+# releases are built here. Run inside WSL as an ordinary user, never as root, and with neither --clone nor --out
+# under /mnt (Windows' disks):
 #
 #     staging_wheels.sh --clone CLONE --out DIR [--rc-base X.Y.Z] [--cutover-from DIR] [--bundles-only]
 #
@@ -27,7 +32,10 @@ set -euo pipefail
 umask 022
 cd "$HOME"
 
-IMAGE="ghcr.io/pyo3/maturin:v1.15.0"
+# maturin's container at package.yml's MATURIN_VERSION (tests/test_staging.py holds MATURIN to it), pinned by the
+# index digest its tag named when the earlier packages pulled it: a tag can be pushed again, a digest cannot.
+MATURIN="v1.15.0"
+IMAGE="ghcr.io/pyo3/maturin@sha256:1c897d72a79c083cdea8829662f7b28e7657cf5b0d7f44fb4231e55998cf52ed"
 TARGET="$HOME/target/citar-p5"
 PY="python3.12"
 
@@ -58,13 +66,22 @@ while [ $# -gt 0 ]; do
   shift
 done
 { [ -n "$CLONE" ] && [ -n "$OUT" ]; } || usage_die "--clone and --out are needed"
+# Neither path under /mnt (Windows' disks through DrvFs: P5.18.1 rule 8), as given or as it resolves (a relative
+# path or a symbolic link can lead there), checked each on its own before anything is written.
+not_mnt() {
+  local p
+  for p in "$@"; do
+    case "$p" in /mnt|/mnt/*) die "never under /mnt: the clone, the scratch clones, the wheels and the bundles stay on WSL's own disk ($p)" ;; esac
+  done
+}
+not_mnt "$CLONE" "$OUT" "$(realpath -m -- "$CLONE")" "$(realpath -m -- "$OUT")"
 [ "$(id -u)" != 0 ] || die "run it as an ordinary user (podman rootless), not as root"
-case "$CLONE$OUT" in /mnt/*) die "never under /mnt: build on WSL's own disk" ;; esac
 CLONE="$(cd "$CLONE" && pwd -P)"
 # P5.18.1 rule 8: name every checkout explicitly, and check the clone is the one meant before anything is written.
 [ "$(git -C "$CLONE" rev-parse --show-toplevel)" = "$CLONE" ] || die "$CLONE is not the top of a git clone"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd -P)"
+not_mnt "$CLONE" "$OUT"
 if git -C "$OUT" rev-parse --show-toplevel >/dev/null 2>&1; then
   die "$OUT is inside a git working tree: the wheels and bundles go outside every checkout"
 fi
@@ -78,11 +95,13 @@ if [ -z "$RC_BASE" ]; then
 fi
 [[ "$RC_BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage_die "--rc-base: X.Y.Z ($RC_BASE)"
 pep440() { printf '%s' "$1" | sed -e 's/-alpha\./a/' -e 's/-beta\./b/' -e 's/-rc\./rc/'; }
+# A wheel's version as its tag names it (bundle.py's V): 0.1.6rc1 -> 0.1.6-rc.1.
+tagged() { printf '%s' "$1" | sed -e 's/rc\([0-9]*\)$/-rc.\1/' -e 's/a\([0-9]*\)$/-alpha.\1/' -e 's/b\([0-9]*\)$/-beta.\1/'; }
 say "staging_wheels: the cutover's release is $( [ -n "$CUTOVER_FROM" ] && printf 'from %s' "$CUTOVER_FROM" || printf "CLONE's %s" "$HEAD_VERSION"); the planted ones $RC_BASE-rc.1 to -rc.3"
 mkdir -p "$TARGET/manylinux" "$TARGET/maturin-registry" "$OUT/wheels" "$OUT/bundles"
 
-# The wheel of source tree $1 into folder $2, as package.yml's Linux x64 leg builds it (manylinux_2_28, --locked,
-# --release), labelled $3.
+# The wheel of source tree $1 into folder $2, labelled $3: in maturin's container (IMAGE), with package.yml's Linux
+# x64 flags (manylinux_2_28, --locked, --release), though not in its manylinux_2_28 image (the header says why).
 build_wheel() {
   local src="$1" into="$2" label="$3" t0
   rm -rf "$src/dist"
@@ -196,9 +215,6 @@ planted_release() {
   rm -rf "$src"
 }
 
-# A wheel folder's version as its tag names it (bundle.py's V): 0.1.6rc1 -> 0.1.6-rc.1.
-tagged() { printf '%s' "$1" | sed -e 's/rc\([0-9]*\)$/-rc.\1/' -e 's/a\([0-9]*\)$/-alpha.\1/' -e 's/b\([0-9]*\)$/-beta.\1/'; }
-
 if [ "$BUNDLES_ONLY" -eq 1 ]; then
   for from in "$OUT"/wheels/*/; do
     from="${from%/}"
@@ -208,8 +224,16 @@ if [ "$BUNDLES_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# The container is the one pinned, holding the maturin package.yml builds with.
+got="$(podman run --rm "$IMAGE" --version)" || die "$IMAGE does not run under podman"
+[ "$got" = "maturin ${MATURIN#v}" ] || die "$IMAGE says '$got', not maturin ${MATURIN#v}"
+say "staging_wheels: $got in $IMAGE"
+
 if [ -n "$CUTOVER_FROM" ]; then
-  CUT_VERSION="$(basename "$(ls "$CUTOVER_FROM"/citar-*-cp311-abi3-manylinux_2_28_x86_64.whl)" | sed 's/^citar-\([^-]*\)-.*/\1/')"
+  cut_wheels=("$CUTOVER_FROM"/citar-*-cp311-abi3-manylinux_2_28_x86_64.whl)
+  { [ "${#cut_wheels[@]}" -eq 1 ] && [ -f "${cut_wheels[0]}" ]; } \
+    || die "--cutover-from: not one Linux x64 wheel in $CUTOVER_FROM"
+  CUT_VERSION="$(tagged "$(basename "${cut_wheels[0]}" | sed 's/^citar-\([^-]*\)-.*/\1/')")"
   bundle "$CUT_VERSION" "$CUTOVER_FROM"
 else
   CUT_VERSION="$HEAD_VERSION"
