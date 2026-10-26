@@ -233,8 +233,8 @@ port is its owner. For a real deployment with accounts and TLS, use
 
 The image is built for `linux/amd64` and `linux/arm64` (Docker picks yours), from the release's own wheels on
 Debian 13 with Python 3.12, about 280 MB. It runs as uid and gid 10001, keeps everything in the one volume at
-`/var/lib/citar`, and checks its own health by asking the server. Tags: `:0.1.6` (a release), `:0.1` (the newest
-0.1 release) and `:latest`.
+`/var/lib/citar`, and checks its own health by asking the server. Tags: `:<version>` (a release),
+`:<major>.<minor>` (the newest release of that series) and `:latest`.
 
 ---
 
@@ -295,7 +295,7 @@ release, `citar-<version>.tar.gz`, which is what pip takes where no wheel fits) 
 [rustup](https://rustup.rs) first; on Windows, let its installer add the Visual Studio C++ build tools. The
 repository's `rust-toolchain.toml` names the exact Rust release, and rustup downloads it the first time. The first
 build takes a few minutes; later ones only rebuild what changed. A build of your own reports its label as `unknown`
-in `citar doctor`, where a release's says `v0.1.6`. The installer, the install scripts, pipx and the release wheels
+in `citar doctor`, where a release's says `v<version>`. The installer, the install scripts, pipx and the release wheels
 need none of this.
 
 An editable install builds the engine without its test operations, so about 200 of the tests (the
@@ -324,15 +324,16 @@ Get-FileHash .\CITAR-<version>-setup.exe -Algorithm SHA256    # compare with CIT
 
 Every file is also built in a [public CI run](https://github.com/jprodgers/CITAR/actions) whose log you can read, and
 carries a build provenance attestation that says so. With the [GitHub CLI](https://cli.github.com), check that a file
-was made by CITAR's release workflow, on GitHub's own runners, for that release's tag:
+was made by CITAR's release workflow, on GitHub's own runners, for that release's tag (`<version>` is the
+release's, such as `0.1.6`):
 
 ```bash
-gh attestation verify CITAR-0.1.6-setup.exe --repo jprodgers/CITAR \
+gh attestation verify CITAR-<version>-setup.exe --repo jprodgers/CITAR \
   --signer-workflow jprodgers/CITAR/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.6 --deny-self-hosted-runners
-gh attestation verify oci://ghcr.io/jprodgers/citar:0.1.6 --repo jprodgers/CITAR \
+  --source-ref refs/tags/v<version> --deny-self-hosted-runners
+gh attestation verify oci://ghcr.io/jprodgers/citar:<version> --repo jprodgers/CITAR \
   --signer-workflow jprodgers/CITAR/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.6 --deny-self-hosted-runners
+  --source-ref refs/tags/v<version> --deny-self-hosted-runners
 ```
 
 PyPI keeps its own attestations of the wheels it serves, made by the same workflow.
