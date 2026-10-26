@@ -54,7 +54,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[ -n "$CLONE" ] && [ -n "$OUT" ] || usage_die "--clone and --out are needed"
+{ [ -n "$CLONE" ] && [ -n "$OUT" ]; } || usage_die "--clone and --out are needed"
 [ "$(id -u)" != 0 ] || die "run it as an ordinary user (podman rootless), not as root"
 case "$CLONE$OUT" in /mnt/*) die "never under /mnt: build on WSL's own disk" ;; esac
 CLONE="$(cd "$CLONE" && pwd -P)"

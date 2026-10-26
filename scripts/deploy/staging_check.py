@@ -105,8 +105,17 @@ def events(path: Path) -> dict:
     return out
 
 
-def unit_cgroup(unit: str, slice_: str = SLICE) -> Path:
-    return CGROUP / slice_ / unit
+def cgroup_of(unit: str) -> Path:
+    """A unit's cgroup, as systemd names it (``ControlGroup``). A dash in a slice's name nests it (systemd.slice(5)):
+    citar-staging.slice is /citar.slice/citar-staging.slice, and a unit in it is below that."""
+    got = subprocess.run(["systemctl", "show", "-p", "ControlGroup", "--value", unit], capture_output=True, text=True,
+                         check=False).stdout.strip()
+    if got:
+        return CGROUP / got.lstrip("/")
+    if unit.endswith(".slice"):
+        parts = unit[:-len(".slice")].split("-")
+        return CGROUP.joinpath(*("-".join(parts[:i + 1]) + ".slice" for i in range(len(parts))))
+    return cgroup_of(SLICE) / unit
 
 
 def systemd_props(unit: str, *names: str) -> dict:
@@ -424,7 +433,7 @@ def cmd_watch(args) -> int:
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    slice_dir = CGROUP / args.slice
+    slice_dir = cgroup_of(args.slice)
     with open(args.out, "a", encoding="utf-8") as out:
         n = 0
         while not stop.is_set():
@@ -537,7 +546,7 @@ class Memory:
 
     def __init__(self, unit: str = "citar.service"):
         self.unit = unit
-        self.peak = Peak(unit_cgroup(unit))
+        self.peak = Peak(cgroup_of(unit))
         self.host_pid = None
         self.host_hwm = None
         self._stop = threading.Event()
@@ -567,7 +576,7 @@ class Memory:
 
 
 def slice_oom(slice_: str = SLICE) -> int:
-    return events(CGROUP / slice_ / "memory.events").get("oom_kill", 0)
+    return events(cgroup_of(slice_) / "memory.events").get("oom_kill", 0)
 
 
 def executor_of(view: dict) -> dict:

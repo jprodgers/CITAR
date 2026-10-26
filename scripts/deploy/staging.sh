@@ -150,7 +150,13 @@ and must never run on a real server"
 recorded() { [ -f "$RECORD" ] && sed -n "s/^$1=//p" "$RECORD" | tail -n 1; }
 remember() { mkdir -p "$STAGE" && printf '%s=%s\n' "$1" "$2" >> "$RECORD"; }
 
-slice_dir() { printf '/sys/fs/cgroup/%s' "$SLICE"; }
+# The slice's cgroup. A dash in a slice's name nests it (systemd.slice(5)): citar-staging.slice is
+# /citar.slice/citar-staging.slice, inside an implicit citar.slice that sets no limit.
+slice_dir() {
+  local cg
+  cg="$(systemctl show -p ControlGroup --value "$SLICE" 2>/dev/null)"
+  printf '/sys/fs/cgroup%s' "${cg:-/citar.slice/$SLICE}"
+}
 oom_kills() { awk '$1 == "oom_kill" { print $2 }' "$(slice_dir)/memory.events" 2>/dev/null || echo 0; }
 
 # ----------------------------------------------------------------------------------------------------- setup
@@ -183,7 +189,7 @@ CPUQuota=$CPU_QUOTA
 MemoryMax=961M
 MemorySwapMax=2G
 EOF
-  systemctl daemon-reload && systemctl start "$SLICE" || die "the slice could not be started"
+  { systemctl daemon-reload && systemctl start "$SLICE"; } || die "the slice could not be started"
 }
 
 probe_readback() {
@@ -375,7 +381,7 @@ EOF
 
 deploy_old() {
   local version unit
-  [ -n "$REPO" ] && [ -d "$REPO/.git" ] || die "--repo: no git clone at '$REPO'"
+  { [ -n "$REPO" ] && [ -d "$REPO/.git" ]; } || die "--repo: no git clone at '$REPO'"
   useradd --system --user-group --home-dir /var/lib/citar --no-create-home --shell /usr/sbin/nologin citar \
     || die "could not make the citar account"
   remember CITAR_USER 1
@@ -589,7 +595,7 @@ cmd_run() {
   where_ok
   [ "$(recorded SETUP_DONE)" = 1 ] || die "staging is not set up (staging.sh setup)"
   for b in "$BUNDLE" "$RC1" "$RC2" "$RC3"; do
-    [ -n "$b" ] && [ -f "$b/BUNDLE" ] || usage_die "run needs --bundle, --rc1, --rc2 and --rc3: unpacked deploy bundles"
+    { [ -n "$b" ] && [ -f "$b/BUNDLE" ]; } || usage_die "run needs --bundle, --rc1, --rc2 and --rc3: unpacked deploy bundles"
   done
   BUNDLE="$(cd "$BUNDLE" && pwd -P)"; RC1="$(cd "$RC1" && pwd -P)"; RC2="$(cd "$RC2" && pwd -P)"; RC3="$(cd "$RC3" && pwd -P)"
   p0="$(bundle_version "$BUNDLE")"; p1="$(bundle_version "$RC1")"; p2="$(bundle_version "$RC2")"; p3="$(bundle_version "$RC3")"
@@ -698,11 +704,13 @@ cmd_cleanup() {
   done
   pkill -u citar 2>/dev/null
   rm -f "$UNITS"/citar.service "$UNITS"/citar-lab.service "$UNITS"/citar-backup.service "$UNITS"/citar-backup.timer
+  rm -f "$UNITS"/*.wants/citar*
   rm -f "$UNITS/$SLICE" "${OWN_UNITS[@]/#/$UNITS/}"
   rm -rf "$UNITS"/citar*.service.d "$UNITS/$SLICE.d" /run/systemd/system.control/citar* \
     "/run/systemd/system.control/$SLICE.d"
   systemctl daemon-reload
-  systemctl stop "$SLICE" 2>/dev/null
+  # The slice, and the citar.slice its name puts it in (a dash nests a slice).
+  systemctl stop "$SLICE" citar.slice 2>/dev/null
   systemctl reset-failed 2>/dev/null
   ok "the citar, citar-lab and backup units, the stand-ins, their drop-ins and the slice removed"
 
@@ -741,8 +749,9 @@ cmd_cleanup() {
   step "Checked gone (S10's WSL items)"
   ! id citar >/dev/null 2>&1 || left+=("the citar account")
   shopt -s nullglob
-  for path in /opt/citar* /var/lib/citar* /etc/citar /var/backups/citar "$UNITS"/citar* "$UNITS/$SLICE"; do
-    left+=("$path")
+  for path in /opt/citar* /var/lib/citar* /etc/citar /var/backups/citar /var/log/citar-deploy.log "$UNITS"/citar* \
+      "$UNITS"/*.wants/citar* /usr/local/bin/citar-* /usr/local/sbin/citar-deploy /etc/nginx/sites-*/citar*; do
+    if [ -e "$path" ] || [ -L "$path" ]; then left+=("$path"); fi
   done
   shopt -u nullglob
   [ -z "$(systemctl list-units --all --plain --no-legend 'citar*' "$SLICE" 2>/dev/null)" ] || left+=("a citar unit")
@@ -754,7 +763,7 @@ cmd_cleanup() {
   if [ -n "$swap" ]; then
     [ "$(cat /proc/sys/vm/swappiness)" = "$swap" ] || left+=("vm.swappiness $(cat /proc/sys/vm/swappiness), not $swap")
   else
-    left+=("no record of vm.swappiness's value before setup: it is $(cat /proc/sys/vm/swappiness)")
+    say "   (no setup record, so vm.swappiness was left as it is: $(cat /proc/sys/vm/swappiness))"
   fi
   if [ "${#left[@]}" -eq 0 ]; then
     ok "no citar account, /opt/citar*, /var/lib/citar*, /etc/citar, citar unit or staging slice; nginx stopped and"
