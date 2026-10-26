@@ -37,6 +37,19 @@ OLD_REVISIONS = ("f064316a6b34", "767c824c2fcb")
 #: shared-memory index, and a rollback journal a crash left.
 SQLITE_COMPANIONS = ("-wal", "-shm", "-journal")
 
+#: How the operator makes the first administrator, for the boot's messages. A server on the release layout
+#: (install.sh --server or citar-deploy) has the citar-admin wrapper, which runs the command as the service runs, with
+#: its environment and state; anywhere else the citar command does it, run the same way, or inside the container.
+CREATE_ADMIN = (
+    "sudo citar-admin create-admin --handle NAME --email you@example.com",
+    "(a server install.sh --server or citar-deploy installed; elsewhere `citar admin create-admin ...`",
+    "with the server's own environment, or `docker compose exec citar citar admin create-admin ...`)",
+)
+
+
+def _create_admin(indent: str) -> str:
+    return "\n".join(indent + line for line in CREATE_ADMIN)
+
 
 def _alembic_config(url: str):
     """The migration environment for the database at ``url``, built in code rather than read from
@@ -245,10 +258,7 @@ def check_configuration() -> list:
                 # to do about it. Failing loudly beats failing obscurely.
                 warnings.append(
                     "NOBODY CAN SIGN IN YET: no OAuth provider, no SMTP server, and no account "
-                    "with a password. Create an administrator:\n"
-                    "         sudo -u citar /opt/citar/.venv/bin/python -m citar.server.admin_cli \\\n"
-                    "              create-admin --handle NAME --email you@example.com\n"
-                    "         (run it from /opt/citar with the service's environment loaded)")
+                    "with a password. Create an administrator:\n" + _create_admin(" " * 9))
         if policy.registration_mode() == "open" and not cfg.captcha_enabled:
             warnings.append(
                 "Registration is OPEN but hCaptcha is not configured — the only protection against "
@@ -291,8 +301,7 @@ def ensure_accounts() -> Optional[str]:
         admins = s.scalar(select(func.count()).select_from(User)
                           .where(User.role == "admin", User.status == "active"))
         if not admins:
-            return ("No administrator account exists yet. Create one with:\n"
-                    "    python -m citar.server.admin_cli create-admin --handle NAME --email you@example.com\n"
+            return ("No administrator account exists yet. Create one with:\n" + _create_admin(" " * 4) + "\n"
                     "Until then nobody can administer this server.")
     return None
 
