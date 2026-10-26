@@ -250,9 +250,9 @@ With the owner's go-ahead, from the release's wheel (design/phase5-release.md P5
    - Unpack the bundle there (reading the tarball from `/mnt/c` is fine; nothing is written under `/mnt`):
      `mkdir -p ~/citar-staging && tar -xzf <the bundle>.tar.gz -C ~/citar-staging`. The folder
      `~/citar-staging/citar-deploy-0.1.6` is `run`'s `--bundle`, and it holds the release's wheel and constraints.
-   - As your own account, the three planted releases (0.1.7-rc.1 to rc.3; about 20 minutes):
+   - As your own account, the three planted releases (0.1.7-rc.1 to rc.3; about 12 minutes):
      `bash scripts/deploy/staging_wheels.sh --clone ~/citar --out ~/citar-staging --cutover-from ~/citar-staging/citar-deploy-0.1.6`.
-   - As root, from copies of `scripts/deploy/staging.sh` and `staging_check.py` on WSL's disk (about 20 minutes):
+   - As root, from copies of `scripts/deploy/staging.sh` and `staging_check.py` on WSL's disk (about 15 minutes):
      `staging.sh setup --ballast-mb <the other sites' memory, from the private deploy log> --repo ~/citar
      --cpu-quota <the last rehearsal's>`; `staging.sh probes --without-cpu-quota`, which must exit 0 (the CPU probe fails without the
      quota, and the quota is back); `staging.sh run --bundle ~/citar-staging/citar-deploy-0.1.6 --rc1
