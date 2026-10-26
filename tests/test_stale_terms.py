@@ -6,6 +6,7 @@ import io
 import shutil
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -14,15 +15,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "ci" / "stale_terms.py"
 
 
-def _load():
-    spec = importlib.util.spec_from_file_location("stale_terms_under_test", SCRIPT)
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    sys.modules[spec.name] = module      # dataclasses look their module up while the class is made
     spec.loader.exec_module(module)
     return module
 
 
-st = _load()
+st = _load("stale_terms_under_test", SCRIPT)
+release = _load("release_for_stale_terms", ROOT / "scripts" / "release.py")
 
 
 def run(argv):
@@ -57,11 +59,12 @@ class Tree:
         target.write_text(text, encoding="utf-8", newline="\n")
 
     def insert_after(self, path, anchor, text):
-        """Insert `text` as the line after the first line equal to `anchor`; return its line number."""
+        """Insert `text` (one line, or several joined by newlines) after the first line equal to `anchor`; return
+        the line number of its first line."""
         target = self.dir / path
         lines = target.read_text(encoding="utf-8").splitlines()
         at = lines.index(anchor) + 1
-        lines[at:at] = [text]
+        lines[at:at] = text.split("\n")
         target.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
         return at + 1
 
@@ -180,16 +183,7 @@ class Exemptions(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
 
     def test_the_unreleased_compatibility_notes_are_exempt_and_the_rest_of_unreleased_is_not(self):
-        self.tree.insert_after("CHANGELOG.md", "### Compatibility", "- `brew install jprodgers/citar/citar` is gone.")
-        code, out, err = run(["--root", str(self.tree.dir)])
-        self.assertEqual(code, 0, out + err)
-        lines = (self.tree.dir / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
-        added = lines.index("### Added", lines.index("## [Unreleased]"))
-        line = self.tree.insert_after("CHANGELOG.md", lines[added], "- brew install jprodgers/citar/citar")
-        self.assertEqual(line, added + 2)
-        code, out, _err = run(["--root", str(self.tree.dir)])
-        self.assertEqual(code, 1)
-        self.assertIn(f"CHANGELOG.md:{line}: homebrew-game:", out)
+        assert_unreleased_rules(self, self.tree)
 
     def test_an_exempt_section_is_exempt_and_the_next_one_is_not(self):
         lines = (self.tree.dir / "docs/server/DEPLOY.md").read_text(encoding="utf-8").splitlines()
@@ -215,6 +209,65 @@ class Exemptions(unittest.TestCase):
         code, out, _err = run(["--root", str(self.tree.dir)])
         self.assertEqual(code, 1)
         self.assertIn("no heading 'Moving from 0.1.5'", out)
+
+
+def assert_unreleased_rules(test, tree):
+    """Unreleased's Compatibility notes are exempt and its other subsections are not. The test plants subsections of
+    its own right under ``## [Unreleased]``, so it holds whatever the live CHANGELOG's Unreleased says, empty included
+    (as it is after ``release.py bump``)."""
+    first = tree.insert_after("CHANGELOG.md", "## [Unreleased]", "\n".join([
+        "", "### Compatibility", "", "- `brew install jprodgers/citar/citar` is gone.",
+        "", "### Added", "", "- brew install jprodgers/citar/citar"]))
+    compatibility, added = first + 3, first + 7
+    code, out, err = run(["--root", str(tree.dir)])
+    test.assertEqual(code, 1, out + err)
+    test.assertIn(f"CHANGELOG.md:{added}: homebrew-game:", out)
+    test.assertNotIn(f"CHANGELOG.md:{compatibility}:", out)
+    test.assertEqual(out.count("CHANGELOG.md:"), 1, out)
+
+
+class AfterABump(unittest.TestCase):
+    """``release.py bump`` turns Unreleased into the release's own section under a new, empty Unreleased: the first step
+    of every release run (a dry run's too, on each test leg's checkout) and of 5-13's bumped clone. The scan, and
+    these tests, must hold on that tree as well as on the branch's. The copy is bumped by release.py itself, so a
+    change to the heading it writes is caught here."""
+
+    DATE = "2026-01-01"
+
+    def setUp(self):
+        self.tree = Tree()
+        self.addCleanup(self.tree.close)
+        # what release.py reads besides the scanned files: the files of its places and each member's manifest
+        members = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["members"]
+        for rel in (*release.Tree(ROOT).files, *(f"{member}/Cargo.toml" for member in members)):
+            target = self.tree.dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / rel, target)
+        log = release.Text(self.tree.dir, "CHANGELOG.md")
+        start, end = release.section_lines(log, "Unreleased")
+        if not "".join(log.lines[start:end]).strip():   # a checkout bumped already: give the next bump a line
+            self.tree.insert_after("CHANGELOG.md", "## [Unreleased]", "\n- A change for the tests.")
+        source = release.Version.parse(release.Tree(self.tree.dir).source.value)
+        self.version = f"{source.major}.{source.minor}.{source.patch + 1}"
+        with redirect_stdout(io.StringIO()):
+            release.bump(self.tree.dir, self.version, self.DATE, out=print)
+        self.heading = f"## [{self.version}] - {self.DATE}"
+        lines = (self.tree.dir / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+        unreleased = lines.index("## [Unreleased]")
+        self.assertEqual([line for line in lines[unreleased + 1:] if line.strip()][0], self.heading,
+                         "release.py bump leaves Unreleased empty, above the release's section")
+
+    def test_the_bumped_tree_names_no_retired_route(self):
+        code, out, err = run(["--root", str(self.tree.dir)])
+        self.assertEqual(code, 0, out + err)
+
+    def test_the_release_s_section_is_history(self):
+        self.tree.insert_after("CHANGELOG.md", self.heading, "\n### Added\n\n- brew install jprodgers/citar/citar")
+        code, out, err = run(["--root", str(self.tree.dir)])
+        self.assertEqual(code, 0, out + err)
+
+    def test_the_new_unreleased_section_is_scanned(self):
+        assert_unreleased_rules(self, self.tree)
 
 
 if __name__ == "__main__":
