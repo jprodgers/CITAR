@@ -18,7 +18,7 @@ Thanks for looking. CITAR is a game and an instrument, and it needs help with bo
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
 pip install -e ".[dev]"                  # builds the Rust engine too, so it needs a Rust toolchain
-python -m unittest discover -s tests     # about 650 tests, a few minutes; about 200 of them skip
+python -m unittest discover -s tests     # about 2,400 tests, about twenty minutes
 citar serve --debug                      # http://127.0.0.1:8765
 ```
 
@@ -46,7 +46,17 @@ The browser client has no build step. Edit a file in `citar/web/js/` and reload.
 python -m unittest discover -s tests
 ruff check .
 python scripts/audit_routes.py --strict   # if you touched any HTTP route
+python scripts/check_links.py --strict    # if you touched the docs: every link inside them resolves
+python scripts/ci/stale_terms.py          # if you touched the docs, a unit in deploy/ or a manifest
 ```
+
+`stale_terms.py` (run by the tests workflow's lint job) refuses, in the docs, the units and the package managers'
+templates, the phrases of the install and deploy routes 0.1.6 retired: the deploy that copied the source tree onto
+the server and ran it there, installs from the requirements file that went with it, the game's Homebrew formula, the
+separate lab service, the server started as a Python module in a unit, and the PyPI sdist as a manifest's download
+(`python scripts/ci/stale_terms.py --list` prints each pattern). The CHANGELOG's history and its Compatibility notes
+are exempt, and so are the few sections its `EXEMPT` names, which describe 0.1.5's layout because the cutover acts on
+it; a finding names the file, the line and what to say instead.
 
 For front-end changes, check the syntax as an **ES module** — `node --check` on a `.js` file parses
 it as CommonJS and misses errors that break the whole module graph in a browser:
@@ -76,7 +86,9 @@ python scripts/ci/action_pins.py verify       # local only: reads GitHub through
 
 The first holds every workflow to the release's rules: nothing publishes outside a tag push (`release.yml`) or
 `main` (`docs.yml`), no secret or environment where it does not belong, nothing installed or built in a job that
-holds a secret or a write permission, `release.yml`'s jobs in their order with their permissions (rule 16), and every
+holds a secret or a write permission, `release.yml`'s jobs in their order with their permissions (rule 16), every
+artifact `package.yml` uploads named `pkg-...` and every one `release.yml` uploads `rel-...` (a release run holds
+`test.yml`'s artifacts beside them, so the names must never meet) and each download naming its artifact, and every
 action is pinned to a commit with its version in a comment. CI checks only that form. The second asks GitHub that each pinned commit belongs to its
 action's repository and that the version in the comment names it; CI does not run it, because it needs the network
 and a token that the tests workflow must not hold. To add an action, write it with its tag (`actions/checkout@v7`)
@@ -475,6 +487,25 @@ python -m unittest discover -s tests
 The unpacked library is ignored by git. Delete it before going back to the dev loop, whose tests
 check that nothing was built into the checkout.
 
+**A release wheel of your own.** Build it outside the checkout's folder, as `package.yml` does, with the build label
+set (or leave it unset: a build without one says `unknown`):
+
+```bash
+CITAR_BUILD_ID="local+$(git rev-parse --short HEAD)" maturin build --release --locked --out "$CARGO_TARGET_DIR/wheel"
+python scripts/ci/check_dist.py wheel "$CARGO_TARGET_DIR/wheel" --tag cp311-abi3-win_amd64 --library citar/_engine.pyd
+python scripts/ci/smoke_wheel.py smoke --wheel "$CARGO_TARGET_DIR/wheel" --python <a 3.11 or newer> \
+  --version <V> --label <L> --platform windows-x64 --work "$CARGO_TARGET_DIR/smoke" --out "$CARGO_TARGET_DIR/smoke.json"
+```
+
+The Linux wheel is a `manylinux_2_28` one, built in WSL (in a clone in your Linux home, never under `/mnt/c`) in
+maturin's container under Podman: `podman run --rm -v "$PWD":/io -e CITAR_BUILD_ID ghcr.io/pyo3/maturin:v1.15.0
+build --release --locked --compatibility manylinux_2_28 --out /io/dist`. CI builds it through maturin-action in
+PyPA's `quay.io/pypa/manylinux_2_28_x86_64` image, pinned by digest; either passes `check_dist.py` with the tag
+`cp311-abi3-manylinux_2_28_x86_64`. `scripts/deploy/staging_wheels.sh` builds its wheels the first way.
+`requirements.txt` is gone (a server installs the release's wheel with the release's constraints file,
+`citar-<V>-server-constraints.txt`, which `smoke_wheel.py constraints` writes from a `[server]` install), and so is
+the script that kept it in step; the dependencies live in `pyproject.toml` alone.
+
 **The helper.** `citar-helper` (`crates/citar-helper`) is the program a lender runs; its protocol
 is `crates/citar-helper/PROTOCOL.md`, and `design/phase4-helper.md` P4.3 the design. Every build a
 contributor makes for running should have the development guard:
@@ -651,6 +682,17 @@ options); `--verify V` checks a published release against its `SHA256SUMS` and P
 anywhere, `winget-schemas --dir OUT` checks winget's against Microsoft's schemas; its `scoop`,
 `winget` and `brew` commands install packages, so they run on CI's runners only (`package.yml`'s
 `managers` job), never on your machine.
+
+**The server's deploy** (design/phase5-release.md P5.13 and P5.14). `deploy/` holds the unit, the backup, the
+`citar-admin` and `citar-secrets` wrappers and `citar-deploy.sh`; `citar/wizard/deploy/` holds byte-for-byte copies
+the wheel carries for `citar setup --server` (`tests/test_deploy.py` holds them equal, so change both).
+`tests/test_citar_deploy.py` runs `citar-deploy` against stand-in releases, a stand-in `systemctl` and
+`systemd-run` and a real SQLite database under `CITAR_DEPLOY_ROOT` (Linux with bash, sqlite3, flock and GNU tar: WSL
+or CI's Linux legs), and holds every `--plan` to `tests/data/deploy/*.txt`; `tests/test_deploy_bundle.py` runs
+`scripts/deploy/bundle.py` with a stand-in `gh`. In WSL, `python3.12 -m unittest discover -s tests -p
+"test_*deploy*.py"`. `scripts/deploy/staging.sh` rehearses the whole deploy as root in WSL, held to the box's limits
+([docs/server/RUNBOOK.md](docs/server/RUNBOOK.md#the-staging-rehearsal)); it changes the machine it runs on, so it
+refuses anything but WSL. `shellcheck` every script you change there.
 
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
