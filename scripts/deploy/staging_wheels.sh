@@ -3,7 +3,7 @@
 # its Linux x64 wheel (maturin in a manylinux container under rootless podman), each made into a deploy bundle by
 # scripts/deploy/bundle.py --from-dir. Run inside WSL as an ordinary user, never as root and never under /mnt/c:
 #
-#     staging_wheels.sh --clone CLONE --out DIR [--rc-base X.Y.Z] [--cutover-from DIR]
+#     staging_wheels.sh --clone CLONE --out DIR [--rc-base X.Y.Z] [--cutover-from DIR] [--bundles-only]
 #
 # CLONE is a git clone of the head being staged (its deploy/ goes into every bundle). DIR, outside any git working
 # tree, receives wheels/<version>/ and bundles/citar-deploy-<version>/ (unpacked, ready for staging.sh run):
@@ -17,7 +17,8 @@
 #     restored;
 #   - X.Y.Z-rc.3: as rc.2, but its server exits before it migrates: undone without a restore.
 #
-# --rc-base defaults to the patch release after CLONE's version. Each scratch clone's changes are committed in it
+# --bundles-only builds nothing: each release's bundle is made again from the wheel and constraints DIR holds already
+# (after a change to deploy/, say). --rc-base defaults to the patch release after CLONE's version. Each scratch clone's changes are committed in it
 # (never pushed) and the clone is removed once its wheel is built. The cargo target and the container's registry are
 # ~/target/citar-p5's (CARGO_TARGET_DIR for the container: its manylinux folder). Exit status 0 when every bundle is
 # written, 1 when something failed, 2 for a usage error.
@@ -38,6 +39,7 @@ CLONE=""
 OUT=""
 RC_BASE=""
 CUTOVER_FROM=""
+BUNDLES_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --clone|--out|--rc-base|--cutover-from)
@@ -49,6 +51,7 @@ while [ $# -gt 0 ]; do
         --cutover-from) CUTOVER_FROM="$2" ;;
       esac
       shift ;;
+    --bundles-only) BUNDLES_ONLY=1 ;;
     -h|--help) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) usage_die "unknown argument: $1" ;;
   esac
@@ -192,6 +195,18 @@ planted_release() {
   bundle "$version" "$OUT/wheels/$p"
   rm -rf "$src"
 }
+
+# A wheel folder's version as its tag names it (bundle.py's V): 0.1.6rc1 -> 0.1.6-rc.1.
+tagged() { printf '%s' "$1" | sed -e 's/rc\([0-9]*\)$/-rc./' -e 's/a\([0-9]*\)$/-alpha./' -e 's/b\([0-9]*\)$/-beta./'; }
+
+if [ "$BUNDLES_ONLY" -eq 1 ]; then
+  for from in "$OUT"/wheels/*/; do
+    from="${from%/}"
+    bundle "$(tagged "${from##*/}")" "$from"
+  done
+  say "staging_wheels: every bundle made again from $OUT/wheels"
+  exit 0
+fi
 
 if [ -n "$CUTOVER_FROM" ]; then
   CUT_VERSION="$(basename "$(ls "$CUTOVER_FROM"/citar-*-cp311-abi3-manylinux_2_28_x86_64.whl)" | sed 's/^citar-\([^-]*\)-.*/\1/')"
