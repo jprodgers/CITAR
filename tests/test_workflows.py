@@ -204,6 +204,7 @@ class TheTree(unittest.TestCase):
         lint = [s.get("run", "") for s in data["jobs"]["lint"]["steps"]]
         self.assertIn("python scripts/ci/check_workflows.py", lint)
         self.assertIn("python scripts/release.py check", lint)
+        self.assertIn("python scripts/ci/stale_terms.py", lint)
         release = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
         self.assertEqual(list(release["jobs"]), list(cw.RELEASE_JOBS), "release.yml is P5.11's table, in its order")
 

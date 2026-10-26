@@ -186,10 +186,15 @@ PyPI holds exactly the release's five wheels and sdist with the same hashes. The
 ```bash
 mkdir -p verify-0.1.6 && cd verify-0.1.6
 gh release download v0.1.6 -p 'citar-0.1.6-cp311-abi3-manylinux_2_28_x86_64.whl' -p citar-helper-linux-x64
-gh attestation verify citar-0.1.6-cp311-abi3-manylinux_2_28_x86_64.whl --repo jprodgers/CITAR
-gh attestation verify citar-helper-linux-x64 --repo jprodgers/CITAR
-gh attestation verify oci://ghcr.io/jprodgers/citar:0.1.6 --repo jprodgers/CITAR
+A=(--repo jprodgers/CITAR --signer-workflow jprodgers/CITAR/.github/workflows/release.yml
+   --source-ref refs/tags/v0.1.6 --deny-self-hosted-runners)
+gh attestation verify citar-0.1.6-cp311-abi3-manylinux_2_28_x86_64.whl "${A[@]}"
+gh attestation verify citar-helper-linux-x64 "${A[@]}"
+gh attestation verify oci://ghcr.io/jprodgers/citar:0.1.6 "${A[@]}"
 ```
+
+Each must be release.yml's attestation, made on GitHub's runners for this tag; `--repo` alone would accept any
+workflow of the repository (docs/INSTALL.md gives users the same command).
 
 - **pip takes a wheel, not the sdist:** in a fresh venv, `python -m venv /tmp/v && /tmp/v/bin/pip download --no-deps
   citar==0.1.6 -d /tmp/v/dl` downloads `citar-0.1.6-cp311-abi3-<platform>.whl`.
@@ -265,7 +270,8 @@ With the owner's go-ahead, from the release's wheel (design/phase5-release.md P5
 
 ## 10. After
 
-- The first administrator: `sudo citar-admin create-user ...`.
+- The first administrator: `sudo citar-admin create-admin --handle NAME --email you@example.com` (it asks for the
+  password).
 - The host's machine settings from the staging measurement: its memory figure **128 MB** (the Servers page, or
   `PUT /api/machines/<host>/settings` with `capabilities.cpu.memory_mb`), not server mode's default of 240, which
   with the server's own peak would pass `citar.service`'s `MemoryHigh=320M`.

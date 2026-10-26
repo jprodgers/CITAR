@@ -68,8 +68,12 @@ changes without the file.
 each under its own licence: notably FastAPI, Starlette and uvicorn (MIT/BSD), SQLAlchemy (MIT),
 Alembic (MIT), Authlib (BSD), argon2-cffi (MIT), httpx (BSD), and the official `anthropic`,
 `openai` and `mcp` clients (MIT). pip installs each with its own licence files; run `pip-licenses`
-in an installed environment for the exact set and versions you have. The Windows bundle, which
-carries the Python packages it runs on, lists them with their licences in `PYTHON-LICENSES.txt`.
+in an installed environment for the exact set and versions you have. The Windows bundle (the installer
+and the portable zip), which carries the Python packages it runs on, lists them with their licences in
+`PYTHON-LICENSES.txt`: the installed closure of `citar[all]`, CPython's own licence, and those of PyInstaller's
+bootloader and run-time hooks, at the bundle's root beside `LICENSE`, `NOTICE.md` and `THIRD-PARTY-LICENSES.txt`. A
+shipped package whose wheel carries no licence file (dnspython, ISC) is given CITAR's verbatim copy of its licence,
+kept in `installer/licenses/`. The server image installs the wheel, so its `.dist-info` carries the notices too.
 
 No dependency's source is vendored into this repository: the crates come from crates.io, pinned
 by `Cargo.lock`, and the Python packages from PyPI.

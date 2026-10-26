@@ -2,12 +2,22 @@
 
 Three things, in the order most people want them: a game, a model in a seat, and a benchmark.
 
-If CITAR is not installed yet, [INSTALL.md](INSTALL.md) has every route. The short one:
+If CITAR is not installed yet, [INSTALL.md](INSTALL.md) has every route. The short ones: on Windows, the
+installer from the [releases page](https://github.com/jprodgers/CITAR/releases/latest); on macOS and Linux,
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jprodgers/CITAR/main/install.sh | bash
+```
+
+or anywhere with Python 3.11 or newer,
 
 ```bash
 pipx install "citar[all]"
 citar setup
 ```
+
+Each installs a CITAR built for your machine (Windows x64, macOS 11+, Linux x64 and ARM64 with glibc 2.28+);
+nothing is compiled.
 
 ---
 

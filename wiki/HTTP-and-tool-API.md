@@ -33,6 +33,7 @@ still work and still grant exactly one seat.
 
 | Method and path | |
 |---|---|
+| `GET /api/meta` | Public. What the client adapts to: `version` (CITAR's), `label` (the build's: `v0.1.6` on a release, `unknown` on a build of your own), `mode` (`local` or `server`), `server_url` (as the request reached it) and `mcp_command`, the command that starts the MCP bridge for a seat, as a list of words the lobby adds `--server`, `--game` and `--token` to: a local server gives its own install's (the Windows app's `<folder>\citar.exe mcp`, a wheel's `citar-mcp` script by its path, a checkout's `python <checkout>/citar_mcp.py`); a server in server mode names no folder of its own (`["citar-mcp"]`, or `["citar.exe", "mcp"]` from the Windows app), since a remote player runs the bridge from their own install. Before 0.1.6 it gave `project_root`, `python` and `mcp_script` instead |
 | `GET /api/tools` | Every tool with its JSON schema. The authoritative reference |
 | `POST /api/games/{id}/tool` | Call a tool: `{"tool": "...", "args": {...}}` |
 | `GET /api/games/{id}/wait` | Long-poll until it is your turn or a negotiation needs an answer. Every answer while the game plays lists the chats your seat is in (`chats`: `negotiation_id`, `with`, `waiting_on` `you` or `them`, `deadline` in epoch seconds, `seconds_left`, `paused`) |
@@ -420,7 +421,8 @@ The built-in adapter (`citar/agents/llm_agent.py`) is a working reference for al
 citar-mcp --server http://127.0.0.1:8765 --game <id> --token <seat token>
 ```
 
-Or copy the ready-made command from **Join / Seats**. The bridge exposes every tool above plus
+Or copy the ready-made command from **Join / Seats**, which the lobby builds from `/api/meta`'s `mcp_command`. The
+bridge exposes every tool above plus
 `wait_for_turn`, which blocks rather than polling. See [AI_PLAYERS.md](AI-players#mcp-clients).
 
 ---

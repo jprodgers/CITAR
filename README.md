@@ -57,7 +57,7 @@ None of it phones home. CITAR has no telemetry and no accounts unless you run a 
 
 ### Just want to play
 
-**Windows** — download [`CITAR-setup.exe`](https://github.com/jprodgers/CITAR/releases/latest) and
+**Windows** — download [`CITAR-<version>-setup.exe`](https://github.com/jprodgers/CITAR/releases/latest) and
 run it. Nothing else needed; there is no Python to install.
 
 **macOS and Linux**
@@ -74,7 +74,12 @@ citar setup                   # finds your models and configures CITAR
 citar                         # starts the game and opens your browser
 ```
 
-Also on [Homebrew, Scoop and winget](docs/INSTALL.md).
+Every release is built for Windows x64, macOS 11+ on Apple silicon and Intel, and Linux x64 and ARM64 (glibc 2.28+),
+so all of these install a compiled CITAR and need no compiler; elsewhere `pip install citar` builds it from source
+with a Rust toolchain. Windows also has a [one-line PowerShell install](docs/INSTALL.md#one-line-windows), and
+[Scoop and winget](docs/INSTALL.md#homebrew-scoop-winget) packages; Homebrew's tap carries the CITAR helper.
+Every file of a release has its SHA-256 and a build provenance attestation:
+[checking a download](docs/INSTALL.md#checking-a-download).
 
 ### Want to run a server
 
@@ -82,7 +87,7 @@ Also on [Homebrew, Scoop and winget](docs/INSTALL.md).
 curl -fsSL https://raw.githubusercontent.com/jprodgers/CITAR/main/install.sh | bash -s -- --server
 ```
 
-or with Docker:
+or with Docker (multi-arch: `linux/amd64` and `linux/arm64`):
 
 ```bash
 curl -O https://raw.githubusercontent.com/jprodgers/CITAR/main/docker-compose.yml
@@ -92,8 +97,15 @@ docker compose up -d
 ```
 
 Either way you get accounts, invitations, single sign-on, per-user budgets, TLS, and a way for
-people to lend their own GPUs to the server without opening a port at home. See
-[docs/server/DEPLOY.md](docs/server/DEPLOY.md).
+people to lend their own GPUs to the server without opening a port at home. A box that serves other sites too
+deploys each release with `citar-deploy`, which checks the release's provenance, verifies it before switching and undoes
+a failed one by itself. See [docs/server/DEPLOY.md](docs/server/DEPLOY.md).
+
+### Want to lend a machine to a server
+
+The **CITAR helper** is one file, for the same five platforms: from the server's Servers page, `install.sh --worker`,
+`install.ps1 -Worker`, or `brew install jprodgers/citar/citar-helper` / `scoop install citar-helper`.
+See [docs/server/WORKERS.md](docs/server/WORKERS.md).
 
 ## First game in five minutes
 
@@ -165,7 +177,7 @@ short version:
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
 pip install -e ".[dev]"                  # builds the Rust engine: needs rustup (rustup.rs)
-python -m unittest discover -s tests     # about 650 tests, a few minutes; about 200 of them skip
+python -m unittest discover -s tests     # about 2,400 tests, about twenty minutes
 citar serve --debug
 ```
 

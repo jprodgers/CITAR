@@ -3,9 +3,10 @@
 What to do when something needs doing. Written for the person who did not build it and is looking
 at it at an awkward hour.
 
-It assumes a deployment made the way [DEPLOY.md](Deploying-a-server) describes: CITAR at `/opt/citar`, state
-at `/var/lib/citar`, configuration at `/etc/citar/citar.env`, running under systemd as the `citar`
-account behind nginx. Adjust the paths if yours differ; `citar where` prints them.
+It assumes a deployment made the way [DEPLOY.md](Deploying-a-server) describes: the release layout, with the release that runs
+at `/opt/citar/current` (a link into `/opt/citar/releases/<version>`), state at `/var/lib/citar`, configuration at
+`/etc/citar/citar.env`, running under systemd as the `citar` account behind nginx. Adjust the paths if yours differ;
+`citar where` prints them.
 
 Throughout, `citar.example.com` stands for your domain.
 
@@ -20,6 +21,12 @@ sudo systemctl restart citar         # turn it off and on again
 sudo citar-admin config              # what does it think its configuration is
 sudo citar-admin list-users          # who has an account
 ```
+
+`citar-admin` is `/usr/local/bin/citar-admin`, which runs `/opt/citar/current/venv/bin/citar-admin` as the service
+runs: as `citar`, through `systemd-run`, with the unit's environment file, working directory and sandbox, so it reads
+the configuration exactly as the server does and can write nothing the server cannot. `citar-admin --plan list-users`
+prints the command it would run. `sudo citar-deploy status` says which release runs, what else is installed, the
+database's revision, the health and the last deploys.
 
 ---
 
@@ -43,7 +50,8 @@ If it is not 200, work outwards from the app:
 
 **The forum and the resume site are separate.** If `forum.example.com` is down but CITAR is
 up, the problem is nginx, PHP-FPM or MariaDB — not CITAR. CITAR cannot take them down by design:
-it runs under a 400 MB cap and is the first thing the kernel kills under memory pressure.
+it runs under a 400 MB cap, its lab games included, is the first thing the kernel kills under memory pressure, and
+yields the CPU to them under contention (`CPUWeight=20`).
 
 ---
 
@@ -58,15 +66,21 @@ sudo journalctl -u citar -n 60 --no-pager
 Known causes, in the order they actually happen:
 
 **A configuration error.** Server mode refuses to start without a secret key, a public origin and
-HTTPS. The message names the variable. Check `/etc/citar/citar.env`.
+HTTPS. The message names the variable. Check `/etc/citar/citar.env`; every comment there must be on a line of its
+own, since systemd reads anything after `=` as the value.
 
 **A failed migration.** The schema is applied at startup. If a migration fails the service will not
 start, on purpose — running against a half-migrated schema is worse. Restore the database (below)
 and report the migration.
 
-**Out of memory.** `systemctl status citar` shows `oom-kill`. The cap is 400 MB and normal use is
-about 70 MB, so this means a leak or a very large game. Check `MemoryCurrent` over time. There is
-2 GB of swap, so this should be rare.
+**A database a newer release migrated.** A release refuses a database at a revision its migrations do not know. That
+happens when `current` is pointed back by hand after an upgrade migrated: go back with `citar-deploy rollback
+--restore-backup` instead ([below](#going-back)), or forward again.
+
+**Out of memory.** `systemctl status citar` shows `oom-kill`. The cap is 400 MB for the server and its lab games
+together; the server idles at about 90 MB and peaked at 148 MB in the staging rehearsal, and the lab's job host is
+held to its machine settings' memory figure (128 MB on a 961 MB box), so this means a leak, a very large game or a
+figure set too high. Check `MemoryCurrent` over time. There is 2 GB of swap, so this should be rare.
 
 **Port 8765 in use.** `sudo ss -tulpn | grep 8765`. Something else grabbed it, or an old process
 did not die: `sudo systemctl restart citar`.
@@ -75,7 +89,9 @@ did not die: `sudo systemctl restart citar`.
 
 ## Backups
 
-Nightly at 03:20 UTC, kept 14 days, in `/var/backups/citar/<timestamp>/`.
+Nightly at 03:20 in the box's own time zone, up to 20 minutes later (`citar-backup.timer`'s
+`RandomizedDelaySec=20m`), kept 14 days (`CITAR_BACKUP_KEEP_DAYS`), in
+`/var/backups/citar/<UTC time>/`. Every deploy takes one more, with the service stopped, just before it switches.
 
 ```bash
 systemctl list-timers citar-backup      # when it next runs
@@ -83,18 +99,35 @@ sudo systemctl start citar-backup       # run one now
 sudo journalctl -u citar-backup -n 20   # what happened
 ```
 
-Each backup holds `citar.db` (a proper `sqlite3 .backup` snapshot, not a copy of a file being
-written to), `citar.env` and `saves.tar.gz`. Every run verifies the snapshot with
-`PRAGMA integrity_check` and marks the directory `UNTRUSTWORTHY` if it fails.
+Each backup holds:
+
+| File | What |
+|---|---|
+| `citar.db` | the database: a proper `sqlite3 .backup` snapshot (not a copy of a file being written to), checked with `PRAGMA integrity_check` |
+| `state.tar.gz` | the whole state directory (saves, config, benchmarks, everything CITAR writes there) without the live database files |
+| `data.tar.gz`, `saves.tar.gz`, `config.tar.gz`, `benchmarks.tar.gz` | only for a directory the env file moves outside the state directory |
+| `citar.env` | the configuration and secrets (0600) |
+| `RELEASE` | what wrote them: the release `current` named, its version, the database's revision, where each directory was |
+| `UNTRUSTWORTHY` | only when something failed, saying what. Such a backup prunes nothing |
+
+Its exit status, which `systemctl start citar-backup` reports: 0 complete (its last line is `backup complete:
+<folder>`); 1 it could not start; 2 not trustworthy (`UNTRUSTWORTHY` says why); 3 complete and trustworthy on this
+disk, but the offsite copy failed. A database outside SQLite (PostgreSQL) is named in `RELEASE` and not dumped:
+back it up with its own tools.
 
 ⚠️ **Backups are on the same disk as the thing they back up.** They protect against a bad migration
 or a mistaken delete; they do not protect against losing the VPS. Set
-`CITAR_BACKUP_RSYNC_TARGET` in the backup service's environment to copy them off-box.
+`CITAR_BACKUP_RSYNC_TARGET` in the backup service's environment to copy each new one off-box.
 
 ### Restoring
 
+The whole state from a backup, release and all, is `citar-deploy rollback --restore-backup DIR` (below). By hand,
+the database alone:
+
 ```bash
 LATEST=$(ls -1d /var/backups/citar/20* | tail -1)
+cat "$LATEST/RELEASE"                                          # the release and revision it was taken at
+test -e "$LATEST/UNTRUSTWORTHY" && cat "$LATEST/UNTRUSTWORTHY" # must not exist
 
 sudo sqlite3 "$LATEST/citar.db" 'PRAGMA integrity_check;'     # expect: ok
 sudo systemctl stop citar
@@ -106,10 +139,13 @@ sudo systemctl start citar
 sudo citar-admin list-users
 ```
 
-Saves: `sudo tar xzf "$LATEST/saves.tar.gz" -C /var/lib/citar`.
+The rest of the state: stop the service, move `/var/lib/citar` aside, make it again (`citar:citar`, 0750), extract
+`state.tar.gz` into it as root (`sudo tar -xzpf "$LATEST/state.tar.gz" -C /var/lib/citar`, which keeps the owners),
+put `citar.db` back as above, and start. The release that runs must know the backup's revision (`RELEASE`'s
+`revision`), or it refuses the database: restore onto the release `RELEASE` names.
 
-**Drill it before you need it.** A backup nobody has restored is a hope. This exact procedure was
-run on 2026-09-20 and CITAR opened the restored database and read its accounts.
+**Drill it before you need it.** A backup nobody has restored is a hope. The staging rehearsal drills it on every run
+(the newest backup opened, integrity-checked, and a second CITAR started on a copy of it, reading its accounts).
 
 ---
 
@@ -156,7 +192,8 @@ sudo citar-admin worker-token "Desktop"                            # another tok
 sudo citar-admin workers                                           # what is registered
 ```
 
-On the machine with the model, the CITAR helper (download it from the Servers page):
+On the machine with the model, the CITAR helper (download it from the Servers page, or
+[INSTALL.md](Installing#the-citar-helper)'s other routes):
 
 ```bash
 citar-helper --server https://citar.example.com --token TOKEN --name "Desktop"
@@ -185,6 +222,18 @@ sudo citar-secrets show     # which secrets are set — never what they are
 
 Prompted, never echoed, never in the shell history or the process list. `citar-secrets KEY=value`
 is deliberately not accepted for exactly that reason.
+
+`citar-deploy` installs `citar-secrets`; a server the installer made (`install.sh --server`) has none. There, edit
+the environment file as root and restart, which keeps the value out of the shell history and the process list too:
+
+```bash
+sudoedit /etc/citar/citar.env       # KEY=value lines; a comment on a line of its own
+sudo systemctl restart citar
+```
+
+The file stays `root:citar` 0640 (`sudoedit` keeps its owner and mode). The release's `deploy/citar-secrets.sh` (in
+its tag, or in a deploy bundle from `bundle.py`) also works there, run as `sudo bash citar-secrets.sh`, when the
+environment file is the default `/etc/citar/citar.env`: it writes that file and offers to restart `citar`.
 
 Mail is `mail.privateemail.com:587` STARTTLS as `you@example.com`. Test it:
 
@@ -234,23 +283,109 @@ sudo sqlite3 /var/lib/citar/citar.db \
 
 ## Deploying a new version
 
-```bash
-# from the laptop, in the project folder
-git archive --format=tar HEAD | gzip -9 > /tmp/citar.tar.gz
-scp -i ~/.ssh/citar_vps_ed25519 /tmp/citar.tar.gz deploy@203.0.113.10:/tmp/
+A release goes onto the server as a **deploy bundle**, made and checked on your own machine, then installed by
+`citar-deploy` ([DEPLOY.md](Deploying-a-server#citar-deploy-a-scripted-deploy-for-a-shared-box) says what each step does). The
+server never downloads a release itself.
 
-# on the server
-sudo systemctl start citar-backup          # always back up before a deploy
-sudo tar xzf /tmp/citar.tar.gz -C /opt/citar
-sudo chown -R citar:citar /opt/citar
-sudo -u citar /opt/citar/.venv/bin/pip install -q --no-cache-dir -r /opt/citar/requirements.txt
-sudo systemctl restart citar
-sleep 8 && systemctl is-active citar
-curl -s -o /dev/null -w '%{http_code}\n' https://citar.example.com/api/auth/config
+```bash
+# on your own machine, in a checkout with the tag fetched (git fetch --tags) and gh signed in
+python scripts/deploy/bundle.py 0.1.7          # the wheel and constraints from the release, hashes and attestation
+                                               # checked: citar-deploy-0.1.7.tar.gz and its .sha256
+scp citar-deploy-0.1.7.tar.gz citar-deploy-0.1.7.tar.gz.sha256 you@citar.example.com:
+
+# on the server, inside tmux or screen
+sha256sum -c citar-deploy-0.1.7.tar.gz.sha256 && tar -xzf citar-deploy-0.1.7.tar.gz
+sudo citar-deploy install --bundle citar-deploy-0.1.7 --plan    # every check, then each step; nothing changes
+sudo citar-deploy install --bundle citar-deploy-0.1.7
 ```
 
-Migrations run automatically at startup. If the service does not come back, the logs say why and
-the backup you just took is one command away.
+The first deploy on a box runs the bundle's own copy, `sudo bash citar-deploy-0.1.7/deploy/citar-deploy.sh`; each
+deploy installs it as `/usr/local/sbin/citar-deploy`. **Read the plan** before the run: it names every path, every
+command, the files that will be replaced (with their differences) and the settings the staged release is verified
+with.
+
+`install` stages the release, verifies it as `citar` with temporary state, stops the service, takes a backup, switches
+`current`, installs the bundle's units and scripts where they differ (never the nginx site, whose difference it shows),
+starts the service, checks its health within 60 s (directly, through nginx with a WebSocket handshake, and `/api/meta`
+naming the new version), checks the other sites again, and records the deploy. The staged release's venv is made
+fresh: a release already staged is refused without `--reinstall` (a release a rollback left behind, say).
+
+| Exit | Means |
+|---|---|
+| 0 | done |
+| 1 | refused before anything changed (the message names why, and ends "Nothing was changed"), or failed and undone: the release that ran is back, with the database restored from the switch's backup if the new release had migrated it; the message says which |
+| 2 | a usage error |
+| 3 | deployed and healthy, but another site in `/etc/citar/deploy-checks.conf` does not answer since. Nothing is done about it automatically (the cause may not be CITAR); the message gives the way back |
+
+**Its files.** `/var/log/citar-deploy.log` has one line a deploy (`install version= previous= result=ok|undone
+revision_before= revision_after= backup= downtime=`). `/var/lib/citar-deploy` holds its lock (a second deploy stops
+there), the staged release's verification folders (removed afterwards) and a cutover's record. Each file a deploy
+replaces is kept in `/var/lib/citar-deploy/run.<stamp>.*` until the deploy is recorded or undone; one left after a hard
+kill is the copy of what was replaced.
+
+**Interrupted.** Run it inside tmux or screen, so that a dropped SSH session does not end it. From the moment the
+service stops until the deploy is recorded, a hang-up is ignored (the command runs to its end), and Ctrl-C or a TERM
+undoes the install or cutover as a failed release is undone (a second Ctrl-C does not cut the undo short).
+`rollback`, `uncutover` and `prune` run to their end once begun.
+
+**The release that ran before** stays installed beside the new one, so a rollback can go back to it: a running
+release without its `.complete` mark (one installed before the mark existed) is marked when its own `citar --version`
+names it, and the install is refused otherwise. After a deploy, releases beyond three are pruned, never the one that
+runs or the one before it.
+
+```bash
+sudo citar-deploy status            # the release that runs, every release and its mark, the service, the revision,
+                                    # the health, a cutover's record, the last five deploys
+sudo citar-deploy prune --keep 3    # releases beyond N removed (N at least 2)
+```
+
+### Going back
+
+```bash
+sudo citar-deploy rollback --plan                 # to the newest complete release older than the running one
+sudo citar-deploy rollback --to 0.1.6
+sudo citar-deploy rollback --to 0.1.6 --restore-backup /var/backups/citar/<the deploy's backup>
+```
+
+The server migrates its database on every start and refuses one a newer release migrated, so a rollback first reads
+the database's revision against the target release's migrations. When the target knows it, `current` goes back, the
+service restarts and the health is checked. When it does not (the newer release migrated), the rollback is refused
+without `--restore-backup`, and the refusal names the backup to give it: the one the migrating deploy took (from the
+deploy log), else the newest usable backup at a revision the target knows. With it, the service is stopped and the
+state restored first: each folder the backup's `RELEASE` names is moved aside as `<dir>.before-restore-<stamp>` (kept)
+and extracted again from its tarball with its owner and mode, a database outside those folders is moved aside as
+`<db>.before-restore-<stamp>`, and the backup's `citar.db` put in its place. **What was written since that backup is
+in the moved-aside copies, not in the restored state.**
+
+---
+
+## The cutover from 0.1.5, and undoing it
+
+The first 0.1.6 deploy on a box that runs 0.1.5 (its source tree in `/opt/citar`, `/opt/citar/.venv`, and
+`citar-lab.service`) is a cutover, not an install:
+
+```bash
+sudo bash citar-deploy-0.1.6/deploy/citar-deploy.sh cutover --bundle citar-deploy-0.1.6 --plan
+sudo bash citar-deploy-0.1.6/deploy/citar-deploy.sh cutover --bundle citar-deploy-0.1.6
+```
+
+It recognises 0.1.5's layout (and refuses a box that has `current` or an earlier cutover), stops `citar` and
+`citar-lab`, takes 0.1.5's own backup, saves each unit and script it will replace or remove (in
+`/var/lib/citar-deploy/cutover/files`, with the record `cutover/CUTOVER`), disables and removes `citar-lab.service`,
+moves `/opt/citar` to `/opt/citar-0.1.5` and `/var/lib/citar` to `/var/lib/citar-archive-<stamp>`, makes a fresh
+`/var/lib/citar` (0.1.6 starts its database afresh), and lists the env file's settings 0.1.6 no longer reads (shown,
+not changed). Then it stages, verifies, switches, enables `citar` and `citar-backup.timer`, and checks as `install`
+does. Any failure from the first move on undoes it by itself and exits 1. The downtime includes the staging (about half
+a minute in the rehearsal; a few minutes on a slow box), since the old tree must move before the new venv exists.
+
+Afterwards: the first administrator, `sudo citar-admin create-admin --handle NAME --email you@example.com` (it asks
+for the password), and the host machine's memory figure set to 128 MB
+([DEPLOY.md](Deploying-a-server#the-unit-and-limits-on-a-small-box)).
+
+`sudo citar-deploy uncutover` undoes it: the service stopped, `/opt/citar` and `/var/lib/citar` moved aside as
+`-<version>-undone-<stamp>` (kept) where the record's archive is there to take their place, 0.1.5's tree and state
+put back, its saved units restored (`citar-lab` included) and the files the cutover added removed, both services
+started, 0.1.5's health and the other sites checked. The record is kept as `cutover-undone-<stamp>`.
 
 ---
 
@@ -340,14 +475,20 @@ One vCPU and 961 MB. Games are CPU-bound, so roughly **one game at a time** befo
 the forum starts feeling it. The per-account limits (`max_concurrent_games`, default 2) are the
 lever; lower them with `citar-admin` if the box is struggling.
 
+The lab plays inside `citar.service` too, one game at a time on its job host, at `nice` and `CPUWeight=20` beside
+the other sites, held to the host machine's memory figure (128 MB here: the server's peak plus that figure stays under
+the unit's `MemoryHigh=320M`, [DEPLOY.md](Deploying-a-server#the-unit-and-limits-on-a-small-box)). Pause it from the Lab page,
+or lower the host machine's threads and share in its machine settings, when the box is struggling.
+
 ```bash
 uptime                                        # load average
-systemctl show citar -p MemoryCurrent
+systemctl show citar -p MemoryCurrent -p MemoryPeak
 free -h
 ```
 
 Sustained load above ~1.5 means CITAR and PHP-FPM are fighting. More users means a bigger VPS, or
-moving game execution onto worker machines — the job-queue boundary is already in place for that.
+moving work onto helper machines: their models already serve model seats, and a helper whose owner lends its CPU
+plays the lab's games ([WORKERS.md](Workers#lending-cpu-what-plays-on-it-and-for-whom)).
 
 
 ---

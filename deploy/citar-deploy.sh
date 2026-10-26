@@ -1658,8 +1658,9 @@ cmd_cutover() {
     exit 0
   fi
   say "CITAR $P runs, on a fresh $STATE_DIR. CITAR $OLD is archived in $OLD_TREE and $archive; citar-deploy uncutover"
-  say "puts it back. Next (packaging/RELEASING.md, step 10): the first administrator (sudo citar-admin create-user ...),"
-  say "the host machine's settings from the staging measurement, and the helpers registered again."
+  say "puts it back. Next (packaging/RELEASING.md, step 10): the first administrator"
+  say "(sudo citar-admin create-admin --handle NAME --email you@example.com), the host machine's settings from the"
+  say "staging measurement, and the helpers registered again."
   [ "$SITES_FAILED" -eq 0 ] || exit 3
 }
 

@@ -90,6 +90,12 @@ same systems, in `src/game/`, `src/mapgen/` and `src/api/` (docs/ARCHITECTURE.md
 people, religion), player actions, end-of-turn (production, growth, research, culture, faith, gold, unit healing
 and upkeep), then an end-of-round pass (barbarians, city-state elections, UN votes, victory checks).
 
+**Packaging** (0.1.6). CITAR ships as one abi3 wheel per platform (Windows x64, macOS arm64 and x64, Linux x64
+and arm64 on glibc 2.28), the Windows installer and zip built from that wheel, the server image built from the
+Linux wheels, and the CITAR helper for the same five platforms; one workflow builds and tests all of it on every
+pull request, the release workflow publishes only what it built, and a server deploys a release's wheel into a
+release layout (docs/ARCHITECTURE.md, "Packaging and releases").
+
 ---
 
 ## 4. Game setup (lobby)

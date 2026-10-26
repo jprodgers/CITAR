@@ -319,6 +319,12 @@ jobs:
         # those allowed; every action pinned to a commit; called workflows get no secrets; artifact
         # names apart; nothing installed or built where a secret or a write permission is held.
         run: python scripts/ci/check_workflows.py
+      - name: The docs name no retired route
+        # scripts/ci/stale_terms.py (design/phase5-release.md P5.16): the git archive deploy, requirements.txt
+        # installs, the game's Homebrew formula, citar-lab, the server run as a module in a unit and the PyPI sdist
+        # in a manifest, refused in the docs, the units and the manifests outside the CHANGELOG's history, its
+        # Compatibility notes and the sections that describe 0.1.5's layout for the cutover.
+        run: python scripts/ci/stale_terms.py
 
   frontend:
     name: front-end syntax

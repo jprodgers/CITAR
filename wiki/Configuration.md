@@ -61,7 +61,7 @@ reference.
 | `CITAR_MODE` | `local` | `local` — loopback, one auto-signed-in owner, no TLS. `server` — real sessions, TLS required, refuses to start half-configured |
 | `CITAR_PUBLIC_ORIGIN` | | The URL browsers use, e.g. `https://citar.example.com`. Required in server mode, must be `https://`. Sign-in links and OAuth callbacks are built from it |
 | `CITAR_SECRET_KEY` | generated locally | Signs sessions and one-shot tokens. Generate once and keep it: changing it signs everybody out. `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
-| `CITAR_HOST` | `127.0.0.1` | Bind address. Keep it on loopback behind a proxy |
+| `CITAR_HOST` | `127.0.0.1` (`0.0.0.0` in server mode, and in the image) | Bind address. Keep it on loopback behind a proxy: the env file a server's wizard writes says `127.0.0.1` |
 | `CITAR_PORT` | `8765` | |
 | `CITAR_DEBUG` | off | Enables the debug endpoints. Never on a public server |
 
@@ -273,6 +273,17 @@ Its update policy is `updates` (`auto`, `notify` or `off`; `--updates`) in `help
 Prefer the settings file `citar-helper setup` writes (`helper.json`): a token on a command line ends up in the shell
 history and the process list. A helper run as a service (`citar-helper service install`) reads its home's `helper.json`
 alone: no flags and no variables reach it ([Workers](Workers#running-the-helper-as-a-service)).
+
+### Building, installing and deploying
+
+Read by the tools around CITAR rather than by the server:
+
+| Variable | Read by | Meaning |
+|---|---|---|
+| `CITAR_BUILD_ID` | the build (maturin, cargo) | The build's label, compiled into the engine and the helper: `build_info()["label"]`, `citar doctor`'s engine line, `/api/meta`'s `label` and `citar-helper --version`. Release builds set it (`v0.1.6`; `ci+<sha7>` on CI); `cargo xtask develop` sets it from `git describe`; unset, a build says `unknown`. A display only: the build id is computed from the sources, never from it |
+| `CITAR_RELEASE_URL` | `install.sh --worker`, `install.ps1 -Worker` | Where the helper is downloaded from, in the GitHub releases' layout (`<url>/latest/download/<name>`, `<url>/download/v<version>/<name>`). Default `https://github.com/jprodgers/CITAR/releases`. `https`, or `http` to this machine only; an address with a user name is refused |
+| `CITAR_BACKUP_DIR`, `CITAR_BACKUP_KEEP_DAYS`, `CITAR_BACKUP_RSYNC_TARGET` | `citar-backup` (its service's environment) | Where backups go (`/var/backups/citar`), how many days are kept (14), and an `rsync` destination each new one is copied to ([Runbook](Runbook#backups)) |
+| `CITAR_DEPLOY_SLICE` | `citar-deploy`, `citar-admin` | A systemd slice every `systemd-run` they start runs in (the staging rehearsal's; unset on a server) |
 
 ---
 

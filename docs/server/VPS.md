@@ -7,10 +7,10 @@ Everything on this page is about the machine, not about CITAR. If you already ru
 
 | | |
 |---|---|
-| **CPU** | The thing that matters. Games are CPU-bound and single-threaded per game, so cores ≈ concurrent games. One core runs one game |
-| **RAM** | 1 GB is enough: about 95 MB for CITAR plus 2–7 MB per loaded game. Add **2 GB of swap** if the machine has none |
-| **Disk** | 2 GB for the program; saved games are a few hundred kilobytes each |
-| **OS** | Any current Linux. Debian and Ubuntu are the best-tested |
+| **CPU** | The thing that matters. Games are CPU-bound and single-threaded per game, so cores ≈ concurrent games. One core runs one game, and the lab's games share it |
+| **RAM** | 1 GB is enough: CITAR idles at about 90 MB, peaked at 148 MB, and its lab games add the job host's memory figure (128 MB on a 1 GB box), all held under the unit's 400 MB cap. Add **2 GB of swap** if the machine has none |
+| **Disk** | 2 GB: three releases of about 200 MB each (each a venv of its own), the state, and two weeks of backups; saved games are a few hundred kilobytes each |
+| **OS** | Linux on x64 or ARM64 with glibc 2.28 or newer and Python 3.11 or newer. Ubuntu 24.04 (Python 3.12) is what the deploy is rehearsed on; Debian and Ubuntu are the best-tested |
 | **Network** | IPv4. IPv6 too if you can, but nothing requires it |
 
 Per-core speed matters less than you would think: a mid-range VPS core is well under twice as slow
@@ -93,7 +93,8 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
 With zero swap, one memory spike makes the kernel kill whatever it likes — which on a shared box
-may be your database rather than CITAR.
+may be your database rather than CITAR. A low `vm.swappiness` (10, say) keeps the other sites' memory resident and
+swaps only under real pressure; CITAR's limits were measured with it so.
 
 ### Unattended security updates
 
@@ -116,12 +117,21 @@ dig +short citar.example.com
 Normal, and fine. CITAR adds a site to the existing nginx rather than replacing anything, and
 listens on loopback so it does not contend for port 443.
 
-Two things to think about when sharing:
+Three things to think about when sharing, which CITAR's unit already does
+([DEPLOY.md](DEPLOY.md#the-unit-and-limits-on-a-small-box) has its figures):
 
-- **Memory.** Set `MemoryMax=` on the CITAR unit so that CITAR is what dies under pressure, not the
-  other site's database.
-- **CPU.** A busy game will use a whole core. If something latency-sensitive shares the machine,
-  cap CITAR with `CPUQuota=` and keep `default_max_concurrent_games` low.
+- **Memory.** `MemoryMax=400M` on the CITAR unit, its lab games included (the lab runs inside the server), and
+  `OOMScoreAdjust=500`, so that CITAR is what dies under pressure, not the other site's database. `MemoryHigh=320M`
+  slows the whole unit, web server included, so the server's peak plus the lab's memory figure must stay under it:
+  set the host machine's memory figure to 128 MB on a 1 GB box.
+- **CPU.** A busy game will use a whole core. `CPUWeight=20` and `IOWeight=20` on the unit let the other sites win
+  under contention: in the staging rehearsal, on one CPU at a VPS's speed with lab games playing without pause, a
+  stand-in PHP site's p95 response time rose from 44 ms idle to 58 ms (66 ms at `CPUWeight=50`). Keep
+  `default_max_concurrent_games` low as well.
+- **Disk.** Three releases and two weeks of backups, as above.
+
+Before a deploy touches such a machine, it can be rehearsed on your own: the
+[staging rehearsal](RUNBOOK.md#the-staging-rehearsal) holds WSL to the box's CPU, memory, swap and other sites.
 
 ## Then
 

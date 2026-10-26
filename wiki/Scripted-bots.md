@@ -164,7 +164,8 @@ The simulator runs one game per core, and uses all of them.
 For changes that need more than a few dozen games, the lab is a resumable queue of experiments that
 runs for days. **The CITAR server plays it** (local or server mode): start the server and it plays
 whatever is queued, on its own job host, under the host machine's CPU settings (below). There is no
-separate runner to start any more: `citar lab run` says so and exits 2.
+separate runner to start any more: `citar lab run` says so and exits 2. On a server installed in the release
+layout, run these as the service runs ([DEPLOY.md](Deploying-a-server#after-it-is-up)), or use the Lab page.
 
 ```bash
 citar lab submit experiment.json     # queue it (bot versions are pinned at submit time)

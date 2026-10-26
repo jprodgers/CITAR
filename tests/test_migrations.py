@@ -517,5 +517,50 @@ class Startup(BootCase):
         self.assertTrue(inspect(db.engine()).has_table("owned_items"))
 
 
+class FirstAdministrator(BootCase):
+    """The boot's messages give 0.1.6's commands for the first administrator: on the release layout the citar-admin
+    wrapper (install.sh --server, citar-deploy), which runs as the service with its environment, not 0.1.5's source-tree
+    venv nor a bare ``python -m`` that would run as root against another database (design/phase5-release.md P5.16,
+    5-12's fix round). The cutover starts 0.1.6 on a fresh database, so this is the first thing its log tells."""
+
+    def assert_0_1_6_commands(self, text):
+        self.assertIn("sudo citar-admin create-admin --handle NAME --email you@example.com", text)
+        self.assertIn("citar admin create-admin", text)
+        self.assertIn("docker compose exec citar citar admin create-admin", text)
+        self.assertNotIn("/opt/citar/.venv", text)
+        self.assertNotIn("python -m citar.server.admin_cli", text)
+        self.assertNotIn("create-user", text)
+
+    def test_nobody_can_sign_in_names_the_wrapper(self):
+        cfg = mock.Mock(server_mode=True, public_origin="https://citar.example.com", require_https=True,
+                        email_enabled=False, enabled_oauth_providers=[], captcha_enabled=True, behind_proxy=True,
+                        host="127.0.0.1")
+        with mock.patch.object(boot.settings, "get", return_value=cfg), \
+                mock.patch.object(boot, "_has_password_account", return_value=False), \
+                mock.patch.object(boot.policy, "registration_mode", return_value="invite"):
+            warnings = boot.check_configuration()
+        found = [w for w in warnings if w.startswith("NOBODY CAN SIGN IN YET")]
+        self.assertEqual(len(found), 1, warnings)
+        self.assert_0_1_6_commands(found[0])
+
+    def test_no_administrator_names_the_wrapper(self):
+        self.boot()                                         # a fresh database at head: nobody in it
+        with mock.patch.object(boot.settings, "get", return_value=mock.Mock(local=False)):
+            message = boot.ensure_accounts()
+        self.assertTrue(message.startswith("No administrator account exists yet"), message)
+        self.assert_0_1_6_commands(message)
+
+    def test_test_email_without_smtp_names_the_environment_file(self):
+        from citar.server import admin_cli
+        with mock.patch.object(admin_cli.settings, "get", return_value=mock.Mock(email_enabled=False)), \
+                mock.patch("builtins.print") as printed:
+            code = admin_cli.cmd_test_email(mock.Mock(to="you@example.com"))
+        self.assertEqual(code, 1)
+        shown = " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
+        self.assertIn("CITAR_SMTP_HOST", shown)
+        self.assertIn("environment file", shown)
+        self.assertIn("citar-secrets on a server citar-deploy installed", shown)
+
+
 if __name__ == "__main__":
     unittest.main()

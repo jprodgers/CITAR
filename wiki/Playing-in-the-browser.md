@@ -10,7 +10,8 @@ The lobby lists running games and saved ones.
 - **Create game** — map, speed, difficulty, victory conditions and seats. Each seat picks a
   civilization or takes a random one; you can rename your civ and your cities afterwards. A seat is a
   person, a scripted bot, an LLM, a [hybrid seat](#hybrid-seats) (a bot that plays the turns with a
-  model that negotiates) or an MCP client.
+  model that negotiates) or an MCP client (Join / Seats gives the command that starts its bridge, `citar-mcp` or,
+  from the Windows app, `citar.exe mcp`: [AI players](AI-players#mcp-clients)).
   **BenchmarkCiv** has no unique abilities, units or buildings, which is what benchmark seats use
   so that a comparison is about the player and not the civ.
 - **Map generation** (the fold-out panel above the seats) changes the world itself:

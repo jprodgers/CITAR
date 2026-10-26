@@ -378,7 +378,8 @@ def cmd_test_email(args) -> int:
 
     cfg = settings.get()
     if not cfg.email_enabled:
-        print("No SMTP configured. Set it with: sudo citar-secrets")
+        print("No SMTP configured. Set CITAR_SMTP_HOST, CITAR_MAIL_FROM and the rest in the server's environment "
+              "file (sudo citar-secrets on a server citar-deploy installed), then restart the server.")
         return 1
     print(f"Sending via {cfg.smtp.host}:{cfg.smtp.port} ({cfg.smtp.security}) "
           f"as {cfg.smtp.user or '(no auth)'}")
