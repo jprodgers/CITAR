@@ -157,7 +157,7 @@ The workflow (`.github/workflows/release.yml`, 398 lines) is 0.1.5's with Phase 
 | The bump is mechanical | `release.py bump 0.1.6` in a scratch clone; `cargo xtask check`, S7's nextest and goldens and the whole S1 suite green there (5-01, and again at the exit). |
 | Nothing was published | No tag, release, PyPI upload, image push or push to another repository; `gh api .../environments` lists exactly `github-pages` and `pypi` (and `helper-signing` once the owner has made it) before and after every dispatch (P5.18.2). |
 
-**As built in 5-13: Phase 5 exit** (Appendix F, 5-13; P5.1.4, P5.15, P5.18). One agent, from 2026-10-26 13:39 to 16:10 (-04:00), on branch `p-5-13` from `ddce64e`, the pushed `v0.1.6`. Logs under `C:/dev/target/citar-p-5-13/logs`, the staging run's under `staging/`; the scripts in the session's scratchpad `p513/` and under `C:/dev/target/citar-p-5-13/wsl/`.
+**As built in 5-13: Phase 5 exit** (Appendix F, 5-13; P5.1.4, P5.15, P5.18). One agent, from 2026-10-26 13:39 to 15:55 (-04:00), on branch `p-5-13` from `ddce64e`, the pushed `v0.1.6`. Logs under `C:/dev/target/citar-p-5-13/logs`, the staging run's under `staging/`; the scripts in the session's scratchpad `p513/` and under `C:/dev/target/citar-p-5-13/wsl/`.
 
 - **What changed.** The walk of RELEASING.md found two defects, each fixed with a test that fails on the old code:
   - **`release.py` printed `\r\n` on Windows** (`b9cd16b`). Step 3's `release.py assets 0.1.6 > assets.txt && diff assets.txt preview-0.1.6/subjects.txt` failed on all 43 lines in Git Bash, the shell RELEASING.md names for Windows. Standard output now writes `\n` everywhere, as `notes` (which writes bytes) already did. `test_release_script`'s new test runs the script and checks the bytes of `assets`, `meta` and `label`.
@@ -271,7 +271,8 @@ The workflow (`.github/workflows/release.yml`, 398 lines) is 0.1.5's with Phase 
     - **S8:** the 8 workflows and `dependabot.yml` parse; `check_workflows` 8/50, rules 1 to 16; `cargo xtask check` all clear; `helper.test.mjs` 4 of 4; `test_workflows` 107 OK; `stale_terms` 49 files.
     - **S11:** 19 places and the changelog agree on 0.1.5.
     - The fixes' modules: `test_release_script` and `test_check_links`, 64 OK.
-    - Not owed: S5 (no `docs/` change), S7 (no Rust), S3, S6, S9.
+    - Not owed: S5 (no `docs/` change), S7 (no Rust), S3 and S6.
+    - In WSL (`logs/wsl-s9.log`; a clone of `07f80ea` on Python 3.12.3, removed afterwards): `test_check_links` 2 OK and `test_release_script` 62 OK; `check_links.py --strict` read 39 files and 400 links; `release.py assets` printed no carriage return.
 - **CI-only, and what was verified locally instead.** The dry run is gate 1's whole evidence for macOS arm64 and x64, Linux arm64, Inno Setup's compile and silent install, Scoop, winget, Homebrew, buildx and both native images. It ran at `ddce64e`, this package's base. Locally this package ran the Windows x64 and Linux x64 halves of gate 4 (the helpers, `pip download`, the amd64 image under podman, the manifests and their schemas), the whole staging run in WSL, and the bump rehearsal on Windows. The two fixes reach CI at the merge's push: lint runs `check_links.py --strict` and `release.py check`, and every leg runs `test_check_links` and `test_release_script`. The merge agent then dispatches the dry run again (P5.18.2).
 - **Deviations.**
   - The Phase 6 handoff is a section of `ops/p5-notes.md`, as the scope asks. This package's prompt allowed it only to append WSL apt installs there, and this package made no apt install.
