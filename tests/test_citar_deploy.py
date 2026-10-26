@@ -874,6 +874,16 @@ def plan_text(name: str, out: str, port: int) -> None:
 # ------------------------------------------------------------------------------------------------ the plans
 
 
+def certbot_site(root: Path) -> str:
+    """Plants /etc/nginx/sites-available/citar as certbot leaves it (deploy/nginx-citar.conf with its own lines):
+    citar-deploy shows how it differs from the bundle's and never writes it. Returns its text."""
+    site = root / "etc" / "nginx" / "sites-available" / "citar"
+    site.parent.mkdir(parents=True, exist_ok=True)
+    text = (DEPLOY / "nginx-citar.conf").read_text(encoding="utf-8") + "    listen 443 ssl; # managed by Certbot\n"
+    site.write_text(text, encoding="utf-8")
+    return text
+
+
 @unittest.skipUnless(LINUX_TOOLS, "Linux with bash, the sqlite3 command, flock, sha256sum and GNU tar")
 class Plans(unittest.TestCase):
     """Gate 2: each command's --plan against its committed text, with and without a slice; nothing changes."""
@@ -1140,8 +1150,15 @@ class Install(unittest.TestCase):
 
     def test_an_install_that_migrates_switches_with_the_service_stopped_after_a_backup(self):
         bundle = self.box.bundle("0.1.7", ["r1", "r2", "r3"])
+        # The site as certbot leaves it differs from the bundle's: shown, never written, and no failure (under pipefail
+        # diff's "they differ" once undid the switch: the staging run found it).
+        site = certbot_site(self.box.root)
         code, out, err = self.box.deploy("install", "--bundle", str(bundle), slice_="citar-staging.slice")
         self.assertEqual(code, 0, out + err)
+        self.assertIn("/etc/nginx/sites-available/citar: never rewritten (certbot edited it)", out)
+        self.assertIn("-    listen 443 ssl; # managed by Certbot", out)
+        self.assertEqual((self.box.root / "etc" / "nginx" / "sites-available" / "citar").read_text(encoding="utf-8"),
+                         site)
         self.assertEqual(os.readlink(self.box.root / "opt" / "citar" / "current"), "releases/0.1.7")
         self.assertEqual(self.box.revision(), "r3")
         self.assertEqual(self.box.calls(), [
@@ -1557,8 +1574,13 @@ class Cutover(unittest.TestCase):
 
     def test_a_cutover_and_its_undoing(self):
         bundle = self.box.bundle("0.1.6", ["r1", "r2"])
+        site = certbot_site(self.box.root)
+        self.before = self.box.tree()
         code, out, err = self.box.deploy("cutover", "--bundle", str(bundle))
         self.assertEqual(code, 0, out + err)
+        self.assertIn("/etc/nginx/sites-available/citar: never rewritten (certbot edited it)", out)
+        self.assertEqual((self.box.root / "etc" / "nginx" / "sites-available" / "citar").read_text(encoding="utf-8"),
+                         site)
         root = self.box.root
         self.assertEqual(os.readlink(root / "opt" / "citar" / "current"), "releases/0.1.6")
         self.assertTrue((root / "opt" / "citar-0.1.5" / "citar" / "__init__.py").exists())

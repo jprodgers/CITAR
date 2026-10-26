@@ -1094,7 +1094,8 @@ install_files() {
     fi
     if [ -f "$ROOT$dest" ]; then
       if act "$dest <- the bundle's $src ($mode): it differs (the difference is shown as it is replaced)"; then
-        diff -u "$ROOT$dest" "$BUNDLE/$src" | unroot | sed 's/^/      /'
+        # Shown only: diff's 1 (they differ) is the expected answer here, never this step's failure.
+        { diff -u "$ROOT$dest" "$BUNDLE/$src" || true; } | unroot | sed 's/^/      /'
         if [ -z "$RUN_DIR" ]; then
           RUN_DIR="$(mktemp -d "$ROOT$WORK/run.$(date -u +%Y%m%d-%H%M%S).XXXXXX")" || return 1
           say "      (each file replaced is kept in $(show "$RUN_DIR") until the deploy is recorded or undone)"
@@ -1114,7 +1115,9 @@ install_files() {
   elif cmp -s "$BUNDLE/deploy/nginx-citar.conf" "$ROOT$NGINX_SITE"; then
     say "   $NGINX_SITE: the same as the bundle's deploy/nginx-citar.conf"
   elif act "$NGINX_SITE: never rewritten (certbot edited it); its difference from the bundle's deploy/nginx-citar.conf is shown"; then
-    diff -u "$ROOT$NGINX_SITE" "$BUNDLE/deploy/nginx-citar.conf" | unroot | sed 's/^/      /'
+    # Under pipefail diff's 1 (they differ, as a site certbot edited always does) would be this function's status, and
+    # the switch would be undone for a file it never writes (found by the staging run, design/phase5-release.md P5.14).
+    { diff -u "$ROOT$NGINX_SITE" "$BUNDLE/deploy/nginx-citar.conf" || true; } | unroot | sed 's/^/      /'
   fi
 }
 

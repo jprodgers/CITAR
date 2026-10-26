@@ -254,6 +254,86 @@ the backup you just took is one command away.
 
 ---
 
+## The staging rehearsal
+
+Rehearse a deploy before it touches the server: `scripts/deploy/staging.sh` plays the whole of it
+inside WSL (Ubuntu 24.04, as on the box), held to the box's limits rather than the laptop's. It
+deploys 0.1.5 the way the box has it, cuts over to the release with `citar-deploy`, measures, upgrades,
+rolls back, plants two failed upgrades, drills a restore and undoes the cutover, checking the other
+sites' stand-ins answer before and after every step. It changes the machine it runs on (a `citar`
+account, nginx, a slice, `vm.swappiness`), so it refuses anything but WSL; never run it on a server.
+
+**What makes WSL look like the box.** A slice, `citar-staging.slice`, that every staged unit joins
+(and every `systemd-run` of `citar-deploy` and `citar-admin`, through `CITAR_DEPLOY_SLICE`), with the
+box's memory and swap (`MemoryMax=961M`, `MemorySwapMax=2G`) and its one vCPU: one CPU of the laptop
+(`AllowedCPUs=`, `--cpu`), so the slice's units take turns on it as the box's do and their CPU
+weights decide between them, slowed by `CPUQuota=` to the box's speed (`--cpu-quota`, default 60%: a
+laptop core is about 1.6 times the box's) in 10 ms periods (`--cpu-period`), so it is a slower core
+rather than a fast one switched off for 40 ms in every 100; `vm.swappiness` 10, as the box has it; a ballast in the slice holding the other sites' resident memory (`--ballast-mb`, the
+operator's own measurement of the box, which the repository does not record); and two stand-in
+sites, an nginx server block and a small Python site doing 25 ms of CPU a request (php-fpm's
+stand-in), listed in `/etc/citar/deploy-checks.conf`. Before anything is measured, probes prove each
+limit binds: the slice's files read back as asked, a process in it may run on its one CPU alone, a
+unit with a small `MemoryMax` and no swap is killed by the kernel (the slice's `oom_kill` rises), and
+a busy loop gets the quota's share of the CPU and no more. `probes --without-cpu-quota` is the probe
+that must fail: it takes the quota away, checks the busy loop then gets more than the quota's share,
+puts the quota back and reads the slice's files again, and exits 0 only when all of that held.
+`IOWeight=` cannot be proven in WSL (its virtual disk weighs no one's IO); it is the box's alone.
+
+**The releases.** As your own account in WSL (podman, rootless), from a clone of the commit being
+deployed (never under `/mnt`, nor its output): the release's wheel and three planted ones, each made
+into a deploy bundle.
+
+```bash
+bash scripts/deploy/staging_wheels.sh --clone ~/citar --out ~/citar-staging
+#   the cutover's release: the clone's own wheel, built in maturin's container (pinned by digest)
+#   with the release's flags, though CI builds the release's own in the manylinux_2_28 image; so
+#   for a real release or a dry run, its linux-x64 wheel and constraints: --cutover-from <folder>
+#   (an unpacked bundle.py bundle holds both)
+#   X.Y.Z-rc.1 (the next patch release): one empty migration, an upgrade that migrates
+#   X.Y.Z-rc.2: a second migration, and its server exits right after migrating
+#   X.Y.Z-rc.3: the same, but its server exits before migrating
+#   --bundles-only makes the bundles again from wheels already built (after a change to deploy/)
+```
+
+**The run.** As root, from copies of the two scripts on WSL's own disk (never under `/mnt/c`):
+
+```bash
+sudo bash staging.sh setup --ballast-mb N --repo ~/citar      # the limits, their probes, 0.1.5
+sudo bash staging.sh probes --without-cpu-quota                # the probe fails without the quota (exit 0)
+sudo bash staging.sh run --bundle ~/citar-staging/bundles/citar-deploy-V \
+    --rc1 .../citar-deploy-X.Y.Z-rc.1 --rc2 .../citar-deploy-X.Y.Z-rc.2 --rc3 .../citar-deploy-X.Y.Z-rc.3 \
+    --host-mb 128
+sudo bash staging.sh cleanup --keep-logs /mnt/c/<somewhere>    # everything undone, then checked gone
+```
+
+`run` checks, each on a line of its own (`ok` or `FAILED`), and exits 0 only when all of them pass:
+
+| Step | What must hold |
+|---|---|
+| before anything | the slice as setup left it: its files read back (memory, swap, the quota, the one CPU), the ballast held, the stand-in running, `vm.swappiness` 10; otherwise `run` stops there |
+| `cutover` | 0.1.5 archived, the release staged, verified as `citar` in the slice, switched and healthy within 60 s, its WebSocket upgrade through nginx |
+| the measurements | the first administrator made with `citar-admin create-user --password-stdin`; the host machine's settings set to what server mode computes for one CPU and 961 MB (`GET /api/servers` names the host machine; `PUT /api/machines/{id}/settings`); a 4-bot game of 40 rounds; three lab duels played by the job host inside `citar.service`, its `ready` at 240 MB held by `RLIMIT_DATA`; no OOM kill; with the lab running, the stand-in's p95 within twice its idle p95 plus 50 ms at the unit's own `CPUWeight=` (other weights are measured beside it); with `--host-mb`, the duels again at that memory figure |
+| `install` of rc.1 | it migrates, answers as rc.1 |
+| `rollback` | refused without `--restore-backup`, naming the backup the migrating install took, nothing changed; then accepted with it: the previous release serving at its own revision |
+| `install --reinstall` of rc.1 | healthy again |
+| `install` of rc.2 | undone by itself, the database restored from the switch's backup, rc.1 serving at its revision, exit 1 |
+| `install` of rc.3 | undone by itself without a restore, exit 1 |
+| rc.2 again, interrupted | a TERM during its health wait undoes it the same way, no `run.*` copies left |
+| backup and drill | `citar-backup` whole and integrity-checked; a second CITAR on a copy of it, on another port, signs the administrator in and reads its accounts |
+| `uncutover` | 0.1.5 back, answering directly and through its site, `citar-lab` running |
+
+The logs are in `/var/lib/citar-staging/logs/run-<stamp>/`: each step's output, `measure.json`
+(memory per phase: idle, the game, the lab and each weight's load, as `citar.service`'s own peak and
+systemd's `MemoryCurrent`/`MemoryPeak`; the job host's resident peak and its runs' peaks; seconds
+a round; the stand-in's and CITAR's response times), `watch.jsonl` (the timeline, sampled four times
+a second) and `report.json` (each `pip install` scope's time and peak, the switches' downtime, the
+slice's peak and what held it). The figures that settled `citar.service`'s `CPUWeight=`, `IOWeight=`,
+`MemoryMax=` and `MemoryHigh=` are written beside them in `deploy/citar.service`; the host machine's
+memory figure the box should use (128 MB) is the one `--host-mb` proves.
+
+---
+
 ## Capacity
 
 One vCPU and 961 MB. Games are CPU-bound, so roughly **one game at a time** before turns slow and

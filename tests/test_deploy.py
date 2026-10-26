@@ -148,11 +148,14 @@ class OneDefinition(unittest.TestCase):
         self.assertEqual(service["ReadWritePaths"], "/var/lib/citar")
         self.assertEqual(service["EnvironmentFile"], "/etc/citar/citar.env")
         self.assertEqual(service["Environment"], "CITAR_STATE_DIR=/var/lib/citar")
-        self.assertEqual((service["CPUWeight"], service["IOWeight"]), ("50", "50"))
+        # Settled by the staging rehearsal (design/phase5-release.md P5.14), with the measurement beside them.
+        self.assertEqual((service["CPUWeight"], service["IOWeight"]), ("20", "20"))
         self.assertEqual((service["MemoryMax"], service["MemoryHigh"], service["OOMScoreAdjust"]),
                          ("400M", "320M", "500"))
         text = unit_text("citar.service")
         self.assertIn("stays under MemoryHigh\n# with 40 MB to spare", text, "the MemoryHigh rule beside the limits")
+        self.assertIn("Measured by the staging rehearsal", text, "the measured peaks beside the limits")
+        self.assertIn("settled by the staging\n# rehearsal's response-time gate", text, "the measurement beside the weights")
         self.assertNotIn("-m citar", service["ExecStart"])
 
     def test_the_other_scripts_take_this_server_s_paths(self):
@@ -338,7 +341,7 @@ class WizardInstall(unittest.TestCase):
                               documentation="https://games.example.org")
         unit = self.targets["citar.service"]
         unit.parent.mkdir(parents=True)
-        unit.write_text(units.service_unit(other).replace("CPUWeight=50", "CPUWeight=20"), encoding="utf-8")
+        unit.write_text(units.service_unit(other).replace("CPUWeight=20", "CPUWeight=50"), encoding="utf-8")
         seen = []
 
         def this_install(env_file, state_dir, documentation):
@@ -356,7 +359,7 @@ class WizardInstall(unittest.TestCase):
             self.assertEqual(seen, [(other.env_file, other.state_dir, "https://games.example.org")])
             for name, text in units.rendered(other).items():
                 self.assertEqual(self.targets[name].read_text(encoding="utf-8"), text, name)
-            self.assertIn("CPUWeight=50", unit.read_text(encoding="utf-8"), "this release's directives")
+            self.assertIn("CPUWeight=20", unit.read_text(encoding="utf-8"), "this release's directives")
             run.assert_not_called()
             notes.clear()
             self.assertEqual(self.server.refresh_units(), 0)

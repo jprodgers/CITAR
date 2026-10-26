@@ -245,9 +245,20 @@ With the owner's go-ahead, from the release's wheel (design/phase5-release.md P5
 
 1. `python scripts/deploy/bundle.py 0.1.6`: the deploy bundle, the wheel fetched from the release and checked with
    `gh attestation verify` before anything reaches the server.
-2. The staging rehearsal in WSL with that bundle (`scripts/deploy/staging.sh setup`, `run`, `cleanup`, as root
-   inside WSL only), with `--ballast-mb` from the private deploy log and the `--cpu-quota` recorded by the last
-   rehearsal.
+2. The staging rehearsal in WSL with that bundle (the runbook's "The staging rehearsal"), from a clone of the tag in
+   WSL's own disk (`~/citar` below, holding the tag `v0.1.5` too; nothing under `/mnt`):
+   - Unpack the bundle there (reading the tarball from `/mnt/c` is fine; nothing is written under `/mnt`):
+     `mkdir -p ~/citar-staging && tar -xzf <the bundle>.tar.gz -C ~/citar-staging`. The folder
+     `~/citar-staging/citar-deploy-0.1.6` is `run`'s `--bundle`, and it holds the release's wheel and constraints.
+   - As your own account, the three planted releases (0.1.7-rc.1 to rc.3; about 12 minutes):
+     `bash scripts/deploy/staging_wheels.sh --clone ~/citar --out ~/citar-staging --cutover-from ~/citar-staging/citar-deploy-0.1.6`.
+   - As root, from copies of `scripts/deploy/staging.sh` and `staging_check.py` on WSL's disk (about 15 minutes):
+     `staging.sh setup --ballast-mb <the other sites' memory, from the private deploy log> --repo ~/citar
+     --cpu-quota <the last rehearsal's>`; `staging.sh probes --without-cpu-quota`, which must exit 0 (the CPU probe fails without the
+     quota, and the quota is back); `staging.sh run --bundle ~/citar-staging/citar-deploy-0.1.6 --rc1
+     ~/citar-staging/bundles/citar-deploy-0.1.7-rc.1 --rc2 ~/citar-staging/bundles/citar-deploy-0.1.7-rc.2 --rc3
+     ~/citar-staging/bundles/citar-deploy-0.1.7-rc.3 --host-mb 128`, which must exit 0; then
+     `staging.sh cleanup --keep-logs <a folder of your own>`.
 3. Copy the bundle to the server; make `/etc/citar/deploy-checks.conf` from the private deploy log.
 4. `sudo bash deploy/citar-deploy.sh cutover --bundle <dir> --plan`, read it, then the same without `--plan`.
    Rollback: `sudo citar-deploy uncutover`.
@@ -255,7 +266,9 @@ With the owner's go-ahead, from the release's wheel (design/phase5-release.md P5
 ## 10. After
 
 - The first administrator: `sudo citar-admin create-user ...`.
-- The host's machine settings from the staging measurement.
+- The host's machine settings from the staging measurement: its memory figure **128 MB** (the Servers page, or
+  `PUT /api/machines/<host>/settings` with `capabilities.cpu.memory_mb`), not server mode's default of 240, which
+  with the server's own peak would pass `citar.service`'s `MemoryHigh=320M`.
 - One lab game's seconds per round on the server compared with staging's, and the ratio recorded as the next
   rehearsal's `--cpu-quota`.
 - Helpers re-registered with the new helper.
