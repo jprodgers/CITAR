@@ -197,7 +197,7 @@ planted_release() {
 }
 
 # A wheel folder's version as its tag names it (bundle.py's V): 0.1.6rc1 -> 0.1.6-rc.1.
-tagged() { printf '%s' "$1" | sed -e 's/rc\([0-9]*\)$/-rc./' -e 's/a\([0-9]*\)$/-alpha./' -e 's/b\([0-9]*\)$/-beta./'; }
+tagged() { printf '%s' "$1" | sed -e 's/rc\([0-9]*\)$/-rc.\1/' -e 's/a\([0-9]*\)$/-alpha.\1/' -e 's/b\([0-9]*\)$/-beta.\1/'; }
 
 if [ "$BUNDLES_ONLY" -eq 1 ]; then
   for from in "$OUT"/wheels/*/; do
