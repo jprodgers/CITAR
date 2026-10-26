@@ -224,7 +224,7 @@ is the tests' `RandomAgent`; a model plays through tools instead, outside the dr
 ### The extension
 
 `citar._engine` (`crates/citar-py`) is the engine as Python sees it: a PyO3 extension, one abi3
-build per OS for every Python from 3.11. `engine_api.py` is the only module that reaches it (the
+build per platform for every Python from 3.11 ([Packaging and releases](#packaging-and-releases)). `engine_api.py` is the only module that reaches it (the
 one door), through `citar/_facade_rust.py`.
 
 - **The GIL is released for every call that does work.** A game is a `Mutex` around the engine's
@@ -828,6 +828,56 @@ Check a change with `node --check` on a **`.mjs` copy** of the file: on a `.js` 
 as CommonJS, where some module-level syntax errors do not error. A broken template literal inside a
 ternary once passed that check and broke the entire module graph in the browser. CI does it the
 right way.
+
+---
+
+## Packaging and releases
+
+One build makes everything a release ships, and it runs on every pull request, so a release can contain nothing a
+pull request did not build and test (design/phase5-release.md; [packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md)
+for the routes, [packaging/RELEASING.md](https://github.com/jprodgers/CITAR/blob/main/packaging/RELEASING.md) for the
+procedure).
+
+**The build matrix.** `.github/workflows/package.yml` builds each file natively on the runner of its platform, never
+cross-compiled or emulated:
+
+| Platform | Runner | The game | The helper |
+|---|---|---|---|
+| Windows x64 | `windows-latest` | `cp311-abi3-win_amd64` wheel; the PyInstaller bundle as the Inno Setup installer and a zip | `citar-helper-windows-x64.exe`; the packaged `.zip` |
+| macOS arm64 | `macos-15` | `cp311-abi3-macosx_11_0_arm64` wheel | `citar-helper-macos-arm64`; the packaged `.tar.gz` |
+| macOS x64 | `macos-15-intel` | `cp311-abi3-macosx_11_0_x86_64` wheel | `citar-helper-macos-x64`; the packaged `.tar.gz` |
+| Linux x64 | `ubuntu-24.04` | `cp311-abi3-manylinux_2_28_x86_64` wheel (in PyPA's manylinux_2_28 image); the `linux/amd64` image | `citar-helper-linux-x64`; the packaged `.tar.gz` (in the same image) |
+| Linux arm64 | `ubuntu-24.04-arm` | `cp311-abi3-manylinux_2_28_aarch64` wheel; the `linux/arm64` image | `citar-helper-linux-arm64`; the packaged `.tar.gz` |
+
+The extension is `abi3-py311`, so one wheel a platform serves CPython 3.11 and every later release. Each wheel is
+installed in a fresh venv on its runner on Python 3.11 and 3.14 and smoke-tested (`scripts/ci/smoke_wheel.py`: the
+label, `citar doctor`, a verifiable job host, one seeded lab game); the bundle, the images and the install scripts are
+run and checked the same way on theirs. Then `assemble` collects every file into one folder, which must be exactly
+`release.py assets V`, and holds every build to one: one version, one label, one build id and one jobs build across
+the wheels, the ten helpers, the bundle, both images and the install scripts' runs, and one result hash for the seeded
+game, so the server's job host and every released helper can share CPU work (the jobs build, [above](#cpu-jobs-and-the-jobs-build)).
+It writes `SHA256SUMS`, the notes and the package managers' manifests.
+
+**`release.yml` builds nothing.** It calls `test.yml` and `package.yml`, and only for a pushed `v*` tag signs the
+helper manifest (the protected `helper-signing` environment, a prebuilt binary), attests every file, and publishes
+PyPI, the image (the very image `package.yml` tested, saved and loaded by its id) and the GitHub release, in an order
+that makes nothing public before the signature and the provenance exist. A dispatch is a dry run. Every rule here is
+a check on every pull request (`scripts/ci/check_workflows.py`).
+
+**The version and the label.** Cargo's `[workspace.package] version` is the version; `scripts/release.py` holds every
+other place that names it to it and bumps them together. Each release build sets `CITAR_BUILD_ID` to its label
+(`v0.1.6` on a tag, `v0.1.6-dryrun+<sha7>` on a dry run, `ci+<sha7>` otherwise), which the engine compiles in as
+`build_info()["label"]` and `citar doctor`, `/api/meta` and `citar-helper --version` report; a build with none says
+`unknown`. The label is a display: the engine's build id is computed from its sources and the version, never from it.
+
+**The server's release layout.** A server runs a release, never a source tree: each release is a venv of its own in
+`/opt/citar/releases/<version>`, made from that release's wheel with its tested constraints, root's and read-only to
+the service; `/opt/citar/current` links to the one that runs, switched by one rename; the state is
+`/var/lib/citar`, the unit's working directory. The unit runs the release's console script, which puts its own
+`bin/` folder first on `sys.path`, and the job host starts with `python -P`, so neither a source tree nor the
+service-writable state directory is ever on the import path. `deploy/citar.service` is the one unit definition
+(`citar setup --server` writes it with its paths, `citar/wizard/units.py`), and `deploy/citar-deploy.sh` installs,
+switches and rolls back releases ([server/DEPLOY.md](server/DEPLOY.md#the-release-layout)).
 
 ---
 
