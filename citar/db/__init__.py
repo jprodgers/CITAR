@@ -32,6 +32,9 @@ _engine: Optional[Engine] = None
 _factory: Optional[sessionmaker] = None
 _lock = threading.RLock()
 _url: Optional[str] = None
+#: Bumped whenever the database this process talks to may have changed under a cache: a new engine, a disposed one,
+#: tables created. ``citar.servers`` keys its cache of the machines on it.
+_epoch = 0
 
 
 def _tune_sqlite(dbapi_connection, _record):
@@ -51,7 +54,7 @@ def _tune_sqlite(dbapi_connection, _record):
 
 def configure(url: Optional[str] = None, *, echo: bool = False) -> Engine:
     """Build (or rebuild) the engine. Safe to call again; the previous engine is disposed."""
-    global _engine, _factory, _url
+    global _engine, _factory, _url, _epoch
     with _lock:
         url = url or settings.get().db_url
         if _engine is not None:
@@ -70,6 +73,7 @@ def configure(url: Optional[str] = None, *, echo: bool = False) -> Engine:
         if url.startswith("sqlite"):
             event.listen(engine, "connect", _tune_sqlite)
         _engine, _factory, _url = engine, sessionmaker(bind=engine, expire_on_commit=False, future=True), url
+        _epoch += 1
         return engine
 
 
@@ -78,9 +82,36 @@ def engine() -> Engine:
     return _engine or configure()
 
 
+def configured() -> bool:
+    """Whether this process has opened its database: the server (at boot) and the tests do; command-line tools
+    that play games without a server (``citar bench``) do not, and code that only indexes what they do (the games
+    index of ``citar.server.ownership``) leaves the database alone rather than opening the default one."""
+    return _engine is not None
+
+
+def epoch() -> int:
+    """A number that changes whenever the database behind ``session()`` may have changed wholesale (configured,
+    disposed, its tables created): what a cache of its rows is keyed on."""
+    return _epoch
+
+
 def create_all():
-    """Create any missing tables. Alembic owns migrations; this is for tests and first boot."""
+    """Create any missing tables, and the rows the baseline revision seeds. Alembic owns migrations; this is for
+    tests, and for a version-less database the boot stamps (``boot.migrate``)."""
+    global _epoch
     Base.metadata.create_all(engine())
+    seed_defaults()
+    _epoch += 1
+
+
+def seed_defaults():
+    """Add the default hardware classes (``models.HARDWARE_CLASS_SEEDS``) that are missing, as the baseline
+    revision does, so a database made by ``create_all`` prices compute the same way as a migrated one."""
+    from .models import HardwareClass, HARDWARE_CLASS_SEEDS
+    with session() as s:
+        for seed in HARDWARE_CLASS_SEEDS:
+            if s.get(HardwareClass, seed["id"]) is None:
+                s.add(HardwareClass(**seed, match={}, priority=0, is_default=True))
 
 
 @contextlib.contextmanager
@@ -111,8 +142,9 @@ def healthy() -> bool:
 
 def dispose():
     """Drop all pooled connections. Tests use this between throwaway databases."""
-    global _engine, _factory, _url
+    global _engine, _factory, _url, _epoch
     with _lock:
         if _engine is not None:
             _engine.dispose()
         _engine = _factory = _url = None
+        _epoch += 1

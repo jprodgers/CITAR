@@ -1,6 +1,7 @@
 // Bots page: bot profiles (named, revisioned configurations of the scripted bot), their parameter editor, the
 // rankings computed from every lab game, and a form that queues an A/B experiment between profiles.
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { el, clear, toast, modal, confirmBox, fmt } from "./util.js";
 import { pageHeader } from "./nav.js";
 import * as auth from "./auth.js";
@@ -11,7 +12,10 @@ const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"
 const charted = new Map();          // entry id -> colour
 let rankOpts = { difficulty: "Prince", factorial: false, minSeats: 1 };
 
-const isAdmin = () => { const u = auth.user(); return !!u && u.role === "admin"; };
+// Profiles and lab experiments are owned items: making one takes a capability (edit_bots, run_lab: an
+// administrator's by default), changing one managing it (the server says so per profile: can_manage).
+const canEditBots = () => auth.can("edit_bots");
+const canRunLab = () => auth.can("run_lab");
 const field = (label, input, hint) => el("div", { class: "field" }, el("label", {}, label), input,
   hint ? el("span", { class: "muted small" }, hint) : null);
 
@@ -30,14 +34,14 @@ export async function renderBots(root, rules, sub) {
   const tab = new URLSearchParams(location.hash.split("?")[1] || "").get("tab") || "profiles";
   const intro = el("div", { class: "card" },
     el("div", { class: "row" }, el("h2", { style: { margin: 0 } }, "Bots"), el("span", { class: "grow" }),
-      isAdmin() ? el("button", { onclick: () => newProfile() }, "New profile") : null,
+      canEditBots() ? el("button", { onclick: () => newProfile() }, "New profile") : null,
       el("button", { class: "primary", onclick: () => abDialog(rules) }, "A/B test…")),
     el("p", { class: "muted small" },
       "A profile is the scripted bot with a chosen code version, aggression and parameter overrides — every number " +
       "the bot decides with is a parameter. Profiles are what lab experiments, lobby seats and benchmark opponents " +
       "play. Ratings come from every lab game: each game's finishing order is split into head-to-head results and " +
       "fitted on the Elo scale (400 points ≈ 10:1 odds of finishing ahead). An entry is one exact configuration " +
-      "(its fingerprint) at one difficulty, so each revision of a profile, and each code change of the live bot, " +
+      "(its fingerprint) at one difficulty, so each revision of a profile, and each build that changes the bot, " +
       "gets its own line."),
     el("div", { class: "tabbar" },
       ...[["profiles", "Profiles"], ["rankings", "Rankings"]].map(([k, label]) =>
@@ -52,8 +56,11 @@ export async function renderBots(root, rules, sub) {
 // ---------------------------------------------------------------------------------------------------------------------
 // profiles list
 // ---------------------------------------------------------------------------------------------------------------------
+// The engine list only labels each profile's code: without it (a request that failed) the ids stand in.
+const engineList = () => api.botEngines().catch(() => ({ engines: [] }));
+
 async function drawProfiles(body, rules) {
-  const [{ profiles }, { engines }] = await Promise.all([api.botProfiles(), api.botEngines()]);
+  const [{ profiles }, { engines }] = await Promise.all([api.botProfiles(), engineList()]);
   const eng = Object.fromEntries(engines.map((e) => [e.id, e]));
   const card = el("div", { class: "card" });
   const table = el("table", { class: "list jobs" }, el("tr", {},
@@ -84,7 +91,7 @@ async function newProfile() {
 }
 
 async function forkProfile(p) {
-  if (!isAdmin()) { toast("Only administrators can create profiles.", "error"); return; }
+  if (!canEditBots()) { toast("Your account cannot create bot profiles; an administrator can allow it.", "error"); return; }
   try {
     const f = await api.forkBotProfile(p.id, `${p.name} (copy)`);
     toast(`Forked ${p.name}`);
@@ -152,7 +159,7 @@ async function drawRankings(body) {
         el("td", {}, tick, color ? el("span", { class: "swatch", style: { background: color } }) : null),
         el("td", { class: "muted" }, e.rated ? `${i + 1}` : "–"),
         el("td", {}, e.profile ? el("a", { href: `#/bots/${encodeURIComponent(e.profile)}`, onclick: (ev) => ev.stopPropagation() }, e.name) : e.name,
-          el("div", { class: "muted small" }, `${e.code}${Object.keys(e.params || {}).length ? ` · ${Object.keys(e.params).length} overrides` : ""}` +
+          el("div", { class: "muted small" }, `${e.code}${e.build ? ` · build ${e.build}` : ""}${Object.keys(e.params || {}).length ? ` · ${Object.keys(e.params).length} overrides` : ""}` +
             `${e.aggression != null ? ` · aggression ${e.aggression}` : ""} · ${e.experiments.join(", ")}`)),
         el("td", {}, e.rated ? el("span", {}, el("b", {}, fmt(e.rating)), el("span", { class: "muted small" }, ` ±${fmt(e.se)}`)) : el("span", { class: "muted" }, "no rival games")),
         el("td", {}, e.seats ?? "–"),
@@ -282,13 +289,24 @@ function ratingChart(series) {
 // ---------------------------------------------------------------------------------------------------------------------
 async function renderProfile(page, rules, pid) {
   let info, engines;
-  try { [info, { engines }] = await Promise.all([api.botProfile(pid), api.botEngines()]); }
-  catch (e) { page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots"))); return {}; }
+  try { [info, { engines }] = await Promise.all([api.botProfile(pid), engineList()]); }
+  catch (e) {
+    // a profile this viewer may not see, or that is not there, is the router's "not found" page (its sign-in for a
+    // visitor whose link is old)
+    if (e.status === 404) throw e;
+    page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots")));
+    return {};
+  }
   const saved = info.profile;
-  const editable = !saved.builtin && isAdmin();
+  // A profile whose code the engine refuses (a frozen snapshot of 0.1.5) has no schema: it is shown read-only with
+  // the refusal, and its owner can still delete it.
+  let schema, refused = null;
+  try { schema = await api.botSchema(saved.engine); }
+  catch (e) { refused = e.message; schema = { engine: saved.engine, groups: [] }; }
+  const owner = !saved.builtin && !!saved.can_manage;
+  const editable = owner && !refused;
   const draft = { name: saved.name, description: saved.description || "", tags: [...(saved.tags || [])], engine: saved.engine,
     aggression: saved.aggression, params: JSON.parse(JSON.stringify(saved.params || {})), archived: !!saved.archived, parent: saved.parent };
-  let schema = await api.botSchema(draft.engine);
   let filter = "", changedOnly = false;
   const openGroups = new Set();
   const head = el("div", { class: "card" });
@@ -308,15 +326,17 @@ async function renderProfile(page, rules, pid) {
     head.append(
       el("div", { class: "row" }, el("a", { href: "#/bots" }, "← Bots"), el("span", { class: "grow" }),
         saved.builtin ? el("span", { class: "pill muted" }, "built-in: fork it to change it") : el("span", { class: "pill" }, `revision ${saved.rev}`),
-        el("button", { onclick: () => forkProfile(saved) }, "Fork"),
-        el("button", { onclick: () => abDialog(rules, [saved.id]) }, "A/B test…"),
-        editable ? el("button", { class: "danger", onclick: async () => {
+        refused ? null : el("button", { onclick: () => forkProfile(saved) }, "Fork"),
+        refused ? null : el("button", { onclick: () => abDialog(rules, [saved.id]) }, "A/B test…"),
+        saved.builtin ? null : shareButton("bot_profile", saved.id, saved.name, saved, () => {}),
+        owner ? el("button", { class: "danger", onclick: async () => {
           if (!(await confirmBox("Delete profile", `Delete ${saved.name}? Its games stay in the rankings under its fingerprint.`))) return;
           try { await api.deleteBotProfile(saved.id); location.hash = "#/bots"; } catch (e) { toast(e.message, "error"); }
         } }, "Delete") : null),
+      refused ? el("p", { class: "bad" }, refused) : null,
       el("div", { class: "profile-grid" },
         field("Name", el("input", { value: draft.name, disabled: !editable, oninput: (e) => { draft.name = e.target.value; drawSave(); } })),
-        field("Code", el("select", { disabled: !editable, onchange: async (e) => {
+        field("Code", refused ? el("input", { value: draft.engine, disabled: true }) : el("select", { disabled: !editable, onchange: async (e) => {
           const next = e.target.value;
           const nextSchema = await api.botSchema(next);
           const keys = new Set(nextSchema.groups.flatMap((g) => g.params.map((p) => p.key)));
@@ -375,6 +395,11 @@ async function renderProfile(page, rules, pid) {
     groupsBox);
     function drawGroups() {
       clear(groupsBox);
+      if (refused) {
+        groupsBox.append(el("p", { class: "muted" }, "The parameters can't be shown, for the reason above. The stored overrides:"),
+          el("pre", { class: "small" }, JSON.stringify(saved.params || {}, null, 1)));
+        return;
+      }
       if (!schema.groups.length) { groupsBox.appendChild(el("p", { class: "muted" }, "This code has no parameters.")); return; }
       for (const g of schema.groups) {
         const ps = g.params.filter((p) => (!changedOnly || p.key in draft.params)
@@ -531,7 +556,8 @@ export async function profileFor(value) {
 
 // A select of bot profiles bound to obj[key], listed in ranking order. With `best`, the first option is "Best bot",
 // which the server resolves to the best-ranked profile when the game is created (and records in the seat).
-// A null value means `fallback`. onChange gets the chosen profile.
+// A null value means `fallback`. onChange gets the chosen profile. Picking one drops a seat bot's "(best)" mark
+// (`chosen_as`, which the server set when it pinned "Best bot"): the bot picked is no longer the one chosen as best.
 export function profileSelect(obj, key = "profile", onChange = null, { best = false, fallback = "standard" } = {}) {
   const s = el("select", { title: "Which bot plays this seat. Listed best first by their rating on this server (Bots page)." });
   if (obj[key] == null) obj[key] = fallback;
@@ -549,6 +575,7 @@ export function profileSelect(obj, key = "profile", onChange = null, { best = fa
   });
   s.onchange = async () => {
     obj[key] = s.value;
+    if (key === "profile") delete obj.chosen_as;
     if (onChange) onChange(await profileFor(s.value));
   };
   return s;
@@ -558,7 +585,7 @@ export function profileSelect(obj, key = "profile", onChange = null, { best = fa
 // A/B experiment form
 // ---------------------------------------------------------------------------------------------------------------------
 export async function abDialog(rules, preselect = []) {
-  if (!isAdmin()) { toast("Only administrators can queue lab experiments.", "error"); return; }
+  if (!canRunLab()) { toast("Your account cannot queue lab experiments; an administrator can allow it.", "error"); return; }
   const { profiles } = await api.botProfiles();      // ranking order
   const chosen = new Set(preselect.length ? preselect : []);
   if (chosen.size === 1 && !chosen.has("standard")) chosen.add("standard");
@@ -582,23 +609,33 @@ export async function abDialog(rules, preselect = []) {
       "Twelve games show a large difference; subtle ones need 24–40.";
   };
   const num = (key, attrs) => el("input", { type: "number", value: f[key], ...attrs, oninput: (e) => { f[key] = +e.target.value; update(); } });
+  // The turn limit stops at the speed's last turn, which is where a game ends anyway: the server refuses one past it.
+  const lastTurn = (speed) => (rules.max_turns && rules.max_turns[speed]) || 1000;
+  const turns = num("turns", { min: 0, max: lastTurn(f.speed) });
+  const setSpeed = (speed) => {
+    f.speed = speed;
+    turns.max = lastTurn(speed);
+    if (f.turns > lastTurn(speed)) { f.turns = lastTurn(speed); turns.value = f.turns; }
+    update();
+  };
   const content = el("div", { class: "col ab-form" },
     el("p", { class: "muted small" }, "The chosen profiles take the seats in turn (A, B, A, B…) and the seat order rotates every game, so each " +
       "profile plays every start position on the same maps and seeds — which removes map and position luck from the comparison. " +
-      "Profiles are frozen when the experiment is queued: editing one later doesn't change it."),
+      "Profiles are resolved when the experiment is queued, and \"latest\" is pinned to the version it names then: editing a profile later doesn't change it."),
     field("Profiles", pickBox),
     el("div", { class: "grid-scenario" },
       field("Players", num("players", { min: 2, max: 8 })),
       field("Games", num("games", { min: 1, max: 500 })),
-      field("Turn limit (0 = full game)", num("turns", { min: 0, max: 1000 })),
+      field("Turn limit (0 = full game)", turns),
       field("Map size", el("select", { onchange: (e) => { f.size = e.target.value; } },
         ...Object.entries(rules.map_sizes).map(([k, v]) => el("option", { value: k, selected: k === f.size }, v.name)))),
-      field("Speed", el("select", { onchange: (e) => { f.speed = e.target.value; } },
-        ...Object.keys(rules.speeds).map((k) => el("option", { value: k, selected: k === f.speed }, k)))),
+      field("Speed", el("select", { onchange: (e) => setSpeed(e.target.value) },
+        ...Object.keys(rules.speeds).map((k) => el("option", { value: k, selected: k === f.speed },
+          rules.max_turns && rules.max_turns[k] ? `${k} (${rules.max_turns[k]} turns)` : k)))),
       field("Difficulty", el("select", { onchange: (e) => { f.difficulty = e.target.value; } },
         ...rules.difficulty_list.map((k) => el("option", { value: k, selected: k === f.difficulty }, k)))),
       field("Priority", num("priority", { min: -100, max: 100 })),
-      field("Seed", num("seed", { min: 0 })),
+      field("Seed", num("seed", { min: 0, max: Number.MAX_SAFE_INTEGER })),
       field("Name (optional)", el("input", { value: "", placeholder: "ab-…", oninput: (e) => { f.name = e.target.value; } }))),
     field("Maps (game i uses map i mod n)", el("div", { class: "row small" }, ...Object.entries(rules.map_types).map(([k, v]) => el("label", {},
       el("input", { type: "checkbox", checked: f.maps.includes(k), onchange: (e) => { f.maps = e.target.checked ? [...f.maps, k] : f.maps.filter((x) => x !== k); } }), ` ${v.name}`)))),

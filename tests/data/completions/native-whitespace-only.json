@@ -1,0 +1,33 @@
+{
+ "name": "native-whitespace-only",
+ "note": "whitespace is not parsed for calls but kept as the text",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "  \n\t",
+   "reasoning": "",
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "  \n\t",
+   "thinking": "",
+   "tool_calls": [],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "  \n\t"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

@@ -31,7 +31,7 @@ Left-drag paints, right-drag pans, the wheel zooms, `Ctrl+Z` undoes. **Check** l
 a start position on ice, a civilization with no fresh water — and saving fixes what it can.
 
 Maps are plain JSON in `saves/maps/<id>.json`; the format is documented at the top of
-`citar/engine/maps.py`. Choose a saved map under *Map* in the lobby. Seats without a start position
+`crates/citar-engine/src/mapgen/document.rs`. Choose a saved map under *Map* in the lobby. Seats without a start position
 get one assigned.
 
 ---
@@ -79,6 +79,17 @@ Each case's end state is saved, and **Open game** loads it — so when a model d
 strange, you can go and look at the position it did it in.
 
 Probe files are JSON in `saves/probes/<id>.json`; the format is at the top of `citar/probes.py`.
+
+### Hybrid runs
+
+A run can play its subject as a [hybrid seat](AI-players#hybrid-seats) instead: choose **Hybrid** in
+the run dialog and which kinds of diplomacy the model decides (trade only by default). Each offer or
+message then goes to the seat's bot first, and to the model only when it is a kind the model decides;
+the results say which side answered each case ("answered by its bot", "answered by its model", or
+"answered by nobody" when the model's prompt did not run, the case's error saying why). A
+turn case plays the bot's turn, then calls the model's diplomat whatever happened (every trigger
+forced), and records that call. A hybrid run holds no lease on its machine: its model's answers and
+its diplomat calls are pooled prompts, so a grant for pooled prompts covers the whole run.
 
 ### Checking a probe without a GPU
 

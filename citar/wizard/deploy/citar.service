@@ -1,0 +1,97 @@
+[Unit]
+Description=CITAR — Civ Inspired Tool for AI Research
+Documentation=https://citar.example.com
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting. The box is small; a transient OOM should recover on its own rather
+# than needing a human. (This key belongs in [Unit] — systemd ignores it in [Service].)
+StartLimitIntervalSec=0
+
+# The release layout (design/phase5-release.md P5.13.1): each release is a venv of its own under
+# /opt/citar/releases/<version>, and /opt/citar/current links to the one that runs, switched
+# atomically by citar-deploy. `citar setup --server` writes this file with its own paths put in
+# (citar/wizard/units.py), so there is one definition.
+
+[Service]
+Type=exec
+User=citar
+Group=citar
+# A console script puts its own bin/ folder first on sys.path, never the working directory, so
+# neither a source tree nor this service-writable state directory is ever on the import path. The
+# job host it starts runs with python -P for the same reason.
+ExecStart=/opt/citar/current/venv/bin/citar serve
+# All state, and the working directory. A default the env file may override (settings from
+# EnvironmentFile= win over Environment=), so a server whose env file names no state directory
+# still keeps everything here rather than in the account's home.
+WorkingDirectory=/var/lib/citar
+Environment=CITAR_STATE_DIR=/var/lib/citar
+EnvironmentFile=/etc/citar/citar.env
+
+Restart=on-failure
+RestartSec=5s
+
+# --- memory ---
+# This box has 961 MB and also serves three other sites. The lab's job host is a child of this
+# service (0.1.6 has no citar-lab unit), so these limits hold the server AND its games. What
+# MemoryMax guarantees is that when something DOES go wrong, the kernel kills CITAR rather than
+# choosing another site's database or php-fpm.
+# The rule for the figures: the server's measured peak plus the job host's memory figure (the host
+# machine's settings; server mode's default is about 240 MB on this box) stays under MemoryHigh
+# with 40 MB to spare. MemoryHigh throttles the whole cgroup, the web server included, so sizing
+# against MemoryMax would slow every page whenever a lab game ran.
+# Measured by the staging rehearsal (design/phase5-release.md P5.14; WSL held to this box's memory,
+# its other sites' share of it and its one vCPU): the server's peak is 148 MB, at its first start
+# on a new database (90 MB idle, 96 MB with a 4-bot game); with the lab, the job host adds its own
+# 32 MB and a duel's 6 MB at most. So 400M/320M stay, and the host's memory figure is set to 128 MB
+# rather than the default 240 MB: 148 + 128 + 40 = 316, under 320 (the lab plays at 128 MB too).
+MemoryMax=400M
+MemoryHigh=320M
+# Prefer this process when the OOM killer is choosing a victim, for the same reason.
+OOMScoreAdjust=500
+
+# --- CPU and IO ---
+# Under contention the other sites win: 20, 0.1.5's lab unit's weight, settled by the staging
+# rehearsal's response-time gate (one CPU at this box's speed). With the job host playing lab games
+# without pause, a stand-in site doing 25 ms of CPU a request must answer within twice its idle p95
+# plus 50 ms (138 ms): its p95 was 58 ms at CPUWeight=20, 63 at 35 and 66 at 50, so 20 gives the
+# other sites the most. The web server is not starved by it: inside this cgroup the job host runs at
+# nice 10 with one thread, and CITAR's own requests through nginx kept a p95 of 63 ms meanwhile, as
+# at 50 (64). IOWeight= cannot be measured in WSL; it follows CPUWeight=.
+CPUWeight=20
+IOWeight=20
+
+# --- filesystem ---
+# The service can write to its state directory and nothing else. A bug, or a compromise through
+# the web app, then cannot touch the other sites' files, nginx config or anyone's home directory.
+# citar-admin runs every admin command with these same settings.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/citar
+PrivateTmp=yes
+
+# --- privileges ---
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# AF_UNIX is needed too: SQLite and the resolver use it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# --- logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=citar
+
+[Install]
+WantedBy=multi-user.target

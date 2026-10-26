@@ -1,0 +1,114 @@
+# What explains each gap between the Rust engine's bot games and the Python baselines
+# (crates/citar-engine/DESIGN.md P2.4.4), read by
+#
+#   python scripts/refcheck/summarize.py refcheck/baseline/python/small.jsonl <rust small run> \
+#       --gate refcheck/baseline/explained.toml --min-games 120 --checked <rust checks run>
+#
+# Each [[gap]] names a metric ("cities", ..., "wars_declared", "cities_captured", or "rate:<name>"),
+# a checkpoint ("100", "200", "300", "end", or "game" for a rate), a stratum (the map size) and the
+# reason: an intended engine fix by its id, a bot fix, or a measured cause with its evidence.
+#
+# Each entry here also records the band its gap was measured in: `ratio = [lo, hi]`, B's mean over
+# A's (`points = [lo, hi]` for a rate, B's share minus A's, in percentage points). An entry answers
+# only a gap inside its band; one that moved out of it (larger, or the other way) fails the gate as
+# "the explained gap moved", since the reason describes another gap. The bands below are the
+# measured 90% interval of the ratio (the interval of B - A over A's mean) widened by 0.05 each side
+# and rounded outward.
+#
+# A gap still owed a fix carries `pending = "<package>"`. `--no-pending` (package 2-12's
+# precondition) fails on every such entry, used or not.
+#
+# Package 2-07's runs (build 7b6450fd4979; DESIGN.md "As built in 2-07"): small x120, standard and
+# large x50. The paired games named below are crates/citar-testkit/examples/paired.rs: each of the
+# corpus's 40 recorded Python bot games played on by basic-1 on the Rust engine from the same state,
+# so on the same map and starts.
+
+# ---- The settler escort fix: more defenders early, and the cities they make safe ---------------
+# Package 2-03's seventh fix (crates/citar-bot/src/basic1/settlers.rs): only a settler's own
+# escort on its tile makes a trip through danger safe, where Python counted any military unit of
+# its civilization there, so a settler in a garrisoned city walked out alone. Settlers now wait
+# for escorts and their cities build defenders for them (memory.need_escort). Measured: in the
+# paired games from turn 1 the Rust civilizations have 15% more military at turn 59 (t = 4.0, 26
+# games of 40 higher) and 9% more cities at turn 119 (t = 3.7); a test build with Python's rule
+# put back closes both (military 1.03x at 59, t = 0.7; cities 1.03x at 119, t = 1.4), and in the
+# baseline's games with that build military at 100 is 1.00x on small (120 games; 600 games:
+# 42.3 against this build's 47.3) and 1.06x on standard, cities at 100 1.03x on small and 1.11x
+# on standard. The gap closes by turn 200 (military 1.03x on small, 1.12x on standard with its
+# interval clear of 0 but under 15%).
+
+[[gap]]
+metric = "military"
+checkpoint = "100"
+stratum = "small"
+reason = "Package 2-03's settler escort fix (settlers.rs, fix 7): a settler in danger waits for its own escort and its city builds a defender, so armies are larger early. Paired games: +15% military at turn 59 (t = 4.0), 1.03x with Python's rule put back; baseline with that rule: 1.00x at 100 (120 games), 42.3 against 47.3 over 600 games."
+# Measured 1.13x, interval of the ratio [1.08, 1.19] (120 games; 600 games: 1.10x, [1.05, 1.14]).
+ratio = [1.02, 1.24]
+
+[[gap]]
+metric = "military"
+checkpoint = "100"
+stratum = "standard"
+reason = "Package 2-03's settler escort fix (settlers.rs, fix 7), as on small: with Python's rule put back, 1.06x at 100 (50 games, interval through 0)."
+# Measured 1.22x, interval of the ratio [1.13, 1.33] (25 games against Python's 14).
+ratio = [1.07, 1.39]
+
+[[gap]]
+metric = "cities"
+checkpoint = "100"
+stratum = "standard"
+reason = "Package 2-03's settler escort fix (settlers.rs, fix 7): escorted settlers survive to found their cities. Paired games: +9% cities at turn 119 (t = 3.7), 1.03x with Python's rule put back; baseline with that rule: 1.11x at 100 on standard (under the 15% bound), 1.03x on small."
+# Measured 1.16x, interval of the ratio [1.09, 1.24] (25 games against Python's 14).
+ratio = [1.04, 1.29]
+
+# ---- Fewer wars on small maps: localized, not yet attributed ---------------------------------
+# Measured: 3.25 +- 0.08 wars a game in 600 Rust small games against Python's 3.97 +- 0.26 (60), so
+# 0.82x; standard and large show no gap (0.96x and 0.93x at the end, intervals through 0). Traced
+# stage by stage (Python's baseline games replayed with the bots' war memory logged at each round:
+# 60 games to turn 130 and 24 whole; 120 Rust games the same way), the pipeline agrees up to turn
+# 130: the share of idle civ-rounds where consider_war could start a war (6.9% and 8.6%), the
+# preparations started (11.4 and 11.2 per 1000 idle civ-rounds) and wars declared (0.40 and 0.41 a
+# game). Past turn 130 the Rust bots start about 8% fewer preparations per idle civ-round and turn
+# fewer into wars (32% against 37%; more time out, 17% against 13%), each about 1.5 standard errors
+# with 24 Python games. Played on from the corpus's turn-120 states, the Rust bots declare as many
+# wars as Python's did (0.95x, t = -0.7); from turn 1 on the same maps, 0.80x (t = -2.6). So the
+# late game's logic answers a given position as Python's did, and the gap grows from the positions
+# the Rust bots' own early game reaches. The escort fix is not it: with Python's rule put back the
+# Rust bots declare fewer wars still (3.05 a game over 600 games). Accepted by the owner on
+# 2026-10-09, with the conquests below, rather than chased in a package 2-07f: the bots are
+# retrained in 0.1.7, which sets their aggression anew.
+#
+# Fewer wars also mean fewer conquests, which no entry here needs (G3 judges an event metric only
+# where Python's mean is at least 1 a game, and at the end the interval runs through 0), but which
+# accepting this gap accepts too. Cities captured a game on small maps, Python (60 games)
+# against Rust, ratio and the 90% interval of B - A:
+#   120 games: at 200 0.28 -> 0.13, 0.47x [-0.31, 0.00]; at 300 0.98 -> 0.62, 0.63x [-0.75, -0.05];
+#              at the end 1.22 -> 0.88, 0.72x [-0.78, 0.06]
+#   600 games: at 200 0.28 -> 0.11, 0.38x [-0.33, -0.03]; at 300 0.98 -> 0.62, 0.64x [-0.72, -0.05];
+#              at the end 1.22 -> 0.98, 0.80x [-0.67, 0.12]
+# So from 20% to 60% fewer cities change hands, most of it before turn 300; the share of games with
+# a capture is 58% against 52% (G4's bound is 25 points). On standard and large maps captures are
+# level (0.94x and 1.03x at the end).
+
+[[gap]]
+metric = "wars_declared"
+checkpoint = "200"
+stratum = "small"
+reason = "Accepted (owner, 2026-10-09; the bots are retrained in 0.1.7), measured, not attributed (see the block above): Rust's small games declare about 18% fewer wars past turn 130 (600 games, 3.25 against 3.97 at the end); the war pipeline agrees with Python's stage by stage to turn 130 and from Python's turn-120 positions. Captures fall with them (0.38x at 200, 0.64x at 300 over 600 games)."
+# Measured 0.81x, interval of the ratio [0.62, 0.99] (120 games; 600 games: 0.78x, [0.62, 0.93]).
+ratio = [0.56, 1.05]
+
+[[gap]]
+metric = "wars_declared"
+checkpoint = "300"
+stratum = "small"
+reason = "Accepted (owner, 2026-10-09), measured, not attributed: as at 200 (the block above)."
+# Measured 0.81x, interval of the ratio [0.67, 0.95] (120 games; 600 games: 0.78x, [0.65, 0.90]).
+ratio = [0.62, 1.00]
+
+[[gap]]
+metric = "wars_declared"
+checkpoint = "end"
+stratum = "small"
+reason = "Accepted (owner, 2026-10-09), measured, not attributed: as at 200 (the block above)."
+# Measured 0.83x, interval of the ratio [0.70, 0.95] (120 games; 600 games: 0.82x, [0.71, 0.93]).
+ratio = [0.65, 1.01]

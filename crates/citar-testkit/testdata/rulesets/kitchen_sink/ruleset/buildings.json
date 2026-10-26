@@ -1,0 +1,27 @@
+{
+  "Kitchen Sink Works": {
+    "name": "Kitchen Sink Works",
+    "cost": 100,
+    "maintenance": 1,
+    "production": 2,
+    "requiredTech": "Engineering",
+    "uniques": [
+      "Cost increases by [30] when built",
+      "[-10]% production cost",
+      "Obsolete with [Electricity]",
+      "[-50]% Food consumption by specialists [in this city]",
+      "Can be purchased for [150] [Faith] [in all cities]",
+      "Never destroyed when the city is captured"
+    ],
+    "id": "kitchen_sink_works"
+  },
+  "Kitchen Sink Wonder": {
+    "name": "Kitchen Sink Wonder",
+    "cost": 500,
+    "isWonder": true,
+    "culture": 3,
+    "requiredTech": "Philosophy",
+    "uniques": ["Triggers victory"],
+    "id": "kitchen_sink_wonder"
+  }
+}

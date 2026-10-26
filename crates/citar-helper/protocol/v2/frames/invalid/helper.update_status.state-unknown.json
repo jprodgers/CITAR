@@ -1,0 +1,12 @@
+{
+  "frame": {
+    "t": "update_status",
+    "ts": 1760000000.0,
+    "state": "pondering",
+    "version": "0.1.7",
+    "message": "CITAR helper 0.1.7 is available; updates are set to notify."
+  },
+  "code": "value",
+  "path": "state",
+  "why": "a state the protocol does not name"
+}

@@ -4,6 +4,7 @@
 import { api, NotSignedIn, setCsrfToken } from "./api.js";
 import * as auth from "./auth.js";
 import { el, clear, toast } from "./util.js";
+import { agentState } from "./seats.js";
 
 const root = document.getElementById("app");
 const titleEl = document.getElementById("m-title");
@@ -42,12 +43,14 @@ function meter(label, used, total, text) {
 }
 
 function gameState(g) {
+  if (g.crashed) return ["bad", "engine error"];
   if (g.phase !== "playing") return ["over", g.winner != null ? "finished" : "over"];
   if (g.paused) return (g.pause_reason && g.pause_reason.kind === "disconnect") ? ["bad", "paused: server down"] : ["warn", "paused"];
   const st = Object.values(g.agent_status || {});
   if (st.includes("reconnecting")) return ["warn", "reconnecting"];
   if (Object.keys(g.agent_errors || {}).length) return ["bad", "AI error"];
-  if (st.includes("thinking")) return ["live", "AI thinking"];
+  if (st.includes("thinking") || st.includes("diplomat")) return ["live", "AI thinking"];
+  if (st.includes("queued")) return ["live", "AI waiting for its machine"];
   return ["live", "playing"];
 }
 
@@ -86,7 +89,7 @@ async function overview() {
       h.disk ? meter("Disk", h.disk.used, h.disk.total, `${bytes(h.disk.used)} of ${bytes(h.disk.total)}`) : null,
       (status.workers || []).length ? el("div", {}, el("h3", {}, "Connected workers"),
         ...status.workers.map((w) => el("div", { class: "row m-line" }, el("span", {}, `● ${w.hostname || w.server_id}`),
-          el("span", { class: "muted" }, `${w.models} models · ${w.in_flight}/${w.max_concurrent} busy`)))) : null));
+          el("span", { class: "muted" }, `${w.models} models · ${w.in_flight}/${w.slots} busy`)))) : null));
   }
   const live = games.filter((x) => x.phase === "playing");
   out.push(section("Running games", ...(live.length ? live.map(gameRow) : [empty("Nothing running right now.")]),
@@ -97,7 +100,8 @@ async function overview() {
 function gameRow(x) {
   const [cls, label] = gameState(x);
   const n = (type) => (x.seats || []).filter((s) => s.type === type).length;
-  const seats = [[n("llm"), "AI model"], [n("human"), "human"], [n("bot"), "bot"], [n("mcp"), "MCP client"]]
+  const seats = [[n("llm"), "AI model"], [n("hybrid"), "hybrid seat"], [n("human"), "human"], [n("bot"), "bot"],
+    [n("mcp"), "MCP client"]]
     .filter(([k]) => k).map(([k, what]) => `${k} ${what}${k === 1 ? "" : "s"}`).join(", ");
   const cur = (x.players || []).find((p) => p.id === x.current_player);
   return el("a", { class: "m-row", href: `#/game/${x.id}` },
@@ -130,7 +134,8 @@ async function gamePage(gid) {
       el("span", { class: `m-pill ${cls}` }, label)),
     d.paused && d.pause_reason && d.pause_reason.kind === "disconnect"
       ? el("p", { class: "m-alert" }, `${d.pause_reason.message}. The game resumes by itself when it answers again.`) : null,
-    d.can_manage && d.phase === "playing"
+    d.crashed ? el("p", { class: "m-alert" }, `${d.pause_reason ? d.pause_reason.message : "The game engine stopped."} (turn ${d.crashed.turn})`) : null,
+    d.can_manage && d.phase === "playing" && !d.crashed
       ? el("div", { class: "row m-actions" },
           el("button", { class: d.paused ? "primary" : "", onclick: async (e) => {
             e.target.disabled = true;
@@ -145,10 +150,10 @@ async function gamePage(gid) {
       el("div", { class: "m-row-main" },
         el("div", {}, d.full ? `${i + 1}. ` : "", el("b", {}, p.name), p.alive ? "" : " (eliminated)"),
         el("div", { class: "muted small" },
-          [p.seat === "llm" ? (p.model || "AI model") : p.seat, p.era,
+          [p.seat === "hybrid" ? (p.label || "hybrid") : p.seat === "llm" ? (p.model || "AI model") : p.seat, p.era,
            p.cities != null ? `${p.cities} cities · pop ${p.pop} · ${p.techs} techs` : null].filter(Boolean).join(" · ")),
         p.status === "reconnecting" ? el("div", { class: "warn small" }, "reconnecting to its model server…")
-          : p.status === "thinking" ? el("div", { class: "live small" }, "thinking…") : null,
+          : agentState({ type: p.seat }, p.status) ? el("div", { class: "live small" }, agentState({ type: p.seat }, p.status)) : null,
         p.error ? el("div", { class: "bad small" }, p.error) : null),
       p.score != null ? el("span", { class: "m-score" }, p.score) : null)))));
   out.push(section("Recent news", ...(d.events.length
@@ -179,19 +184,17 @@ async function benchPage() {
 
 async function reportsPage() {
   titleEl.textContent = "Reports";
-  let list = [];
-  if (auth.isAdmin()) {
-    const r = await api.reports();
-    list = (Array.isArray(r) ? r : r.reports || []).map((x) => ({ id: x.id, name: x.title || x.name || x.id, status: x.status,
-      when: x.created || x.created_at, url: x.status === "done" || !x.status ? `/api/reports/${x.id}/html` : null }));
-  } else {
-    const r = await api.get("/api/shared/reports");
-    list = (r.reports || []).map((x) => ({ id: x.id, name: x.name, when: x.created_at, url: x.public_url || `/r/${x.id}` }));
-  }
-  if (!list.length) return [section(null, empty("No reports yet."))];
+  // the reports this account may see (its own, shared with it, members' and published ones), as the desktop's
+  // Reports page lists them (/api/reports, the report item routes)
+  const r = await api.reports();
+  const list = (Array.isArray(r) ? r : r.reports || []).map((x) => ({ id: x.id, name: x.title || x.name || x.id,
+    status: x.status, when: x.created || x.created_at, mine: x.can_manage,
+    url: x.status === "done" ? `/api/reports/${encodeURIComponent(x.id)}/html` : null }));
+  if (!list.length) return [section(null, empty("No reports yet. Build one on the desktop site."))];
   return [section(null, ...list.slice(0, 40).map((x) => el(x.url ? "a" : "div", { class: "m-row", href: x.url || null, target: x.url ? "_blank" : null, rel: "noopener" },
     el("div", { class: "m-row-main" }, el("div", { class: "m-row-title" }, x.name),
-      el("div", { class: "muted small" }, x.when ? new Date(typeof x.when === "number" ? x.when * 1000 : x.when).toLocaleString() : "")),
+      el("div", { class: "muted small" }, [x.when ? new Date(typeof x.when === "number" ? x.when * 1000 : x.when).toLocaleString() : "",
+        x.mine === false ? "shared with you" : ""].filter(Boolean).join(" · "))),
     x.status && x.status !== "done" ? el("span", { class: "m-pill" }, x.status) : el("span", { class: "muted" }, "›"))))];
 }
 

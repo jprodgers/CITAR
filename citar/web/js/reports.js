@@ -1,9 +1,11 @@
 // Reports page: the report builder (what to include), the list of generated reports, and a viewer. Reports are only
 // made when you run them; each is a self-contained HTML page with charts and analysis you can download and share.
-import { api } from "./api.js";
+import { api, shareKey } from "./api.js";
 import { el, clear, toast, confirmBox, keepPlace } from "./util.js";
 import { pageHeader, secs } from "./nav.js";
 import { llmForm } from "./lobby.js";
+import { shareButton } from "./share.js";
+import * as auth from "./auth.js";
 
 const SECTION_INFO = {
   summary: ["Summary", "Headline numbers and the key findings"],
@@ -29,8 +31,13 @@ const ITEM_KIND = { benchmark_run: "Benchmark run", probe: "Probe", probe_run: "
 
 let draft = null;
 
+// What a report's figures come from (the server's reports.POOLING).
+const POOLING = [["own", "What you may see", "Your own games, runs and experiments, and those shared with you; costs on your own machines."],
+  ["both", "Plus pooled averages", "Adds per-model averages over the games other members pool, once enough members are behind each."],
+  ["pooled", "Pooled averages only", "Only the averages over other members' pooled games."]];
+
 function blankSpec(preset) {
-  return { title: preset ? preset.name : "CITAR report", preset: preset ? preset.id : null, range: { preset: "all", from: "", to: "" },
+  return { title: preset ? preset.name : "CITAR report", preset: preset ? preset.id : null, pooling: "own", range: { preset: "all", from: "", to: "" },
     scope: { servers: [], models: [], kinds: [], items: [] }, sections: preset ? [...preset.sections] : ["summary", "costs", "models"],
     options: { electricity_basis: "full", lifespan_range: [2, 6] },
     narrative: { enabled: false, server_id: null, model_id: null, profile_id: null, instructions: "" } };
@@ -88,9 +95,13 @@ function renderBuilder(card, ctx, redraw) {
   const range = el("select", { onchange: (e) => { S.range.preset = e.target.value; redraw(); } },
     ...[["all", "All time"], ["today", "Today"], ["24h", "Last 24 hours"], ["7d", "Last 7 days"], ["30d", "Last 30 days"], ["90d", "Last 90 days"],
       ["365d", "Last year"], ["custom", "Custom dates"]].map(([v, t]) => el("option", { value: v, selected: S.range.preset === v }, t)));
+  const pooling = el("select", { onchange: (e) => { S.pooling = e.target.value; redraw(); } },
+    ...POOLING.map(([v, t]) => el("option", { value: v, selected: (S.pooling || "own") === v }, t)));
   card.appendChild(el("div", { class: "grid2", style: { marginTop: "10px" } },
     field("Title", el("input", { value: S.title, oninput: (e) => { S.title = e.target.value; } })),
     field("Period", range),
+    field("Data", el("div", { class: "col" }, pooling,
+      el("span", { class: "muted small" }, (POOLING.find(([v]) => v === (S.pooling || "own")) || POOLING[0])[2]))),
     S.range.preset === "custom" ? field("From", el("input", { type: "date", value: S.range.from, onchange: (e) => { S.range.from = e.target.value; } })) : null,
     S.range.preset === "custom" ? field("To (inclusive)", el("input", { type: "date", value: S.range.to, onchange: (e) => { S.range.to = e.target.value; } })) : null));
   // scope
@@ -151,8 +162,10 @@ function renderBuilder(card, ctx, redraw) {
     el("b", {}, "Have a model write an analysis"), el("span", { class: "muted small" }, "Optional. The computed findings and charts never need a model; this adds a written summary. Its cost is tracked like any other use.")), narrBox);
   if (n.enabled) {
     // the picker writes server_id / model_id / profile_id straight into the narrative settings
-    const redrawNarr = () => { clear(narrBox).append(llmForm(n, redrawNarr, { seat: false })); };
-    narrBox.append(llmForm(n, redrawNarr, { seat: false }));
+    // a narrative is a pooled prompt (citar.reports.NARRATIVE_PURPOSE): the machines show that admission
+    const narrForm = () => llmForm(n, redrawNarr, { seat: false, purpose: "pooled" });
+    const redrawNarr = () => { clear(narrBox).append(narrForm()); };
+    narrBox.append(narrForm());
     narr.appendChild(el("div", { class: "field" }, el("label", {}, "Extra instructions (optional)"),
       el("textarea", { rows: 2, value: n.instructions, placeholder: "e.g. Focus on whether the desktop is worth it compared with the Claude API.", oninput: (e) => { n.instructions = e.target.value; } })));
   }
@@ -179,7 +192,9 @@ function renderList(card, reports, ctx, redrawBuilder) {
     const sm = r.summary || {};
     const busy = ["queued", "running"].includes(r.status);
     table.appendChild(el("tr", {},
-      el("td", {}, el("b", {}, r.title), r.narrative ? el("div", { class: "muted small" }, "with written analysis") : null),
+      el("td", {}, el("b", {}, r.title), r.narrative ? el("div", { class: "muted small" },
+        // a narrative that was skipped or failed says why (the report's page says it too)
+        r.status === "done" && r.narrative_written === false ? (r.narrative_note || "without its written analysis") : "with written analysis") : null),
       el("td", {}, el("span", { class: `pill ${busy ? "live" : r.status === "done" ? "good" : r.status === "failed" ? "bad" : ""}` }, r.status),
         busy ? el("div", { class: "muted small" }, r.progress || "") : null,
         r.status === "failed" ? el("div", { class: "bad small", title: r.trace || "" }, r.error) : null,
@@ -192,13 +207,14 @@ function renderList(card, reports, ctx, redrawBuilder) {
         r.status === "done" ? el("a", { class: "button small primary", href: `#/reports/${r.id}` }, "View") : null,
         r.status === "done" ? el("a", { class: "button small", href: `/api/reports/${r.id}/html`, target: "_blank" }, "Open in new tab") : null,
         r.status === "done" ? el("a", { class: "button small", href: `/api/reports/${r.id}/download` }, "Download") : null,
-        !busy ? el("button", { class: "small", title: "Run the same report again with fresh data", onclick: async () => {
+        !busy && r.can_manage && auth.can("run_reports") ? el("button", { class: "small", title: "Run the same report again with fresh data", onclick: async () => {
           try { await api.rerunReport(r.id); ctx.refreshList(true); } catch (e) { toast(e.message, "error"); }
         } }, "Re-run") : null,
         el("button", { class: "small", title: "Load this report's choices into the builder", onclick: async () => {
           try { draft = (await api.report(r.id)).spec; redrawBuilder(); window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { toast(e.message, "error"); }
         } }, "Edit copy"),
-        !busy ? el("button", { class: "small danger", onclick: async () => {
+        shareButton("report", r.id, r.title, r, () => ctx.refreshList(true)),
+        !busy && r.can_manage ? el("button", { class: "small danger", onclick: async () => {
           if (!(await confirmBox("Delete report", `Delete "${r.title}"?`))) return;
           try { await api.deleteReport(r.id); ctx.refreshList(true); } catch (e) { toast(e.message, "error"); }
         } }, "Delete") : null))));
@@ -207,17 +223,30 @@ function renderList(card, reports, ctx, redrawBuilder) {
 }
 
 // ---------------------------------------------------------------------------- viewer
+// One report, framed. It opens for whoever may see it, a visitor with no account included when it is published or
+// they hold its link (whose key the frame and the links carry: they cannot send the page's header). A report the
+// viewer may not see is the router's "not found" (the 404 is thrown to it).
 async function renderViewer(root, id) {
+  const info = await api.report(id);
+  const meta = info.meta || {};
   const page = el("div", { class: "report-viewer" });
   root.appendChild(page);
-  page.appendChild(pageHeader("reports"));
-  let meta = {};
-  try { meta = (await api.report(id)).meta; } catch (e) { toast(e.message, "error"); }
-  page.appendChild(el("div", { class: "row viewer-bar" }, el("a", { href: "#/reports" }, "← Reports"), el("b", {}, meta.title || id),
+  if (auth.user()) page.appendChild(pageHeader("reports"));
+  const key = shareKey();
+  const q = key ? `?k=${encodeURIComponent(key)}` : "";
+  const done = meta.status === "done";
+  page.appendChild(el("div", { class: "row viewer-bar" }, auth.user() ? el("a", { href: "#/reports" }, "← Reports") : null,
+    el("b", {}, meta.title || id),
     el("span", { class: "grow" }),
-    el("a", { class: "button small", href: `/api/reports/${id}/html`, target: "_blank" }, "Open in new tab"),
-    el("a", { class: "button small primary", href: `/api/reports/${id}/download` }, "Download HTML")));
-  page.appendChild(el("iframe", { class: "report-frame", src: `/api/reports/${id}/html`, title: meta.title || "Report",
-    sandbox: "allow-popups allow-popups-to-escape-sandbox" }));
+    shareButton("report", id, meta.title || id, info, () => { location.reload(); }),
+    done ? el("a", { class: "button small", href: `/api/reports/${id}/html${q}`, target: "_blank" }, "Open in new tab") : null,
+    done ? el("a", { class: "button small primary", href: `/api/reports/${id}/download${q}` }, "Download HTML") : null));
+  if (done) {
+    page.appendChild(el("iframe", { class: "report-frame", src: `/api/reports/${id}/html${q}`, title: meta.title || "Report",
+      sandbox: "allow-popups allow-popups-to-escape-sandbox" }));
+  } else {
+    page.appendChild(el("p", { class: "muted" }, meta.status === "failed" ? `This report failed: ${meta.error || ""}`
+      : `This report is ${meta.status || "not ready"}: ${meta.progress || ""}`));
+  }
   return {};
 }

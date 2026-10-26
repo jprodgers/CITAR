@@ -13,7 +13,9 @@ An environment file (``citar.env``), and optionally the system integration that 
 
 * a **systemd unit** with the memory limit, the writable state directory and the sandboxing already
   set, so that CITAR is the process the kernel kills under pressure rather than whatever else is on
-  the box;
+  the box; with it the admin wrapper (``citar-admin``, which runs each command as the service runs)
+  and the nightly backup. They are ``deploy/``'s files, written with this server's paths
+  (:mod:`citar.wizard.units`), so a server installed this way runs exactly what citar-deploy installs;
 * an **nginx site** that proxies to CITAR and passes the WebSocket upgrade through, written to sit
   alongside existing sites rather than replacing them;
 * a **TLS certificate** through certbot, using the nginx plugin so renewal keeps working.
@@ -30,13 +32,14 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import prompts
+from . import prompts, units
 
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", re.I)
 
@@ -85,7 +88,8 @@ class ServerPlan:
         if self.admin:
             lines.append(f"Create the first administrator: {self.admin['handle']}")
         if self.install_systemd:
-            lines.append("Install and enable the citar systemd service")
+            lines.append("Install and enable the citar systemd service, citar-admin, and the nightly backup "
+                         "(citar-backup.timer)")
         if self.install_nginx:
             lines.append(f"Add an nginx site for {self.domain} (existing sites untouched)")
         if self.run_certbot:
@@ -95,12 +99,20 @@ class ServerPlan:
 
 def run(args) -> int:
     """Ask the server-setup questions, then apply the answers."""
+    if getattr(args, "refresh_units", False):
+        return refresh_units()
     plan = ServerPlan()
     _ask_identity(plan, args)
     _ask_storage(plan, args)
     _ask_signin(plan, args)
     _ask_system_integration(plan, args)
 
+    # Checked again here, not only at the prompt: an unattended run takes --state-dir unasked.
+    problem = state_dir_problem(plan.state_dir) if _is_root() else None
+    if problem:
+        prompts.note(problem)
+        prompts.say("Nothing was changed.")
+        return 1
     if not prompts.confirm_plan("CITAR will:", plan.summary()):
         prompts.say("Nothing was changed.")
         return 1
@@ -159,7 +171,11 @@ def _ask_storage(plan: ServerPlan, args) -> None:
     prompts.heading("Where does the data go?")
     default_state = Path(args.state_dir) if args.state_dir else (
         SYSTEM_STATE_DIR if _is_root() else Path.home() / ".local" / "share" / "citar")
-    plan.state_dir = Path(prompts.ask("State directory", str(default_state)))
+    # A system install writes these paths into the unit and the scripts, which read a space, a quote, `$` or `%`
+    # differently from a shell's or the user's idea of them; and it gives the state directory to the service account.
+    check_path = units.path_problem if _is_root() else None
+    check_state = state_dir_problem if _is_root() else None
+    plan.state_dir = Path(prompts.ask("State directory", str(default_state), validate=check_state))
     prompts.note("Saved games, the database, benchmark runs and reports. Back this up.")
 
     choice = prompts.ask_choice(
@@ -178,7 +194,7 @@ def _ask_storage(plan: ServerPlan, args) -> None:
         plan.db_url = ""                                        # settings derives it from the state dir
 
     default_env = SYSTEM_ENV_PATH if _is_root() else plan.state_dir / "citar.env"
-    plan.env_path = Path(prompts.ask("Environment file", str(args.env_path or default_env)))
+    plan.env_path = Path(prompts.ask("Environment file", str(args.env_path or default_env), validate=check_path))
 
 
 def _ask_signin(plan: ServerPlan, args) -> None:
@@ -330,60 +346,86 @@ def _write_env(plan: ServerPlan) -> None:
 
 
 def _install_systemd(plan: ServerPlan) -> None:
-    """Write, enable and start the service unit."""
+    """Write citar.service, citar-admin and the backup from deploy/'s files, then enable and start them."""
     if not _user_exists(SERVICE_USER):
         subprocess.run(["useradd", "--system", "--home", str(plan.state_dir),
                         "--shell", "/usr/sbin/nologin", SERVICE_USER], check=False)
+    plan.state_dir.mkdir(parents=True, exist_ok=True)
     shutil.chown(plan.state_dir, SERVICE_USER, SERVICE_USER)
+    os.chmod(plan.state_dir, 0o750)
 
-    unit = _render_unit(plan)
-    path = Path("/etc/systemd/system/citar.service")
-    path.write_text(unit, encoding="utf-8", newline="\n")
-    prompts.note(f"Wrote {path}")
+    install = units.this_install(plan.env_path, plan.state_dir, plan.public_origin)
+    try:
+        files = units.rendered(install)
+    except ValueError as exc:
+        prompts.note(f"Not installing the service: {exc}.")
+        prompts.note("Choose a state directory and an environment file without such characters, and run this again.")
+        return
+    _write_units(files)
     subprocess.run(["systemctl", "daemon-reload"], check=False)
     subprocess.run(["systemctl", "enable", "--now", "citar"], check=False)
-    prompts.note("Service enabled and started.")
+    subprocess.run(["systemctl", "enable", "--now", "citar-backup.timer"], check=False)
+    prompts.note("Service enabled and started; the nightly backup is on (citar-backup.timer).")
 
 
-def _render_unit(plan: ServerPlan) -> str:
-    """The systemd unit for this deployment."""
-    executable = shutil.which("citar") or f"{sys.executable} -m citar.server"
-    return f"""[Unit]
-Description=CITAR game server
-Documentation={plan.public_origin}
-After=network-online.target
-Wants=network-online.target
+def _write_units(files: dict[str, Optional[str]]) -> None:
+    """Install :func:`units.rendered`'s files where :data:`units.TARGETS` puts them, each only when it differs."""
+    for name, text in files.items():
+        target = Path(units.TARGETS[name])
+        if text is None:
+            prompts.note(f"Not writing {target}: this copy of CITAR has no citar-admin command to run.")
+            continue
+        try:
+            same = not target.is_symlink() and target.read_text(encoding="utf-8") == text
+        except OSError:
+            same = False
+        if same:
+            prompts.note(f"{target} is up to date")
+            continue
+        _install_file(target, text, 0o755 if name.endswith(".sh") else 0o644)
+        prompts.note(f"Wrote {target}")
 
-[Service]
-Type=simple
-User={SERVICE_USER}
-Group={SERVICE_USER}
-EnvironmentFile={plan.env_path}
-ExecStart={executable} serve
-Restart=on-failure
-RestartSec=5
 
-# CITAR is the process that should die when the machine runs short of memory, not whatever else
-# is on this box. MemoryMax caps it; the OOM score makes the kernel pick it first.
-MemoryMax=400M
-OOMScoreAdjust=500
+def refresh_units() -> int:
+    """``citar setup --server --refresh-units``: write the unit, citar-admin and the backup again from this release,
+    for a server whose unit is installed, keeping the paths that unit names (its environment file, its state
+    directory and its documentation link). It asks nothing and starts nothing: install.sh's switch, which runs it
+    from the release it has just made current, reloads systemd and starts the service itself. Returns 0 when the
+    files are in place, 2 when there is no installed unit to take the paths from."""
+    unit = Path(units.TARGETS["citar.service"])
+    if not _is_root():
+        prompts.note(f"--refresh-units writes {unit} and the scripts beside it: run it as root.")
+        return 2
+    try:
+        installed = unit.read_text(encoding="utf-8")
+    except OSError as exc:
+        prompts.note(f"There is no unit to write again ({exc}): `citar setup --server` installs the service.")
+        return 2
+    service, about = dict(units.directives(installed, "Service")), dict(units.directives(installed, "Unit"))
+    env_file, state_dir = service.get("EnvironmentFile", "").lstrip("-"), service.get("WorkingDirectory", "")
+    if not env_file or not state_dir:
+        prompts.note(f"{unit} names no EnvironmentFile= or WorkingDirectory=: it is not one `citar setup` wrote, so "
+                     "it is left as it is.")
+        return 2
+    install = units.this_install(Path(env_file), Path(state_dir), about.get("Documentation") or units.DOCUMENTATION)
+    try:
+        files = units.rendered(install)
+    except ValueError as exc:
+        prompts.note(f"Not writing the unit again: {exc}.")
+        return 2
+    _write_units(files)
+    return 0
 
-# Sandboxing: the service writes to exactly one directory and needs nothing else.
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths={plan.state_dir}
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-LockPersonality=yes
 
-[Install]
-WantedBy=multi-user.target
-"""
+def _install_file(path: Path, text: str, mode: int) -> None:
+    """Write ``path`` whole and then rename it into place, so a crash leaves the old file, never half of one,
+    and a symbolic link already there (0.1.5's install linked citar-admin to a venv's own command) is
+    replaced rather than written through."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f".{path.name}.citar-setup")
+    staged.write_text(text, encoding="utf-8", newline="\n")
+    os.chmod(staged, mode)
+    os.replace(staged, path)
 
 
 def _install_nginx(plan: ServerPlan) -> None:
@@ -486,25 +528,117 @@ def _create_admin(plan: ServerPlan) -> None:
     """Create the first administrator, through the same code path the CLI uses."""
     os.environ.setdefault("CITAR_STATE_DIR", str(plan.state_dir))
     os.environ.setdefault("CITAR_DATA_DIR", str(plan.state_dir))
+    give = _is_root() and _user_exists(SERVICE_USER)
+    before = _paths_under(plan.state_dir) if give else set()
     try:
-        from .. import db
-        from ..auth import accounts, audit
-        from ..server import boot
-
-        boot.migrate()
-        with db.session() as session:
-            user = accounts.create_user(
-                session, handle=plan.admin["handle"], email=plan.admin["email"],
-                password=plan.admin["password"] or None, role="admin", status="active",
-                email_verified=True, display_name=plan.admin["handle"])
-            audit.record(session, "user.bootstrap_admin", actor=user,
-                         object_type="user", object_id=user.id)
-        prompts.note(f"Created administrator '{user.handle}'.")
+        prompts.note(f"Created administrator '{_bootstrap_admin(plan)}'.")
     except Exception as exc:
         prompts.note(f"Could not create the account ({type(exc).__name__}: {exc}).")
         prompts.note("Create it once the service is running:")
-        prompts.note(f"  citar admin create-admin --handle {plan.admin['handle']} "
+        prompts.note(f"  {_admin_command(plan)} create-admin --handle {plan.admin['handle']} "
                      f"--email {plan.admin['email']}")
+    finally:
+        # Even after a failure: a migration that ran part way may have made the database as root.
+        if give:
+            _give_to_service_user(plan.state_dir, before, plan.env_path)
+
+
+def _bootstrap_admin(plan: ServerPlan) -> str:
+    """Migrate the database and create the first administrator in it; returns the new account's handle."""
+    from .. import db
+    from ..auth import accounts, audit
+    from ..server import boot
+
+    boot.migrate()
+    with db.session() as session:
+        user = accounts.create_user(
+            session, handle=plan.admin["handle"], email=plan.admin["email"],
+            password=plan.admin["password"] or None, role="admin", status="active",
+            email_verified=True, display_name=plan.admin["handle"])
+        audit.record(session, "user.bootstrap_admin", actor=user,
+                     object_type="user", object_id=user.id)
+        accounts.on_first_admin(session, user)
+        return user.handle
+
+
+def _admin_command(plan: ServerPlan) -> str:
+    """How the operator runs an admin command on this server: the wrapper, which runs it as the service runs, when
+    it was installed; else the command itself (a server without systemd, where nothing else runs it)."""
+    if plan.install_systemd and Path(units.TARGETS["citar-admin.sh"]).is_file():
+        return "sudo citar-admin"
+    return "citar admin"
+
+
+#: The database files the in-process admin creation writes as root (settings' default, citar.db in the state
+#: directory) are the service's whatever made them first.
+_DATABASE_FILES = ("citar.db", "citar.db-wal", "citar.db-shm", "citar.db-journal")
+
+
+def _paths_under(state_dir: Path) -> set[str]:
+    """Every path in ``state_dir`` (itself included), without following a link."""
+    found = {str(state_dir)} if os.path.lexists(state_dir) else set()
+    for folder, folders, files in os.walk(state_dir):
+        found.update(os.path.join(folder, name) for name in folders + files)
+    return found
+
+
+def _give_to_service_user(state_dir: Path, before: set[str], env_path: Path) -> None:
+    """Give the service account what root's in-process admin creation made in its state directory: the entries that
+    were not there ``before`` it, and the database's files. Run as root, a new database, its write-ahead log or a
+    folder is root's, and the service (citar) could open the database but never write it again. Nothing that was
+    there already is touched, nor the environment file (root:citar 0640, whoever's folder it is in)."""
+    database = {str(state_dir / name) for name in _DATABASE_FILES}
+    try:
+        keep = os.path.realpath(env_path)
+    except OSError:
+        keep = ""
+    for path in sorted(_paths_under(state_dir)):
+        if (path in before and path not in database) or os.path.realpath(path) == keep:
+            continue
+        try:
+            info = os.lstat(path)
+            if info.st_uid == 0 and not stat.S_ISLNK(info.st_mode):
+                shutil.chown(path, SERVICE_USER, SERVICE_USER)
+        except OSError:
+            pass
+
+
+#: What a state directory CITAR already uses holds (citar/paths.py), any one of which marks it as CITAR's own.
+_STATE_ENTRIES = frozenset({"citar.db", "saves", "config", "benchmarks", "secret_key", "citar.env"})
+
+
+def _install_roots() -> list[Path]:
+    """Where CITAR itself is installed: this venv, its release layout's root when it runs from one, and the layout's
+    default prefix (install.sh --server's)."""
+    venv = Path(sys.prefix).resolve()
+    roots = [venv, Path(str(units.LAYOUT))]
+    if venv.parent.parent.name == "releases":
+        roots.append(venv.parent.parent.parent)
+    return roots
+
+
+def state_dir_problem(state_dir: Path | str) -> Optional[str]:
+    """Why a root install must not take ``state_dir`` as the service's state directory, or None when it may. The
+    folder is given to the service account (citar:citar 0750) and backed up whole, so it must be CITAR's alone: new,
+    empty, or already holding CITAR's state; never one holding, or held in, CITAR's own install (whose venvs are
+    root's and read-only to the service, and which an uninstall removes whole)."""
+    problem = units.path_problem(state_dir)
+    if problem:
+        return problem
+    path = Path(state_dir).resolve()
+    for root in _install_roots():
+        root = root.resolve()
+        if path == root or root in path.parents or path in root.parents:
+            return (f"{path} overlaps CITAR's own install at {root}: choose a folder of its own for the state "
+                    "(the default is /var/lib/citar)")
+    if path.exists():
+        if not path.is_dir():
+            return f"{path} is not a folder"
+        entries = {entry.name for entry in path.iterdir()} - {"lost+found"}
+        if entries and not entries & _STATE_ENTRIES:
+            return (f"{path} already holds files that are not CITAR's: choose a new or empty folder (the state "
+                    f"directory is given to the {SERVICE_USER} account and backed up whole)")
+    return None
 
 
 def _finish(plan: ServerPlan) -> None:
@@ -514,15 +648,16 @@ def _finish(plan: ServerPlan) -> None:
     prompts.note(f"State:         {plan.state_dir}")
     prompts.say("")
     if plan.install_systemd:
-        prompts.note("systemctl status citar      is it running")
-        prompts.note("journalctl -u citar -f      what it is doing")
+        prompts.note("systemctl status citar          is it running")
+        prompts.note("journalctl -u citar -f          what it is doing")
+        prompts.note("sudo citar-admin list-users     an admin command, run as the service runs")
     else:
         prompts.note("Start it with:")
         prompts.note(f"  env $(grep -v '^#' {plan.env_path} | xargs) citar serve")
     prompts.say("")
     prompts.note(f"Check it: curl -s -o /dev/null -w '%{{http_code}}' {plan.public_origin}/api/auth/config")
     if plan.registration == "invite":
-        prompts.note("Invite the first player:  citar admin invite --email them@example.com")
+        prompts.note(f"Invite the first player:  {_admin_command(plan)} invite --email them@example.com")
     prompts.say("")
     prompts.note("Then run `citar doctor` to confirm every part of the configuration.")
 

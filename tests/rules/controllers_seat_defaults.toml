@@ -1,0 +1,49 @@
+about = """
+A seat's handicap and automatic decisions follow its controller: people and models (human, llm,
+mcp) get a human's handicap and decide everything themselves; the bots, hybrid seats, city-states
+and the barbarians get the AI's handicap and let the engine decide.
+"""
+from = "tests/test_controllers.py::DefaultTests::test_defaults_follow_the_controller"
+
+[config]
+players = [
+  { controller = "human" },
+  { controller = "llm" },
+  { controller = "mcp" },
+  { controller = "bot" },
+  { controller = "hybrid" },
+]
+city_states = 1
+barbarians = "normal"
+
+[[step]]
+check = { what = "game" }
+subset = { majors = [0, 1, 2, 3, 4], city_states = [5], barbarians = 6 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { controller = "human", handicap = "human", auto = { un_vote = false, conquest = false, free_picks = false }, overrides = {} }
+
+[[step]]
+check = { what = "player", player = 1 }
+subset = { controller = "llm", handicap = "human", auto = { un_vote = false, conquest = false, free_picks = false } }
+
+[[step]]
+check = { what = "player", player = 2 }
+subset = { controller = "mcp", handicap = "human", auto = { un_vote = false, conquest = false, free_picks = false } }
+
+[[step]]
+check = { what = "player", player = 3 }
+subset = { controller = "bot", handicap = "ai", auto = { un_vote = true, conquest = true, free_picks = true } }
+
+[[step]]
+check = { what = "player", player = 4 }
+subset = { controller = "hybrid", handicap = "ai", auto = { un_vote = true, conquest = true, free_picks = true }, overrides = {} }
+
+[[step]]
+check = { what = "player", player = 5 }
+subset = { kind = "city_state", controller = "minor", handicap = "ai", auto = { un_vote = true, conquest = true, free_picks = true } }
+
+[[step]]
+check = { what = "player", player = 6 }
+subset = { kind = "barbarian", controller = "barbarian", handicap = "ai", auto = { un_vote = true, conquest = true, free_picks = true } }

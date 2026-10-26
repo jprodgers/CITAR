@@ -1,0 +1,80 @@
+about = """
+Aggression sets how barbarians behave. At 0 a lone raider beside a healthy city leaves it alone,
+since the odds are bad and no others have gathered round it; at 100 it storms it. The knobs follow:
+a sacked city is left alone 10 turns at 0 and 5 at 100 (see barbarians_sacked_city_left_alone).
+"""
+from = "tests/test_barbarians.py::AggressionTests::test_aggression_makes_barbarians_storm_cities"
+
+[config]
+barbarians = "normal"
+barbarian_aggression = 0
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma" }
+as = "made"
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "A>e" }
+as = "raider"
+
+[[step]]
+set = { roma = "=made.city_id", b = "=raider.unit_id" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 200 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=b" }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+path = "health"
+ge = 1
+as = "full"
+
+[[step]]
+op = "barbarian_act"
+args = { unit = "=b" }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+path = "health"
+eq = "=full"
+
+[[step]]
+note = "The same at aggression 100."
+new_game = { barbarian_aggression = 100 }
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma" }
+as = "made"
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "A>e" }
+as = "raider"
+
+[[step]]
+set = { roma = "=made.city_id", b = "=raider.unit_id" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 200 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=b" }
+
+[[step]]
+op = "barbarian_act"
+args = { unit = "=b" }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+path = "health"
+lt = "=full"

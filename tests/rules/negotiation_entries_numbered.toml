@@ -1,0 +1,129 @@
+about = """
+A negotiation's entries are numbered in order, each with its message: an opening proposal, a counter,
+two replies and the acceptance of the counter, which becomes the deal. Each side's view numbers them
+alike, counts the messages and gives the cap, the ruleset's 30; the proposal reads in the viewer's
+own terms.
+"""
+from = "tests/test_negotiation_chat.py::MessageTests::test_entries_are_numbered_in_order"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Your map for gold?", give = [{ type = "gold", amount = 20 }], receive = [{ type = "share_map" }] }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "counter", message = "More gold.", give = [{ type = "share_map" }], receive = [{ type = "gold", amount = 30 }] }
+as = "countered"
+
+[[step]]
+check = "countered"
+eq = { status = "open", awaiting = "Civilization 1" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 0 }
+subset = { your_move = true, proposal_by_you = false, current_proposal = { you_give = [{ type = "gold", amount = 30 }], you_receive = [{ type = "share_map" }], summary = "You give 30 gold; you receive their world map." } }
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "reply", message = "That is steep." }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reply", message = "It is a good map." }
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "accept", message = "Very well." }
+as = "accepted"
+
+[[step]]
+check = "accepted"
+eq = { status = "accepted", deal = "Civilization 1 gives 30 gold; Civilization 2 gives their world map." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "accepted", awaiting = "=null", deal_id = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history"
+len = 5
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[0]"
+subset = { seq = 1, by = 0, action = "open", message = "Your map for gold?" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[1]"
+subset = { seq = 2, by = 1, action = "counter", message = "More gold." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[2]"
+subset = { seq = 3, by = 0, action = "reply", message = "That is steep." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[3]"
+subset = { seq = 4, by = 1, action = "reply", message = "It is a good map." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[4]"
+subset = { seq = 5, by = 0, action = "accept", message = "Very well." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+subset = { messages = 5, max_messages = 30, with = 0, with_name = "Civilization 1" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+path = "history[0]"
+subset = { seq = 1, you = false, by = "Civilization 1" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+path = "history[1]"
+subset = { seq = 2, you = true }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+path = "history[2]"
+subset = { seq = 3 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+path = "history[3]"
+subset = { seq = 4 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+path = "history[4]"
+subset = { seq = 5 }
+
+[[step]]
+note = "The deal: the counter's gold changed hands."
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 170
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "gold"
+eq = 230
+
+[[step]]
+check = { what = "events", type = "deal" }
+path = "[0].text"
+eq = "Deal concluded between Civilization 1 and Civilization 2: Civilization 1 gives 30 gold; Civilization 2 gives their world map."

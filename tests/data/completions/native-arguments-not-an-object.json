@@ -1,0 +1,79 @@
+{
+ "name": "native-arguments-not-an-object",
+ "note": "arguments that are JSON but not an object are dropped",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "",
+   "reasoning": null,
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "get_tile",
+      "arguments": "[3, 4]"
+     }
+    },
+    {
+     "id": "c2",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "null"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "name": "get_tile",
+     "args": {}
+    },
+    {
+     "id": "c2",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "get_tile",
+      "arguments": "{}"
+     }
+    },
+    {
+     "id": "c2",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

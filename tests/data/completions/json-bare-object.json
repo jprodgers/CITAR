@@ -1,0 +1,41 @@
+{
+ "name": "json-bare-object",
+ "note": "the JSON protocol as a bare object",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "{\"thoughts\": \"settle\", \"calls\": [{\"tool\": \"found_city\", \"args\": {\"unit_id\": 1}}]}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "settle",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "found_city",
+     "args": {
+      "unit_id": 1
+     }
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "{\"thoughts\": \"settle\", \"calls\": [{\"tool\": \"found_city\", \"args\": {\"unit_id\": 1}}]}"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

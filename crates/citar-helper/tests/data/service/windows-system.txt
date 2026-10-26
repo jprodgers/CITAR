@@ -1,0 +1,19 @@
+citar-helper service install --system (a dry run: nothing is written, started or changed)
+1. check the folders above C:\ProgramData\CITAR\helper, up to its drive's root: none is a link or junction, each is owned by SYSTEM (S-1-5-18), Administrators (S-1-5-32-544), NT SERVICE\TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464) or the administrator installing, and none lets another account delete or rename it or what it holds, or change its permissions or owner
+2. make each missing folder above C:\ProgramData\CITAR\helper, secured as it is made: owner Administrators (S-1-5-32-544), full control for SYSTEM (S-1-5-18), Administrators (S-1-5-32-544), read for Users (S-1-5-32-545), nothing inherited (SDDL: O:S-1-5-32-544D:P(A;OICI;FA;;;S-1-5-18)(A;OICI;FA;;;S-1-5-32-544)(A;OICI;0x1200a9;;;S-1-5-32-545)); one that another account makes meanwhile is checked as above
+3. make C:\ProgramData\CITAR\helper if it is missing, secured as it is made, then secure it and everything in it: owner Administrators (S-1-5-32-544), access for SYSTEM (S-1-5-18), Administrators (S-1-5-32-544), NT SERVICE\citar-helper (S-1-5-80-219617694-3995075832-2536948979-2158398981-2168424158) alone, nothing inherited (SDDL of the folder: O:S-1-5-32-544D:P(A;OICI;FA;;;S-1-5-18)(A;OICI;FA;;;S-1-5-32-544)(A;OICI;FA;;;S-1-5-80-219617694-3995075832-2536948979-2158398981-2168424158))
+4. make the folder C:\ProgramData\CITAR\helper\bin
+5. copy C:\Users\alice\Downloads\citar-helper-windows-x64.exe to C:\ProgramData\CITAR\helper\bin\citar-helper.exe
+6. run: sc.exe create citar-helper binPath= "\"C:\ProgramData\CITAR\helper\bin\citar-helper.exe\" service run --home \"C:\ProgramData\CITAR\helper\"" start= auto obj= "NT SERVICE\citar-helper" DisplayName= "CITAR helper"
+7. run: sc.exe description citar-helper "Lends this machine's model endpoint and, if its owner says so, its spare CPU to a CITAR server."
+8. run: sc.exe sidtype citar-helper unrestricted
+9. run: sc.exe failure citar-helper reset= 86400 actions= restart/15000/restart/15000/restart/15000
+10. run: sc.exe failureflag citar-helper 1
+11. run: sc.exe start citar-helper
+12. note: the service citar-helper runs as NT SERVICE\citar-helper with the home C:\ProgramData\CITAR\helper; its log is helper\logs there
+
+citar-helper service uninstall --system (a dry run: nothing is written, started or changed)
+1. run: sc.exe stop citar-helper (a failure is noted)
+2. wait until the service citar-helper has stopped (at most 30 s)
+3. run: sc.exe delete citar-helper
+4. note: the home C:\ProgramData\CITAR\helper is kept (helper.json and the machine's key); delete it to remove everything

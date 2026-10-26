@@ -10,9 +10,22 @@ much to find out". CITAR tracks the cost side so that comparisons can include it
 
 ## Servers
 
-**Servers** in the top navigation is the registry of every machine and service that runs models.
-Seats, benchmark suites, probe runs and report narratives all pick *server → model → load profile*
-from it. There are no ad-hoc endpoints anywhere else in CITAR — this is the one place.
+**Servers** in the top navigation (`#/pool`) is the one page of every machine and service that runs
+models. Seats, benchmark suites, probe runs and report narratives all pick *server → model → load
+profile* from it. There are no ad-hoc endpoints anywhere else in CITAR — this is the one place.
+
+It lists every machine the viewer owns or may use, the ones this server connects to itself
+(**direct**: the host, its online APIs, a dry run, an administrator's machines on the network) and
+the ones behind a CITAR helper ([Workers](Workers)) alike: for an administrator the
+site's machines, their own and the members'; for a member their own and the ones a server group
+shares with them. Each machine is a card, and its editors open from it as dialogs: **Connection &
+models**, **Hardware & power**, **Costs**, **Quiet hours**, **API key** (a machine the server
+dials), **Helper** (a helper machine's tokens), **Sharing** (the group that shares it),
+**Disable** and **Remove**. The page's head has **Add a machine** and **New group**, and for
+administrators **Electricity plans** and **Settings**. A control shows only when the server would
+take it from the viewer, so a member's page never calls an administrator's route; a machine shared
+with you shows its models, its quiet hours and **Test**. The page's address before 0.1.6,
+`#/servers` (or `#/servers/<id>`), leads here, opening that machine.
 
 ### Kinds
 
@@ -26,8 +39,10 @@ from it. There are no ad-hoc endpoints anywhere else in CITAR — this is the on
 ### Connection
 
 Provider (LM Studio, Ollama, OpenAI-compatible, Anthropic, Dry run), base URL, the LM Link device
-for a PC reached through this one's LM Studio, how many games may use it at once, and whether CITAR
-loads and unloads models on it.
+for a PC reached through this one's LM Studio, how many requests it takes at once (its slots), and
+whether CITAR loads and unloads models on it. A machine the server connects to itself is an
+administrator's to point at an address; a member's is a helper machine (whose helper holds the
+address and any key) or the dry run, which dials nothing.
 
 ### API keys
 
@@ -41,7 +56,8 @@ Pasted once, never shown again, never written to the project folder. Three backe
 
 ### Models and load profiles
 
-**Detect models** fills the catalogue. Each model carries inference defaults — tool mode, reasoning
+**Detect models** fills the catalogue of a machine the server dials; a helper machine's models are
+the ones its helper reports when it connects. Each model carries inference defaults — tool mode, reasoning
 effort, max tokens, temperature, tool-call limit — and, on LM Studio, **load profiles**: context
 length, GPU offload, parallel slots, unload-after-idle, exclusivity, speculative decoding.
 
@@ -50,7 +66,8 @@ act immediately, which is how you free a GPU without leaving the page.
 
 ### Hardware
 
-**Collect from this PC** reads the machine CITAR is running on. For other machines, download
+**Collect from this PC** (administrators, on the host) reads the machine CITAR is running on; a
+helper's scan replaces a helper machine's details when it connects. For other machines, download
 `collect_hardware.py` (any platform with Python 3), `collect_hardware.sh` (Linux or macOS without
 Python) or `collect_hardware.ps1` (Windows without Python), run it there, and **Import JSON**.
 Everything can also be typed in: CPU, GPUs and VRAM, RAM or unified memory, disks.
@@ -67,22 +84,27 @@ the hardware. On the machine running CITAR, GPU power (via `nvidia-smi`) and CPU
 as its own line — and **cost periods** that apply from a date. Changing a price means adding a
 period, never editing history, so a report of last month still reflects last month.
 
-**Electricity plans** (⚡) are shared between servers: flat, time-of-use or tiered rates, plus a
+**Electricity plans** (⚡) are shared between machines: flat, time-of-use or tiered rates, plus a
 fixed monthly charge that can be spread over the household's kWh, charged as a set share, or
-ignored. Effective-dated like everything else.
+ignored. Effective-dated like everything else. They are the site's bill, so an administrator keeps
+them and names them in machines' costs; a member puts their own power cost in a cost period's
+fixed monthly figure.
 
-### Restricted hours
+### Quiet hours
 
-Windows per weekday, with optional unloading and grace minutes for a turn in progress. Benchmarks,
-probe runs and the lab respect them; games you start yourself show a 🌙 warning instead of
-refusing. The page header lists servers that are restricted right now.
+Windows per weekday when nothing runs on the machine, for anyone, its owner included, with optional
+unloading (a machine CITAR loads models on) and grace minutes for a turn in progress: games,
+benchmarks, probe runs and the lab finish the model turn in progress and pause until the hours end.
+A helper machine's hours are in its owner's time zone, a machine the server dials keeps this
+server's clock. The page's head lists the machines in their quiet hours right now.
 
 ### Settings
 
-Currency, and which server is the machine running CITAR — its CPU runs the engine, the bots and the
-lab, so it gets a share of every game's cost.
+Administrators: the currency, and which machine runs CITAR — its CPU runs the engine, the bots and
+the lab, so it gets a share of every game's cost.
 
-The registry lives in `config/servers.json` (`citar where` prints the path).
+The machines are rows of the server's database since 0.1.6, edited on the Servers page (a pre-0.1.6
+`config/servers.json` is imported once; see [Configuration](Configuration#the-machines-in-the-database-not-a-file)).
 
 ---
 
@@ -91,15 +113,31 @@ The registry lives in `config/servers.json` (`citar where` prints the path).
 Every game with an AI seat, benchmark game, probe run, lab game and report narrative is written to
 `saves/usage/*.jsonl`:
 
+- the activity: what it was, whose run or experiment it belongs to
 - which servers it held, and for how long
-- how long each model spent generating
-- tokens: input, output, reasoning, cache reads and cache writes
-- CPU time on the host
 - one-minute power samples of the host
 
-**The ledger holds no prices.** Reports price it with the settings in force at the time, so
+The **work** each activity did is the compute ledger's (`compute_events` in the database; how it is counted is in
+[Accounts](Design-accounts-and-sharing#the-compute-ledger-and-the-ratio)), which costing reads beside it:
+
+- how long each model spent generating, per model step: the time the model worked, bounded by what the server saw of
+  a helper's answer, never the time the request waited for its machine in the prompt scheduler's line;
+- tokens: input, output, reasoning, cache reads and cache writes;
+- the host's CPU time, measured per unit of work (a game's drives and engine calls, a chat answer, a report's build, a
+  probe case), so a thread that serves several games charges each its own time, and spread over the minute or so it
+  was measured in; a lab game's CPU from its result, spread over the whole game.
+
+So a minute in which a game's seat waited ten seconds for a machine busy with somebody else's work is charged ten
+seconds less busy energy than before 0.1.6, when the ledger counted the whole call. The held time, which fixed costs
+and idle power are split by, is unchanged. Spans written before 0.1.6 carry their own work, and are priced as they
+were: an activity's compute events up to the end of its last such span are left out, so the lab's past games, whose
+results the compute ledger reads too, and a game played across the upgrade are counted once.
+
+**The ledgers hold no prices.** Reports price them with the settings in force at the time, so
 correcting a rate later corrects every report that touches that period. This is the single most
 useful property of the design: you do not have to know your electricity tariff before you start.
+(The compute ledger's own credits are another unit, priced when each event is written, for the ratio and budgets:
+[Configuration](Configuration#credits-and-hardware-classes).)
 
 ---
 
@@ -111,17 +149,63 @@ useful property of the design: you do not have to know your electricity tariff b
    comparison over time*, *Model behaviour in scenarios*, *Bot lab experiments*, *Everything* — or
    tick sections yourself.
 2. Choose the period and scope: activity types, servers, models, or specific benchmark runs, probe
-   runs, lab experiments and games.
+   runs, lab experiments and games. **Data** says what the figures come from: what you may see (the
+   default), that plus pooled averages, or pooled averages only (below).
 3. Options: count electricity as the full draw or only the extra power the work caused, and the
    lifespan range for the depreciation sensitivity table.
 4. Optionally have a model write an analysis — pick server, model and profile, plus instructions.
-   The computed findings never need a model, and the narrative's own cost is tracked too.
+   The computed findings never need a model, and the narrative's own cost is tracked too. The analysis
+   is a pooled prompt on that machine ([Workers](Workers#when-a-machine-is-busy)): your grant
+   there must cover pooled prompts; it waits its turn in the machine's line (the report's progress says
+   where: "Waiting for Home GPU: 2nd in line, about 40 s"), runs between a game's turns on the slot the
+   game lends, and waits for a benchmark to finish. It may wait half an hour to start (an offline
+   helper, the machine's quiet hours, a grant's window included) and rides out a helper that drops
+   while it writes for as long; past that, or when the machine will not take it (the model not loaded,
+   no grant), the report is built without it, and its Analysis section (and the Reports list) says why.
+   Reports are built several at a time, and one whose analysis waits for its machine holds up no other
+   report; each member has at most two analyses under way, and their next report with one waits,
+   queued. A report being built can be deleted: its prompt leaves the machine's line. One the server
+   restarted under is built again when it comes back (up to twice).
 5. **Run report.**
 
 **View** opens it in place; **Open in new tab** and **Download** give a single self-contained HTML
 file — inline SVG charts with hover values and a data table under each, light and dark themes,
 printable, no internet needed. **Re-run** makes a fresh one with current data; **Edit copy** loads
-its choices back into the builder.
+its choices back into the builder. **Share** (for the report's owner) sets who can see it, as for a
+game: members, a link, people by name, or the whole internet (an administrator's permission); a report
+shared by link or published has a page for people with no account, `/r/<key>` or `/r/<id>`. The
+phone site's Reports tab lists the same reports.
+
+### What a report contains
+
+Building a report needs the `run_reports` capability; the report is yours, private until you share
+it. What it gathers depends on whose it is:
+
+- **A member's report** covers what its owner may see: the activities of their own games, benchmark
+  runs, probe runs, lab experiments and reports, and of those shared with them, with members or with
+  everyone. Another member's private game or run is not in it, not even by name or id.
+- **Costs are counted on your own machines only.** An activity that also ran on the server's own
+  machines or on another member's (your game's engine on the CITAR host, your seat on a machine shared
+  with you) keeps its outcome and its usage, but not what it cost there; a data-quality note says how
+  many such activities there were. The servers, hardware, costs-over-time and lifespan sections show
+  your machines and no one else's, and the data-quality notes about pricing (a model with no token
+  price, say) are about your machines only, never another's.
+- **Pooled averages** (Data: "plus pooled averages" or "pooled averages only") add, in the model
+  comparison, per-model figures over the games other members pool (each game's own pooling setting
+  and its owner's), each model shown only once enough different accounts are behind it, so no
+  average is one person's results.
+- **An administrator's report** covers everything on the server, every machine priced.
+
+A report is built when it runs, with what its owner may see then: sharing something with you later
+does not change a report already built; **Re-run** builds it again. A report built while its owner's
+account is suspended (or otherwise not in good standing, an administrator's included) covers only
+what is published to everyone, with no machine priced.
+
+**Sharing a report shares the report.** Whoever it reaches (a member it is shared with, a visitor with
+its link) reads it, its title and its progress. Of how it was made they get only what they could have
+chosen themselves: the items and machines of its scope that they may see, and whether it has a written
+analysis, but not the analysis's instructions or the machine, model and profile that wrote it; a
+failed build shows them its error, not its traceback. Its owner and administrators see all of it.
 
 ### Sections
 

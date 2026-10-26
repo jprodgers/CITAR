@@ -1,0 +1,6 @@
+{
+  "frame": {"t": "jobs_pause", "ts": 1760000000.0, "reason": 1},
+  "code": "type",
+  "path": "reason",
+  "why": "a reason is a string"
+}

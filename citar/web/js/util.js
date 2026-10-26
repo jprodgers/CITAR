@@ -38,7 +38,13 @@ export function modal({ title, content, footer, narrow = false, onClose }) {
   const root = document.getElementById("modal-root");
   let back;
   const close = () => { back.remove(); document.removeEventListener("keydown", onKey); if (onClose) onClose(); };
-  const onKey = (e) => { if (e.key === "Escape") close(); };
+  // Escape closes the topmost dialog only: one opened from another (a machine's API key from its connection editor,
+  // a confirmation, a prompt) must not take the one under it, and that one's unsaved edits, with it. A dialog the
+  // page took away without closing it (the router clears them on navigation) just stops listening.
+  const onKey = (e) => {
+    if (!back.isConnected) { document.removeEventListener("keydown", onKey); return; }
+    if (e.key === "Escape" && root.lastElementChild === back) { e.stopPropagation(); close(); }
+  };
   back = el("div", { class: "modal-back", onmousedown: (e) => { if (e.target === back) close(); } },
     el("div", { class: `modal ${narrow ? "narrow" : ""}` },
       el("header", {}, el("h2", {}, title), el("button", { onclick: close }, "✕")),

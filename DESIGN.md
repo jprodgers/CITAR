@@ -27,21 +27,24 @@ draws flat vector terrain and unit glyphs.
 ## 2. Rule data and the UnCiv import
 
 - `scripts/import_unciv.py` reads the UnCiv G&K JSON (`android/assets/jsons/Civ V - Gods & Kings`), keeps the
-  numbers and the rule text ("uniques"), drops flavour text, and writes `citar/data/ruleset/*.json`. Rerun it to
-  pick up a newer UnCiv version. `scripts/gen_unique_types.py` generates `engine/unique_types.py` from UnCiv's
-  `UniqueType.kt`. `scripts/check_uniques.py` lists ruleset uniques whose text matches no UnCiv unique type
-  (usually a typo), and `scripts/check_refs.py` finds calls to missing functions across engine modules.
-- `citar/data/custom/` holds CITAR additions (currently `BenchmarkCiv`). `citar/data/game.json` holds CITAR's own
-  constants: map sizes, map types, lobby defaults, barbarian levels, and limits for the AI interface.
+  numbers and the rule text ("uniques"), drops flavour text, and writes `crates/citar-engine/data/ruleset/*.json`.
+  Rerun it to pick up a newer UnCiv version. `scripts/gen_unique_types.py` generates
+  `crates/citar-engine/unique_types.tsv` from UnCiv's `UniqueType.kt`. `citar ruleset check DIR` loads a ruleset
+  as the engine does and lists every problem: a unique whose text matches no type the engine supports (usually a
+  typo), a reference to nothing, a field out of shape.
+- `crates/citar-engine/data/custom/` holds CITAR additions (currently `BenchmarkCiv`).
+  `crates/citar-engine/data/game.json` holds CITAR's own constants: map sizes, map types, lobby defaults, barbarian
+  levels, and limits for the AI interface. The engine compiles the folder in; `CITAR_RULESET_DIR` plays a modded
+  copy (docs/MODDING.md).
 - **Licence:** UnCiv is MPL-2.0. The derived data and the engine code ported from UnCiv's Kotlin carry that licence.
-  Attribution is in `citar/data/ruleset/NOTICE.md` and the README.
+  Attribution is in `crates/citar-engine/data/ruleset/NOTICE.md` and the README.
 - **Uniques:** as in UnCiv, most behaviour is written as rule text on techs, buildings, policies, beliefs, promotions,
-  nations and eras, for example `[+15]% Strength <when attacking>`. `engine/uniques.py` parses the placeholders,
-  parameters and conditionals, collects uniques from every source that applies (`UniqueMap`), and evaluates
-  conditionals against a context (`Ctx`). Triggered uniques (`engine/triggers.py`) run on events such as adopting a
+  nations and eras, for example `[+15]% Strength <when attacking>`. The engine compiles each unique when the
+  ruleset loads (`crates/citar-engine/src/unique/`): its type, its typed parameters and its conditionals, indexed by
+  the source it comes from, which the systems ask in a context. Triggered uniques run on events such as adopting a
   policy, founding a city or discovering a tech.
-- Every ruleset object is keyed by its UnCiv display name ("Bronze Working", "Great Library"). `Rules.resolve`
-  also accepts lower-case or snake_case ids, so AI players can write either form.
+- Every ruleset object is keyed by its UnCiv display name ("Bronze Working", "Great Library"). The engine also
+  accepts lower-case or snake_case ids, so AI players can write either form.
 
 ---
 
@@ -49,7 +52,7 @@ draws flat vector terrain and unit glyphs.
 
 ```
             ┌───────────────────────────────────────────────────┐
-            │                 Game Server (Python)              │
+            │       Game Server (Python; the engine in Rust)    │
             │  ┌──────────────┐   ┌──────────────────────────┐  │
             │  │    Engine     │   │ Tool registry (tools.py) │  │
             │  │ (pure rules,  │◄──┤ one schema per action →  │  │
@@ -65,9 +68,11 @@ draws flat vector terrain and unit glyphs.
           (human / spectator)
 ```
 
-**Engine modules** (`citar/engine/`, pure standard library):
+**The engine** (`crates/citar-engine`, Rust: no I/O, no threads, no clock; the server reaches it through
+`citar/engine_api.py`). It was a Python package until 0.1.6, whose modules these were; the Rust engine keeps the
+same systems, in `src/game/`, `src/mapgen/` and `src/api/` (docs/ARCHITECTURE.md):
 
-| Module | Covers |
+| Python module | Covers |
 |---|---|
 | `rules`, `uniques`, `unique_types`, `triggers` | ruleset loading, the unique language, triggered effects |
 | `state`, `game`, `hexmap` | serializable state, the `Game` facade (caches, events, RNG), hex math |
@@ -84,6 +89,12 @@ draws flat vector terrain and unit glyphs.
 **Turn order** follows UnCiv's `TurnManager`: start-of-turn (resources, city processing, golden ages, great
 people, religion), player actions, end-of-turn (production, growth, research, culture, faith, gold, unit healing
 and upkeep), then an end-of-round pass (barbarians, city-state elections, UN votes, victory checks).
+
+**Packaging** (0.1.6). CITAR ships as one abi3 wheel per platform (Windows x64, macOS arm64 and x64, Linux x64
+and arm64 on glibc 2.28), the Windows installer and zip built from that wheel, the server image built from the
+Linux wheels, and the CITAR helper for the same five platforms; one workflow builds and tests all of it on every
+pull request, the release workflow publishes only what it built, and a server deploys a release's wheel into a
+release layout (docs/ARCHITECTURE.md, "Packaging and releases").
 
 ---
 
@@ -116,10 +127,10 @@ chosen from the nation's start bias.
 | **Human** | Browser client with that seat's token. Several humans can join over the LAN. |
 | **MCP** | `citar_mcp.py` bridges an MCP client (Claude Code, Claude Desktop, …) to the seat; `wait_for_turn` blocks until it's the seat's turn or a negotiation needs a reply. |
 | **LLM adapter** | The server drives the model: `anthropic` or any OpenAI-compatible endpoint (LM Studio, Ollama, llama.cpp, vLLM). API keys come from environment variables and are never saved. |
-| **Scripted bot** | `citar/bots/basic.py`: needs-based research, production and policies; religion, great people, spies, city-state gifts, trading, war preparation and sieges. |
+| **Scripted bot** | `crates/citar-bot` (`basic-1`, the port of 0.1.5's Python bot): needs-based research, production and policies; religion, great people, spies, city-state gifts, trading, war preparation and sieges. |
 
 ### One tool set
-Each action is declared once with `@tool(...)` in `engine/tools.py`. The REST API, browser UI, MCP bridge and LLM
+Each action is declared once in the engine's tool registry (`crates/citar-engine/src/api/tools/`). The REST API, browser UI, MCP bridge and LLM
 adapter all derive from that registry. Invalid actions return a clear error ("Swordsman requires Iron") so models
 can adapt.
 
@@ -148,8 +159,8 @@ using UnCiv terrain names, events, and diplomacy. After each batch of actions th
 Messages are free text and never binding. Deals are binding and enforced by the engine. They can include gold,
 gold per turn, resources, open borders, embassies, peace, declarations of friendship, research agreements,
 defensive pacts, declaring war on a third party, cities, maps and technologies. The other side is interrupted
-out of turn to accept, reject, counter or reply. The exchange repeats until one side accepts or walks away, or
-the round cap is reached.
+out of turn to accept, reject, counter or reply, always with a message. The exchange repeats until one side accepts
+or walks away, or the message cap is reached, and neither side can end its turn while it is open.
 
 ---
 

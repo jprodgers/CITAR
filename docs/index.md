@@ -30,7 +30,7 @@ New here? [Quick start](QUICKSTART.md) gets you a game, a model and a benchmark 
 
 | | |
 |---|---|
-| [Deploying a server](server/DEPLOY.md) | Installer, Docker, or by hand |
+| [Deploying a server](server/DEPLOY.md) | Installer, Docker, or by hand; the release layout and `citar-deploy` |
 | [Preparing a VPS](server/VPS.md) | SSH, firewall, swap, DNS — before CITAR |
 | [Single sign-on](server/OAUTH.md) | Registering an app with each provider |
 | [Workers](server/WORKERS.md) | Lending a GPU to a server without opening a port |
@@ -60,10 +60,11 @@ New here? [Quick start](QUICKSTART.md) gets you a game, a model and a benchmark 
 
 ## The shape of the thing, in one paragraph
 
-`citar/engine/` holds the rules and does no I/O — it turns a state and an action into a new state
-or an error. Everything else calls it: the browser client over HTTP, a scripted bot in-process, a
-language model through an adapter, an external agent over MCP. Every action any of them can take is
-registered once in `citar/engine/tools.py`, which is why the interfaces cannot drift apart and why
-a model has exactly the powers a human has. Around that sit the measurement parts — metrics,
+The engine, in Rust (`crates/`), holds the rules and does no I/O — it turns a state and an action
+into a new state or an error — and Python reaches it through one module, `citar/engine_api.py`.
+Everything else calls it: the browser client over HTTP, a scripted bot compiled into it, a language
+model through an adapter, an external agent over MCP. Every action any of them can take is
+registered once in the engine's tool registry, which is why the interfaces cannot drift apart and
+why a model has exactly the powers a human has. Around that sit the measurement parts — metrics,
 benchmarks, probes, a usage ledger and costed reports — because the point is not only to play the
 game but to know what happened.

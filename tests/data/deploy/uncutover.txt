@@ -1,0 +1,34 @@
+citar-deploy uncutover: the plan. Every check runs; nothing is changed (run it without --plan to do it).
+
+Before anything changes:
+  ok  root: not needed under CITAR_DEPLOY_ROOT (tests)
+  ok  tools: systemctl, systemd-run, sqlite3, sha256sum, flock, and python3.12 with venv
+  ok  configuration: /etc/citar/citar.env; CITAR answers at http://127.0.0.1:@PORT@, and through http://citar.test:@PORT@
+  ok  cutover: from CITAR 0.1.5, made 20261101-120000; CITAR 0.1.6 runs now
+
+1. Put CITAR 0.1.5 back (the new layout and state moved aside and kept):
+   systemctl stop citar
+   mv -T /opt/citar '/opt/citar-0.1.6-undone-<stamp>'
+   mv -T /opt/citar-0.1.5 /opt/citar
+   mv -T /var/lib/citar '/var/lib/citar-0.1.6-undone-<stamp>'
+   mv -T /var/lib/citar-archive-20261101-120000 /var/lib/citar
+   /etc/systemd/system/citar.service <- its copy saved at the cutover
+   /etc/systemd/system/citar-lab.service <- its copy saved at the cutover
+   /etc/systemd/system/citar-backup.service <- its copy saved at the cutover
+   rm -f /usr/local/bin/citar-secrets (not here before the cutover)
+   rm -f /usr/local/sbin/citar-deploy (not here before the cutover)
+   systemctl daemon-reload
+   systemctl enable citar-lab
+   systemctl start citar
+   systemctl start citar-lab
+   within 60 s: http://127.0.0.1:@PORT@/api/auth/config answers 200;
+   http://citar.test:@PORT@ at 127.0.0.1 (the site's own Host): /api/auth/config answers 200
+   /var/lib/citar-deploy/cutover -> /var/lib/citar-deploy/cutover-undone-<stamp> (the record kept)
+
+2. The other sites again:
+   each URL in /etc/citar/deploy-checks.conf answers 200
+
+3. Record:
+   append to /var/log/citar-deploy.log: <time> uncutover version=0.1.5 previous=0.1.6 result=ok
+
+End of the plan: nothing was changed.

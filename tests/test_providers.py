@@ -5,7 +5,8 @@ from types import SimpleNamespace as NS
 from unittest import mock
 
 from citar.agents.providers.anthropic_provider import AnthropicConversation
-from citar.agents.providers.openai_provider import OpenAIConversation, parse_json_calls
+from citar.agents.providers.completion import parse_json_calls
+from citar.agents.providers.openai_provider import OpenAIConversation
 
 TOOLS = [{"name": "end_turn", "description": "End turn", "input_schema": {"type": "object", "properties": {}}},
          {"name": "get_tile", "description": "Tile", "input_schema": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}}}]
@@ -116,7 +117,7 @@ class OpenAITests(unittest.TestCase):
         self.assertNotIn("tools", calls[0])
 
     def test_repairs_leaked_xml_tool_calls(self):
-        from citar.agents.providers.openai_provider import repair_tool_calls
+        from citar.agents.providers.completion import repair_tool_calls
         from citar.agents.providers.base import ToolCall
         calls, n = repair_tool_calls([
             ToolCall("a", "set_research", {"tech": "pottery</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=unit_order>\n<parameter=unit_id>\n9</parameter>\n<parameter=order>\nexplore"}),
@@ -139,8 +140,8 @@ class OpenAITests(unittest.TestCase):
         self.assertEqual(conv.messages[-1]["tool_calls"][0]["id"], s.tool_calls[0].id)
 
     def test_plain_text_tool_calls(self):
-        from citar.agents.providers.openai_provider import parse_plain_calls
-        from citar.engine.tools import tool_list
+        from citar.agents.providers.completion import parse_plain_calls
+        from citar.engine_api import tool_list
         tools = [{"type": "function", "function": {"name": t["name"], "parameters": t["input_schema"]}} for t in tool_list()]
 
         def parsed(text):
@@ -153,6 +154,22 @@ class OpenAITests(unittest.TestCase):
         self.assertEqual(parsed('set_research {"tech": "pottery"}\nunit_order({"unit_id": 3, "order": "explore"})\nend_turn'),
                          [("set_research", {"tech": "pottery"}), ("unit_order", {"unit_id": 3, "order": "explore"}),
                           ("end_turn", {})])
+        # Gemma 4's own syntax, which LM Studio left in the reply's text for a chat answer of the exit QA's
+        # gemma-4-e2b: bare keys, strings between <|"|> marks (commas, colons and braces inside them are text)
+        q = '<|"|>'
+        self.assertEqual(parsed(f"respond_negotiation{{action:{q}reply{q},message:{q}Peace, friend: {{always}}.{q},"
+                                f"negotiation_id:3}}"),
+                         [("respond_negotiation", {"action": "reply", "message": "Peace, friend: {always}.",
+                                                   "negotiation_id": 3})])
+        self.assertEqual(parsed(f"<|tool_call>call:respond_negotiation{{action:{q}counter{q},give:[{{type:{q}gold{q},"
+                                f"amount:20}}],receive:[{{type:{q}share_map{q}}}],message:{q}Less.{q},negotiation_id:7,"
+                                f"final:true}}<tool_call|>"),
+                         [("respond_negotiation", {"action": "counter", "give": [{"type": "gold", "amount": 20}],
+                                                   "receive": [{"type": "share_map"}], "message": "Less.",
+                                                   "negotiation_id": 7, "final": True})])
+        # cut off before its closing mark or brace: no call
+        self.assertEqual(parsed(f"respond_negotiation{{action:{q}reply"), [])
+        self.assertEqual(parsed(f"respond_negotiation{{action:{q}reply{q},message:{q}Hi{q}"), [])
         # prose that only mentions tools is not a call
         self.assertEqual(parsed("I will call end_turn once the city has production set."), [])
         self.assertEqual(parsed("set_research needs a tech name, so let me think."), [])

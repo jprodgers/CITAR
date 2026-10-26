@@ -1,0 +1,132 @@
+about = """
+A settler whose way to its site an enemy could reach does not go alone. With no free military unit
+near it, it waits in its city (and the city builds a defender) until the danger is gone, then sets
+out; with one, that unit escorts it and the two go to the site, where the city is founded.
+"""
+from = "citar/bots/basic.py:1858-1925 (handle_settler's danger, _assign_escort, _follow)"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
+
+[[step]]
+note = "The best site is at (9,4); an enemy warrior stands at (7,4), in sight of the capital and a step from the way."
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Settler", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true },
+  { op = "reveal", player = 0 },
+  { op = "set_tile", x = 10, y = 4, resource = "Wine" },
+  { op = "set_tile", x = 9, y = 4, resource = "Incense" },
+  { op = "set_tile", x = 10, y = 6, resource = "Wheat" },
+  { op = "set_tile", x = 8, y = 6, resource = "Cattle" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+  { op = "add_unit", player = 1, unit = "Warrior", x = 7, y = 4 },
+]
+as = "made"
+
+[[step]]
+set = { capital = "=made[0].city_id" }
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[type=Settler].id"
+absent = false
+as = "settler"
+
+[[step]]
+repeat = 2
+steps = [
+  { bot = "turn", player = 0, params = "=calm" },
+  { check = { what = "unit", unit = "=settler" }, subset = { x = 5, y = 5 } },
+  { op = "end_turn", args = { player = 1 } },
+]
+
+[[step]]
+note = "The capital builds the defender the settler waits for."
+check = { what = "city", city = "=capital" }
+path = "queue[0]"
+eq = "Warrior"
+
+[[step]]
+note = "With the enemy gone, the settler sets out."
+op = "remove_units"
+args = { x = 7, y = 4 }
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "unit", unit = "=settler" }
+path = "x"
+gt = 5
+
+[[step]]
+note = "With a free warrior beside the capital, the warrior escorts the settler from the start."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Settler", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true },
+  { op = "reveal", player = 0 },
+  { op = "set_tile", x = 10, y = 4, resource = "Wine" },
+  { op = "set_tile", x = 9, y = 4, resource = "Incense" },
+  { op = "set_tile", x = 10, y = 6, resource = "Wheat" },
+  { op = "set_tile", x = 8, y = 6, resource = "Cattle" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+  { op = "add_unit", player = 1, unit = "Warrior", x = 7, y = 4 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w" },
+]
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[type=Settler].id"
+absent = false
+as = "settler"
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[type=Warrior].id"
+absent = false
+as = "escort"
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+note = "Both left: the settler for the site, the warrior after it."
+check = { what = "unit", unit = "=settler" }
+path = "x"
+gt = 5
+
+[[step]]
+check = { what = "unit", unit = "=escort" }
+path = "x"
+gt = 4
+
+[[step]]
+op = "end_turn"
+args = { player = 1 }
+
+[[step]]
+repeat = 2
+steps = [
+  { bot = "turn", player = 0, params = "=calm" },
+  { op = "end_turn", args = { player = 1 } },
+]
+
+[[step]]
+check = { what = "tile", x = 9, y = 4 }
+subset = { owner = 0 }
+
+[[step]]
+check = { what = "tile", x = 9, y = 4 }
+path = "city"
+is_null = false

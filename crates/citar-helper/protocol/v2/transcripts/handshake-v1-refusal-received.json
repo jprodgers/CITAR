@@ -1,0 +1,80 @@
+{
+  "name": "handshake-v1-refusal-received",
+  "about": "The 0.1.6 refusal of a protocol 1 hello, received by a helper, is read as refused protocol: the helper waits.",
+  "refs": ["P4.2.8"],
+  "plays": {"helper": "4-03", "hub": null},
+  "one_side": "the 0.1.6 hub sends this refusal only to a protocol 1 hello, which a protocol 2 helper never sends",
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {"helper": {"clock": "fake"}, "hub": {}},
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {
+      "s2h": {
+        "t": "error",
+        "id": "",
+        "message": "This server runs CITAR 0.1.6, which needs the new CITAR helper (protocol 2). Download it from the Servers page of this server, or from https://github.com/jprodgers/CITAR/releases/latest, and run it with a token issued there."
+      }
+    },
+    {"close": {"by": "server", "code": 4426}},
+    {"wait": {"s": 590, "quiet": true}},
+    {"connect": {}, "within_s": 20},
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    }
+  ]
+}

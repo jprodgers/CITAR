@@ -1,0 +1,53 @@
+{
+ "name": "json-native-calls-ignored",
+ "note": "in json mode the tool-call channel is ignored",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "{\"thoughts\": \"t\", \"calls\": [{\"tool\": \"end_turn\", \"args\": {}}]}",
+   "reasoning": "r",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "get_tile",
+      "arguments": "{\"x\": 1, \"y\": 2}"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": {
+   "prompt_tokens": 10,
+   "completion_tokens": 5,
+   "reasoning_tokens": 2,
+   "cached_tokens": 4
+  }
+ },
+ "expect": {
+  "step": {
+   "text": "t",
+   "thinking": "r",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "{\"thoughts\": \"t\", \"calls\": [{\"tool\": \"end_turn\", \"args\": {}}]}"
+  },
+  "usage": {
+   "input_tokens": 10,
+   "output_tokens": 5,
+   "reasoning_tokens": 2
+  }
+ }
+}

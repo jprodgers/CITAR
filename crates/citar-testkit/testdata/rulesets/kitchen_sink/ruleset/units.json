@@ -1,0 +1,90 @@
+{
+  "Kitchen Sink Raider": {
+    "name": "Kitchen Sink Raider",
+    "unitType": "Sword",
+    "movement": 2,
+    "strength": 10,
+    "cost": 50,
+    "requiredTech": "Bronze Working",
+    "uniques": [
+      "May attack when embarked",
+      "No defensive terrain penalty",
+      "[+50]% Health from pillaging tiles",
+      "[+100]% Yield from pillaging tiles",
+      "Can upgrade to [Swordsman]",
+      "[1] Movement point cost to embark",
+      "[This Unit] gains [1] movement <upon defeating a [Military] unit>",
+      "[This Unit] loses [1] movement <upon being promoted>",
+      "Gain [50] [Gold] <upon being defeated>"
+    ],
+    "id": "kitchen_sink_raider"
+  },
+  "Kitchen Sink Hovercraft": {
+    "name": "Kitchen Sink Hovercraft",
+    "unitType": "Mounted",
+    "movement": 3,
+    "strength": 12,
+    "cost": 70,
+    "requiredTech": "Engineering",
+    "uniques": ["May travel on Water tiles without embarking"],
+    "id": "kitchen_sink_hovercraft"
+  },
+  "Kitchen Sink Sub": {
+    "name": "Kitchen Sink Sub",
+    "unitType": "Submarine",
+    "movement": 5,
+    "strength": 30,
+    "rangedStrength": 50,
+    "cost": 300,
+    "requiredTech": "Refrigeration",
+    "uniques": ["Invisible to others"],
+    "id": "kitchen_sink_sub"
+  },
+  "Kitchen Sink Interceptor": {
+    "name": "Kitchen Sink Interceptor",
+    "unitType": "Fighter",
+    "movement": 1,
+    "strength": 40,
+    "rangedStrength": 40,
+    "range": 6,
+    "interceptRange": 6,
+    "cost": 350,
+    "requiredTech": "Radar",
+    "uniques": ["[+2] Air Interception Range", "[100]% chance to intercept air attacks"],
+    "id": "kitchen_sink_interceptor"
+  },
+  "Kitchen Sink Drone": {
+    "name": "Kitchen Sink Drone",
+    "unitType": "Missile",
+    "movement": 1,
+    "strength": 50,
+    "rangedStrength": 50,
+    "range": 8,
+    "cost": 150,
+    "requiredTech": "Radar",
+    "uniques": ["No Sight"],
+    "id": "kitchen_sink_drone"
+  },
+  "Kitchen Sink Walker": {
+    "name": "Kitchen Sink Walker",
+    "unitType": "Civilian",
+    "movement": 2,
+    "cost": 60,
+    "uniques": [
+      "Cannot embark",
+      "[-50]% construction time for [Farm] improvements"
+    ],
+    "id": "kitchen_sink_walker"
+  },
+  "Kitchen Sink Sage": {
+    "name": "Kitchen Sink Sage",
+    "unitType": "Civilian",
+    "movement": 2,
+    "uniques": [
+      "Can generate a large amount of culture <by consuming this unit>",
+      "Can speed up the construction of a wonder <by consuming this unit>",
+      "Unbuildable"
+    ],
+    "id": "kitchen_sink_sage"
+  }
+}

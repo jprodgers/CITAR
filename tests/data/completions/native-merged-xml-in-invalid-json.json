@@ -1,0 +1,61 @@
+{
+ "name": "native-merged-xml-in-invalid-json",
+ "note": "leaked XML in arguments that are not JSON: kept as __invalid_json__, then repaired from it",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "",
+   "reasoning": null,
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "set_research",
+      "arguments": "{\"tech\": \"pottery</parameter>\n<parameter=x>\n2"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "name": "set_research",
+     "args": {
+      "__invalid_json__": "{\"tech\": \"pottery",
+      "x": 2
+     }
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 2
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "set_research",
+      "arguments": "{\"__invalid_json__\": \"{\\\"tech\\\": \\\"pottery\", \"x\": 2}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

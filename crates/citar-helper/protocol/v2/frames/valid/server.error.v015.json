@@ -1,0 +1,10 @@
+{
+  "frame": {
+    "t": "error",
+    "ts": 1760000000.0,
+    "id": "",
+    "message": "This server speaks worker protocol v1; the worker speaks vNone. Update citar-worker.",
+    "refusal": "",
+    "retryable": false
+  }
+}

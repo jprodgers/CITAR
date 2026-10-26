@@ -12,6 +12,25 @@ nothing, contains no secrets, and is what a bug report should include.
 
 ---
 
+## It will not install
+
+**`There is no prebuilt CITAR for this platform: ...`** — the install scripts install CITAR's prebuilt wheels only,
+built for Windows x64, macOS 11 or newer, and Linux x64 and ARM64 with glibc 2.28 or newer, and the message names what
+this machine lacks: musl (Alpine), an older glibc, another processor, a 32-bit or free-threaded Python. A
+free-threaded Python (`python3.14t`) has a regular build beside it (`--python python3.14`); on Windows on ARM, install
+the x64 Python, or use the installer. Anywhere else, `pip install citar` builds CITAR from its source with a Rust
+toolchain ([INSTALL.md](INSTALL.md#from-source)).
+
+**pip starts compiling Rust, or fails with `cargo` or `rustc` not found** — pip found no wheel for this machine and
+took the source release. See the line above; `pip install --only-binary=citar "citar[all]"` stops at once instead.
+
+**"Windows protected your PC"** — the installer is not code-signed, so SmartScreen warns until enough people have run
+it: **More info → Run anyway**, after [checking the file](INSTALL.md#checking-a-download) if you like.
+
+**macOS says the CITAR helper "cannot be opened" or "is damaged"** — a file downloaded with a browser carries
+macOS's quarantine attribute and the helper is not notarised: `xattr -d com.apple.quarantine citar-helper-macos-*`.
+`install.sh --worker` and Homebrew leave no quarantine attribute.
+
 ## It will not start
 
 **`No Python 3.11+ found`** — CITAR needs 3.11 or newer. On Debian or Ubuntu, `python3-venv` is a
@@ -36,7 +55,9 @@ journalctl -u citar -n 50 --no-pager
 ```
 
 Usually the environment file: a missing secret key, a database path the service account cannot
-write, or a `CITAR_PUBLIC_ORIGIN` that is not `https://`.
+write, a `CITAR_PUBLIC_ORIGIN` that is not `https://`, or a comment after a value on the same line (systemd reads it
+as part of the value). After a rollback by hand, a database a newer release migrated, which an older release refuses:
+see [the runbook](server/RUNBOOK.md#going-back).
 
 ---
 
@@ -69,8 +90,28 @@ Look at **📊 AI stats** for that seat:
 
 ### It was working and now it is not
 
-A server restart drops in-memory games. Reload from the autosave in the lobby — nothing is lost,
-autosaves are written every turn.
+A server restart, or a server that was killed, brings back the lobby games that were open, from
+their autosaves, running or paused as they were. An autosave is taken at the start of every round,
+and a round's last turn waits until it is written, so a game comes back at most a round behind: the
+round in progress is played again, and the round before it too when the server stopped while that
+round's autosave was still being written. A game closed on purpose stays closed; reload it
+from its saves in the lobby. A game that was open when a version 0.1.5 server stopped is not brought
+back on the first start of this version (its autosave is the Python engine's); the server's log
+names it once.
+
+### A save does not load
+
+The lobby lists such a save without its turn or players, and **Load** says why:
+
+| The message says | Means |
+|---|---|
+| saved by the Python engine; archived with 0.1.5 | A save of version 0.1.5 or earlier, which this version does not read |
+| ...'s history ... cannot be read | Its journal (`journal.cjnl` beside it) is missing, or damaged in a part this save needs. An earlier save of the game may still load: each needs only the history up to its own turn |
+| is in use by another session | Another server, or another game open in this one, is writing that game. Close it first |
+
+Loading a save never costs the game it would replace: a save that does not load is refused with that
+game still playing as it was. A damaged journal is never repaired in place: loading a save from
+before the damage starts a new journal from the good part, and the damaged file is left as it is.
 
 ---
 
@@ -85,6 +126,12 @@ or raise the context only as far as you need.
 **The engine is slow.** Bot turns and large maps are CPU-bound and single-threaded per game. A
 Gargantuan map with 24 civilizations is slow no matter what hardware you have. On a small server,
 lower `default_max_concurrent_games`.
+
+**Saving holds the game up.** A save is taken under the game's lock, so nothing reads or plays the
+game meanwhile, and written to the disk after. `/api/games/<game id>/debug/errors` reports how long
+this game's saves held the lock (`save_lock`: the saves, their total, the longest and the last, in
+seconds). The longest should stay well under 10 ms; if it does not, the state is unusually large or
+the machine is very busy.
 
 ---
 
@@ -139,6 +186,12 @@ Mail from a new subdomain often lands in spam until SPF and DKIM are in place.
 
 **The worker connects and disconnects.** Check the token — it is per-server, and reissuing one
 invalidates the old.
+
+**A helper from Homebrew, Scoop or winget never updates itself.** That is the packaged build, on purpose: its package
+manager owns the binary, so the helper reports a new release (`notify`) and refuses `"updates": "auto"`. Update it
+with `brew upgrade citar-helper`, `scoop update citar-helper` or `winget upgrade JimmieRodgers.CITAR.Helper`
+([Workers](server/WORKERS.md#updates)). A helper that says `updates: unavailable` trusts no update key: download the
+newer one by hand.
 
 **The worker connects but models never run on it.** The worker serves its models to the server; the
 *server* decides which seat uses which model. Check that the seat is configured to use that

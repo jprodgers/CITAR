@@ -16,6 +16,21 @@ updates:
         patterns: ["*"]
     labels: ["dependencies"]
 
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      rust:
+        patterns: ["*"]
+    ignore:
+      # libm is pinned exactly and bumped by hand: a bump can change the last bit of a result,
+      # so it comes with re-blessed goldens (crates/citar-engine/DESIGN.md 2.6 and 7.5).
+      - dependency-name: "libm"
+    labels: ["dependencies"]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
@@ -31,4 +46,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    ignore:
+      # The Dockerfile's base is pinned by digest, which this moves weekly; its Python stays the VPS's, 3.12, so the
+      # image and the server's deploy run one interpreter (design/phase5-release.md P5.7): moved by hand, with both.
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     labels: ["dependencies", "docker"]

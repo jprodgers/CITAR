@@ -1,0 +1,110 @@
+{
+ "name": "native-several-calls",
+ "note": "three native calls in order, text beside them",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "Founding the capital, then ending the turn.",
+   "reasoning": null,
+   "tool_calls": [
+    {
+     "id": "call_a1",
+     "type": "function",
+     "function": {
+      "name": "found_city",
+      "arguments": "{\"unit_id\": 1, \"name\": \"Roma\"}"
+     }
+    },
+    {
+     "id": "call_a2",
+     "type": "function",
+     "function": {
+      "name": "set_research",
+      "arguments": "{\"tech\": \"pottery\"}"
+     }
+    },
+    {
+     "id": "call_a3",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": {
+   "prompt_tokens": 1200,
+   "completion_tokens": 64,
+   "reasoning_tokens": 0,
+   "cached_tokens": null
+  }
+ },
+ "expect": {
+  "step": {
+   "text": "Founding the capital, then ending the turn.",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "call_a1",
+     "name": "found_city",
+     "args": {
+      "unit_id": 1,
+      "name": "Roma"
+     }
+    },
+    {
+     "id": "call_a2",
+     "name": "set_research",
+     "args": {
+      "tech": "pottery"
+     }
+    },
+    {
+     "id": "call_a3",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "Founding the capital, then ending the turn.",
+   "tool_calls": [
+    {
+     "id": "call_a1",
+     "type": "function",
+     "function": {
+      "name": "found_city",
+      "arguments": "{\"unit_id\": 1, \"name\": \"Roma\"}"
+     }
+    },
+    {
+     "id": "call_a2",
+     "type": "function",
+     "function": {
+      "name": "set_research",
+      "arguments": "{\"tech\": \"pottery\"}"
+     }
+    },
+    {
+     "id": "call_a3",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 1200,
+   "output_tokens": 64,
+   "reasoning_tokens": 0
+  }
+ }
+}

@@ -1,0 +1,95 @@
+about = """
+A chat that has run to its cap without a deal is not converging: the message that would pass the cap
+closes it as expired instead of joining it, so an open chat never holds more than the cap. The sender
+is told why and that the message was not delivered; the history ends with the game's close entry and
+its note, which the views show but do not count as a message; nothing more may be said.
+"""
+from = "tests/test_negotiation_chat.py::MessageCapTests::test_a_chat_that_would_pass_the_cap_closes_as_expired"
+
+[config]
+diplomacy = { max_chat_messages = 4 }
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reply", message = "Talk is cheap." }
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "reply", message = "So it is." }
+
+[[step]]
+note = "Four messages: at the cap, and still open."
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reply", message = "Indeed." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "status"
+eq = "open"
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history"
+len = 4
+
+[[step]]
+note = "A fifth would pass it, so it closes the chat instead."
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "reply", message = "Well then." }
+as = "res"
+
+[[step]]
+check = "res"
+eq = { status = "expired", awaiting = "=null", note = "Negotiation #1 already held 4 messages, its limit, so it has closed and your reply was not delivered." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "expired", awaiting = "=null" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history"
+len = 5
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[4]"
+subset = { seq = 5, by = "=null", action = "close", message = "", note = "The negotiation reached its limit of 4 messages and closed." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history"
+none = { path = "message", eq = "Well then." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 0 }
+subset = { messages = 4, max_messages = 4, status = "expired", your_move = false }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 0 }
+path = "history[4]"
+subset = { action = "close", by = "=null", note = "The negotiation reached its limit of 4 messages and closed." }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+path = "[4].text"
+eq = "Negotiation #1 between Civilization 1 and Civilization 2 expired. The negotiation reached its limit of 4 messages and closed."
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reply", message = "Hello?" }
+error = "Negotiation #1 is expired."

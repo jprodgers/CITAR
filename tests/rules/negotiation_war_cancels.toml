@@ -1,0 +1,52 @@
+about = """
+A war makes its two sides' open negotiations moot: declaring war cancels them, with a note saying who
+declared war on whom. Negotiations with others go on.
+"""
+from = "tests/test_negotiation_chat.py::CloseNegotiationTests::test_war_cancels_the_chat_with_a_note"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "meet", a = 0, b = 2 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 2, message = "And you?" }
+
+[[step]]
+tool = "declare_war"
+args = { player_id = 1 }
+as = "war"
+
+[[step]]
+check = "war"
+eq = { war_declared_on = "Civilization 2" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "cancelled", awaiting = "=null" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[1]"
+subset = { action = "close", by = "=null", note = "Civilization 1 declared war on Civilization 2." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 2 }
+path = "status"
+eq = "open"
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+path = "[2].text"
+eq = "Negotiation #1 between Civilization 1 and Civilization 2 was cancelled. Civilization 1 declared war on Civilization 2."

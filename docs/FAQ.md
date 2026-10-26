@@ -48,7 +48,7 @@ worse than a smaller one that can.
 
 No. There is no telemetry, no analytics and no phoning home. The only outbound connections are to
 the model endpoints you configure — which may be entirely on your own machine — and, if you run a
-worker, to the CITAR server you pointed it at.
+helper (the CITAR helper, which lends your models), to the CITAR server you pointed it at.
 
 API keys go to your operating system's credential store and are never written to the project
 folder, a save file or a report.
@@ -103,9 +103,10 @@ inherent, not a bug, and it is why:
 
 ## Can I use my own ruleset or mod?
 
-Yes. Most content is data. A mod entry in `citar/data/custom/` in UnCiv format works as long as the
-engine knows the uniques it uses. To move to a newer UnCiv release, point
-`scripts/import_unciv.py` at a checkout and regenerate. See [MODDING.md](MODDING.md).
+Yes. Most content is data. Copy the ruleset (`crates/citar-engine/data/`), change it in UnCiv's
+format, check it with `citar ruleset check DIR`, and point `CITAR_RULESET_DIR` at it: no Rust
+toolchain needed, as long as the engine knows the uniques it uses. To move to a newer UnCiv release,
+point `scripts/import_unciv.py` at a checkout and regenerate. See [MODDING.md](MODDING.md).
 
 ## Can I drive CITAR from my own code?
 
@@ -134,7 +135,14 @@ production.
 
 Copy the state directory (`citar where`), and on a server the environment file. That is everything:
 saved games, the registry, benchmark runs, reports and the database. A server install has a nightly
-backup timer and a documented restore drill — [server/RUNBOOK.md](server/RUNBOOK.md).
+backup timer that takes all of it, and a documented restore drill — [server/RUNBOOK.md](server/RUNBOOK.md#backups).
+
+## Is there a CITAR for my machine?
+
+Every release is built for Windows x64, macOS 11 or newer on Apple silicon and Intel, and Linux x64 and ARM64 with
+glibc 2.28 or newer, for Python 3.11 and every newer release, and the CITAR helper for the same five. Anywhere else
+(Alpine, 32-bit, an older Linux) `pip install citar` builds it from source with a Rust toolchain, and the install
+scripts say so before they change anything. [INSTALL.md](INSTALL.md#where-citar-is-built-for).
 
 ## Can I contribute?
 

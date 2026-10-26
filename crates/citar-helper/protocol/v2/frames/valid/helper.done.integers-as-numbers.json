@@ -1,0 +1,24 @@
+{
+  "frame": {
+    "t": "done",
+    "ts": 1760000000,
+    "id": "0123456789abcdef",
+    "message": {"content": "ok", "reasoning": null, "tool_calls": []},
+    "finish_reason": null,
+    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "reasoning_tokens": null, "cached_tokens": 0},
+    "gen_s": 1,
+    "ttft_s": 0,
+    "streamed": true
+  },
+  "expect": {
+    "t": "done",
+    "ts": 1760000000,
+    "id": "0123456789abcdef",
+    "message": {"content": "ok", "reasoning": null, "tool_calls": []},
+    "finish_reason": null,
+    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "reasoning_tokens": null, "cached_tokens": 0},
+    "gen_s": 1,
+    "ttft_s": 0,
+    "streamed": true
+  }
+}

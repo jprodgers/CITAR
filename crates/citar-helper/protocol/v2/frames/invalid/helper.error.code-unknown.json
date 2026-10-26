@@ -1,0 +1,13 @@
+{
+  "frame": {
+    "t": "error",
+    "ts": 1760000000.0,
+    "id": "0123456789abcdef",
+    "code": "overloaded",
+    "message": "All 2 local slots are in use.",
+    "retryable": true
+  },
+  "code": "value",
+  "path": "code",
+  "why": "a code the protocol does not name"
+}

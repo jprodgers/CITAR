@@ -1,0 +1,74 @@
+about = """
+Only the player whose turn it is can end it, and nobody can once the game is over: a game ends
+when its turn limit has passed, with no winner when the Time victory is off. Nor can a turn be
+forced then.
+"""
+from = "tests/test_engine.py::TurnTests::test_not_your_turn"
+
+[config]
+players = [{}, {}]
+turn_limit = 1
+victories = { Time = false }
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+op = "end_turn"
+args = { player = 1 }
+error = "It is not your turn"
+
+[[step]]
+op = "end_turn"
+args = { player = 1 }
+error = "It is not your turn (it is Civilization 1's turn)."
+intended = "end-turn-names-whose-turn-it-is"
+
+[[step]]
+note = "The refusal changed nothing."
+check = { what = "game" }
+subset = { turn = 1, current = 0, phase = "playing" }
+
+[[step]]
+check = { what = "events", type = "turn_end" }
+len = 0
+
+[[step]]
+note = "The only round of a one-turn game."
+op = "end_round"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 2, current = 1 }
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over", winner = "=null" }
+
+[[step]]
+check = { what = "events", type = "game_over" }
+len = 1
+any = { path = "text", eq = "The turn limit has been reached. The game ends with no winner." }
+
+[[step]]
+op = "end_turn"
+error = "The game is over."
+
+[[step]]
+op = "end_turn"
+args = { player = 0 }
+error = "The game is over."
+
+[[step]]
+note = "A turn cannot be forced in a game that is over either, and the refusal changes nothing."
+op = "force_turn"
+args = { player = 0 }
+error = "Test operation 1 (force_turn): The game is over."
+
+[[step]]
+check = { what = "game" }
+subset = { turn = 2, current = 1, phase = "over" }

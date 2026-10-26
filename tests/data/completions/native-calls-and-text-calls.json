@@ -1,0 +1,58 @@
+{
+ "name": "native-calls-and-text-calls",
+ "note": "native calls win: XML in the text beside them is left as text",
+ "mode": "native",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "I'll do it.\n<tool_call>\n<function=found_city>\n<parameter=unit_id>\n7\n</parameter>\n</function>\n</tool_call>",
+   "reasoning": null,
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "finish_reason": "tool_calls",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "I'll do it.\n<tool_call>\n<function=found_city>\n<parameter=unit_id>\n7\n</parameter>\n</function>\n</tool_call>",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "tool_calls",
+   "malformed": 0
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "I'll do it.\n<tool_call>\n<function=found_city>\n<parameter=unit_id>\n7\n</parameter>\n</function>\n</tool_call>",
+   "tool_calls": [
+    {
+     "id": "c1",
+     "type": "function",
+     "function": {
+      "name": "end_turn",
+      "arguments": "{}"
+     }
+    }
+   ]
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

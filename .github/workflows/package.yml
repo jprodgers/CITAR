@@ -1,0 +1,1670 @@
+# The release build (design/phase5-release.md P5.3): what a release ships, built and tested on every pull request,
+# so no failure is left for the release to find. It publishes nothing.
+#
+# - meta: the version, its PEP 440 form and the build label (scripts/release.py meta), one set for every job.
+# - wheels: the five abi3 wheels, each built natively on its own architecture with maturin MATURIN_VERSION (no
+#   emulation, no cross build: the Linux ones in the manylinux_2_28 container of the runner's own architecture,
+#   pinned by digest),
+#   CITAR_BUILD_ID set to the label; each held to the checkout and its tag by scripts/ci/check_dist.py, checked by
+#   twine, then installed in a fresh venv on the runner that built it under Python 3.11 (the floor) and 3.14 (the
+#   newest) and proved there by scripts/ci/smoke_wheel.py: the label arrived, a job host is verifiable on this
+#   platform, and it played the seeded lab job, whose result hash every platform must share (package 5-08's assemble
+#   holds the lines to one version, label, build id, jobs build and hash).
+# - sdist, sdist-build: the source distribution, and a wheel built from it as a user builds one (pip, the runner's
+#   rustup and the sdist's rust-toolchain.toml, maturin from build isolation, no label), smoke-tested with the label
+#   unknown.
+# - constraints: the [server] extra's tested dependency set, from the Linux x64 wheel on Python 3.12, which the image
+#   and the server's deploy install with --constraint (P5.7, P5.13).
+# - helpers: the CITAR helper twice on each of its five targets (P5.4.1), natively on the target's own runner, the
+#   Linux ones in the wheels' manylinux_2_28 containers so the helper needs glibc 2.28 as the game does (checked from
+#   its dynamic symbols): the self-updating build under its unversioned release name, and the `packaged` build
+#   (Homebrew, Scoop, winget; it never updates itself) in its versioned archive with the notices. Both are run on the
+#   runner, outside any container, through scripts/ci/gate_run.py with a home of their own (scripts/ci/
+#   helper_release.py): --version names the version, the label and the target, --self-test passes, and update check
+#   says what the tree's update-keys.pub and each build's policy make it. Linux x64 also connects from Fedora, whose
+#   certificates are kept elsewhere.
+# - helper-manifest: citar-helper-manifest.json over the five self-updating builds, written by the xtask binary
+#   this job builds once and uploads (release.yml's signing job runs that binary and builds nothing, P5.11); signed
+#   with a throwaway key made in the runner's temporary folder, and the signature verified by xtask and by
+#   scripts/ci/verify_manifest.py, which shares no code with it, a copy with one byte changed and another key refused
+#   by both. Nothing here holds the release's key.
+# - notices: packaging/THIRD-PARTY-LICENSES.txt held to Cargo.lock (cargo xtask licenses --check, P5.5) and uploaded as
+#   the release's asset; the wheels carry it as a licence file and the packaged helpers' archives beside the binary.
+# - windows: the Windows bundle (PyInstaller) from the Windows wheel installed in a fresh venv, never the checkout;
+#   its checks (scripts/ci/check_bundle.py: the job host started from the bundle among them), the Inno Setup installer,
+#   a silent per-user install on the runner, run and uninstalled, and the portable zip (P5.6).
+# - install: install.sh (Linux and macOS) and install.ps1 (Windows) on each platform, against this run's wheel and
+#   helper for it, served from a loopback server as a release serves them (scripts/ci/install_check.py): the
+#   platform check, wheels only, the game and its commands, --worker's helper and its checksum, the uninstall
+#   (P5.8).
+# - image: the server image for linux/amd64 and linux/arm64, each built natively from its own wheel and the
+#   constraints, run and checked (scripts/ci/check_image.py: health, version and label, the job host verifiable as uid
+#   10001, the wheels' smoke, a restart keeping the volume's state), saved and loaded again with the same id; kept as
+#   pkg-image-<arch> on a release's dry run and on a tag, for release.yml to push (P5.7).
+# - assemble: every file the release ships, downloaded by name into one folder that must be exactly scripts/release.py
+#   assets V, every build's report held to one version, label, build id, jobs build and result hash
+#   (scripts/ci/assemble_release.py), SHA256SUMS, the notes, the attestation's subjects and the package managers'
+#   manifests (scripts/release_checksums.py); uploaded as pkg-release-assets, pkg-python-dists and pkg-release-preview,
+#   which release.yml publishes without building anything (P5.10, P5.11).
+# - managers: Scoop's two packages and winget's (its JSON schemas; winget itself where the runner has it) on Windows,
+#   Homebrew's formula (audit and style with the real URLs, install and test) on macOS arm64 and x64 and Linux x64,
+#   each from a loopback copy of the assembled release (scripts/ci/check_managers.py, P5.9).
+#
+# release.yml calls this workflow on a tag and on a release's dry run (P5.11) with the mode, the version, the date
+# and the label, no secrets and contents: read; a run of its own is mode ci (label ci+<sha>). Every job starts, after
+# the checkout and its interpreters, with scripts/release.py prepare: a dry run bumps the runner's checkout first, so
+# it builds exactly what a tag of the bumped branch would. scripts/ci/check_workflows.py holds this file to P5.17's
+# rules: it publishes nothing and names no environment and no secret, every action is pinned to a commit, every job
+# prepares before it builds, maturin is MATURIN_VERSION, and its artifacts are pkg-..., downloaded by name. cargo
+# xtask check holds every line of it to builds without a test feature (its helper rule).
+name: package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      mode:
+        description: "ci, dry-run or tag: what scripts/release.py prepare does first in every job"
+        type: string
+        default: ci
+      version:
+        description: "the release's version, without the leading v (dry-run and tag)"
+        type: string
+        default: ""
+      date:
+        description: "a dry run's bump date, YYYY-MM-DD (one per run, so every job bumps alike)"
+        type: string
+        default: ""
+      label:
+        description: "the caller's build label (release.py label); the meta job computes its own and must agree"
+        type: string
+        default: ""
+
+concurrency:
+  # A new push supersedes the run in flight for the same branch. When release.yml calls this workflow,
+  # github.workflow is the caller's name, so its run never shares a group with a push's (check_workflows.py's
+  # rule 4).
+  group: package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The maturin every wheel and the source distribution are built with, as test.yml's: the version tested, moved on
+  # deliberately (a test holds the two pins equal); scripts/ci/check_dist.py holds what it builds to the checkout.
+  MATURIN_VERSION: v1.15.0
+  # The call's inputs (a run of its own is mode ci). They reach the meta job's shell through the environment, never
+  # written into a script; every other job takes the meta job's outputs.
+  RELEASE_MODE: ${{ inputs.mode || 'ci' }}
+  RELEASE_VERSION: ${{ inputs.version || '' }}
+  RELEASE_DATE: ${{ inputs.date || '' }}
+  RELEASE_LABEL: ${{ inputs.label || '' }}
+
+jobs:
+  meta:
+    name: version and label
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      pep440: ${{ steps.meta.outputs.pep440 }}
+      numeric: ${{ steps.meta.outputs.numeric }}
+      label: ${{ steps.meta.outputs.label }}
+      date: ${{ steps.meta.outputs.date }}
+      mode: ${{ steps.meta.outputs.mode }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: The values every job reads
+        # The version (refused unless it is one), its PEP 440 and numeric forms, the label (v<V> on a tag,
+        # v<V>-dryrun+<sha7> on a dry run, ci+<sha7> otherwise) and one date for the whole run.
+        id: meta
+        shell: bash
+        run: |
+          values=$(python scripts/release.py meta --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} --sha "$GITHUB_SHA" ${RELEASE_DATE:+--date "$RELEASE_DATE"} --github-output "$GITHUB_OUTPUT")
+          printf '%s\n' "$values"
+          label=$(printf '%s\n' "$values" | sed -n 's/^label=//p')
+          if [ -n "$RELEASE_LABEL" ] && [ "$RELEASE_LABEL" != "$label" ]; then
+            echo "::error title=package.yml meta::the caller's label $RELEASE_LABEL is not this run's $label"
+            exit 1
+          fi
+
+  wheels:
+    name: wheel (${{ matrix.platform }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      PEP440: ${{ needs.meta.outputs.pep440 }}
+      # The label every release build carries (P5.2): citar doctor, build_info() and the smoke line name it.
+      CITAR_BUILD_ID: ${{ needs.meta.outputs.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # P5.3.2's table: abi3-py311, so one wheel per platform serves CPython 3.11 and later; macOS 11 for both
+        # architectures; glibc 2.28 for both Linux ones, whose maturin audits the wheel against its tag.
+        include:
+          - platform: windows-x64
+            runner: windows-latest
+            machine: x86_64
+            target: x86_64-pc-windows-msvc
+            manylinux: "off"
+            container: ""
+            macos_target: ""
+            tag: cp311-abi3-win_amd64
+            library: citar/_engine.pyd
+          - platform: macos-arm64
+            runner: macos-15
+            machine: arm64
+            target: aarch64-apple-darwin
+            manylinux: "off"
+            container: ""
+            macos_target: "11.0"
+            tag: cp311-abi3-macosx_11_0_arm64
+            library: citar/_engine.abi3.so
+          - platform: macos-x64
+            runner: macos-15-intel
+            machine: x86_64
+            target: x86_64-apple-darwin
+            manylinux: "off"
+            container: ""
+            macos_target: "11.0"
+            tag: cp311-abi3-macosx_11_0_x86_64
+            library: citar/_engine.abi3.so
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            machine: x86_64
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+            # PyPA's 2026.10.16-1, "latest" on 2026-10-19 (rule 11: a build image by digest, moved deliberately).
+            container: quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b8460ad8fb3fb0fbe1cd818845159ac896b4fd17452d56e892c291f3b97a8
+            macos_target: ""
+            tag: cp311-abi3-manylinux_2_28_x86_64
+            library: citar/_engine.abi3.so
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+            # Named, not left to maturin-action, so no change of its defaults can swap in a cross-compiling image;
+            # PyPA's 2026.10.16-1, "latest" on 2026-10-19.
+            container: quay.io/pypa/manylinux_2_28_aarch64@sha256:b873ffc316ffe8a154e3dc4872871de2ebd170db4876c8bbd983d42ff320001e
+            macos_target: ""
+            tag: cp311-abi3-manylinux_2_28_aarch64
+            library: citar/_engine.abi3.so
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The smoke's two interpreters, then the build's (the last one is the default on PATH).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: py311
+        with:
+          python-version: "3.11"
+          update-environment: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: py314
+        with:
+          python-version: "3.14"
+          update-environment: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: This runner's own architecture (no emulation, no cross build)
+        shell: bash
+        env:
+          WANT: ${{ matrix.machine }}
+        run: |
+          got=$(uname -m)
+          echo "uname -m: $got; label: $CITAR_BUILD_ID; version: $RELEASE_VERSION ($PEP440)"
+          [ "$got" = "$WANT" ] || { echo "::error::this runner is $got, not $WANT"; exit 1; }
+
+      - name: Toolchain
+        # rust-toolchain.toml's release, installed before the cache reads `rustc -vV` for its key, as test.yml's
+        # build-ext does (rustup's install on first use can be turned off). The native builds only: a container's
+        # build installs the toolchain inside it.
+        if: matrix.container == ''
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # The native builds only: a container's build runs as root with a cargo home of its own, so the runner
+        # neither restores nor saves it. A run of its own only (mode ci): a release's or a dry run's wheels are built
+        # from the locked sources alone, never from what an earlier run left in a cache.
+        if: matrix.container == '' && needs.meta.outputs.mode == 'ci'
+        with:
+          shared-key: wheel-${{ matrix.target }}
+
+      - name: Build the release wheel
+        # The release profile, pyproject.toml's features (never the test operations), Cargo.lock as committed. The
+        # label reaches the container through docker-options; the smoke below asserts it arrived.
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
+        with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          container: ${{ matrix.container }}
+          docker-options: -e CITAR_BUILD_ID
+          args: --release --locked --out dist
+
+      - name: One wheel, its tag and library, and the files the checkout says
+        shell: bash
+        env:
+          TAG: ${{ matrix.tag }}
+          LIBRARY: ${{ matrix.library }}
+        run: |
+          ls -l dist
+          python scripts/ci/check_dist.py wheel dist --tag "$TAG" --library "$LIBRARY" --version "$PEP440"
+
+      - name: Its metadata is valid for PyPI
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade twine
+          python -m twine check dist/*.whl
+
+      - name: Installed and run on Python 3.11, the floor
+        # A fresh venv, pip install --only-binary=:all: "<wheel>[all]", then the checks from a folder outside the
+        # checkout with -P and every state variable in the runner's temporary folder (scripts/ci/smoke_wheel.py).
+        shell: bash
+        env:
+          PY: ${{ steps.py311.outputs.python-path }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          python scripts/ci/smoke_wheel.py smoke --wheel dist --python "$PY" --work "$RUNNER_TEMP/smoke-3.11" \
+            --version "$RELEASE_VERSION" --label "$CITAR_BUILD_ID" --platform "$PLATFORM" \
+            --out "smoke/smoke-$PLATFORM-3.11.json"
+
+      - name: Installed and run on Python 3.14, the newest
+        shell: bash
+        env:
+          PY: ${{ steps.py314.outputs.python-path }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          python scripts/ci/smoke_wheel.py smoke --wheel dist --python "$PY" --work "$RUNNER_TEMP/smoke-3.14" \
+            --version "$RELEASE_VERSION" --label "$CITAR_BUILD_ID" --platform "$PLATFORM" \
+            --out "smoke/smoke-$PLATFORM-3.14.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-wheel-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-smoke-${{ matrix.platform }}-3.11
+          path: smoke/smoke-${{ matrix.platform }}-3.11.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-smoke-${{ matrix.platform }}-3.14
+          path: smoke/smoke-${{ matrix.platform }}-3.14.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  sdist:
+    name: source distribution
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      PEP440: ${{ needs.meta.outputs.pep440 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: Toolchain
+        # maturin asks cargo for the crates' files.
+        run: rustup toolchain install
+
+      - name: The source distribution
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: sdist
+          args: --out dist
+
+      - name: It holds what the checkout says, and its metadata is valid for PyPI
+        # Only tracked files, all of citar/ and everything its includes name, the ruleset the engine compiles in, the
+        # licence files; its version.
+        shell: bash
+        run: |
+          ls -l dist
+          python scripts/ci/check_dist.py sdist dist --version "$PEP440"
+          python -m pip install --disable-pip-version-check --upgrade twine
+          python -m twine check dist/*.tar.gz
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  sdist-build:
+    name: a wheel from the source distribution, as a user builds one
+    needs: [meta, sdist]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      PEP440: ${{ needs.meta.outputs.pep440 }}
+      # No CITAR_BUILD_ID: a user's build carries no label, so this wheel says unknown.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-sdist
+          path: sdist
+
+      - name: pip wheel from the source distribution
+        # As a user would build it: pip, with maturin from build isolation (floating within pyproject.toml's <2), the
+        # runner's rustup, which installs the toolchain the sdist's rust-toolchain.toml names, outside the checkout.
+        shell: bash
+        run: |
+          sdist=$(ls "$GITHUB_WORKSPACE"/sdist/*.tar.gz)
+          mkdir -p "$RUNNER_TEMP/sdist-build"
+          cd "$RUNNER_TEMP/sdist-build"
+          env -u CITAR_BUILD_ID python -m pip wheel --disable-pip-version-check --no-deps \
+            --wheel-dir "$GITHUB_WORKSPACE/built" "$sdist"
+          ls -l "$GITHUB_WORKSPACE/built"
+
+      - name: The wheel holds what the checkout says
+        shell: bash
+        run: python scripts/ci/check_dist.py wheel built --library citar/_engine.abi3.so --version "$PEP440"
+
+      - name: Installed and run, with the label unknown
+        shell: bash
+        run: |
+          python scripts/ci/smoke_wheel.py smoke --wheel built --python "$(command -v python)" \
+            --work "$RUNNER_TEMP/smoke-sdist" --version "$RELEASE_VERSION" --label unknown \
+            --platform sdist-linux-x64 --out smoke/smoke-sdist.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-smoke-sdist
+          path: smoke/smoke-sdist.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  constraints:
+    name: the release's tested dependency set
+    needs: [meta, wheels]
+    # It needs only the Linux x64 wheel, so another platform's failure does not skip it.
+    if: ${{ !cancelled() && needs.meta.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      PEP440: ${{ needs.meta.outputs.pep440 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # The VPS's and the image's Python.
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-linux-x64
+          path: wheel
+
+      - name: pip freeze of a [server] venv
+        # citar-<pep440>-server-constraints.txt: every distribution the [server] extra installed with this wheel, each
+        # pinned (P5.3.4).
+        shell: bash
+        run: |
+          python scripts/ci/smoke_wheel.py constraints --wheel wheel --python "$(command -v python)" \
+            --work "$RUNNER_TEMP/constraints" --out "constraints/citar-$PEP440-server-constraints.txt"
+          cat "constraints/citar-$PEP440-server-constraints.txt"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-constraints
+          path: constraints/*.txt
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  helpers:
+    name: helper (${{ matrix.platform }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      # The label every release build carries (P5.2): --version and the helper's hello name it.
+      CITAR_BUILD_ID: ${{ needs.meta.outputs.label }}
+      # macOS 11 for both Macs, as the wheels (read by the macOS builds only; helper_release.py check holds both
+      # builds' LC_BUILD_VERSION to it).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # The rustup the Linux builds install in their container: this release of rustup-init, fetched from
+      # static.rust-lang.org's archive and run only once its SHA-256 is the one its matrix leg names (rustup_sha256,
+      # the archive's own .sha256 for that target). helper.yml's artifact job, the same (tests/test_workflows.py).
+      RUSTUP_INIT_VERSION: "1.29.1"
+    strategy:
+      fail-fast: false
+      matrix:
+        # P4.10's targets and unversioned names, one line a target: helper.yml's artifact matrix builds the same five
+        # (citar/web/tests/helper.test.mjs holds the two, the download card and cargo xtask helper-manifest's table
+        # equal). Each builds on its own architecture; the Linux ones in the wheels' manylinux_2_28 images, by the
+        # same digests (tests/test_workflows.py holds them equal; rule 11 holds each to a digest).
+        include:
+          - { platform: windows-x64, runner: windows-latest, machine: x86_64, target: x86_64-pc-windows-msvc, asset: citar-helper-windows-x64.exe, container: "", rustup_sha256: "" }
+          - { platform: macos-arm64, runner: macos-15, machine: arm64, target: aarch64-apple-darwin, asset: citar-helper-macos-arm64, container: "", rustup_sha256: "" }
+          - { platform: macos-x64, runner: macos-15-intel, machine: x86_64, target: x86_64-apple-darwin, asset: citar-helper-macos-x64, container: "", rustup_sha256: "" }
+          - { platform: linux-x64, runner: ubuntu-24.04, machine: x86_64, target: x86_64-unknown-linux-gnu, asset: citar-helper-linux-x64, container: "quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b8460ad8fb3fb0fbe1cd818845159ac896b4fd17452d56e892c291f3b97a8", rustup_sha256: "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71" }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, machine: aarch64, target: aarch64-unknown-linux-gnu, asset: citar-helper-linux-arm64, container: "quay.io/pypa/manylinux_2_28_aarch64@sha256:b873ffc316ffe8a154e3dc4872871de2ebd170db4876c8bbd983d42ff320001e", rustup_sha256: "15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: This runner's own architecture (no emulation, no cross build)
+        shell: bash
+        env:
+          WANT: ${{ matrix.machine }}
+        run: |
+          got=$(uname -m)
+          echo "uname -m: $got; label: $CITAR_BUILD_ID; version: $RELEASE_VERSION"
+          [ "$got" = "$WANT" ] || { echo "::error::this runner is $got, not $WANT"; exit 1; }
+
+      - name: Toolchain
+        # rust-toolchain.toml's release, before the cache reads `rustc -vV` for its key. The native builds only: the
+        # container's build installs the toolchain inside it.
+        if: matrix.container == ''
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # A run of its own only (mode ci): the binaries a release or a dry run ships are built from the locked
+        # sources alone, never from what an earlier run left in a cache.
+        if: matrix.container == '' && needs.meta.outputs.mode == 'ci'
+        with:
+          shared-key: pkg-helper-${{ matrix.target }}
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        # The container's cargo home, rustup and target (rust-cache reads the runner's toolchain and cannot), so a pull
+        # request's Linux builds start from the dependencies the last one compiled; helper.yml's artifact builds share
+        # it. Mode ci only, as above.
+        if: matrix.container != '' && needs.meta.outputs.mode == 'ci'
+        with:
+          path: |
+            target/container
+            target/container-cargo
+            target/container-rustup
+          key: helper-container-${{ matrix.container }}-rustup-${{ env.RUSTUP_INIT_VERSION }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Both builds, on the runner (Windows, macOS)
+        # The self-updating build (no features), then the packaged one (`packaged`, a feature that ships: cargo xtask
+        # check reads every line of this file and refuses a test feature or a list it cannot read). They share every
+        # crate but citar-helper itself, so the second costs that crate and the link.
+        if: matrix.container == ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          mkdir -p build/self build/packaged
+          cargo build --release --locked -p citar-helper --target "$TARGET"
+          cp "target/$TARGET/release/citar-helper$ext" build/self/
+          cargo build --release --locked -p citar-helper --target "$TARGET" --features packaged
+          cp "target/$TARGET/release/citar-helper$ext" build/packaged/
+
+      - name: Both builds, in the manylinux_2_28 container (Linux)
+        # The image the wheel of this architecture builds in, by its digest: rust-toolchain.toml's toolchain installed
+        # in it by the pinned rustup-init (its SHA-256 checked before it runs), the label passed in by name, its gcc
+        # toolset all the helper needs (rustls on ring: no OpenSSL). The cargo home, rustup and target are the cached
+        # folders above, given back to the runner's user with the builds. The builds then run outside it, on this
+        # runner's newer glibc, as a user's machine would run them.
+        if: matrix.container != ''
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.container }}
+          TARGET: ${{ matrix.target }}
+          RUSTUP_SHA256: ${{ matrix.rustup_sha256 }}
+        run: |
+          mkdir -p build/self build/packaged
+          docker run --rm -e CITAR_BUILD_ID -e TARGET -e RUSTUP_INIT_VERSION -e RUSTUP_SHA256 \
+            -e OWNER="$(id -u):$(id -g)" -v "$PWD:/io" -w /io "$IMAGE" bash -euo pipefail -c '
+              echo "container: $(uname -m), $(ldd --version | head -n 1)"
+              export CARGO_HOME=/io/target/container-cargo RUSTUP_HOME=/io/target/container-rustup
+              export CARGO_TARGET_DIR=/io/target/container PATH="/io/target/container-cargo/bin:$PATH"
+              if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+                curl --proto "=https" --tlsv1.2 -sSf -o /tmp/rustup-init \
+                  "https://static.rust-lang.org/rustup/archive/$RUSTUP_INIT_VERSION/$TARGET/rustup-init"
+                echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c -
+                chmod +x /tmp/rustup-init
+                /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
+              fi
+              rustup toolchain install
+              cargo build --release --locked -p citar-helper --target "$TARGET"
+              cp "$CARGO_TARGET_DIR/$TARGET/release/citar-helper" build/self/
+              cargo build --release --locked -p citar-helper --target "$TARGET" --features packaged
+              cp "$CARGO_TARGET_DIR/$TARGET/release/citar-helper" build/packaged/
+              chown -R "$OWNER" build target'
+
+      - name: The Linux builds need glibc 2.28 at most, the game's floor
+        if: matrix.container != ''
+        shell: bash
+        run: python scripts/ci/helper_release.py glibc --max 2.28 build/self/citar-helper build/packaged/citar-helper
+
+      - name: The self-updating build under its release name, the packaged one in its archive
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          python scripts/ci/helper_release.py stage --self "build/self/citar-helper$ext" \
+            --packaged "build/packaged/citar-helper$ext" --platform "$PLATFORM" --version "$RELEASE_VERSION" --out stage
+
+      - name: Both run here, each with a home of its own (--version, --self-test, update check)
+        # Through scripts/ci/gate_run.py: a release build has no development guard, so without --home its home would
+        # be the runner user's per-user folder. The packaged binary is the one unpacked from its archive. On a Mac,
+        # both builds' oldest macOS (otool -l) must be MACOSX_DEPLOYMENT_TARGET's.
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          python scripts/ci/helper_release.py check --stage stage --platform "$PLATFORM" --target "$TARGET" \
+            --version "$RELEASE_VERSION" --label "$CITAR_BUILD_ID" --under "$RUNNER_TEMP" \
+            --work "$RUNNER_TEMP/helper-check" --macos-min "$MACOSX_DEPLOYMENT_TARGET" \
+            --out "report/helper-$PLATFORM.json"
+
+      - name: TLS works on a distribution that keeps its certificates elsewhere (Fedora)
+        # The helper verifies servers with the OS's own trust store (rustls-platform-verifier), so a distribution that
+        # keeps its CA roots elsewhere than the build machine (Fedora; 0.1.1's Python helper failed every handshake
+        # there) must still connect: any answer from the server is fine here (it refuses the token), a certificate
+        # error is not. Fedora 44's own glibc runs the build first. (4-14's check, moved here with the build.)
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        env:
+          # Fedora 44, linux/amd64: Docker Hub's official image, fedora:44 as pushed on 2026-08-26 (rule 11: an image a
+          # step runs, by its digest). Not quay.io/fedora/fedora: it rebuilds 44 and latest every day and deletes the
+          # day before's manifests, so a digest there stops pulling within a day ("manifest unknown", 5-04's merge).
+          FEDORA_IMAGE: docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19
+          ASSET: ${{ matrix.asset }}
+        run: |
+          docker run --rm -v "$PWD/stage:/d:ro" "$FEDORA_IMAGE" "/d/$ASSET" --version --home /tmp/citar-helper-home
+          out=$(docker run --rm -v "$PWD/stage:/d:ro" "$FEDORA_IMAGE" timeout 15 "/d/$ASSET" \
+                --home /tmp/citar-helper-home --server https://github.com --token x --no-hardware \
+                --base-url http://127.0.0.1:9/v1 2>&1 || true)
+          echo "$out"
+          if echo "$out" | grep -qi "certificate"; then echo "::error::the helper's TLS failed on Fedora"; exit 1; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-helper-${{ matrix.platform }}
+          path: |
+            stage/${{ matrix.asset }}
+            stage/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-helper-packaged-${{ matrix.platform }}
+          path: stage/citar-helper-${{ needs.meta.outputs.version }}-${{ matrix.platform }}.*
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Both builds' version lines, hashes and checks: package 5-08's assemble holds every helper to one version,
+        # label, build and jobs build with it.
+        with:
+          name: pkg-helper-report-${{ matrix.platform }}
+          path: report/helper-${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  helper-manifest:
+    name: the helper manifest, signed with a throwaway key
+    needs: [meta, helpers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-windows-x64
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-macos-arm64
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-macos-x64
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-linux-x64
+          path: assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-linux-arm64
+          path: assets
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # A run of its own only (mode ci): the xtask a release's signing job runs with the key (P5.4.2: the key never
+        # meets a build) is compiled from the locked sources alone, never linked from a cache an earlier run wrote.
+        if: needs.meta.outputs.mode == 'ci'
+        with:
+          shared-key: pkg-xtask
+
+      - name: xtask, built once
+        # Every step below runs this binary, and it is the one uploaded (pkg-xtask-linux-x64, with its SHA-256):
+        # release.yml's signing job runs it on the same runner image and builds nothing (P5.4.2, P5.11).
+        shell: bash
+        run: |
+          cargo build --release --locked -p xtask
+          mkdir -p xtask-bin
+          cp target/release/xtask xtask-bin/xtask
+          (cd xtask-bin && sha256sum xtask | cut -d' ' -f1 > xtask.sha256 && cat xtask.sha256)
+
+      - name: The manifest over the five self-updating builds
+        # Its build and protocol read from the Linux x64 build, which runs here; each asset's URL, SHA-256 and size.
+        shell: bash
+        run: |
+          chmod +x assets/citar-helper-linux-x64
+          ls -l assets
+          mkdir -p manifest
+          xtask-bin/xtask helper-manifest --assets assets --version "$RELEASE_VERSION" \
+            --out manifest/citar-helper-manifest.json
+          cat manifest/citar-helper-manifest.json
+          python scripts/ci/helper_release.py manifest manifest/citar-helper-manifest.json --assets assets \
+            --version "$RELEASE_VERSION"
+
+      - name: Signed with a throwaway key, and the signature verified twice
+        # The key is made in the runner's temporary folder (outside the checkout, which keygen insists on) and dies with
+        # the runner; check_workflows.py's rule 9 refuses an upload that could take it. The second verifier is the
+        # cryptography package's Ed25519, which shares no code with xtask's. The real signature is release.yml's alone,
+        # on a tag, under its environment's reviewer (P5.11).
+        shell: bash
+        run: |
+          key="$RUNNER_TEMP/throwaway"
+          xtask-bin/xtask keygen --out "$key"
+          mkdir -p dry-run
+          xtask-bin/xtask sign-manifest --key "$key/citar-update-signing.key" \
+            --out dry-run/citar-helper-manifest.json.sig manifest/citar-helper-manifest.json
+          cp "$key/citar-update-signing.pub" dry-run/dry-run-signing.pub
+          xtask-bin/xtask verify-manifest --pub dry-run/dry-run-signing.pub manifest/citar-helper-manifest.json \
+            dry-run/citar-helper-manifest.json.sig
+          python -m pip install --disable-pip-version-check "cryptography>=42.0"
+          python scripts/ci/verify_manifest.py --pub dry-run/dry-run-signing.pub manifest/citar-helper-manifest.json \
+            dry-run/citar-helper-manifest.json.sig
+
+      - name: A copy with one byte changed, and another key, are refused by both verifiers
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/changed"
+          changed="$RUNNER_TEMP/changed/citar-helper-manifest.json"
+          python -c "import sys; b = bytearray(open(sys.argv[1], 'rb').read()); b[len(b) // 2] ^= 1; open(sys.argv[2], 'wb').write(b)" \
+            manifest/citar-helper-manifest.json "$changed"
+          xtask-bin/xtask keygen --out "$RUNNER_TEMP/throwaway-other"
+          sig=dry-run/citar-helper-manifest.json.sig
+          for case in "dry-run/dry-run-signing.pub $changed" "$RUNNER_TEMP/throwaway-other/citar-update-signing.pub manifest/citar-helper-manifest.json"; do
+            set -- $case
+            for verifier in xtask python; do
+              rc=0
+              if [ "$verifier" = xtask ]; then
+                xtask-bin/xtask verify-manifest --pub "$1" "$2" "$sig" || rc=$?
+              else
+                python scripts/ci/verify_manifest.py --pub "$1" "$2" "$sig" || rc=$?
+              fi
+              [ "$rc" = 1 ] || { echo "::error::$verifier gave $rc, not 1 (does not verify), for $case"; exit 1; }
+              echo "refused by $verifier, as it must be: $case"
+            done
+          done
+
+      - name: The release's helpers trust what the tree's update-keys.pub says
+        # Empty until the owner commits the public key (RELEASING.md step 1): then update check says updates are
+        # unavailable. With a key: each line well formed, at most two, and the helper trusts that many.
+        shell: bash
+        run: |
+          python scripts/ci/verify_manifest.py --check-keys crates/citar-jobs/update-keys.pub
+          # distinct keys, as citar-jobs reads the file (blank and # lines read past, a key given twice trusted once)
+          keys=$(python -c "import sys; print(len({l.strip() for l in open(sys.argv[1]) if l.strip() and not l.strip().startswith('#')}))" \
+                 crates/citar-jobs/update-keys.pub)
+          out=$(python scripts/ci/gate_run.py helper --under "$RUNNER_TEMP" -- assets/citar-helper-linux-x64 \
+                update check --home "$RUNNER_TEMP/keys-home")
+          echo "$out"
+          echo "$out" | grep -q "^update keys trusted: $keys\b"
+          if [ "$keys" = 0 ]; then echo "$out" | grep -q "^updates: unavailable"; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The manifest alone: the release attaches it, and release.yml's signing job signs it on a tag.
+        with:
+          name: pkg-helper-manifest
+          path: manifest/citar-helper-manifest.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The throwaway key's signature and public key, named as a dry run's: never a release asset.
+        with:
+          name: pkg-helper-manifest-dry-run
+          path: |
+            dry-run/citar-helper-manifest.json.sig
+            dry-run/dry-run-signing.pub
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-xtask-linux-x64
+          path: |
+            xtask-bin/xtask
+            xtask-bin/xtask.sha256
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  notices:
+    # The third-party notices (design/phase5-release.md P5.5): packaging/THIRD-PARTY-LICENSES.txt must be what cargo
+    # xtask licenses writes from this checkout's Cargo.lock (every crate the wheels' extension and the helper link on
+    # the five release targets, each licence on the allow-list, with its texts), and this is the copy the release
+    # carries as an asset, beside the wheels and the packaged helpers' archives, which hold it too. release.yml calls
+    # no rust.yml, so a tag's or a dry run's notices are proved here; a dry run's version bump changes no third-party
+    # crate, so the file holds.
+    name: third-party notices
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - name: The notices are Cargo.lock's
+        # cargo fetch downloads every locked crate for every platform, whose licence files cargo xtask licenses reads.
+        # No cache: what a release carries is read from the locked sources alone.
+        shell: bash
+        run: |
+          cargo fetch --locked
+          cargo xtask licenses --check
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The release's asset of that name (scripts/release.py's notices group).
+        with:
+          name: pkg-third-party-licenses
+          path: packaging/THIRD-PARTY-LICENSES.txt
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  windows:
+    # The Windows bundle and installer (design/phase5-release.md P5.6), from this run's Windows wheel, never the
+    # checkout: the wheel installed with [all] in a fresh venv beside the pinned PyInstaller, which runs with -P from a
+    # folder outside the checkout on installer/citar.spec by its absolute path (the spec refuses unless citar and its
+    # engine are the installed wheel's, and puts the notices and PYTHON-LICENSES.txt at the bundle's root). Then the
+    # bundle's checks (scripts/ci/check_bundle.py: --version, where, doctor with the job host started from the bundle,
+    # _engine.pyd, the notices), Inno Setup's compile, a silent per-user install on the runner, run and uninstalled
+    # (the person's data kept), and the portable zip. No cache: what a release ships is built from this run's files.
+    name: Windows bundle and installer
+    needs: [meta, wheels]
+    # It needs only the Windows wheel.
+    if: ${{ !cancelled() && needs.meta.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      # Inno Setup's VersionInfoVersion must be four numbers (0.1.6-rc.1 is 0.1.6.0).
+      NUMERIC: ${{ needs.meta.outputs.numeric }}
+      # The label the wheel was built with, which the bundle's engine must name.
+      LABEL: ${{ needs.meta.outputs.label }}
+      # The bundle's builder, moved deliberately: PyInstaller 6.22.3 (2026-09-12) and its hooks 2026.8 (2026-09-30).
+      PYINSTALLER_VERSION: "6.22.3"
+      PYINSTALLER_HOOKS_VERSION: "2026.8"
+      # Installed only when the runner image has no Inno Setup (windows-2025's has 6.7.1).
+      INNO_SETUP_VERSION: "6.7.1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # The bundle's Python, as 0.1.5's.
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-windows-x64
+          path: wheel
+
+      - name: The bundle's venv, from the wheel
+        # Wheels only (no sdist is built here), the wheel with every extra, and the pinned PyInstaller beside it.
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/bundle-venv"
+          py="$RUNNER_TEMP/bundle-venv/Scripts/python.exe"
+          "$py" -m pip install --disable-pip-version-check --only-binary=:all: "$(ls wheel/*.whl)[all]" \
+            "pyinstaller==$PYINSTALLER_VERSION" "pyinstaller-hooks-contrib==$PYINSTALLER_HOOKS_VERSION"
+          "$py" -m pip list --disable-pip-version-check
+
+      - name: The bundle, from the installed wheel
+        # -P and a working folder outside the checkout: -m from the checkout's root would put its citar/ ahead of
+        # site-packages. The spec by its absolute path; its output in the runner's temporary folder.
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/bundle"
+          cd "$RUNNER_TEMP/bundle"
+          "$RUNNER_TEMP/bundle-venv/Scripts/python.exe" -P -m PyInstaller "$GITHUB_WORKSPACE/installer/citar.spec" \
+            --noconfirm --distpath "$RUNNER_TEMP/bundle/dist" --workpath "$RUNNER_TEMP/bundle/work"
+
+      - name: The bundle runs, and its job host starts from it
+        # citar.exe --version, where, doctor --quiet and doctor (the job host it starts is citar.exe jobs-host, and
+        # verifiable), every run's state in the runner's temporary folder; the label; _engine.pyd; the notices at the
+        # root, PYTHON-LICENSES.txt the venv's closure of citar[all], and nothing in the bundle outside it (no build
+        # tool's package, no Universal CRT DLL: installer/spec_rules.py audit).
+        shell: bash
+        run: |
+          python scripts/ci/check_bundle.py bundle --dir "$RUNNER_TEMP/bundle/dist/CITAR" --version "$RELEASE_VERSION" \
+            --label "$LABEL" --work "$RUNNER_TEMP/bundle-check" --python "$RUNNER_TEMP/bundle-venv/Scripts/python.exe" \
+            --out report/windows-bundle.json
+
+      - name: Inno Setup
+        # From the runner image when it has it, else installed on the runner at the pinned version. ISCC.exe's
+        # version resource says 0.0.0.0 (5-05's merge saw it at every head), so the version is read from the
+        # compiler's own words in the next step.
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "No Inno Setup on this image: installing $env:INNO_SETUP_VERSION"
+            choco install innosetup --version $env:INNO_SETUP_VERSION -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          if (-not (Test-Path $iscc)) { Write-Error "no ISCC.exe at $iscc"; exit 1 }
+          Write-Host "ISCC: $iscc"
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      - name: The installer
+        # The version and its numeric form, and the bundle checked above, all given (installer/citar.iss's defaults
+        # are a hand build's); its output outside the checkout. The compiler names its version ("Compiler engine
+        # version: Inno Setup X"): a warning when it is not the pinned one, which only a runner without Inno Setup
+        # installs.
+        shell: pwsh
+        run: |
+          $out = & $env:ISCC "/DAppVersion=$env:RELEASE_VERSION" "/DAppVersionNumeric=$env:NUMERIC" `
+            "/DBundleDir=$env:RUNNER_TEMP\bundle\dist\CITAR" "/O$env:RUNNER_TEMP\installer" installer\citar.iss
+          $status = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          if ($status -ne 0) { exit $status }
+          $engine = $out | Select-String -Pattern "Compiler engine version: Inno Setup (\S+)" | Select-Object -First 1
+          if (-not $engine) {
+            Write-Host "::warning title=Inno Setup::ISCC did not name its version"
+          } elseif ($engine.Matches[0].Groups[1].Value -ne $env:INNO_SETUP_VERSION) {
+            Write-Host "::warning title=Inno Setup::the runner's Inno Setup is $($engine.Matches[0].Groups[1].Value), not the pinned $env:INNO_SETUP_VERSION"
+          } else {
+            Write-Host "Inno Setup $env:INNO_SETUP_VERSION, as pinned"
+          }
+
+      - name: A silent per-user install on the runner, run, then uninstalled
+        # Into a temporary folder, no task (no desktop icon, no PATH change), nothing started. The installed citar.exe
+        # runs; the per-user uninstall key is there. A person's data (%LOCALAPPDATA%\CITAR) survives the silent
+        # uninstall, whose question about it answers No; the folder and the key go.
+        shell: pwsh
+        run: |
+          $setup = "$env:RUNNER_TEMP\installer\CITAR-$env:RELEASE_VERSION-setup.exe"
+          $dir = "$env:RUNNER_TEMP\installed\CITAR"
+          $log = "$env:RUNNER_TEMP\installed-setup.log"
+          $p = Start-Process -FilePath $setup -Wait -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$dir`" /TASKS=`"`" /LOG=`"$log`""
+          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; Write-Error "the installer exited $($p.ExitCode)"; exit 1 }
+          python scripts/ci/check_bundle.py installed --dir $dir --version $env:RELEASE_VERSION `
+            --work "$env:RUNNER_TEMP\installed-check" --out report\windows-installed.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = Join-Path $env:LOCALAPPDATA "CITAR"
+          New-Item -ItemType Directory -Force $data | Out-Null
+          Set-Content (Join-Path $data "keep-me.txt") "a person's saved games"
+          $p = Start-Process -FilePath "$dir\unins000.exe" -Wait -PassThru -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+          python scripts/ci/check_bundle.py uninstalled --dir $dir --wait 180 --out report\windows-uninstalled.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path (Join-Path $data "keep-me.txt"))) { Write-Error "the silent uninstall deleted the person's data"; exit 1 }
+          Write-Host "the person's data in $data was kept"
+          Remove-Item -Recurse -Force $data
+
+      - name: The portable zip, and every file's .sha256
+        # CITAR-V-windows-x64.zip holds the bundle under CITAR/ (Scoop's package).
+        shell: bash
+        run: |
+          python scripts/ci/check_bundle.py zip --dir "$RUNNER_TEMP/bundle/dist/CITAR" --version "$RELEASE_VERSION" \
+            --out windows
+          cp "$RUNNER_TEMP/installer/CITAR-$RELEASE_VERSION-setup.exe" windows/
+          python scripts/ci/check_bundle.py sums "windows/CITAR-$RELEASE_VERSION-setup.exe"
+          ls -l windows
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The release's two Windows assets and their .sha256 (scripts/release.py's windows group).
+        with:
+          name: pkg-windows
+          path: |
+            windows/CITAR-${{ needs.meta.outputs.version }}-setup.exe
+            windows/CITAR-${{ needs.meta.outputs.version }}-setup.exe.sha256
+            windows/CITAR-${{ needs.meta.outputs.version }}-windows-x64.zip
+            windows/CITAR-${{ needs.meta.outputs.version }}-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The bundle's version, label, build and jobs build: package 5-08's assemble holds them to the other builds'.
+        with:
+          name: pkg-windows-report
+          path: report/windows-*.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  install:
+    # The install scripts (design/phase5-release.md P5.8) on each platform the wheels and helpers are built for, each
+    # against this run's own wheel and helper for it, the helper served from a loopback server laid out as a release
+    # (never PyPI's CITAR or GitHub's downloads): scripts/ci/install_check.py. install.sh on Linux and macOS,
+    # install.ps1 on Windows (through gate_run.py install-ps1). The platform check's messages through the scripts'
+    # test hook; wheels only (a folder holding only an sdist refused); the game from its wheel, its commands run
+    # (citar doctor naming the version and the label); --worker/-Worker installing the self-updating helper with its
+    # .sha256, which then runs (gate_run.py helper: the version, target and label); a wrong checksum and plain http to
+    # another machine refused before anything is written; the uninstall leaving nothing. A runner's profile and PATH
+    # are its own, so --path-route also takes the default route that writes them (install.ps1's user PATH put back
+    # byte for byte by its uninstall).
+    name: install scripts (${{ matrix.platform }})
+    needs: [meta, wheels, helpers]
+    # Each leg needs only its own platform's wheel and helper.
+    if: ${{ !cancelled() && needs.meta.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      # The label the wheel and the helper were built with, which citar doctor and citar-helper --version must name.
+      LABEL: ${{ needs.meta.outputs.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each on the runner its wheel and helper are built on (tests/test_workflows.py holds the three equal).
+        include:
+          - { platform: windows-x64, runner: windows-latest, machine: x86_64, script: ps1, asset: citar-helper-windows-x64.exe }
+          - { platform: macos-arm64, runner: macos-15, machine: arm64, script: sh, asset: citar-helper-macos-arm64 }
+          - { platform: macos-x64, runner: macos-15-intel, machine: x86_64, script: sh, asset: citar-helper-macos-x64 }
+          - { platform: linux-x64, runner: ubuntu-24.04, machine: x86_64, script: sh, asset: citar-helper-linux-x64 }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, machine: aarch64, script: sh, asset: citar-helper-linux-arm64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: This runner's own architecture
+        shell: bash
+        env:
+          WANT: ${{ matrix.machine }}
+        run: |
+          got=$(uname -m)
+          echo "uname -m: $got; label: $LABEL; version: $RELEASE_VERSION; $(python -V); $(curl --version | head -n 1)"
+          [ "$got" = "$WANT" ] || { echo "::error::this runner is $got, not $WANT"; exit 1; }
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-${{ matrix.platform }}
+          path: wheel
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        # The self-updating helper and its .sha256, which the loopback server serves as a release does.
+        with:
+          name: pkg-helper-${{ matrix.platform }}
+          path: helper
+
+      - name: The install script against this run's wheel and helper
+        shell: bash
+        env:
+          SCRIPT: ${{ matrix.script }}
+          PLATFORM: ${{ matrix.platform }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          python scripts/ci/install_check.py "$SCRIPT" --wheel "$(ls wheel/*.whl)" --helper "helper/$ASSET" \
+            --version "$RELEASE_VERSION" --label "$LABEL" --under "$RUNNER_TEMP" --work "$RUNNER_TEMP/install-check" \
+            --path-route --out "report/install-$PLATFORM.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Every check and what the game's and the helper's runs said.
+        if: ${{ !cancelled() }}
+        with:
+          name: pkg-install-report-${{ matrix.platform }}
+          path: report/install-${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+  image:
+    # The server image (design/phase5-release.md P5.7), for each architecture natively on a runner of its own (no
+    # emulation, no cross build), from this run's wheel for it and the release's tested dependency set (pkg-
+    # constraints, which the Dockerfile installs with --constraint, wheels only). Then run and checked there by
+    # scripts/ci/check_image.py: its port on 127.0.0.1 only, the health route within 60 s, the version and label,
+    # no test operations, citar doctor's job host verifiable as uid 10001, the wheels' smoke and its lab job, the
+    # dependencies the constraints' versions, and a restart keeping the volume's state. Then saved (docker save, zstd),
+    # removed and loaded again with the same id: on a release's dry run and on a tag the file is the artifact
+    # pkg-image-<arch> that release.yml's tag-only jobs push (P5.11), so the image pushed is the image tested. No
+    # cache: what a release ships is built from this run's files.
+    name: image (${{ matrix.arch }})
+    needs: [meta, wheels, constraints]
+    # Each leg needs only its own wheel and the constraints.
+    if: ${{ !cancelled() && needs.meta.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      PEP440: ${{ needs.meta.outputs.pep440 }}
+      # The label the wheel was built with, which the image's engine must name.
+      LABEL: ${{ needs.meta.outputs.label }}
+      # The name release.yml pushes it under (:V-<arch>, then joined as :V); nothing in this workflow pushes.
+      TAG: ghcr.io/jprodgers/citar:${{ needs.meta.outputs.version }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each on the runner its platform's wheel is built on.
+        include:
+          - { arch: amd64, platform: linux-x64, runner: ubuntu-24.04, machine: x86_64 }
+          - { arch: arm64, platform: linux-arm64, runner: ubuntu-24.04-arm, machine: aarch64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The version this run builds
+        shell: bash
+        run: python3 scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: This runner's own architecture, and its Docker
+        shell: bash
+        env:
+          WANT: ${{ matrix.machine }}
+        run: |
+          got=$(uname -m)
+          echo "uname -m: $got; label: $LABEL; version: $RELEASE_VERSION ($PEP440); tag: $TAG"
+          [ "$got" = "$WANT" ] || { echo "::error::this runner is $got, not $WANT"; exit 1; }
+          docker version
+          docker buildx version
+          zstd --version
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        # The Dockerfile installs the package from wheelhouse/, never building Rust in the image.
+        with:
+          name: pkg-wheel-${{ matrix.platform }}
+          path: wheelhouse
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-constraints
+          path: constraints
+
+      - name: The build context
+        # The wheel and the release's constraints, under the name the Dockerfile looks for.
+        shell: bash
+        run: |
+          cp "constraints/citar-$PEP440-server-constraints.txt" wheelhouse/constraints.txt
+          ls -l wheelhouse
+
+      - name: Build the image
+        # On this runner's own platform, loaded into its Docker; no provenance or SBOM manifest beside it (release.yml
+        # attests the pushed image, P5.12), so the saved file holds the image and nothing else.
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker buildx build --load --platform "linux/$ARCH" --provenance=false --sbom=false --progress plain \
+            --label "org.opencontainers.image.version=$RELEASE_VERSION" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$TAG" .
+          docker image ls "$TAG"
+
+      - name: The image runs, and what it runs is this release
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          python3 scripts/ci/check_image.py run --engine docker --image "$TAG" --arch "$ARCH" \
+            --version "$RELEASE_VERSION" --label "$LABEL" --wheel "$(ls wheelhouse/*.whl)" \
+            --constraints wheelhouse/constraints.txt --out "report/image-$ARCH.json"
+
+      - name: Saved, removed and loaded again, the same image
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          python3 scripts/ci/check_image.py save --engine docker --image "$TAG" \
+            --out "image/citar-image-$RELEASE_VERSION-$ARCH.tar.zst" --report "report/image-$ARCH.json"
+          ls -l image
+
+      - name: docker-compose.yml is a valid Compose file
+        # The image does not depend on it; one leg checks it. Its two required values are given stand-ins.
+        if: matrix.arch == 'amd64'
+        shell: bash
+        run: |
+          CITAR_DOMAIN=citar.example.invalid CITAR_SECRET_KEY=a-stand-in-for-a-generated-secret-of-48-characters \
+            docker compose -f docker-compose.yml config --quiet
+          echo "docker-compose.yml: valid"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The image's id, version, label, build id and jobs build: package 5-08's assemble holds them to the other
+        # builds'.
+        with:
+          name: pkg-image-report-${{ matrix.arch }}
+          path: report/image-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The image release.yml loads and pushes (a release's dry run and a tag only; a pull request saves it and
+        # loads it back above, and uploads nothing).
+        if: needs.meta.outputs.mode != 'ci'
+        with:
+          name: pkg-image-${{ matrix.arch }}
+          path: image/citar-image-${{ needs.meta.outputs.version }}-${{ matrix.arch }}.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  assemble:
+    # The release assembled (design/phase5-release.md P5.10): every file a release ships, downloaded from this run's
+    # builds by their artifacts' exact names into release/, and every build's report into reports/. Then
+    # scripts/ci/assemble_release.py: the folder is exactly scripts/release.py assets V (a missing or an extra file
+    # named); every report says one version and label (the sdist build's label unknown, never compared with the
+    # release's), one build id and one jobs build (so the server's job host and every helper released can share CPU
+    # work), the helpers one protocol, and the five wheels on 3.11 and 3.14, the sdist build and both images played
+    # the seeded lab job to one result hash; each helper report tested the very files released; the .sha256 files the
+    # builds do not write, then SHA256SUMS; the preview: the notes (the CHANGELOG section, the checksums, gh
+    # attestation verify, the ways to install), the attestation's subjects, the asset list with sizes and hashes, the
+    # one build, and the package managers' manifests from these files with the release's real URLs
+    # (scripts/release_checksums.py). sha256sum -c checks the sums before the uploads; the manifests' structure and
+    # twine (the wheels and the sdist together) after them. release.yml publishes what this job uploads and builds
+    # nothing (P5.11).
+    name: the release, assembled
+    needs: [meta, wheels, sdist, sdist-build, constraints, helpers, helper-manifest, notices, windows, install, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      PEP440: ${{ needs.meta.outputs.pep440 }}
+      # The label every release build carries; the sdist build's must be unknown.
+      LABEL: ${{ needs.meta.outputs.label }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      # The release's files (scripts/release.py's asset list), each artifact by its exact name (check_workflows.py's
+      # rule 13), into one folder: the five wheels, the sdist, the constraints, the Windows installer and zip, the ten
+      # helpers (five self-updating, five packaged archives), the manifest and the notices.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-windows-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-macos-arm64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-macos-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-linux-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-wheel-linux-arm64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-sdist
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-constraints
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-windows
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-windows-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-macos-arm64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-macos-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-linux-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-linux-arm64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-packaged-windows-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-packaged-macos-arm64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-packaged-macos-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-packaged-linux-x64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-packaged-linux-arm64
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-manifest
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-third-party-licenses
+          path: release
+
+      # Every build's report: the smoke lines, the helpers', the bundle's, the images' and the install scripts'.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-windows-x64-3.11
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-windows-x64-3.14
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-macos-arm64-3.11
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-macos-arm64-3.14
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-macos-x64-3.11
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-macos-x64-3.14
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-linux-x64-3.11
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-linux-x64-3.14
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-linux-arm64-3.11
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-linux-arm64-3.14
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-smoke-sdist
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-report-windows-x64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-report-macos-arm64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-report-macos-x64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-report-linux-x64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-helper-report-linux-arm64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-windows-report
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-report-amd64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-image-report-arm64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-install-report-windows-x64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-install-report-macos-arm64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-install-report-macos-x64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-install-report-linux-x64
+          path: reports
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-install-report-linux-arm64
+          path: reports
+
+      # Up to the uploads this job runs only the checkout's own scripts (the standard library) and coreutils: no
+      # package from PyPI runs while the release's files and SHA256SUMS are on this disk to be changed, since what is
+      # uploaded here is what release.yml attests and publishes without building it again.
+      - name: One release, of one build
+        shell: bash
+        run: |
+          python scripts/ci/assemble_release.py assemble --version "$RELEASE_VERSION" --label "$LABEL" \
+            --release release --reports reports --preview preview
+          ls -l release
+
+      - name: The sums check
+        shell: bash
+        run: (cd release && sha256sum -c SHA256SUMS)
+
+      # The release's files are compressed already (zip, exe, wheels, tar.gz): zipping them again buys nothing.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Every file of the release (release.yml attests, publishes and attaches them: P5.11).
+        with:
+          name: pkg-release-assets
+          path: release
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The wheels and the sdist alone, for PyPI (a folder of anything else would fail its upload).
+        with:
+          name: pkg-python-dists
+          path: |
+            release/citar-${{ needs.meta.outputs.pep440 }}.tar.gz
+            release/citar-${{ needs.meta.outputs.pep440 }}-cp311-abi3-*.whl
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # The notes, the sums, the attestation's subjects, the asset list with sizes, the one build and the package
+        # managers' manifests: what release.yml's summary shows, and what Phase 6 copies to the tap and the bucket.
+        with:
+          name: pkg-release-preview
+          path: preview
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}
+
+      - name: The manifests hold, and the wheels and the sdist are valid for PyPI
+        # After the uploads, so no package's code can change the uploaded files by changing them on disk: twine and
+        # PyYAML come from PyPI (wheels only, so no package's build code runs either). A failure here still fails the
+        # job, so release.yml (whose package job is this workflow) publishes nothing, and managers never starts.
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --upgrade twine pyyaml
+          python scripts/ci/check_managers.py structure --dir preview/managers --version "$RELEASE_VERSION" \
+            --assets release
+          python -m twine check "release/citar-$PEP440.tar.gz" release/citar-"$PEP440"-cp311-abi3-*.whl
+
+  managers:
+    # The package managers (design/phase5-release.md P5.9), each against this run's assembled release served from a
+    # loopback server (scripts/ci/check_managers.py, which writes the manifests again pointing there). On Windows:
+    # Scoop, installed by its installer pinned to a commit and its SHA-256, with -RunAsAdmin (the runner is elevated,
+    # which Scoop's installer refuses otherwise), installs both its packages (the game's zip, the packaged helper's)
+    # and runs them; winget's YAML validated against Microsoft's JSON schemas its headers name (the gate), then winget
+    # validate and winget install --manifest where the runner has winget, a notice where it has not. On macOS arm64,
+    # macOS x64 and Linux x64: Homebrew audits (--strict) and styles the formula with the release's real URLs
+    # (offline: nothing is published yet), then installs and tests the loopback copy in a tap of its own
+    # (brew tap-new --no-git), and removes both. Linux arm64's block is held by check_managers.py structure
+    # (assemble). Nothing is published or submitted here: the tap, the bucket and winget are Phase 6's (P5.15).
+    name: package managers (${{ matrix.platform }})
+    needs: [meta, assemble]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      RELEASE_MODE: ${{ needs.meta.outputs.mode }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      RELEASE_DATE: ${{ needs.meta.outputs.date }}
+      LABEL: ${{ needs.meta.outputs.label }}
+      # Scoop's installer, ScoopInstaller/Install's install.ps1 at this commit (2026-08-28), run only once its SHA-256
+      # is this one (moved deliberately, as rustup-init is). Scoop itself then comes from its own default branch, as a
+      # user's install does.
+      SCOOP_INSTALL_COMMIT: 1e2f334083d609986d8c8bc9e31ae8e87c39fab4
+      SCOOP_INSTALL_SHA256: 94f983b190438311e006b957db7c8422709e0ba62a6c2ac04e278164108f2512
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows-x64, runner: windows-latest }
+          - { platform: macos-arm64, runner: macos-15 }
+          - { platform: macos-x64, runner: macos-15-intel }
+          - { platform: linux-x64, runner: ubuntu-24.04 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The version this run builds
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkg-release-assets
+          path: release
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        # The manifests with the real URLs (winget validate's).
+        with:
+          name: pkg-release-preview
+          path: preview
+
+      - name: Scoop, from its pinned installer
+        if: matrix.platform == 'windows-x64'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "scoop-install.ps1"
+          Invoke-WebRequest -UseBasicParsing -OutFile $installer `
+            -Uri "https://raw.githubusercontent.com/ScoopInstaller/Install/$env:SCOOP_INSTALL_COMMIT/install.ps1"
+          $got = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($got -ne $env:SCOOP_INSTALL_SHA256) {
+            Write-Error "Scoop's installer is $got, not $env:SCOOP_INSTALL_SHA256"
+            exit 1
+          }
+          & $installer -RunAsAdmin
+          $shims = Join-Path $env:USERPROFILE "scoop\shims"
+          if (-not (Test-Path (Join-Path $shims "scoop.cmd"))) { Write-Error "no scoop.cmd in $shims"; exit 1 }
+          $shims >> $env:GITHUB_PATH
+
+      - name: Scoop installs the game and the helper from the loopback release
+        if: matrix.platform == 'windows-x64'
+        shell: bash
+        run: |
+          python scripts/ci/check_managers.py scoop --release release --version "$RELEASE_VERSION" --label "$LABEL" \
+            --work "$RUNNER_TEMP/scoop" --out report/managers-scoop.json
+
+      - name: winget's manifests against its JSON schemas, then winget itself where the runner has it
+        if: matrix.platform == 'windows-x64'
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check jsonschema pyyaml
+          python scripts/ci/check_managers.py winget-schemas --dir preview/managers
+          python scripts/ci/check_managers.py winget --release release --manifests preview/managers \
+            --version "$RELEASE_VERSION" --label "$LABEL" --work "$RUNNER_TEMP/winget" --out report/managers-winget.json
+
+      - name: Homebrew audits and styles the formula, installs and tests the loopback copy
+        if: matrix.platform != 'windows-x64'
+        shell: bash
+        run: |
+          python scripts/ci/check_managers.py brew --release release --version "$RELEASE_VERSION" --label "$LABEL" \
+            --work "$RUNNER_TEMP/brew" --out report/managers-brew.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Every check, and what each manager said.
+        if: ${{ !cancelled() }}
+        with:
+          name: pkg-managers-report-${{ matrix.platform }}
+          path: report/managers-*.json
+          if-no-files-found: error
+          retention-days: ${{ needs.meta.outputs.mode == 'ci' && 7 || 14 }}

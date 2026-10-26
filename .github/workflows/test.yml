@@ -5,6 +5,29 @@
 # version each, because what they catch is platform behaviour (path separators, file locking, the
 # console encoding) and not version differences, and three full matrices for that is a lot of
 # runner minutes for very little.
+#
+# The Rust extension, citar._engine, is built once per OS (build-ext) and every job that needs it
+# takes that build rather than compiling its own: the test jobs unpack it into the checkout, so the
+# checkout's own sources run with it and the four Linux Pythons (3.11 to 3.14) share one abi3
+# library (crates/citar-engine/DESIGN.md P2.6.8). What a release ships is package.yml's: the five
+# release wheels and the source distribution, installed and smoke-tested on their own runners, and
+# the install script and the image on those wheels (design/phase5-release.md P5.3; the package,
+# installer and docker jobs moved there in 5-02b).
+#
+# Every Linux job runs on ubuntu-24.04 by name, package.yml's Linux image, not on ubuntu-latest (5-13's
+# fix round). GitHub moves that label to Ubuntu 26.04 from 2026-10-19, a share of jobs at a time, so a
+# floating label could put build-ext on one image and the suite legs that run its natively built
+# extension and helpers on another, and a release's tag run on an image no dry run had seen. The image
+# moves on deliberately, here and in package.yml together (tests/test_workflows.py holds them equal).
+#
+# release.yml calls this workflow on a tag and on a release's dry run (design/phase5-release.md
+# P5.11, P5.17), with the mode, the version and the date, no secrets and contents: read. Every job
+# starts, after the checkout and its interpreter, with scripts/release.py prepare: a dry run bumps
+# the runner's checkout to its version there, so the suite runs on what a tag of the bumped branch
+# would build; a tag checks that every place agrees with it; a run of its own (mode ci) checks.
+# scripts/ci/check_workflows.py (the lint job) holds this file to P5.17's rules: it publishes
+# nothing, names no environment and no secret, every action is pinned to a commit, and every job
+# prepares before it builds or tests.
 name: tests
 
 on:
@@ -12,88 +35,316 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      mode:
+        description: "ci, dry-run or tag: what scripts/release.py prepare does first in every job"
+        type: string
+        default: ci
+      version:
+        description: "the release's version, without the leading v (dry-run and tag)"
+        type: string
+        default: ""
+      date:
+        description: "a dry run's bump date, YYYY-MM-DD (one per run, so every job bumps alike)"
+        type: string
+        default: ""
 
 concurrency:
-  # A new push supersedes the run in flight for the same branch.
-  group: tests-${{ github.ref }}
+  # A new push supersedes the run in flight for the same branch. When release.yml calls this
+  # workflow, github.workflow is the caller's name, so its run never shares a group with a push's
+  # (it can neither wait on its caller nor be cancelled by a later push: check_workflows.py's rule 4).
+  group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artefacts are never reused on a fresh runner; they only slow the cache down.
+  CARGO_INCREMENTAL: 0
+  # The maturin the test wheels are built with, package.yml's for the release ones (a test holds the
+  # two pins equal): the version tested, moved on deliberately. Left to itself maturin-action takes
+  # the newest release that pyproject.toml's `maturin>=1.15,<2` allows, and how maturin reads the
+  # include and exclude lists has changed between minor releases; scripts/ci/check_dist.py then
+  # holds what it built to the checkout.
+  MATURIN_VERSION: v1.15.0
+  # The release run's mode, version and date (workflow_call's inputs; a run of its own is mode ci).
+  # They reach release.py prepare's shell through the environment, never written into a script.
+  RELEASE_MODE: ${{ inputs.mode || 'ci' }}
+  RELEASE_VERSION: ${{ inputs.version || '' }}
+  RELEASE_DATE: ${{ inputs.date || '' }}
+
 jobs:
+  build-ext:
+    name: build-ext (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # PyO3 reads an interpreter's configuration when it builds; any Python of 3.11 or later
+        # does for an abi3 build. It runs release.py first.
+        with:
+          python-version: "3.12"
+
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - name: Toolchain
+        # rust-toolchain.toml pins the exact release; maturin-action reads the same file.
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: build-ext
+
+      - name: Build the test wheel
+        # The ci profile with the test operations, as `cargo xtask develop` builds it: the suite's
+        # engine tests need them, and the ci profile keeps the debug assertions. This is also where
+        # the extension links on each OS (Windows through raw-dylib, macOS with `-undefined
+        # dynamic_lookup` from crates/citar-py/build.rs). On Linux it builds on the runner itself
+        # (`manylinux: off`, a plain `linux` tag), so the cache above serves it; package.yml builds
+        # the release wheels, the manylinux ones among them.
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: build
+          args: --profile ci --features test-ops --locked --out wheels
+          manylinux: "off"
+
+      - name: One abi3 wheel, holding the package and the extension
+        # The test jobs run this wheel's library, so it is held to what package.yml holds the
+        # release wheels to: one cp311-abi3 tag, this OS's library, the files git tracks under
+        # citar/ and nothing else but the dist-info.
+        shell: bash
+        run: |
+          ls -l wheels
+          python scripts/ci/check_dist.py wheel wheels --library "citar/_engine${{ runner.os == 'Windows' && '.pyd' || '.abi3.so' }}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ext-${{ runner.os }}
+          path: wheels/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: The CITAR helper, for the end-to-end tests
+        # tests/test_helper_e2e.py runs the real binary against the real hub (design/phase4-helper.md, 4-05). Built
+        # as cargo xtask develop builds it on a laptop: the ci profile, with the development guard (loopback
+        # servers only, an explicit --home), which no shipped build ever has; with it, citar-fake-probe, the
+        # stand-in for the scan's probe programs that only such builds make (4-06), beside the helper, the
+        # helper built to cheat on purpose (test-faults, 4-11), which the verification tests run, and the update
+        # tests' older and newer helper (test-update-key, 4-13: 0.1.6-test.1, and 0.1.6-test.2, another jobs
+        # build), which tests/test_helper_update_e2e.py runs.
+        shell: bash
+        run: |
+          # both binaries named, as cargo xtask develop names them: with -p and citar-helper/dev-guard alone cargo
+          # built the helper but not citar-fake-probe, whose required feature it did not count as given
+          cargo build --profile ci --locked -p citar-helper --bin citar-helper --bin citar-fake-probe --features dev-guard
+          mkdir -p helper
+          cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
+          cp "target/ci/citar-fake-probe${{ runner.os == 'Windows' && '.exe' || '' }}" helper/
+          # and the helper that cheats on purpose (--test-fault, the verification tests: 4-11), as develop builds it
+          cargo build --profile ci --locked -p citar-helper --bin citar-helper --features dev-guard,test-faults
+          cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" "helper/citar-helper-faults${{ runner.os == 'Windows' && '.exe' || '' }}"
+          # and the update tests' two helpers, as develop builds them (the version and the salt at compile time)
+          CITAR_HELPER_VERSION=0.1.6-test.1 cargo build --profile ci --locked -p citar-helper --bin citar-helper --features dev-guard,test-update-key
+          cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" "helper/citar-helper-update-1${{ runner.os == 'Windows' && '.exe' || '' }}"
+          CITAR_HELPER_VERSION=0.1.6-test.2 CITAR_HELPER_JOBS_SALT=test.2 cargo build --profile ci --locked -p citar-helper --bin citar-helper --features dev-guard,test-update-key
+          cp "target/ci/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}" "helper/citar-helper-update-2${{ runner.os == 'Windows' && '.exe' || '' }}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: helper-${{ runner.os }}
+          path: helper/
+          if-no-files-found: error
+          retention-days: 7
+
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    needs: build-ext
+    # A failed build on one OS fails this job on that OS alone, at the download of its missing
+    # wheel: without this condition a matrix need skips the job on every OS when any leg fails.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.11" }
-          - { os: ubuntu-latest, python: "3.12" }
-          - { os: ubuntu-latest, python: "3.13" }
+          - { os: ubuntu-24.04, python: "3.11" }
+          - { os: ubuntu-24.04, python: "3.12" }
+          - { os: ubuntu-24.04, python: "3.13" }
+          # The newest the classifiers claim (design/phase5-release.md P5.17).
+          - { os: ubuntu-24.04, python: "3.14" }
           - { os: windows-latest, python: "3.12" }
           - { os: macos-latest, python: "3.12" }
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
 
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ext-${{ runner.os }}
+          path: ext
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helper-${{ runner.os }}
+          path: helper
+
       - name: Install
+        # The dependencies alone, since installing the package would build the extension again:
+        # the build-ext job's library goes into the checkout instead, and the unpacking fails
+        # unless it imports with the test operations, so the engine's tests can never be skipped
+        # here unnoticed.
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[all]"
+          python scripts/ci/requirements.py all > "$RUNNER_TEMP/requirements.txt"
+          pip install -r "$RUNNER_TEMP/requirements.txt"
+          python scripts/ci/unpack_ext.py ext --test-ops
 
       - name: Tests
         # Not pytest: the suite is unittest and is run the same way here as on a laptop, so a
-        # failure can be reproduced with the command in the contributing guide.
-        run: python -m unittest discover -s tests -v
+        # failure can be reproduced with the command in the contributing guide. The end-to-end
+        # tests run the build-ext job's helper (CITAR_HELPER_BIN; an artifact loses its exec bit).
+        shell: bash
+        run: |
+          chmod +x helper/citar-helper* helper/citar-fake-probe* || true
+          export CITAR_HELPER_BIN="$PWD/helper/citar-helper${{ runner.os == 'Windows' && '.exe' || '' }}"
+          export CITAR_HELPER_FAULTS_BIN="$PWD/helper/citar-helper-faults${{ runner.os == 'Windows' && '.exe' || '' }}"
+          # two paths joined by os.pathsep: Git Bash turns one path in a variable into Windows' form for
+          # Python, but not a list joined by ';', so on Windows each is converted here (cygpath -w)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export CITAR_HELPER_UPDATE_BINS="$(cygpath -w "$PWD/helper/citar-helper-update-1.exe");$(cygpath -w "$PWD/helper/citar-helper-update-2.exe")"
+          else
+            export CITAR_HELPER_UPDATE_BINS="$PWD/helper/citar-helper-update-1:$PWD/helper/citar-helper-update-2"
+          fi
+          python -m unittest discover -s tests -v
 
       - name: Route audit
         # Every HTTP route must declare a gate or be listed as public with a reason. This is the
         # check that a new route added in a hurry cannot quietly skip.
         run: python scripts/audit_routes.py --strict
 
-      - name: Ruleset integrity
-        run: |
-          python scripts/check_refs.py
-          python scripts/check_uniques.py
-
-      - name: requirements.txt matches pyproject.toml
-        # The server installs from requirements.txt while everything else installs the package.
-        # Two lists of dependencies that disagree produce a deployment that starts and then fails
-        # on an import nobody tested.
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: python scripts/sync_requirements.py --check
-
       - name: Documentation links
         # Only once: the answer cannot differ by platform, and a broken link failing five jobs
         # says the same thing five times.
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.12'
         run: python scripts/check_links.py --strict
 
-  lint:
-    runs-on: ubuntu-latest
+  interpreter-exit:
+    # DESIGN.md P2.6.4: the interpreter exits while a daemon thread is inside a call to
+    # citar._engine, on each Python from 3.11, and the process must exit 0 with no call left in
+    # flight. tests/engine_exit_child.py says how it checks. The Linux test wheel's one abi3
+    # library serves every version; the check needs nothing else installed.
+    needs: build-ext
+    # It needs only the Linux wheel, so a Windows or macOS build failing does not skip it.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # Every version is installed; the last is the default.
+        with:
+          python-version: |
+            3.11
+            3.12
+            3.13
+            3.14
+
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ext-Linux
+          path: ext
+
+      - name: Unpack the extension
+        run: python scripts/ci/unpack_ext.py ext --test-ops
+
+      - name: Exit mid-drive on each Python
+        run: |
+          set -u
+          failed=0
+          for v in 3.11 3.12 3.13 3.14; do
+            echo "::group::Python $v"
+            "python$v" --version
+            "python$v" tests/engine_exit_child.py check || { failed=1; echo "::error::the check failed on Python $v"; }
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install ruff
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
+      - run: pip install ruff pyyaml
       - run: ruff check --output-format=github .
+      - name: Every place the version lives agrees
+        # scripts/release.py (design/phase5-release.md P5.2): Cargo.toml's version, both locks' workspace entries,
+        # __version__, the installer script's defaults, KNOWN_ISSUES' header and the changelog. A half-done bump
+        # fails here, naming each place with its file and line.
+        run: python scripts/release.py check
+      - name: The workflows keep the release's rules
+        # scripts/ci/check_workflows.py (design/phase5-release.md P5.17): every workflow reads only, and
+        # nothing publishes outside a tag push (release.yml) or main (docs.yml); no environment but
+        # those allowed; every action pinned to a commit; called workflows get no secrets; artifact
+        # names apart; nothing installed or built where a secret or a write permission is held.
+        run: python scripts/ci/check_workflows.py
+      - name: The docs name no retired route
+        # scripts/ci/stale_terms.py (design/phase5-release.md P5.16): the git archive deploy, requirements.txt
+        # installs, the game's Homebrew formula, citar-lab, the server run as a module in a unit and the PyPI sdist
+        # in a manifest, refused in the docs, the units and the manifests outside the CHANGELOG's history, its
+        # Compatibility notes and the sections that describe 0.1.5's layout for the cutover.
+        run: python scripts/ci/stale_terms.py
 
   frontend:
     name: front-end syntax
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+      - name: The version this run tests
+        # scripts/release.py prepare (P5.2): a release's dry run bumps this runner's checkout to its version first;
+        # a run of its own (mode ci) only checks.
+        shell: bash
+        run: python3 scripts/release.py prepare --mode "$RELEASE_MODE" ${RELEASE_VERSION:+--version "$RELEASE_VERSION"} ${RELEASE_DATE:+--date "$RELEASE_DATE"}
       - name: Parse every module as an ES module
         # `node --check` on a .js file parses it as CommonJS, where `import` is a syntax error only
         # in some positions — a broken template literal inside a ternary once passed this check and
@@ -108,134 +359,10 @@ jobs:
             node --check "$file" || failed=1
           done
           exit $failed
+      - name: Test the client's pure modules
+        # citar/web/tests: the parts of the client with no network (the Servers page's rules, machines.js; the chat
+        # window's state, chatmodel.js; util.js's dialogs and chat.js's docked windows over stand-ins for the DOM).
+        # Node 22 takes the test files as a pattern, not a folder: `node --test citar/web/tests/` runs the folder as
+        # one file and fails, on Node 24 too.
+        run: node --test "citar/web/tests/*.test.mjs"
 
-  package:
-    name: wheel installs and runs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Build
-        run: |
-          pip install build
-          python -m build
-
-      - name: Install the wheel into a clean environment
-        run: |
-          python -m venv /tmp/fresh
-          /tmp/fresh/bin/pip install --quiet dist/*.whl
-
-      - name: It runs, and its data came with it
-        # The failure this catches is a packaging change that drops the ruleset or the web client:
-        # the wheel installs, the command runs, and the first game fails with a missing file.
-        #
-        # Run from /tmp, and with -P. `python -c` puts the current directory at the front of
-        # sys.path, so running this from the checkout imported the *source tree* and asserted
-        # nothing at all about the wheel - it passed while the wheel was broken.
-        working-directory: /tmp
-        run: |
-          /tmp/fresh/bin/citar --version
-          /tmp/fresh/bin/citar where
-          /tmp/fresh/bin/citar doctor --quiet
-          /tmp/fresh/bin/python -P -c "
-          from citar import paths
-          from citar.engine.rules import get_rules
-          assert 'site-packages' in paths.PACKAGE.as_posix(), f'not testing the wheel: {paths.PACKAGE}'
-          assert (paths.package_data() / 'ruleset').is_dir(), 'ruleset missing from the wheel'
-          assert (paths.web_dir() / 'index.html').is_file(), 'web client missing from the wheel'
-          assert (paths.migrations_dir() / 'env.py').is_file(), 'migrations missing from the wheel'
-          assert list((paths.migrations_dir() / 'versions').glob('*.py')), 'no migrations in the wheel'
-          assert len(get_rules().techs) > 50, 'the ruleset did not load'
-          print('package contents OK')
-          "
-
-      - name: An installed copy writes to the user directory, not site-packages
-        # The bug this pins: every module used to resolve its own directory from __file__, which
-        # put saved games inside site-packages once CITAR was installed from a wheel.
-        working-directory: /tmp
-        run: |
-          /tmp/fresh/bin/python -P -c "
-          from citar import paths
-          assert 'site-packages' in paths.PACKAGE.as_posix(), f'not testing the wheel: {paths.PACKAGE}'
-          assert not paths.in_source_checkout(), 'an installed copy thinks it is a checkout'
-          assert 'site-packages' not in str(paths.save_dir()), paths.save_dir()
-          print('state directory OK:', paths.save_dir())
-          "
-
-      - name: Metadata is valid for PyPI
-        run: |
-          pip install twine
-          twine check dist/*
-
-  installer:
-    name: install.sh works
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with: { python-version: "3.12" }
-
-      - name: Build a wheel for the installer to use
-        # --from lets the script install a local wheel instead of PyPI, so the installer is tested
-        # on the code in the pull request rather than on the last release.
-        run: |
-          pip install build
-          python -m build --wheel
-
-      - name: Install
-        run: bash install.sh --from "$(ls dist/*.whl)" --no-setup
-
-      - name: It installed, and it runs
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          citar --version
-          citar where
-          citar doctor --quiet
-          # The unattended path the installers use. With no model server running on a CI runner it
-          # configures for scripted bots, which is the correct outcome and the one least tested by
-          # hand.
-          citar setup --local --non-interactive
-
-      - name: Uninstall leaves no program behind, and no data missing
-        run: |
-          bash install.sh --uninstall
-          test ! -e "$HOME/.local/share/citar-app" || { echo "prefix survived the uninstall"; exit 1; }
-          test ! -e "$HOME/.local/bin/citar" || { echo "command survived the uninstall"; exit 1; }
-          echo "uninstall is clean"
-
-  docker:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - name: Build the image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: false
-          load: true
-          tags: citar:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: It starts and answers
-        run: |
-          docker run -d --name citar-ci -p 8765:8765 citar:ci
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8765/api/auth/config >/dev/null 2>&1; then
-              echo "answered after ${attempt}s"
-              docker rm -f citar-ci
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "the container never answered:"
-          docker logs citar-ci
-          exit 1

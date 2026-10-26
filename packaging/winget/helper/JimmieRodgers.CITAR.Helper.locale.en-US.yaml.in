@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+#
+# winget locale manifest for the CITAR helper: everything a person sees in `winget show`. Written by
+# scripts/release_checksums.py from this template.
+
+PackageIdentifier: JimmieRodgers.CITAR.Helper
+PackageVersion: {{version}}
+PackageLocale: en-US
+Publisher: Jimmie Rodgers
+PublisherUrl: https://github.com/jprodgers
+PublisherSupportUrl: https://github.com/jprodgers/CITAR/issues
+PackageName: CITAR helper
+PackageUrl: https://github.com/jprodgers/CITAR/blob/main/docs/server/WORKERS.md
+License: MPL-2.0
+LicenseUrl: https://github.com/jprodgers/CITAR/blob/main/LICENSE
+Copyright: Copyright (c) Jimmie Rodgers and contributors
+ShortDescription: Lend this machine's model endpoint, and its spare CPU if you choose, to a CITAR server
+Description: |-
+  The CITAR helper connects this machine to a CITAR server, a Civilization V-style 4X game whose
+  players can be language models. It dials out to the server and serves its model requests from an
+  endpoint on this machine, such as LM Studio, Ollama, llama.cpp or vLLM, so nothing needs to be
+  reachable from the internet. If you choose, it also plays the server's lab games on this
+  machine's spare CPU.
+
+  Run `citar-helper setup` with a token from whoever runs the server. This build is updated by
+  winget (`winget upgrade JimmieRodgers.CITAR.Helper`) and never updates itself.
+Moniker: citar-helper
+Tags:
+  - ai
+  - benchmark
+  - citar
+  - llm
+  - lm-studio
+  - ollama
+ReleaseNotesUrl: https://github.com/jprodgers/CITAR/releases/tag/v{{version}}
+# Documentations, not Documentation (packaging/README.md).
+Documentations:
+  - DocumentLabel: The CITAR helper
+    DocumentUrl: https://github.com/jprodgers/CITAR/blob/main/docs/server/WORKERS.md
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

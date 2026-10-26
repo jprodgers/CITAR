@@ -2,13 +2,27 @@
 // The editor works on a game held by the server; every change is a scenario operation (see /api/scenario-ops), so
 // what you click here can also be written into probe files as "setup".
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { MapRenderer, modelFromView } from "./render.js";
 import { pageHeader } from "./nav.js";
-import { llmForm, defaultLLM } from "./lobby.js";
+import { llmForm, defaultLLM, hybridForm } from "./lobby.js";
+import { hybridBlock, hybridProblem } from "./seats.js";
 
-const SEAT_TYPES = [["human", "Human"], ["llm", "LLM (server-run)"], ["bot", "Scripted bot"], ["mcp", "MCP client"],
-  ["script", "Probe script (scripted counterparty)"]];
+const SEAT_TYPES = [["human", "Human"], ["llm", "LLM (server-run)"], ["bot", "Scripted bot"],
+  ["hybrid", "Hybrid (bot plays, model negotiates)"], ["mcp", "MCP client"], ["script", "Probe script (scripted counterparty)"]];
+
+// A scenario's seat as the editor saves it or a launch sends it (P3.6.8): a hybrid seat with its settings as the lobby
+// sends them and its handicap; any other seat without them, its own handicap the one it was loaded with (`was`), since
+// a hybrid seat's handicap is its hybrid setting, not a choice for whatever plays the seat next.
+function scenarioSeat(seat, was) {
+  if (seat.type === "hybrid") return { ...seat, hybrid: hybridBlock(seat.hybrid), handicap: seat.handicap || "ai" };
+  const out = { ...seat };
+  delete out.hybrid;
+  delete out.handicap;
+  if (was && was.type !== "hybrid" && was.handicap) out.handicap = was.handicap;
+  return out;
+}
 
 // ---------------------------------------------------------------------------- list page
 export async function renderScenarios(root, rules) {
@@ -49,7 +63,8 @@ function drawList(card, list, rules, refresh) {
           catch (e) { toast(e.message, "error"); }
         } }, "Edit"),
         el("button", { class: "small", onclick: () => { location.hash = `#/probes?scenario=${encodeURIComponent(s.id)}`; } }, "Probe…"),
-        el("button", { class: "small", onclick: async () => {
+        shareButton("scenario", s.id, s.name, s, refresh),
+        s.can_manage === false ? null : el("button", { class: "small", onclick: async () => {
           if (!(await confirmBox("Delete scenario", `Delete "${s.name}"? Games already started from it are kept.`))) return;
           try { await api.deleteScenario(s.id); refresh(); } catch (e) { toast(e.message, "error"); }
         } }, "Delete")))));
@@ -58,23 +73,30 @@ function drawList(card, list, rules, refresh) {
 }
 
 function launchDialog(s, rules) {
+  const saved = s.seats.map((x) => ({ ...x }));
   const seats = s.seats.map((x) => ({ ...x, type: x.type === "script" ? "human" : x.type }));
   const body = el("div");
   const draw = () => {
     clear(body);
     seats.forEach((seat, i) => {
-      const type = el("select", { onchange: (e) => { seat.type = e.target.value; if (seat.type === "llm" && !seat.llm) seat.llm = defaultLLM(); draw(); } },
-        ...SEAT_TYPES.filter(([k]) => k !== "script").map(([k, l]) => el("option", { value: k, selected: seat.type === k }, l)));
-      const row = el("div", { class: "seat-row" }, el("b", {}, `P${i}`), el("span", {}, s.players[i] ? s.players[i].name : ""), type);
+      const type = el("select", { onchange: (e) => {
+        seat.type = e.target.value;
+        if (seat.type === "llm" && !seat.llm) seat.llm = defaultLLM();
+        draw();
+      } }, ...SEAT_TYPES.filter(([k]) => k !== "script").map(([k, l]) => el("option", { value: k, selected: seat.type === k }, l)));
+      const row = el("div", { class: "seat-row", "data-seat": i }, el("b", {}, `P${i}`), el("span", {}, s.players[i] ? s.players[i].name : ""), type);
       if (seat.type === "llm") { seat.llm = seat.llm || defaultLLM(); row.appendChild(llmForm(seat.llm, draw)); }
+      if (seat.type === "hybrid") row.appendChild(hybridForm(seat, draw, { level: (s.players[i] || {}).difficulty || "" }));
       body.appendChild(row);
     });
   };
   draw();
   const go = el("button", { class: "primary", onclick: async () => {
+    const wrong = seats.map((x, i) => [i, x.type === "hybrid" ? hybridProblem(x.hybrid) : null]).find(([, why]) => why);
+    if (wrong) { toast(`P${wrong[0]}: ${wrong[1]}`, "error"); return; }
     go.disabled = true;
     try {
-      const info = await api.launchScenario(s.id, { seats });
+      const info = await api.launchScenario(s.id, { seats: seats.map((x, i) => scenarioSeat(x, saved[i])) });
       dlg.close();
       const human = info.seats.find((x) => x.type === "human");
       location.hash = human ? `#/game/${info.id}/${encodeURIComponent(human.token)}` : `#/game/${info.id}/${encodeURIComponent(info.spectator_token)}`;
@@ -309,18 +331,39 @@ class ScenarioEditor {
     const name = el("input", { value: m.name || "", placeholder: "Scenario name" });
     const desc = el("textarea", { rows: 3, value: m.description || "", placeholder: "What this scenario tests" });
     const majors = this.majors();
-    const seats = (m.seats || []).map((s) => ({ ...s }));
-    const seatRows = majors.map((p, i) => {
-      seats[i] = seats[i] || { type: "bot" };
-      const t = el("select", { onchange: (e) => { seats[i].type = e.target.value; } },
-        ...SEAT_TYPES.map(([k, l]) => el("option", { value: k, selected: seats[i].type === k }, l)));
-      return el("div", { class: "row" }, el("span", { class: "chip", style: { background: p.color, width: "12px", height: "12px", display: "inline-block", borderRadius: "3px" } }),
-        el("span", { class: "small", style: { minWidth: "90px" } }, `P${p.id} ${p.name}`), t);
-    });
+    // the seats being edited live on the editor, so a redraw (another tab and back) keeps a hybrid seat's settings
+    if (!this._seats || this._seatsOf !== m) {
+      this._seats = (m.seats || []).map((s) => ({ ...s }));
+      this._seatsOf = m;
+    }
+    const seats = this._seats;
+    const loaded = (m.seats || []).map((s) => ({ ...s }));
+    const seatsBox = el("div", { class: "col" });
+    const drawSeats = () => {
+      clear(seatsBox);
+      majors.forEach((p, i) => {
+        seats[i] = seats[i] || { type: "bot" };
+        const t = el("select", { onchange: (e) => { seats[i].type = e.target.value; drawSeats(); } },
+          ...SEAT_TYPES.map(([k, l]) => el("option", { value: k, selected: seats[i].type === k }, l)));
+        seatsBox.appendChild(el("div", { class: "row", "data-seat": i }, el("span", { class: "chip", style: { background: p.color, width: "12px", height: "12px", display: "inline-block", borderRadius: "3px" } }),
+          el("span", { class: "small", style: { minWidth: "90px" } }, `P${p.id} ${p.name}`), t));
+        // a hybrid seat's settings are the scenario's; its model is picked when a game starts from it
+        if (seats[i].type === "hybrid") {
+          seatsBox.appendChild(el("div", { style: { marginLeft: "18px" } },
+            hybridForm(seats[i], drawSeats, { model: false, level: p.difficulty || "" })));
+        }
+      });
+    };
+    drawSeats();
+    const saveSeats = () => {
+      const wrong = seats.map((x, i) => [i, x.type === "hybrid" ? hybridProblem(x.hybrid) : null]).find(([, why]) => why);
+      if (wrong) throw new Error(`P${wrong[0]}: ${wrong[1]}`);
+      return seats.map((x, i) => scenarioSeat(x, loaded[i]));
+    };
     const save = el("button", { class: "primary small", onclick: async () => {
       if (!name.value.trim()) { toast("Give the scenario a name.", "error"); return; }
       try {
-        const s = await api.editorSave(this.eid, { id: m.id || null, name: name.value, description: desc.value, seats });
+        const s = await api.editorSave(this.eid, { id: m.id || null, name: name.value, description: desc.value, seats: saveSeats() });
         this.data.meta = { ...m, id: s.id, name: name.value, description: desc.value, seats: s.seats };
         toast(`Saved scenario "${s.name}"`, "success");
         this.drawSide();
@@ -328,7 +371,7 @@ class ScenarioEditor {
     } }, m.id ? "Save" : "Save scenario");
     const saveAs = m.id ? el("button", { class: "small", onclick: async () => {
       try {
-        const s = await api.editorSave(this.eid, { id: `${m.id}-copy`, name: `${name.value} (copy)`, description: desc.value, seats });
+        const s = await api.editorSave(this.eid, { id: `${m.id}-copy`, name: `${name.value} (copy)`, description: desc.value, seats: saveSeats() });
         this.data.meta = { ...m, id: s.id, name: s.name };
         toast(`Saved as "${s.name}"`, "success");
         this.drawSide();
@@ -336,7 +379,7 @@ class ScenarioEditor {
     } }, "Save as copy") : null;
     box.append(el("h4", {}, "Scenario"), name, desc,
       el("div", { class: "muted small" }, m.id ? `Saved as "${m.id}".` : "Not saved yet."),
-      el("h4", {}, "Default seats"), ...seatRows,
+      el("h4", {}, "Default seats"), seatsBox,
       el("p", { class: "muted small" }, "Seats can be changed when a game starts. \"Probe script\" marks the scripted counterparty in probes (it plays as a human seat in normal games)."),
       el("div", { class: "row" }, save, saveAs,
         m.id ? el("button", { class: "small", onclick: () => { location.hash = "#/scenarios"; } }, "Back to list") : null));

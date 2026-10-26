@@ -3,21 +3,30 @@
 Chiefly: creating the first administrator of a fresh server, and getting back in when nobody can.
 
     python -m citar.server.admin_cli create-admin --handle jimmie --email you@example.com
+    python -m citar.server.admin_cli create-user --handle sam --email sam@example.com [--role moderator]
     python -m citar.server.admin_cli list-users
     python -m citar.server.admin_cli set-role jimmie admin
+    python -m citar.server.admin_cli set-status sam suspended --reason "spam"
+    python -m citar.server.admin_cli set-caps sam run_lab=on publish_global=default
+    python -m citar.server.admin_cli set-limits sam --games 4 --seats 8 --invites 2
+    python -m citar.server.admin_cli set-trust sam trusted
+    python -m citar.server.admin_cli audit --actor jimmie --action 'user.*' --limit 20
     python -m citar.server.admin_cli reset-password jimmie
     python -m citar.server.admin_cli invite --role moderator --uses 1
     python -m citar.server.admin_cli policy registration invite
+    python -m citar.server.admin_cli reprice --since 2026-10-01 [--until 2026-10-08]
+    python -m citar.server.admin_cli set-collection benchmark_run br_1234 on
+    python -m citar.server.admin_cli refresh-budgets [--period 2026-10]
 
 Passwords are always prompted for, never taken as an argument: a password on the command line ends
-up in the shell history and in the process list where every other user on the box can read it.
+up in the shell history and in the process list where every other user on the box can read it. A
+script gives ``create-user`` one on its standard input instead (``--password-stdin``).
 """
 from __future__ import annotations
 
 import argparse
 import getpass
 import sys
-from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -72,8 +81,39 @@ def cmd_create_admin(args) -> int:
             print(f"error: {exc}")
             return 1
         audit.record(s, "user.bootstrap_admin", actor=user, object_type="user", object_id=user.id)
+        accounts.on_first_admin(s, user)
         print(f"Created administrator '{user.handle}' <{user.email}>.")
         print(f"Sign in at {settings.get().url('/')}")
+    return 0
+
+
+def _read_password(args) -> str:
+    """The new account's password: prompted (twice), or the first line of standard input with ``--password-stdin``
+    (for a script, as ``docker login`` takes one: never an argument, which the process list would show). A password
+    from standard input is checked like a typed one."""
+    if not getattr(args, "password_stdin", False):
+        return _prompt_password()
+    password = sys.stdin.readline().rstrip("\r\n")
+    passwords.check(password)
+    return password
+
+
+def cmd_create_user(args) -> int:
+    """Create an account that is ready to use: active, its email address taken as verified, with the role given
+    (design/phase3-features.md P3.2.7; the QA harness makes its accounts with it). An administrator made this way
+    adopts the item files nobody owns, as every path that makes one does (``accounts.on_first_admin``)."""
+    with db.session() as s:
+        try:
+            password = _read_password(args)
+            user = accounts.create_user(s, handle=args.handle, email=args.email, password=password, role=args.role,
+                                        status="active", email_verified=True, display_name=args.name or args.handle)
+        except (accounts.AccountError, passwords.PasswordError) as exc:
+            print(f"error: {exc}")
+            return 1
+        audit.record(s, "user.created", actor_label="admin_cli", object_type="user", object_id=user.id,
+                     role=user.role)
+        accounts.on_first_admin(s, user)
+        print(f"Created {user.role} '{user.handle}' <{user.email}>.")
     return 0
 
 
@@ -94,49 +134,93 @@ def cmd_list_users(args) -> int:
     return 0
 
 
-def cmd_set_role(args) -> int:
-    """Change an account's role."""
-    if args.role not in ("user", "moderator", "admin"):
-        print("error: role must be user, moderator or admin")
-        return 1
+def _admin_change(handle: str, changes: dict, reason=None) -> int:
+    """Change an account as the admin users page does (``user_admin.apply``: everything checked first, one audit row
+    naming the fields, never the last active administrator demoted or suspended), as ``admin_cli``."""
+    from ..auth import user_admin
     with db.session() as s:
-        user = accounts.by_handle(s, args.handle)
+        user = accounts.by_handle(s, handle)
         if user is None:
-            print(f"error: no account '{args.handle}'")
+            print(f"error: no account '{handle}'")
             return 1
-        if user.role == "admin" and args.role != "admin":
-            remaining = s.scalar(select(User).where(User.role == "admin", User.id != user.id,
-                                                    User.status == "active"))
-            if remaining is None:
-                print("error: that is the only administrator. Promote somebody else first.")
-                return 1
-        before, user.role = user.role, args.role
-        audit.record(s, "user.role_changed", actor_label="admin_cli", object_type="user",
-                     object_id=user.id, **{"from": before, "to": args.role})
-        print(f"{user.handle}: {before} -> {args.role}")
+        try:
+            changed = user_admin.apply(s, user, changes, actor_label="admin_cli", reason=reason)
+        except user_admin.UserAdminError as exc:
+            print(f"error: {exc}")
+            return 1
+        if not changed:
+            print(f"{user.handle}: nothing to change")
+            return 0
+        for field in changed:
+            value = getattr(user, field)
+            if field == "caps":
+                value = ", ".join(f"{k}={'on' if v else 'off'}" for k, v in sorted((value or {}).items())) or "(role defaults)"
+            print(f"{user.handle}: {field} -> {value}")
     return 0
 
 
+def cmd_set_role(args) -> int:
+    """Change an account's role."""
+    return _admin_change(args.handle, {"role": args.role})
+
+
 def cmd_set_status(args) -> int:
-    """Activate or suspend an account."""
-    if args.status not in ("active", "probation", "suspended"):
-        print("error: status must be active, probation or suspended")
-        return 1
-    with db.session() as s:
-        user = accounts.by_handle(s, args.handle)
-        if user is None:
-            print(f"error: no account '{args.handle}'")
+    """Activate, put on probation or suspend an account (a suspension needs --reason: its owner is told it)."""
+    return _admin_change(args.handle, {"status": args.status}, reason=args.reason)
+
+
+#: How ``set-caps`` reads a setting: on, off, or back to the role's default.
+_CAP_WORDS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False,
+              "default": None, "null": None, "none": None}
+
+
+def cmd_set_caps(args) -> int:
+    """Override an account's capabilities (``cap=on``, ``cap=off``), or drop an override (``cap=default``)."""
+    caps = {}
+    for item in args.caps:
+        cap, sep, word = item.partition("=")
+        if not sep or word.strip().lower() not in _CAP_WORDS:
+            print(f"error: {item!r}: write capability=on, capability=off or capability=default")
             return 1
-        before, user.status = user.status, args.status
-        if args.status == "suspended":
-            user.suspended_at = datetime.now(timezone.utc)
-            user.suspended_reason = args.reason
-            accounts.revoke_all_sessions(s, user)
-        else:
-            user.suspended_at = user.suspended_reason = None
-        audit.record(s, "user.status_changed", actor_label="admin_cli", object_type="user",
-                     object_id=user.id, **{"from": before, "to": args.status})
-        print(f"{user.handle}: {before} -> {args.status}")
+        caps[cap.strip()] = _CAP_WORDS[word.strip().lower()]
+    return _admin_change(args.handle, {"caps": caps})
+
+
+def cmd_set_limits(args) -> int:
+    """Change an account's limits: invitations, games at once, seats per game (0: the ruleset's maximum)."""
+    changes = {field: value for field, value in (("invite_quota", args.invites), ("max_concurrent_games", args.games),
+                                                 ("max_seats_per_game", args.seats)) if value is not None}
+    if not changes:
+        print("error: name at least one of --invites, --games, --seats")
+        return 1
+    return _admin_change(args.handle, changes)
+
+
+def cmd_set_trust(args) -> int:
+    """Set an account's trust tier."""
+    return _admin_change(args.handle, {"trust_tier": args.tier})
+
+
+def cmd_audit(args) -> int:
+    """Read the audit log, newest first (the admin page's filters)."""
+    import json as _json
+    from ..auth import user_admin
+    with db.session() as s:
+        page = user_admin.audit_page(s, actor=args.actor, action=args.action, object_type=args.object_type,
+                                     object_id=args.object_id, before=args.before, limit=args.limit)
+    if args.json:
+        print(_json.dumps(page, indent=2))
+        return 0
+    if not page["entries"]:
+        print("No entries.")
+        return 0
+    for e in page["entries"]:
+        obj = f"{e['object_type']}/{e['object_id']}" if e["object_type"] else "-"
+        detail = _json.dumps(e["detail"], separators=(",", ":")) if e["detail"] else ""
+        print(f"{e['id']:>7}  {(e['at'] or '')[:19]}  {e['actor']:<28.28}  {e['action']:<26}  {obj}  {detail}")
+    if page["next_before"] is not None:
+        print()
+        print(f"More: --before {page['next_before']}")
     return 0
 
 
@@ -222,8 +306,8 @@ def cmd_add_server(args) -> int:
               + (f" in group '{group.name}'." if group else "."))
         print(f"  server id : {server.id}")
         print()
-        print("Run this on the machine with the model:")
-        print(f"  python -m citar.worker --server {origin} \\")
+        print("Run the CITAR helper on the machine with the model (download it from the Servers page):")
+        print(f"  citar-helper --server {origin} \\")
         print(f"      --token {raw} \\")
         print(f"      --name \"{server.name}\"")
         print()
@@ -248,7 +332,7 @@ def cmd_worker_token(args) -> int:
         s.add(WorkerToken(server_id=server.id, token_hash=hashed,
                           prefix=token_util.prefix(raw), label=args.label or "admin_cli"))
         print(f"New worker token for '{server.name}':")
-        print(f"  python -m citar.worker --server {settings.get().public_origin} "
+        print(f"  citar-helper --server {settings.get().public_origin} "
               f"--token {raw} --name \"{server.name}\"")
         print("  Shown once; only the hash is stored.")
     return 0
@@ -268,7 +352,7 @@ def cmd_workers(args) -> int:
             print("No servers registered.")
             return 0
         for server in rows:
-            owner = s.get(User, server.owner_id)
+            owner = s.get(User, server.owner_id) if server.owner_id else None
             toks = list(s.scalars(select(WorkerToken).where(WorkerToken.server_id == server.id)))
             live = [t for t in toks if t.revoked_at is None]
             last = max((t.last_seen_at for t in live if t.last_seen_at), default=None)
@@ -294,7 +378,8 @@ def cmd_test_email(args) -> int:
 
     cfg = settings.get()
     if not cfg.email_enabled:
-        print("No SMTP configured. Set it with: sudo citar-secrets")
+        print("No SMTP configured. Set CITAR_SMTP_HOST, CITAR_MAIL_FROM and the rest in the server's environment "
+              "file (sudo citar-secrets on a server citar-deploy installed), then restart the server.")
         return 1
     print(f"Sending via {cfg.smtp.host}:{cfg.smtp.port} ({cfg.smtp.security}) "
           f"as {cfg.smtp.user or '(no auth)'}")
@@ -346,6 +431,74 @@ def cmd_policy(args) -> int:
     return 0
 
 
+def _date(text: str, what: str):
+    """A ``YYYY-MM-DD`` date (or an ISO time) as an aware UTC instant; a naive one is UTC."""
+    from datetime import datetime, timezone
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        raise SystemExit(f"error: {what} is a date (YYYY-MM-DD) or a time (YYYY-MM-DDTHH:MM).")
+    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when.astimezone(timezone.utc)
+
+
+def cmd_reprice(args) -> int:
+    """Recompute the credits of the compute ledger's events in a period with the hardware classes, their rates and
+    the models' token prices in force now (design/phase3-features.md P3.4.3), then the rollups of the hours touched;
+    one audit row. A new rate otherwise applies only to events written after it."""
+    from .. import ledger
+    since = _date(args.since, "--since")
+    until = _date(args.until, "--until") if args.until else None
+    if until is not None and until <= since:
+        print("error: --until comes after --since.")
+        return 1
+    with db.session() as s:
+        result = ledger.reprice(s, since, until)
+        audit.record(s, "ledger.repriced", actor_label="admin_cli", object_type="ledger",
+                     since=since.isoformat(), until=until.isoformat() if until else None, **result)
+    print(f"{result['events']} event(s) read, {result['changed']} repriced, {result['hours']} hour(s) rolled up again.")
+    return 0
+
+
+def cmd_refresh_budgets(args) -> int:
+    """Rebuild the budgets' entries of their current period (or ``--period``: then only the budgets counted in periods
+    of that kind, a day's key for daily budgets, a week's for weekly ones, a month's for monthly ones, ``all`` for
+    totals) from the compute ledger's events (``pool.budgets.refresh_from_ledger``): the repair for an entry lost when
+    the server stopped between an event and its settling, or for credits repriced. A running server reads every
+    budget's spend again from the rebuilt entries at its ledger's next rollup pass, within five minutes."""
+    from ..pool import budgets
+    try:
+        with db.session() as s:
+            n = budgets.refresh_from_ledger(s, key=args.period)
+            audit.record(s, "budgets.refreshed", actor_label="admin_cli", object_type="budget", entries=n,
+                         period=args.period)
+    except ValueError as e:
+        print(f"error: {e}")
+        return 1
+    print(f"{n} budget entr{'y' if n == 1 else 'ies'} rebuilt from the compute ledger; a running server reads them "
+          "within five minutes.")
+    return 0
+
+
+def cmd_set_collection(args) -> int:
+    """Mark an owned item (a benchmark run, a probe run, a report, a lab experiment) as the server's own data
+    collection, or not: its compute is then used by nobody, and given by whoever's machine served it (P3.4.2)."""
+    from .. import items
+    on = {"on": True, "off": False}.get(args.state)
+    with db.session() as s:
+        row = items.get(s, args.kind, args.ref)
+        if row is None:
+            print(f"error: no {args.kind} {args.ref!r}.")
+            return 1
+        if bool(row.collection) == on:
+            print(f"{args.kind} {args.ref} is already {'' if on else 'not '}the server's data collection.")
+            return 0
+        row.collection = on
+        audit.record(s, "item.collection", actor_label="admin_cli", object_type=args.kind, object_id=args.ref,
+                     collection=on)
+    print(f"{args.kind} {args.ref} is {'now' if on else 'no longer'} the server's own data collection.")
+    return 0
+
+
 def cmd_config(args) -> int:
     """Print the effective configuration, with no secrets in it."""
     for key, value in settings.get().describe().items():
@@ -366,6 +519,15 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="add another admin even if one exists")
     p.set_defaults(func=cmd_create_admin)
 
+    p = subparsers.add_parser("create-user", help="create an active account with a verified email")
+    p.add_argument("--handle", required=True)
+    p.add_argument("--email", required=True)
+    p.add_argument("--name", default="")
+    p.add_argument("--role", default="user", choices=["user", "moderator", "admin"])
+    p.add_argument("--password-stdin", dest="password_stdin", action="store_true",
+                   help="read the password from the first line of standard input instead of prompting")
+    p.set_defaults(func=cmd_create_user)
+
     p = subparsers.add_parser("list-users", help="list every account")
     p.set_defaults(func=cmd_list_users)
 
@@ -374,11 +536,39 @@ def main(argv=None) -> int:
     p.add_argument("role", choices=["user", "moderator", "admin"])
     p.set_defaults(func=cmd_set_role)
 
-    p = subparsers.add_parser("set-status", help="activate or suspend an account")
+    p = subparsers.add_parser("set-status", help="activate, put on probation or suspend an account")
     p.add_argument("handle")
     p.add_argument("status", choices=["active", "probation", "suspended"])
-    p.add_argument("--reason", default=None)
+    p.add_argument("--reason", default=None, help="why (required for a suspension: its owner is told)")
     p.set_defaults(func=cmd_set_status)
+
+    p = subparsers.add_parser("set-caps", help="override an account's capabilities (cap=on|off|default)")
+    p.add_argument("handle")
+    p.add_argument("caps", nargs="+", metavar="CAP=on|off|default")
+    p.set_defaults(func=cmd_set_caps)
+
+    p = subparsers.add_parser("set-limits", help="change an account's limits")
+    p.add_argument("handle")
+    p.add_argument("--invites", type=int, default=None, help="invitations it may have outstanding (0 to 1000; 0: none)")
+    p.add_argument("--games", type=int, default=None, help="lobby games it may run at once (1 to 100)")
+    p.add_argument("--seats", type=int, default=None, help="seats per game (0 to 64; 0: the ruleset's maximum)")
+    p.set_defaults(func=cmd_set_limits)
+
+    p = subparsers.add_parser("set-trust", help="set an account's trust tier")
+    p.add_argument("handle")
+    p.add_argument("tier", choices=["new", "provisional", "trusted", "quarantined"])
+    p.set_defaults(func=cmd_set_trust)
+
+    p = subparsers.add_parser("audit", help="read the audit log, newest first")
+    p.add_argument("--actor", default=None,
+                   help="an account's handle or id, or admin_cli for this command line's changes")
+    p.add_argument("--action", default=None, help="an action, or a prefix ending in * (user.*)")
+    p.add_argument("--object-type", dest="object_type", default=None)
+    p.add_argument("--object-id", dest="object_id", default=None)
+    p.add_argument("--before", type=int, default=None, help="entries before this id (the next page)")
+    p.add_argument("--limit", type=int, default=50, help="at most 200")
+    p.add_argument("--json", action="store_true", help="print the page as JSON")
+    p.set_defaults(func=cmd_audit)
 
     p = subparsers.add_parser("reset-password", help="set an account's password")
     p.add_argument("handle")
@@ -422,6 +612,23 @@ def main(argv=None) -> int:
 
     p = subparsers.add_parser("config", help="show the effective configuration")
     p.set_defaults(func=cmd_config)
+
+    p = subparsers.add_parser("reprice", help="recompute the compute ledger's credits of a period at today's rates")
+    p.add_argument("--since", required=True, help="YYYY-MM-DD (UTC)")
+    p.add_argument("--until", default=None, help="YYYY-MM-DD (UTC); default now")
+    p.set_defaults(func=cmd_reprice)
+
+    p = subparsers.add_parser("refresh-budgets", help="rebuild the grants' budget entries from the compute ledger")
+    p.add_argument("--period", default=None,
+                   help="a period key: 2026-10-12 (daily budgets), 2026-W41 (weekly), 2026-10 (monthly) or all "
+                        "(totals); only the budgets of that kind are rebuilt. Default: each budget's current period")
+    p.set_defaults(func=cmd_refresh_budgets)
+
+    p = subparsers.add_parser("set-collection", help="mark an owned item as the server's own data collection")
+    p.add_argument("kind", choices=("benchmark_run", "probe_run", "report", "lab_experiment"))
+    p.add_argument("ref")
+    p.add_argument("state", choices=("on", "off"))
+    p.set_defaults(func=cmd_set_collection)
 
     args = parser.parse_args(argv)
     _setup()

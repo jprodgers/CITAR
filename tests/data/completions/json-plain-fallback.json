@@ -1,0 +1,39 @@
+{
+ "name": "json-plain-fallback",
+ "note": "end_turn{} in json mode: its braces are an empty object, then the plain call",
+ "mode": "json",
+ "tools": "game",
+ "completion": {
+  "message": {
+   "content": "end_turn{}",
+   "reasoning": null,
+   "tool_calls": []
+  },
+  "finish_reason": "stop",
+  "usage": null
+ },
+ "expect": {
+  "step": {
+   "text": "end_turn{}",
+   "thinking": "",
+   "tool_calls": [
+    {
+     "id": "<gen:1>",
+     "name": "end_turn",
+     "args": {}
+    }
+   ],
+   "stop_reason": "stop",
+   "malformed": 1
+  },
+  "entry": {
+   "role": "assistant",
+   "content": "end_turn{}"
+  },
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "reasoning_tokens": 0
+  }
+ }
+}

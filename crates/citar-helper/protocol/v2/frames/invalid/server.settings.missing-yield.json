@@ -1,0 +1,17 @@
+{
+  "frame": {
+    "t": "settings",
+    "ts": 1760000000.0,
+    "llm": {"enabled": true, "slots": 2, "allow_swaps": false},
+    "cpu": {
+      "enabled": true,
+      "threads": 2,
+      "cpu_percent": 25,
+      "memory_mb": 1024,
+      "work": ["lab_game", "ranking_game"]
+    }
+  },
+  "code": "missing",
+  "path": "cpu.yield_to_llm",
+  "why": "no yield_to_llm"
+}

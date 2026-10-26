@@ -22,17 +22,18 @@ In practice this means:
 
 | Part | Relationship to UnCiv |
 |---|---|
-| `citar/data/ruleset/` | Generated from UnCiv's "Civ V - Gods & Kings" ruleset by `scripts/import_unciv.py`. Numeric values and rule ("unique") text only. |
-| `citar/engine/` | Ported logic. Each module's docstring names the UnCiv classes it derives from — for example `cities.py` ports `City`, `CityStats`, `CityPopulationManager` and `CityConstructions`. |
-| `citar/engine/unique_types.py` | Generated from UnCiv's `UniqueType` enum by `scripts/gen_unique_types.py`. |
+| `crates/citar-engine/data/ruleset/` | Generated from UnCiv's "Civ V - Gods & Kings" ruleset by `scripts/import_unciv.py`. Numeric values and rule ("unique") text only. |
+| `crates/citar-engine/src/` | Ported logic: a port of CITAR's Python engine of 0.1.5 (the tag `python-engine-0.1.6` keeps it), which ported UnCiv's. Each Python module's docstring named the UnCiv classes it derived from — for example `cities.py` ported `City`, `CityStats`, `CityPopulationManager` and `CityConstructions` — and each Rust module names the Python lines it replaces. |
+| `crates/citar-engine/unique_types.tsv` | Generated from UnCiv's `UniqueType` enum by `scripts/gen_unique_types.py`. |
 
 **Not** taken from UnCiv: graphics, sounds, music, fonts, civilopedia articles, leader dialogue,
 quotations, tutorials and all other flavour text. CITAR ships no UnCiv art assets of any kind.
 
-`citar/data/custom/` holds CITAR's own additions (such as `BenchmarkCiv`) in the same format.
+`crates/citar-engine/data/custom/` holds CITAR's own additions (such as `BenchmarkCiv`) in the same
+format.
 
 To move to a newer UnCiv release, point `scripts/import_unciv.py` at a checkout of it and regenerate
-`citar/data/ruleset/`. See [docs/MODDING.md](docs/MODDING.md).
+`crates/citar-engine/data/ruleset/`. See [docs/MODDING.md](docs/MODDING.md).
 
 ## Trademarks
 
@@ -46,9 +47,33 @@ use it.
 
 ## Third-party dependencies
 
-CITAR depends on the packages listed in [`pyproject.toml`](pyproject.toml), each under its own
-licence — notably FastAPI, Starlette and uvicorn (MIT/BSD), SQLAlchemy (MIT), Alembic (MIT), Authlib
-(BSD), argon2-cffi (MIT), httpx (BSD), and the official `anthropic`, `openai` and `mcp` clients
-(MIT). Run `pip-licenses` in an installed environment for the exact set and versions you have.
+**The Rust crates in the binaries.** CITAR's Python extension (`citar._engine`, built from
+`crates/citar-py`) and its helper (`citar-helper`) statically link about 180 third-party Rust
+crates, among them tokio, rustls and ring, reqwest and hyper, serde, PyO3, clap, sysinfo and the
+Windows crates, each under its own permissive licence: most under MIT or Apache-2.0, the others
+under BSD-3-Clause, ISC or Unicode-3.0 (the file names each crate's). Their notices travel with
+every binary in [`packaging/THIRD-PARTY-LICENSES.txt`](packaging/THIRD-PARTY-LICENSES.txt): each
+crate the two link on CITAR's release targets, with its version, its licence and the licence and
+notice texts its package ships, those of code it bundles included. Every wheel carries the file in
+its `.dist-info/licenses/`, every packaged helper archive (the Homebrew, Scoop and winget builds)
+beside the binary, and each release as an asset of its own.
 
-No dependency is vendored into this repository.
+`cargo xtask licenses` writes the file from `Cargo.lock` and the crates' published sources, and
+refuses any crate whose licence is outside an allow-list of permissive licences: MIT, Apache-2.0
+(with or without its LLVM exception), BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0,
+Unicode-DFS-2016, MPL-2.0, CC0-1.0, BSL-1.0, 0BSD and CDLA-Permissive-2.0. CI fails when the lock
+changes without the file.
+
+**The Python packages.** CITAR depends on the packages listed in [`pyproject.toml`](pyproject.toml),
+each under its own licence: notably FastAPI, Starlette and uvicorn (MIT/BSD), SQLAlchemy (MIT),
+Alembic (MIT), Authlib (BSD), argon2-cffi (MIT), httpx (BSD), and the official `anthropic`,
+`openai` and `mcp` clients (MIT). pip installs each with its own licence files; run `pip-licenses`
+in an installed environment for the exact set and versions you have. The Windows bundle (the installer
+and the portable zip), which carries the Python packages it runs on, lists them with their licences in
+`PYTHON-LICENSES.txt`: the installed closure of `citar[all]`, CPython's own licence, and those of PyInstaller's
+bootloader and run-time hooks, at the bundle's root beside `LICENSE`, `NOTICE.md` and `THIRD-PARTY-LICENSES.txt`. A
+shipped package whose wheel carries no licence file (dnspython, ISC) is given CITAR's verbatim copy of its licence,
+kept in `installer/licenses/`. The server image installs the wheel, so its `.dist-info` carries the notices too.
+
+No dependency's source is vendored into this repository: the crates come from crates.io, pinned
+by `Cargo.lock`, and the Python packages from PyPI.

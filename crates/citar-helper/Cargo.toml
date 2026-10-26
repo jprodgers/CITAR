@@ -1,0 +1,118 @@
+[package]
+name = "citar-helper"
+description = "The CITAR helper: lends a machine's model endpoint and spare CPU to a CITAR server over protocol 2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+# `cargo run -p citar-helper` runs the helper, not the fake probe a development build also makes.
+default-run = "citar-helper"
+
+[features]
+# Test and development features (design/phase4-helper.md P4.3.1). cargo xtask check refuses them in
+# every shipped build: in citar-py's dependencies, pyproject.toml's maturin features, release.yml
+# and helper.yml's artifact job. Their code arrives with the packages that need them.
+# The development build's guard: loopback addresses only, an explicit --home (4-03).
+dev-guard = []
+# --test-fault MODE, a helper that cheats on purpose for the verification gates (4-11).
+test-faults = []
+# --update-key FILE (an update key trusted at run time), and at compile time CITAR_HELPER_VERSION
+# (the version it calls itself) and CITAR_HELPER_JOBS_SALT (another jobs build, as another
+# release's), with the test hooks of the update gates (4-13, src/update).
+test-update-key = []
+# Phase 5's package-manager builds (Homebrew, Scoop, winget; design P4.3.8): updates default to
+# notify, and auto is refused ("update through your package manager"), so the helper never fights
+# the package manager over its own binary. The GitHub release assets are built without it.
+packaged = []
+# The conformance support (src/conformance: the fixtures' loaders, the matcher, the transcripts),
+# which reads files under this crate's source directory: for this crate's tests and the players of
+# the transcripts (4-03 on), never for the binary that ships. The tests turn it on through the
+# self dev-dependency below.
+conformance = []
+
+# cargo xtask check: the engine, the bot, the runner and the jobs crate (P4.3.1), the engine with
+# no test-only feature, since the helper ships.
+[dependencies]
+# The build id `--version` prints and the hello carries (citar_bot::build_id over the ruleset
+# compiled in).
+citar-engine = { workspace = true, features = ["embedded-ruleset"] }
+citar-bot.workspace = true
+# Every frame of protocol 2 as a serde type (src/protocol).
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The keys and signatures of the frames are standard base64.
+base64.workspace = true
+# The owner-only machine key file (P4.3.7): citar-jobs' sys module holds the OS calls, so this
+# crate keeps forbid(unsafe_code).
+citar-jobs.workspace = true
+# The command line: protocol 1's flags, each with its meaning (P4.3.2), long names abbreviable
+# as argparse allowed.
+clap.workspace = true
+# The connection (P4.3.3): one runtime, the socket, timers, Ctrl-C and SIGTERM.
+# The update (4-13): its download written as it comes (fs), the staged binary's self-test and the
+# console run's supervisor (process).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util", "fs", "process"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-platform-verifier.workspace = true
+rustls-pki-types.workspace = true
+# Model discovery (P4.3.4).
+reqwest.workspace = true
+# The proxy's completions (P4.3.4): one HTTP/1.1 exchange per completion on a connection its own
+# task owns, so a cancel closes the socket before `cancelled` is sent.
+hyper.workspace = true
+hyper-util.workspace = true
+# The machine key: ed25519 from the OS's random source; its fingerprint is blake3's.
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+blake3.workspace = true
+# The host name, and the logical CPUs and memory the default CPU ceiling is a share of; the scan's
+# CPU, memory and volumes (`disk`), and the CPU's utilisation for the power samples (4-06).
+sysinfo = { workspace = true, features = ["disk"] }
+# Local quiet hours, in the machine's own time zone.
+chrono.workspace = true
+# An update's download is checked against the signed manifest's SHA-256 (P4.3.8).
+sha2.workspace = true
+# The Windows service's account SID, NT SERVICE\citar-helper's, named in its home's DACL and in
+# `--dry-run`'s plan on every OS (P4.3.9, 4-14).
+sha1.workspace = true
+
+[dev-dependencies]
+# The transcripts run on tokio's paused clock (the fake clock, `setup.helper.clock`), and the
+# binary's tests serve a fake hub and a fake endpoint on loopback.
+tokio = { workspace = true, features = ["test-util", "process"] }
+# The parser's robustness gate: mutated frames never panic it (tests/robustness.rs).
+proptest.workspace = true
+# The transcripts' fake server speaks the WebSocket's server half; the tests read the engine's
+# ruleset id and the bots' versions as the binary does.
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+citar-engine = { workspace = true, features = ["embedded-ruleset"] }
+citar-bot.workspace = true
+# This crate again, with its conformance support, for the integration tests in tests/ (a
+# dev-dependency never reaches a shipped build; cargo xtask check allows only this self-reference).
+citar-helper = { path = ".", features = ["conformance"] }
+
+[lib]
+name = "citar_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "citar-helper"
+path = "src/main.rs"
+
+# A stand-in for the scan's probe programs (nvidia-smi, PowerShell, system_profiler), named by
+# CITAR_HELPER_NVIDIA_SMI and the others in a development or test build (4-06, P4.3.5): it prints
+# fixed answers and logs each call. Only builds with the development guard make it, so no release
+# build (`cargo build --release -p citar-helper`, no features) ever holds it.
+[[bin]]
+name = "citar-fake-probe"
+path = "src/bin/fake_probe.rs"
+required-features = ["dev-guard"]
+
+[lints]
+workspace = true

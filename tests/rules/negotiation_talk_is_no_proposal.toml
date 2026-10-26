@@ -1,0 +1,41 @@
+about = """
+Empty lists on both sides are no proposal: models often send give=[] and receive=[] with a plain
+message, and a proposal in which neither side gives anything could be accepted into a deal of
+nothing. With nothing on the table, accept is refused and the negotiation stays open.
+"""
+from = "tests/test_negotiation_chat.py::MessageTests::test_empty_lists_are_no_proposal"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?", give = [], receive = [] }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { proposal = "=null", proposal_by = "=null" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[0]"
+subset = { seq = 1, action = "open", message = "Shall we talk?", proposal = "=null" }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "accept", message = "Deal." }
+error = "There is no proposal on the table in negotiation #1 to accept. Use 'reply' or 'counter'."
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "status"
+eq = "open"
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+subset = { current_proposal = "=null", proposal_by_you = "=null", your_move = true }

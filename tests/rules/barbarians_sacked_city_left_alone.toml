@@ -1,0 +1,110 @@
+about = """
+A sacked city is left alone for a while: 5 turns at the highest aggression. A sack within that time
+takes nothing, and the barbarians do not even attack it; once the time is up they sack it again.
+"""
+from = "tests/test_barbarians.py::SackTests::test_a_sacked_city_is_left_alone_for_a_while"
+
+[config]
+barbarians = "normal"
+barbarian_aggression = 100
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "set_player", player = 0, gold = 400 },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 200 }
+
+[[step]]
+op = "sack_city"
+args = { city = "=roma" }
+as = "first"
+
+[[step]]
+check = "first"
+subset = { sacked_city = "Roma" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+ge = 0
+as = "gold"
+
+[[step]]
+check = "gold"
+eq = "=400 - first.gold_stolen"
+
+[[step]]
+op = "sack_city"
+args = { city = "=roma" }
+as = "again"
+
+[[step]]
+check = "again"
+eq = { sacked_city = "=null", note = "Roma was sacked too recently to have anything left to take." }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = "=gold"
+
+[[step]]
+note = "The barbarian AI does not try: the city is no target while it is picked clean."
+op = "set_city"
+args = { city = "=roma", health = 1 }
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "A>e" }
+as = "raider"
+
+[[step]]
+set = { b = "=raider.unit_id" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=b" }
+
+[[step]]
+op = "barbarian_act"
+args = { unit = "=b" }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { owner = 0, health = 1 }
+
+[[step]]
+check = { what = "events", type = "city_sacked" }
+len = 1
+
+[[step]]
+note = "Five turns later it is worth sacking again."
+op = "set_turn"
+args = { turn = 205 }
+
+[[step]]
+op = "set_unit"
+args = { unit = "=b", at = "A>e", hp = 100 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=b" }
+
+[[step]]
+op = "barbarian_act"
+args = { unit = "=b" }
+
+[[step]]
+check = { what = "events", type = "city_sacked" }
+len = 2
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { owner = 0 }

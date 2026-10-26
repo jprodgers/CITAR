@@ -1,0 +1,44 @@
+{
+  "name": "handshake-refused-token",
+  "about": "An unknown or revoked token is refused; from a console the helper exits 78 and does not reconnect.",
+  "refs": ["P4.2.2", "P4.3.9"],
+  "plays": {"helper": "4-03", "hub": "4-05"},
+  "values": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "token": "cwt_example_0123456789abcdef0123456789abcdef"
+  },
+  "setup": {"helper": {"clock": "fake"}, "hub": {"token": "revoked"}},
+  "steps": [
+    {
+      "h2s": {
+        "t": "hello",
+        "protocol": 2,
+        "token": "<id:token>",
+        "helper": {
+          "version": "<string>",
+          "build": "<hex12>",
+          "jobs_build": "<any>",
+          "target": "<string>",
+          "label": "<string>"
+        },
+        "machine": {
+          "hostname": "<string>",
+          "name": "<string>",
+          "os": "<string>",
+          "arch": "<string>",
+          "public_key": "<id:key>"
+        },
+        "llm": "<any>",
+        "cpu": "<any>",
+        "report": "<any>",
+        "running": [],
+        "results": [],
+        "updates": "<string>",
+        "quiet_until": "<any>"
+      }
+    },
+    {"s2h": {"t": "refused", "code": "token", "message": "<string>"}, "within_s": 5},
+    {"close": {"by": "server", "code": 4401}},
+    {"state": {"side": "helper", "expect": {"exit": 78}}}
+  ]
+}

@@ -1,0 +1,945 @@
+{
+ "fn": {
+  "auto": "cities.auto_pick_production's choice, not set",
+  "classic": "bots.basic.BasicBot(seed=city.id, params={'prod_mode': 'classic'}).advise_production",
+  "puppet_pick": "cities.auto_pick_production's puppet branch, for any city",
+  "unciv": "bots.basic.BasicBot(seed=city.id).advise_production"
+ },
+ "format": 1,
+ "states": [
+  {
+   "case": "duel-continents-normal",
+   "cities": [],
+   "turn": 1
+  },
+  {
+   "case": "duel-continents-normal",
+   "cities": [
+    {
+     "auto": "Worker",
+     "city": 16,
+     "classic": "Worker",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Granary",
+     "unciv": "Worker"
+    },
+    {
+     "auto": "Scout",
+     "city": 17,
+     "classic": "Worker",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Scout"
+    }
+   ],
+   "turn": 20
+  },
+  {
+   "case": "duel-continents-normal",
+   "cities": [
+    {
+     "auto": "Spearman",
+     "city": 16,
+     "classic": "Spearman",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Spearman"
+    },
+    {
+     "auto": "Worker",
+     "city": 17,
+     "classic": "Walls",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Worker"
+    },
+    {
+     "auto": "Settler",
+     "city": 73,
+     "classic": "Settler",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Settler"
+    },
+    {
+     "auto": "Worker",
+     "city": 81,
+     "classic": "Worker",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Worker"
+    }
+   ],
+   "turn": 50
+  },
+  {
+   "case": "scenario-duel-fractal",
+   "cities": [
+    {
+     "auto": "Apollo Program",
+     "city": 9,
+     "classic": "Notre Dame",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Apollo Program"
+    },
+    {
+     "auto": "Machine Gun",
+     "city": 10,
+     "classic": "Machine Gun",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Machine Gun"
+    },
+    {
+     "auto": "Walls",
+     "city": 21,
+     "classic": "Machine Gun",
+     "owner": 0,
+     "puppet": true,
+     "puppet_pick": "Walls",
+     "unciv": "Machine Gun"
+    }
+   ],
+   "turn": 10
+  },
+  {
+   "case": "scenario-duel-fractal",
+   "cities": [
+    {
+     "auto": "Apollo Program",
+     "city": 9,
+     "classic": "Notre Dame",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Apollo Program"
+    },
+    {
+     "auto": "Machine Gun",
+     "city": 10,
+     "classic": "Machine Gun",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Machine Gun"
+    },
+    {
+     "auto": "Walls",
+     "city": 21,
+     "classic": "Machine Gun",
+     "owner": 0,
+     "puppet": true,
+     "puppet_pick": "Walls",
+     "unciv": "Machine Gun"
+    }
+   ],
+   "turn": 11
+  },
+  {
+   "case": "scenario-duel-fractal",
+   "cities": [
+    {
+     "auto": "Apollo Program",
+     "city": 9,
+     "classic": "Notre Dame",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Apollo Program"
+    },
+    {
+     "auto": "Machine Gun",
+     "city": 10,
+     "classic": "Machine Gun",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Machine Gun"
+    },
+    {
+     "auto": "Walls",
+     "city": 21,
+     "classic": "Machine Gun",
+     "owner": 0,
+     "puppet": true,
+     "puppet_pick": "Walls",
+     "unciv": "Machine Gun"
+    }
+   ],
+   "turn": 12
+  },
+  {
+   "case": "scenario-small-continents-s3001",
+   "cities": [
+    {
+     "auto": "Apollo Program",
+     "city": 27,
+     "classic": "Notre Dame",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Apollo Program"
+    },
+    {
+     "auto": "Machine Gun",
+     "city": 28,
+     "classic": "Machine Gun",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Machine Gun"
+    },
+    {
+     "auto": "The Great Library",
+     "city": 29,
+     "classic": "Walls",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "The Great Library"
+    },
+    {
+     "auto": "The Great Library",
+     "city": 30,
+     "classic": "Colosseum",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "The Great Library"
+    },
+    {
+     "auto": "Spearman",
+     "city": 138,
+     "classic": "Spearman",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Spearman"
+    },
+    {
+     "auto": "Notre Dame",
+     "city": 214,
+     "classic": "Artillery",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Notre Dame"
+    },
+    {
+     "auto": "War Elephant",
+     "city": 251,
+     "classic": "War Elephant",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "War Elephant"
+    },
+    {
+     "auto": "Notre Dame",
+     "city": 266,
+     "classic": "Notre Dame",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Notre Dame"
+    },
+    {
+     "auto": "Walls",
+     "city": 291,
+     "classic": "Machine Gun",
+     "owner": 0,
+     "puppet": true,
+     "puppet_pick": "Walls",
+     "unciv": "Machine Gun"
+    }
+   ],
+   "turn": 61
+  },
+  {
+   "case": "small-continents-normal-s1025",
+   "cities": [
+    {
+     "auto": "Worker",
+     "city": 27,
+     "classic": "Museum",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Museum",
+     "unciv": "Worker"
+    },
+    {
+     "auto": "Windmill",
+     "city": 28,
+     "classic": "Windmill",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Windmill",
+     "unciv": "Windmill"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 29,
+     "classic": "Research Lab",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Hospital",
+     "city": 30,
+     "classic": "Research Lab",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Hospital"
+    },
+    {
+     "auto": "Bank",
+     "city": 112,
+     "classic": "Bank",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Arsenal",
+     "unciv": "Bank"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 136,
+     "classic": "Research Lab",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Public School",
+     "city": 198,
+     "classic": "Castle",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Stadium",
+     "unciv": "Public School"
+    },
+    {
+     "auto": "Broadcast Tower",
+     "city": 237,
+     "classic": "Broadcast Tower",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Broadcast Tower",
+     "unciv": "Broadcast Tower"
+    },
+    {
+     "auto": "Stadium",
+     "city": 282,
+     "classic": "Stadium",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Stadium",
+     "unciv": "Stadium"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 384,
+     "classic": "Research Lab",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 400,
+     "classic": "Stadium",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 484,
+     "classic": "Market",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 593,
+     "classic": "Research Lab",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 617,
+     "classic": "Research Lab",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 753,
+     "classic": "Research Lab",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "University",
+     "city": 767,
+     "classic": "University",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "University"
+    },
+    {
+     "auto": "Castle",
+     "city": 884,
+     "classic": "Research Lab",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Castle"
+    },
+    {
+     "auto": "Museum",
+     "city": 894,
+     "classic": "Windmill",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Windmill",
+     "unciv": "Museum"
+    },
+    {
+     "auto": "Theatre",
+     "city": 951,
+     "classic": "Theatre",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Theatre",
+     "unciv": "Theatre"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 957,
+     "classic": "Research Lab",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Stadium",
+     "city": 991,
+     "classic": "Stadium",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Stadium",
+     "unciv": "Stadium"
+    },
+    {
+     "auto": "Observatory",
+     "city": 1026,
+     "classic": "Observatory",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Observatory",
+     "unciv": "Observatory"
+    },
+    {
+     "auto": "Stadium",
+     "city": 1052,
+     "classic": "Stadium",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Stadium",
+     "unciv": "Stadium"
+    },
+    {
+     "auto": "University",
+     "city": 1056,
+     "classic": "University",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Stadium",
+     "unciv": "University"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 1073,
+     "classic": "Market",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "University",
+     "city": 1090,
+     "classic": "University",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "University",
+     "unciv": "University"
+    },
+    {
+     "auto": "Public School",
+     "city": 1134,
+     "classic": "Public School",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Public School",
+     "unciv": "Public School"
+    },
+    {
+     "auto": "University",
+     "city": 1224,
+     "classic": "University",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Stadium",
+     "unciv": "University"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 1248,
+     "classic": "Research Lab",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Public School",
+     "city": 1287,
+     "classic": "Public School",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Public School",
+     "unciv": "Public School"
+    },
+    {
+     "auto": "Research Lab",
+     "city": 1303,
+     "classic": "Research Lab",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Research Lab",
+     "unciv": "Research Lab"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 1363,
+     "classic": "Colosseum",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Stadium",
+     "city": 1375,
+     "classic": "Stadium",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Stadium",
+     "unciv": "Stadium"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 1388,
+     "classic": "Colosseum",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 1549,
+     "classic": "Colosseum",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Infantry",
+     "city": 1570,
+     "classic": "Infantry",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Infantry"
+    }
+   ],
+   "turn": 280
+  },
+  {
+   "case": "small-pangaea-raging",
+   "cities": [],
+   "turn": 1
+  },
+  {
+   "case": "small-pangaea-raging",
+   "cities": [
+    {
+     "auto": "Settler",
+     "city": 28,
+     "classic": "Settler",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Granary",
+     "unciv": "Settler"
+    },
+    {
+     "auto": "Settler",
+     "city": 29,
+     "classic": "Settler",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Granary",
+     "unciv": "Settler"
+    },
+    {
+     "auto": "Jaguar",
+     "city": 30,
+     "classic": "Jaguar",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Granary",
+     "unciv": "Jaguar"
+    },
+    {
+     "auto": "Worker",
+     "city": 31,
+     "classic": "Worker",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Granary",
+     "unciv": "Worker"
+    }
+   ],
+   "turn": 12
+  },
+  {
+   "case": "small-pangaea-raging",
+   "cities": [
+    {
+     "auto": "Scout",
+     "city": 28,
+     "classic": "Worker",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Scout"
+    },
+    {
+     "auto": "Work Boats",
+     "city": 29,
+     "classic": "The Great Library",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Work Boats"
+    },
+    {
+     "auto": "Scout",
+     "city": 30,
+     "classic": "Scout",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Scout"
+    },
+    {
+     "auto": "The Pyramids",
+     "city": 31,
+     "classic": "Walls",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "The Pyramids"
+    },
+    {
+     "auto": "Worker",
+     "city": 222,
+     "classic": "Worker",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Granary",
+     "unciv": "Worker"
+    },
+    {
+     "auto": "The Great Library",
+     "city": 267,
+     "classic": "Spearman",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "The Great Library"
+    },
+    {
+     "auto": "Spearman",
+     "city": 347,
+     "classic": "Spearman",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Granary",
+     "unciv": "Spearman"
+    },
+    {
+     "auto": "Spearman",
+     "city": 366,
+     "classic": "Spearman",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Spearman"
+    }
+   ],
+   "turn": 50
+  },
+  {
+   "case": "standard-pangaea-normal-s1031",
+   "cities": [
+    {
+     "auto": "Market",
+     "city": 40,
+     "classic": "Walls",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Market"
+    },
+    {
+     "auto": "Library",
+     "city": 41,
+     "classic": "Market",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "Library"
+    },
+    {
+     "auto": "Great Mosque of Djenne",
+     "city": 42,
+     "classic": "Great Mosque of Djenne",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "Great Mosque of Djenne"
+    },
+    {
+     "auto": "Great Mosque of Djenne",
+     "city": 43,
+     "classic": "Great Mosque of Djenne",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Stable",
+     "unciv": "Great Mosque of Djenne"
+    },
+    {
+     "auto": "Water Mill",
+     "city": 44,
+     "classic": "Market",
+     "owner": 4,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "Water Mill"
+    },
+    {
+     "auto": "Great Mosque of Djenne",
+     "city": 45,
+     "classic": "Great Mosque of Djenne",
+     "owner": 5,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "Great Mosque of Djenne"
+    },
+    {
+     "auto": "Great Wall",
+     "city": 150,
+     "classic": "Walls",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Great Wall"
+    },
+    {
+     "auto": "Library",
+     "city": 168,
+     "classic": "Worker",
+     "owner": 5,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "Library"
+    },
+    {
+     "auto": "Hagia Sophia",
+     "city": 172,
+     "classic": "Spearman",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "Hagia Sophia"
+    },
+    {
+     "auto": "Library",
+     "city": 196,
+     "classic": "Worker",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Stable",
+     "unciv": "Library"
+    },
+    {
+     "auto": "Great Mosque of Djenne",
+     "city": 197,
+     "classic": "Worker",
+     "owner": 4,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "Great Mosque of Djenne"
+    },
+    {
+     "auto": "Library",
+     "city": 309,
+     "classic": "Worker",
+     "owner": 4,
+     "puppet": false,
+     "puppet_pick": "Market",
+     "unciv": "Library"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 380,
+     "classic": "Worker",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 390,
+     "classic": "Colosseum",
+     "owner": 4,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Circus Maximus",
+     "city": 444,
+     "classic": "Circus Maximus",
+     "owner": 3,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Circus Maximus"
+    },
+    {
+     "auto": "Granary",
+     "city": 525,
+     "classic": "Worker",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Granary"
+    },
+    {
+     "auto": "Swordsman",
+     "city": 568,
+     "classic": "Swordsman",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Swordsman"
+    },
+    {
+     "auto": "Walls",
+     "city": 581,
+     "classic": "Walls",
+     "owner": 5,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Walls"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 589,
+     "classic": "Walls",
+     "owner": 4,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Swordsman",
+     "city": 594,
+     "classic": "Swordsman",
+     "owner": 1,
+     "puppet": false,
+     "puppet_pick": "Walls",
+     "unciv": "Swordsman"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 653,
+     "classic": "Swordsman",
+     "owner": 0,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 679,
+     "classic": "Worker",
+     "owner": 5,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Colosseum",
+     "city": 742,
+     "classic": "Worker",
+     "owner": 2,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Colosseum"
+    },
+    {
+     "auto": "Chariot Archer",
+     "city": 767,
+     "classic": "Chariot Archer",
+     "owner": 5,
+     "puppet": false,
+     "puppet_pick": "Colosseum",
+     "unciv": "Chariot Archer"
+    }
+   ],
+   "turn": 120
+  }
+ ]
+}

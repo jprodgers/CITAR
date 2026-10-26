@@ -9,10 +9,12 @@ Every flow can also run unattended, which is how the installers use it::
 
     citar setup --local --non-interactive
     citar setup --server --domain citar.example.com --non-interactive
-    citar setup --worker --server https://citar.example.com --token CODE --non-interactive
 
 In that mode a question with no answer supplied is an error naming the flag that would have answered
 it, rather than a process blocking on a terminal nobody is watching.
+
+``citar setup --worker`` configured the Python worker, which the CITAR helper replaced in 0.1.6: it now
+says where to download the helper (whose own ``citar-helper setup`` asks its questions) and exits 2.
 """
 from __future__ import annotations
 
@@ -45,7 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--server", dest="server_mode", action="store_true",
                       help="a public server other people sign in to")
     mode.add_argument("--worker", action="store_true",
-                      help="serve this machine's models to a CITAR server elsewhere")
+                      help="replaced by the CITAR helper (citar-helper): where to get it")
 
     parser.add_argument("--non-interactive", action="store_true",
                         help="never prompt; fail if an answer is missing")
@@ -63,12 +65,9 @@ def _build_parser() -> argparse.ArgumentParser:
     remote.add_argument("--proxy-hops", type=int, help="how many reverse proxies are in front")
     remote.add_argument("--state-dir", help="where saves, the database and runs are kept")
     remote.add_argument("--env-path", help="where to write the environment file")
-
-    agent = parser.add_argument_group("worker")
-    agent.add_argument("--server-url", dest="server", help="the CITAR server to connect to")
-    agent.add_argument("--token", help="worker token (prefer the prompt)")
-    agent.add_argument("--name", help="a name for this machine")
-    agent.add_argument("--max-concurrent", type=int, help="requests to serve at once")
+    remote.add_argument("--refresh-units", action="store_true",
+                        help="write the installed service's unit, citar-admin and backup again from this release, "
+                             "keeping their paths; ask nothing, start nothing (install.sh's switch runs it)")
 
     return parser
 
@@ -94,8 +93,7 @@ def _choose_mode(args) -> str:
              "A public deployment: a domain, TLS, accounts, invitations and budgets.\n"
              "Needs a machine with a name on the internet."),
             ("worker", "This machine's GPU, serving a CITAR server elsewhere",
-             "The models run here; the games run there. The connection is outbound, so\n"
-             "nothing needs to be opened on your router."),
+             "That is the CITAR helper's job, a separate download: this says where to get it."),
         ],
         default="local")
 

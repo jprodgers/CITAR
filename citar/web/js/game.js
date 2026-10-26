@@ -1,11 +1,16 @@
 // The in-game screen: map, top bar, unit/city panels, side feeds, spectator controls.
-import { api, connectWS } from "./api.js";
+import { api, connectWS, gameLink, replayLink } from "./api.js";
 import { el, clear, toast, fmt, signed, nameOf, prompt, confirmBox, modal } from "./util.js";
 import { MapRenderer, modelFromView, TERRAIN_COLORS } from "./render.js";
 import { hexDistance, neighbors } from "./hex.js";
 import { renderUnitPanel, renderCityPanel, openTechTree, openDiplomacy, openEmpire, openNotes, openHelp, openPolicies,
          openReligion, openGreatPeople, openCityStates, openVictory, chooseBeliefs } from "./panels.js";
 import { openMetrics } from "./metrics.js";
+import { ChatDock } from "./chat.js";
+import { agentState, isModelSeat, seatLabel } from "./seats.js";
+import { computeWindow, exploredBox, fit, inWindow, loadWindow, sameBox, saveWindow, tileCentre, toScreen, toTile,
+         wholeMap, windowKey } from "./minimap.js";
+import { SQRT3 } from "./hex.js";
 
 export class GameScreen {
   constructor(root, rules, gid, token, asPlayer) {
@@ -24,12 +29,22 @@ export class GameScreen {
     this.thoughts = [];
     this.sideTab = "events";
     this.agentStatus = {};
+    this.agentWait = {};    // player -> where its model call waits for its machine ({machine, position, eta_s})
     this._refreshTimer = null;
+    this._viewTag = null;   // the ETag of the view in hand, sent with every refresh (a 304 keeps the view)
+    this.viewSeq = 0;       // how many refreshes have come back: a view fetched after a moment is one counted after it
     this._inflight = false;
     this._pending = false;
     this._lastTurnKey = null;
     this._centered = false;
+    this.mini = null;       // the minimap's window, its fit and the map it is of (updateMinimap)
+    this._miniLayer = null; // its tiles, drawn offscreen when the view's tiles or the window change
     this.build();
+    // the docked chat windows, left of End Turn (design/phase3-features.md P3.5.6), clear of the panels when there is room
+    this.chat = new ChatDock(this, { host: this.main, turnBox: this.turnBox,
+                                     obstacles: [this.unitPanel, this.cityPanel, this.sidePanel, this.minimap],
+                                     fetchChat: (nid) => api.negotiation(this.gid, this.token, nid),
+                                     fetchOptions: (civ) => api.tradeOptions(this.gid, this.token, civ) });
     this.refresh();
     this.ws = connectWS(gid, token, (m) => this.onWS(m));
     this._keyHandler = (e) => this.onKey(e);
@@ -38,6 +53,7 @@ export class GameScreen {
 
   destroy() {
     if (this.ws) this.ws.close();
+    if (this.chat) this.chat.destroy();
     document.removeEventListener("keydown", this._keyHandler);
   }
 
@@ -63,13 +79,30 @@ export class GameScreen {
     this.renderer.onViewChange = () => this.drawMinimap();
     this.bindMouse();
     for (const node of [this.topbar, this.turnBox, this.sidePanel, this.unitPanel, this.cityPanel]) this.holdWhileHovered(node);
-    this.minimap.addEventListener("click", (e) => {
-      if (!this.view) return;
-      const r = this.minimap.getBoundingClientRect();
-      const x = Math.floor((e.clientX - r.left) / r.width * this.view.width);
-      const y = Math.floor((e.clientY - r.top) / r.height * this.view.height);
-      this.renderer.centerOn(x, y);
+    // the minimap: a click centres the main map on the tile under it, a drag pans it (P3.7.4)
+    this.minimap.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { this.minimap.setPointerCapture(e.pointerId); } catch { /* the drag still follows inside the widget */ }
+      this._miniDrag = true;
+      this.minimapCentre(e);
     });
+    this.minimap.addEventListener("pointermove", (e) => { if (this._miniDrag) this.minimapCentre(e); });
+    for (const end of ["pointerup", "pointercancel", "lostpointercapture"]) {
+      this.minimap.addEventListener(end, () => { this._miniDrag = false; });
+    }
+  }
+
+  // centre the main map on the minimap's tile under the pointer
+  minimapCentre(e) {
+    const m = this.mini;
+    if (!m) return;
+    const r = this.minimap.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const px = (e.clientX - r.left) * this.minimap.width / r.width, py = (e.clientY - r.top) * this.minimap.height / r.height;
+    const [x, y] = toTile(m.fit, m.win, m.map, px, py);
+    this.renderer.centerOn(x, y);
+    this.drawMinimap();
   }
 
   // Redrawing a bar or panel replaces its buttons and closes its dropdowns. In a fast AI game that happens several
@@ -183,17 +216,33 @@ export class GameScreen {
     this._inflight = true;
     try {
       const started = Date.now();
-      const v = await api.view(this.gid, this.token, this.asPlayer);
+      // with the ETag of the view in hand: a 304 says it is still the view, and nothing was built or sent
+      const r = await api.view(this.gid, this.token, this.asPlayer, this.view ? this._viewTag : null);
+      if (r.notModified && !this.view) throw new Error("The game's view did not come.");
+      const same = r.notModified;
       this._viewStartedAt = started;
-      this.view = v;
+      this.viewSeq++;
+      const v = same ? this.view : r.data;
+      if (!same) {
+        this._viewTag = r.etag || null;
+        this.view = v;
+        // what each AI seat is doing as the view saw it, for a seat the socket has not spoken of since the page opened
+        for (const [pid, st] of Object.entries((v.session && v.session.agent_status) || {})) {
+          if (!(pid in this.agentStatus)) this.agentStatus[pid] = st;
+        }
+      }
       if (!this.feed.length) this.feed = (v.events || []).slice(-150);
       if (v.thoughts && !this.thoughts.length) this.thoughts = v.thoughts.slice(-80);
-      this.model = modelFromView(v);
-      this.renderer.setModel(this.model);
+      if (!same) {
+        this.model = modelFromView(v);
+        this.renderer.setModel(this.model);
+        this.updateMinimap();
+      }
       if (!this._centered) { this.centerHome(); this._centered = true; }
       if (this.selectedUnit != null && !v.units.some((u) => u.id === this.selectedUnit && u.owner === this.you)) this.deselect();
       if (this.selectedCity != null && !v.cities.some((c) => c.id === this.selectedCity && c.owner === this.you)) this.deselect();
       await this.refreshDetails();
+      this.chat.onView(v);
       this.renderTopbar();
       this.renderSide();
       this.renderBanner();
@@ -213,7 +262,6 @@ export class GameScreen {
           if (fresh && keys.size) this.showAlerts();
         }
       }
-      this.checkNegotiations();
       this.checkReturnOffers();
     } catch (e) {
       toast(e.message, "error");
@@ -251,6 +299,8 @@ export class GameScreen {
       this.feed.push(m.event);
       if (this.feed.length > 400) this.feed.splice(0, this.feed.length - 400);
       this.maybeToastEvent(m.event);
+      if (m.event.type === "negotiation") this.chat.onEvent(m.event);
+      // the Diplomacy screen shows relations, messages and which chats wait (it keeps the message being written)
       if (this._diploModal && this._redrawDiplomacy && ["negotiation", "message", "deal", "war_declared", "peace", "first_contact"].includes(m.event.type)) {
         clearTimeout(this._diploTimer);
         this._diploTimer = setTimeout(() => this._redrawDiplomacy(), 250);
@@ -262,9 +312,19 @@ export class GameScreen {
       if (this.sideTab === "thoughts") this.renderSide();
     } else if (m.type === "agent") {
       this.agentStatus[m.player] = m.status;
+      if (m.status === "queued") this.agentWait[m.player] = m;
+      else delete this.agentWait[m.player];
       this.renderTopbar();
+      if (this.sideTab === "scores") this.renderSide();      // the Civs list says what each AI seat is doing
+    } else if (m.type === "negotiation_status") {
+      this.chat.onStatus(m);
     } else if (m.type === "control") {
       this.scheduleRefresh(10);
+    } else if (m.type === "crashed") {
+      toast(m.message, "error", 20000);
+      this.scheduleRefresh(10);
+    } else if (m.type === "agent_error") {
+      toast(m.text, "error", 12000);
     }
   }
 
@@ -273,7 +333,8 @@ export class GameScreen {
     if (ev.type === "agent_error" || ev.type === "game_paused") { toast(ev.text, "error", 12000); return; }
     if (ev.type === "game_resumed") { toast(ev.text, "info", 6000); return; }
     const mine = this.you != null && ev.players && ev.players.includes(this.you);
-    // the diplomacy window shows (or is about to show) these itself: a toast on top would only hide it
+    // the chat window shows (or is about to show) these itself, and the Diplomacy screen its messages: a toast on top
+    // would only hide them
     if (mine && (ev.type === "negotiation" || (ev.type === "message" && this._diploModal))) return;
     if (important.includes(ev.type) || (mine && ["unit_killed", "unit_captured", "negotiation", "message", "camp_cleared", "ruins", "tech",
         "wonder_built", "great_person_born", "golden_age", "natural_wonder", "spy", "un_vote"].includes(ev.type))) {
@@ -305,18 +366,6 @@ export class GameScreen {
       footer: [el("button", { onclick: () => decide(true) }, "Keep it"),
                el("button", { class: "primary", onclick: () => decide(false) }, `Return to ${who}`)],
     });
-  }
-
-  checkNegotiations() {
-    if (!this.view.diplomacy || this.isSpectator) return;
-    const waiting = this.view.diplomacy.open_negotiations.filter((n) => n.your_move);
-    for (const n of waiting) {
-      const key = `${n.id}:${n.history.length}`;
-      if (this._shownNeg === key) continue;
-      this._shownNeg = key;
-      openDiplomacy(this, n.with);
-      break;
-    }
   }
 
   // ------------------------------------------------------------------
@@ -386,7 +435,8 @@ export class GameScreen {
     return true;
   }
 
-  // wait for any in-flight refresh, then fetch a fresh view
+  // wait for any in-flight refresh, then fetch a fresh view (or hear that the one in hand still is: `viewSeq` moves
+  // either way, and not when the fetch failed)
   async syncView() {
     while (this._inflight) await new Promise((r) => setTimeout(r, 25));
     if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = null; }
@@ -502,7 +552,7 @@ export class GameScreen {
     const k = e.key.toLowerCase();
     if (k === "escape") this.deselect();
     else if (k === "n" || k === "tab") { e.preventDefault(); this.selectNextIdle(); }
-    else if (k === "enter" && e.shiftKey) this.endTurn(e.ctrlKey || e.metaKey);
+    else if (k === "enter" && e.shiftKey) this.onEndTurn(e.ctrlKey || e.metaKey);
     else if (k === "t") openTechTree(this);
     else if (k === "o") openPolicies(this);
     else if (k === "d") openDiplomacy(this);
@@ -535,11 +585,12 @@ export class GameScreen {
     if (r) { toast(`${a.name}: done`, "info", 2500); this.afterOrder(d.id); }
   }
 
-  // decisions still open this turn; any of them keeps End Turn greyed out (Ctrl+click ends the turn anyway)
+  // decisions still open this turn; any of them keeps End Turn greyed out (Ctrl+click ends the turn anyway). Open
+  // chats are End Turn's own states (chat.js: answer first, waiting, armed), not one of these.
   turnBlockers() {
     const v = this.view;
     if (!v || this.you == null) return [];
-    const BLOCKING = ["research", "free_tech", "policy", "great_person", "pantheon", "promotion", "negotiation", "un_vote", "idle_city",
+    const BLOCKING = ["research", "free_tech", "policy", "great_person", "pantheon", "promotion", "un_vote", "idle_city",
                       "return_civilian"];
     const out = (v.alerts || []).filter((a) => BLOCKING.includes(a.type));
     const idle = v.units.filter((u) => u.owner === this.you && !u.activity && u.moves > 0);
@@ -554,22 +605,37 @@ export class GameScreen {
       const u = this.view.units.find((x) => x.id === a.unit);
       if (u) { this.renderer.centerOn(u.x, u.y); this.selectUnit(u.id); return this.askReturnCivilian(u); }
     }
+    // a negotiation alert names the other side: its chat window opens
+    if (a.type === "negotiation") return a.player != null ? this.chat.open(a.player) : openDiplomacy(this);
     const open = { research: openTechTree, free_tech: openTechTree, policy: openPolicies, great_person: openGreatPeople,
-                   pantheon: openReligion, un_vote: openDiplomacy, negotiation: openDiplomacy }[a.type];
+                   pantheon: openReligion, un_vote: openDiplomacy }[a.type];
     if (open) return open(this);
     if (a.x != null) this.renderer.centerOn(a.x, a.y);
     if (a.city != null) this.selectCity(a.city);
     else if (a.unit != null) this.selectUnit(a.unit);
   }
 
+  // End Turn (the button, Shift+Enter). The chats decide first (chat.js's endTurnClick, tested there): a chat waiting
+  // on you opens; armed, a click disarms; with other decisions left a plain click goes to the first; a chat waiting on
+  // the other side arms End Turn, which ends the turn once every chat has closed (checking the other decisions again
+  // on a view fetched then, unless Ctrl armed it); with nothing holding the turn, it ends.
+  onEndTurn(force = false) {
+    if (!this.myTurn) return;
+    const blockers = this.turnBlockers();
+    const next = this.chat.endTurnClick(force, blockers);
+    if (next === "blocked") return this.showBlockers(blockers);
+    if (next === "end") return this.endTurn(force);
+  }
+
+  showBlockers(blockers) {
+    toast(`Before ending the turn: ${blockers.map((a) => a.text).join(" ")} (Ctrl+click End Turn to end it anyway.)`, "info", 5000);
+    this.goToBlocker(blockers[0]);
+  }
+
   async endTurn(force = false) {
     if (!this.myTurn) return;
     const blockers = this.turnBlockers();
-    if (blockers.length && !force) {
-      toast(`Before ending the turn: ${blockers.map((a) => a.text).join(" ")} (Ctrl+click End Turn to end it anyway.)`, "info", 5000);
-      this.goToBlocker(blockers[0]);
-      return;
-    }
+    if (blockers.length && !force) return this.showBlockers(blockers);
     this.deselect();
     await this.tool("end_turn");
   }
@@ -732,10 +798,16 @@ export class GameScreen {
         el("span", { class: "pill live", title: `Run: ${bench.run_name} · server: ${bench.server}` }, `Benchmark: ${bench.model} · ${bench.scenario}`));
     }
     if (!bench && v.session) {
-      // a game pauses itself before its AI's next turn in a server's restricted hours; until then, say so
-      const late = (v.session.seats || []).filter((st) => st.type === "llm" && st.llm_info && st.llm_info.restricted_until);
-      for (const st of late) tb.append(el("span", { class: "pill quiet", title: "This server is in its restricted hours (Servers page): the game pauses before its AI's next turn and resumes when they end." },
+      // a game pauses itself before its AI's next turn in a server's restricted hours; until then, say so. A hybrid
+      // seat's prompts are refused there instead (its bot answers), and its game plays on.
+      const late = (v.session.seats || []).filter((st) => isModelSeat(st) && st.llm_info && st.llm_info.restricted_until);
+      for (const st of late) {
+        const hybrid = st.type === "hybrid";
+        tb.append(el("span", { class: "pill quiet", title: hybrid
+          ? "This server is in its restricted hours (Servers page): the hybrid seat's bot decides its diplomacy until they end."
+          : "This server is in its restricted hours (Servers page): the game pauses before its AI's next turn and resumes when they end." },
         `🌙 ${st.llm_info.server} restricted until ${st.llm_info.restricted_until}`));
+      }
     }
     const cur = v.players.find((p) => p.id === v.current_player);
     if (v.empire) {
@@ -780,12 +852,16 @@ export class GameScreen {
     }
     if (this.isSpectator || (v.session && v.session.seats.some((s) => s.type !== "human"))) {
       const sess = v.session;
+      // a crashed game takes no more moves: nothing to pause, resume or slow down, but everything to look at
+      const stopped = !!sess.crashed;
       // toggles the state the game is in now (not the one a held button was drawn with), and shows it at once:
       // while AIs are playing, the server can take a second or more to send a fresh view
       const want = this._pauseWanted && Date.now() - this._pauseWanted.at < 5000 ? this._pauseWanted.paused : null;
       if (want === sess.paused) this._pauseWanted = null;             // the server has caught up
       const paused = want ?? sess.paused;
-      tb.append(el("button", { class: "small", onclick: () => {
+      // pausing, the AI delay and a named save are for whoever manages the game (the server says: can_manage)
+      const manages = v.can_manage !== false;
+      if (!stopped && manages) tb.append(el("button", { class: "small", onclick: () => {
         this._pauseWanted = { paused: !paused, at: Date.now() };
         this.renderTopbar();
         api.control(this.gid, { paused: !paused });
@@ -794,23 +870,24 @@ export class GameScreen {
         const delay = el("select", { onchange: (ev) => api.control(this.gid, { ai_delay: +ev.target.value }) },
           ...[0, 0.5, 1, 2, 5].map((d) => el("option", { value: d, selected: sess.ai_delay === d }, `delay ${d}s`)));
         const viewAs = el("select", { onchange: (ev) => {
-          location.hash = `#/game/${this.gid}/${encodeURIComponent(this.token)}` + (ev.target.value !== "" ? `/${ev.target.value}` : "");
+          location.hash = gameLink(this.gid, this.token, ev.target.value);
         } }, el("option", { value: "", selected: this.asPlayer == null }, "God view"),
           ...sess.players.filter((p) => p.kind === "major").map((p) => el("option", { value: p.id, selected: this.asPlayer === p.id }, `View as ${p.name}`)));
-        tb.append(delay, viewAs);
-        if (v.phase !== "playing" || sess.god_view_allowed) tb.append(el("button", { class: "small", onclick: () => { location.hash = `#/replay/${this.gid}/${encodeURIComponent(this.token)}`; } }, "Recap"));
+        if (!stopped && manages) tb.append(delay);
+        tb.append(viewAs);
+        if (v.phase !== "playing" || sess.god_view_allowed) tb.append(el("button", { class: "small", onclick: () => { location.hash = replayLink(this.gid, this.token); } }, "Recap"));
       }
     }
     if (v.session && v.session.seats.some((s) => s.type !== "human")) {
       tb.append(el("button", { class: "small", title: "AI performance metrics", onclick: () => openMetrics(this.gid) }, "📊 AI stats"));
     }
-    tb.append(el("button", { class: "small", onclick: async () => { const r = await api.save(this.gid, null); toast(`Saved: ${r.saved}`); } }, "Save"));
+    if (v.can_manage !== false) tb.append(el("button", { class: "small", onclick: async () => { const r = await api.save(this.gid, null); toast(`Saved: ${r.saved}`); } }, "Save"));
     tb.append(el("button", { class: "small", onclick: () => openHelp(this) }, "?"));
     const box = clear(this.turnBox);
     if (v.phase !== "playing") {
       const w = v.players.find((p) => p.id === v.winner);
       box.append(el("span", { class: "pill" }, `Game over: ${w ? w.name : "no winner"} (${v.victory || ""})`),
-        el("button", { class: "primary", onclick: () => { location.hash = `#/replay/${this.gid}/${encodeURIComponent(this.token)}`; } }, "Watch recap"));
+        el("button", { class: "primary", onclick: () => { location.hash = replayLink(this.gid, this.token); } }, "Watch recap"));
     } else if (this.myTurn) {
       const needs = v.units.filter((u) => u.owner === this.you && !u.activity && u.moves > 0).length;
       // things that usually need a decision this turn get their own button right next to End Turn
@@ -843,16 +920,20 @@ export class GameScreen {
           promos.length === 1 ? `▲ Promote ${u.name}` : `▲ ${promos.length} promotions`));
       }
       box.append(el("button", { disabled: !needs, onclick: () => this.selectNextIdle() }, `Next unit (${needs})`),
-        (() => {
+        // while a chat holds the turn, End Turn says so (answer first, waiting with its countdown, armed)
+        this.chat.endTurnButton((force) => this.onEndTurn(force)) || (() => {
           const blockers = this.turnBlockers();
           return el("button", { class: `end-turn ${blockers.length ? "blocked" : "ready"}`, "aria-disabled": blockers.length ? "true" : "false",
             title: blockers.length ? `Still to do:\n${blockers.map((a) => "• " + a.text).join("\n")}\n\nClick to go to the first one; Ctrl+click to end the turn anyway.` : "End your turn (Shift+Enter)",
-            onclick: (e) => this.endTurn(e.ctrlKey || e.metaKey) }, "End Turn");
+            onclick: (e) => this.onEndTurn(e.ctrlKey || e.metaKey) }, "End Turn");
         })());
     } else {
-      const st = this.agentStatus[v.current_player];
-      box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)" : st === "paused" ? " (paused mid-turn)" : ""}`));
+      const seat = v.session ? (v.session.seats || [])[v.current_player] : null;
+      const state = agentState(seat, this.agentStatus[v.current_player], this.agentWait[v.current_player]);
+      const note = state ? ` (${state})` : "";
+      box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${note}`));
     }
+    this.chat.layout();          // the End Turn box changed size: the docked windows stay clear of it
   }
 
   renderBanner() {
@@ -861,6 +942,9 @@ export class GameScreen {
     if (v.phase !== "playing") {
       const w = v.players.find((p) => p.id === v.winner);
       b.textContent = `🏆 ${w ? w.name : "No one"} wins — ${v.victory || "game over"}`;
+      b.style.display = "block";
+    } else if (v.session && v.session.crashed) {
+      b.textContent = `⚠ ${v.session.pause_reason ? v.session.pause_reason.message : "The game engine stopped."} (turn ${v.session.crashed.turn})`;
       b.style.display = "block";
     } else if (v.session && v.session.paused) {
       const why = v.session.pause_reason;
@@ -895,6 +979,7 @@ export class GameScreen {
       this.cityPanel.style.display = "none";
       this.sidePanel.style.display = "flex";
     }
+    if (this.chat) this.chat.layout();   // the docked chat windows keep clear of the panels shown
   }
 
   renderSide() {
@@ -922,9 +1007,9 @@ export class GameScreen {
       for (const a of alerts) {
         body.appendChild(el("div", { class: "event alert-item clickable", onclick: () => {
           if (a.x == null) {
+            if (a.type === "negotiation") { if (a.player != null) this.chat.open(a.player); else openDiplomacy(this); return; }
             const open = { gold: openEmpire, happiness: openEmpire, research: openTechTree, free_tech: openTechTree, policy: openPolicies,
-                           great_person: openGreatPeople, pantheon: openReligion, spy: openGreatPeople, un_vote: openDiplomacy,
-                           negotiation: openDiplomacy }[a.type];
+                           great_person: openGreatPeople, pantheon: openReligion, spy: openGreatPeople, un_vote: openDiplomacy }[a.type];
             if (open) open(this);
             return;
           }
@@ -969,8 +1054,13 @@ export class GameScreen {
             v.current_player === p.id ? el("span", { class: "pill", style: { marginLeft: "4px" } }, "to move") : null),
           el("div", { class: "muted" }, [
             p.score != null ? `score ${p.score}` : null, p.cities != null ? `${p.cities} cities` : null, p.era || null,
-            seat ? (seat.type === "llm" ? `LLM ${seat.llm.model || ""}` : seat.type) : null,
+            seat ? seatLabel(seat) : null,
           ].filter(Boolean).join(" · ")),
+          // what an AI seat is doing now (P3.6.8: a hybrid seat's "bot playing", "diplomat thinking", "queued #n")
+          (() => {
+            const state = seat && seat.type !== "human" ? agentState(seat, this.agentStatus[p.id], this.agentWait[p.id]) : null;
+            return state ? el("div", { class: "seat-state", "data-state": this.agentStatus[p.id] }, state) : null;
+          })(),
           emp ? el("div", { class: "muted" }, `● ${emp.gold} (${signed((emp.per_turn || {}).gold || 0)}) · ⚗ ${fmt((emp.per_turn || {}).science || 0)} · ✦ ${fmt((emp.per_turn || {}).culture || 0)} · ☺ ${emp.happiness.total} · techs ${emp.techs_known}`) : null));
       }
     }
@@ -982,37 +1072,91 @@ export class GameScreen {
     setTimeout(() => this.updateOverlay(), 900);
   }
 
-  drawMinimap() {
-    const v = this.view, m = this.model;
-    if (!v || !m) return;
+  // The minimap's window for this view (P3.7.3, minimap.js): a person's seat sees what it has explored, bounded by its
+  // era's stage and never shrinking (kept per game and seat in localStorage); spectators and AI seats the whole map.
+  updateMinimap() {
+    const v = this.view;
+    const map = { width: v.width, height: v.height, wrapX: !!v.wrap_x, wrapY: !!v.wrap_y };
+    let win, key = null;
+    if (!this.isSpectator && v.seat && v.seat.type === "human" && v.minimap && v.you != null) {
+      key = windowKey(this.gid, v.you);
+      const store = localStore();
+      const prev = this.mini && this.mini.key === key ? this.mini.win : loadWindow(store, key, map);
+      win = computeWindow({ explored: exploredBox(v.tiles, v.width, v.height, map.wrapX, map.wrapY),
+                            home: v.minimap.home, stage: v.minimap.stage, capital: v.minimap.capital, ...map, prev });
+      if (!sameBox(win, prev)) saveWindow(store, key, win, map);
+    } else {
+      win = wholeMap(map);
+    }
     const c = this.minimap;
-    const ctx = c.getContext("2d");
-    const sx = c.width / v.width, sy = c.height / v.height;
-    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, c.width, c.height);
+    this.mini = { win, map, key, fit: fit(win, c.width, c.height) };
+    this._miniLayer = null;
+  }
+
+  // the minimap's tiles and cities, drawn once per view or window onto an offscreen canvas
+  minimapLayer() {
+    const v = this.view, m = this.model, { win, map, fit: f } = this.mini;
+    const c = this.minimap;
+    const layer = document.createElement("canvas");
+    layer.width = c.width; layer.height = c.height;
+    const ctx = layer.getContext("2d");
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, layer.width, layer.height);
+    // each tile a box as wide as a hex and as tall as its row, so they tile the window with the map's proportions; its
+    // edges on whole pixels, so neighbours meet with no seam and none bleeds into another (an unexplored one stays
+    // black, however small the tiles)
+    const hw = f.scale * SQRT3, hh = f.scale * 1.5;
+    const cell = (cx, cy, w, h) => {
+      const x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2);
+      ctx.fillRect(x0, y0, Math.max(1, Math.round(cx + w / 2) - x0), Math.max(1, Math.round(cy + h / 2) - y0));
+    };
     for (let i = 0; i < m.tiles.length; i++) {
       const t = m.tiles[i];
       if (!t) continue;
       const x = i % v.width, y = Math.floor(i / v.width);
+      if (!inWindow(win, map, x, y)) continue;
+      const [cx, cy] = tileCentre(f, win, map, x, y);
       ctx.fillStyle = t.owner != null && m.players[t.owner] ? m.players[t.owner].color : (TERRAIN_COLORS[t.terrain] || "#444");
       ctx.globalAlpha = t.visible ? 1 : 0.55;
-      ctx.fillRect((x + (y & 1) * 0.5) * sx, y * sy, sx + 0.5, sy + 0.5);
+      cell(cx, cy, hw, hh);
     }
     ctx.globalAlpha = 1;
+    ctx.fillStyle = "#fff";
+    // a city's dot inside its own tile
+    const dot = Math.max(1, Math.min(5, Math.floor(Math.min(hw, hh) * 0.75)));
     for (const city of v.cities) {
-      ctx.fillStyle = "#fff";
-      ctx.fillRect((city.x + (city.y & 1) * 0.5) * sx - 1.5, city.y * sy - 1.5, 3.5, 3.5);
+      if (!inWindow(win, map, city.x, city.y)) continue;
+      const [cx, cy] = tileCentre(f, win, map, city.x, city.y);
+      cell(cx, cy, dot, dot);
     }
-    // viewport rectangle
+    return layer;
+  }
+
+  drawMinimap() {
+    const v = this.view, m = this.model;
+    if (!v || !m || !this.mini) return;
+    const c = this.minimap;
+    const ctx = c.getContext("2d");
+    if (!this._miniLayer) this._miniLayer = this.minimapLayer();
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.drawImage(this._miniLayer, 0, 0);
+    // the main map's view: its corners in tiles (u a column with an odd row's half in, v a row), as the camera has them
+    const { win, map, fit: f } = this.mini;
     const r = this.canvas.getBoundingClientRect();
     const size = this.renderer.size;
-    const vx = this.renderer.cam.x / (size * Math.sqrt(3)), vy = this.renderer.cam.y / (size * 1.5);
-    const vw = r.width / (size * Math.sqrt(3)), vh = r.height / (size * 1.5);
+    const u = this.renderer.cam.x / (size * SQRT3), vv = this.renderer.cam.y / (size * 1.5);
+    const [x0, y0] = toScreen(f, win, map, u, vv);
+    const w = r.width / (size * SQRT3) * f.scale * SQRT3, h = r.height / (size * 1.5) * f.scale * 1.5;
+    // ... one map over too where the map wraps, so a view across the seam shows both halves
+    const ox = map.wrapX ? [0, -map.width * f.scale * SQRT3] : [0];
+    const oy = map.wrapY ? [0, -map.height * f.scale * 1.5] : [0];
     ctx.strokeStyle = "#ffe066"; ctx.lineWidth = 1;
-    // on a wrapping map the view can straddle the seam: draw the box again one map over, so both halves show
-    for (const ox of m.wrapX ? [0, -v.width] : [0]) {
-      for (const oy of m.wrapY ? [0, -v.height] : [0]) ctx.strokeRect((vx + ox) * sx, (vy + oy) * sy, vw * sx, vh * sy);
-    }
+    for (const dx of ox) for (const dy of oy) ctx.strokeRect(x0 + dx, y0 + dy, w, h);
   }
+}
+
+// the browser's localStorage, or null where reading it throws (a sandboxed frame, blocked site data)
+function localStore() {
+  try { return window.localStorage; } catch { return null; }
 }
 
 export function summarizeCombat(r) {
@@ -1035,3 +1179,4 @@ function gptTitle(e) {
 function happyTitle(h) {
   return Object.entries(h.breakdown || {}).map(([k, v]) => `${k} ${signed(v)}`).join(", ") + ` (luxuries: ${h.luxury_types.join(", ") || "none"}) — ${h.status}`;
 }
+

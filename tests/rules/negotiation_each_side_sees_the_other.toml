@@ -1,0 +1,44 @@
+about = """
+A negotiation names the other side to each of its two sides, so a screen can open diplomacy on the chat
+itself: each side's view names who it is with and whose move it is, and each side's end_turn refusal
+names the other side and the negotiation. The briefing's alert items that carry the same come with
+package 1d-03.
+"""
+from = "tests/test_negotiation_chat.py::EndTurnTests::test_the_alerts_name_the_other_side"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 0 }
+subset = { id = 1, with = 1, with_name = "Civilization 2", your_move = false, you_initiated = true, status = "open", turn = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1, player = 1 }
+subset = { id = 1, with = 0, with_name = "Civilization 1", your_move = true, you_initiated = false }
+
+[[step]]
+tool = "end_turn"
+error = "You are waiting for Civilization 2 to answer negotiation #1."
+
+[[step]]
+op = "force_turn"
+args = { player = 1 }
+
+[[step]]
+tool = "end_turn"
+player = 1
+error = "Answer Civilization 1 in negotiation #1 first"
+
+[[step]]
+check = { what = "events", type = "negotiation", player = 1 }
+path = "[0]"
+subset = { text = "Civilization 1 opened negotiations with Civilization 2: \"Shall we talk?\"", audience = [0, 1] }
