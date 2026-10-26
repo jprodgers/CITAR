@@ -54,13 +54,14 @@ did not ship can be imported, and switching releases (or back) is one rename.
 | `/etc/systemd/system/citar.service` | The service: `ExecStart=/opt/citar/current/venv/bin/citar serve` |
 | `/usr/local/bin/citar-admin` | The administration commands, each run [as the service runs](Runbook#accounts) |
 | `/usr/local/bin/citar-backup`, `citar-backup.service`, `citar-backup.timer` | The nightly backup ([RUNBOOK.md](Runbook#backups)) |
-| `/usr/local/bin/citar-secrets` | Setting a secret without it reaching the shell history |
 | `/etc/nginx/sites-available/citar` | The site, alongside any you already have |
 | A `citar` system account | No shell, no sudo |
 
-`citar-deploy` adds `/usr/local/sbin/citar-deploy`, `/etc/citar/deploy-checks.conf` (the box's other sites),
-`/var/lib/citar-deploy` (its lock and records) and `/var/log/citar-deploy.log` (one line a deploy). The lab has no
-unit of its own: it runs inside `citar.service` ([below](#the-lab-on-a-server)).
+`citar-deploy` adds `/usr/local/bin/citar-secrets` (setting a secret without it reaching the shell history:
+[RUNBOOK.md](Runbook#secrets), which also says how to set one on a server the installer made),
+`/usr/local/sbin/citar-deploy`, `/etc/citar/deploy-checks.conf` (the box's other sites), `/var/lib/citar-deploy` (its
+lock and records) and `/var/log/citar-deploy.log` (one line a deploy). The lab has no unit of its own: it runs inside
+`citar.service` ([below](#the-lab-on-a-server)).
 
 ---
 
@@ -223,9 +224,9 @@ citar-deploy-0.1.6` (with `--plan` first) moves such a box to the release layout
 takes 0.1.5's own backup, saves every unit and script it will replace, disables and removes `citar-lab.service`, moves
 `/opt/citar` to `/opt/citar-0.1.5` and `/var/lib/citar` to `/var/lib/citar-archive-<stamp>`, makes a fresh state
 directory (0.1.6 starts its database afresh), lists the env file's settings 0.1.6 no longer reads, and then installs
-the release as above. Any failure undoes it by itself; `sudo citar-deploy uncutover` undoes it later. After it:
-`sudo citar-admin create-user` for the first administrator, and the host machine's memory figure set to 128 MB
-([below](#the-unit-and-limits-on-a-small-box)).
+the release as above. Any failure undoes it by itself; `sudo citar-deploy uncutover` undoes it later. After it: the
+first administrator, `sudo citar-admin create-admin --handle NAME --email you@example.com` (it asks for the
+password), and the host machine's memory figure set to 128 MB ([below](#the-unit-and-limits-on-a-small-box)).
 
 A 0.1.5 box upgraded any other way keeps `citar-lab.service`, which 0.1.6 retires (`citar lab run` exits 2, so the
 unit would restart into that every 30 s): `sudo systemctl disable --now citar-lab && sudo rm
@@ -303,9 +304,10 @@ On a single-core VPS, one concurrent game is realistic before turns start to dra
 
 ### Backups
 
-The installer sets up a nightly backup timer (`citar-backup.timer`, 03:20 UTC): the database, the whole state
-directory, the configuration and the release that wrote them. Check that it has run, and **practise the restore** —
-a backup you have not restored is a hypothesis. [RUNBOOK.md](Runbook#backups) has the drill.
+The installer sets up a nightly backup timer (`citar-backup.timer`, 03:20 in the box's own time zone, up to 20
+minutes later): the database, the whole state directory, the configuration and the release that wrote them. Check
+that it has run, and **practise the restore** — a backup you have not restored is a hypothesis.
+[RUNBOOK.md](Runbook#backups) has the drill.
 
 ---
 

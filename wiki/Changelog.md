@@ -43,7 +43,8 @@ that means for an existing install:
   deleted, and a rename that fails (another program has the file open) refuses the start, naming the
   file. A PostgreSQL database of an older version, or a database of a newer one, refuses the start.
   Accounts, sessions, machines, groups, grants, budgets and sharing start empty: make the first
-  administrator again (`citar admin create-user`, or the setup page). Saved games stay on disk and get
+  administrator again (`citar admin create-admin`, `sudo citar-admin create-admin` on a server's
+  release layout, or the setup page). Saved games stay on disk and get
   their place in the games list back as they are loaded.
   [docs/server/ACCOUNTS.md](Design-accounts-and-sharing).
 - **`config/servers.json` is imported once.** The machines, electricity plans and keys it lists
@@ -433,8 +434,11 @@ that means for an existing install:
   permissive licences refused), travels in every wheel's `.dist-info/licenses/`, every packaged helper archive, the
   Windows bundle and the release; a `Cargo.lock` change regenerates it (`cargo xtask licenses --check` in CI).
 - **Every release can be checked.** `SHA256SUMS` and a `.sha256` beside every file; a build provenance attestation
-  for every file, made before anything is published (`gh attestation verify FILE --repo jprodgers/CITAR`), and for the
-  image after its push; the release notes carry the checksums, the attestation command and the install routes.
+  for every file, made before anything is published, and for the image after its push; `gh attestation verify FILE
+  --repo jprodgers/CITAR --signer-workflow jprodgers/CITAR/.github/workflows/release.yml --source-ref refs/tags/vV
+  --deny-self-hosted-runners` holds a file to the release workflow, on GitHub's runners, for its tag
+  ([docs/INSTALL.md](Installing#checking-a-download)). The release notes carry the checksums, that command and
+  the install routes.
   `scripts/release_checksums.py` writes the package managers' manifests from the release's files (no manifest names
   the PyPI sdist any more) and `--verify` checks a published release against its sums and PyPI.
 - **The release workflow, rebuilt** (design/phase5-release.md P5.11): `release.yml` builds nothing; it calls

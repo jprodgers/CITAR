@@ -89,7 +89,8 @@ did not die: `sudo systemctl restart citar`.
 
 ## Backups
 
-Nightly at 03:20 UTC (`citar-backup.timer`), kept 14 days (`CITAR_BACKUP_KEEP_DAYS`), in
+Nightly at 03:20 in the box's own time zone, up to 20 minutes later (`citar-backup.timer`'s
+`RandomizedDelaySec=20m`), kept 14 days (`CITAR_BACKUP_KEEP_DAYS`), in
 `/var/backups/citar/<UTC time>/`. Every deploy takes one more, with the service stopped, just before it switches.
 
 ```bash
@@ -221,6 +222,18 @@ sudo citar-secrets show     # which secrets are set — never what they are
 
 Prompted, never echoed, never in the shell history or the process list. `citar-secrets KEY=value`
 is deliberately not accepted for exactly that reason.
+
+`citar-deploy` installs `citar-secrets`; a server the installer made (`install.sh --server`) has none. There, edit
+the environment file as root and restart, which keeps the value out of the shell history and the process list too:
+
+```bash
+sudoedit /etc/citar/citar.env       # KEY=value lines; a comment on a line of its own
+sudo systemctl restart citar
+```
+
+The file stays `root:citar` 0640 (`sudoedit` keeps its owner and mode). The release's `deploy/citar-secrets.sh` (in
+its tag, or in a deploy bundle from `bundle.py`) also works there, run as `sudo bash citar-secrets.sh`, when the
+environment file is the default `/etc/citar/citar.env`: it writes that file and offers to restart `citar`.
 
 Mail is `mail.privateemail.com:587` STARTTLS as `you@example.com`. Test it:
 
@@ -365,8 +378,9 @@ not changed). Then it stages, verifies, switches, enables `citar` and `citar-bac
 does. Any failure from the first move on undoes it by itself and exits 1. The downtime includes the staging (about half
 a minute in the rehearsal; a few minutes on a slow box), since the old tree must move before the new venv exists.
 
-Afterwards: `sudo citar-admin create-user ...` for the first administrator, and the host machine's memory figure set
-to 128 MB ([DEPLOY.md](Deploying-a-server#the-unit-and-limits-on-a-small-box)).
+Afterwards: the first administrator, `sudo citar-admin create-admin --handle NAME --email you@example.com` (it asks
+for the password), and the host machine's memory figure set to 128 MB
+([DEPLOY.md](Deploying-a-server#the-unit-and-limits-on-a-small-box)).
 
 `sudo citar-deploy uncutover` undoes it: the service stopped, `/opt/citar` and `/var/lib/citar` moved aside as
 `-<version>-undone-<stamp>` (kept) where the record's archive is there to take their place, 0.1.5's tree and state
