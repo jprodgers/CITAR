@@ -122,7 +122,7 @@ An installed CITAR plays a modded ruleset without a Rust toolchain: the engine r
 directory when it loads, instead of the one compiled into it.
 
 1. **Copy the data.** Copy `crates/citar-engine/data/` from the source of your CITAR version (the
-   GitHub release, or a checkout of its tag) to a folder of your own. Keep the layout:
+   release's source distribution, `citar-<version>.tar.gz`, or a checkout of its tag) to a folder of your own. Keep the layout:
    `ruleset/*.json`, `custom/nations.json` and `game.json`.
 2. **Change it.** Add a civilization to `custom/nations.json`, or edit or add entries in the
    tables under `ruleset/`, in the same shape as the entries beside them. The engine reads exactly
