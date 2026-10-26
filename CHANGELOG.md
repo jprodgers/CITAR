@@ -43,7 +43,8 @@ that means for an existing install:
   deleted, and a rename that fails (another program has the file open) refuses the start, naming the
   file. A PostgreSQL database of an older version, or a database of a newer one, refuses the start.
   Accounts, sessions, machines, groups, grants, budgets and sharing start empty: make the first
-  administrator again (`citar admin create-user`, or the setup page). Saved games stay on disk and get
+  administrator again (`citar admin create-admin`, `sudo citar-admin create-admin` on a server's
+  release layout, or the setup page). Saved games stay on disk and get
   their place in the games list back as they are loaded.
   [docs/server/ACCOUNTS.md](docs/server/ACCOUNTS.md).
 - **`config/servers.json` is imported once.** The machines, electricity plans and keys it lists

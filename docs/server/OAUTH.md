@@ -46,7 +46,9 @@ sudo citar-secrets
 ```
 
 Choose **3) GitHub sign-in**, paste the Client ID, paste the secret when prompted (it will not
-echo — that is normal), and let it restart CITAR.
+echo — that is normal), and let it restart CITAR. (`citar-secrets` comes with a server `citar-deploy` installed; on
+one the installer made, set the provider's `CITAR_OAUTH_*` lines in the environment file instead:
+[RUNBOOK.md](RUNBOOK.md#secrets).)
 
 Reload the sign-in page and a **Continue with GitHub** button appears.
 

@@ -270,7 +270,8 @@ With the owner's go-ahead, from the release's wheel (design/phase5-release.md P5
 
 ## 10. After
 
-- The first administrator: `sudo citar-admin create-user ...`.
+- The first administrator: `sudo citar-admin create-admin --handle NAME --email you@example.com` (it asks for the
+  password).
 - The host's machine settings from the staging measurement: its memory figure **128 MB** (the Servers page, or
   `PUT /api/machines/<host>/settings` with `capabilities.cpu.memory_mb`), not server mode's default of 240, which
   with the server's own peak would pass `citar.service`'s `MemoryHigh=320M`.
