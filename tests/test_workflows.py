@@ -199,7 +199,7 @@ class TheTree(unittest.TestCase):
         import yaml
         data = yaml.safe_load((WORKFLOWS / "test.yml").read_text(encoding="utf-8"))
         legs = data["jobs"]["test"]["strategy"]["matrix"]["include"]
-        self.assertIn({"os": "ubuntu-latest", "python": "3.14"}, legs)
+        self.assertIn({"os": "ubuntu-24.04", "python": "3.14"}, legs)
         self.assertEqual(set(data[True]["workflow_call"]["inputs"]), {"mode", "version", "date"})
         lint = [s.get("run", "") for s in data["jobs"]["lint"]["steps"]]
         self.assertIn("python scripts/ci/check_workflows.py", lint)
@@ -207,6 +207,33 @@ class TheTree(unittest.TestCase):
         self.assertIn("python scripts/ci/stale_terms.py", lint)
         release = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
         self.assertEqual(list(release["jobs"]), list(cw.RELEASE_JOBS), "release.yml is P5.11's table, in its order")
+
+    def test_test_ymls_linux_jobs_run_on_package_ymls_linux_image_by_name(self):
+        """5-13's fix round: GitHub moves ubuntu-latest to Ubuntu 26.04 from 2026-10-19, a share of jobs at a time
+        (the release dry run 40371519447 carried the notice). On that label build-ext could build the Linux extension
+        and helpers natively on one image while the suite legs that run them took another, and a tag's run could land
+        on an image no dry run had seen. Every Linux job of test.yml names the image package.yml builds the Linux
+        release on, so the two move together and on purpose."""
+        import yaml
+        package = yaml.safe_load((WORKFLOWS / "package.yml").read_text(encoding="utf-8"))
+        linux = {leg["runner"] for leg in package["jobs"]["wheels"]["strategy"]["matrix"]["include"]
+                 if leg["platform"] == "linux-x64"}
+        self.assertEqual(linux, {"ubuntu-24.04"})
+        data = yaml.safe_load((WORKFLOWS / "test.yml").read_text(encoding="utf-8"))
+        ubuntu = {}
+        for job_id, job in data["jobs"].items():
+            if job["runs-on"] == "${{ matrix.os }}":
+                matrix = job["strategy"]["matrix"]
+                labels = list(matrix.get("os", [])) + [leg["os"] for leg in matrix.get("include", [])]
+            else:
+                labels = [job["runs-on"]]
+            self.assertTrue(labels, job_id)
+            ubuntu[job_id] = {label for label in labels if label.startswith("ubuntu")}
+        self.assertEqual(ubuntu, {"build-ext": linux, "test": linux, "interpreter-exit": linux, "lint": linux,
+                                  "frontend": linux})
+        # The one suite leg that checks the links names the same image, or no leg would run the check.
+        steps = {step.get("name"): step for step in data["jobs"]["test"]["steps"]}
+        self.assertEqual(steps["Documentation links"]["if"], "matrix.os == 'ubuntu-24.04' && matrix.python == '3.12'")
 
 
 class ThePackageWorkflow(unittest.TestCase):
@@ -1086,8 +1113,8 @@ steps:
     # ---- rule 3
     def test_rule_3_an_environment_named_in_test_yml(self):
         tree = Tree(self)
-        tree.replace("test.yml", "  lint:\n    runs-on: ubuntu-latest\n",
-                     "  lint:\n    runs-on: ubuntu-latest\n    environment: staging\n")
+        tree.replace("test.yml", "  lint:\n    runs-on: ubuntu-24.04\n",
+                     "  lint:\n    runs-on: ubuntu-24.04\n    environment: staging\n")
         found = self.assertFinds(tree, 3, "test.yml", "lint")
         self.assertTrue(any(f.rule == 14 and f.job == "lint" for f in found), found)
 
