@@ -124,7 +124,13 @@ A prompt that works:
 > respond_negotiation. Keep your long-term strategy in write_notes. Continue until the game is
 > over.
 
-The bridge is `citar-mcp` (`citar_mcp.py` in a checkout). It exposes every game tool plus
+The bridge is `citar-mcp` (`citar_mcp.py` in a checkout, `citar.exe mcp` in the Windows app), run on the machine
+where your MCP client runs. The copied command starts it from the right place, since the server says which command
+its own install has (`/api/meta`'s `mcp_command`): on your own machine, its full path, so the command works whatever
+your PATH holds. A public server names no folder of its own: its seats show `citar-mcp`, which you run from your own
+install of CITAR (pipx, `install.sh` and pip put it on your PATH), with the server's address and the seat's token.
+From the Windows app it is `citar.exe mcp`, which runs from the app's install folder, or by its full path, unless the
+installer added that folder to your PATH. It exposes every game tool plus
 `wait_for_turn`, which blocks until it is that seat's turn or a negotiation needs an answer — so
 the agent waits rather than polling. On the seat's own turn, after it opens a negotiation, it waits
 for the other side's answer, since `end_turn` is refused until the negotiation is settled. Every
