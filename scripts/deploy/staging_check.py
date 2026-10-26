@@ -63,6 +63,11 @@ def check(cond: bool, text: str, detail: str = "") -> bool:
     return cond
 
 
+def note(text: str) -> None:
+    """A figure that is measured and recorded, not held to a bound."""
+    print(f"  --  {text}", flush=True)
+
+
 def done() -> int:
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed: " + "; ".join(FAILURES), flush=True)
@@ -231,13 +236,19 @@ def cmd_ballast(args) -> int:
 
 
 def calibrate(work_ms: float) -> int:
-    """How many rounds of the stand-in's work take ``work_ms`` of this process's CPU time."""
-    rounds, data = 2000, b"citar-staging" * 8
-    t0 = time.process_time()
-    for _ in range(rounds):
-        data = hashlib.sha256(data).digest()
-    per_ms = rounds / max(1e-6, (time.process_time() - t0) * 1000)
-    return max(1, round(per_ms * work_ms))
+    """How many rounds of the stand-in's work take ``work_ms`` of CPU time on this machine: the fastest of seven
+    batches of about 100 ms each, so a batch slowed by something else (a frequency step, another process on the core)
+    does not make every request lighter than asked."""
+    data, best = b"citar-staging" * 8, 0.0
+    rounds = 1000
+    for _ in range(7):
+        t0 = time.process_time()
+        for _ in range(rounds):
+            data = hashlib.sha256(data).digest()
+        took_ms = max(1e-6, (time.process_time() - t0) * 1000)
+        best = max(best, rounds / took_ms)
+        rounds = max(1000, round(best * 100))
+    return max(1, round(best * work_ms))
 
 
 def cmd_standin(args) -> int:
@@ -763,23 +774,32 @@ class Measure:
                 "seconds_per_round": round(sum(r["wall_s"] for r in done_runs) / rounds, 4) if rounds else None,
                 "cpu_seconds_per_round": round(sum(r["cpu_s"] for r in done_runs) / rounds, 4) if rounds else None}
 
-    def lab(self, mem) -> dict:
-        """The three duels gate 2 names: played by the job host under citar.service, at the host's settings."""
+    def lab(self, mem, memory_mb: int = 240) -> dict:
+        """The three duels gate 2 names: played by the job host under citar.service, at the host's settings (its memory
+        figure ``memory_mb``)."""
         games = self.args.lab_games
-        result = self.experiment(mem, f"staging-lab-{secrets.token_hex(3)}", games, 7100)
+        result = self.experiment(mem, f"staging-lab-{memory_mb}mb-{secrets.token_hex(3)}", games, 7100 + memory_mb)
         ex = result.get("executor") or {}
         check(result.get("state") == "complete" and result.get("runs_done") == games and result.get("lines") == games,
               f"the lab's {games} games are played to their end by the job host",
               json.dumps({k: result.get(k) for k in ("state", "runs", "runs_done", "lines", "machines")}))
-        check(ex.get("memory_mb") == 240 and ex.get("threads") == 1,
-              "the job host's ready reports the host's settings: 240 MB, one thread",
+        check(ex.get("memory_mb") == memory_mb and ex.get("threads") == 1,
+              f"the job host's ready reports the host's settings: {memory_mb} MB, one thread",
               json.dumps({k: ex.get(k) for k in ("memory_mb", "memory_per_run_mb", "threads", "cpu_percent", "held")}))
         notes = "; ".join(ex.get("notes") or [])
-        check("RLIMIT_DATA 240 MB" in notes, "its memory is held by RLIMIT_DATA (a system service has no user manager "
-                                              "for a scope), as it logs", notes[:400])
+        check(f"RLIMIT_DATA {memory_mb} MB" in notes, "its memory is held by RLIMIT_DATA (a system service has no user "
+                                                       "manager for a scope), as it logs", notes[:400])
         check("citar.service" in str(result.get("job_host_cgroup")), "the job host runs inside citar.service's cgroup",
               str(result.get("job_host_cgroup")))
         return result
+
+    def host_memory(self, machine: str, memory_mb: int) -> bool:
+        """The host's memory figure set to ``memory_mb`` (the rest of its settings kept): its job host starts again with
+        it once its runs have finished."""
+        want = {**self.data["host_defaults"], "memory_mb": memory_mb}
+        status, _ = self.admin.call("PUT", f"/api/machines/{machine}/settings", {"capabilities": {"cpu": want}})
+        return check(status == 200, f"the host's memory figure set to {memory_mb} MB (PUT /api/machines/{machine}/"
+                                    f"settings)", str(status))
 
     def load_at(self, mem, weight: int) -> dict:
         """The response-time bound at one CPUWeight=: the stand-in's times while a longer lab keeps the job host busy."""
@@ -792,26 +812,42 @@ class Measure:
         try:
             if not self.first_admin():
                 return done()
-            self.host_settings()
+            machine = self.host_settings()
             idle = self.span("idle", self.idle)
             idle_p95 = idle["standin"].get("p95_ms") or 0.0
             check(idle["standin"]["n"] >= 30, "the stand-in's idle response times are sampled",
                   json.dumps(idle["standin"]))
             self.span("game", self.game)
             self.span("lab", self.lab)
+            # The bound is held at the installed unit's own CPUWeight= (the one this release settles on); the other
+            # weights asked for are measured beside it, for the record.
+            unit_weight = int(systemd_props("citar.service", "CPUWeight").get("CPUWeight") or 100)
+            self.data["unit_weight"] = unit_weight
+            weights = list(self.args.weights) + ([] if unit_weight in self.args.weights else [unit_weight])
             loads = []
-            for weight in self.args.weights:
+            for weight in weights:
                 result = self.span(f"load_w{weight}", lambda mem, w=weight: self.load_at(mem, w), weight=weight)
                 loads.append((weight, result))
                 p95 = result["standin"].get("p95_ms")
                 bound = 2 * idle_p95 + 50
                 result["bound_ms"] = round(bound, 1)
                 result["within_bound"] = p95 is not None and p95 <= bound
-                check(result["standin"]["n"] >= 30 and p95 is not None and p95 <= bound,
-                      f"CPUWeight={weight}: the stand-in's p95 with a lab game running is within twice its idle p95 "
-                      f"plus 50 ms", f"{p95} ms against {bound:.1f} ms ({result['standin']['n']} requests in "
-                      f"{result.get('in_flight_seconds')} s of lab; idle p95 {idle_p95} ms)")
+                what = (f"CPUWeight={weight}: the stand-in's p95 with a lab game running is within twice its idle p95 "
+                        f"plus 50 ms")
+                figures = (f"{p95} ms against {bound:.1f} ms ({result['standin']['n']} requests in "
+                           f"{result.get('in_flight_seconds')} s of lab; idle p95 {idle_p95} ms; CITAR's own p95 "
+                           f"through nginx {result['citar_via_site'].get('p95_ms')} ms)")
+                check(result["standin"]["n"] >= 30, f"CPUWeight={weight}: the stand-in's times are sampled while the "
+                                                    f"lab runs", f"{result['standin']['n']} requests")
+                if weight == unit_weight:
+                    check(p95 is not None and p95 <= bound, what + " (the installed unit's weight)", figures)
+                else:
+                    note(f"{what}: {'yes' if result['within_bound'] else 'NO'}, {figures} (measured beside the unit's "
+                         f"{unit_weight}, not held to it)")
                 self.save()
+            if machine and self.args.host_mb:
+                self.host_memory(machine, self.args.host_mb)
+                self.span(f"lab_{self.args.host_mb}mb", lambda mem: self.lab(mem, self.args.host_mb))
             self.data["weights"] = {str(w): {"p95_ms": r["standin"].get("p95_ms"), "bound_ms": r.get("bound_ms"),
                                              "within": r.get("within_bound"), "n": r["standin"].get("n"),
                                              "citar_p95_ms": r["citar_via_site"].get("p95_ms"),
@@ -910,9 +946,15 @@ def cmd_report(args) -> int:
                 name = p["phase"]
         return name
 
+    top = max(rows, key=lambda r: r["slice"].get("mem") or 0) if rows else None
     report = {
         "samples": len(rows),
-        "slice_peak_mb": round(max((r["slice"].get("mem") or 0) for r in rows) / MIB, 1) if rows else None,
+        "slice_peak_mb": round((top["slice"].get("mem") or 0) / MIB, 1) if top else None,
+        "slice_peak_during": phase_at(top["t"]) if top else None,
+        "slice_peak_units_mb": {n: round((u.get("mem") or 0) / MIB, 1) for n, u in (top or {}).get("units", {}).items()},
+        # memory.events now: "high" and "max" count the times the slice was held at its limit (reclaimed), "oom_kill"
+        # the processes killed (the setup's probe is the one expected).
+        "slice_memory_events": events(cgroup_of(SLICE) / "memory.events"),
         "slice_swap_peak_mb": round(max((r["slice"].get("swap") or 0) for r in rows) / MIB, 1) if rows else None,
         "oom_kill_first": rows[0]["slice"].get("oom_kill") if rows else None,
         "oom_kill_last": rows[-1]["slice"].get("oom_kill") if rows else None,
@@ -992,6 +1034,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--db", default="/var/lib/citar/citar.db")
     p.add_argument("--lab-games", type=int, default=3)
     p.add_argument("--load-games", type=int, default=40, help="the duels of each CPUWeight's response-time span")
+    p.add_argument("--host-mb", type=int, default=0, help="a lab at this host memory figure too (0: none)")
     p.add_argument("--lab-turns", type=int, default=0, help="each duel's rounds (0: to the speed's last turn)")
     p.add_argument("--lab-timeout", type=float, default=1800.0)
     p.add_argument("--weights", type=lambda s: [int(x) for x in re.split(r"[ ,]+", s.strip()) if x], default=[50])

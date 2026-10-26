@@ -4,7 +4,8 @@
 #
 #     staging.sh setup --ballast-mb N --repo CLONE [--cpu-quota 60%] [--work-ms 25]
 #     staging.sh probes [--without-cpu-quota]
-#     staging.sh run --bundle DIR --rc1 DIR --rc2 DIR --rc3 DIR [--weights "50 20"] [--load-games N] [--lab-turns N]
+#     staging.sh run --bundle DIR --rc1 DIR --rc2 DIR --rc3 DIR [--weights "50 35 20"] [--load-games N] [--lab-turns N]
+#                    [--host-mb N]
 #     staging.sh cleanup [--keep-logs DIR]
 #     staging.sh status
 #
@@ -28,7 +29,9 @@
 #   host machine's settings for one CPU and 961 MB, idle, a 4-bot game of 40 rounds, a lab of three duel games, and
 #   at each --weights CPUWeight= a longer lab (--load-games duels, each to --lab-turns rounds, 0 for the speed's last)
 #   while the stand-in's response times are taken (staging_check.py measure, the stand-in loaded throughout; a duel
-#   plays in under a second, so three of them alone are too short to time anything against); install of --rc1 (it
+#   plays in under a second, so three of them alone are too short to time anything against), the bound held at the
+#   installed unit's own CPUWeight= and the other weights measured beside it; with --host-mb, three duels again at
+#   that host memory figure (the one recommended for the box); install of --rc1 (it
 #   migrates); rollback refused without --restore-backup, then with the backup it names; install --reinstall of
 #   --rc1; install of --rc2 (planted: its server exits after migrating), undone with the database restored; install
 #   of --rc3 (planted: its server exits before migrating), undone without a restore; --rc2 again, interrupted by a
@@ -92,7 +95,8 @@ BUNDLE=""
 RC1=""
 RC2=""
 RC3=""
-WEIGHTS="50"
+WEIGHTS="50 35 20"
+HOST_MB=0
 LAB_TURNS=0
 LOAD_GAMES=40
 KEEP_LOGS=""
@@ -102,7 +106,7 @@ while [ $# -gt 0 ]; do
       [ -z "$COMMAND" ] || usage_die "one command at a time ($COMMAND and $1)"
       COMMAND="$1" ;;
     --without-cpu-quota) WITHOUT_QUOTA=1 ;;
-    --ballast-mb|--cpu-quota|--work-ms|--repo|--bundle|--rc1|--rc2|--rc3|--weights|--load-games|--lab-turns|--keep-logs)
+    --ballast-mb|--cpu-quota|--work-ms|--repo|--bundle|--rc1|--rc2|--rc3|--weights|--load-games|--lab-turns|--host-mb|--keep-logs)
       [ $# -ge 2 ] || usage_die "$1 needs a value"
       case "$1" in
         --ballast-mb) BALLAST_MB="$2" ;;
@@ -115,6 +119,7 @@ while [ $# -gt 0 ]; do
         --rc3) RC3="$2" ;;
         --weights) WEIGHTS="$2" ;;
         --load-games) LOAD_GAMES="$2" ;;
+        --host-mb) HOST_MB="$2" ;;
         --lab-turns) LAB_TURNS="$2" ;;
         --keep-logs) KEEP_LOGS="$2" ;;
       esac
@@ -130,6 +135,7 @@ QUOTA_PCT="${BASH_REMATCH[1]}"
 [[ "$WORK_MS" =~ ^[1-9][0-9]{0,3}$ ]] || usage_die "--work-ms: whole milliseconds ($WORK_MS)"
 [[ "$LAB_TURNS" =~ ^[0-9]{1,4}$ ]] || usage_die "--lab-turns: a number of rounds, 0 for the speed's last ($LAB_TURNS)"
 [[ "$LOAD_GAMES" =~ ^[1-9][0-9]{0,2}$ ]] || usage_die "--load-games: a number of duels ($LOAD_GAMES)"
+[[ "$HOST_MB" =~ ^[0-9]{1,4}$ ]] || usage_die "--host-mb: MB, 0 for none ($HOST_MB)"
 [[ "$WEIGHTS" =~ ^[0-9]+([ ,][0-9]+)*$ ]] || usage_die "--weights: CPUWeight= values, such as \"50 20\""
 for w in ${WEIGHTS//,/ }; do
   { [ "$w" -ge 20 ] && [ "$w" -le 50 ]; } || usage_die "--weights: each from 20 to 50, the unit's range ($w)"
@@ -623,7 +629,7 @@ cmd_run() {
   phase "measure"
   checker measure --out "$LOGS/measure.json" --site "$SITE_URL" --standin "$STANDIN_URL" \
     --password-file "$STAGE/admin.pw" --weights "$WEIGHTS" --lab-turns "$LAB_TURNS" \
-    --load-games "$LOAD_GAMES" 2>&1 | tee "$LOGS/measure.log" \
+    --load-games "$LOAD_GAMES" --host-mb "$HOST_MB" 2>&1 | tee "$LOGS/measure.log" \
     | sed 's/^/   | /'
   check "${PIPESTATUS[0]}" "the measurements' checks"
   checker sites "$CHECKS" --when "after: the measurements" || FAILED=$((FAILED + 1))
@@ -733,7 +739,9 @@ cmd_cleanup() {
   fi
   swap="$(recorded SWAPPINESS)"
   shopt -s nullglob
-  rm -rf /opt/citar /opt/citar-* /var/lib/citar-* /var/lib/citar /etc/citar /var/backups/citar \
+  # Every name beginning citar: the releases' trees and states moved aside (-<version>-undone-<stamp>, a restore's
+  # .before-restore-<stamp>), the archive, citar-deploy's and staging's own folders.
+  rm -rf /opt/citar* /var/lib/citar* /etc/citar /var/backups/citar \
     /var/log/citar-deploy.log
   shopt -u nullglob
   ok "/opt/citar*, /var/lib/citar*, /etc/citar, /var/backups/citar and /var/log/citar-deploy.log removed"
