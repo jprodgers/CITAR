@@ -62,7 +62,9 @@ def files() -> list[Path]:
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*.md")):
-            if any(part in SKIP_DIRS for part in path.parts):
+            # The folders above the checkout are not the checkout's: a clone under C:/dev/target or ~/build
+            # skipped every page and passed with nothing read (5-13's bumped clone did).
+            if any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts):
                 continue
             out.append(path)
     return out

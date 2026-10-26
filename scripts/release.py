@@ -727,6 +727,11 @@ def main(argv: list[str] | None = None) -> int:
         # A file's text in a message must not fail on a console whose code page lacks a character.
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="backslashreplace")
+    if hasattr(sys.stdout, "reconfigure"):
+        # What it prints is data that a shell compares with files written with "\n" (RELEASING.md step 3 diffs
+        # `assets` against the preview's subjects.txt), so every line ends in "\n" on Windows too, as `notes`, which
+        # writes bytes, already did; Python's default there is "\r\n", and the diff failed in Git Bash (5-13).
+        sys.stdout.reconfigure(newline="\n")
     args = parser().parse_args(argv)
     root = args.root.resolve()
     try:

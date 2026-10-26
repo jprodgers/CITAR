@@ -14,6 +14,12 @@
 # the install script and the image on those wheels (design/phase5-release.md P5.3; the package,
 # installer and docker jobs moved there in 5-02b).
 #
+# Every Linux job runs on ubuntu-24.04 by name, package.yml's Linux image, not on ubuntu-latest (5-13's
+# fix round). GitHub moves that label to Ubuntu 26.04 from 2026-10-19, a share of jobs at a time, so a
+# floating label could put build-ext on one image and the suite legs that run its natively built
+# extension and helpers on another, and a release's tag run on an image no dry run had seen. The image
+# moves on deliberately, here and in package.yml together (tests/test_workflows.py holds them equal).
+#
 # release.yml calls this workflow on a tag and on a release's dry run (design/phase5-release.md
 # P5.11, P5.17), with the mode, the version and the date, no secrets and contents: read. Every job
 # starts, after the checkout and its interpreter, with scripts/release.py prepare: a dry run bumps
@@ -77,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -174,11 +180,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.11" }
-          - { os: ubuntu-latest, python: "3.12" }
-          - { os: ubuntu-latest, python: "3.13" }
+          - { os: ubuntu-24.04, python: "3.11" }
+          - { os: ubuntu-24.04, python: "3.12" }
+          - { os: ubuntu-24.04, python: "3.13" }
           # The newest the classifiers claim (design/phase5-release.md P5.17).
-          - { os: ubuntu-latest, python: "3.14" }
+          - { os: ubuntu-24.04, python: "3.14" }
           - { os: windows-latest, python: "3.12" }
           - { os: macos-latest, python: "3.12" }
     steps:
@@ -243,7 +249,7 @@ jobs:
       - name: Documentation links
         # Only once: the answer cannot differ by platform, and a broken link failing five jobs
         # says the same thing five times.
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.12'
         run: python scripts/check_links.py --strict
 
   interpreter-exit:
@@ -254,7 +260,7 @@ jobs:
     needs: build-ext
     # It needs only the Linux wheel, so a Windows or macOS build failing does not skip it.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -294,7 +300,7 @@ jobs:
           exit $failed
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -328,7 +334,7 @@ jobs:
 
   frontend:
     name: front-end syntax
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
