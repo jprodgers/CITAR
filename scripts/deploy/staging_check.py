@@ -202,8 +202,8 @@ def cmd_hog(args) -> int:
 
 
 def cmd_burn(args) -> int:
-    """A busy loop for --seconds of wall time; prints the cgroup's CPU use over it (cpu.stat's usage_usec) and the
-    wall time, as JSON."""
+    """A busy loop for --seconds of wall time; prints the cgroup's CPU use over it (cpu.stat's usage_usec), the wall
+    time and the CPUs this process may run on (Cpus_allowed_list), as JSON."""
     stat = Path(args.cgroup) / "cpu.stat"
     before, t0 = events(stat).get("usage_usec"), time.monotonic()
     end = t0 + args.seconds
@@ -214,7 +214,10 @@ def cmd_burn(args) -> int:
     if before is None or after is None:
         print(json.dumps({"error": f"no usage_usec in {stat}"}))
         return 1
-    print(json.dumps({"usage_usec": after - before, "wall_usec": round(wall * 1e6), "loops": n}), flush=True)
+    allowed = next((line.split(":", 1)[1].strip() for line in Path("/proc/self/status").read_text().splitlines()
+                    if line.startswith("Cpus_allowed_list:")), None)
+    print(json.dumps({"usage_usec": after - before, "wall_usec": round(wall * 1e6), "loops": n,
+                      "cpus_allowed": allowed}), flush=True)
     return 0
 
 
@@ -612,6 +615,8 @@ def set_weight(weight: int | None) -> None:
         return
     subprocess.run(["systemctl", "set-property", "--runtime", "citar.service", f"CPUWeight={weight}",
                     f"IOWeight={weight}"], check=True)
+    got = read_int(cgroup_of("citar.service") / "cpu.weight")
+    check(got == weight, f"citar.service's cgroup has cpu.weight {weight} for the span", f"it reads {got}")
 
 
 class Measure:
@@ -647,10 +652,18 @@ class Measure:
         self.data["host_defaults"] = want
         check(want.get("memory_mb") == 240 and want.get("threads") == 1 and want.get("cpu_percent") == 50,
               "host_cpu_defaults(mode='server', cpus=1, ram_mb=961), from the release's own code", json.dumps(want))
-        # The Servers page's read (GET /api/servers) names the host machine; reading the registry makes its row on a
-        # new server, which has none until something reads it.
-        status, servers = self.admin.call("GET", "/api/servers")
-        machine = (servers or {}).get("host_server_id") if status == 200 else None
+        # The Servers page's read (GET /api/servers) names the host machine. A new server makes its registry, the host
+        # machine's row among it, after it has started answering (a slow box takes seconds over its hardware's
+        # survey), so it is asked again until it names one.
+        answer: dict = {}
+
+        def named():
+            status, servers = self.admin.call("GET", "/api/servers")
+            answer.update(status=status, servers=servers)
+            return status == 200 and (servers or {}).get("host_server_id")
+
+        machine = wait_until(named, 120, 1.0)
+        status = answer.get("status")
         self.data["host_machine"] = machine
         if not check(bool(machine), "the host machine's row is found (GET /api/servers: host_server_id)",
                      f"{status} {str(machine)}"):
@@ -733,14 +746,16 @@ class Measure:
             st, view = self.admin.call("GET", "/api/admin/jobs")
             if st == 200:
                 ex = executor_of(view)
-                if ex.get("state") == "ready" and ex.get("pid") and not executor:
+                running = any(r.get("exp") == name for rs in (view.get("running") or {}).values() for r in rs)
+                # The job host as it is while it plays this experiment's games (one that was ready before, under
+                # settings since changed, starts again before it plays them).
+                if running and ex.get("state") == "ready" and ex.get("pid") and not executor:
                     executor = ex
                     mem.host_pid = ex["pid"]
                     try:
                         cgroup = Path(f"/proc/{ex['pid']}/cgroup").read_text().strip()
                     except OSError:
                         cgroup = None
-                running = any(r.get("exp") == name for rs in (view.get("running") or {}).values() for r in rs)
                 now = time.monotonic()
                 if running and running_since is None:
                     running_since = now
@@ -798,8 +813,16 @@ class Measure:
         it once its runs have finished."""
         want = {**self.data["host_defaults"], "memory_mb": memory_mb}
         status, _ = self.admin.call("PUT", f"/api/machines/{machine}/settings", {"capabilities": {"cpu": want}})
-        return check(status == 200, f"the host's memory figure set to {memory_mb} MB (PUT /api/machines/{machine}/"
-                                    f"settings)", str(status))
+
+        def applied():
+            # The executor shows a ready host's own figures, else the ones it wants: the new figure once the old host
+            # has closed or started again with it.
+            st, view = self.admin.call("GET", "/api/admin/jobs")
+            return st == 200 and executor_of(view).get("memory_mb") == memory_mb
+        took = wait_until(applied, 60, 0.5)
+        return check(status == 200 and bool(took), f"the host's memory figure set to {memory_mb} MB (PUT /api/"
+                                                    f"machines/{machine}/settings), and the dispatcher has it",
+                     str(status))
 
     def load_at(self, mem, weight: int) -> dict:
         """The response-time bound at one CPUWeight=: the stand-in's times while a longer lab keeps the job host busy."""

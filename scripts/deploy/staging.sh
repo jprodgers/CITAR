@@ -2,7 +2,7 @@
 # staging.sh: the staging rehearsal of a CITAR deploy, inside WSL, held to the VPS's limits (design/phase5-release.md
 # P5.14). Run as root inside WSL only, from a copy on WSL's own disk (never under /mnt/c), never on a real server:
 #
-#     staging.sh setup --ballast-mb N --repo CLONE [--cpu-quota 60%] [--work-ms 25]
+#     staging.sh setup --ballast-mb N --repo CLONE [--cpu-quota 60%] [--cpu-period 10] [--cpu N] [--work-ms 25]
 #     staging.sh probes [--without-cpu-quota]
 #     staging.sh run --bundle DIR --rc1 DIR --rc2 DIR --rc3 DIR [--weights "50 35 20"] [--load-games N] [--lab-turns N]
 #                    [--host-mb N]
@@ -11,15 +11,20 @@
 #
 # setup: the apt packages a fresh VPS lacks here (python3-venv, sqlite3, nginx); vm.swappiness 10 (the VPS's; the
 #   value it had is recorded and cleanup puts it back); citar-staging.slice with the VPS's memory (MemoryMax=961M,
-#   MemorySwapMax=2G) and CPUQuota= scaled to its one vCPU (--cpu-quota, default 60%: a laptop core is taken to be
-#   about 1.6 times the VPS's); the probes (below), which must pass; the other sites' load in the slice: a ballast
+#   MemorySwapMax=2G) and its one vCPU: one CPU of this machine (AllowedCPUs=, --cpu, default the last), so the
+#   slice's units share one run queue as the box's do and CPUWeight= decides between them (with several CPUs they
+#   would run side by side and the weights would decide nothing), scaled by CPUQuota= (--cpu-quota, default 60%: a
+#   laptop core is taken to be about 1.6 times the VPS's) over a short period (--cpu-period, default 10 ms: the share
+#   of a slower core in slices too short to see, rather than the whole core taken away for 40 ms in every 100, which
+#   no box does); the probes (below), which must pass; the other sites' load in the slice: a ballast
 #   holding --ballast-mb of their resident memory (the private log's figure, kept in ops/p5-notes.md and never in a
 #   tracked file) and two stand-in sites, an nginx server block and a Python unit doing --work-ms of CPU a request
 #   (php-fpm's stand-in), listed in /etc/citar/deploy-checks.conf; and CITAR 0.1.5 as the VPS has it: `git archive
 #   v0.1.5` of CLONE in /opt/citar with its .venv from its requirements.txt, its citar, citar-lab and backup units,
 #   its env file, a hand-made citar-admin, and an nginx site on a loopback port with the connection_upgrade map,
 #   started once to make its state. Every staged unit joins the slice through a drop-in (Slice=).
-# probes: the slice's memory.max, memory.swap.max and cpu.max read back as asked; a unit in the slice with a small
+# probes: the slice's memory.max, memory.swap.max, cpu.max and cpuset.cpus.effective read back as asked, and a
+#   process started in the slice may run on that one CPU alone; a unit in the slice with a small
 #   MemoryMax and no swap allocates past it and is OOM-killed, the slice's oom_kill count rising; a busy loop in the
 #   slice for 5 s uses the quota's share of a CPU (cpu.stat's usage_usec within 10% of quota times wall time).
 #   --without-cpu-quota takes the quota away for the CPU probe alone, which must then fail (it exits 1 when it does),
@@ -88,6 +93,8 @@ checker() { "$PY" -I "$TOOLS/staging_check.py" "$@"; }
 COMMAND=""
 BALLAST_MB=""
 CPU_QUOTA="60%"
+CPU_PERIOD=10
+CPU_ONE=""
 WORK_MS=25
 REPO=""
 WITHOUT_QUOTA=0
@@ -106,11 +113,13 @@ while [ $# -gt 0 ]; do
       [ -z "$COMMAND" ] || usage_die "one command at a time ($COMMAND and $1)"
       COMMAND="$1" ;;
     --without-cpu-quota) WITHOUT_QUOTA=1 ;;
-    --ballast-mb|--cpu-quota|--work-ms|--repo|--bundle|--rc1|--rc2|--rc3|--weights|--load-games|--lab-turns|--host-mb|--keep-logs)
+    --ballast-mb|--cpu-quota|--cpu-period|--cpu|--work-ms|--repo|--bundle|--rc1|--rc2|--rc3|--weights|--load-games|--lab-turns|--host-mb|--keep-logs)
       [ $# -ge 2 ] || usage_die "$1 needs a value"
       case "$1" in
         --ballast-mb) BALLAST_MB="$2" ;;
         --cpu-quota) CPU_QUOTA="$2" ;;
+        --cpu-period) CPU_PERIOD="$2" ;;
+        --cpu) CPU_ONE="$2" ;;
         --work-ms) WORK_MS="$2" ;;
         --repo) REPO="$2" ;;
         --bundle) BUNDLE="$2" ;;
@@ -131,7 +140,12 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$COMMAND" ] || usage_die "which command: setup, probes, run, cleanup or status?"
 [[ "$CPU_QUOTA" =~ ^([1-9][0-9]?)%$ ]] || usage_die "--cpu-quota: a percentage of one CPU from 1% to 99% ($CPU_QUOTA)"
-QUOTA_PCT="${BASH_REMATCH[1]}"
+{ [[ "$CPU_PERIOD" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$CPU_PERIOD" -le 100 ]; } \
+  || usage_die "--cpu-period: milliseconds, from 1 to 100 ($CPU_PERIOD)"
+if [ -n "$CPU_ONE" ]; then
+  { [[ "$CPU_ONE" =~ ^[0-9]{1,3}$ ]] && [ "$CPU_ONE" -lt "$(nproc --all)" ]; } \
+    || usage_die "--cpu: one of this machine's CPUs, 0 to $(( $(nproc --all) - 1 )) ($CPU_ONE)"
+fi
 [[ "$WORK_MS" =~ ^[1-9][0-9]{0,3}$ ]] || usage_die "--work-ms: whole milliseconds ($WORK_MS)"
 [[ "$LAB_TURNS" =~ ^[0-9]{1,4}$ ]] || usage_die "--lab-turns: a number of rounds, 0 for the speed's last ($LAB_TURNS)"
 [[ "$LOAD_GAMES" =~ ^[1-9][0-9]{0,2}$ ]] || usage_die "--load-games: a number of duels ($LOAD_GAMES)"
@@ -163,6 +177,21 @@ remember() { mkdir -p "$STAGE" && printf '%s=%s\n' "$1" "$2" >> "$RECORD"; }
 
 # The slice's cgroup. A dash in a slice's name nests it (systemd.slice(5)): citar-staging.slice is
 # /citar.slice/citar-staging.slice, inside an implicit citar.slice that sets no limit.
+# The quota setup used (its record; else the arguments): QUOTA_PCT, PERIOD_US and CPU_MAX, cpu.max as it must read.
+quota_figures() {
+  local q p
+  local c
+  q="$(recorded CPU_QUOTA)"
+  p="$(recorded CPU_PERIOD)"
+  c="$(recorded CPU_ONE)"
+  CPU_QUOTA="${q:-$CPU_QUOTA}"
+  CPU_PERIOD="${p:-$CPU_PERIOD}"
+  CPU_ONE="${c:-${CPU_ONE:-$(( $(nproc --all) - 1 ))}}"
+  QUOTA_PCT="${CPU_QUOTA%\%}"
+  PERIOD_US=$((CPU_PERIOD * 1000))
+  CPU_MAX="$((QUOTA_PCT * PERIOD_US / 100)) $PERIOD_US"
+}
+
 slice_dir() {
   local cg
   cg="$(systemctl show -p ControlGroup --value "$SLICE" 2>/dev/null)"
@@ -196,7 +225,9 @@ write_slice() {
 Description=CITAR staging: the VPS's limits
 
 [Slice]
+AllowedCPUs=$CPU_ONE
 CPUQuota=$CPU_QUOTA
+CPUQuotaPeriodSec=${CPU_PERIOD}ms
 MemoryMax=961M
 MemorySwapMax=2G
 EOF
@@ -211,7 +242,9 @@ probe_readback() {
   cpu="$(cat "$dir/cpu.max")"
   [ "$mem" = $((961 * 1048576)) ]; check $? "memory.max reads $mem (961M)"
   [ "$swap" = $((2048 * 1048576)) ]; check $? "memory.swap.max reads $swap (2G)"
-  [ "$cpu" = "$((QUOTA_PCT * 1000)) 100000" ]; check $? "cpu.max reads '$cpu' ($CPU_QUOTA of one CPU)"
+  [ "$cpu" = "$CPU_MAX" ]; check $? "cpu.max reads '$cpu' ($CPU_QUOTA of one CPU, in periods of $CPU_PERIOD ms)"
+  [ "$(cat "$dir/cpuset.cpus.effective" 2>/dev/null)" = "$CPU_ONE" ]
+  check $? "cpuset.cpus.effective reads '$(cat "$dir/cpuset.cpus.effective" 2>/dev/null)' (AllowedCPUs=$CPU_ONE: one CPU)"
 }
 
 probe_oom() {
@@ -228,10 +261,11 @@ probe_oom() {
 
 # The CPU probe: prints its verdict; returns 0 when the slice's CPU use over a 5 s busy loop is the quota's share.
 probe_cpu() {   # $1 the share expected, in percent of one CPU
-  local out usage wall
+  local out usage wall allowed
   out="$(systemd-run --unit=citar-staging-probe-cpu --slice="$SLICE" --quiet --wait --collect --pipe -p Type=exec \
     -- "$PY" -I "$TOOLS/staging_check.py" burn --seconds 5 --cgroup "$(slice_dir)" 2>&1 < /dev/null | tail -n 1)"
   usage="$(printf '%s' "$out" | sed -n 's/.*"usage_usec": \([0-9]*\).*/\1/p')"
+  allowed="$(printf '%s' "$out" | sed -n 's/.*"cpus_allowed": "\([^"]*\)".*/\1/p')"
   wall="$(printf '%s' "$out" | sed -n 's/.*"wall_usec": \([0-9]*\).*/\1/p')"
   if [ -z "$usage" ] || [ -z "$wall" ]; then
     fail "the CPU probe printed no figures: $out"
@@ -243,11 +277,13 @@ probe_cpu() {   # $1 the share expected, in percent of one CPU
     exit !(used >= lo && used <= hi) }' > "$STAGE/cpu-probe.txt"
   local status=$?
   check "$status" "$(cat "$STAGE/cpu-probe.txt")"
+  [ "$allowed" = "$CPU_ONE" ]; check $? "the probe may run on CPU $CPU_ONE alone (Cpus_allowed_list: ${allowed:-none})"
   return "$status"
 }
 
 cmd_probes() {
   where_ok
+  quota_figures
   [ -f "$UNITS/$SLICE" ] || die "no $SLICE: run setup first"
   if [ "$WITHOUT_QUOTA" -eq 1 ]; then
     step "The CPU probe with the slice's CPUQuota removed (a gate that can fail: it must fail)"
@@ -257,7 +293,7 @@ cmd_probes() {
     local status=$?
     rm -f "/run/systemd/system.control/$SLICE.d/50-CPUQuota.conf"
     systemctl daemon-reload
-    [ "$(cat "$(slice_dir)/cpu.max")" = "$((QUOTA_PCT * 1000)) 100000" ]
+    [ "$(cat "$(slice_dir)/cpu.max")" = "$CPU_MAX" ]
     check $? "the quota is back: cpu.max reads '$(cat "$(slice_dir)/cpu.max")'"
     return "$status"
   fi
@@ -442,6 +478,9 @@ log's measurement (ops/p5-notes.md keeps the figure)"
   ! id citar >/dev/null 2>&1 || die "a citar account exists already: staging needs a WSL without CITAR (run cleanup)"
   mkdir -p "$STAGE/logs"
   remember CPU_QUOTA "$CPU_QUOTA"
+  remember CPU_PERIOD "$CPU_PERIOD"
+  remember CPU_ONE "${CPU_ONE:-$(( $(nproc --all) - 1 ))}"
+  quota_figures
   remember BALLAST_MB "$BALLAST_MB"
   remember WORK_MS "$WORK_MS"
   install -d -m 0755 "$TOOLS"
@@ -461,7 +500,7 @@ log's measurement (ops/p5-notes.md keeps the figure)"
   sysctl -q -w vm.swappiness=10 || die "vm.swappiness could not be set"
   [ "$(cat /proc/sys/vm/swappiness)" = 10 ]; check $? "vm.swappiness 10, the VPS's (it was $before; cleanup restores it)"
 
-  step "The slice: $SLICE (CPUQuota=$CPU_QUOTA, MemoryMax=961M, MemorySwapMax=2G)"
+  step "The slice: $SLICE (AllowedCPUs=$CPU_ONE, CPUQuota=$CPU_QUOTA in periods of $CPU_PERIOD ms, MemoryMax=961M, MemorySwapMax=2G)"
   write_slice
   remember SLICE 1
   cmd_probes || die "a probe failed: a limit that does not bind fails setup (cleanup undoes it)"
@@ -615,7 +654,7 @@ cmd_run() {
   mkdir -p "$LOGS"
   export CITAR_DEPLOY_SLICE="$SLICE"
   say "staging run $stamp: cutover to $p0, then $p1, $p2 (planted: exits after migrating), $p3 (planted: exits before"
-  say "migrating); CPUQuota=$(recorded CPU_QUOTA), ballast $(recorded BALLAST_MB) MB, stand-in $(recorded WORK_MS) ms a request;"
+  say "migrating); CPU $(recorded CPU_ONE) alone at $(recorded CPU_QUOTA) (periods of $(recorded CPU_PERIOD) ms), ballast $(recorded BALLAST_MB) MB, stand-in $(recorded WORK_MS) ms a request;"
   say "logs in $LOGS"
   systemd-run --unit=citar-staging-watch --collect --quiet -p Type=exec -- "$PY" -I "$TOOLS/staging_check.py" watch \
     --out "$LOGS/watch.jsonl" --url "$DIRECT_URL" || die "the timeline could not be started"
