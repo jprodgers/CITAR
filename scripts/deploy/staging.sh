@@ -27,9 +27,12 @@
 #   process started in the slice may run on that one CPU alone; a unit in the slice with a small
 #   MemoryMax and no swap allocates past it and is OOM-killed, the slice's oom_kill count rising; a busy loop in the
 #   slice for 5 s uses the quota's share of a CPU (cpu.stat's usage_usec within 10% of quota times wall time).
-#   --without-cpu-quota takes the quota away for the CPU probe alone, which must then fail (it exits 1 when it does),
-#   and puts it back.
-# run: with CITAR_DEPLOY_SLICE=citar-staging.slice exported, so citar-deploy's pip scope and every systemd-run of
+#   --without-cpu-quota is the gate that can fail: it takes the quota away, runs the CPU probe alone (which must then
+#   use more than the quota's share), puts the quota back and reads the slice's files again. Like every command it
+#   exits 0 only when all of that held: the probe failed without its quota, and the quota is back.
+# run: first reads the slice again as setup left it (its files, the ballast, the loaded stand-in, vm.swappiness), and
+#   runs nothing on a slice that differs (a quota left off would put every figure on an unthrottled core); then,
+#   with CITAR_DEPLOY_SLICE=citar-staging.slice exported, so citar-deploy's pip scope and every systemd-run of
 #   citar-deploy and citar-admin land in the slice: citar-deploy cutover with --bundle; the first administrator, the
 #   host machine's settings for one CPU and 961 MB, idle, a 4-bot game of 40 rounds, a lab of three duel games, and
 #   at each --weights CPUWeight= a longer lab (--load-games duels, each to --lab-turns rounds, 0 for the speed's last)
@@ -44,8 +47,9 @@
 #   uncutover, 0.1.5 answering again. The stand-in sites answer 200 before and after every step. A timeline
 #   (staging_check.py watch) records the memory, the OOM kills, every transient unit and CITAR's answers.
 # cleanup: the units, drop-ins, the slice, the ballast, the stand-ins, the citar account, /opt/citar*,
-#   /var/lib/citar*, /etc/citar, the backups, the deploy log and the nginx sites removed; vm.swappiness restored;
-#   nginx stopped and disabled (the packages stay); then each of these checked gone.
+#   /var/lib/citar*, /etc/citar, the backups, the deploy log, the nginx sites and the CITAR site's nginx logs
+#   (/var/log/nginx/citar.*) removed; vm.swappiness restored; nginx stopped and disabled (the packages stay); then
+#   each of these checked gone.
 #
 # The logs are in /var/lib/citar-staging/logs (cleanup --keep-logs copies them out first). Exit status: 0 when every
 # check passed, 1 when one failed or something was refused, 2 for a usage error.
@@ -139,6 +143,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$COMMAND" ] || usage_die "which command: setup, probes, run, cleanup or status?"
+[ "$WITHOUT_QUOTA" -eq 0 ] || [ "$COMMAND" = probes ] || usage_die "--without-cpu-quota is probes' alone"
 [[ "$CPU_QUOTA" =~ ^([1-9][0-9]?)%$ ]] || usage_die "--cpu-quota: a percentage of one CPU from 1% to 99% ($CPU_QUOTA)"
 { [[ "$CPU_PERIOD" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$CPU_PERIOD" -le 100 ]; } \
   || usage_die "--cpu-period: milliseconds, from 1 to 100 ($CPU_PERIOD)"
@@ -259,9 +264,12 @@ probe_oom() {
   check $? "the OOM probe (256 MiB under MemoryMax=64M, no swap) is killed by the kernel, and the slice's oom_kill rises ($before -> $after)"
 }
 
-# The CPU probe: prints its verdict; returns 0 when the slice's CPU use over a 5 s busy loop is the quota's share.
-probe_cpu() {   # $1 the share expected, in percent of one CPU
-  local out usage wall allowed
+# The CPU probe: a 5 s busy loop in the slice, and the CPUs it may run on (the slice's one alone, a check). Returns 0
+# when its CPU use is the quota's share (within 10%), 1 when it is not, 2 when the probe printed no figures (counted
+# as a failed check). With "held" (the default) the share is a check; with "unheld" (the quota taken away) the use is
+# printed as a figure, and the caller holds the status to 1.
+probe_cpu() {   # $1 the share expected, in percent of one CPU; $2 held or unheld
+  local out usage wall allowed line status
   out="$(systemd-run --unit=citar-staging-probe-cpu --slice="$SLICE" --quiet --wait --collect --pipe -p Type=exec \
     -- "$PY" -I "$TOOLS/staging_check.py" burn --seconds 5 --cgroup "$(slice_dir)" 2>&1 < /dev/null | tail -n 1)"
   usage="$(printf '%s' "$out" | sed -n 's/.*"usage_usec": \([0-9]*\).*/\1/p')"
@@ -269,33 +277,45 @@ probe_cpu() {   # $1 the share expected, in percent of one CPU
   wall="$(printf '%s' "$out" | sed -n 's/.*"wall_usec": \([0-9]*\).*/\1/p')"
   if [ -z "$usage" ] || [ -z "$wall" ]; then
     fail "the CPU probe printed no figures: $out"
-    return 1
+    return 2
   fi
-  awk -v u="$usage" -v w="$wall" -v q="$1" 'BEGIN {
+  line="$(awk -v u="$usage" -v w="$wall" -v q="$1" 'BEGIN {
     used = 100 * u / w; lo = q * 0.9; hi = q * 1.1
-    printf "the CPU probe used %.1f%% of a CPU over %.2f s (the quota %s%%: %.1f%% to %.1f%% passes)\n", used, w / 1e6, q, lo, hi
-    exit !(used >= lo && used <= hi) }' > "$STAGE/cpu-probe.txt"
-  local status=$?
-  check "$status" "$(cat "$STAGE/cpu-probe.txt")"
+    printf "the CPU probe used %.1f%% of a CPU over %.2f s (the quota %s%%: %.1f%% to %.1f%% is its share)\n", used, w / 1e6, q, lo, hi
+    exit !(used >= lo && used <= hi) }')"
+  status=$?
+  if [ "${2:-held}" = held ]; then check "$status" "$line"; else say "  --  $line"; fi
   [ "$allowed" = "$CPU_ONE" ]; check $? "the probe may run on CPU $CPU_ONE alone (Cpus_allowed_list: ${allowed:-none})"
   return "$status"
 }
 
 cmd_probes() {
+  local status now
   where_ok
   quota_figures
   [ -f "$UNITS/$SLICE" ] || die "no $SLICE: run setup first"
   if [ "$WITHOUT_QUOTA" -eq 1 ]; then
-    step "The CPU probe with the slice's CPUQuota removed (a gate that can fail: it must fail)"
-    systemctl set-property --runtime "$SLICE" CPUQuota= || die "the quota could not be removed"
-    say "   cpu.max now reads '$(cat "$(slice_dir)/cpu.max")'"
-    probe_cpu "$QUOTA_PCT"
-    local status=$?
+    # The gate that can fail. Its verdict is this command's own exit status, 0 only when the probe failed without its
+    # quota and the quota is back: a refusal, a probe within its share, or a quota left off all exit 1.
+    step "The CPU probe with the slice's CPUQuota taken away (a gate that can fail: the probe must fail)"
+    systemctl set-property --runtime "$SLICE" CPUQuota= || die "the quota could not be taken away"
+    now="$(cat "$(slice_dir)/cpu.max")"
+    [ "${now%% *}" = max ]; check $? "the quota is taken away: cpu.max reads '$now'"
+    probe_cpu "$QUOTA_PCT" unheld
+    status=$?
     rm -f "/run/systemd/system.control/$SLICE.d/50-CPUQuota.conf"
     systemctl daemon-reload
-    [ "$(cat "$(slice_dir)/cpu.max")" = "$CPU_MAX" ]
-    check $? "the quota is back: cpu.max reads '$(cat "$(slice_dir)/cpu.max")'"
-    return "$status"
+    [ "$status" -eq 1 ]
+    check $? "without its quota the CPU probe fails, as it must: the quota is what holds the slice to its share"
+    step "The quota put back: the slice's files read again"
+    probe_readback
+    say ""
+    if [ "$FAILED" -eq 0 ]; then
+      say "The gate that can fail did: the CPU probe failed without the quota, and the quota is back."
+      return 0
+    fi
+    say "$FAILED check(s) FAILED (above)."
+    return 1
   fi
   step "The probes: each limit must bind before anything is measured"
   probe_readback
@@ -640,6 +660,25 @@ drill() {
   checker sites "$CHECKS" --when "after: the drill" || FAILED=$((FAILED + 1))
 }
 
+# The slice read again as setup left it, before a run measures anything on it: its files (a quota left off by an
+# interrupted `probes --without-cpu-quota`, say, would put every figure on an unthrottled core and fail nothing), the
+# ballast still holding the other sites' memory (swapped or not), the loaded stand-in running, vm.swappiness 10.
+slice_as_set() {
+  local ballast held
+  step "The slice as setup left it (read again before anything is measured)"
+  quota_figures
+  probe_readback
+  ballast="$(recorded BALLAST_MB)"
+  held=$(( $(cat "$(slice_dir)/citar-staging-ballast.service/memory.current" 2>/dev/null || echo 0) \
+    + $(cat "$(slice_dir)/citar-staging-ballast.service/memory.swap.current" 2>/dev/null || echo 0) ))
+  [ "$held" -ge $(( ${ballast:-0} * 1048576 * 95 / 100 )) ] && [ "${ballast:-0}" -gt 0 ]
+  check $? "the ballast holds $((held / 1048576)) MB in the slice (--ballast-mb ${ballast:-none})"
+  systemctl is-active --quiet citar-staging-standin.service
+  check $? "the loaded stand-in runs (citar-staging-standin.service)"
+  [ "$(cat /proc/sys/vm/swappiness)" = 10 ]; check $? "vm.swappiness reads $(cat /proc/sys/vm/swappiness) (10)"
+  [ "$FAILED" -eq 0 ] || die "the slice is not as setup left it (above): nothing is run on it (cleanup, then setup)"
+}
+
 cmd_run() {
   local p0 p1 p2 p3 rev0 rev1 named stamp
   where_ok
@@ -647,6 +686,7 @@ cmd_run() {
   for b in "$BUNDLE" "$RC1" "$RC2" "$RC3"; do
     { [ -n "$b" ] && [ -f "$b/BUNDLE" ]; } || usage_die "run needs --bundle, --rc1, --rc2 and --rc3: unpacked deploy bundles"
   done
+  slice_as_set
   BUNDLE="$(cd "$BUNDLE" && pwd -P)"; RC1="$(cd "$RC1" && pwd -P)"; RC2="$(cd "$RC2" && pwd -P)"; RC3="$(cd "$RC3" && pwd -P)"
   p0="$(bundle_version "$BUNDLE")"; p1="$(bundle_version "$RC1")"; p2="$(bundle_version "$RC2")"; p3="$(bundle_version "$RC3")"
   stamp="$(date -u +%Y%m%d-%H%M%S)"
@@ -798,12 +838,17 @@ cmd_cleanup() {
     systemctl stop nginx 2>/dev/null
     systemctl disable nginx 2>/dev/null
   fi
+  # The CITAR site's own logs (write_citar_site names them), rotated ones included, once nginx has let go of them;
+  # nginx's own access.log and error.log stay with the package.
+  rm -f /var/log/nginx/citar.access.log* /var/log/nginx/citar.error.log*
+  ok "the CITAR site's nginx logs removed (/var/log/nginx/citar.*)"
 
   step "Checked gone (S10's WSL items)"
   ! id citar >/dev/null 2>&1 || left+=("the citar account")
   shopt -s nullglob
   for path in /opt/citar* /var/lib/citar* /etc/citar /var/backups/citar /var/log/citar-deploy.log "$UNITS"/citar* \
-      "$UNITS"/*.wants/citar* /usr/local/bin/citar-* /usr/local/sbin/citar-deploy /etc/nginx/sites-*/citar*; do
+      "$UNITS"/*.wants/citar* /usr/local/bin/citar-* /usr/local/sbin/citar-deploy /etc/nginx/sites-*/citar* \
+      /var/log/nginx/citar*; do
     if [ -e "$path" ] || [ -L "$path" ]; then left+=("$path"); fi
   done
   shopt -u nullglob
@@ -819,8 +864,8 @@ cmd_cleanup() {
     say "   (no setup record, so vm.swappiness was left as it is: $(cat /proc/sys/vm/swappiness))"
   fi
   if [ "${#left[@]}" -eq 0 ]; then
-    ok "no citar account, /opt/citar*, /var/lib/citar*, /etc/citar, citar unit or staging slice; nginx stopped and"
-    say "      disabled; vm.swappiness ${swap:-?}"
+    ok "no citar account, /opt/citar*, /var/lib/citar*, /etc/citar, citar unit, staging slice or CITAR nginx site or"
+    say "      log; nginx stopped and disabled; vm.swappiness ${swap:-?}"
     return 0
   fi
   fail "left behind: ${left[*]}"
