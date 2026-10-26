@@ -339,11 +339,20 @@ class Lending(unittest.TestCase):
         self.addCleanup(runs.stop)
         name = self.submit("alice", {"name": "held-to-its-share", "games": 2, "seed": 9500, **LONG})
         self.assertTrue(_until(lambda: len(runs.running()) == 2, 60), "both games started")
+
+        def held() -> dict:
+            with db.session() as s:
+                return (machine_settings_client(s, sid, self.ids["bob"])["cpu_helper"] or {}).get("limits") or {}
+        self.assertTrue(_until(lambda: held().get("cpu"), 30), "the helper said how its OS holds the share")
+        limits = held()
         watch = qa4.CpuWatch(helper.proc.pid).start()
-        time.sleep(8.0)
+        # Held hard, 8 s measure the share. Held softly (macOS: nice and a thread cap) nothing is held to a figure, and
+        # the two games end by themselves in about 8 s on CI's runner: deleted after 8 s, one or both had ended done
+        # before the abort reached them (test.yml runs 38986642828, 39078917427 and 40282631733). So there the deletion
+        # comes after 1 s, while both are playing.
+        wait = 8.0 if limits.get("cpu") == "hard" else 1.0
+        time.sleep(wait)
         cpu = watch.stop()
-        with db.session() as s:
-            limits = (machine_settings_client(s, sid, self.ids["bob"])["cpu_helper"] or {}).get("limits") or {}
         if limits.get("cpu") == "hard" and cpu["peak_pct"] is not None:
             self.assertLessEqual(cpu["peak_pct"], 5 + 2, cpu)
             self.assertGreater(cpu["mean_pct"], 2.5, f"it used its share: {cpu}")
@@ -352,15 +361,15 @@ class Lending(unittest.TestCase):
         except FileNotFoundError:
             if limits.get("cpu") == "hard":
                 raise
-            # A share held softly (macOS: nice and a thread cap) let both games end within the 8 s on CI's runner
-            # (test.yml run 38986642828: the experiment done, its file gone), so nothing is left to abort. Where it is
-            # held hard the games are still running and the deletion must find them.
-            print(f"\n[jobs e2e] a share of 5% held {limits}: both games ended within the 8 s; CPU {json.dumps(cpu)}",
-                  file=sys.stderr)
+            # A share held softly (macOS: nice and a thread cap) let both games end within the wait on CI's runner
+            # when it was 8 s (test.yml run 38986642828: the experiment done, its file gone), so nothing is left to
+            # abort. Where it is held hard the games are still running and the deletion must find them.
+            print(f"\n[jobs e2e] a share of 5% held {limits}: both games ended within the {wait:g} s; "
+                  f"CPU {json.dumps(cpu)}", file=sys.stderr)
             return
         D.poke()
         # each run seen playing ends aborted; where the share is held softly one may have ended (done) before the
-        # deletion reached it (CI, test.yml run 39078917427, macos), but not both, as the file was still queued
+        # deletion reached it (CI, test.yml run 39078917427, macos, when the wait was 8 s), but not both
         ends = [self.finished(run, 30).state for run in runs.running()]
         if limits.get("cpu") == "hard":
             self.assertEqual(set(ends), {"aborted"}, ends)
