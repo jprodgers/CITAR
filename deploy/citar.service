@@ -51,11 +51,12 @@ OOMScoreAdjust=500
 
 # --- CPU and IO ---
 # Under contention the other sites win: 20, 0.1.5's lab unit's weight, settled by the staging
-# rehearsal's response-time gate. With the job host playing a lab game without pause, a stand-in
-# site doing 25 ms of CPU a request must answer within twice its idle p95 plus 50 ms: it does at
-# CPUWeight=20 and not at 35 or 50. The web server is not starved by it: inside this cgroup the job
-# host runs at nice 10 with one thread, behind the server's own requests, which kept a p95 of about
-# 2 ms through nginx meanwhile. IOWeight= cannot be measured in WSL; it follows CPUWeight=.
+# rehearsal's response-time gate (one CPU at this box's speed). With the job host playing lab games
+# without pause, a stand-in site doing 25 ms of CPU a request must answer within twice its idle p95
+# plus 50 ms (about 133 ms): its p95 was about 60 ms at CPUWeight=20, 61 at 35 and 71 at 50, so 20
+# gives the other sites the most. The web server is not starved by it: inside this cgroup the job
+# host runs at nice 10 with one thread, and CITAR's own requests through nginx kept a p95 of about
+# 60 ms meanwhile (51 at 50). IOWeight= cannot be measured in WSL; it follows CPUWeight=.
 CPUWeight=20
 IOWeight=20
 
