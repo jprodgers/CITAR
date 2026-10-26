@@ -59,14 +59,36 @@ game or benchmark job, the end of the case for a probe run. A report already bei
 
 ## Platforms and packaging
 
-**Windows artifacts are unsigned.** SmartScreen warns about the installer until enough people have
-run it, and some antivirus products flag PyInstaller output on sight. SHA-256 hashes are published
-for every asset and every build is a public CI run. See
+**Where CITAR is built for.** Wheels for Windows x64, macOS 11 or newer on Apple silicon and Intel, and Linux x64
+and ARM64 with glibc 2.28 or newer (Debian 10, Ubuntu 20.04, RHEL 8 and later), each one wheel for CPython 3.11 and
+every newer release; the CITAR helper for the same five, the Linux builds on the same glibc 2.28 floor. There is **no
+wheel for musl (Alpine), 32-bit systems, Windows on ARM64 or the free-threaded Pythons** (`python3.13t`,
+`python3.14t`, which cannot load an abi3 extension). There, `pip install citar` builds from the source release and
+needs a Rust toolchain; the install scripts refuse up front and say so rather than start that build. Windows on ARM64
+runs the x64 Python and the installer under emulation.
+
+**Windows and macOS binaries are unsigned.** SmartScreen warns about the installer until enough people have run it,
+and some antivirus products flag PyInstaller output on sight. The macOS binaries are not notarised, so a helper
+downloaded with a browser needs `xattr -d com.apple.quarantine` before macOS will run it; `install.sh --worker`,
+Homebrew, `pip` and `pipx` are unaffected. Every file of a release has its SHA-256 (`SHA256SUMS`) and a build
+provenance attestation, and every build is a public CI run. See
 [packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md#code-signing).
 
-**macOS binaries are not notarised**, for the same reason — including the CITAR helper, which
-needs `xattr -d com.apple.quarantine` before macOS will run it. The `pip`, `pipx` and Homebrew routes
-are unaffected.
+**winget is pending at Microsoft.** `JimmieRodgers.CITAR` and `JimmieRodgers.CITAR.Helper` are submitted with each
+release, but a first submission is reviewed by a person and none has been accepted yet; on Windows, use the installer,
+Scoop or `install.ps1` meanwhile.
+
+**Homebrew, Scoop and winget lag the release** by a day or so: each needs the GitHub release to exist before its
+manifest can be updated. Homebrew's tap ships only the helper (`citar-helper`); the game installs with `install.sh` or
+pipx.
+
+**A package manager's helper does not update itself.** The packaged build (Homebrew, Scoop, winget) leaves updates to
+its package manager and refuses `"updates": "auto"`, so it stays at its version until `brew upgrade`, `scoop update`
+or `winget upgrade`; the Servers page shows it as not updating itself.
+
+**Helper updates need the release key.** A helper trusts only the update keys it was built with. Until a release ships
+with the owner's public key in `crates/citar-jobs/update-keys.pub`, its helpers report updates unavailable, and each
+must be replaced by hand (or by its package manager) to reach the next release.
 
 **The helper as a service runs only while you are signed in, except as a system service.** A
 LaunchAgent (macOS) and a systemd user unit (Linux, unless `loginctl enable-linger` is on) stop when
@@ -77,13 +99,10 @@ or Windows (from an elevated prompt); macOS has none
 started (`service uninstall --user`) ends it at once, as closing its window would: a game it was
 playing is played again elsewhere.
 
-**Homebrew, Scoop and winget lag the release** by a day or so — each needs the GitHub release to
-exist before its manifest can be updated.
-
 **`install.sh` is verified in CI, not on every distribution.** It is tested on Ubuntu (x64 and ARM64)
 and macOS (Apple silicon and Intel) runners, and `install.ps1` on Windows, each against the release's
-own wheel and helper. On something unusual, read it first; it is short, and `--no-setup` makes it do
-nothing but install.
+own wheel and helper. On something unusual, read it first; `--plan` shows what it would do, and `--no-setup` makes
+it do nothing but install.
 
 ---
 
@@ -92,8 +111,19 @@ nothing but install.
 **One core, one game.** Games are CPU-bound and single-threaded per game. A single-core VPS runs
 about one concurrent game before turns start dragging. `default_max_concurrent_games` is the lever.
 
+**The lab shares the server's memory and CPU.** There is no separate lab service: the lab's job host is a child of
+the server, inside `citar.service`'s `MemoryMax` (400 MB on a 1 GB box), at `CPUWeight=20` beside the other sites
+and `nice` within CITAR. Its CPU share on a server is soft (a thread cap and `nice`, not a hard quota), and its memory
+figure must be set so the server's peak plus that figure stays under `MemoryHigh` (128 MB on a 1 GB box,
+[DEPLOY.md](Deploying-a-server#the-unit-and-limits-on-a-small-box)); server mode's own default figure is larger.
+
 **Backups are local by default.** The nightly timer writes to the same disk, which protects against
-mistakes and not against losing the machine. Copying them off-site is documented but not automatic.
+mistakes and not against losing the machine. Copying them off-site (`CITAR_BACKUP_RSYNC_TARGET`) is documented but
+not automatic, and a PostgreSQL database is named in the backup but not dumped.
+
+**A rollback across a migration needs a backup.** A release refuses a database a newer release migrated, so going
+back past a migrating upgrade restores the backup that upgrade took (`citar-deploy rollback --restore-backup`), and
+what was written after it is set aside, not merged.
 
 **No payments, deliberately.** Budgets are accounting and admission control only. There is no
 billing anywhere in CITAR and none is planned.

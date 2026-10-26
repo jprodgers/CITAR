@@ -305,7 +305,8 @@ stated. Highest priority first:
 | `noise-prince4` | 24 | Four identical Prince bots, fresh seeds. With `v012-baseline-prince4`: the between-seat spread for sample-size and significance planning. |
 | `map-wrap-both`, `map-no-rivers`, `map-rich-resources`, `map-boxed` | 8 each | How map options move pace, victory mix and balance (vs the ice-cap baseline), before choosing benchmark scenarios. |
 
-Reports: Lab page, or `python -m citar.lab report NAME` on the server.
+Reports: Lab page, or `citar lab report NAME` on the server, run as the service runs
+([DEPLOY.md](Deploying-a-server#after-it-is-up)).
 
 ## Next steps (keep current)
 

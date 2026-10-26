@@ -163,7 +163,9 @@ or put itself on probation. The page's **Audit log** reads the whole log, newest
 handle, or `admin_cli` for the command line's changes), the action (or a prefix: `user.*`) and the object, 100 a
 page. For anyone but an administrator these pages, and their routes, do not exist (404).
 
-The command line does the same on the server's database (`citar-admin`, `python -m citar.server.admin_cli`):
+The command line does the same on the server's database (`citar-admin`: on a server, `sudo citar-admin`, the
+wrapper that runs it as the service runs, through `systemd-run` as `citar` with the unit's settings and sandbox;
+elsewhere the `citar-admin` command, `python -m citar.server.admin_cli`):
 `set-role`, `set-status` (`--reason` for a suspension), `set-caps NAME run_lab=on publish_global=default`,
 `set-limits NAME --games 4 --seats 8 --invites 2`, `set-trust NAME trusted` and `audit [--actor] [--action]
 [--object-type] [--object-id] [--before] [--json]`, under the same rules, each change recorded as `admin_cli`'s.

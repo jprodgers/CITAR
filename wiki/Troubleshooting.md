@@ -12,6 +12,25 @@ nothing, contains no secrets, and is what a bug report should include.
 
 ---
 
+## It will not install
+
+**`There is no prebuilt CITAR for this platform: ...`** — the install scripts install CITAR's prebuilt wheels only,
+built for Windows x64, macOS 11 or newer, and Linux x64 and ARM64 with glibc 2.28 or newer, and the message names what
+this machine lacks: musl (Alpine), an older glibc, another processor, a 32-bit or free-threaded Python. A
+free-threaded Python (`python3.14t`) has a regular build beside it (`--python python3.14`); on Windows on ARM, install
+the x64 Python, or use the installer. Anywhere else, `pip install citar` builds CITAR from its source with a Rust
+toolchain ([INSTALL.md](Installing#from-source)).
+
+**pip starts compiling Rust, or fails with `cargo` or `rustc` not found** — pip found no wheel for this machine and
+took the source release. See the line above; `pip install --only-binary=citar "citar[all]"` stops at once instead.
+
+**"Windows protected your PC"** — the installer is not code-signed, so SmartScreen warns until enough people have run
+it: **More info → Run anyway**, after [checking the file](Installing#checking-a-download) if you like.
+
+**macOS says the CITAR helper "cannot be opened" or "is damaged"** — a file downloaded with a browser carries
+macOS's quarantine attribute and the helper is not notarised: `xattr -d com.apple.quarantine citar-helper-macos-*`.
+`install.sh --worker` and Homebrew leave no quarantine attribute.
+
 ## It will not start
 
 **`No Python 3.11+ found`** — CITAR needs 3.11 or newer. On Debian or Ubuntu, `python3-venv` is a
@@ -36,7 +55,9 @@ journalctl -u citar -n 50 --no-pager
 ```
 
 Usually the environment file: a missing secret key, a database path the service account cannot
-write, or a `CITAR_PUBLIC_ORIGIN` that is not `https://`.
+write, a `CITAR_PUBLIC_ORIGIN` that is not `https://`, or a comment after a value on the same line (systemd reads it
+as part of the value). After a rollback by hand, a database a newer release migrated, which an older release refuses:
+see [the runbook](Runbook#going-back).
 
 ---
 
@@ -165,6 +186,12 @@ Mail from a new subdomain often lands in spam until SPF and DKIM are in place.
 
 **The worker connects and disconnects.** Check the token — it is per-server, and reissuing one
 invalidates the old.
+
+**A helper from Homebrew, Scoop or winget never updates itself.** That is the packaged build, on purpose: its package
+manager owns the binary, so the helper reports a new release (`notify`) and refuses `"updates": "auto"`. Update it
+with `brew upgrade citar-helper`, `scoop update citar-helper` or `winget upgrade JimmieRodgers.CITAR.Helper`
+([Workers](Workers#updates)). A helper that says `updates: unavailable` trusts no update key: download the
+newer one by hand.
 
 **The worker connects but models never run on it.** The worker serves its models to the server; the
 *server* decides which seat uses which model. Check that the seat is configured to use that

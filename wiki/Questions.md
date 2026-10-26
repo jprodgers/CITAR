@@ -135,7 +135,14 @@ production.
 
 Copy the state directory (`citar where`), and on a server the environment file. That is everything:
 saved games, the registry, benchmark runs, reports and the database. A server install has a nightly
-backup timer and a documented restore drill — [server/RUNBOOK.md](Runbook).
+backup timer that takes all of it, and a documented restore drill — [server/RUNBOOK.md](Runbook#backups).
+
+## Is there a CITAR for my machine?
+
+Every release is built for Windows x64, macOS 11 or newer on Apple silicon and Intel, and Linux x64 and ARM64 with
+glibc 2.28 or newer, for Python 3.11 and every newer release, and the CITAR helper for the same five. Anywhere else
+(Alpine, 32-bit, an older Linux) `pip install citar` builds it from source with a Rust toolchain, and the install
+scripts say so before they change anything. [INSTALL.md](Installing#where-citar-is-built-for).
 
 ## Can I contribute?
 

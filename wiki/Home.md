@@ -30,7 +30,7 @@ New here? [Quick start](Quick-start) gets you a game, a model and a benchmark in
 
 | | |
 |---|---|
-| [Deploying a server](Deploying-a-server) | Installer, Docker, or by hand |
+| [Deploying a server](Deploying-a-server) | Installer, Docker, or by hand; the release layout and `citar-deploy` |
 | [Preparing a VPS](Preparing-a-VPS) | SSH, firewall, swap, DNS — before CITAR |
 | [Single sign-on](Single-sign-on) | Registering an app with each provider |
 | [Workers](Workers) | Lending a GPU to a server without opening a port |

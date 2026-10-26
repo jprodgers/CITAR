@@ -113,7 +113,30 @@ that means for an existing install:
   /api/machines/{id}/key/reset` and `/rescan`; `GET /api/machines/{id}/jobs`; `GET /api/lab/jobs`; `GET
   /api/admin/jobs` and `POST /api/admin/jobs/pause`, `/resume` and `/retry`; `PUT /api/admin/machines/{id}/trust`
   (with `withdraw` and `verifier`) and `POST /api/admin/machines/{id}/replicate`; `GET` and `PUT
-  /api/admin/verification`; and `/ws/worker` speaks helper protocol 2 only.
+  /api/admin/verification`; and `/ws/worker` speaks helper protocol 2 only. `GET /api/meta` no longer returns
+  `project_root`, `python` or `mcp_script`: it returns `version`, `label`, `mode`, `server_url` and `mcp_command`, the
+  command that starts this install's MCP bridge, and in server mode names no folder of the server's.
+- **Installing and packaging.** CITAR installs from wheels for Windows x64, macOS 11 or newer (Apple silicon and
+  Intel) and Linux x64 and ARM64 (glibc 2.28 or newer), each one wheel for Python 3.11 or newer; elsewhere `pip install
+  citar` builds the source release with a Rust toolchain. `install.sh` and `install.ps1` install wheels only, saying
+  plainly when there is none for the machine (musl, 32-bit, Windows on ARM64's own Python, a free-threaded Python, an
+  older glibc), and `--worker`/`-Worker` install the CITAR helper. The Homebrew tap now ships only the helper: `brew
+  uninstall citar` removes 0.1.5's formula, then install the game with `install.sh` or pipx, and the helper with `brew
+  install jprodgers/citar/citar-helper`. Scoop gains `citar-helper` beside `citar`, and winget
+  `JimmieRodgers.CITAR.Helper` beside `JimmieRodgers.CITAR` (neither accepted by Microsoft yet). The Docker image is
+  multi-arch (`linux/amd64` and `linux/arm64`), built from the release's wheels on Debian 13; it runs as uid and now
+  gid 10001 with its state 0750, and a 0.1.5 volume keeps working (its files are uid 10001's). The Windows installer
+  upgrades a 0.1.5 install in place (the same AppId and data folder). A release's assets add the five wheels, the
+  sdist, `citar-<version>-server-constraints.txt`, the packaged helper archives (`citar-helper-<version>-<platform>`),
+  `THIRD-PARTY-LICENSES.txt` and `SHA256SUMS`, every file with a `.sha256` and a build provenance attestation; the
+  helper's download names are unchanged, and its Linux builds now run on the game's floor, glibc 2.28 (0.1.5's needed
+  2.35). A self-hosted server deploys the release's wheel into a release layout (`/opt/citar/releases/<version>`,
+  `/opt/citar/current`) rather than running a copy of the source tree: `citar-deploy cutover` moves a 0.1.5 box to it
+  ([docs/server/DEPLOY.md](Deploying-a-server#moving-from-015)), `citar-lab.service` and `requirements.txt` (and
+  `scripts/sync_requirements.py`) are gone, the lab runs inside `citar.service`, which now carries the lab's lower CPU
+  and IO weights (`CPUWeight=20`, `IOWeight=20`), the nightly backup covers the whole state directory, and a rollback
+  across a migration restores the deploy's backup. Release builds report their label (`v0.1.6`) in `citar doctor`
+  and `citar-helper --version`.
 
 ### Added
 
@@ -322,8 +345,8 @@ that means for an existing install:
   cannot take idles and is read again after 15 s (doubling to an hour) or as soon as `helper.json` changes.
   [docs/server/WORKERS.md](Workers#running-the-helper-as-a-service).
 - **Five helper downloads:** an Intel Mac build (`citar-helper-macos-x64`) joins Windows x64, macOS on Apple silicon
-  and Linux x64 and ARM64, all built in Rust by the release workflow under the same unversioned names, each with its
-  `.sha256`, run once with `--version` and `--self-test`. The Servers page offers a Mac whose browser does not say its
+  and Linux x64 and ARM64, all built in Rust by `package.yml` on every pull request under the same unversioned names,
+  each with its `.sha256`, run once with `--version` and `--self-test`. The Servers page offers a Mac whose browser does not say its
   processor (Safari, Firefox) both macOS downloads. `helper.yml` tests the helper on the five targets and installs it
   as a service on each OS's runner. [packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md#the-citar-helper).
 
@@ -363,6 +386,100 @@ that means for an existing install:
   answers with an ETag and a refresh that has nothing new gets 304; trade options are fetched when the
   deal builder opens.
 
+**Installing, packaging and releasing** ([docs/INSTALL.md](Installing),
+[packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md), design/phase5-release.md):
+
+- **Wheels for five platforms.** `citar-<version>-cp311-abi3-<platform>.whl` for Windows x64, macOS arm64 and x64
+  (11.0 or newer) and manylinux_2_28 x64 and aarch64, each built natively on its own CI runner with the engine's
+  release profile, installed in a fresh venv there on Python 3.11 and 3.14 and smoke-tested (`citar doctor`, a
+  verifiable job host, one seeded lab game whose result hash every platform must share); the sdist is built into a
+  wheel as a user would and passes the same smoke. `.github/workflows/package.yml` builds and tests every file a
+  release ships on every pull request.
+- **The build label.** A release build reports `v0.1.6` (`v0.1.6-dryrun+<sha>` on a dry run, `ci+<sha>` on CI, and a
+  build of your own `unknown`) in `citar doctor`, `build_info()` and `citar-helper --version`.
+- **`citar doctor` checks the job host:** its jobs line starts one for a moment, as the server would, and says
+  whether it is verifiable (its canary and self-check passed), why not, or why it did not start.
+- **The Windows bundle from the release wheel.** The installer and the portable zip are built from the Windows wheel
+  in a clean venv, never from a checkout, carry `LICENSE`, `NOTICE.md`, `THIRD-PARTY-LICENSES.txt` and a
+  `PYTHON-LICENSES.txt` (the Python packages it ships, CPython's licence and those of PyInstaller's bootloader and
+  run-time hooks) at their root, and no longer carry setuptools or the Universal CRT's DLLs; nothing from outside
+  `citar[all]`'s closure gets in. Each is installed silently, run and uninstalled on a CI runner. A prerelease version
+  compiles (the installer's numeric version is separate), and the zip is the same bytes for the same files.
+- **The image from the wheels.** `ghcr.io/jprodgers/citar` for `linux/amd64` and `linux/arm64`, each built natively
+  from its release wheel on `python:3.12-slim-trixie` (pinned by digest), with the dependency versions the release
+  was tested with (its constraints file), no compiler and no `curl`, `USER 10001:10001`, its state directory 0750, and
+  a health check in Python that asks the server directly (so a container given `http_proxy` for its model APIs stays
+  healthy); the image pushed is the image tested, and `:latest` moves only once the release is published.
+- **The install scripts install wheels only.** `install.sh` and `install.ps1` install CITAR's wheel (never its sdist)
+  after a platform check that names what is missing; each dependency from a wheel where one exists, so `install.sh`
+  no longer fails on an Intel Mac building `cryptography` from source. New options: `--prefix`, `--bin-dir`,
+  `--no-profile`, `--python`, `--from` a wheel or a folder of wheels, `--plan` (`install.sh`); `-Prefix`, `-BinDir`,
+  `-NoPath`, `-From`, `-Python` (`install.ps1`). `--worker`/`-Worker` download the self-updating helper for the
+  machine from the release (`CITAR_RELEASE_URL`: https, or http to this machine only), check its `.sha256` before
+  anything is written and install it as `citar-helper`. The uninstall removes only what is the script's (a marked
+  prefix, the commands that point into it, the helper with its update leftovers) and refuses while the helper runs as
+  a service. `install.ps1` writes the user's PATH as it is stored (`REG_EXPAND_SZ` and its `%VARIABLES%` kept) and
+  its one-liner, `& ([scriptblock]::Create((iwr -useb URL)))`, takes parameters and no longer closes the PowerShell
+  window when it stops.
+- **The helper, twice.** Every release carries the five self-updating builds and five **packaged** builds in
+  versioned archives (`citar-helper-<version>-<platform>.tar.gz`, `.zip` on Windows) with their notices, which
+  Homebrew (`citar-helper`, with a `brew services` block), Scoop (`citar-helper`) and winget
+  (`JimmieRodgers.CITAR.Helper`) install; a packaged build never updates itself and refuses `auto`. The Linux builds
+  are made in the manylinux_2_28 containers and checked to need nothing past glibc 2.28. `citar-helper update check`
+  says `updates: unavailable` for a build that trusts no key, a packaged build's `notify`, and its refusal of `auto`,
+  with no `helper.json` too.
+- **Third-party notices.** `packaging/THIRD-PARTY-LICENSES.txt`, from `cargo xtask licenses` (the crates the wheels
+  and the helper link on every release target, each with its licence and texts, any outside an allow-list of
+  permissive licences refused), travels in every wheel's `.dist-info/licenses/`, every packaged helper archive, the
+  Windows bundle and the release; a `Cargo.lock` change regenerates it (`cargo xtask licenses --check` in CI).
+- **Every release can be checked.** `SHA256SUMS` and a `.sha256` beside every file; a build provenance attestation
+  for every file, made before anything is published (`gh attestation verify FILE --repo jprodgers/CITAR`), and for the
+  image after its push; the release notes carry the checksums, the attestation command and the install routes.
+  `scripts/release_checksums.py` writes the package managers' manifests from the release's files (no manifest names
+  the PyPI sdist any more) and `--verify` checks a published release against its sums and PyPI.
+- **The release workflow, rebuilt** (design/phase5-release.md P5.11): `release.yml` builds nothing; it calls
+  `test.yml` and `package.yml`, and only for a pushed `v*` tag signs the helper manifest (in the protected
+  `helper-signing` environment, with a prebuilt binary and nothing installed beside the key), attests every file, and
+  publishes PyPI (trusted publishing), the image and the GitHub release (a draft until it is whole), in that order. A
+  dispatch is a dry run that publishes nothing and names no environment. `scripts/release.py` checks and bumps every
+  place the version lives; `scripts/ci/check_workflows.py` holds every workflow to the release's rules on every pull
+  request; every action is pinned to a commit. `packaging/RELEASING.md` is the checklist, each step a command.
+- **The test suite runs on Python 3.14** on Linux in CI, beside 3.11 to 3.13.
+
+**The server's deploy** ([docs/server/DEPLOY.md](Deploying-a-server), [docs/server/RUNBOOK.md](Runbook)):
+
+- **The release layout.** Each release a venv of its own in `/opt/citar/releases/<version>`, root's and read-only
+  to the service, `/opt/citar/current` linking to the one that runs, the state in `/var/lib/citar` as the unit's
+  working directory. `install.sh --server` installs into it (`--plan` prints every step first); run again with a newer
+  `--version` it switches with the service stopped, just after a backup, writes the unit and scripts again from the
+  new release (`citar setup --server --refresh-units`) and undoes a release that does not answer, the database put
+  back if it migrated; an older release is refused, and the release that runs is never removed. The state directory
+  must be CITAR's alone.
+- **One unit.** `citar setup --server` writes `deploy/citar.service` with its own paths put in, with `citar-admin`
+  and the nightly backup, and enables the service and the timer. `citar-admin` runs every administration command as
+  the service runs (`systemd-run` as `citar`, with the unit's environment file and sandbox).
+- **The backup covers the whole state directory:** `citar.db` by `sqlite3 .backup` and integrity-checked,
+  `state.tar.gz`, a tarball for any directory the env file moves outside it, `citar.env`, and `RELEASE` (the release
+  and the database revision that wrote them); `UNTRUSTWORTHY` when anything failed. It exits 0, 1 (could not start),
+  2 (untrustworthy) or 3 (complete, but the offsite copy failed).
+- **`citar-deploy`** (`deploy/citar-deploy.sh`): `install`, `cutover` (from 0.1.5's layout), `rollback`,
+  `uncutover`, `status` and `prune`, each with `--plan`. It checks a deploy bundle and the box's other sites before
+  changing anything, stages the release with pip in a limited scope, verifies it as `citar` under the unit's sandbox
+  with every state setting in a temporary folder, switches with the service stopped just after a backup, checks the
+  health directly and through nginx, and undoes a release that does not come up by itself, putting the database
+  back when it was migrated. A rollback across a migration is refused without `--restore-backup`, naming the backup
+  to give it. A hang-up during the switch is ignored and Ctrl-C undoes it; it never writes the nginx site (certbot
+  edits it), showing how it differs instead. Exit 0, 1, 2 or 3 (deployed, but another site does not answer since).
+- **The deploy bundle:** `scripts/deploy/bundle.py V` fetches the release's Linux wheel and constraints on your own
+  machine, checks their hashes and their provenance (release.yml's attestation for the tag, on GitHub's runners, from
+  the same commit as the deploy scripts) and packs them with `deploy/` and `env.example`.
+- **The staging rehearsal:** `scripts/deploy/staging.sh` (with `staging_wheels.sh` and `staging_check.py`) plays a
+  whole deploy in WSL held to a small box's limits (one CPU at its speed, 961 MB, 2 GB of swap at swappiness 10,
+  the other sites' memory and CPU held by stand-ins), each limit probed to bind first: the cutover from 0.1.5, a
+  game and the lab under the unit's sandbox, an upgrade that migrates, rollbacks, planted failed upgrades, a restore
+  drill and the cutover undone. Its measurement set `citar.service`'s `CPUWeight=20` and `IOWeight=20` and kept
+  `MemoryMax=400M`/`MemoryHigh=320M`, and recommends a host memory figure of 128 MB on such a box.
+
 **Development:** `POST /api/games/{id}/debug/ops` (scenario operations on a live game, on debug
 servers only); `scripts/qa_phase3.py`, which checks each feature end to end on a dev server of its
 own, and all of them at once in one game, with a real model in LM Studio last; `scripts/qa_phase4.py`,
@@ -374,6 +491,37 @@ loaded and none has failed, so a crash stops the part before anything could load
 ([CONTRIBUTING.md](Contributing)).
 
 ### Fixed
+
+- The Windows app's lab could not play: its job host was started as `citar.exe -m citar.jobs host`, which the app's
+  program refuses. It is `citar.exe jobs-host` now, and a job host anywhere starts with `python -P`, so no file in its
+  working directory (a server's state directory) can stand in for a module.
+- `/api/meta` named `citar_mcp.py` beside the package, a file no installed copy has, so the lobby's MCP command was
+  wrong for every pip, pipx, bundle and image install; and, being public, it told anyone a server's install path and
+  interpreter. It gives the install's own command now, and names no path in server mode.
+- Release builds said `unknown` for their label; the wheels, helpers, bundle and image now name the release.
+- No third-party notices travelled with the binaries, which statically link about 180 Rust crates.
+- The server's backup left out most of the state directory (`config/`, `benchmarks/` and everything else 0.1.6 writes
+  there beside the database and the saves).
+- `install.ps1` could not leave the user's PATH alone, and it rewrote a `REG_EXPAND_SZ` PATH as `REG_SZ` with every
+  variable expanded; its `iwr | iex` one-liner closed the PowerShell window when it stopped. `install.sh --uninstall`
+  removed whatever `--prefix` named, whatever it held.
+- `install.sh` on a machine with no wheel downloaded the sdist and failed minutes later building Rust; it now says
+  there is no prebuilt CITAR for the machine before anything is installed.
+- The Homebrew formula installed the game from the PyPI sdist, which since 0.1.6 needs a Rust toolchain it never asked
+  for (the tap now ships only the helper).
+- The Linux helpers needed glibc 2.35 while the game needed 2.28, so `--worker` on RHEL 8 and 9, Rocky, Alma or Debian 11
+  would have installed a helper that cannot start.
+- `citar setup --server` wrote a unit of its own that differed from `deploy/citar.service`, and did not install the
+  nightly backup timer `DEPLOY.md` said it did; it writes the one definition and enables the timer now. Its first
+  administrator, created as root, could leave the database or its write-ahead log owned by root, which the service
+  then could not write. Run by a non-root user, it skipped every system step; it runs through `sudo` now.
+- `env.example`'s comments after a value were read by systemd as part of the value (`CITAR_SMTP_SECURITY=starttls #
+  ...`), so a server set up from it refused to start; every comment is on a line of its own.
+- The lab no longer yielded the CPU to a box's other sites once 0.1.5's lab unit was gone: `citar.service` carries its
+  weights (`CPUWeight=20`, `IOWeight=20`).
+- A silent uninstall of the Windows app (winget's, `/VERYSILENT /SUPPRESSMSGBOXES`) waited for an answer to the
+  question about the saved games; it now takes the default, keeping them.
+- The Windows installer could not be compiled for a prerelease version (`VersionInfoVersion` must be numeric).
 
 - A helper's result that waited for its replay when the server was upgraded to another jobs build waited for ever (no
   verifier plays an old build): it is accepted unverified at the next start.

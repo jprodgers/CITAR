@@ -131,6 +131,27 @@ helper reports updates **unavailable**. To set it up, once, on a machine of your
    Every pull request already proves this path with a throwaway key: `package.yml`'s `helper-manifest` job writes the
    manifest over the five builds, signs it with a key made on the runner, and verifies it both ways.
 
+**What a release does with the two halves.** `sign-helper-manifest` runs only for a pushed `v*` tag, in
+`helper-signing`, after your approval; a dispatched dry run skips it and never names the environment (its name is
+an expression that is empty on a dispatch), so nothing waits and no environment is made. The job builds and installs
+nothing: it runs the xtask binary `package.yml` built and used for the throwaway signature (its SHA-256 checked first)
+through `scripts/ci/release_sign.py` on the runner's own Python, in one step whose only setting is the secret, so the
+key never meets a compiler, a build script or a package installer. It holds the secret and the committed
+`update-keys.pub` against each other:
+
+| `update-keys.pub` | The secret | The release |
+|---|---|---|
+| empty | absent | a notice, and no signature: its helpers report updates unavailable |
+| empty | present | **stopped**: commit the public key first (a signature nobody trusts) |
+| a key | absent | **stopped**: its helpers would trust a key no release signs with |
+| a key | present | signed, and the signature must verify against a committed line, else **stopped** ("the secret is not the committed key") |
+
+Then `check-signature`, a job that holds no secret, checks the signature again with `scripts/ci/verify_manifest.py`
+(the `cryptography` package, installed from hash-pinned wheels, sharing no code with the signer) against each
+committed key. A stop comes before anything is published: PyPI, the image and the release page are untouched
+([RELEASING.md](https://github.com/jprodgers/CITAR/blob/main/packaging/RELEASING.md), step 6, says what to fix and
+re-run).
+
 **Rotating the key:** make a new one, add its public line to `update-keys.pub` beside the old one in a release (two
 slots), sign that release with the old key, then replace the secret and, a release later, drop the old line. A helper
 trusts only the keys it was built with, so the step through a release that holds both is what lets old helpers follow.
@@ -313,7 +334,15 @@ Only a refused token or key, or a machine taken away, stops it for good.
 `citar worker` and `citar setup --worker`, which set up the Python worker before 0.1.6, now say where
 to download the helper and exit with code 2; `install.sh --worker` and `install.ps1 -Worker` download
 it (the self-updating build for the machine, checked against its `.sha256` before anything is written)
-into the bin folder, `~/.local/bin` or `%LOCALAPPDATA%\CITAR\bin`.
+into the bin folder, `~/.local/bin` or `%LOCALAPPDATA%\CITAR\bin` ([INSTALL.md](Installing#the-citar-helper) has
+the one-liners). The Linux builds need glibc 2.28 or newer, as the game does.
+
+**From a package manager:** `brew install jprodgers/citar/citar-helper` (macOS and Linux), `scoop install
+citar-helper` (after `scoop bucket add citar https://github.com/jprodgers/scoop-citar`) or, once Microsoft accepts it,
+`winget install JimmieRodgers.CITAR.Helper`. These install the helper's **packaged** build, from a versioned archive
+with its notices: the same program, except that it never updates itself (its package manager does, [below](#updates)).
+With Homebrew, run it as a service with `brew services start citar-helper`, not `citar-helper service install`, which
+would record this version's Cellar path that the next `brew upgrade` removes.
 
 ### Moving from 0.1.5
 
@@ -340,7 +369,8 @@ design/phase4-helper.md P4.2.8):
    `citar setup --worker` installed it as a service (then `sudo rm
    /etc/systemd/system/citar-worker.service && sudo systemctl daemon-reload`); otherwise close it.
 3. **Download the helper** for the machine (`citar-helper-<target>`, the table above) from the Servers
-   page, and make it executable on macOS and Linux.
+   page, and make it executable on macOS and Linux; or install it with `install.sh --worker`,
+   `install.ps1 -Worker` or a package manager (above).
 4. **Run `citar-helper setup`:** it reads the old `helper.json` (the endpoint, the models and the quiet
    hours carry over with their meanings), asks for the new token, and asks whether to lend this
    machine's spare CPU (default no). A `worker.json` that `citar setup --worker` wrote works too:
@@ -466,7 +496,9 @@ happens then:
 
 To turn updates off: `"updates": "off"` in `helper.json`, or `--updates off`. A helper installed by a package manager
 (Homebrew, Scoop, winget: a `packaged` build) defaults to `notify` and refuses `auto`: update it through the package
-manager, which owns its binary.
+manager, which owns its binary (`brew upgrade citar-helper`, `scoop update citar-helper`, `winget upgrade
+JimmieRodgers.CITAR.Helper`). Its `update check` says so: `policy: notify (a packaged build: its package manager
+updates it)`, and with `"updates": "auto"` in its `helper.json`, `auto, which a packaged build refuses`.
 
 What it checks, each a refusal the Servers page shows with its reason: the signature (a build that trusts no update
 key reports updates **unavailable** and downloads nothing: **every 0.1.6 build until the owner's first signed release
